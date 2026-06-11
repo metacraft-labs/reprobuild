@@ -236,6 +236,19 @@ type
       ## single declarative entry over the per-cask
       ## `pkg.homebrewCask` resources). `darwinModuleDestroy` selects
       ## the rollback direction (delete the drop-in file).
+    pokLinuxFhsSandbox = "linux.fhsSandbox"
+      ## The Linux-Third-Party-Sandbox-MVP M1 driver scaffold: launch a
+      ## `bubblewrap` process that wraps the target binary so it sees a
+      ## per-process FHS view composed from the realized package
+      ## prefixes the operator named. The driver locks the M0
+      ## transparency posture (see
+      ## `Linux-Third-Party-Sandbox-MVP.milestones.org` M0): only
+      ## `/usr / /lib / /lib64 / /bin / /sbin / /etc` come from a
+      ## composed realized prefix; `/home / /tmp / /dev / /sys / /run /
+      ## /var / /proc` bind-pass to the host; NO `--unshare-*` flag is
+      ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
+      ## mount-namespace bubblewrap creates are MECHANISM (the privilege
+      ## needed to bind-mount without root), not an isolation policy.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -545,6 +558,96 @@ type
       darwinModuleName*: string
       darwinModuleContent*: string
       darwinModuleDestroy*: bool
+    of pokLinuxFhsSandbox:
+      ## Launch `fsbBinPath` under bubblewrap with the M0-locked
+      ## transparency-posture invocation shape:
+      ##
+      ##   bwrap                                                 \
+      ##     --bind <fsbFhsTreeRoots[0]>/usr   /usr              \
+      ##     --bind <fsbFhsTreeRoots[0]>/lib   /lib              \
+      ##     --bind <fsbFhsTreeRoots[0]>/lib64 /lib64            \
+      ##     --bind <fsbFhsTreeRoots[0]>/bin   /bin              \
+      ##     --bind <fsbFhsTreeRoots[0]>/sbin  /sbin             \
+      ##     --bind <fsbFhsTreeRoots[0]>/etc   /etc              \
+      ##     --dev-bind /dev /dev                                \
+      ##     --bind /home /home                                  \
+      ##     --bind /tmp  /tmp                                   \
+      ##     --bind /run  /run                                   \
+      ##     --bind /sys  /sys                                   \
+      ##     --bind /var  /var                                   \
+      ##     --proc /proc                                        \
+      ##     -- <fsbBinPath> <fsbArgv...>
+      ##
+      ## `fsbBinPath` is an absolute path inside the FHS view
+      ## (typically `/usr/bin/<x>`); the parser enforces leading `/`.
+      ## `fsbFhsTreeRoots` is the sequence of realized package
+      ## prefixes to compose into `/usr / /lib / /lib64 / /bin /
+      ## /sbin / /etc` — M1 takes the FIRST entry and binds the
+      ## six sub-paths from it; M2+ adds multi-package overlay /
+      ## sequential-bind composition. Each entry is validated as an
+      ## absolute path at parse time (existence is deferred to apply
+      ## because the realized prefix is produced upstream by the
+      ## catalog-adapter chain). `fsbArgv` is the additional argv
+      ## passed to the wrapped binary; argv is execve-delivered (NOT
+      ## shell-parsed) so the parser rejects only NUL bytes, matching
+      ## the closed-set contract.  `fsbDestroy` is the rollback flag
+      ## — bubblewrap sessions are NOT persistent, so destroy is a
+      ## no-op (the driver returns absent without spawning anything).
+      ## Kept for parity with the other Phase-C drivers so the
+      ## dispatch destroy-predicate stays uniform.
+      fsbBinPath*: string
+      fsbFhsTreeRoots*: seq[string]
+      fsbArgv*: seq[string]
+      fsbDestroy*: bool
+
+# ---------------------------------------------------------------------------
+# linux.fhsSandbox — closed-set charset / shape helpers.
+#
+# The driver builds a `bwrap` argv vector (NOT a shell command) so per-
+# argument shell-metacharacter filtering is not required. What IS
+# required:
+#
+#   * `fsbBinPath` MUST be a POSIX absolute path (leading `/`) so the
+#     bubblewrap target binary identity is unambiguous; a relative path
+#     would be resolved against bubblewrap's cwd inside the FHS view,
+#     which is implementation-defined and not the contract.
+#
+#   * Each `fsbFhsTreeRoots` entry MUST be a POSIX absolute path. The
+#     driver binds `<root>/usr`, `<root>/lib`, ... so a non-absolute
+#     entry has no defined meaning. Existence is deferred to apply time
+#     (the catalog-adapter chain produces the prefix upstream).
+#
+#   * Neither field may contain a NUL byte — `execve` would refuse it
+#     and the resulting EFAULT would surface as an inscrutable broker
+#     failure. Reject it at parse time so the operator sees a clean
+#     diagnostic.
+# ---------------------------------------------------------------------------
+
+proc isPosixAbsolutePath*(p: string): bool =
+  ## True only for a non-empty path with a leading `/`. Used by the
+  ## `linux.fhsSandbox` closed-set validator to enforce that the
+  ## wrapped binary path and every composed FHS-tree root are
+  ## absolute. The driver does NOT canonicalize the path (no `..`
+  ## collapse, no symlink resolution) — that is the catalog-adapter
+  ## chain's responsibility upstream — but a leading `/` is the
+  ## minimum precondition for an unambiguous bind-mount target.
+  if p.len == 0:
+    return false
+  if p[0] != '/':
+    return false
+  return true
+
+proc containsNul*(s: string): bool =
+  ## True if `s` contains a NUL byte (`\x00`). The closed-set
+  ## validator uses this to refuse any field that would later be
+  ## passed to `execve` as an argv element — the kernel rejects NUL
+  ## in argv with EFAULT, and surfacing it as a typed parse error
+  ## gives the operator a useful diagnostic instead of a cryptic
+  ## broker failure.
+  for ch in s:
+    if ch == '\x00':
+      return true
+  return false
 
 # ---------------------------------------------------------------------------
 # requiresElevation predicate.
@@ -591,6 +694,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxFirewallRule: true
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
+  of pokLinuxFhsSandbox: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -629,6 +733,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxFirewallRule: pokLinuxFirewallRule
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
+  of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -1413,6 +1518,48 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.darwinModuleName.endsWith(".nix"):
       return "macos.darwinSystemModule name '" & op.darwinModuleName &
         "' must end with '.nix' (Nix module convention)"
+  of pokLinuxFhsSandbox:
+    # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
+    # driver does NOT canonicalize — `..` collapse / symlink resolve
+    # is the catalog adapter's job upstream — but unambiguous
+    # bind-mount targets require a leading `/`.
+    if op.fsbBinPath.strip().len == 0:
+      return "linux.fhsSandbox operation has an empty binPath"
+    if not isPosixAbsolutePath(op.fsbBinPath):
+      return "linux.fhsSandbox binPath '" & op.fsbBinPath &
+        "' is not an absolute path (must start with '/')"
+    if containsNul(op.fsbBinPath):
+      return "linux.fhsSandbox binPath contains a NUL byte (refused — " &
+        "execve would reject the argv element)"
+    # M1 takes the FIRST FHS-tree-root entry as the single composed
+    # prefix. A non-destroy apply MUST therefore declare at least one
+    # entry. A multi-entry compose is accepted at parse time (each
+    # entry is shape-checked) but the driver currently only uses
+    # entries[0]; M2 will add the overlay / sequential-bind compose.
+    if not op.fsbDestroy and op.fsbFhsTreeRoots.len == 0:
+      return "linux.fhsSandbox '" & op.address &
+        "' has an empty fhsTreeRoots list (a non-destroy apply must " &
+        "declare at least one realized FHS-tree-root prefix; M1 uses " &
+        "the first entry, M2 will compose multiple)"
+    for root in op.fsbFhsTreeRoots:
+      if root.strip().len == 0:
+        return "linux.fhsSandbox '" & op.address &
+          "' has an empty fhsTreeRoots entry"
+      if not isPosixAbsolutePath(root):
+        return "linux.fhsSandbox fhsTreeRoots entry '" & root &
+          "' is not an absolute path (must start with '/')"
+      if containsNul(root):
+        return "linux.fhsSandbox fhsTreeRoots entry contains a NUL " &
+          "byte (refused — execve would reject the argv element)"
+    # `fsbArgv` passes through `execve` as an argv vector — NOT a
+    # shell command. Shell metacharacter filtering is therefore
+    # unnecessary by construction. The only filter is a NUL byte
+    # refusal because `execve` rejects NUL in argv with EFAULT and a
+    # typed parse error gives the operator a useful diagnostic.
+    for arg in op.fsbArgv:
+      if containsNul(arg):
+        return "linux.fhsSandbox argv entry contains a NUL byte " &
+          "(refused — execve would reject the argv element)"
   return ""
 
 # ---------------------------------------------------------------------------

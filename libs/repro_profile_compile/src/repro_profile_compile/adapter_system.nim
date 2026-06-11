@@ -425,6 +425,39 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "' must end with '.nix'")
     result = SystemResource(kind: srkMacosDarwinSystemModule,
       darwinModuleName: n, darwinModuleContent: c)
+  of "linux.fhsSandbox":
+    # Linux-Third-Party-Sandbox-MVP M1. The closed-set / shape checks
+    # mirror the `parseSystemProfile` arm in repro_infra/profile.nim
+    # — both flow through the same `posix_system_driver` apply path.
+    let binPath = fieldString(r, "binPath")
+    if not isPosixAbsolutePath(binPath):
+      raise newException(ValueError,
+        "linux.fhsSandbox binPath '" & binPath &
+        "' is not an absolute path (must start with '/')")
+    if containsNul(binPath):
+      raise newException(ValueError,
+        "linux.fhsSandbox binPath contains a NUL byte")
+    let fhsTrees = fieldList(r, "fhsTrees")
+    if fhsTrees.len == 0:
+      raise newException(ValueError,
+        "linux.fhsSandbox '" & binPath &
+        "' requires a non-empty fhsTrees list (M1 uses the first " &
+        "entry; M2 will compose multiple)")
+    for root in fhsTrees:
+      if not isPosixAbsolutePath(root):
+        raise newException(ValueError,
+          "linux.fhsSandbox fhsTrees entry '" & root &
+          "' is not an absolute path (must start with '/')")
+      if containsNul(root):
+        raise newException(ValueError,
+          "linux.fhsSandbox fhsTrees entry contains a NUL byte")
+    let argv = fieldList(r, "argv")
+    for a in argv:
+      if containsNul(a):
+        raise newException(ValueError,
+          "linux.fhsSandbox argv entry contains a NUL byte")
+    result = SystemResource(kind: srkLinuxFhsSandbox,
+      fsbBinPath: binPath, fsbFhsTreeRoots: fhsTrees, fsbArgv: argv)
   else:
     raise newException(ValueError,
       "unknown system-scope resource kind: '" & r.kind & "'")
@@ -454,7 +487,8 @@ proc isSystemScopeResource(kind: string): bool =
      "linux.tmpfilesRule", "linux.sudoersRule",
      "passwd.group", "linux.nixDaemonSetting",
      "systemd.systemTimer", "linux.firewallRule",
-     "linux.nixosSystemModule", "macos.darwinSystemModule":
+     "linux.nixosSystemModule", "macos.darwinSystemModule",
+     "linux.fhsSandbox":
     true
   else:
     false
@@ -679,5 +713,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkMacosDarwinSystemModule:
       pairs.add(("name", quoteSystemValue(r.darwinModuleName)))
       pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
+    of srkLinuxFhsSandbox:
+      pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
+      pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))
+      if r.fsbArgv.len > 0:
+        pairs.add(("argv", renderListLiteral(r.fsbArgv)))
     pairs.add(("address", quoteSystemValue(r.address)))
     appendStanza(result, $r.kind, pairs, r.dependsOn)

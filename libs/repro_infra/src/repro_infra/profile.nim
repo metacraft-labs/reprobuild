@@ -60,6 +60,7 @@ type
     srkLinuxFirewallRule = "linux.firewallRule"
     srkLinuxNixosSystemModule = "linux.nixosSystemModule"
     srkMacosDarwinSystemModule = "macos.darwinSystemModule"
+    srkLinuxFhsSandbox = "linux.fhsSandbox"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -192,6 +193,10 @@ type
     of srkMacosDarwinSystemModule:
       darwinModuleName*: string           ## basename, must end `.nix`
       darwinModuleContent*: string        ## verbatim Nix expression
+    of srkLinuxFhsSandbox:
+      fsbBinPath*: string                 ## absolute path inside the FHS view
+      fsbFhsTreeRoots*: seq[string]       ## realized prefixes composed into /
+      fsbArgv*: seq[string]               ## additional argv after fsbBinPath
 
   SystemProfile* = object
     ## The parsed `system.nim` — an ordered list of resources. The
@@ -254,6 +259,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "nixosSystemModule:" & r.nixosModuleName
   of srkMacosDarwinSystemModule:
     "darwinSystemModule:" & r.darwinModuleName
+  of srkLinuxFhsSandbox:
+    "fhsSandbox:" & r.fsbBinPath
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -299,6 +306,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxFirewallRule: r.lfwName
   of srkLinuxNixosSystemModule: r.nixosModuleName
   of srkMacosDarwinSystemModule: r.darwinModuleName
+  of srkLinuxFhsSandbox: r.fsbBinPath
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -508,6 +516,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxFirewallRule: srk = srkLinuxFirewallRule
     of $srkLinuxNixosSystemModule: srk = srkLinuxNixosSystemModule
     of $srkMacosDarwinSystemModule: srk = srkMacosDarwinSystemModule
+    of $srkLinuxFhsSandbox: srk = srkLinuxFhsSandbox
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -975,6 +984,39 @@ proc parseSystemProfile*(text: string): SystemProfile =
           "' must end with '.nix' (Nix module convention)")
       res = SystemResource(kind: srkMacosDarwinSystemModule,
         darwinModuleName: n, darwinModuleContent: c)
+    of srkLinuxFhsSandbox:
+      let binPath = need("binPath")
+      if not isPosixAbsolutePath(binPath):
+        raiseSystemProfileInvalid("linux.fhsSandbox binPath '" & binPath &
+          "' is not an absolute path (must start with '/')")
+      if containsNul(binPath):
+        raiseSystemProfileInvalid("linux.fhsSandbox binPath contains a " &
+          "NUL byte (refused — execve would reject the argv element)")
+      let fhsTrees =
+        if "fhsTrees" in rawFields: parseListLiteral(rawFields["fhsTrees"])
+        else: @[]
+      if fhsTrees.len == 0:
+        raiseSystemProfileInvalid("linux.fhsSandbox '" & binPath &
+          "' requires a non-empty fhsTrees list (M1 uses the first " &
+          "entry; M2 will compose multiple)")
+      for root in fhsTrees:
+        if not isPosixAbsolutePath(root):
+          raiseSystemProfileInvalid("linux.fhsSandbox fhsTrees entry '" &
+            root & "' is not an absolute path (must start with '/')")
+        if containsNul(root):
+          raiseSystemProfileInvalid("linux.fhsSandbox fhsTrees entry " &
+            "contains a NUL byte (refused — execve would reject the " &
+            "argv element)")
+      let argv =
+        if "argv" in rawFields: parseListLiteral(rawFields["argv"])
+        else: @[]
+      for a in argv:
+        if containsNul(a):
+          raiseSystemProfileInvalid("linux.fhsSandbox argv entry " &
+            "contains a NUL byte (refused — execve would reject the " &
+            "argv element)")
+      res = SystemResource(kind: srkLinuxFhsSandbox,
+        fsbBinPath: binPath, fsbFhsTreeRoots: fhsTrees, fsbArgv: argv)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -1157,6 +1199,12 @@ proc toPrivilegedOperation*(r: SystemResource;
       darwinModuleName: r.darwinModuleName,
       darwinModuleContent: r.darwinModuleContent,
       darwinModuleDestroy: destroy)
+  of srkLinuxFhsSandbox:
+    PrivilegedOperation(kind: pokLinuxFhsSandbox, address: r.address,
+      fsbBinPath: r.fsbBinPath,
+      fsbFhsTreeRoots: r.fsbFhsTreeRoots,
+      fsbArgv: r.fsbArgv,
+      fsbDestroy: destroy)
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

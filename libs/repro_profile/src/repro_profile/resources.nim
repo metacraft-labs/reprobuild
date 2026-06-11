@@ -957,3 +957,36 @@ template macosDarwinSystemModule*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("macos.darwinSystemModule", name)
     pushResource(targetResources, "macos.darwinSystemModule", addr0,
       fields, dependsOn)
+
+template fhsSandbox*(targetResources: var seq[ResourceIntent];
+                    binPath: string;
+                    fhsTrees: openArray[string];
+                    argv: openArray[string] = [];
+                    address: string = "";
+                    dependsOn: seq[string] = @[]) =
+  ## Linux-Third-Party-Sandbox-MVP M1 — wrap `binPath` under
+  ## bubblewrap with a per-process FHS view composed from the realized
+  ## package prefixes in `fhsTrees`. The driver applies the M0-locked
+  ## transparency posture: only `/usr / /lib / /lib64 / /bin / /sbin
+  ## / /etc` come from a composed realized prefix; `/home / /tmp /
+  ## /dev / /sys / /run / /var / /proc` bind-pass to the host; NO
+  ## `--unshare-*`, NO `--cap-drop`, NO `--seccomp` flags.
+  ##
+  ## M1 takes the FIRST `fhsTrees` entry as the single composed
+  ## prefix; M2+ adds multi-package overlay / sequential-bind
+  ## composition. Both `binPath` and every `fhsTrees` entry MUST be
+  ## absolute paths (leading `/`); the parser refuses anything else.
+  ## `argv` is the additional argv passed to the wrapped binary; it
+  ## passes through `execve` (NOT a shell), so shell-metacharacter
+  ## filtering is unnecessary — the parser refuses only NUL bytes.
+  ##
+  ## Address default: `linux.fhsSandbox:<binPath>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["binPath"] = strField(binPath)
+    fields["fhsTrees"] = listField(@fhsTrees)
+    fields["argv"] = listField(@argv)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.fhsSandbox", binPath)
+    pushResource(targetResources, "linux.fhsSandbox", addr0, fields,
+      dependsOn)

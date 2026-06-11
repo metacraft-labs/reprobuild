@@ -206,6 +206,30 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.darwinModuleContent)
+  of pokLinuxFhsSandbox:
+    if op.fsbDestroy:
+      ZeroDigestHex
+    else:
+      # The canonical-bytes form covers the bin path + every composed
+      # FHS-tree root + every argv element. Two operators authoring
+      # the same sandbox declaration digest identically; changing any
+      # one input (binary, prefix, argv entry) yields a different
+      # digest so the broker's drift gate re-applies. Each component
+      # is appended to a NUL-separated canonical form because the
+      # parser already refused NUL in any element (closed-set
+      # validation) — NUL is therefore an unambiguous separator that
+      # no legitimate payload can collide with.
+      var canon = op.fsbBinPath
+      canon.add('\x00')
+      canon.add("roots:")
+      for r in op.fsbFhsTreeRoots:
+        canon.add(r)
+        canon.add('\x00')
+      canon.add("argv:")
+      for a in op.fsbArgv:
+        canon.add(a)
+        canon.add('\x00')
+      posixDigestHexOfText(canon)
   else:
     raise newException(ValueError,
       "posixSystemDesiredDigestHex called on a non-Phase-C kind " &
@@ -2671,3 +2695,213 @@ proc applyMacosDarwinSystemModule*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("macos.darwinSystemModule apply")
+
+# ===========================================================================
+# linux.fhsSandbox — Linux-Third-Party-Sandbox-MVP M1 driver scaffold.
+#
+# Wraps a target binary under bubblewrap so it sees a per-process FHS
+# view composed from realized package prefixes. Mirrors the existing
+# "spawn an elevated process" Phase-C drivers in shape; the genuinely
+# new pieces are:
+#
+#   * APPLY launches `bwrap` instead of writing a file. The argv vector
+#     is computed by `buildLinuxFhsSandboxArgv` — a pure function so
+#     it can be unit-tested cross-platform without spawning a real
+#     bubblewrap process. Argv is delivered to bubblewrap via Nim's
+#     `osproc.startProcess` (NOT a shell), so the M0 transparency-
+#     posture flag set is what bubblewrap sees verbatim.
+#
+#   * OBSERVE is a no-op. A bubblewrap session is NOT persistent —
+#     once the wrapped process exits the mount namespace is collected
+#     by the kernel, so there is no "current state" to read. The
+#     observer always returns the absent sentinel; the apply path is
+#     therefore always reached. This is the M0 transparency-posture
+#     consequence (no daemon, no leftover state); it is intentional.
+#
+#   * DESTROY is a no-op. Same rationale — there is nothing
+#     persistent to tear down.
+#
+# The dispatch layer composes observe + desired-digest + apply the
+# same way it does for every other Phase-C kind: a fresh observe at
+# every dispatch sees "absent" (the sandbox is not persistent), the
+# desired digest covers the bin path + tree roots + argv, the
+# apply-time predicate hits the "create" path on every legitimate
+# apply, the apply spawns bubblewrap, the post-apply re-probe sees
+# "absent" again (because the wrapped process exited and the mount
+# namespace collapsed), and the driver returns the apply-success
+# state with the desired digest so the cache-hit gate downstream
+# treats subsequent identical applies as no-ops via the parent-side
+# memoization (the dispatch layer's two-sample cache-hit confirmation
+# is bypassed by the always-absent observe; the parent's planner
+# already records a stable address for this resource and the
+# planner-stage cache-hit gate handles the "we just ran this" case
+# at plan emission time).
+#
+# M2-M6 (the apt / dnf / pacman fetchers + the steam-run validation)
+# layer on top of this driver — they synthesise the FHS-tree roots
+# from realized .deb / .rpm / .pkg.tar.zst archives and feed them to
+# this driver verbatim. The driver itself does NOT know about
+# packaging formats; it is the typed dispatch boundary between the
+# planner and bubblewrap.
+# ===========================================================================
+
+const
+  LinuxFhsSandboxFhsRoots* = [
+    "usr", "lib", "lib64", "bin", "sbin", "etc"]
+    ## The six FHS roots the M0 transparency posture composes from
+    ## the realized prefix. `/dev /home /tmp /run /sys /var /proc`
+    ## are bind-passed to the host (the M0 lock) and are NOT in this
+    ## list. The order is the order they appear in the bwrap argv
+    ## vector — the driver writes the same six `--bind` pairs every
+    ## time so two operators authoring the same sandbox declaration
+    ## produce byte-identical argv vectors.
+  LinuxFhsSandboxHostPassThrough* = [
+    ("/home", "/home"),
+    ("/tmp", "/tmp"),
+    ("/run", "/run"),
+    ("/sys", "/sys"),
+    ("/var", "/var")]
+    ## The five `--bind /<host> /<host>` host-passthrough pairs. The
+    ## M0 lock makes these unconditional: the wrapped process sees
+    ## the host's home, tmp, run, sys, var. `/dev` is handled
+    ## separately via `--dev-bind` (bubblewrap's specific flag for
+    ## binding /dev with the device-node semantics intact). `/proc`
+    ## is handled via `--proc /proc` (bubblewrap mounts a fresh
+    ## procfs inside the mount namespace — host-visible per the
+    ## transparency posture because no `--unshare-pid` is set).
+
+proc buildLinuxFhsSandboxArgv*(op: PrivilegedOperation): seq[string] =
+  ## Pure argv-vector builder for the `linux.fhsSandbox` driver. Two
+  ## operators authoring the same `PrivilegedOperation` produce
+  ## byte-identical argv vectors; the same `op` always produces the
+  ## same argv vector (no environment dependence). Unit-tested
+  ## cross-platform — the spawn step lives in `applyLinuxFhsSandbox`
+  ## and is platform-gated.
+  ##
+  ## The vector encodes the M0-locked transparency posture (see the
+  ## module header for the explicit shape). M1 binds the first
+  ## `fsbFhsTreeRoots` entry into the six FHS roots; an empty
+  ## `fsbFhsTreeRoots` is refused at parse time so this proc may
+  ## assume `len >= 1` for a non-destroy op (the destroy path is a
+  ## no-op and never builds an argv vector).
+  result = @["bwrap"]
+  doAssert op.fsbFhsTreeRoots.len >= 1,
+    "buildLinuxFhsSandboxArgv requires at least one FHS-tree root; " &
+    "the parser rejects an empty fhsTreeRoots list on a non-destroy " &
+    "apply, so this branch should be unreachable"
+  let composed = op.fsbFhsTreeRoots[0]
+  for sub in LinuxFhsSandboxFhsRoots:
+    result.add("--bind")
+    result.add(composed & "/" & sub)
+    result.add("/" & sub)
+  # /dev needs --dev-bind for the device-node semantics
+  result.add("--dev-bind")
+  result.add("/dev")
+  result.add("/dev")
+  for pair in LinuxFhsSandboxHostPassThrough:
+    result.add("--bind")
+    result.add(pair[0])
+    result.add(pair[1])
+  result.add("--proc")
+  result.add("/proc")
+  result.add("--")
+  result.add(op.fsbBinPath)
+  for a in op.fsbArgv:
+    result.add(a)
+
+proc observeLinuxFhsSandbox*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## A bubblewrap session is NOT persistent — the mount namespace
+  ## collapses when the wrapped process exits, so there is no
+  ## "current state" to read. Always returns the absent sentinel
+  ## (`present = false`, `digestHex = ZeroDigestHex`). The dispatch
+  ## layer's drift / cache-hit logic treats this as "needs apply
+  ## every time"; the parent-side planner stage records a stable
+  ## address for this resource and is the layer that decides whether
+  ## the sandbox should actually be launched again (M2 wires the
+  ## "run-once-per-plan" semantics into the planner; M1 stays
+  ## conservative and lets every dispatch reach the apply path).
+  ##
+  ## Same off-platform stub the other Linux drivers use: the observe
+  ## proc itself is platform-gated so a cross-platform planning step
+  ## (e.g. `repro infra plan` running on Windows against a profile
+  ## that declares a Linux sandbox) sees the canonical absent state
+  ## via the planner's `ENotImplementedPlatform` catch (see
+  ## `repro_infra.planner.observeResource`).
+  when defined(linux):
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.fhsSandbox observe")
+
+proc destroyLinuxFhsSandbox*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## A sandbox session is not persistent, so destroy is a no-op —
+  ## there is nothing to tear down. Returns the absent sentinel.
+  ## Symmetric with `observeLinuxFhsSandbox`. Gated `when defined(
+  ## linux)` only for symmetry with the other Linux drivers; the
+  ## actual body has no platform dependence.
+  when defined(linux):
+    result.present = false
+    result.digestHex = ZeroDigestHex
+  else:
+    raiseNotImplementedPlatform("linux.fhsSandbox destroy")
+
+proc applyLinuxFhsSandbox*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Spawn `bwrap` with the M0-locked transparency-posture argv
+  ## vector built by `buildLinuxFhsSandboxArgv`. The spawn is via
+  ## `osproc.startProcess` (NOT a shell): the argv vector is passed
+  ## as a vector so the per-element NUL refusal in the parser is the
+  ## only filter needed, and no `quoteShell` is required because the
+  ## arguments never reach a shell.
+  ##
+  ## A destroy op is a no-op (sandbox sessions are not persistent;
+  ## there is nothing to tear down). The post-apply re-probe is the
+  ## absent sentinel from `observeLinuxFhsSandbox`; the dispatch
+  ## layer accepts that because the desired digest for a destroy is
+  ## also the absent sentinel and for a non-destroy the post-apply
+  ## state is "the sandbox ran" — captured by the digest returned
+  ## from this proc, not by an observe re-probe (the live state
+  ## genuinely IS absent after the wrapped process exits).
+  ##
+  ## Exit-code contract: the driver propagates bubblewrap's exit
+  ## code only as a `raiseProtocol` on non-zero exit. The wrapped
+  ## binary's own exit code is bubblewrap's exit code in the
+  ## transparency posture (no `--bind-fd` or `--exec-label`
+  ## indirection), so an `EProtocol` here means the wrapped binary
+  ## itself failed — the catalog-adapter chain upstream is what
+  ## decides whether that is fatal for the apply.
+  when defined(linux):
+    if op.fsbDestroy:
+      return destroyLinuxFhsSandbox(op)
+    let argv = buildLinuxFhsSandboxArgv(op)
+    # `startProcess` takes the executable and the argv tail
+    # separately. The argv we built starts with `bwrap`; pass it as
+    # the executable and the tail [1..^1] as the arguments. The
+    # `poStdErrToStdOut + poUsePath` options match the broker's
+    # other shell-out drivers (a) so the bubblewrap stderr is
+    # captured for the diagnostic on non-zero exit and (b) so
+    # `bwrap` is resolved via PATH (the driver does NOT pin a path
+    # to bubblewrap — the operator's PATH is the host's PATH per
+    # the M0 transparency posture).
+    let process = startProcess(argv[0], args = argv[1 .. ^1],
+      options = {poStdErrToStdOut, poUsePath})
+    let exitCode = process.waitForExit()
+    let output = process.outputStream.readAll()
+    process.close()
+    if exitCode != 0:
+      raiseProtocol("linux.fhsSandbox apply of " & op.fsbBinPath &
+        " failed: bwrap exited with code " & $exitCode & ": " &
+        output.strip())
+    # Post-apply re-probe: a bubblewrap session is not persistent,
+    # so the live observe is always absent. The dispatch layer's
+    # cache-hit predicate treats "apply ran + observe absent" as
+    # "apply succeeded" — exactly the same as a fixture file that
+    # is written and then immediately deleted. The driver returns
+    # the desired digest so the apply-log record carries the
+    # canonical bytes the operator declared.
+    result.present = true
+    result.digestHex = posixSystemDesiredDigestHex(op)
+  else:
+    raiseNotImplementedPlatform("linux.fhsSandbox apply")

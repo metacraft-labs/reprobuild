@@ -107,7 +107,7 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule, pokLinuxNixosSystemModule,
-     pokMacosDarwinSystemModule:
+     pokMacosDarwinSystemModule, pokLinuxFhsSandbox:
     posixSystemDesiredDigestHex(op)
   of pokOsTimezone, pokOsHostname:
     # Cross-platform: every platform's desired digest is the canonical
@@ -197,6 +197,8 @@ proc reobserve*(ctx: FixtureContext;
     observeLinuxNixosSystemModule(op)
   of pokMacosDarwinSystemModule:
     observeMacosDarwinSystemModule(op)
+  of pokLinuxFhsSandbox:
+    observeLinuxFhsSandbox(op)
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -272,6 +274,8 @@ proc applyOne(ctx: FixtureContext;
     result = applyLinuxNixosSystemModule(op)
   of pokMacosDarwinSystemModule:
     result = applyMacosDarwinSystemModule(op)
+  of pokLinuxFhsSandbox:
+    result = applyLinuxFhsSandbox(op)
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -333,7 +337,8 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokSystemdSystemTimer and op.stDestroy) or
     (op.kind == pokLinuxFirewallRule and op.lfwDestroy) or
     (op.kind == pokLinuxNixosSystemModule and op.nixosModuleDestroy) or
-    (op.kind == pokMacosDarwinSystemModule and op.darwinModuleDestroy)
+    (op.kind == pokMacosDarwinSystemModule and op.darwinModuleDestroy) or
+    (op.kind == pokLinuxFhsSandbox and op.fsbDestroy)
   let firstSampleLooksLikeCacheHit =
     if destroyOp: not observed.present
     else: observed.present and observed.digestHex == desiredHex

@@ -367,6 +367,11 @@ proc renderStanza*(r: SystemResource): seq[string] =
   of srkMacosDarwinSystemModule:
     result.add("  name = " & renderScalar(r.darwinModuleName))
     result.add("  content = " & renderScalar(r.darwinModuleContent))
+  of srkLinuxFhsSandbox:
+    result.add("  binPath = " & renderScalar(r.fsbBinPath))
+    result.add("  fhsTrees = " & renderList(r.fsbFhsTreeRoots))
+    if r.fsbArgv.len > 0:
+      result.add("  argv = " & renderList(r.fsbArgv))
   # M82 Phase B: emit `depends_on` last so its presence is obvious in a
   # rendered stanza without disrupting the legacy kind-field order.
   # Absent / empty seq omits the line entirely (the common case), so

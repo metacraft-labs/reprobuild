@@ -399,6 +399,15 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.darwinModuleName)
     body.writeString(op.darwinModuleContent)
     body.writeBool(op.darwinModuleDestroy)
+  of pokLinuxFhsSandbox:
+    body.writeString(op.fsbBinPath)
+    body.writeU32Le(uint32(op.fsbFhsTreeRoots.len))
+    for r in op.fsbFhsTreeRoots:
+      body.writeString(r)
+    body.writeU32Le(uint32(op.fsbArgv.len))
+    for a in op.fsbArgv:
+      body.writeString(a)
+    body.writeBool(op.fsbDestroy)
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -644,6 +653,21 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.darwinModuleContent = readString(body, pos)
     result.operation.darwinModuleDestroy = readBool(body, pos,
       "darwinModuleDestroy")
+  of pokLinuxFhsSandbox:
+    result.operation = PrivilegedOperation(kind: pokLinuxFhsSandbox,
+      address: address)
+    result.operation.fsbBinPath = readString(body, pos)
+    let rootCount = int(readU32Le(body, pos))
+    if rootCount < 0 or pos + rootCount > body.len:
+      raiseProtocol("linux.fhsSandbox frame: implausible fhsTreeRoots count")
+    for _ in 0 ..< rootCount:
+      result.operation.fsbFhsTreeRoots.add(readString(body, pos))
+    let argvCount = int(readU32Le(body, pos))
+    if argvCount < 0 or pos + argvCount > body.len:
+      raiseProtocol("linux.fhsSandbox frame: implausible argv count")
+    for _ in 0 ..< argvCount:
+      result.operation.fsbArgv.add(readString(body, pos))
+    result.operation.fsbDestroy = readBool(body, pos, "fsbDestroy")
 
 # ---- OperationResult -------------------------------------------------------
 

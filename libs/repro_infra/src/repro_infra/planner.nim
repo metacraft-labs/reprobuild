@@ -159,10 +159,13 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule,
-     pokLinuxNixosSystemModule, pokMacosDarwinSystemModule:
+     pokLinuxNixosSystemModule, pokMacosDarwinSystemModule,
+     pokLinuxFhsSandbox:
     # The M2 (Dotfiles-Migration-Completion) NixOS + nix-darwin
     # escape-hatch drivers are POSIX-side; their digest lives in
     # posix_system_driver alongside the other Phase-C kinds.
+    # The Linux-Third-Party-Sandbox-MVP M1 `linux.fhsSandbox` driver
+    # is the same shape — POSIX-side, digest in posix_system_driver.
     posixSystemDesiredDigestHex(op)
   else:
     systemDesiredDigestHex(op)
@@ -235,6 +238,8 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeLinuxNixosSystemModule(op)
       of srkMacosDarwinSystemModule:
         observeMacosDarwinSystemModule(op)
+      of srkLinuxFhsSandbox:
+        observeLinuxFhsSandbox(op)
   except ENotImplementedPlatform:
     obs.present = false
     obs.digestHex = ZeroDigestHex
@@ -352,6 +357,12 @@ proc summaryLine(r: SystemResource; action: string): string =
   of srkMacosDarwinSystemModule:
     action & " darwin-module " & r.darwinModuleName &
       " (" & $r.darwinModuleContent.len & " bytes)"
+  of srkLinuxFhsSandbox:
+    action & " fhs-sandbox " & r.fsbBinPath &
+      " (" & $r.fsbFhsTreeRoots.len & " tree-root" &
+      (if r.fsbFhsTreeRoots.len == 1: "" else: "s") &
+      (if r.fsbArgv.len > 0: ", " & $r.fsbArgv.len & " argv" else: "") &
+      ")"
 
 # ---------------------------------------------------------------------------
 # Resource dependency graph + topological sort (M82 Phase B).
