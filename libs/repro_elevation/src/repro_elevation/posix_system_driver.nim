@@ -56,7 +56,7 @@ import ./os_system_parse
 import ./posix_system_parse
 
 when defined(linux) or defined(macosx):
-  import std/[os, osproc]
+  import std/[os, osproc, streams]
 elif defined(windows):
   import std/[os]
 
