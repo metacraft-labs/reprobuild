@@ -346,6 +346,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     binary: "build/test-bin/t_windows_hook_registry",
     defines: @[]),
   TestSpec(
+    source: "libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim",
+    binary: "build/test-bin/t_n7_multicast_windows_smoke",
+    defines: @[]),
+  TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_action_cache_reader_consults_peer_on_miss.nim",
     binary: "build/test-bin/t_peer_cache_action_cache_reader_consults_peer_on_miss",
     defines: @[]),
@@ -1560,6 +1564,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
     binary: "build/test-bin/t_b0_runquota_repro_nim_compiles",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b1_apps_action_cache_hit.nim",
+    binary: "build/test-bin/t_b1_apps_action_cache_hit",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b1_repro_build_apps_byte_equivalent.nim",
+    binary: "build/test-bin/t_b1_repro_build_apps_byte_equivalent",
+    defines: @[]),
+  TestSpec(
+    source: "tests/integration/t_b1_repro_build_apps_collection.nim",
+    binary: "build/test-bin/t_b1_repro_build_apps_collection",
     defines: @[]),
   TestSpec(
     source: "tests/integration/t_cli_repro_lock_explain.nim",

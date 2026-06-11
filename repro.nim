@@ -38,6 +38,17 @@
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
+# Bootstrap-And-Self-Build B1: ``nim.c(...)`` typed-tool calls in the
+# package-level ``build:`` block below resolve through the ``nim``
+# const emitted by the ``package nim:`` DSL block in
+# ``repro_dsl_stdlib/packages/nim.nim``. That module is auto-imported
+# by the ``package`` macro's ``usesImportCode`` pass because
+# ``"nim >=2.2 <3.0"`` appears in our ``uses:`` block (the macro
+# imports it ``as nim_module`` so the bare ``nim`` identifier resolves
+# to the const value, not to the module — direct ``import
+# repro_dsl_stdlib/packages/nim`` would shadow the const with the
+# module name and break ``nim.c(...)`` method-call resolution).
+
 # Test-Edges-And-Parallel-Runner M1: ``ct_test_nim_unittest`` is the
 # codetracer-side Nim-unittest framework adapter that supplies the
 # ``buildNimUnittest.build(...)`` typed-tool used by every entry in
@@ -126,10 +137,18 @@ package reprobuild:
   # ``import repro_cli_support``, ...).
   library reprobuild
 
-  # Eleven shipping executables, one entry per non-comment line in
+  # Shipping executables, one entry per non-comment line in
   # apps/entrypoints.txt. Nim identifiers are camelCase; the hyphenated
   # on-disk binary name is restored via ``name: "<bin>"``. The order
   # below matches apps/entrypoints.txt to make drift visually obvious.
+  #
+  # Bootstrap-And-Self-Build B1: the executable declarations stay as
+  # naming/visibility records here; the per-executable ``nim.c(...)``
+  # build edges are emitted in the package-level ``build:`` block below
+  # (the project DSL's ``parseExecutable`` currently accepts only
+  # ``name:`` and ``cli:`` body members — a ``build:`` body inside an
+  # executable would be silently ignored, so the edges live one scope
+  # out and aggregate into the ``apps`` build graph collection there).
   executable repro:
     discard
 
@@ -147,6 +166,15 @@ package reprobuild:
 
   executable reproDaemon:
     name: "repro-daemon"
+
+  executable reproPeerCacheTier2:
+    name: "repro-peer-cache-tier2"
+
+  executable reproPeerCacheAdmin:
+    name: "repro-peer-cache-admin"
+
+  executable reproPeerCacheMintCert:
+    name: "repro-peer-cache-mint-cert"
 
   executable reprostored:
     discard
@@ -193,13 +221,124 @@ package reprobuild:
     # for the same data model in M0 (the registry split lands later).
     discard collect("test", reprobuildTestActions)
 
+    # Bootstrap-And-Self-Build B1: per-app typed-tool build edges +
+    # the ``apps`` build graph collection.
+    #
+    # One ``nim.c(...)`` edge per non-comment line in
+    # ``apps/entrypoints.txt``. The mapping reproduces the per-entry
+    # shell loop in ``scripts/build_apps.sh``: each entry's binary
+    # basename becomes ``build/bin/<name>`` and the source path is the
+    # ``.nim`` file under ``apps/<name>/<source>.nim``. The two
+    # provider entries carry ``-d:reproProviderMode`` (the third field
+    # in ``apps/entrypoints.txt`` for those rows).
+    #
+    # Per-app edge actions are accumulated into ``reprobuildAppsActions``
+    # and folded into a build graph collection named ``apps`` via the
+    # M0 ``collect`` primitive. ``repro build .#apps`` materialises
+    # every member in one engine pass. (The fragment form ``.#apps``
+    # is required because the CLI's path-vs-name classifier treats
+    # bare ``apps`` as the on-disk ``apps/`` directory; the fragment
+    # syntax disambiguates per the Named-Targets M3 rules in
+    # CLI/build.md §"Target Selection".)
+    #
+    # The option-(A) ``shell(command = "bash scripts/build_apps.sh", ...)``
+    # wrapper below stays in place for one transition milestone (B5
+    # retires it). B1 ships both paths in parallel so consumers can
+    # cut over incrementally; the per-app edges are the supported path
+    # going forward.
+    var reprobuildAppsActions: seq[BuildActionDef] = @[]
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro/repro.nim",
+      binary = "build/bin/repro",
+      actionId = "reprobuild.apps.repro"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-fs-snoop/repro_fs_snoop.nim",
+      binary = "build/bin/repro-fs-snoop",
+      actionId = "reprobuild.apps.repro-fs-snoop"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-hcr-link/repro_hcr_link.nim",
+      binary = "build/bin/repro-hcr-link",
+      actionId = "reprobuild.apps.repro-hcr-link"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-controller/repro_controller.nim",
+      binary = "build/bin/repro-controller",
+      actionId = "reprobuild.apps.repro-controller"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-worker/repro_worker.nim",
+      binary = "build/bin/repro-worker",
+      actionId = "reprobuild.apps.repro-worker"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-daemon/repro_daemon.nim",
+      binary = "build/bin/repro-daemon",
+      actionId = "reprobuild.apps.repro-daemon"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
+      binary = "build/bin/repro-peer-cache-tier2",
+      actionId = "reprobuild.apps.repro-peer-cache-tier2"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-peer-cache-admin/repro_peer_cache_admin.nim",
+      binary = "build/bin/repro-peer-cache-admin",
+      actionId = "reprobuild.apps.repro-peer-cache-admin"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim",
+      binary = "build/bin/repro-peer-cache-mint-cert",
+      actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/reprostored/reprostored.nim",
+      binary = "build/bin/reprostored",
+      actionId = "reprobuild.apps.reprostored"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-provider-host/repro_provider_host.nim",
+      binary = "build/bin/repro-provider-host",
+      actionId = "reprobuild.apps.repro-provider-host"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim",
+      binary = "build/bin/repro-cmake-dyndep-fragment",
+      actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
+
+    # Provider-mode entries carry ``-d:reproProviderMode`` per the
+    # third field on their ``apps/entrypoints.txt`` line.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim",
+      binary = "build/bin/repro-cmake-trycompile-provider",
+      defines = @["reproProviderMode"],
+      actionId = "reprobuild.apps.repro-cmake-trycompile-provider"))
+
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-standard-provider/repro_standard_provider.nim",
+      binary = "build/bin/repro-standard-provider",
+      defines = @["reproProviderMode"],
+      actionId = "reprobuild.apps.repro-standard-provider"))
+
+    discard collect("apps", reprobuildAppsActions)
+
     # Option (A) from the repo packaging memo: wrap scripts/build_apps.sh
     # byte-for-byte so the action's behaviour is identical to ``just
     # build`` today. The action declares the union of source roots the
     # script reads (apps/, libs/, config.nims, reprobuild.nimble) as
-    # extra inputs and every ``build/bin/<name>`` artifact as an extra
-    # output so a future engine pass can cache-key correctly without
-    # re-deriving the inputs.
+    # extra inputs.
+    #
+    # Bootstrap-And-Self-Build B1: the wrapper no longer declares the
+    # 14 ``build/bin/<name>`` app binaries as ``extraOutputs`` — the
+    # per-app ``nim.c(...)`` edges above own those artifacts now and
+    # the engine rejects duplicate owned-effect claims on the same
+    # output path. The wrapper retains its monitor-shim and DSL-runtime
+    # DLL outputs (which the per-app edges don't produce) so that
+    # ``bash scripts/build_apps.sh`` remains a complete drop-in for
+    # ``just build`` during the transition. B5 retires the wrapper
+    # entirely.
     #
     # Env vars (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX /
     # NIMCRYPTO_SRC / RUNQUOTA_SRC / REPROBUILD_USE_SYSTEM_HASH_LIBS)
@@ -216,17 +355,4 @@ package reprobuild:
         "config.nims",
         "reprobuild.nimble",
         "scripts/build_apps.sh",
-      ],
-      extraOutputs = @[
-        "build/bin/repro",
-        "build/bin/repro-fs-snoop",
-        "build/bin/repro-hcr-link",
-        "build/bin/repro-controller",
-        "build/bin/repro-worker",
-        "build/bin/repro-daemon",
-        "build/bin/reprostored",
-        "build/bin/repro-provider-host",
-        "build/bin/repro-cmake-dyndep-fragment",
-        "build/bin/repro-cmake-trycompile-provider",
-        "build/bin/repro-standard-provider",
       ])
