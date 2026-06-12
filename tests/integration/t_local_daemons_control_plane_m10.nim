@@ -33,9 +33,6 @@ proc repoRoot(): string =
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
-proc publicReproDaemonBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
-
 proc daemonEndpoint(tempRoot: string): string =
   "/tmp" / (tempRoot.extractFilename & ".sock")
 
@@ -107,10 +104,18 @@ proc appendMarker(path, marker: string) =
     file.write("\nM10-RESTART-MARKER:" & marker & "\n")
 
 proc copyDaemonFixture(tempRoot: string): string =
+  # Executable-Consolidation M2 (commit b62edf0): the daemon image IS
+  # the public ``repro`` binary; the standalone ``repro-daemon`` was
+  # retired. ``daemon start --dev --daemon-exe=<exe>`` invokes
+  # ``<exe> daemon serve …`` (see ``daemonProcessArgs``) so the
+  # fixture path's BASENAME does not matter -- only the byte contents
+  # do. Keep the ``repro-daemon`` filename for the source-image hash
+  # diagnostics so the dev-restart marker append targets the same
+  # file the daemon will re-image from.
   let sourceDir = tempRoot / "source-bin"
   createDir(sourceDir)
   result = sourceDir / "repro-daemon"
-  copyFile(publicReproDaemonBin(), result)
+  copyFile(publicReproBin(), result)
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 

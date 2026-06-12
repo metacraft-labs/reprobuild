@@ -8,9 +8,6 @@ proc repoRoot(): string =
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
-proc publicReproDaemonBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
-
 proc daemonEndpoint(tempRoot: string): string =
   daemonSocketEndpoint(tempRoot.extractFilename)
 
@@ -57,8 +54,12 @@ proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 60.0) =
 proc startForegroundDaemon(tempRoot: string): owned(Process) =
   createDir(daemonStateDir(tempRoot))
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
-  result = startProcess(publicReproDaemonBin(),
-    args = @["--foreground"] & daemonArgs(tempRoot),
+  # Executable-Consolidation M2 (commit b62edf0): the daemon process
+  # is now ``repro daemon serve …`` -- the standalone ``repro-daemon``
+  # binary was retired. Spawn via the public ``repro`` image; the
+  # daemon role is selected by the ``daemon serve`` subcommand.
+  result = startProcess(publicReproBin(),
+    args = @["daemon", "serve", "--foreground"] & daemonArgs(tempRoot),
     workingDir = repoRoot(),
     options = {poUsePath, poStdErrToStdOut})
   try:

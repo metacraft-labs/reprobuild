@@ -8,12 +8,6 @@ proc repoRoot(): string =
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
-proc userDaemonBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
-
-proc storeDaemonBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("reprostored", ExeExt)
-
 proc requireReproFailure(args: openArray[string]): string =
   requireFailure(shellCommand(@[publicReproBin()] & @args), repoRoot())
 
@@ -31,16 +25,19 @@ proc copyFixtureProject(source, dest: string) =
 suite "Local daemons/control-plane M0 current-state gates":
   when isNixSupported:
     test "test_daemon_entrypoint_builds":
-      check "repro-daemon" in entrypointNames()
-      check fileExists(userDaemonBin())
-      let output = requireSuccess(shellCommand([userDaemonBin(), "--version"]),
+      # Executable-Consolidation M2 (commit b62edf0): the standalone
+      # ``repro-daemon`` and ``reprostored`` binaries were retired in
+      # favour of self-spawning the ``repro`` image as
+      # ``repro daemon serve`` / ``repro store serve``. The
+      # ``apps/entrypoints.txt`` manifest therefore lists ``repro``
+      # only; the daemon / store roles live inside that one image and
+      # are exercised by the subsequent ``daemon status`` /
+      # ``store daemon status`` invocations below.
+      check "repro" in entrypointNames()
+      check fileExists(publicReproBin())
+      let output = requireSuccess(shellCommand([publicReproBin(), "--version"]),
         repoRoot())
-      check output.strip().startsWith("repro-daemon ")
-      check "reprostored" in entrypointNames()
-      check fileExists(storeDaemonBin())
-      let storeOutput = requireSuccess(shellCommand([storeDaemonBin(),
-        "--version"]), repoRoot())
-      check storeOutput.strip().startsWith("reprostored ")
+      check output.strip().startsWith("repro ")
 
     test "test_daemon_track_current_surface_inventory":
       check fileExists(publicReproBin())

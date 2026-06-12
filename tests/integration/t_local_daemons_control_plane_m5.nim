@@ -8,9 +8,6 @@ proc repoRoot(): string =
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
-proc publicReproDaemonBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro-daemon", ExeExt)
-
 proc daemonEndpoint(tempRoot: string): string =
   daemonSocketEndpoint(tempRoot.extractFilename)
 
@@ -39,10 +36,15 @@ proc stopDaemon(tempRoot: string) =
     daemonArgs(tempRoot)), repoRoot())
   let endpoint = daemonEndpoint(tempRoot)
   let deadline = epochTime() + 5.0
+  # Executable-Consolidation M2 (commit b62edf0): the foreground
+  # daemon process command is ``<repro> daemon serve --foreground
+  # --endpoint <ep> …`` -- the standalone ``repro-daemon`` binary was
+  # retired. Match on the ``daemon serve --foreground --endpoint <ep>``
+  # substring so the wait loop still identifies the right process.
   while epochTime() < deadline:
     let res = runShell(shellCommand(@["sh", "-c",
       "ps -axo command | grep " &
-      quoteShell("repro-daemon --foreground --endpoint " & endpoint) &
+      quoteShell("daemon serve --foreground --endpoint " & endpoint) &
       " | grep -v grep"]), repoRoot())
     if res.code != 0:
       break
@@ -68,8 +70,12 @@ proc waitForDaemonRunning(tempRoot: string; timeoutSeconds = 60.0) =
 proc startForegroundDaemon(tempRoot: string): owned(Process) =
   createDir(daemonStateDir(tempRoot))
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
-  result = startProcess(publicReproDaemonBin(),
-    args = @["--foreground"] & daemonArgs(tempRoot),
+  # Executable-Consolidation M2 (commit b62edf0): the daemon process
+  # is now ``repro daemon serve …`` -- the standalone ``repro-daemon``
+  # binary was retired. Spawn via the public ``repro`` image; the
+  # daemon role is selected by the ``daemon serve`` subcommand.
+  result = startProcess(publicReproBin(),
+    args = @["daemon", "serve", "--foreground"] & daemonArgs(tempRoot),
     workingDir = repoRoot(),
     options = {poUsePath, poStdErrToStdOut})
   try:
