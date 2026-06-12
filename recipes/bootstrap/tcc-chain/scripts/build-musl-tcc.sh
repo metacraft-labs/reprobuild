@@ -98,11 +98,22 @@ rm -f src/math/i386/*.c src/math/x86_64/*.c
 log "Stage 3: ./configure CC=tcc"
 # We use the shim's wrapper-less tcc plus explicit -B for libtcc1.a.
 # Make tcc visible as just "tcc" so configure's heuristics work; add a
-# wrapper that injects -B.
+# wrapper that injects -B and -I (the latter is required when the tcc
+# binary has CONFIG_TCC_PREDEFS=1 with `#include <mes/config.h>` baked
+# in -- such as tinycc-mes -- because musl's Makefile uses `-nostdinc`
+# which disables the baked-in sysinclude path).
+#
+# We add the include AFTER musl's own -I flags by NOT including -nostdinc
+# in the wrapper (musl adds it itself); the user-specified -I dirs are
+# searched first, mes-libc include is found via -isystem-like append.
+EXTRA_INCLUDE_FLAG=""
+if [ -d "$SHIM_ABS/include" ]; then
+  EXTRA_INCLUDE_FLAG="-isystem $SHIM_ABS/include"
+fi
 mkdir -p "$WORK/bin-tcc"
 cat > "$WORK/bin-tcc/tcc" <<EOF
 #!/bin/bash
-exec "$SHIM_ABS/bin/tcc" -B "$SHIM_ABS/lib" "\$@"
+exec "$SHIM_ABS/bin/tcc" -B "$SHIM_ABS/lib" $EXTRA_INCLUDE_FLAG "\$@"
 EOF
 chmod +x "$WORK/bin-tcc/tcc"
 export PATH="$WORK/bin-tcc:$PATH"

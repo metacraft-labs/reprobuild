@@ -47,6 +47,10 @@ $urls = @(
      url  = 'https://ftpmirror.gnu.org/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz' },
   @{ name = 'gmp-6.3.0.tar.xz';
      url  = 'https://ftpmirror.gnu.org/gmp/gmp-6.3.0.tar.xz' }
+  # tinycc-mes: see vendor/MANIFEST.md — repo.or.cz is Anubis-gated, so
+  # we re-materialise via `git clone https://repo.or.cz/tinycc.git` +
+  # `git archive cb41cbfe7`.  Not included in the URL loop; refresh via
+  # scripts/_mkarchive.sh + scripts/_mktargz.sh after cloning.
 )
 
 Push-Location $vendorDir

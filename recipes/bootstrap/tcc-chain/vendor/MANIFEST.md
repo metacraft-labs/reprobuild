@@ -263,6 +263,48 @@ matches byte-for-byte (10 SRI hashes + 5 nix-base32 hashes verified
 - **Note**: same mpfr 4.2.2, mpc 1.3.1, isl 0.24 as gcc 10 -- no
   separate vendoring required.
 
+## tinycc-mes.tar.gz (R5 Session 2 vendor)
+
+- **Upstream URL**:
+  `https://repo.or.cz/tinycc.git/snapshot/cb41cbfe717e4c00d7bb70035cda5ee5f0ff9341.tar.gz`.
+- **Upstream commit**: `cb41cbfe717e4c00d7bb70035cda5ee5f0ff9341`
+  (repo.or.cz/tinycc.git "mob" history; nixpkgs labels
+  "unstable-2025-12-03").
+- **Snapshot date**: 2026-06-12.
+- **Size**: 992909 bytes.
+- **Our sha256 (tarball file)**:
+  `012fe809a988528925771b4e3ec6e5914a49d3fed59790e04a36f75f3aca5439`.
+- **nixpkgs SRI pin (tarball file)**:
+  `sha256-MRuqq3TKcfIahtUWdhAcYhqDiGPkAjS8UTMsDE+/jGU=` (hex
+  `311baaab74ca71f21a86d51676101c621a838863e40234bc51332c0c4fbf8c65`).
+  Source: `pkgs/os-specific/linux/minimal-bootstrap/tinycc/mes.nix`.
+- **Why our hash differs from nixpkgs**: repo.or.cz now gates downloads
+  through an Anubis proof-of-work challenge (2026 onward) that
+  `Invoke-WebRequest` can't solve.  We re-materialised the tarball
+  deterministically via `git archive` from a clone of the public mirror
+  (which Github / GitLab forks track):
+  ```
+  git clone --no-tags https://repo.or.cz/tinycc.git
+  git --git-dir=tinycc.git archive --format=tar.gz \
+      --prefix=tinycc-cb41cbf/ cb41cbfe717e4c00d7bb70035cda5ee5f0ff9341 \
+      -o tinycc-mes.tar.gz
+  ```
+  The TAR.GZ format / metadata differ from repo.or.cz's snapshot tarball,
+  but the EXTRACTED SOURCE CONTENT is byte-identical to the cb41cbfe7
+  git tree (which is content-addressable by definition).  Cross-check
+  by hashing individual files:
+  - `tcc.c`        sha256 `fd46f22e22b9a2b50d1ded68eab593e178e1bd43288a7a4d03531985928c0777`
+  - `tccgen.c`     sha256 `fa3370179d632ee88df3c09ef78fd8b2e9222d452ee77a78ec23d80f09464744`
+  - `i386-asm.c`   sha256 `ee96b69a8c394190461936691d50d18d4322dc0ec8580f07bc5af18b15cf1647`
+  - `libtcc.c`     sha256 `2ca28a612f13028edfbd2751f3a8b6190911a1b2b527db793061d454bf728c8b`
+  - `x86_64-gen.c` sha256 `8c2993ffe617872b6bfaaf67aaa1b8219f8af8b4d55e124b4cc1f6b6e5b54c33`
+  - `include/tccdefs.h` sha256 `1d7fd24fbf8fbc9c07f54c9803390a37348d4f7b791b43e6166c1597b28ad41b`
+- **License**: LGPL-2.1-only.
+- **Note**: `tinycc-mes` is the modern tcc (CONFIG_TCC_PREDEFS=1 +
+  generated tccdefs_.h) that accepts the C99 features musl 1.2.6 requires
+  (`__builtin_va_list`, `[static N]` array params).  It's the missing
+  link between `tinycc-bootstrappable` (R4) and musl-tcc (R5 Phase B).
+
 ## Refresh (R5)
 
 ```
