@@ -134,15 +134,35 @@ nixpkgs's hex0.nix selects per-arch from the same upstream commit.
 - **Note**: mes 0.27.1 is incompatible with nyacc >= 1.09.2 (block-comment
   parse bug); 1.09.1 is the explicit upstream pin.
 
+## tinycc-bootstrappable.tar.gz
+
+- **Upstream URL**:
+  `https://gitlab.com/janneke/tinycc/-/archive/ea3900f6d5e71776c5cfabcabee317652e3a19ee/tinycc-ea3900f6d5e71776c5cfabcabee317652e3a19ee.tar.gz`.
+- **Upstream commit**: `ea3900f6d5e71776c5cfabcabee317652e3a19ee`
+  (janneke's bootstrappable fork; nixpkgs "unstable-2024-07-07").
+- **Snapshot date**: 2026-06-12.
+- **Size**: 772254 bytes.
+- **sha256**: `d7a2411890130163fe94fca53a2dfe9688e976fd12479a6acb1395d8f895c740`.
+- **NAR-format pin in nixpkgs**:
+  `sha256-16JBGJATAWP+lPylOi3+lojpdv0SR5pqyxOV2PiVx0A=` — byte-equal to
+  the raw file sha256 above. Source:
+  `pkgs/os-specific/linux/minimal-bootstrap/tinycc/bootstrappable.nix`.
+- **License**: LGPL-2.1-only.
+- **Note**: this is the mes-compatible tinycc fork, not upstream tinycc.
+  Required because upstream tinycc has portability issues that mes 0.27
+  cannot compile.  Re-vendored to tarball form (not git clone) because
+  the GitLab archive is deterministic per commit hash.
+
 ## Refresh
 
 Run `pwsh fetch.ps1` to re-materialise `minimal-bootstrap-sources.tar.gz`
 from upstream. The script clones the pinned tag + submodules in a WSL
 distro and re-tars deterministically. The hex0-seed is committed and
-needs no refresh. The mes + nyacc tarballs are direct upstream
-downloads; refresh via:
+needs no refresh. The mes + nyacc + tinycc-bootstrappable tarballs are
+direct upstream downloads; refresh via:
 
 ```
 pwsh -c 'iwr https://ftpmirror.gnu.org/gnu/mes/mes-0.27.1.tar.gz -OutFile mes-0.27.1.tar.gz'
 pwsh -c 'iwr https://download.savannah.nongnu.org/releases/nyacc/nyacc-1.09.1.tar.gz -OutFile nyacc-1.09.1.tar.gz'
+pwsh -c 'iwr https://gitlab.com/janneke/tinycc/-/archive/ea3900f6d5e71776c5cfabcabee317652e3a19ee/tinycc-ea3900f6d5e71776c5cfabcabee317652e3a19ee.tar.gz -OutFile tinycc-bootstrappable.tar.gz'
 ```

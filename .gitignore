@@ -73,3 +73,10 @@ recipes/reproos-ref-iso/vendor/*.raw
 recipes/reproos-ref-iso/vendor/*.vhdx
 recipes/reproos-ref-iso/vendor/*.iso
 recipes/reproos-ref-iso/vendor/*.src-sha256
+
+# R4 tcc-chain vendored upstream tarballs (sources only; the in-tree
+# hex0-seed.AMD64.bin is the only committed binary).  Manifest,
+# SHA256SUMS, and fetch.ps1 ARE committed; tarballs themselves are
+# gitignored.
+recipes/bootstrap/tcc-chain/vendor/*.tar.gz
+recipes/bootstrap/tcc-chain/vendor/*.tar.xz

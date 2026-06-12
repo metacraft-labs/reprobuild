@@ -1,7 +1,10 @@
-# Canonical sha256 sums for R4 session 1 outputs (2026-06-12)
+# Canonical sha256 sums for R4 outputs (sessions 1-2, 2026-06-12)
 # Built on: WSL2 repro-debian (Debian 12 bookworm), Windows 11 Pro host
 # Reproducibility: Phase 2 + Phase 4 verified bit-identical across re-runs
 #                  Phase 3 deterministic by construction (no Phase 3 re-run yet)
+#                  Phase 5 + Phase 6 deterministic by construction
+#                  (mes + tcc embed canonical /repro/mes-0.27.1 paths;
+#                   re-run reproducibility verification deferred)
 
 [phase-2 hex0 (1 binary)]
 229      66c95985e668f20f2465c2b876f83fef066fd7c8c2dd3adb51a969f2d7120c8b  hex0
@@ -34,8 +37,29 @@
 57101    379cb35a87bd7a9c190d79d3141af897869aae5e4cb0ac9e03235c78b84e1be7  bin/get_machine
 458747   7cf19de29a4ae63637898f6093d0526b73108040ab3634f11232030439602fc1  bin/M2-Planet
 
+[phase-5 mes (8 outputs)]
+157160   86d7776ca25e0ed05911c3f7a73f4cad54481c69aa19c2009e05849c4d70d149  bin/mes
+293531   0d81ac8558bc9ce68d7d106a4f3cd26000d49b12c026000b7c2bf5d1d2a75a70  bin/mes-m2
+2243     b5ed3a5f3927712e95ab9067a0e5bc09610ca2528e0491912733ba788e709910  bin/mescc.scm
+2313     67c4de288c6213fde9d6f076c71c75354cf4c71c9d07ebeeb3ac14611d3bb66a  lib/x86_64-mes/libc-mini.a
+706      898cf3b3219aa392ebaaff90d5bd70f76105b903b4bd453c05b72a4519843694  lib/x86_64-mes/libmescc.a
+53299    b92d03733f49aff369ca3390e0fc8a44cfc4111bd154dd3f46a3fe236a2377ef  lib/x86_64-mes/libc.a
+143221   63778b3a997746e9e3bf121c27048bde2ba2a5c119a8871135d7466cdfb6d1f3  lib/x86_64-mes/libc+tcc.a
+365      9fdd4b604bbc916b345e5649d0afcc2bd2890363ce109345110ccea5853b2888  lib/x86_64-mes/crt1.o
+
+[phase-6 tcc (7 outputs) — R4 acceptance gate PASSED 2026-06-12]
+# tcc -o hello hello.c; ./hello; echo $? -> 42
+799520   b83b261db1e70a241ff2211f71383e96be1dbe37b1f9f0c67044cd3f8b46fdd7  bin/tcc
+4222     0e855d8deb1e35da8a02296feb07f6685c69ca9d75c7f3eb64f5cb38da28487c  lib/libtcc1.a
+92894    1b89fb83e0c502fd5a5d4d7499bd9f0c102d8116b2ab0c72367e1bef35834c9c  lib/libc.a
+8390     5bbdfe7314dc17144c34066133514bd870341e6770592801346dc64050452c5d  lib/libgetopt.a
+968      56ca39f4be996dcb439e6afff645107b93ce6c43a33dcb973662d04e1d99893d  lib/crt1.o
+656      2eb4c7e6b8de2d1cd02aac20a634cb44d67b2e7f5242aebc0fd976c427c6694b  lib/crtn.o
+656      502d1463becdad3ea2655442b1fe056e24a761507f0b30c8df3579542358cb67  lib/crti.o
+
 [vendor inputs]
 229      66c95985e668f20f2465c2b876f83fef066fd7c8c2dd3adb51a969f2d7120c8b  vendor/hex0-seed.AMD64.bin
 1508930  91df538e63abd103a2f5ace56638eb20c07f577afd57e1fa398a638fd955589c  vendor/minimal-bootstrap-sources.tar.gz
 756876   183a40ea47ea49f8a1e3bd1b9d12e676374d64d63bc79e7bc1ae7d673dfdf25d  vendor/mes-0.27.1.tar.gz
 1282761  0ec9ae537e0d951781a50de3c7929ac97a85c1d4b5e85e5d51542e3751022717  vendor/nyacc-1.09.1.tar.gz
+772254   d7a2411890130163fe94fca53a2dfe9688e976fd12479a6acb1395d8f895c740  vendor/tinycc-bootstrappable.tar.gz
