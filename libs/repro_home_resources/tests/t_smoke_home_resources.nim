@@ -1982,3 +1982,125 @@ suite "M83 step 9 Driver B: pkg.homebrewCask integration":
       address: "hbc:empty",
       caskName: "",
       caskVersion: "")).len > 0
+
+# ---------------------------------------------------------------------------
+# Recipe-Validation side-finding (Item 2): POSIX `env.userVariable`
+# arm.
+#
+# Pre-fix: `applyUserVariableCreate` was a no-op on POSIX — the M6
+# multi-distro harness's step 6d soft-warned on the gap. The arm now
+# writes `export <name>='<value>'` into a per-variable managed block
+# in the same shell rc file `env.userPath` already owns. The block id
+# is `repro-home-env-<name>` so multiple variables don't collide.
+# ---------------------------------------------------------------------------
+
+import repro_home_resources/drivers/env_user
+import repro_home_resources/drivers/managed_block
+
+suite "Recipe-Val side-finding: POSIX env.userVariable arm":
+
+  test "renderUserVariableBlockContent emits export with single-quoted value":
+    var payload = RegistryValuePayload(kind: rvkString)
+    payload.bytes = encodeString("hello world")
+    let rendered = renderUserVariableBlockContent("MY_VAR", payload)
+    check rendered == "export MY_VAR='hello world'\n"
+
+  test "renderUserVariableBlockContent escapes embedded single quotes":
+    # The shell-single-quote escape pattern `'\"'\"'` lets an embedded
+    # apostrophe survive the dquote-as-literal. Matches the existing
+    # `posixPathBlockContent` escape contract.
+    var payload = RegistryValuePayload(kind: rvkString)
+    payload.bytes = encodeString("it's fine")
+    let rendered = renderUserVariableBlockContent("X", payload)
+    check rendered.contains("it'\"'\"'s fine")
+
+  test "userVariableBlockId is name-derived and stable":
+    check userVariableBlockId("JAVA_HOME") == "repro-home-env-JAVA_HOME"
+    check userVariableBlockId("MAVEN_HOME") == "repro-home-env-MAVEN_HOME"
+    # Two different vars get distinct block ids so they don't collide
+    # in the shared rc file.
+    check userVariableBlockId("A") != userVariableBlockId("B")
+
+  test "applyUserVariableCreate writes managed block on POSIX":
+    when not defined(windows):
+      # Use REPRO_HOME_POSIX_PATH_RC test seam so the apply writes to
+      # a temp file instead of `$HOME/.profile`. Mirrors the
+      # `env.userPath` POSIX test pattern.
+      let dir = createTempDir("reprobuild-env-userVar-", "")
+      let rc = dir / "test_rc"
+      writeFile(rc, "")
+      putEnv("REPRO_HOME_POSIX_PATH_RC", rc)
+      try:
+        var payload = RegistryValuePayload(kind: rvkString)
+        payload.bytes = encodeString("/opt/maven")
+        let recorded = applyUserVariableCreate("MAVEN_HOME", payload)
+        check recorded.len > 0
+        let after = readFile(rc)
+        # Sentinel + export line both materialize.
+        check after.contains("repro-managed:repro-home-env-MAVEN_HOME")
+        check after.contains("export MAVEN_HOME='/opt/maven'")
+        # Observe round-trip: the post-write digest must match what
+        # `observeUserVariable` reads back, so the lifecycle algorithm
+        # reports no-op on re-apply.
+        let obs = observeUserVariable("MAVEN_HOME")
+        check obs.present
+      finally:
+        delEnv("REPRO_HOME_POSIX_PATH_RC")
+        try: removeFile(rc) except OSError: discard
+        try: removeDir(dir) except OSError: discard
+
+  test "applyUserVariableDestroy removes managed block on POSIX":
+    when not defined(windows):
+      let dir = createTempDir("reprobuild-env-userVar-destroy-", "")
+      let rc = dir / "test_rc"
+      writeFile(rc, "# user header\n")
+      putEnv("REPRO_HOME_POSIX_PATH_RC", rc)
+      try:
+        var payload = RegistryValuePayload(kind: rvkString)
+        payload.bytes = encodeString("xyz")
+        discard applyUserVariableCreate("DOOMED", payload)
+        let withBlock = readFile(rc)
+        check withBlock.contains("export DOOMED='xyz'")
+        applyUserVariableDestroy("DOOMED")
+        let afterDestroy = readFile(rc)
+        # The user's surrounding content is preserved; only the
+        # managed block + its sentinels are removed.
+        check afterDestroy.contains("# user header")
+        check (not afterDestroy.contains("export DOOMED='xyz'"))
+        check (not afterDestroy.contains("repro-home-env-DOOMED"))
+        # Re-observation reports absent.
+        let obs = observeUserVariable("DOOMED")
+        check (not obs.present)
+      finally:
+        delEnv("REPRO_HOME_POSIX_PATH_RC")
+        try: removeFile(rc) except OSError: discard
+        try: removeDir(dir) except OSError: discard
+
+  test "two env vars get independent blocks in the same rc file":
+    when not defined(windows):
+      let dir = createTempDir("reprobuild-env-userVar-two-", "")
+      let rc = dir / "test_rc"
+      writeFile(rc, "")
+      putEnv("REPRO_HOME_POSIX_PATH_RC", rc)
+      try:
+        var p1 = RegistryValuePayload(kind: rvkString)
+        p1.bytes = encodeString("/opt/jdk")
+        var p2 = RegistryValuePayload(kind: rvkString)
+        p2.bytes = encodeString("/opt/maven")
+        discard applyUserVariableCreate("JAVA_HOME", p1)
+        discard applyUserVariableCreate("MAVEN_HOME", p2)
+        let after = readFile(rc)
+        # Both blocks coexist; neither clobbered the other.
+        check after.contains("repro-managed:repro-home-env-JAVA_HOME")
+        check after.contains("repro-managed:repro-home-env-MAVEN_HOME")
+        check after.contains("export JAVA_HOME='/opt/jdk'")
+        check after.contains("export MAVEN_HOME='/opt/maven'")
+        # Destroying one leaves the other intact.
+        applyUserVariableDestroy("JAVA_HOME")
+        let afterDestroy = readFile(rc)
+        check (not afterDestroy.contains("export JAVA_HOME='/opt/jdk'"))
+        check afterDestroy.contains("export MAVEN_HOME='/opt/maven'")
+      finally:
+        delEnv("REPRO_HOME_POSIX_PATH_RC")
+        try: removeFile(rc) except OSError: discard
+        try: removeDir(dir) except OSError: discard

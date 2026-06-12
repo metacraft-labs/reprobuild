@@ -691,44 +691,34 @@ in the SYSTEM scope, which is M7's territory: Debian's
 `/usr/share/bash-completion/` vs Fedora's `/etc/bash_completion.d/`
 etc.).
 
-### Known finding: `env.userVariable` is Windows-only on the apply leg
+### Closed finding: `env.userVariable` POSIX arm landed
 
-The `env.userVariable` driver's `applyUserVariableCreate` /
-`applyUserVariableUpdate` / `applyUserVariableDestroy` procs in
+Pre-fix: `applyUserVariableCreate` / `applyUserVariableUpdate` /
+`applyUserVariableDestroy` in
 `libs/repro_home_resources/src/repro_home_resources/drivers/env_user.nim`
-are gated `when defined(windows):` — on POSIX the body is a no-op
-beyond returning `payload.bytes` to the executor. Concretely:
+were gated `when defined(windows):` and were no-ops on POSIX. The
+M6 step 6d soft-warned on the gap so it surfaced in the logs.
 
-- The resource IS recognized by the intent parser + the planner
-  (`pipeline.nim` line 734-755).
-- The plan correctly lists the resource as `create`.
-- The apply pipeline calls into the driver, which on Linux writes
-  nothing to disk.
-- On a re-`--plan`, the resource re-appears in the listing as
-  `create` (because the driver never recorded a post-apply
-  observation that matches the desired state), BUT the OVERALL
-  plan status is still `no-op (matches the active generation)`
-  and `0 drift(s)`, because the generation digest doesn't change.
+The POSIX arm now writes `export <name>='<value>'` into a per-variable
+managed block (`repro-home-env-<name>`) in the same shell rc file the
+`env.userPath` driver owns
+(`defaultUserPathHostFile()`-resolved, overridable via
+`REPRO_HOME_POSIX_PATH_RC` for tests). The destroy direction removes
+the per-variable managed block, leaving the user's surrounding rc
+content intact. The post-apply digest matches the re-observed
+managed-block bytes so the lifecycle algorithm reports no-op on
+re-apply.
 
-This means env.userVariable is **observed as planned but not
-materialized** on Linux. Setting `REPRO_M6_HOME_APPLY=1` does NOT
-write the variable to any shell rc — the env.userPath managed block
-is present, but the env.userVariable line is absent. The M6 test
-script's step 6d soft-warns (not hard-fails) on this gap so the
-M6 gate stays green and the divergence surfaces in the logs without
-masking the other four primitives' success.
+Regression coverage:
+`libs/repro_home_resources/tests/t_smoke_home_resources.nim` →
+`Recipe-Val side-finding: POSIX env.userVariable arm` (6 tests:
+render, escape, block-id stability, create round-trip, destroy
+round-trip, two-var coexistence).
 
-This is the same class of issue Dotfiles-Migration-Completion N6
-surfaced: an "implemented for Windows, not yet implemented for Linux"
-arm in a driver. Recommended fix scope: add a POSIX
-`applyUserVariableCreate` arm that writes `export <name>=<value>`
-into the same shared rc managed block the env.userPath driver
-already owns (`REPRO_HOME_POSIX_PATH_RC` test seam +
-`defaultUserPathHostFile()`'s rc resolution), so the gap closes
-without inventing a new host-file convention.
-
-The other 4 primitives (`fs.userFile` x2, `env.userPath`,
-`shell.integration`) materialize correctly on all 5 distros.
+All 5 home-scope primitives (`fs.userFile` x2, `env.userPath`,
+`shell.integration`, `env.userVariable`) now materialize correctly
+on all 5 non-NixOS distros. M6 step 6d can be promoted from
+soft-warn to hard-assert at the next harness pass.
 
 ### Running M6 acceptance
 
@@ -828,23 +818,33 @@ divergence the M7 brief asks for.
 - **Alpine**: NO systemd — openrc is the real init. The plan reports
   a legal `create` for the unit file (the filesystem write would
   succeed; the unit just would never start because nothing reads
-  `/etc/systemd/system/` on a musl/openrc host). **Architecturally
-  this means a real `infra apply` on Alpine would need either a
-  per-distro driver variant (an openrc unit translator) or the spec
-  to declare Alpine out-of-scope for systemd primitives**. M7's
-  brief is plan-only so this divergence surfaces without blocking
-  the gate.
-- **Timezone driver — Etc/UTC fast-path missing**: every glibc
-  distro under WSL has `/etc/localtime` pre-set to UTC (the same
-  IANA value the fixture declares), yet the plan reports `update`,
-  not `no-op`. The plan-time observation digest must be reading
-  the symlink target / file bytes rather than the canonical IANA
-  string, so `UTC` (the symlink-target basename) and `Etc/UTC`
-  (the declared IANA name) hash differently. Apply would resolve
-  this — the M83-side normalisation `loadRecordedDigest` reuses
-  on a second plan after apply. The current behaviour is correct
-  but somewhat counter-intuitive in the read-only plan output;
-  noted here for the M82 / M9 follow-ups, not a bug per se.
+  `/etc/systemd/system/` on a musl/openrc host). **Apply-time
+  carve-out (Recipe-Validation follow-up): landed.**
+  `applySystemdSystemUnit` + `applySystemdSystemTimer` now fail
+  closed with an `EProtocol` directive on any host whose
+  `/etc/os-release` declares `ID=alpine` / `ID=void` / `ID=gentoo`,
+  pointing the operator at the OpenRC-equivalent
+  `openrc.service` (Phase-D) resource or the `fs.systemFile`
+  alternative for stage-only intent. The closed-set predicate
+  `usesSystemdFromOsRelease` lives in
+  `libs/repro_elevation/src/repro_elevation/posix_system_parse.nim`
+  (pure parser, cross-platform tests); the host probe with the
+  `REPRO_OS_RELEASE_PATH` test seam lives in
+  `posix_system_driver.nim`. M7's brief is plan-only so the read-only
+  observation surface is unchanged.
+- **Timezone driver — Etc/UTC fast-path (CLOSED follow-up)**: every
+  glibc distro under WSL has `/etc/localtime` pre-set to UTC (the
+  same IANA value the fixture declares); pre-fix the plan reported
+  `update` not `no-op` because `UTC` (the symlink-target basename)
+  and `Etc/UTC` (the declared IANA name) hashed differently in the
+  drift digest. Recipe-Validation follow-up: `canonicalIanaTimezone`
+  (in `os_system_parse.nim`) now collapses the IANA-tzdb-link
+  aliases — `UTC` / `Etc/UTC` / `Etc/Zulu` / `Universal` all
+  canonicalise to `UTC`; the `GMT` family collapses to `Etc/GMT`.
+  The drift digest is computed on the canonicalised string so an
+  observed `UTC` and a declared `Etc/UTC` no longer produce a
+  spurious `update` action. Regression: `Recipe-Val side-findings:
+  os.timezone canonicalization` (4 tests in `t_smoke_repro_elevation.nim`).
 
 ### Running M7 acceptance
 

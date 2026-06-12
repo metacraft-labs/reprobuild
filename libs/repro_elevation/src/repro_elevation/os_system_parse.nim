@@ -247,20 +247,58 @@ proc parseSystemsetupTimezoneOutput*(rawOutput: string): string =
 # Canonical state / desired digests.
 # ---------------------------------------------------------------------------
 
+proc canonicalIanaTimezone*(iana: string): string =
+  ## Collapse IANA timezone aliases that resolve to the same offset and
+  ## tzdata file onto a single canonical name. Without this, the
+  ## drift digest compares `UTC` (the `/etc/localtime` symlink-target
+  ## basename on every glibc distro) against `Etc/UTC` (the
+  ## profile-declared IANA name on the M7 fixture) byte-for-byte and
+  ## reports a spurious `update` action in the read-only plan. The IANA
+  ## tzdb itself ships these names as `Link` aliases pointing at the
+  ## same file, so collapsing them is semantically correct.
+  ##
+  ## The Recipe-Validation M7 finding ("Timezone driver — Etc/UTC
+  ## fast-path missing", see `tools/multi-distro-harness/README.md`)
+  ## traces directly to this normalisation gap: every fresh WSL glibc
+  ## distro pre-sets `/etc/localtime -> /usr/share/zoneinfo/UTC` so
+  ## `timedatectl show --property=Timezone --value` returns `UTC`,
+  ## while the profile fixture declares `Etc/UTC`. The two strings
+  ## hash differently without collapsing.
+  let t = iana.strip()
+  case t
+  of "Etc/UTC", "Etc/Zulu", "Zulu", "Universal", "Etc/Universal":
+    "UTC"
+  of "Etc/GMT", "GMT", "GMT0", "Etc/GMT0", "Etc/Greenwich", "Greenwich",
+     "Etc/GMT+0", "Etc/GMT-0":
+    # All these names map (via the IANA `backward` aliases) to the
+    # zero-offset `Etc/GMT` file. Collapse to a single canonical form;
+    # the IANA tzdb itself classes them as the same zone. `Etc/GMT+0`
+    # and `Etc/GMT-0` are zero-offset link entries per the IANA `etcetera`
+    # zone table; the non-zero `Etc/GMT+N` / `Etc/GMT-N` zones are
+    # different offsets and must NOT be collapsed here.
+    "Etc/GMT"
+  else:
+    t
+
 proc canonicalTimezoneState*(iana: string): string =
   ## Render an observed IANA timezone name to a stable canonical
   ## rendering used for the broker's drift digest. An empty observed
   ## value indicates the resource is absent (the platform-specific
-  ## probe could not read a value).
+  ## probe could not read a value). The IANA-alias collapsing above
+  ## ensures `UTC` and `Etc/UTC` (and the `GMT` family) hash identically
+  ## so the M7 plan-time observation does not surface a spurious
+  ## `update` against a no-op fixture.
   if iana.strip().len == 0:
     return "timezone:absent"
-  "timezone:" & iana.strip()
+  "timezone:" & canonicalIanaTimezone(iana)
 
 proc canonicalTimezoneDesired*(iana: string): string =
   ## The desired canonical rendering. Always uses the IANA name —
   ## the Windows side maps via the table at apply time, so both
-  ## scopes digest identically for the same declared profile.
-  "timezone:" & iana.strip()
+  ## scopes digest identically for the same declared profile. Runs
+  ## through `canonicalIanaTimezone` so the desired digest matches the
+  ## state digest on alias-equivalent inputs.
+  "timezone:" & canonicalIanaTimezone(iana)
 
 # ===========================================================================
 # os.hostname — charset guard + canonical state.

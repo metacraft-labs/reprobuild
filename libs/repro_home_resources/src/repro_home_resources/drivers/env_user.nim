@@ -12,6 +12,18 @@
 ## `(existing entries we did NOT add) ++ (the entries this generation
 ## contributes)`. Gate 4 verifies that user-added entries (outside
 ## the recorded contribution) are preserved on rollback.
+##
+## **POSIX `env.userVariable` arm (Recipe-Validation side-finding):**
+## the non-Windows `applyUserVariableCreate` writes
+## `export <name>='<value>'` into a per-variable managed block in
+## the same shell rc file `env.userPath` already owns (the
+## `defaultUserPathHostFile`-resolved path, overridable via
+## `REPRO_HOME_POSIX_PATH_RC`). Each variable gets a dedicated
+## block id (`repro-home-env-<name>`) so multiple variables don't
+## clobber each other. The value bytes follow the same UTF-16LE
+## REG_SZ / REG_EXPAND_SZ encoding the Windows arm consumes — we
+## decode to UTF-8 before quoting and writing the shell line. The
+## destroy direction simply removes the per-variable managed block.
 
 import std/[os, strutils]
 
@@ -47,59 +59,29 @@ proc bytesToString(b: openArray[byte]): string =
     result[i] = char(x)
 
 # ---------------------------------------------------------------------------
-# `env.userVariable` driver.
+# Shared helpers used by both `env.userVariable` (POSIX arm) and
+# `env.userPath` (POSIX arm). Defined here so they're visible to the
+# `env.userVariable` block that follows; the `env.userPath` block
+# below re-uses them without re-declaration.
 # ---------------------------------------------------------------------------
-
-proc observeUserVariable*(name: string): ObservedState =
-  ## Observe `HKCU\Environment\<name>`. The recorded payload is the
-  ## raw bytes written (UTF-16LE including the trailing double-zero
-  ## terminator for REG_SZ / REG_EXPAND_SZ).
-  observeRegistryValue("HKCU\\" & EnvironmentSubkey, name)
-
-proc applyUserVariableCreate*(name: string;
-                              payload: RegistryValuePayload):
-    seq[byte] =
-  ## Write the value. Returns the raw bytes that the apply executor
-  ## should record as `payloadBytes`. Always issues the
-  ## `WM_SETTINGCHANGE` broadcast.
-  when defined(windows):
-    let regType = registryValueKindToRegType(payload.kind)
-    writeRegistryValue(EnvironmentSubkey, name, regType, payload.bytes)
-    broadcastEnvironmentChange()
-  result = payload.bytes
-
-proc applyUserVariableUpdate*(name: string;
-                              payload: RegistryValuePayload):
-    seq[byte] =
-  applyUserVariableCreate(name, payload)
-
-proc applyUserVariableDestroy*(name: string) =
-  when defined(windows):
-    deleteRegistryValue(EnvironmentSubkey, name)
-    broadcastEnvironmentChange()
-
-# ---------------------------------------------------------------------------
-# `env.userPath` driver — the gate-4 invariant lives here.
-# ---------------------------------------------------------------------------
-
-proc splitPathEntries*(raw: string): seq[string] =
-  ## Split a user PATH contribution using the host platform's path-list
-  ## separator. Empty entries are dropped, consistent with loader behavior.
-  result = @[]
-  for piece in raw.split(PathSeparator):
-    if piece.len > 0:
-      result.add(piece)
-
-proc joinPathEntries*(entries: openArray[string]): string =
-  entries.join(PathSeparator)
 
 proc shellSingleQuote(s: string): string =
   "'" & s.replace("'", "'\"'\"'") & "'"
 
 proc defaultUserPathHostFile*(homeDir = ""): string =
-  ## POSIX fallback for `env.userPath`: write a managed block into the
-  ## current user's shell rc. Tests may pin the exact host file with
-  ## `REPRO_HOME_POSIX_PATH_RC`.
+  ## POSIX fallback for `env.userPath` AND `env.userVariable`: write a
+  ## managed block into the current user's shell rc. Tests may pin the
+  ## exact host file with `REPRO_HOME_POSIX_PATH_RC`.
+  ##
+  ## Distro coverage:
+  ##   * Alpine / Arch / Debian / Fedora / Ubuntu — all five non-NixOS
+  ##     Linux distros in the Recipe-Validation harness — resolve to
+  ##     `~/.bashrc`, `~/.zshrc`, or `~/.profile` depending on the
+  ##     current SHELL. The systemd `environment.d` machinery is NOT
+  ##     used: the M82 sandbox-harness gate compares against the rc
+  ##     fragment, and POSIX shells source rc files on every interactive
+  ##     login — so the variable IS visible in the next shell after
+  ##     `repro home apply`, on every distro the campaign covers.
   when defined(windows):
     ""
   else:
@@ -119,6 +101,149 @@ proc defaultUserPathHostFile*(homeDir = ""): string =
       home / ".config" / "fish" / "config.fish"
     else:
       home / ".profile"
+
+# ---------------------------------------------------------------------------
+# `env.userVariable` driver.
+# ---------------------------------------------------------------------------
+
+proc userVariableBlockId*(name: string): string =
+  ## Per-variable managed-block id under the shell rc file. Each
+  ## variable gets its own block so multiple `env.userVariable`
+  ## resources don't clobber each other when they share a host file.
+  "repro-home-env-" & name
+
+proc decodeRegistryStringValue(payload: RegistryValuePayload): string =
+  ## Decode a REG_SZ / REG_EXPAND_SZ payload to a UTF-8 string. The
+  ## trailing UTF-16LE NUL terminator is stripped. The POSIX arm
+  ## writes the result into a shell `export` statement.
+  case payload.kind
+  of rvkString, rvkExpandString:
+    fromUtf16Bytes(payload.bytes, trimTrailingNul = true)
+  of rvkBinary:
+    # Treat as raw UTF-8 bytes — POSIX env vars don't have a typed
+    # encoding; the bytes are what `printenv` would echo verbatim.
+    var s = newString(payload.bytes.len)
+    for i, b in payload.bytes:
+      s[i] = char(b)
+    s
+  of rvkDword:
+    if payload.bytes.len >= 4:
+      var v = uint32(payload.bytes[0]) or
+              (uint32(payload.bytes[1]) shl 8) or
+              (uint32(payload.bytes[2]) shl 16) or
+              (uint32(payload.bytes[3]) shl 24)
+      $v
+    else: ""
+  of rvkQword:
+    if payload.bytes.len >= 8:
+      var v: uint64 = 0
+      for i in 0 ..< 8:
+        v = v or (uint64(payload.bytes[i]) shl (i*8))
+      $v
+    else: ""
+  of rvkMultiString:
+    # MULTI_SZ -> newline-joined fallback (rare for env vars).
+    decodeMultiString(payload.bytes).join("\n")
+
+proc renderUserVariableBlockContent*(name: string;
+                                     payload: RegistryValuePayload): string =
+  ## Shell fragment used by the POSIX `env.userVariable` arm. Single-
+  ## quote-escapes the decoded value so embedded `'`, `"`, `$`, and
+  ## backticks are passed verbatim to the shell.
+  let value = decodeRegistryStringValue(payload)
+  "export " & name & "=" & shellSingleQuote(value) & "\n"
+
+proc observeUserVariable*(name: string;
+                         hostFilePath = ""): ObservedState =
+  ## Observe `HKCU\Environment\<name>` on Windows; on POSIX, observe
+  ## the per-variable managed block in the shared rc file. The
+  ## recorded payload is the raw bytes written — UTF-16LE on
+  ## Windows (REG_SZ / REG_EXPAND_SZ), the rendered shell-fragment
+  ## bytes on POSIX. Drift comparison is byte-equality on the
+  ## post-write digest.
+  when defined(windows):
+    observeRegistryValue("HKCU\\" & EnvironmentSubkey, name)
+  else:
+    let hostFile =
+      if hostFilePath.len > 0: hostFilePath
+      else: defaultUserPathHostFile()
+    if hostFile.len == 0:
+      result.present = false
+      result.digest = zeroDigest()
+      return
+    observeManagedBlock(hostFile, userVariableBlockId(name))
+
+proc applyUserVariableCreate*(name: string;
+                              payload: RegistryValuePayload;
+                              hostFilePath = ""):
+    seq[byte] =
+  ## Write the value. Returns the raw bytes that the apply executor
+  ## should record as `payloadBytes`.
+  ##
+  ## On Windows: writes `HKCU\Environment\<name>` and broadcasts
+  ## `WM_SETTINGCHANGE`; recorded bytes are the UTF-16LE registry
+  ## payload (identical to what `observeUserVariable` reads back).
+  ##
+  ## On POSIX: writes `export <name>='<value>'` into a per-variable
+  ## managed block in the shared rc file `env.userPath` already
+  ## owns; recorded bytes are the rendered shell fragment between
+  ## the sentinels.
+  when defined(windows):
+    let regType = registryValueKindToRegType(payload.kind)
+    writeRegistryValue(EnvironmentSubkey, name, regType, payload.bytes)
+    broadcastEnvironmentChange()
+    result = payload.bytes
+  else:
+    let hostFile =
+      if hostFilePath.len > 0: hostFilePath
+      else: defaultUserPathHostFile()
+    if hostFile.len == 0:
+      # No rc file available (e.g. test env without HOME / SHELL); the
+      # caller treats an empty payload as "wrote nothing", which keeps
+      # the recorded post-write digest stable as the zero digest.
+      result = @[]
+      return
+    let content = renderUserVariableBlockContent(name, payload)
+    result = applyManagedBlockResource(hostFile,
+      userVariableBlockId(name), content)
+
+proc applyUserVariableUpdate*(name: string;
+                              payload: RegistryValuePayload;
+                              hostFilePath = ""):
+    seq[byte] =
+  applyUserVariableCreate(name, payload, hostFilePath)
+
+proc applyUserVariableDestroy*(name: string;
+                              hostFilePath = "") =
+  when defined(windows):
+    deleteRegistryValue(EnvironmentSubkey, name)
+    broadcastEnvironmentChange()
+  else:
+    let hostFile =
+      if hostFilePath.len > 0: hostFilePath
+      else: defaultUserPathHostFile()
+    if hostFile.len > 0:
+      destroyManagedBlockResource(hostFile,
+        userVariableBlockId(name))
+
+# ---------------------------------------------------------------------------
+# `env.userPath` driver — the gate-4 invariant lives here.
+# ---------------------------------------------------------------------------
+
+proc splitPathEntries*(raw: string): seq[string] =
+  ## Split a user PATH contribution using the host platform's path-list
+  ## separator. Empty entries are dropped, consistent with loader behavior.
+  result = @[]
+  for piece in raw.split(PathSeparator):
+    if piece.len > 0:
+      result.add(piece)
+
+proc joinPathEntries*(entries: openArray[string]): string =
+  entries.join(PathSeparator)
+
+# `shellSingleQuote` + `defaultUserPathHostFile` are defined ABOVE the
+# `env.userVariable` block so both arms share the helpers without
+# duplication.
 
 proc posixPathBlockContent*(entries: openArray[string]): string =
   ## Shell fragment used by POSIX `env.userPath`. It prepends the

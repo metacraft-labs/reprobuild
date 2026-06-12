@@ -3005,3 +3005,153 @@ suite "repro_elevation: windows.acl pure surface":
         discard applyWindowsAcl(op)
       expect ENotImplementedPlatform:
         discard destroyWindowsAcl(op)
+
+# ---------------------------------------------------------------------------
+# Recipe-Validation side-finding regressions:
+#
+#   * Item 3 — `os.timezone` IANA alias collapsing (Etc/UTC vs UTC).
+#   * Item 4 — `systemd.systemUnit` Alpine / OpenRC carve-out.
+# ---------------------------------------------------------------------------
+
+suite "Recipe-Val side-findings: os.timezone canonicalization":
+
+  test "Etc/UTC collapses to UTC in canonical state and desired digests":
+    # The M7 multi-distro harness observed `UTC` (the
+    # `/etc/localtime` symlink-target basename on every glibc distro)
+    # while the fixture profile declared `Etc/UTC`. Without
+    # `canonicalIanaTimezone`, the two strings hash differently and
+    # the plan reports a spurious `update` action on a true no-op.
+    # Both halves of the digest comparison must reduce alias-equivalent
+    # IANA names to the same canonical form.
+    check canonicalTimezoneState("UTC") == canonicalTimezoneDesired("Etc/UTC")
+    check canonicalTimezoneState("Etc/UTC") ==
+          canonicalTimezoneDesired("UTC")
+    check canonicalTimezoneState("Etc/UTC") ==
+          canonicalTimezoneDesired("Etc/UTC")
+    # Per the IANA tzdb's `backward` link table.
+    check canonicalIanaTimezone("Etc/UTC") == "UTC"
+    check canonicalIanaTimezone("Etc/Zulu") == "UTC"
+    check canonicalIanaTimezone("Universal") == "UTC"
+
+  test "GMT family aliases collapse to Etc/GMT":
+    # IANA `backward` link aliases for the zero-offset GMT file. All
+    # collapse to a single canonical form so a fixture declaring `GMT`
+    # and a host reporting `Etc/GMT` (or vice-versa) drift-compare as
+    # no-op.
+    check canonicalIanaTimezone("Etc/GMT") == "Etc/GMT"
+    check canonicalIanaTimezone("GMT") == "Etc/GMT"
+    check canonicalIanaTimezone("Greenwich") == "Etc/GMT"
+    check canonicalTimezoneState("GMT") == canonicalTimezoneDesired("Etc/GMT")
+    check canonicalIanaTimezone("Etc/GMT+0") == canonicalIanaTimezone("Etc/GMT")
+    check canonicalIanaTimezone("Etc/GMT-0") == canonicalIanaTimezone("Etc/GMT")
+    check canonicalIanaTimezone("Etc/GMT+1") != canonicalIanaTimezone("Etc/GMT")  # different zone
+
+  test "non-alias timezones flow through the canonicalizer unchanged":
+    # The slow-path zones must keep their existing identity-on-IANA
+    # canonicalization — only the explicit alias families fold. A
+    # `Europe/Sofia` -> `Europe/Sofia` round-trip is the existing
+    # contract every other test in this file relies on.
+    check canonicalIanaTimezone("Europe/Sofia") == "Europe/Sofia"
+    check canonicalIanaTimezone("America/Los_Angeles") == "America/Los_Angeles"
+    check canonicalIanaTimezone("Asia/Tokyo") == "Asia/Tokyo"
+    check canonicalTimezoneState("Europe/Sofia") ==
+          canonicalTimezoneDesired("Europe/Sofia")
+    # Whitespace handling preserved.
+    check canonicalIanaTimezone("  Europe/Sofia  ") == "Europe/Sofia"
+
+  test "empty string still maps to timezone:absent":
+    # The "absent" sentinel must not be polluted by the alias map.
+    check canonicalTimezoneState("") == "timezone:absent"
+    check canonicalTimezoneState("   ") == "timezone:absent"
+
+suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
+
+  test "parseOsReleaseId extracts ID for the five harness distros":
+    # The Recipe-Validation M7 sweep covers arch / debian / ubuntu /
+    # fedora / alpine. Each `/etc/os-release` has the same `ID=`
+    # shape; the carve-out predicate only needs to identify alpine
+    # but verifying the other four roundtrip protects against a future
+    # quoting / whitespace regression.
+    check parseOsReleaseId("ID=alpine\n") == "alpine"
+    check parseOsReleaseId("ID=\"alpine\"\n") == "alpine"
+    check parseOsReleaseId("ID='alpine'\n") == "alpine"
+    check parseOsReleaseId("NAME=\"Alpine Linux\"\nID=alpine\nVERSION_ID=3.21\n") ==
+          "alpine"
+    check parseOsReleaseId("ID=debian") == "debian"
+    check parseOsReleaseId("ID=ubuntu\n") == "ubuntu"
+    check parseOsReleaseId("ID=fedora\n") == "fedora"
+    check parseOsReleaseId("ID=arch\n") == "arch"
+    # `#` comments + blank lines are stripped before the prefix match.
+    check parseOsReleaseId("# leading comment\n\nID=alpine\n") == "alpine"
+    # Missing ID line -> empty.
+    check parseOsReleaseId("PRETTY_NAME=Nothing\n") == ""
+    check parseOsReleaseId("") == ""
+
+  test "isAlpineFromOsRelease + usesSystemdFromOsRelease closed-set":
+    check isAlpineFromOsRelease("ID=alpine\n")
+    check not isAlpineFromOsRelease("ID=debian\n")
+    # Alpine, Void, Gentoo: not systemd (per the conservative closed
+    # set the M7 carve-out enforces). Every other ID assumed systemd
+    # — including the unknown / empty case so an unrecognized
+    # mainstream distro doesn't auto-deny a system-unit install.
+    check not usesSystemdFromOsRelease("ID=alpine\n")
+    check not usesSystemdFromOsRelease("ID=void\n")
+    check not usesSystemdFromOsRelease("ID=gentoo\n")
+    check usesSystemdFromOsRelease("ID=debian\n")
+    check usesSystemdFromOsRelease("ID=ubuntu\n")
+    check usesSystemdFromOsRelease("ID=fedora\n")
+    check usesSystemdFromOsRelease("ID=arch\n")
+    check usesSystemdFromOsRelease("")  # conservative default
+
+  test "REPRO_OS_RELEASE_PATH override drives hostOsReleaseId":
+    # The host-probe + override seam is the wire that lets the
+    # destructive `applySystemdSystemUnit` carve-out be tested from
+    # a non-Alpine host (e.g. this Windows / macOS test machine).
+    # Drop a fake `os-release` and re-read it through `hostOsReleaseId`
+    # — the round-trip MUST observe the ID we wrote, and the
+    # `hostUsesSystemd` predicate MUST flip false for alpine and true
+    # otherwise.
+    let dir = createTempDir("reprobuild-os-release-", "")
+    let fakePath = dir / "os-release-alpine"
+    writeFile(fakePath, "ID=alpine\nVERSION_ID=3.21\n")
+    putEnv(OsReleaseOverrideEnvVar, fakePath)
+    try:
+      check hostOsReleaseId() == "alpine"
+      check not hostUsesSystemd()
+    finally:
+      delEnv(OsReleaseOverrideEnvVar)
+      try: removeFile(fakePath) except OSError: discard
+      try: removeDir(dir) except OSError: discard
+
+  test "applySystemdSystemUnit raises EProtocol on Alpine":
+    # Wire the override to a fake Alpine `os-release`; on Linux the
+    # destructive entry point hard-errors before any filesystem write.
+    # On non-Linux the entry point still raises `ENotImplementedPlatform`
+    # via the existing fail-closed arm — the carve-out is Linux-only by
+    # design (the OpenRC equivalence is a Linux question).
+    when defined(linux):
+      let dir = createTempDir("reprobuild-os-release-", "")
+      let fakePath = dir / "os-release-alpine-carveout"
+      writeFile(fakePath, "ID=alpine\n")
+      putEnv(OsReleaseOverrideEnvVar, fakePath)
+      try:
+        let op = PrivilegedOperation(kind: pokSystemdSystemUnit,
+          address: "m7-hello.service",
+          suName: "m7-hello.service",
+          suContent: "[Unit]\nDescription=test\n",
+          suEnabled: false)
+        var caught = false
+        try:
+          discard applySystemdSystemUnit(op)
+        except EProtocol as e:
+          caught = true
+          # The diagnostic must name the distro AND point at the
+          # OpenRC alternative; an unhelpful "not supported" string
+          # would defeat the purpose of the carve-out.
+          check "alpine" in e.msg
+          check "openrc" in e.msg.toLowerAscii()
+        check caught
+      finally:
+        delEnv(OsReleaseOverrideEnvVar)
+        try: removeFile(fakePath) except OSError: discard
+        try: removeDir(dir) except OSError: discard

@@ -922,3 +922,62 @@ proc parseNftRuleSpecForComment*(rawOutput, comment: string): string =
       clean = clean[0 ..< handleIdx].strip()
     return clean
   return ""
+
+# ===========================================================================
+# Linux distro probe — pure parser for `/etc/os-release`.
+#
+# Driver carve-outs (e.g. `systemd.systemUnit` on Alpine, which runs
+# OpenRC) need to know whether the host is a systemd distro. The actual
+# `/etc/os-release` read happens in `posix_system_driver.nim`; the pure
+# parse logic lives here so the driver-side guard is testable
+# cross-platform.
+#
+# `/etc/os-release` format (per `os-release(5)`):
+#   KEY=value
+#   KEY="quoted value"
+#   # comments + blank lines allowed
+# We treat the file as case-sensitive on keys (the spec mandates UPPER
+# CASE) and tolerate surrounding whitespace + optional double / single
+# quotes around values. A missing or empty `ID=` returns "".
+# ===========================================================================
+
+proc parseOsReleaseId*(rawContent: string): string =
+  ## Extract the `ID=<distro>` value from a `/etc/os-release` file.
+  ## Returns "" when the line is absent or empty. The IANA-style
+  ## charset (lowercase letters, digits, `-`, `_`) is preserved
+  ## verbatim — callers compare against literals like `"alpine"`,
+  ## `"debian"`, `"fedora"`.
+  for line in rawContent.splitLines():
+    let t = line.strip()
+    if t.len == 0 or t.startsWith("#"):
+      continue
+    if not t.startsWith("ID="):
+      continue
+    var value = t[3 .. ^1].strip()
+    # Strip the optional surrounding quotes.
+    if value.len >= 2 and
+       ((value[0] == '"' and value[^1] == '"') or
+        (value[0] == '\'' and value[^1] == '\'')):
+      value = value[1 ..< value.len - 1]
+    return value
+  return ""
+
+proc isAlpineFromOsRelease*(rawContent: string): bool =
+  ## True when `/etc/os-release` declares `ID=alpine`. The Alpine
+  ## family does NOT include `ID_LIKE=alpine` derivatives; if such a
+  ## distro emerges, the caller can extend this predicate to also
+  ## probe `ID_LIKE=`. The closed-set is the deliberate-conservative
+  ## carve-out shape Recipe-Validation M7 requested.
+  parseOsReleaseId(rawContent) == "alpine"
+
+proc usesSystemdFromOsRelease*(rawContent: string): bool =
+  ## True when the host's init system is reasonably expected to be
+  ## systemd: i.e. NOT Alpine (OpenRC) and not Void (runit) and not
+  ## Gentoo's OpenRC profile. The conservative default for an unknown
+  ## distro is "yes" — every mainstream Linux distro the
+  ## Recipe-Validation campaign covers (Arch, Debian, Fedora, Ubuntu,
+  ## openSUSE) uses systemd by default. A non-systemd Linux distro
+  ## that surfaces in the campaign should be added to this closed
+  ## list before the carve-out is relaxed.
+  let id = parseOsReleaseId(rawContent)
+  id != "alpine" and id != "void" and id != "gentoo"

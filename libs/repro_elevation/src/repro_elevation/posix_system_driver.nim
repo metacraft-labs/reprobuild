@@ -77,6 +77,60 @@ proc posixDigestHexOfText*(text: string): string =
     buf[i] = byte(ord(ch))
   posixDigestHexOfBytes(buf)
 
+# ---------------------------------------------------------------------------
+# Linux distro probe (Recipe-Validation M7 follow-up).
+#
+# `systemd.systemUnit` / `systemd.systemTimer` carve out Alpine (and
+# other non-systemd Linux distros) by fail-closing with a clear
+# directive to switch to the OpenRC equivalent. The pure parser
+# (`parseOsReleaseId` / `usesSystemdFromOsRelease`) lives in
+# `posix_system_parse.nim`; the host read happens here so the driver
+# guard is testable cross-platform via the parser.
+# ---------------------------------------------------------------------------
+
+const OsReleaseOverrideEnvVar* = "REPRO_OS_RELEASE_PATH"
+  ## Test seam: when set, the host probe reads this path instead of
+  ## `/etc/os-release`. Lets the regression test exercise the Alpine
+  ## carve-out from a non-Alpine host.
+
+proc hostOsReleaseId*(): string =
+  ## Read `/etc/os-release` (or the test-override path) and return the
+  ## `ID=` value. Returns "" when the file is absent / unreadable —
+  ## the caller treats that as "unknown distro", which the
+  ## `usesSystemdFromOsRelease` predicate falls back to "yes".
+  when defined(linux) or defined(macosx):
+    let path = block:
+      let ovr = getEnv(OsReleaseOverrideEnvVar)
+      if ovr.len > 0: ovr
+      else: "/etc/os-release"
+    if not fileExists(path):
+      return ""
+    try:
+      return parseOsReleaseId(readFile(path))
+    except IOError, OSError:
+      return ""
+  else:
+    when defined(windows):
+      let ovr = getEnv(OsReleaseOverrideEnvVar)
+      if ovr.len > 0 and fileExists(ovr):
+        try:
+          return parseOsReleaseId(readFile(ovr))
+        except IOError, OSError:
+          return ""
+    return ""
+
+proc hostUsesSystemd*(): bool =
+  ## Test-seam-aware version of `usesSystemdFromOsRelease`. Returns
+  ## true when the host's `/etc/os-release` either declares a known
+  ## systemd-shipping distro OR is absent (conservative default —
+  ## Reprobuild's M82 plan-time observation is filesystem-only, so
+  ## reading a no-systemd unit file does not yet require systemd to
+  ## be live; the carve-out specifically gates the destructive APPLY).
+  let id = hostOsReleaseId()
+  if id.len == 0:
+    return true
+  id != "alpine" and id != "void" and id != "gentoo"
+
 # ===========================================================================
 # Desired-state digest for every Phase-C operation. The non-elevated
 # planner computes this; the broker compares its re-observed state
@@ -376,7 +430,30 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
   ## file-read path `observeSystemdSystemUnit` uses and comparing the
   ## canonical-bytes digest closes that gap. Raises `EProtocol` on
   ## mismatch.
+  ##
+  ## ALPINE / OPENRC CARVE-OUT (Recipe-Validation M7): Alpine ships
+  ## OpenRC as its init system, not systemd. Writing the unit file to
+  ## `/etc/systemd/system/` would succeed but the unit would NEVER run
+  ## because nothing reads that directory on a musl/openrc host. The
+  ## carve-out fail-closes with a clear directive to the user rather
+  ## than reporting a spurious success on an apply that doesn't
+  ## actually start the unit. The `usesSystemdFromOsRelease` predicate
+  ## extends to Void (runit) and Gentoo's OpenRC profile.
   when defined(linux):
+    if not hostUsesSystemd():
+      let id = hostOsReleaseId()
+      raiseProtocol("systemd.systemUnit '" & op.suName &
+        "' refused on non-systemd host (ID=" &
+        (if id.len > 0: id else: "<unknown>") &
+        "). Reprobuild does NOT silently install a `/etc/systemd/" &
+        "system/*.service` file on a host whose init system would " &
+        "never read it. Switch the profile to the OpenRC equivalent: " &
+        "declare an `openrc.service` (Phase-D scope) resource, OR mark " &
+        "this resource conditional on a systemd-shipping distro " &
+        "(`when distro != \"alpine\"` in the profile). If you " &
+        "intentionally want the file present without it ever running " &
+        "(staging another agent's install), declare the resource as " &
+        "`fs.systemFile` so the carve-out doesn't apply.")
     let path = systemUnitPath(op.suName)
     if op.suDestroy:
       discard execCmd("systemctl disable --now " & quoteShell(op.suName))
@@ -2242,7 +2319,19 @@ proc applySystemdSystemTimer*(op: PrivilegedOperation):
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): re-read the unit
   ## file via `observeSystemdSystemTimer` and compare the content
   ## digest; raise `EProtocol` on mismatch.
+  ##
+  ## ALPINE / OPENRC CARVE-OUT: see `applySystemdSystemUnit` — the
+  ## same reasoning applies to `.timer` units. OpenRC has no `.timer`
+  ## concept; the equivalent is `crond` or the `local` runscript.
   when defined(linux):
+    if not hostUsesSystemd():
+      let id = hostOsReleaseId()
+      raiseProtocol("systemd.systemTimer '" & op.stName &
+        "' refused on non-systemd host (ID=" &
+        (if id.len > 0: id else: "<unknown>") &
+        "). Switch the profile to the OpenRC equivalent (a `crond` " &
+        "job or `local` runscript), OR mark this resource conditional " &
+        "on a systemd-shipping distro.")
     let path = systemUnitPath(op.stName)
     if op.stDestroy:
       # Stop, disable, remove. Each is best-effort against an

@@ -197,6 +197,33 @@ for libName in [
 ]:
   switch("path", runquotaRoot / "libs" / libName / "src")
 
+# Lib subdirectories to probe under a system prefix. The order matters:
+# `lib` covers the default + Debian-multiarch case (Debian/Ubuntu install
+# headers under `/usr/include/` but the dylib at `/usr/lib/x86_64-linux-gnu/`);
+# `lib64` covers Fedora / openSUSE / RHEL (64-bit lib path); the multiarch
+# triples cover Debian/Ubuntu when the prefix is `/usr` or `/usr/local`.
+# Without this expansion, `BLAKE3_PREFIX=/usr` on Fedora misses
+# `/usr/lib64/libblake3.so` and the build silently falls back to the
+# vendored sources (when the system-libs path is intended).
+const LibSubdirs = [
+  "lib",
+  "lib64",
+  "lib/x86_64-linux-gnu",
+  "lib/aarch64-linux-gnu",
+]
+
+proc firstExistingPrefixLibDir(prefix: string;
+                               dylibNames: openArray[string]): string =
+  ## Return the absolute libdir under `prefix` that holds one of
+  ## `dylibNames`, or "" if none match. Probes `prefix/lib`,
+  ## `prefix/lib64`, and the two common Debian-multiarch triples.
+  for libSub in LibSubdirs:
+    let candidate = prefix / libSub
+    for dylibName in dylibNames:
+      if fileExists(candidate / dylibName):
+        return candidate
+  ""
+
 proc firstExistingPrefix(candidates: openArray[string]; header: string;
                          dylibNames: openArray[string]): string =
   for prefix in candidates:
@@ -204,9 +231,8 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
       continue
     if not fileExists(prefix / header):
       continue
-    for dylibName in dylibNames:
-      if fileExists(prefix / "lib" / dylibName):
-        return prefix
+    if firstExistingPrefixLibDir(prefix, dylibNames).len > 0:
+      return prefix
   ""
 
 proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): string =
@@ -219,10 +245,9 @@ proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): stri
     let prefix = line.strip()
     if prefix.len == 0:
       continue
-    if fileExists(prefix / header):
-      for dylibName in dylibNames:
-        if fileExists(prefix / "lib" / dylibName):
-          return prefix
+    if fileExists(prefix / header) and
+       firstExistingPrefixLibDir(prefix, dylibNames).len > 0:
+      return prefix
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
@@ -231,10 +256,17 @@ proc firstExistingLibDir(candidates: openArray[string];
     let path = candidate.strip()
     if path.len == 0:
       continue
-    for libDir in [path, path / "lib"]:
-      for dylibName in dylibNames:
-        if fileExists(libDir / dylibName):
-          return libDir
+    # Probe the candidate directly (it may already be a libdir like
+    # `/usr/lib64` from the sqlite candidate list) and then walk the
+    # standard lib subdirectories so a candidate like `/usr` resolves
+    # whether the host is `/usr/lib`, `/usr/lib64`, or a Debian-multiarch
+    # triple.
+    for dylibName in dylibNames:
+      if fileExists(path / dylibName):
+        return path
+    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    if resolved.len > 0:
+      return resolved
   ""
 
 proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
@@ -283,7 +315,14 @@ else:
 
   if blake3Prefix.len > 0:
     switch("passC", "-I" & blake3Prefix / "include")
-    switch("passL", "-L" & blake3Prefix / "lib")
+    # Resolve the actual libdir (lib / lib64 / multiarch) so the `-L`
+    # flag points at the directory that holds the resolved dylib.
+    let blake3LibDir = firstExistingPrefixLibDir(blake3Prefix,
+      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    if blake3LibDir.len > 0:
+      switch("passL", "-L" & blake3LibDir)
+    else:
+      switch("passL", "-L" & blake3Prefix / "lib")
     switch("passL", "-lblake3")
 
   let xxhashPrefix = block:
@@ -297,7 +336,12 @@ else:
 
   if xxhashPrefix.len > 0:
     switch("passC", "-I" & xxhashPrefix / "include")
-    switch("passL", "-L" & xxhashPrefix / "lib")
+    let xxhashLibDir = firstExistingPrefixLibDir(xxhashPrefix,
+      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    if xxhashLibDir.len > 0:
+      switch("passL", "-L" & xxhashLibDir)
+    else:
+      switch("passL", "-L" & xxhashPrefix / "lib")
     switch("passL", "-lxxhash")
 
 when not defined(windows) and not defined(macosx):

@@ -77,7 +77,7 @@ proc toUtf16Z(s: string): seq[uint16] =
     i += advance
   result.add(0'u16)
 
-proc fromUtf16Bytes(bytes: openArray[byte]; trimTrailingNul = true): string =
+proc fromUtf16Bytes*(bytes: openArray[byte]; trimTrailingNul = true): string =
   ## UTF-16LE bytes -> UTF-8.
   var units: seq[uint16] = @[]
   var i = 0
