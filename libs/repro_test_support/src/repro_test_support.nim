@@ -315,6 +315,27 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
     return vendored
   ""
 
+type MissingTestFixtureError* = object of CatchableError
+
+proc requireBinary*(path, edgeName: string): string {.discardable.} =
+  ## Test-Fixtures-In-Build-Graph: assert that a graph-built fixture binary
+  ## already exists, instead of compiling it at test runtime. Returns ``path``
+  ## on success; raises ``MissingTestFixtureError`` with a fail-fast diagnostic
+  ## (the expected path + the build-graph edge that produces it) otherwise.
+  ##
+  ## Fixtures (the ``repro`` binary, the monitor shim, fixture providers, …)
+  ## are built by ``repro build test`` as graph edges and are cached across
+  ## runs; test code must depend on them and assert their presence here, never
+  ## invoke a compiler. This replaces the per-test ``proc compileNim`` shell-outs
+  ## (see ``Test-Fixtures-In-Build-Graph.md``).
+  if not fileExists(path):
+    raise newException(MissingTestFixtureError,
+      "required test fixture binary not found: " & path & "\n" &
+      "  it is produced by build-graph edge '" & edgeName & "'.\n" &
+      "  run `repro build test` (which builds the fixture) before this test, " &
+      "or declare that edge as a dependency of this test's execute edge.")
+  path
+
 proc fsSnoopWrapperSource*(repoRoot, cacheKey: string): string =
   ## Executable-Consolidation M1 deleted the standalone
   ## ``apps/repro-fs-snoop/repro_fs_snoop.nim`` entry point: the internal
