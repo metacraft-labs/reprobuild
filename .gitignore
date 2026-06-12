@@ -56,3 +56,9 @@ build/m4-live-smoke/
 # Python bytecode caches from unittest runners
 __pycache__/
 *.pyc
+
+# Boot-harness (R0) per-run JSON outcomes + serial logs.
+# All transient VM/distro state goes to $env:TEMP\repro-boot-harness\;
+# only the JSON outcome records land under the repo, here.
+boot-harness-out/
+*.vhdx
