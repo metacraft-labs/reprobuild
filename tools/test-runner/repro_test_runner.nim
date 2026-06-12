@@ -24,7 +24,7 @@
 ##
 ##   repro_test_runner [--threads N] [--bin-dir DIR] [--build]
 ##                     [--summary-json PATH] [--quiet]
-##                     [--filter GLOB]...
+##                     [--filter GLOB]... [--test-timeout=N]
 ##
 ## Default ``--bin-dir`` is ``build/test-bin`` relative to the current
 ## working directory. ``--threads`` defaults to ``$NPROC`` or the
@@ -88,6 +88,7 @@ type
     resultsDir: string
     quiet: bool
     failFast: bool
+    testTimeoutSec: int
     activeCount: ptr int
     ## Snapshot of the parent process environment taken once before
     ## any worker thread is spawned. ``runOneProtocol`` clones this into
@@ -264,6 +265,17 @@ proc spawnedProcess(binary: string; args: openArray[string];
   finally:
     release(spawnLock)
 
+## Sentinel exit code returned by ``drainAndWaitWithTimeout`` when the
+## child was killed after exceeding the per-test deadline. Chosen to be
+## well outside the conventional 0/1/2 PASS/FAIL/SKIP range and outside
+## the POSIX 128+signal range that ``waitForExit`` would normally return
+## for a signal-killed child (e.g. 137 for SIGKILL, 143 for SIGTERM), so
+## a reader can distinguish "we killed it because it ran too long" from
+## "the OS killed it for other reasons" by exit code alone.
+const TimeoutExitCode = -42
+const TimeoutPollIntervalMs = 100
+const TimeoutKillGraceSec = 5
+
 proc drainAndWait(p: Process): tuple[output: string; exitCode: int] =
   ## Drain the merged stdout/stderr stream to EOF, then collect the
   ## child's exit code and free its handles. Reading the stream to EOF
@@ -279,7 +291,103 @@ proc drainAndWait(p: Process): tuple[output: string; exitCode: int] =
   close(p)
   result = (output, exitCode)
 
-proc runWholeBinary(tc: TestCase; resultsDir: string): TestResult =
+proc drainToEof(p: Process; output: var string) =
+  ## Drain the merged stdout/stderr pipe to EOF. Safe to call only
+  ## after the child has exited (or been killed) — Nim's stream
+  ## ``readLine`` is blocking, so calling this on a live child that
+  ## isn't emitting output would park the runner indefinitely. The
+  ## polling loop in ``drainAndWaitWithTimeout`` is explicitly
+  ## structured to avoid that: it only reaches ``drainToEof`` once
+  ## ``peekExitCode`` reports the child is gone (either it exited on
+  ## its own, or we SIGTERM/SIGKILLed it).
+  let outp = p.outputStream
+  if outp.isNil:
+    return
+  var line = newStringOfCap(120)
+  while true:
+    try:
+      if not outp.readLine(line):
+        break
+    except IOError:
+      break
+    output.add(line)
+    output.add('\n')
+
+proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
+    tuple[output: string; exitCode: int; timedOut: bool] =
+  ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
+  ## the call delegates to ``drainAndWait`` (preserving M3 behaviour).
+  ## Otherwise a polling loop checks ``peekExitCode`` every
+  ## ~``TimeoutPollIntervalMs`` until either the child exits cleanly
+  ## or the deadline expires; on expiry the child is SIGTERM'd, given
+  ## ``TimeoutKillGraceSec`` to exit gracefully, then SIGKILL'd. The
+  ## output pipe is drained only after the child has exited (or been
+  ## killed) — Nim's ``readLine`` is blocking, so trying to pump the
+  ## pipe mid-flight would itself stall the polling loop on any test
+  ## that doesn't emit periodic output (the very class of failure D6
+  ## is meant to defeat).
+  ##
+  ## Why this matters: a self-hosted CI runner stalled 2h42m at M3
+  ## because ``t_local_daemons_control_plane_m11`` left ``repro-daemon``
+  ## / ``fake_protocol_daemon_helper`` / ``repro`` children alive after
+  ## the test exec returned. ``drainAndWait``'s ``readLine`` then
+  ## blocked indefinitely waiting for the orphans' inherited pipe FDs
+  ## to close. D6 makes the runner kill such a test (visible as a clear
+  ## TIMEOUT signature in the build report) so the suite continues
+  ## instead of starving every queue slot behind it.
+  ##
+  ## Pipe-buffer note: with no concurrent drain, a verbose test that
+  ## writes more than the kernel pipe buffer (64KB on Linux) before
+  ## exiting will block its own ``write``. That manifests as a
+  ## timeout — which is the correct shape: a test that fills its
+  ## output pipe and never reads from the parent isn't completing
+  ## within the deadline anyway, and killing it produces the same
+  ## FAIL+TIMEOUT signal the user needs to investigate.
+  if timeoutSec <= 0:
+    let (output, exitCode) = drainAndWait(p)
+    return (output, exitCode, false)
+
+  var output = ""
+  let start = epochTime()
+  var timedOut = false
+  while true:
+    let code = p.peekExitCode()
+    if code != -1:
+      # Child exited on its own. Drain the buffered output now that
+      # ``readLine`` is guaranteed to return EOF at the end.
+      drainToEof(p, output)
+      close(p)
+      return (output, code, false)
+    if (epochTime() - start) > timeoutSec.float:
+      timedOut = true
+      break
+    sleep(TimeoutPollIntervalMs)
+
+  # Deadline expired. SIGTERM, grace, SIGKILL.
+  try:
+    p.terminate()
+  except OSError, Exception:
+    discard
+  let killDeadline = epochTime() + TimeoutKillGraceSec.float
+  while epochTime() < killDeadline:
+    if p.peekExitCode() != -1:
+      break
+    sleep(TimeoutPollIntervalMs)
+  if p.peekExitCode() == -1:
+    try:
+      p.kill()
+    except OSError, Exception:
+      discard
+    # Block on waitForExit only after the SIGKILL has been delivered;
+    # the kernel must reap the zombie before peekExitCode returns a
+    # real code, but the wait window is bounded by the kill itself.
+    discard p.waitForExit()
+  drainToEof(p, output)
+  close(p)
+  result = (output, TimeoutExitCode, timedOut)
+
+proc runWholeBinary(tc: TestCase; resultsDir: string;
+                    testTimeoutSec: int): TestResult =
   result.testCase = tc
   result.status = tsFail
   let t0 = epochTime()
@@ -292,12 +400,19 @@ proc runWholeBinary(tc: TestCase; resultsDir: string): TestResult =
   # — failing the test is the right exit-code behaviour for the run.
   try:
     let p = spawnedProcess(tc.binary, args = [], env = nil)
-    let (output, exitCode) = drainAndWait(p)
-    result.stdout = output
-    case exitCode
-    of 0: result.status = tsPass
-    of 2: result.status = tsSkip
-    else: result.status = tsFail
+    let (output, exitCode, timedOut) =
+      drainAndWaitWithTimeout(p, testTimeoutSec)
+    if timedOut:
+      result.status = tsFail
+      result.stdout =
+        "repro_test_runner: TIMEOUT after " & $testTimeoutSec &
+        "s; SIGKILLed\n" & output
+    else:
+      result.stdout = output
+      case exitCode
+      of 0: result.status = tsPass
+      of 2: result.status = tsSkip
+      else: result.status = tsFail
   except OSError as e:
     result.status = tsFail
     result.stdout = "repro_test_runner: spawn failed: " & e.msg & "\n"
@@ -308,7 +423,8 @@ proc runWholeBinary(tc: TestCase; resultsDir: string): TestResult =
   result.stderr = ""
 
 proc runOneProtocol(tc: TestCase; resultsDir: string;
-                    baseEnv: seq[tuple[key, value: string]]): TestResult =
+                    baseEnv: seq[tuple[key, value: string]];
+                    testTimeoutSec: int): TestResult =
   result.testCase = tc
   result.status = tsFail
   let resultFile = resultsDir / (tc.binaryStem & "__" &
@@ -334,10 +450,12 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   var output = ""
   var exitCode = 1
   var spawnFailed = false
+  var timedOut = false
   try:
     let p = spawnedProcess(
       tc.binary, args = ["--run", tc.qualifiedName], env = childEnv)
-    (output, exitCode) = drainAndWait(p)
+    (output, exitCode, timedOut) =
+      drainAndWaitWithTimeout(p, testTimeoutSec)
   except OSError as e:
     spawnFailed = true
     output = "repro_test_runner: spawn failed: " & e.msg & "\n"
@@ -345,8 +463,15 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     spawnFailed = true
     output = "repro_test_runner: i/o failed: " & e.msg & "\n"
   result.durationMs = int((epochTime() - t0) * 1000)
-  result.stdout = output
+  if timedOut:
+    result.stdout =
+      "repro_test_runner: TIMEOUT after " & $testTimeoutSec &
+      "s; SIGKILLed\n" & output
+  else:
+    result.stdout = output
   if spawnFailed:
+    result.status = tsFail
+  elif timedOut:
     result.status = tsFail
   else:
     case exitCode
@@ -405,9 +530,10 @@ proc workerLoop(args: WorkerArgs) =
     # summary reflects what happened.
     try:
       if tc.protocolAware:
-        res = runOneProtocol(tc, args.resultsDir, args.baseEnv[])
+        res = runOneProtocol(tc, args.resultsDir, args.baseEnv[],
+          args.testTimeoutSec)
       else:
-        res = runWholeBinary(tc, args.resultsDir)
+        res = runWholeBinary(tc, args.resultsDir, args.testTimeoutSec)
     except CatchableError as e:
       res = TestResult(
         testCase: tc,
@@ -444,6 +570,13 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
     node["status"] = %($r.status)
     node["duration_ms"] = %r.durationMs
     node["result_file"] = %r.resultFile
+    # Include the captured merged stdout/stderr for FAIL entries so
+    # the build report carries the failure context (e.g. D6's
+    # ``TIMEOUT after Ns; SIGKILLed`` prefix). PASS entries are kept
+    # lightweight — their stdout would otherwise blow up the summary
+    # file on a 500-test sweep.
+    if r.status != tsPass and r.stdout.len > 0:
+      node["stdout"] = %r.stdout
     arr.add(node)
   var doc = newJObject()
   var summary = newJObject()
@@ -469,6 +602,7 @@ type
     quiet: bool
     filters: seq[string]
     resultsDir: string
+    testTimeoutSec: int
 
 proc defaultThreads(): int =
   let env = getEnv("REPRO_TEST_THREADS")
@@ -491,6 +625,7 @@ proc parseArgs(): RunnerOpts =
   result.quiet = false
   result.filters = @[]
   result.resultsDir = DefaultResultsSubdir
+  result.testTimeoutSec = 0
   var p = initOptParser(commandLineParams())
   while true:
     p.next()
@@ -506,6 +641,15 @@ proc parseArgs(): RunnerOpts =
       of "results-dir": result.resultsDir = p.val
       of "quiet": result.quiet = true
       of "filter": result.filters.add(p.val)
+      of "test-timeout":
+        try:
+          result.testTimeoutSec = parseInt(p.val)
+        except ValueError:
+          stderr.writeLine "repro_test_runner: --test-timeout requires " &
+            "an integer (seconds)"
+          quit(2)
+        if result.testTimeoutSec < 0:
+          result.testTimeoutSec = 0
       of "help", "h":
         echo "repro_test_runner — protocol-level parallel test runner"
         echo "  --threads N         worker count (default $NPROC)"
@@ -515,6 +659,7 @@ proc parseArgs(): RunnerOpts =
         echo "  --results-dir DIR   per-test JSON result file dir"
         echo "  --filter GLOB       only run binaries whose stem matches"
         echo "  --quiet             suppress per-test progress lines"
+        echo "  --test-timeout=N    per-test timeout in seconds (0=off)"
         quit(0)
       else:
         stderr.writeLine "repro_test_runner: unknown option --" & p.key
@@ -623,6 +768,7 @@ proc main() =
     resultsDir: opts.resultsDir,
     quiet: opts.quiet,
     failFast: failFast,
+    testTimeoutSec: opts.testTimeoutSec,
     activeCount: addr activeCount,
     baseEnv: addr baseEnv)
 

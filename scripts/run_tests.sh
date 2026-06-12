@@ -111,16 +111,23 @@ done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
-# Total wall-clock cap for the runner phase. The M3 runner has no
-# per-test ``--timeout`` flag yet, so an individual hung test (e.g.
-# a daemon-coupling regression that leaves ``repro-daemon`` /
-# ``fake_protocol_daemon_helper`` orphans alive) would block the
-# whole phase indefinitely. ``timeout 90m`` bounds the worst case
-# at 90 minutes; on CI a clean 500-test sweep at 4 threads
-# completes in ~45-60 min. ``timeout``'s ``--kill-after=30s`` sends
-# SIGKILL 30 seconds after SIGTERM in case the runner is stuck in
-# uninterruptible waits. CI surfaces the SIGTERM via exit code 124.
-RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-90m}"
+# D6 lands a per-test ``--test-timeout=N`` flag on the M3 internal
+# runner. Default below is 600 seconds (10 minutes) per test — well
+# above any normal test on CI, but low enough that a single hung test
+# fails with a clear TIMEOUT signature in the build report while the
+# rest of the suite continues instead of starving every queue slot
+# behind it.
+#
+# The shell ``timeout`` wrapper stays as a very high wall-clock
+# backstop (default 4h) in case the runner itself wedges before any
+# per-test deadline fires (e.g. fd-race tear-down during spawn, signal
+# handler stuck). On CI a clean 500-test sweep at 4 threads completes
+# in ~45-60 min, so 4h is far above the normal envelope.
+# ``--kill-after=30s`` sends SIGKILL 30 seconds after SIGTERM in case
+# the runner is stuck in uninterruptible waits. CI surfaces the
+# SIGTERM via exit code 124.
+RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
+TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-600}"
 
 ct_test_runner="../ct-test/build/bin/ct-test-runner${exe_ext}"
 if [[ -x "${ct_test_runner}" ]]; then
@@ -150,9 +157,12 @@ else
   # Thread count capped at 2 to dodge the runner's known fd-race;
   # callers can lift via REPROBUILD_TEST_THREADS once the runner fix
   # lands. ct-test-runner is unaffected and is the preferred path.
+  # ``--test-timeout`` is the D6 per-test SIGKILL deadline; the outer
+  # ``timeout`` is the runner-phase wall-clock backstop.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
     --threads=${REPROBUILD_TEST_THREADS:-2} \
+    --test-timeout=${TEST_TIMEOUT} \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \
     --results-dir=test-logs/results
