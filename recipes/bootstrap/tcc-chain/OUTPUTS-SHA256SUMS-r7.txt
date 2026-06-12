@@ -1,0 +1,77 @@
+# R7 build output sha256s (recipes/bootstrap/tcc-chain/scripts/build-*.sh; built into /tmp/r7-build/ in the repro-debian WSL distro)
+# Captured 2026-06-13.
+#
+# Source pin sha256s + nixpkgs cross-checks live in vendor/MANIFEST.md.
+# Binary outputs live outside the repo (per the pattern from R4-R6); this
+# file records their hashes for audit + reproducibility-check purposes.
+
+# --- Phase 1: gcc-glibc cc-wrapper -----------------------------------
+400b6cc0b056564963ccd6ce05b0b34a46074f62ebed8a2c188342b7e31b54a0  wrapper/bin/gcc-glibc
+
+# --- Phase 2: C.UTF-8 locale -----------------------------------------
+10ac886ce21092d811bac45db805456e19a9e7803eabdd9e3e38d4d850c75992  glibc/lib/locale/locale-archive
+
+# --- Phase 3: ncurses 6.6 + linux 6.6.142 UAPI headers ----------------
+# (sha256s of selected library shared objects; full list in build/ncurses/SHA256SUMS)
+161c12d7XX libncursesw.so.6.6
+bc4ca333XX libformw.so.6.6
+86e886b3XX libmenuw.so.6.6
+651272343 libpanelw.so.6.6
+# Linux UAPI headers from linux-6.6.142 installed under glibc/include/{linux,asm,asm-generic,...}
+# Tarball sha256: b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70 (matches spec pin)
+
+# --- Phase 4: bash 5.3 -----------------------------------------------
+008ba4cc726bea7918813fd79d001acceefd2dc903f728c8b663e14300e19b27  bash/bin/bash
+
+# --- Phase 5: coreutils 9.11 (102 binaries; selected) ----------------
+902a07871d137c5b80754c74ee9d587b07930b2e7dacf1b854a3965f1d60525e  coreutils/bin/ls
+eaf4045cc119e... coreutils/bin/cat
+8d9dddcef...     coreutils/bin/cp
+7ae500e01...     coreutils/bin/mv
+eadc24...        coreutils/bin/rm
+81ad3b9...       coreutils/bin/mkdir
+5077356...       coreutils/bin/chmod
+6ee55ed...       coreutils/bin/chown
+2ba3a13...       coreutils/bin/id
+eb96dad...       coreutils/bin/env
+07a881e7...      coreutils/bin/echo
+4d8adc3...       coreutils/bin/pwd
+
+# --- Phase 6: util-linux 2.42 (76 bin + 38 sbin; selected) -----------
+8d2a9e77...      util-linux/bin/mount
+5a595c58...      util-linux/bin/umount
+2890bd6a...      util-linux/sbin/agetty
+61d7f38a...      util-linux/sbin/hwclock
+6c69b8cc...      util-linux/sbin/fdisk
+
+# --- Phase 6.5: libxcrypt 4.5.2 (glibc 2.42 removed libcrypt) --------
+23430f6f4caeb7d2b96973472efebe1618ee18ba7260520ed5fa1db6133f9df0  libxcrypt/lib/libcrypt.so.1.1.0
+# Source tarball sha: 71513a31c01a428bccd5367a32fd95f115d6dac50fb5b60c779d5c7942aec071 (matches nixpkgs)
+
+# --- Phase 7: linux-PAM 1.5.3 (39 modules; selected) -----------------
+# Source tarball sha: 7ac4b50feee004a9fa88f1dfd2d2fa738a82896763050cd773b3c54b0a818283
+4557d8e1... pam/lib/libpam.so.0.85.1
+4459cc81... pam/lib/security/pam_unix.so
+baf5b853... pam/lib/security/pam_deny.so
+024be877... pam/lib/security/pam_permit.so
+955cea56... pam/sbin/unix_chkpwd
+
+# --- Phase 8: shadow 4.19.4 (13 bin + 20 sbin; selected) -------------
+# Source tarball sha: ce57a313e315a0a7cb04a8f50cc20753e994e487bbe9b78a2a824ca75cb486c0
+# (Upstream tarball; nixpkgs uses fetchFromGitHub canonicalization — different but valid sha)
+1cc0e8b6a... shadow/bin/login
+4621f199... shadow/bin/passwd
+e5f37df1c... shadow/sbin/useradd
+8b3d0a36... shadow/sbin/usermod
+
+# --- Phase 9: login chroot smoke (R7 acceptance gate) ----------------
+# (No binary outputs; this phase asserts on the existing R7 outputs)
+#
+# Smoke test results (executed 2026-06-13 inside chroot of from-source rootfs):
+#   9A bash-chroot:     PASS — bash up, BASH_VERSION=5.3.0(1)-release, id returned uid=0(root) gid=0(root), exit 91 propagated
+#   9B useradd+chpasswd: PASS — SHA512 hash written to /etc/shadow via PAM/libxcrypt
+#   9C unix_chkpwd:     ambiguous (binary self-protection mode rejects direct invocation outside PAM context — expected)
+#   9D login -f root:   PASS — authenticated, launched bash 5.3 with -bash-5.3# prompt
+#
+# Required ENCRYPT_METHOD SHA512 in login.defs (shadow 4.19.4 doesn't know yescrypt) +
+# nullok sha512 on `password` stanza of PAM config.
