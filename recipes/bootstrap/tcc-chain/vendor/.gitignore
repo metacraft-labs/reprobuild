@@ -1,0 +1,6 @@
+# Vendor blobs > 10 MB or large source snapshots are gitignored and
+# fetched on demand via fetch.ps1. The hex0-seed.AMD64.bin (229 bytes) IS
+# committed, since it's the trust anchor and tiny.
+minimal-bootstrap-sources.tar.gz
+mes-0.27.1.tar.gz
+nyacc-1.09.1.tar.gz
