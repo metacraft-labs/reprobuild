@@ -252,12 +252,147 @@ must symlink those locations or pass `--m2libc-path` to M2-Mesoplanet
 at runtime. After fix, two consecutive builds emit bit-identical
 SHA256SUMS (verified).
 
+## R6 status (gcc -> glibc), 2026-06-13
+
+| Phase | Status                                                                         | Wall-clock        | Bytes-stable? |
+|-------|--------------------------------------------------------------------------------|-------------------|---------------|
+| 1     | COMPLETE (linux 6.18.7 headers via `make headers_install ARCH=x86_64`)         | ~30 s             | yes (sanitised .h tree, byte-stable under SDE) |
+| 2     | COMPLETE (glibc 2.42 vanilla, via R5 gcc 15.2.0 + binutils 2.46.0)             | ~5 min on 32-core | unverified (no re-run; SDE-pinned)             |
+| 3     | COMPLETE (smoke-test PASS: hello-world prints + exits 42)                      | <1 s              | n/a                                            |
+| 4     | NOT REACHED (rebuild gcc 15.2 with glibc as system libc — deferred to R7)      | n/a               | n/a                                            |
+
+R6 acceptance gate (`gcc 15.2 + glibc -> hello-world links and runs`) PASSES.
+
+### R6 deliverables (session 1)
+
+- `vendor/fetch-r6.ps1` — downloads 2 R6 source pins from upstream and
+  sha256-verifies against `vendor/SHA256SUMS-r6.txt`.
+- `vendor/SHA256SUMS-r6.txt` — both hashes byte-equal to nixpkgs SRI pins
+  (decoded in PowerShell and cross-checked: linux 6.18.7 + glibc 2.42).
+- `vendor/MANIFEST.md` — appended R6 section with per-file provenance,
+  upstream URLs, sizes, license, nixpkgs ref, patch-skip rationale.
+- `scripts/build-linux-headers.sh` — R6 Phase 1 driver. Plain
+  `make headers_install ARCH=x86_64` with nixpkgs's cc-version stubs
+  + HOST_LFS_CFLAGS. Output: 1028 .h files, 7.0 MiB.
+- `scripts/build-glibc.sh` — R6 Phase 2 driver. Out-of-tree build via R5
+  gcc 15.2.0 + binutils 2.46.0; `--with-headers=<R6 Phase 1>`,
+  `--enable-kernel=3.10.0`, `--disable-multilib`, `--disable-profile`,
+  `--disable-nscd`, `--without-gd`, `--without-selinux`. NB:
+  `CXX=` (empty) override at `make` time bypasses a libstdc++/hidden-atexit
+  conflict in glibc's `support/links-dso-program` test driver — see
+  "Known reproducibility hazard caught + fixed" below.
+- `scripts/_r6_glibc_shasums.sh` — helper, generates `$OUT/SHA256SUMS`
+  with sizes + sha256 for the canonical 17 glibc outputs.
+- `scripts/r6-smoke-test.sh` — Phase 3 driver. Builds hello.c, runs it,
+  checks `stdout == "Hello from glibc!"` AND `exit code == 42` AND
+  the binary's `Requesting program interpreter` is the R6 ld.so AND
+  ldd shows libc.so.6 resolved against R6's libc.
+
+### R6 verified sha256 (canonical, 2026-06-13 build run)
+
+Linux headers (Phase 1):
+```
+include/asm/unistd.h            623  a83776c3b064c9d1f04ea0a8228e20eef166508c6c13cd75afbabd3237acc445
+include/asm/unistd_64.h       10372  e491134abeb6c23ea140e967b7b52a27bb5d958c6889d7e7d2d2ce062c973617
+include/linux/version.h         216  fddf0fe9c09b1e7fbe9306f2726bb2551003147a42377b24bb63b41984cb2f12
+include/linux/types.h          1829  4152b3c5d095f5cf0adf5cc13ee0670e737eb7c4efef5fa08e9d1eb87e68ed78
+include/asm-generic/unistd.h  31792  3e926f0eb23613d1293a8cae1db5a58dcdd575304e9ac75e5b492a8bf205c13f
+```
+Total: 1028 .h files, 7,120,325 bytes across 15 top-level dirs.
+
+glibc 2.42 (Phase 2):
+```
+lib/libc.so.6               11880752  5b005ba93c1240431a5e69b221bcbf3f3aadddd51d2955226dae7777206dedad
+lib/ld-linux-x86-64.so.2     1376816  8f2e3e0795c3c9c7c63d67be83e311bb2a89339ec59ae89e06e8a12dca29646e
+lib/libm.so.6                4035272  a9074545934fa483346c27bb38146bca0d293c76786c985c423a6ade42a8e2a4
+lib/libpthread.so.0            19856  d727c54f114bfa42e6f58ec28b3e9d91add424614484a0faf01a7e767a4d5b81
+lib/librt.so.1                 24144  c057d741ad25bd205391607fd12bdad168dc87bfb33f5081535b4944134753aa
+lib/libdl.so.2                 19080  79449fa34e133179b6ac4eda62c0f19b530a3bfeaed921faaeefd062c82f9673
+lib/libresolv.so.2            263168  cdb713d9e63fb2381ef6e3c4e734cbdbab1a40d6d5857c29f31fa7c3ce3c24ac
+lib/libutil.so.1               18800  94690790de6285813c3518d65c6995fd9d078a509daae40b1eaed611744b14f5
+lib/libc_nonshared.a           16978  6643ae19ec75a261ea92bfc6c4e29d042105a7a30792e65ace15a8b5d4d71adb
+lib/crt1.o                      8896  09fd86832ca66ba97c5b4b6d5852cebfa9476246fb2536b5b5ccf0efb47535a9
+lib/crti.o                      3008  5545e0509b7b5d3c8f54f211d469a05db56eeef7cf5f2bc664e465da659b87aa
+lib/crtn.o                      2752  77baaebc89a0b1cf1e555f763910d027b10f2c133978aa9a1cecbcaa987bfb84
+bin/ldd                         5463  beea383917107db2fca823133900725d7a8390c4a1b33e34da3ff222e70fec9f
+bin/getconf                    53400  842bccd91fa3cf06a5df87c65b5c5fc35b8d944a338dcfee7f5b20440f79e073
+bin/getent                     96488  688b05ac84f55cec7f60b1487b4cbb906e9ce75cf751dd741b77716cd76473c8
+bin/locale                    154592  98407737e80f2998c18a938e255e91c8f580440a34f6d8bab825849af0ce510a
+```
+
+NB: glibc's `libpthread.so.0` is a 19,856-byte stub since glibc 2.34
+(pthread merged into libc.so.6). The stub still exists for SONAME
+back-compat with binaries that have `NEEDED libpthread.so.0`.
+
+### R6 known reproducibility hazard caught + fixed
+
+`support/links-dso-program` (a glibc-internal test binary) links with
+`-lstdc++`. R5's libstdc++ provides a *hidden* `atexit` symbol that
+collides with `libc_nonshared.a(atexit.oS)`'s exported `atexit`, breaking
+the link with `ld: hidden symbol 'atexit' ... is referenced by DSO`.
+
+Fix: pass `CXX=` (empty) to `make`. glibc's `support/Makefile` falls back
+to `links-dso-program-c` (C-only, links against `-lgcc` only) when
+`$(CXX)` is empty, which assembles cleanly. The fix is in
+`scripts/build-glibc.sh` at Stage 4 ("make -j N CXX=").
+
+This same `links-dso-program` issue is mentioned in glibc's mailing
+list archives as a known interaction with non-Debian/non-Fedora
+toolchains. Our R5 g++ ships libstdc++.a built against musl, where
+the visibility annotations differ from glibc's expectations.
+
+### R6 embedded-path posture
+
+`strings libc.so.6 | grep '^/tmp/'`:
+```
+/tmp/r6-build/glibc/lib/locale/locale-archive
+/tmp/r6-build/glibc/share/locale
+/tmp/r6-build/glibc/share/zoneinfo
+/tmp/r6-build/glibc/lib/gconv/gconv-modules.cache
+```
+
+These are baked in by glibc via the `--prefix=$OUT` configure flag.
+ReproOS will install glibc at `/repro/glibc` (or similar) at boot time;
+the same configure flag pattern, just with a different prefix. For R6
+acceptance the `/tmp/r6-build` prefix is the staging path; the smoke
+test verifies the runtime works AT that prefix, which is the only thing
+the R6 gate requires.
+
+For R7+ we'll configure with `--prefix=/repro/glibc` and use the
+junction-aware install pattern from M2-sim (mount or symlink
+`/repro/glibc` at boot).
+
+### R6 deferred to next phase
+
+- Phase 4 (rebuild gcc 15.2.0 with glibc as system libc): not strictly
+  needed for the R6 gate ("glibc builds and works"). R5's gcc still has
+  `--with-sysroot=$MUSL_GCC46`, but binaries built with the R6
+  smoke-test pattern (explicit `--dynamic-linker` + `-isystem $GLIBC/include`
+  + `-nostdinc`) link cleanly against glibc. For R7 (userspace) we may
+  need to either (a) accept the explicit-flag invocation pattern, (b)
+  build a gcc 15.2 wrapper that injects the flags, or (c) rebuild gcc
+  15.2 with `--with-sysroot=$GLIBC --with-native-system-header-dir=/include`.
+  Option (b) is the standard "cc-wrapper" pattern used by nixpkgs and
+  Gentoo's gcc-config; it's cheap and bit-for-bit reproducible.
+- Apply the nixpkgs `2.42-master.patch` (254 KB of upstream stable-branch
+  backports producing "glibc 2.42-61"). These are bug fixes, not behaviour
+  changes; safe to skip for the R6 gate but should be considered before
+  any production use.
+- Build glibc-locales (separate package per nixpkgs's `locales.nix`).
+  Our R6 install includes `bin/localedef` but no locale archive; programs
+  needing locale data will get C/POSIX behaviour. Acceptable for R7 dev
+  iteration; R8+ needs at least the C.UTF-8 locale.
+
 ## References
 
 - Spec: `D:/metacraft/reprobuild-specs/ReproOS-MVP.milestones.org`
-  ** R4 heading
+  ** R4, R5, R6 headings
 - M2-sim chain (the simulation we're replacing): `D:/metacraft/reprobuild-specs/recipes/bootstrap/tcc-chain/chain.json`
 - nixpkgs reference: `D:/metacraft/nixpkgs/pkgs/os-specific/linux/minimal-bootstrap/`
+  + `pkgs/os-specific/linux/kernel-headers/default.nix`
+  + `pkgs/development/libraries/glibc/{default.nix,common.nix}`
 - Upstream source: `https://github.com/oriansj/stage0-posix` tag `Release_1.9.1`
 - Bootstrap-seeds: `https://github.com/oriansj/bootstrap-seeds` commit
   `cedec6b8066d1db229b6c77d42d120a23c6980ed`
+- linux 6.18.7: `https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.7.tar.xz`
+- glibc 2.42: `https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz`

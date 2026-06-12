@@ -312,3 +312,60 @@ pwsh recipes/bootstrap/tcc-chain/vendor/fetch-r5.ps1
 ```
 
 Each file is sha256-checked against SHA256SUMS-r5.txt after download.
+
+# R6 (gcc -> glibc) vendored sources
+
+Pulled by `vendor/fetch-r6.ps1`.  Each file is sha256-verified against
+`SHA256SUMS-r6.txt` after download.  All pins cross-checked against
+nixpkgs at commit `06a4933d0`.
+
+## linux-6.18.7.tar.xz
+
+- **Upstream URL**: `https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.7.tar.xz`.
+- **Size**: 154327332 bytes (~147 MiB).
+- **sha256**: `b726a4d15cf9ae06219b56d87820776e34d89fbc137e55fb54a9b9c3015b8f1e`.
+- **nixpkgs ref**: `pkgs/os-specific/linux/kernel-headers/default.nix`
+  (`sha256-tyak0Vz5rgYhm1bYeCB3bjTYn7wTflX7VKm5wwFbjx4=` decoded to hex
+  matches our pin byte-for-byte).
+- **License**: GPL-2.0-only.
+- **Usage**: `make headers_install ARCH=x86_64 INSTALL_HDR_PATH=...` is
+  the only target consumed.  None of the kernel C sources are compiled.
+- **R6 acceptance**: kernel-headers produces a sanitised `asm/`, `asm-generic/`,
+  `linux/`, `mtd/`, `rdma/`, `scsi/`, `sound/`, `video/`, `drm/`, `misc/`,
+  `xen/` include tree that glibc consumes via `--with-headers=<dir>`.
+
+## glibc-2.42.tar.xz
+
+- **Upstream URL**: `https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz`.
+- **Size**: 19930508 bytes (~19 MiB).
+- **sha256**: `d1775e32e4628e64ef930f435b67bb63af7599acb6be2b335b9f19f16509f17f`.
+- **nixpkgs ref**: `pkgs/development/libraries/glibc/common.nix`
+  (`sha256-0XdeMuRijmTvkw9DW2e7Y691may2viszW58Z8WUJ8X8=` decoded to hex
+  matches our pin byte-for-byte).
+- **License**: LGPL-2.1+.
+- **Patch posture**: nixpkgs ships `2.42-master.patch` (~254 KB of upstream
+  stable-branch backports producing "2.42-61") plus 9 nix-specific
+  patches.  For R6 we build *vanilla* 2.42 (no patches) to keep the work
+  tractable.  The nixpkgs patches break down as:
+  - `2.42-master.patch`: 61 upstream cherry-picks since the 2.42 tag --
+    bug fixes, not behaviour changes.  Skipping costs us the security
+    backports; acceptable for the R6 gate which is "libc loads and runs".
+  - `nix-locale-archive.patch`, `dont-use-system-ld-so-cache.patch`,
+    `dont-use-system-ld-so-preload.patch`, `fix_path_attribute_in_getconf.patch`,
+    `nix-nss-open-files.patch`: nixos-specific FS paths.  We use `/repro`
+    paths instead; no patch needed.
+  - `0001-Revert-Remove-all-usage-of-BASH-or-BASH-in-installed.patch`,
+    `0001-localedata-allow-reproducible-parallel-install-of-lo.patch`,
+    `0002-Makeconfig-make-inst_complocaledir-overridable.patch`,
+    `reenable_DT_HASH.patch`, `fix-x64-abi.patch`: behavioural tweaks
+    none of which affect "compile a hello-world and run it".
+- **R6 acceptance**: produces `lib/libc.so.6` + `lib/ld-linux-x86-64.so.2`
+  + `lib/libpthread.so.0` + the include tree under `include/`.
+
+## Refresh (R6)
+
+```
+pwsh recipes/bootstrap/tcc-chain/vendor/fetch-r6.ps1
+```
+
+Each file is sha256-checked against SHA256SUMS-r6.txt after download.

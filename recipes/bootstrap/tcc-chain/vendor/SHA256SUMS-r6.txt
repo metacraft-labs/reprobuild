@@ -1,0 +1,15 @@
+# R6 (gcc -> glibc) vendored sources -- sha256 pins.
+# Every line matches the upstream tarball sha256 AND the nixpkgs pin.
+# Cross-check tooling: vendor/fetch-r6.ps1 verifies all lines after download.
+
+# linux 6.18.7 -- pin matches nixpkgs pkgs/os-specific/linux/kernel-headers/default.nix
+# (`sha256-tyak0Vz5rgYhm1bYeCB3bjTYn7wTflX7VKm5wwFbjx4=` decodes to this hex).
+b726a4d15cf9ae06219b56d87820776e34d89fbc137e55fb54a9b9c3015b8f1e  linux-6.18.7.tar.xz
+
+# glibc 2.42 -- pin matches nixpkgs pkgs/development/libraries/glibc/common.nix
+# (`sha256-0XdeMuRijmTvkw9DW2e7Y691may2viszW58Z8WUJ8X8=` decodes to this hex).
+# nixpkgs additionally applies a 2.42-master.patch (254 KB of stable-branch
+# backports) producing "glibc 2.42-61"; for R6 we build vanilla 2.42 to keep
+# the patch surface tractable. The released 2.42 tarball is exactly what
+# upstream sourceware.org publishes.
+d1775e32e4628e64ef930f435b67bb63af7599acb6be2b335b9f19f16509f17f  glibc-2.42.tar.xz
