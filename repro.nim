@@ -287,27 +287,32 @@ package reprobuild:
         else: binary
       "reprobuild.test_execute." & stem
 
+    # Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR tests
+    # carry ``extraPassC`` / ``extraPassL`` lists (the codesign
+    # workaround flags that previously lived in ``scripts/run_tests.sh``'s
+    # ``compile_hcr_workaround`` direct ``nim c`` re-compile loop) plus
+    # ``targetOs: soMacosArm64`` as the cross-target guard.
+    #
+    # **B4 CI fix**: the original spec assumed gcc on Linux would
+    # accept the macOS-only ``-Wl,-segprot,__HCR,rwx,rwx`` flag
+    # harmlessly. binutils-ld instead errors out
+    # (``unable to disambiguate: -segprot``), which broke ``just
+    # test`` once D1 + D2 + D3 wired the engine through end-to-end.
+    # The flags are macOS-only by construction; gating their
+    # emission on ``when defined(macosx)`` at compile time of the
+    # project interface DLL keeps the ``targetOs: soMacosArm64``
+    # field documentary and avoids the linker error on Linux/Windows.
+    # The HCR tests themselves are macOS-only at runtime anyway, so
+    # the gated build edge still produces a compilable binary on
+    # Linux/Windows for any non-runtime CI sweep.
+    const hostIsMacos = defined(macosx)
     for spec in reprobuildTestSpecs:
-      # Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR tests
-      # carry ``extraPassC`` / ``extraPassL`` lists (the codesign
-      # workaround flags that previously lived in
-      # ``scripts/run_tests.sh``'s ``compile_hcr_workaround`` direct
-      # ``nim c`` re-compile loop) plus ``targetOs: soMacosArm64`` as
-      # the cross-target guard. The build edge passes the flags through
-      # to ``nim c`` unconditionally for those specs — on Linux/gcc the
-      # flags are typically ignored with a warning (the HCR tests are
-      # macOS-only at runtime anyway), so the cross-target guard is
-      # documentary today and tightens to a hard skip once the
-      # ``currentBuildContext().crossTarget.targetTriple()`` API is
-      # plumbed into the package-macro-emitted build body (B0/M5 prep
-      # work). Until then the spec's spec-mandated fallback path "emit
-      # the flags unconditionally for the 3 HCR specs" is what runs.
       let edge = buildNimUnittest.build(
         source = spec.source,
         binary = spec.binary,
         defines = spec.defines,
-        extraPassC = spec.extraPassC,
-        extraPassL = spec.extraPassL)
+        extraPassC = (when hostIsMacos: spec.extraPassC else: @[]),
+        extraPassL = (when hostIsMacos: spec.extraPassL else: @[]))
       reprobuildTestBuildActions.add(edge.action)
       # B3: emit the EXECUTE edge.
       #
