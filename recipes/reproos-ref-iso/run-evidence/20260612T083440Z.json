@@ -1,0 +1,37 @@
+{
+  "assertions": [
+    {
+      "description": "systemd reports its version (systemd is installed and reachable)",
+      "elapsed_s": 8.812999999994645,
+      "error": "",
+      "expect_line": "systemd 2\\d\\d",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "systemd 252",
+      "send_after_match": null,
+      "timeout_s": 30.0
+    },
+    {
+      "description": "system-state reflects PID-1 systemd (running, degraded, or starting)",
+      "elapsed_s": 0.1090000000258442,
+      "error": "",
+      "expect_line": "^(running|degraded|starting|initializing)$",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "degraded",
+      "send_after_match": null,
+      "timeout_s": 60.0
+    }
+  ],
+  "assertions_failed": 0,
+  "assertions_passed": 2,
+  "backend": "wsl2",
+  "error_message": "",
+  "finished_at": "2026-06-12T08:34:40Z",
+  "image_path": "D:\\metacraft\\reprobuild\\recipes\\reproos-ref-iso\\vendor\\debian-bookworm-slim-amd64-rootfs.tar.gz",
+  "image_sha256": "b9136609bef0128191aa157637b98dd7b98e52154ca60c18258d65957a01c6d0",
+  "outcome": "PASS",
+  "serial_log_path": "C:\\Users\\zahary\\AppData\\Local\\Temp\\repro-boot-harness\\repro-test-boot-r1-a129c1.log",
+  "started_at": "2026-06-12T08:34:23Z",
+  "vm_name": "repro-test-boot-r1-a129c1"
+}

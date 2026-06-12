@@ -62,3 +62,11 @@ __pycache__/
 # only the JSON outcome records land under the repo, here.
 boot-harness-out/
 *.vhdx
+
+# R1 vendored upstream blobs — pulled by recipes/reproos-ref-iso/vendor/fetch.ps1
+# on first run, never committed. The manifest, SHA256SUMS, and fetch
+# script ARE committed; the blobs themselves are gitignored.
+recipes/reproos-ref-iso/vendor/*.tar.gz
+recipes/reproos-ref-iso/vendor/*.tar.xz
+recipes/reproos-ref-iso/vendor/*.qcow2
+recipes/reproos-ref-iso/vendor/*.raw
