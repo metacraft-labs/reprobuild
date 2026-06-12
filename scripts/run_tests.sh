@@ -111,15 +111,28 @@ done < <(
   find tests -type f -name 'test_*.py' -print0
 )
 
+# Total wall-clock cap for the runner phase. The M3 runner has no
+# per-test ``--timeout`` flag yet, so an individual hung test (e.g.
+# a daemon-coupling regression that leaves ``repro-daemon`` /
+# ``fake_protocol_daemon_helper`` orphans alive) would block the
+# whole phase indefinitely. ``timeout 90m`` bounds the worst case
+# at 90 minutes; on CI a clean 500-test sweep at 4 threads
+# completes in ~45-60 min. ``timeout``'s ``--kill-after=30s`` sends
+# SIGKILL 30 seconds after SIGTERM in case the runner is stuck in
+# uninterruptible waits. CI surfaces the SIGTERM via exit code 124.
+RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-90m}"
+
 ct_test_runner="../ct-test/build/bin/ct-test-runner${exe_ext}"
 if [[ -x "${ct_test_runner}" ]]; then
-  printf 'Using ct-test-runner: %s\n' "${ct_test_runner}" >&2
-  "${ct_test_runner}" run \
+  printf 'Using ct-test-runner: %s (overall timeout %s)\n' \
+    "${ct_test_runner}" "${RUNNER_TIMEOUT}" >&2
+  timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${ct_test_runner}" run \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \
     --results-dir=test-logs/results
 else
-  printf 'ct-test-runner not built; falling back to M3 internal runner\n' >&2
+  printf 'ct-test-runner not built; falling back to M3 internal runner (overall timeout %s)\n' \
+    "${RUNNER_TIMEOUT}" >&2
   runner_bin="build/bin/repro_test_runner${exe_ext}"
   if [[ ! -x "${runner_bin}" ]]; then
     printf 'Building M3 fallback runner: %s\n' "${runner_bin}" >&2
@@ -137,7 +150,7 @@ else
   # Thread count capped at 2 to dodge the runner's known fd-race;
   # callers can lift via REPROBUILD_TEST_THREADS once the runner fix
   # lands. ct-test-runner is unaffected and is the preferred path.
-  "${runner_bin}" \
+  timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
     --threads=${REPROBUILD_TEST_THREADS:-2} \
     --bin-dir=build/test-bin \
