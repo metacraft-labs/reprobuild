@@ -1,0 +1,7 @@
+## Both vendored blobs exceed the project's "<=10 MB committable" rule.
+## They are fetched on demand via fetch.ps1 (idempotent; sha256 pinned
+## against the upstream Debian SHA256SUMS file). SHA256SUMS is committed
+## so the boot test and reproducibility gate can verify integrity
+## without re-running fetch.ps1.
+vmlinuz-debian-netinst
+initrd.img-debian-netinst

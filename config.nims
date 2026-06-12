@@ -170,6 +170,16 @@ addPackagePath("CT_INTERPOSE_SRC", [
   "libs" / "repro_monitor_shim" / "vendor" / "ct_interpose" / "src",
 ], "ct_interpose" / "hook_registry.nim")
 
+# R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
+# (see ReproOS-MVP R0 status). The R2 boot integration test
+# (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
+# the bootFromMedia/captureSerial/expectLine primitives against the
+# Hyper-V Gen-2 UEFI backend. Prefer $VM_HARNESS_SRC, then the
+# sibling-repo checkout.
+addPackagePath("VM_HARNESS_SRC", [
+  ".." / "vm-harness" / "src",
+], "vm_harness.nim")
+
 let runquotaRoot = block:
   let fromEnv = getEnv("RUNQUOTA_SRC")
   if fromEnv.len > 0:
