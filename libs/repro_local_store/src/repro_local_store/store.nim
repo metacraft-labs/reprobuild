@@ -21,7 +21,7 @@
 ## requested key before returning to the caller — the hash-on-read
 ## contract from the spec is enforced by `readCasBlob` / `materializeBlob`.
 
-import std/[os, strutils, times]
+import std/[algorithm, os, strutils, tables, times]
 
 import blake3
 import repro_core
@@ -93,6 +93,21 @@ type
     createdAtUnix*: int64
     writerProcessId*: int64
     writerMode*: string                ## "direct" | "daemon"
+    outputName*: string
+      ## Recipe-Val M8: which Nix-style package output this receipt
+      ## belongs to. Empty string (the default) means "legacy
+      ## single-output realize" and the on-disk encoding round-trips
+      ## byte-identically to the pre-M8 receipt envelope. Multi-output
+      ## realize sets this to ``"bin"`` / ``"man"`` / ``"doc"`` /
+      ## ``"dev"`` (whatever the recipe declared).
+    outputPrefixes*: Table[string, string]
+      ## Recipe-Val M8 sibling-output index: empty for single-output
+      ## receipts, populated only on the receipt sealed into the
+      ## *first* output of a multi-output realize so a downstream
+      ## consumer can discover the sibling prefixes (one per declared
+      ## output) without re-walking the store index. Keys are
+      ## logical output names (``"bin"``, ``"man"``, …); values are
+      ## store-relative paths (forward-slashed).
 
   PrefixRow* = object
     ## One row in the `prefixes` table.
@@ -161,6 +176,23 @@ type
     provenanceUrl*: string
     provenanceChecksum*: string
     materializationMechanism*: string
+    outputName*: string
+      ## Recipe-Val M8: the Nix-style output the realize call is
+      ## materialising. Empty = legacy single-output realize (the
+      ## v1 path); non-empty = per-output content-addressed prefix
+      ## (the v2 path; the receipt is sealed with this name and
+      ## ``outputPrefixes`` for sibling-output discovery).
+
+  MultiOutputSpec* = object
+    ## Recipe-Val M8: descriptor passed to :proc:`realizeMultiOutput`
+    ## for each per-output staging tree the caller has already laid
+    ## out on disk. The store computes a per-output realization hash
+    ## (including ``outputName`` AND the BLAKE3 of the staging tree
+    ## manifest), publishes each output at its own prefix, and seals
+    ## a receipt linking back to all sibling-output prefixes in the
+    ## ``outputPrefixes`` table on the first output's receipt.
+    outputName*: string                ## "bin" | "man" | "doc" | "dev" | ...
+    stagingDir*: string                ## absolute path to the per-output tree
 
   Store* = object
     root*: string
@@ -186,7 +218,15 @@ const
   StoreSchemaVersion* = 1
   ReceiptFileName* = ".repro-receipt"
   ReceiptMagic* = "RPRC"                ## envelope magic
-  ReceiptFormatVersion* = 1'u16
+  ReceiptFormatVersion* = 2'u16
+    ## v2: Recipe-Val M8 — appends ``outputName: string`` and a
+    ## length-prefixed (name, relativePath) sibling-output map after
+    ## the v1 ``writerMode`` field. v1 receipts decode with both
+    ## fields empty, which matches the single-output legacy
+    ## behavior byte-for-byte (the canonical encoding of an empty
+    ## string + empty table appends 6 bytes, so v1 receipts written
+    ## on disk before this upgrade remain readable without
+    ## re-sealing).
   DefaultGcGraceSeconds* = 5 * 60       ## five minutes per the spec
   StoreRootEnvVar* = "REPRO_STORE_ROOT"
 
@@ -269,12 +309,29 @@ proc realizationDirName*(version: string; prefixId: PrefixIdBytes): string =
   cleanVersion & "-" & hexOf(prefixId)[0 ..< 16]
 
 proc prefixRelativePath*(packageName, version: string;
-                        prefixId: PrefixIdBytes): string =
+                        prefixId: PrefixIdBytes;
+                        outputName = ""): string =
   ## Returns the canonical relative path under `prefixes/` for the
   ## supplied identity. Always forward-slashed so the SQLite column is
   ## portable across hosts.
-  "prefixes/" & safePathSegment(packageName, "pkg") & "/" &
-    realizationDirName(version, prefixId)
+  ##
+  ## Recipe-Val M8: ``outputName`` selects which Nix-style package
+  ## output the prefix belongs to. An empty value (the default)
+  ## preserves the legacy single-output layout
+  ## ``prefixes/<package>/<version>-<hash>/``. A non-empty value
+  ## inserts an output-name segment to give Nix-style
+  ## ``prefixes/<package>-<output>/<version>-<hash>/`` partitioning
+  ## — the package + output pair drives a fresh directory tree so
+  ## each output's prefix is independently content-addressable and
+  ## a downstream consumer can refer to one without dragging in the
+  ## siblings.
+  let pkgSegment =
+    if outputName.len == 0 or outputName == "out":
+      safePathSegment(packageName, "pkg")
+    else:
+      safePathSegment(packageName, "pkg") & "-" &
+        safePathSegment(outputName, "out")
+  "prefixes/" & pkgSegment & "/" & realizationDirName(version, prefixId)
 
 proc casBlobRelative*(digest: PrefixIdBytes): string =
   let hex = hexOf(digest)
@@ -315,6 +372,24 @@ proc encodeReceipt*(rec: RealizationReceipt): seq[byte] =
   body.writeU64Le(uint64(rec.createdAtUnix))
   body.writeU64Le(uint64(rec.writerProcessId))
   body.writeString(rec.writerMode)
+  # Recipe-Val M8 v2 trailing fields. Single-output realize leaves
+  # ``outputName`` empty and ``outputPrefixes`` empty, so v1
+  # receipts that round-trip through encode/decode pick up the
+  # 4-byte zero count and the 4-byte empty-string length only —
+  # the body grows by 8 bytes vs. v1, which the checksum and
+  # ``payloadLen`` header rebuild correctly.
+  body.writeString(rec.outputName)
+  body.writeU32Le(uint32(rec.outputPrefixes.len))
+  # Emit sibling-output entries in deterministic order: sort keys
+  # so a multi-output realize always emits the same bytes regardless
+  # of which output's receipt was sealed first.
+  var siblingKeys: seq[string] = @[]
+  for key in rec.outputPrefixes.keys:
+    siblingKeys.add(key)
+  siblingKeys.sort()
+  for key in siblingKeys:
+    body.writeString(key)
+    body.writeString(rec.outputPrefixes[key])
 
   result.add(byte(ord(ReceiptMagic[0])))
   result.add(byte(ord(ReceiptMagic[1])))
@@ -335,7 +410,7 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
       raise newException(EReceiptCorrupt, "unknown receipt magic")
   var pos = 4
   let version = readU16Le(buf, pos)
-  if version != ReceiptFormatVersion:
+  if version notin {1'u16, ReceiptFormatVersion}:
     raise newException(EReceiptCorrupt,
       "unsupported receipt format version: " & $version)
   let bodyLen = int(readU32Le(buf, pos))
@@ -370,6 +445,16 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
   result.createdAtUnix = int64(readU64Le(buf, pos))
   result.writerProcessId = int64(readU64Le(buf, pos))
   result.writerMode = readString(buf, pos)
+  result.outputPrefixes = initTable[string, string]()
+  if version >= 2'u16:
+    # Recipe-Val M8 v2 trailing fields. v1 receipts decode with
+    # both fields empty (single-output legacy semantics).
+    result.outputName = readString(buf, pos)
+    let siblingCount = int(readU32Le(buf, pos))
+    for i in 0 ..< siblingCount:
+      let key = readString(buf, pos)
+      let value = readString(buf, pos)
+      result.outputPrefixes[key] = value
   if pos != bodyEnd:
     raise newException(EReceiptCorrupt, "trailing receipt bytes")
 
@@ -414,6 +499,45 @@ proc computeRealizationHash*(packageName, version, adapter,
   buf.writeString(declaredExecutablePath)
   buf.writeString(provenanceUrl)
   buf.writeString(provenanceChecksum)
+  buf.writeU32Le(uint32(extra.len))
+  for value in extra:
+    buf.writeString(value)
+  blake3.digest(buf)
+
+proc computeOutputRealizationHash*(packageName, version, adapter,
+                                  lockIdentity, declaredExecutablePath: string;
+                                  outputName: string;
+                                  payload: openArray[byte];
+                                  provenanceUrl = "";
+                                  provenanceChecksum = "";
+                                  extra: openArray[string] = []): PrefixIdBytes =
+  ## Recipe-Val M8: per-output content-addressed identity. Same
+  ## inputs as :proc:`computeRealizationHash` plus the logical
+  ## output name AND the BLAKE3 digest of the per-output payload
+  ## bytes. Two outputs of the same package therefore land at
+  ## DISTINCT prefix hashes because (a) the output-name discriminator
+  ## differs and (b) the payload bytes differ — so changing the
+  ## ``man`` output does not invalidate the cached ``bin`` prefix
+  ## and vice-versa.
+  ##
+  ## ``payload`` is hashed in-line into the realization-hash; the
+  ## caller is responsible for supplying the canonical byte
+  ## representation of the per-output staging tree. Multi-output
+  ## realize uses the BLAKE3 digest of the staging tree manifest
+  ## (sorted ``path\0size\0blake3-digest\n`` lines) as the payload.
+  var buf: seq[byte] = @[]
+  buf.writeString("reprobuild.realization.v1.multi")
+  buf.writeString(adapter)
+  buf.writeString(packageName)
+  buf.writeString(version)
+  buf.writeString(lockIdentity)
+  buf.writeString(declaredExecutablePath)
+  buf.writeString(provenanceUrl)
+  buf.writeString(provenanceChecksum)
+  buf.writeString(outputName)
+  buf.writeU32Le(uint32(payload.len))
+  for b in payload:
+    buf.add(b)
   buf.writeU32Le(uint32(extra.len))
   for value in extra:
     buf.writeString(value)
@@ -690,6 +814,30 @@ type
     absolutePath*: string
     row*: PrefixRow
 
+  PerOutputRealize* = object
+    ## Recipe-Val M8: one entry per Nix-style package output that a
+    ## multi-output realize call materialised. ``name`` matches the
+    ## ``MultiOutputSpec.outputName`` the caller supplied; the other
+    ## fields mirror the single-output :type:`RealizeResult` shape so
+    ## downstream consumers (closure builders, peer-cache fetchers,
+    ## ``repro why``) can iterate per-output prefixes without special
+    ## casing.
+    name*: string
+    outcome*: RealizeOutcome
+    prefixId*: PrefixIdBytes
+    relativePath*: string
+    absolutePath*: string
+
+  MultiOutputResult* = object
+    ## Result envelope from :proc:`realizeMultiOutput`. ``perOutput``
+    ## carries one entry per declared output, in declaration order;
+    ## the sealed ``outputPrefixes`` table on every receipt also
+    ## stores the same name→relativePath mapping so a downstream
+    ## consumer that opens the ``bin`` prefix can discover its
+    ## ``man`` / ``doc`` / ``dev`` siblings without re-querying the
+    ## store index.
+    perOutput*: seq[PerOutputRealize]
+
 proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
                                   mechanism: var string) =
   ## Walks `srcDir` and reproduces its file tree under `dstDir`,
@@ -741,7 +889,7 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
   ## guaranteed to match.
   result.prefixId = prefixId
   result.relativePath = prefixRelativePath(hint.packageName,
-    hint.version, prefixId)
+    hint.version, prefixId, hint.outputName)
   result.absolutePath = s.absolutePrefixPath(result.relativePath)
 
   let lookup = s.lookupPrefix(prefixId)
@@ -776,7 +924,9 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
         else: mechanism,
       createdAtUnix: getTime().toUnix,
       writerProcessId: int64(getCurrentProcessId()),
-      writerMode: writerMode)
+      writerMode: writerMode,
+      outputName: hint.outputName,
+      outputPrefixes: initTable[string, string]())
     writeReceiptFile(stage / ReceiptFileName, receipt)
     let digest = receiptDigest(receipt)
     # Publish (atomic rename):
@@ -1227,6 +1377,170 @@ proc realizeDirectoryAsPrefix*(s: var Store; sourceDir: string;
   result = s.realizePrefix(prefixId, hint,
     proc (stagingDir: string; mechanism: var string) =
       materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism))
+
+# ---------------------------------------------------------------------------
+# Recipe-Val M8 — multi-output realize
+# ---------------------------------------------------------------------------
+
+proc stagingTreeManifestDigest(dir: string): seq[byte] =
+  ## BLAKE3-256 of a deterministic manifest of `dir`'s file tree
+  ## (sorted relative paths + per-file sizes + per-file BLAKE3
+  ## digests). Used by :proc:`computeOutputRealizationHash` so each
+  ## per-output prefix is independently content-addressable.
+  if not dirExists(extendedPath(dir)):
+    return @[]
+  var entries: seq[tuple[path: string; size: int64;
+                          digest: PrefixIdBytes]] = @[]
+  for entry in walkDirRec(extendedPath(dir),
+                          yieldFilter = {pcFile, pcLinkToFile},
+                          relative = true):
+    let abs = dir / entry
+    let size = getFileSize(extendedPath(abs))
+    let raw = readFile(extendedPath(abs))
+    var buf = newSeq[byte](raw.len)
+    for i, ch in raw:
+      buf[i] = byte(ord(ch))
+    let d = blake3.digest(buf)
+    entries.add((path: toForwardSlash(entry), size: size, digest: d))
+  entries.sort(proc (a, b: tuple[path: string; size: int64;
+                                 digest: PrefixIdBytes]): int =
+    cmp(a.path, b.path))
+  var manifest: seq[byte] = @[]
+  manifest.writeString("reprobuild.staging-tree.v1")
+  manifest.writeU32Le(uint32(entries.len))
+  for e in entries:
+    manifest.writeString(e.path)
+    manifest.writeU64Le(uint64(e.size))
+    for b in e.digest:
+      manifest.add(b)
+  let h = blake3.digest(manifest)
+  result = newSeq[byte](32)
+  for i in 0 ..< 32:
+    result[i] = h[i]
+
+proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
+                         outputs: openArray[MultiOutputSpec];
+                         writerMode = "direct";
+                         extra: openArray[string] = []): MultiOutputResult =
+  ## Recipe-Val M8: materialise N Nix-style outputs of a single
+  ## package recipe, each at its own content-addressed prefix. The
+  ## caller passes one :type:`MultiOutputSpec` per declared output
+  ## (the per-output staging tree must already be populated on disk
+  ## under ``MultiOutputSpec.stagingDir``).
+  ##
+  ## On return ``result.perOutput`` carries one entry per output, in
+  ## declaration order. Every receipt sealed during the call records
+  ## the full sibling-output map in ``outputPrefixes`` so a downstream
+  ## consumer that opens any one output's receipt can discover the
+  ## sibling prefixes without consulting the store index.
+  if outputs.len == 0:
+    raise newException(StoreError,
+      "realizeMultiOutput requires at least one output spec")
+  # Phase 1: compute every output's realization hash up front so the
+  # sibling-output map is fully known before any receipt is sealed.
+  type
+    Pending = object
+      spec: MultiOutputSpec
+      prefixId: PrefixIdBytes
+      relativePath: string
+      absolutePath: string
+  var pending: seq[Pending] = newSeq[Pending](outputs.len)
+  var siblingMap = initTable[string, string]()
+  for i, spec in outputs:
+    if spec.outputName.len == 0:
+      raise newException(StoreError,
+        "realizeMultiOutput: every output must have a non-empty name")
+    let manifest = stagingTreeManifestDigest(spec.stagingDir)
+    let prefixId = computeOutputRealizationHash(hint.packageName,
+      hint.version, hint.adapter, hint.lockIdentity,
+      hint.declaredExecutablePath, spec.outputName, manifest,
+      hint.provenanceUrl, hint.provenanceChecksum, extra)
+    let rel = prefixRelativePath(hint.packageName, hint.version,
+      prefixId, spec.outputName)
+    let abs = s.absolutePrefixPath(rel)
+    pending[i] = Pending(spec: spec, prefixId: prefixId,
+      relativePath: rel, absolutePath: abs)
+    siblingMap[spec.outputName] = toForwardSlash(rel)
+  # Phase 2: stage each output, seal a receipt that lists every
+  # sibling output's relative path, atomic rename + index insert.
+  for i, p in pending:
+    var entry = PerOutputRealize(name: p.spec.outputName,
+      prefixId: p.prefixId, relativePath: p.relativePath,
+      absolutePath: p.absolutePath)
+    # Cache hit (already-present prefix): skip staging entirely.
+    let lookup = s.lookupPrefix(p.prefixId)
+    if lookup.found and dirExists(extendedPath(p.absolutePath)):
+      entry.outcome = roAlreadyPresent
+      result.perOutput.add(entry)
+      continue
+    var perHint = hint
+    perHint.outputName = p.spec.outputName
+    let stage = s.allocateStagingDir()
+    var mechanism = "copy"
+    try:
+      materializeViaHardlinkOrCopy(p.spec.stagingDir, stage, mechanism)
+      var receipt = RealizationReceipt(
+        schemaVersion: 1'u16,
+        adapter: perHint.adapter,
+        packageName: perHint.packageName,
+        version: perHint.version,
+        realizationHash: p.prefixId,
+        realizedPath: p.relativePath,
+        declaredExecutablePath: perHint.declaredExecutablePath,
+        exportedExecutables: perHint.exportedExecutables,
+        lockIdentity: perHint.lockIdentity,
+        provenanceUrl: perHint.provenanceUrl,
+        provenanceChecksum: perHint.provenanceChecksum,
+        materializationMechanism:
+          if perHint.materializationMechanism.len > 0:
+            perHint.materializationMechanism
+          else: mechanism,
+        createdAtUnix: getTime().toUnix,
+        writerProcessId: int64(getCurrentProcessId()),
+        writerMode: writerMode,
+        outputName: p.spec.outputName,
+        outputPrefixes: siblingMap)
+      writeReceiptFile(stage / ReceiptFileName, receipt)
+      let digest = receiptDigest(receipt)
+      createDir(extendedPath(parentDir(p.absolutePath)))
+      var publishedSelf = true
+      try:
+        moveDir(extendedPath(stage), extendedPath(p.absolutePath))
+      except OSError:
+        publishedSelf = false
+      if not publishedSelf:
+        if dirExists(extendedPath(stage)):
+          try: removeDir(extendedPath(stage)) except OSError: discard
+        if not dirExists(extendedPath(p.absolutePath)):
+          raise
+        entry.outcome = roLoserOfRace
+        result.perOutput.add(entry)
+        continue
+      var row = PrefixRow(
+        prefixId: p.prefixId,
+        packageName: perHint.packageName,
+        version: perHint.version,
+        realizedPath: toForwardSlash(p.relativePath),
+        adapter: perHint.adapter,
+        receiptDigest: digest,
+        createdAtUnix: receipt.createdAtUnix)
+      s.db.exec("BEGIN IMMEDIATE")
+      var committed = false
+      try:
+        let inserted = s.insertPrefixOrIgnore(row)
+        s.db.exec("COMMIT")
+        committed = true
+        entry.outcome =
+          if inserted: roPublished
+          else: roLoserOfRace
+      finally:
+        if not committed:
+          try: s.db.exec("ROLLBACK") except CatchableError: discard
+      result.perOutput.add(entry)
+    except CatchableError:
+      if dirExists(extendedPath(stage)):
+        try: removeDir(extendedPath(stage)) except OSError: discard
+      raise
 
 # ---------------------------------------------------------------------------
 # Tests-facing helpers: hex-conversion of receipt digests, etc.

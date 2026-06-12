@@ -170,7 +170,14 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 12'u16
+  BuildActionPayloadVersion = 13'u16
+    ## v13: Recipe-Val M8 — appends an ``outputTag: string`` field
+    ## carrying the Nix-style package-output discriminator. Empty
+    ## string means "contributes to the default ``out`` output,"
+    ## which the closure walker treats identically to the explicit
+    ## ``"out"`` value so v12-and-earlier payloads round-trip
+    ## losslessly under the default-output rule.
+    ##
     ## v12: Typed-Outputs M1 — appends a length-prefixed list of
     ## ``BuildActionTypedOutput`` entries after ``targetNames``. Each
     ## entry serialises ``fieldName: string``, ``types: seq[string]``,
@@ -717,8 +724,14 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cacheable = true;
                   commandStatsId = "";
                   dependencyPolicy = defaultDependencyPolicy();
-                  actionCachePolicy = defaultActionCachePolicy()):
+                  actionCachePolicy = defaultActionCachePolicy();
+                  outputTag = ""):
     BuildActionDef {.dynOrStatic.} =
+  ## ``outputTag`` (Recipe-Val M8): which package-output this edge
+  ## contributes to. Defaults to the empty string which the closure
+  ## walker treats identically to ``"out"`` — preserves legacy
+  ## single-output behavior for every recipe that doesn't opt in to
+  ## multi-output partitioning.
   result = BuildActionDef(
     id: id,
     call: call,
@@ -732,7 +745,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cacheable: cacheable,
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy,
-    actionCachePolicy: actionCachePolicy)
+    actionCachePolicy: actionCachePolicy,
+    outputTag: outputTag)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -746,6 +760,36 @@ proc addUniqueValue(values: var seq[string]; value: string) =
 proc actionIds*(actions: openArray[BuildActionDef]): seq[string] {.dynOrStatic.} =
   for action in actions:
     result.addUniqueValue(action.id)
+
+proc effectiveOutputTag*(action: BuildActionDef): string {.dynOrStatic.} =
+  ## Recipe-Val M8: normalise the per-edge ``outputTag`` to its
+  ## canonical form. An empty string is the legacy default and is
+  ## treated identically to the explicit ``"out"`` output, so
+  ## v12-and-earlier payloads (and recipes that never declare an
+  ## ``outputs:`` section) flow into the same single-output prefix
+  ## as before this milestone.
+  if action.outputTag.len == 0:
+    "out"
+  else:
+    action.outputTag
+
+proc filterActionsByOutput*(actions: openArray[BuildActionDef];
+                            outputName: string): seq[BuildActionDef]
+    {.dynOrStatic.} =
+  ## Recipe-Val M8 closure walker: select the edges that contribute
+  ## to the requested package-output (``"bin"`` / ``"man"`` /
+  ## ``"doc"`` / ``"dev"`` / ``"out"``). The runtime closure for a
+  ## downstream consumer that ``uses:`` package P's ``bin`` output
+  ## is built from the result of this proc — edges tagged for the
+  ## ``man`` output are not pulled into the closure, which is what
+  ## prevents man-page realizations from cascading into binary-only
+  ## consumers.
+  let want =
+    if outputName.len == 0: "out"
+    else: outputName
+  for action in actions:
+    if effectiveOutputTag(action) == want:
+      result.add(action)
 
 proc targetNames*(targets: openArray[BuildTargetDef]): seq[string] {.dynOrStatic.} =
   for target in targets:
@@ -1633,6 +1677,8 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
     payload.writeString(typedOutput.fieldName)
     payload.writeStringSeq(typedOutput.types)
     payload.writeString(typedOutput.path)
+  # v13: Recipe-Val M8 — Nix-style package-output discriminator.
+  payload.writeString(action.outputTag)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1648,7 +1694,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, BuildActionPayloadVersion}:
+      9'u16, 10'u16, 11'u16, 12'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1686,6 +1732,11 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       result.typedOutputs[i].fieldName = readString(bytes, pos)
       result.typedOutputs[i].types = readStringSeq(bytes, pos)
       result.typedOutputs[i].path = readString(bytes, pos)
+  if version >= 13'u16:
+    result.outputTag = readString(bytes, pos)
+  # Older payloads (v1..v12) decode with an empty ``outputTag``, which
+  # the closure walker normalises to the default ``"out"`` output —
+  # preserving legacy single-output behavior byte-for-byte.
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

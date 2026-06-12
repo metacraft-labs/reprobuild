@@ -68,12 +68,15 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     check decoded.typedOutputs[1].path == "build/test-bin/foo-installer"
 
   test "older v11 payload decodes with empty typed-output list":
-    # Forge a v11 payload by encoding a v12 action with no typed
-    # outputs, then patching the version field down to 11 and
-    # truncating the trailing typed-output u32-length prefix.
-    # ``writeStringSeq`` would emit a u32 of 0 for an empty seq — at
-    # v11 that suffix doesn't exist, so trimming the last 4 bytes
-    # produces a byte-accurate v11 payload.
+    # Forge a v11 payload by encoding the current-version action with
+    # no typed outputs and no ``outputTag``, then patching the version
+    # field down to 11 and truncating the trailing fields that
+    # ``writeStringSeq`` / ``writeString`` for those empty defaults
+    # emitted.
+    # Recipe-Val M8 (v13): the encoded payload now ends with the
+    # u32 typedOutputs count + the u32 outputTag string length (both
+    # zero for an empty action), so 8 trailing bytes need trimming to
+    # reach v11's wire shape.
     let action = BuildActionDef(
       id: "legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -89,13 +92,16 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # to 11 and re-encode the payload length so the framing self-
     # consistency check stays valid.
     # Magic is bytes 0..3; version is bytes 4..5; length is bytes 6..9.
-    # Truncate the trailing 4-byte u32 (the empty typedOutputs count).
+    # Truncate 8 trailing bytes: 4 for the empty typedOutputs count
+    # (the v12 addition) + 4 for the empty outputTag string length
+    # (the v13 addition). Both fields are absent at v11.
+    let trimBytes = 8
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
       (uint32(payload[9]) shl 24))
-    payload.setLen(payload.len - 4)
-    let newLen = uint32(oldLen - 4)
+    payload.setLen(payload.len - trimBytes)
+    let newLen = uint32(oldLen - trimBytes)
     payload[4] = 11'u8
     payload[5] = 0'u8
     payload[6] = byte(newLen and 0xff)
@@ -107,5 +113,6 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     check decoded.id == "legacy"
     check decoded.targetNames == @["legacy-target"]
     # Backward-compatibility contract: v11 payloads decode with an
-    # empty typed-output list.
+    # empty typed-output list and an empty outputTag.
     check decoded.typedOutputs.len == 0
+    check decoded.outputTag == ""

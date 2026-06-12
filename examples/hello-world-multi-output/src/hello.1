@@ -1,0 +1,15 @@
+.TH HELLO 1 "2026-06-12" "reprobuild" "User Commands"
+.SH NAME
+hello \- print a friendly multi-output greeting
+.SH SYNOPSIS
+.B hello
+.SH DESCRIPTION
+Demonstrates Recipe-Val M8 (Nix-style multi-output) under reprobuild.
+The compiled binary ships under the package's
+.B bin
+output prefix; this man page ships under the
+.B man
+output prefix, content-addressed independently so a binary-only
+consumer never pulls the man page into its closure.
+.SH AUTHOR
+Metacraft Labs.

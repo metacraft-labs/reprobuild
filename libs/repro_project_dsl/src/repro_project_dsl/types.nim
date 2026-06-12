@@ -212,6 +212,39 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  OutputDef* = object
+    ## Recipe-Val M8: one entry per logical Nix-style package output
+    ## (``$out`` / ``$out-man`` / ``$out-doc`` / ``$out-dev``). A
+    ## recipe declares its outputs in an ``outputs:`` section inside
+    ## the ``package`` block; each output is materialised at its own
+    ## content-addressed store prefix with its own realization hash.
+    ##
+    ## Empty ``PackageDef.outputs`` keeps legacy single-output
+    ## behavior: every build artifact lands in one prefix named
+    ## after the package, matching the pre-M8 store layout.
+    name*: string
+      ## Logical output name. Conventional names are ``bin`` /
+      ## ``man`` / ``doc`` / ``dev``; ``out`` is the default
+      ## (synthesised when ``outputs:`` is absent).
+    actionIds*: seq[string]
+      ## Build actions whose materialised outputs flow into this
+      ## per-output prefix. Populated by the build-graph normalizer
+      ## at apply time from the ``outputTag`` field on each
+      ## ``BuildActionDef``; surface DSL recipes leave it empty.
+    paths*: seq[string]
+      ## Per-output file globs taken from the recipe's ``outputs:``
+      ## block (e.g. ``"share/man/**"`` for the ``man`` output).
+      ## Used by the store split path to partition the realized
+      ## payload across per-output prefixes.
+    inheritsDefault*: bool
+      ## When true, this output also receives whatever paths are
+      ## NOT claimed by any other output. The synthesised default
+      ## ``out`` output sets this flag so legacy single-output
+      ## recipes (with no ``outputs:`` section) preserve their
+      ## "everything in one prefix" layout.
+    sourceFile*: string
+    sourceLine*: int
+
   PackageDef* = object
     packageName*: string
     defaultToolProvisioning*: string
@@ -228,6 +261,14 @@ type
     sourceFile*: string
     sourceLine*: int
     variants*: seq[VariantDecl]
+    outputs*: seq[OutputDef]
+      ## Recipe-Val M8: declared Nix-style package outputs. Empty
+      ## means "legacy single-output recipe — everything goes into
+      ## one ``out`` prefix"; the store layer synthesises a default
+      ## ``out`` ``OutputDef`` at realize time when this is empty so
+      ## the on-the-wire representation of single-output recipes is
+      ## indistinguishable from pre-M8 recipes (no payload bytes
+      ## emitted by the ``outputs:`` section).
       ## Spec-Implementation M1: variants declared in the package's
       ## ``config:`` block. The ``package`` macro emits one
       ## ``declareVariant[T](...)`` call per entry followed by
@@ -324,6 +365,21 @@ type
       ## consumers can identify framework-specific outputs (e.g.
       ## those implementing ``TestBinary``) without re-parsing the
       ## DSL.
+    outputTag*: string
+      ## Recipe-Val M8: which package-output (``$out`` / ``$out-man``
+      ## / ``$out-doc`` / ``$out-dev``, declared via ``OutputDef`` on
+      ## ``PackageDef.outputs``) this edge contributes to. Default
+      ## (empty string OR ``"out"``) means "contributes to the
+      ## default ``out`` output," preserving legacy single-output
+      ## semantics. The runtime closure walker filters edges by this
+      ## tag when computing per-output transitive dependencies so a
+      ## consumer that ``uses:`` only the ``bin`` output of package
+      ## P never pulls man-page or doc edges into its closure.
+      ##
+      ## Carried through the payload codec (v13+) so multi-output
+      ## graphs survive serialization. v12 and earlier payloads
+      ## decode with an empty ``outputTag``, which the closure walker
+      ## treats identically to ``"out"``.
     sourceFile*: string
     sourceLine*: int
 

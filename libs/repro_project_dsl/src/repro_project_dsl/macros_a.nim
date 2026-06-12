@@ -542,6 +542,62 @@ proc libraryKindLiteral(node: NimNode; fallback: LibraryKind): LibraryKind =
       "(got '" & text & "')", node)
     lkStatic
 
+proc parseOutputDef(packageName: string; node: NimNode): OutputDef =
+  ## Recipe-Val M8: parse a single ``output <name>:`` entry inside a
+  ## package's ``outputs:`` block. The body grammar mirrors
+  ## ``parseLibrary``: optional ``paths = ["..."]`` line + optional
+  ## ``inheritsDefault: true``. Everything else is forward-compat ignored.
+  discard packageName
+  let loc = lineFile(node)
+  if node.len < 2:
+    error("output expects a name", node)
+  result.name = identText(node[1])
+  result.sourceFile = loc.file
+  result.sourceLine = loc.line
+  if node.len < 3:
+    return
+  let body = node[2]
+  if body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    case calleeName(stmt).normalize
+    of "paths":
+      if stmt.len < 2:
+        error("output paths = requires a value", stmt)
+      # ``paths = ["bin/*"]`` parses to ``Call(paths, StmtList(Bracket))``
+      # or ``Asgn(paths, Bracket)`` depending on shape; handle both.
+      var valueNode = stmt[1]
+      while valueNode.kind == nnkStmtList and valueNode.len == 1:
+        valueNode = valueNode[0]
+      result.paths = stringSeqLiteral(valueNode)
+    of "inheritsdefault":
+      if stmt.len < 2:
+        error("output inheritsDefault: requires a bool value", stmt)
+      var valueNode = stmt[1]
+      while valueNode.kind == nnkStmtList and valueNode.len == 1:
+        valueNode = valueNode[0]
+      result.inheritsDefault = boolLiteral(valueNode, false)
+    of "discard":
+      discard
+    else:
+      # Unknown body member — silently ignore for forward compatibility.
+      discard
+
+proc parseOutputsBlock(packageName: string; node: NimNode;
+                       outputs: var seq[OutputDef]) =
+  ## Recipe-Val M8: parse the package-block ``outputs:`` section.
+  ## Body shape: one ``output <name>:`` call per logical Nix-style
+  ## output. The orchestrator validates uniqueness; this proc only
+  ## extracts the data.
+  if node.len < 2:
+    return
+  let body = node[node.len - 1]
+  if body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    if calleeName(stmt).normalize == "output":
+      outputs.add(parseOutputDef(packageName, stmt))
+
 proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
   ## Mirrors ``parseExecutable``. Accepts two shapes:
   ##
@@ -1219,6 +1275,13 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # ``finalizeVariants()`` call once the block ends.
       if stmt.len >= 2:
         collectConfigSection(stmt[stmt.len - 1], result.variants)
+    elif calleeName(stmt).normalize == "outputs":
+      # Recipe-Val M8: package-level multi-output partitioning. The
+      # ``outputs:`` block holds one ``output <name>:`` entry per
+      # logical Nix-style output (``$out`` / ``$out-man`` /
+      # ``$out-doc`` / ``$out-dev``). Empty / absent ``outputs:``
+      # keeps legacy single-output behavior.
+      parseOutputsBlock(result.packageName, stmt, result.outputs)
 
 proc escForCode(text: string): string =
   text.escape()
@@ -1396,6 +1459,28 @@ proc packageLiteral(pkg: PackageDef): string =
       ", kind: " & $lib.kind &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
+  # Recipe-Val M8: emit the package-level multi-output partition list.
+  # Empty ``outputs`` serialises as ``@[]`` so legacy single-output
+  # recipes round-trip byte-identically to their pre-M8 packageLiteral
+  # output.
+  result.add("], outputs: @[")
+  for outIndex, outDef in pkg.outputs:
+    if outIndex > 0:
+      result.add(", ")
+    result.add("OutputDef(name: " & escForCode(outDef.name) &
+      ", actionIds: @[")
+    for actIdx, actId in outDef.actionIds:
+      if actIdx > 0:
+        result.add(", ")
+      result.add(escForCode(actId))
+    result.add("], paths: @[")
+    for pathIdx, pathExpr in outDef.paths:
+      if pathIdx > 0:
+        result.add(", ")
+      result.add(escForCode(pathExpr))
+    result.add("], inheritsDefault: " & $outDef.inheritsDefault &
+      ", sourceFile: " & escForCode(outDef.sourceFile) &
+      ", sourceLine: " & $outDef.sourceLine & ")")
   result.add("])")
 
 proc nimDefault(nimType: string): string =

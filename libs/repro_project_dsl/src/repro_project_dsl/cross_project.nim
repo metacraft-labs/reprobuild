@@ -347,7 +347,12 @@ proc isKnownPackageSection(stmt: NimNode): bool =
   result = n in ["build", "executable", "library", "files", "service",
                  "devenv", "uses", "usesimportpath", "defaulttoolprovisioning",
                  "toolprovisioning", "provisioning", "versions", "config",
-                 "depends_on", "dependson"]
+                 "depends_on", "dependson",
+                 # Recipe-Val M8: the ``outputs:`` block declaring
+                 # Nix-style package outputs (``$out`` / ``$out-man``
+                 # / ``$out-doc`` / ``$out-dev``). One ``output <name>:``
+                 # entry per declared output inside the body.
+                 "outputs"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.
