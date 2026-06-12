@@ -3302,6 +3302,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_d5_collection_member_selector.nim",
+    binary: "build/test-bin/t_d5_collection_member_selector",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_dependency_report_and_converter_paths.nim",
     binary: "build/test-bin/t_dependency_report_and_converter_paths",
     defines: @[],

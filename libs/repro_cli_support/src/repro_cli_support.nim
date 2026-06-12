@@ -1759,7 +1759,11 @@ type
 proc resolveTargetExportSelector*(exportTable: TargetExportTable;
                                   knownActionIds: openArray[string];
                                   knownExplicitTargets: openArray[string];
-                                  selector: string): TargetResolutionRecord =
+                                  selector: string;
+                                  collectionMembers:
+                                    Table[string, seq[string]] =
+                                      initTable[string, seq[string]]()):
+    TargetResolutionRecord =
   ## Named-Targets M5: shared name-lookup that ``runGraphCommand`` /
   ## ``runWhyCommand`` use to translate a bare name or qualified
   ## ``<package>:<name>`` selector into an action id BEFORE handing the
@@ -1767,6 +1771,13 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
   ## inside ``lowerProviderSnapshot`` so the two code paths cannot
   ## drift. The return record is also embedded in the build report by
   ## ``writeBuildReport`` (M5 diagnostic-taxonomy polish).
+  ##
+  ## **Deferred Item D5** — when ``collectionMembers`` is supplied,
+  ## ``<collection>#<member>`` selectors resolve against it the same
+  ## way ``lowerProviderSnapshot``'s in-engine resolver does. The
+  ## parameter defaults to empty so the M5 callers that don't have a
+  ## collection-membership view (the build-target-export table alone
+  ## doesn't carry one) keep working unchanged.
   result.selector = selector
 
   # Build the same indexes the lowering resolver computes.
@@ -1811,6 +1822,48 @@ proc resolveTargetExportSelector*(exportTable: TargetExportTable;
       result.actionId = selector
       result.targetKind = tekExplicit
       return
+
+  # **Deferred Item D5** ``<collection>#<member>`` shorthand.
+  # Mirrors the resolver inside ``lowerProviderSnapshot`` so the
+  # build-report ``targetResolution`` row matches what the engine
+  # actually selected. Only fires when the caller supplied a
+  # collection-membership view (the engine path has one because it
+  # decodes ``reprobuild.build-target.v1`` nodes from the snapshot;
+  # the M5 graph/why callers may not).
+  let hashPos = selector.find('#')
+  if hashPos > 0 and hashPos < selector.high and collectionMembers.len > 0:
+    let collectionName = selector[0 ..< hashPos]
+    let memberName = selector[hashPos + 1 .. ^1]
+    if collectionMembers.hasKey(collectionName) and memberName.len > 0:
+      let actions = collectionMembers[collectionName]
+      var matches: seq[string] = @[]
+      # Direct action-id match.
+      for actionId in actions:
+        if actionId == memberName and matches.find(actionId) < 0:
+          matches.add(actionId)
+      # ``.<member>`` suffix match.
+      let needle = "." & memberName
+      for actionId in actions:
+        if actionId.len >= needle.len and
+            actionId[actionId.len - needle.len .. ^1] == needle and
+            matches.find(actionId) < 0:
+          matches.add(actionId)
+      # Implicit-name match — the export table's row whose ``name``
+      # equals ``<member>`` and whose ``actionId`` is in the
+      # collection's action list.
+      if entriesByName.hasKey(memberName):
+        for entry in entriesByName[memberName]:
+          if entry.actionId in actions and matches.find(entry.actionId) < 0:
+            matches.add(entry.actionId)
+      if matches.len == 1:
+        result.kind = trkResolved
+        result.actionId = matches[0]
+        result.targetKind = tekCollection
+        return
+      if matches.len > 1:
+        result.kind = trkAmbiguous
+        result.candidates = matches
+        return
 
   # 3. Bare implicit name.
   if entriesByName.hasKey(selector):
@@ -1980,6 +2033,111 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     # Existing ``target "name", handle`` label.
     if targets.hasKey(selector):
       return selector
+
+    # **Deferred Item D5** ``<collection>#<member>`` shorthand. When the
+    # selector contains a ``#`` (carried through from the CLI's
+    # ``.#<collection>#<member>`` outer-fragment form: the outer ``.#``
+    # is consumed by ``parseBuildTarget`` as the project-file anchor,
+    # leaving the inner ``<collection>#<member>`` as ``selectedActionId``),
+    # interpret the left half as a build-graph collection name and the
+    # right half as a member selector. The member resolves against the
+    # collection's action list using the same conventions the engine
+    # already understands:
+    #
+    #   1. action-id equality — ``<member>`` equals an action id in the
+    #      collection (rare; the user would normally spell the full id),
+    #   2. ``.<member>`` suffix — the typical case for
+    #      ``reprobuild.<verb>.<stem>`` action ids registered by the
+    #      ``test`` / ``apps`` / ``test-helpers`` collections (per
+    #      reprobuild/repro.nim), and
+    #   3. implicit-name match — a typed-tool wrapper registered the
+    #      binary's basename (e.g. ``t_dsl_outputs_statement_basic_accepted``)
+    #      as an implicit target name pointing at the build edge's
+    #      auto-generated id (e.g. ``nim-c-9a79fb5ba32…``). This is the
+    #      shape ``test-builds#<stem>`` lands on because the build edges
+    #      do not carry an explicit ``actionId =``.
+    #
+    # The selector parser intentionally leaves the resolution to the
+    # engine: at parse time the project's collection registry isn't
+    # available yet (it's persisted into the provider snapshot during
+    # graph emission), but at lowering time the snapshot's per-fragment
+    # ``BuildTargetDef`` rows give us the full ``actions`` membership.
+    # When neither half resolves, fall through to the generic
+    # ``unknown_target`` diagnostic below so the user still sees the
+    # available-names hint.
+    let hashPos = selector.find('#')
+    if hashPos > 0 and hashPos < selector.high:
+      let collectionName = selector[0 ..< hashPos]
+      let memberName = selector[hashPos + 1 .. ^1]
+      if targets.hasKey(collectionName) and memberName.len > 0:
+        let collection = targets[collectionName]
+        var memberIdsByActionId = initHashSet[string]()
+        for actionId in collection.actions:
+          memberIdsByActionId.incl(actionId)
+        # Pass 1: direct action-id match.
+        if memberIdsByActionId.contains(memberName):
+          return memberName
+        # Pass 2: ``.<member>`` suffix match against any action id in
+        # the collection. Matches the
+        # ``reprobuild.test_execute.<stem>`` /
+        # ``reprobuild.python_test.<stem>`` / ``reprobuild.apps.<name>``
+        # conventions used by reprobuild's collections.
+        var suffixMatches: seq[string] = @[]
+        let needle = "." & memberName
+        for actionId in collection.actions:
+          if actionId.len >= needle.len and
+              actionId[actionId.len - needle.len .. ^1] == needle:
+            if suffixMatches.find(actionId) < 0:
+              suffixMatches.add(actionId)
+        # Pass 3: implicit-name match — find export-table entries
+        # whose ``name`` equals ``<member>`` and whose ``actionId`` is
+        # in the collection's action list.
+        if entriesByName.hasKey(memberName):
+          for entry in entriesByName[memberName]:
+            if memberIdsByActionId.contains(entry.actionId) and
+                suffixMatches.find(entry.actionId) < 0:
+              suffixMatches.add(entry.actionId)
+        if suffixMatches.len == 1:
+          return suffixMatches[0]
+        if suffixMatches.len > 1:
+          var err = newException(BuildTargetAmbiguousError,
+            "collection member '" & memberName & "' in '" &
+              collectionName & "' matches multiple actions: " &
+              suffixMatches.join(", ") &
+              " — re-run with the qualified action id")
+          err.selectorName = selector
+          err.candidates = suffixMatches
+          raise err
+        # No member matched: surface the same ``unknown_target`` shape
+        # as the generic miss, but enumerate the collection's members
+        # in the suggestions so the user sees what's available. The
+        # suggestion list is the per-action implicit names when known
+        # (more user-friendly), falling back to the raw action ids.
+        var members: seq[string] = @[]
+        for actionId in collection.actions:
+          var displayed = actionId
+          # When the action id has a ``.``-separated last segment,
+          # use that as the member-shorthand form so the suggestion
+          # matches what the user just typed.
+          let lastDot = actionId.rfind('.')
+          if lastDot > 0 and lastDot < actionId.high:
+            displayed = actionId[lastDot + 1 .. ^1]
+          else:
+            # Fall back to any implicit target name pointing at this
+            # action.
+            for entry in exportTable.entries:
+              if entry.actionId == actionId and entry.name.len > 0:
+                displayed = entry.name
+                break
+          if members.find(displayed) < 0:
+            members.add(displayed)
+        var err = newException(BuildTargetUnknownError,
+          "unknown build target: " & selector &
+            " (no member '" & memberName & "' in collection '" &
+            collectionName & "')")
+        err.selectorName = selector
+        err.suggestions = topLevenshteinCandidates(memberName, members)
+        raise err
 
     # M2 implicit / explicit target-name lookup.
     if entriesByName.hasKey(selector):
@@ -4869,6 +5027,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let exportTable = aggregateTargetExportTable(refresh.snapshot)
       var actionIds: seq[string] = @[]
       var explicitTargets: seq[string] = @[]
+      # **Deferred Item D5** collection-membership view passed to
+      # ``resolveTargetExportSelector`` so the build report's
+      # ``targetResolution`` row for a ``<collection>#<member>``
+      # selector matches what the engine actually executed (instead
+      # of being recorded as ``unknown_target``).
+      var collectionMembers = initTable[string, seq[string]]()
       var seenAction = initHashSet[string]()
       var seenExplicit = initHashSet[string]()
       for fragment in refresh.snapshot.fragments:
@@ -4882,6 +5046,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
             if not seenExplicit.containsOrIncl(targetDef.name):
               explicitTargets.add(targetDef.name)
+            if targetDef.kind == btkCollection:
+              if collectionMembers.hasKey(targetDef.name):
+                for a in targetDef.actions:
+                  if a notin collectionMembers[targetDef.name]:
+                    collectionMembers[targetDef.name].add(a)
+              else:
+                collectionMembers[targetDef.name] = targetDef.actions
       var userSelectors: seq[string] = @[]
       if parsedTarget.fragmentKind == tfkActionSelection and
           parsedTarget.selectedActionId.len > 0:
@@ -4891,7 +5062,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           userSelectors.add(extra)
       for sel in userSelectors:
         targetResolutions.add(resolveTargetExportSelector(exportTable,
-          actionIds, explicitTargets, sel))
+          actionIds, explicitTargets, sel, collectionMembers))
 
     let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
