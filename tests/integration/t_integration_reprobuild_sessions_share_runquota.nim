@@ -265,9 +265,20 @@ suite "integration_reprobuild_sessions_share_runquota":
           removeFile(daemon.socket)
 
       let launchStart = nowMillis()
+      # Pin ``--daemon=off`` so this RunQuota-sharing test exercises the
+      # direct-mode build engine without coupling to whichever host
+      # ``repro-daemon`` is already running. The default ``--daemon=auto``
+      # would reuse a pre-existing user daemon -- whose forwarded env
+      # carries stale PATH entries from an unrelated test -- producing
+      # hangs / spurious cache misses unrelated to the RunQuota-session
+      # sharing this test guards. Mirrors the pins applied in
+      # ``t_e2e_m51_dsl_stdlib_file_ops`` (091cba4),
+      # ``t_e2e_local_reprobuild_project_build`` (448b887),
+      # ``t_e2e_repro_build_named_target`` (30a7ce6) and
+      # ``t_e2e_repro_build_multiple_named_targets`` (86be3f1).
       let codeBuild = startProcess(reproBin, workingDir = repoRoot,
-        args = ["build", codeProject, "--tool-provisioning=path",
-          "--log=actions", "--report=full"],
+        args = ["build", codeProject, "--daemon=off",
+          "--tool-provisioning=path", "--log=actions", "--report=full"],
         options = {poUsePath, poStdErrToStdOut})
       let codeStartStamp = stampsDir / "codetracer.stamp.start"
       for _ in 0 ..< 4800:
@@ -277,8 +288,8 @@ suite "integration_reprobuild_sessions_share_runquota":
       check pathExists(codeStartStamp)
 
       let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
-        args = ["build", fixtureProject, "--tool-provisioning=path",
-          "--log=actions", "--report=full"],
+        args = ["build", fixtureProject, "--daemon=off",
+          "--tool-provisioning=path", "--log=actions", "--report=full"],
         options = {poUsePath, poStdErrToStdOut})
       let launchEnd = nowMillis()
       check launchEnd - launchStart < 150000
