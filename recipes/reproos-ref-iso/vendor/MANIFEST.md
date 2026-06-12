@@ -30,15 +30,27 @@ import).
 - **License**: per-component upstream (mostly GPL/MIT/BSD); see
   `/usr/share/doc/*/copyright` inside the rootfs after import.
 
-### debian-12-genericcloud-amd64.qcow2 (Path B — Hyper-V backend, optional)
+### debian-12-genericcloud-amd64.qcow2 (Path B — Hyper-V backend)
 
 Standard Debian 12 cloud image with cloud-init enabled. Used by the
-Hyper-V path; the boot test rewrites the kernel cmdline / cloud-init
-seed before boot so the guest exposes a serial console + autologin shell.
+Hyper-V Gen-2 UEFI path. The boot test:
+
+1. Converts the qcow2 to a dynamic VHDX via `qemu-img convert -O vhdx`.
+2. Generates a NoCloud cloud-init seed.iso (label `cidata`) with
+   `user-data` setting a root password + enabling serial console, and
+   `meta-data` carrying the instance-id.
+3. Attaches the VHDX as primary disk + the seed.iso as DVD on a Gen-2
+   UEFI VM with Secure Boot disabled.
+4. Captures the serial pipe and asserts on `systemd[1]:` + `login:`.
 
 - **URL**: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
-- **SHA512 (upstream)**: looked up from `SHA512SUMS` on first fetch.
-- **Note**: Path B is **not exercised in this R1 session** because
-  `qemu-img` (needed for qcow2 -> VHDX conversion) is not on this host's
-  PATH; documented as a follow-up in `README.md`. The fetch script
-  still records the manifest entry so R2 can pick it up.
+- **Size (latest snapshot 2026-06-01 build of bookworm 12.10)**: ~334 MiB
+- **SHA512 pin**: `ff1c5b86c680bf29fb65a485296f45da744c9f636cb3c3ecc573b7c51ff88797ef207119e40f07ae9428b9bb539d57b490cdb2beecdfbac25dc95163e1418936`
+  (sourced from https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS;
+  verified by `fetch.ps1` before write; SHA256 also recorded in
+  `SHA256SUMS` for downstream tooling that prefers SHA256).
+- **Conversion**: `qemu-img convert -O vhdx -o subformat=dynamic` (qemu 11.0.0
+  on PATH; see `convert-cloud-image.ps1`). Resulting VHDX is also gitignored.
+- **Upstream maintainer**: Debian Cloud Team (https://salsa.debian.org/cloud-team/debian-cloud-images).
+- **License**: per-component upstream (mostly GPL/MIT/BSD); see
+  `/usr/share/doc/*/copyright` inside the guest after first boot.

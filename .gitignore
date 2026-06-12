@@ -70,3 +70,6 @@ recipes/reproos-ref-iso/vendor/*.tar.gz
 recipes/reproos-ref-iso/vendor/*.tar.xz
 recipes/reproos-ref-iso/vendor/*.qcow2
 recipes/reproos-ref-iso/vendor/*.raw
+recipes/reproos-ref-iso/vendor/*.vhdx
+recipes/reproos-ref-iso/vendor/*.iso
+recipes/reproos-ref-iso/vendor/*.src-sha256

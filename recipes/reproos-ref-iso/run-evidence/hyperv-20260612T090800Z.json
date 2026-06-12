@@ -1,0 +1,81 @@
+{
+  "assertions": [
+    {
+      "description": "systemd reaches PID 1 (kernel boot + systemd init)",
+      "elapsed_s": 2.9864746000093874,
+      "error": "",
+      "expect_line": "systemd\\[1\\]:",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "systemd[1]:",
+      "send_after_match": null,
+      "timeout_s": 120.0
+    },
+    {
+      "description": "cloud-init detected our NoCloud seed (final-message fires)",
+      "elapsed_s": 122.50034610001603,
+      "error": "",
+      "expect_line": "R1-CLOUD-INIT-FINAL: cloud-init completed",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "R1-CLOUD-INIT-FINAL: cloud-init completed",
+      "send_after_match": null,
+      "timeout_s": 180.0
+    },
+    {
+      "description": "systemd reaches a login prompt on COM1 (serial getty up)",
+      "elapsed_s": 1.058501499996055,
+      "error": "",
+      "expect_line": "(login:|Debian GNU/Linux.*tty)",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "Debian GNU/Linux 12 repro-r1 tty",
+      "send_after_match": null,
+      "timeout_s": 180.0
+    },
+    {
+      "description": "login prompts for password after username",
+      "elapsed_s": 0.10065639999811538,
+      "error": "",
+      "expect_line": "[Pp]assword:",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "Password:",
+      "send_after_match": null,
+      "timeout_s": 15.0
+    },
+    {
+      "description": "shell prompt after successful login",
+      "elapsed_s": 0.15129099998739548,
+      "error": "",
+      "expect_line": "root@repro-r1:",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "root@repro-r1:",
+      "send_after_match": null,
+      "timeout_s": 15.0
+    },
+    {
+      "description": "systemctl --version reports systemd 2xx",
+      "elapsed_s": 0.10143680000328459,
+      "error": "",
+      "expect_line": "systemd 2\\d\\d",
+      "expect_within": null,
+      "matched": true,
+      "matched_text": "systemd 252",
+      "send_after_match": null,
+      "timeout_s": 15.0
+    }
+  ],
+  "assertions_failed": 0,
+  "assertions_passed": 6,
+  "backend": "hyperv",
+  "error_message": "",
+  "finished_at": "2026-06-12T09:08:00Z",
+  "image_path": "C:\\Users\\zahary\\AppData\\Local\\Temp\\repro-boot-harness\\repro-test-boot-r1b-8457fb\\repro-test-boot-r1b-8457fb.boot.vhdx",
+  "image_sha256": "791ef6dabde429dfbecfd3df059e689035397c28c303d0f1a18f2a9fe64b5243",
+  "outcome": "PASS",
+  "serial_log_path": "C:\\Users\\zahary\\AppData\\Local\\Temp\\repro-boot-harness\\repro-test-boot-r1b-8457fb.log",
+  "started_at": "2026-06-12T09:05:48Z",
+  "vm_name": "repro-test-boot-r1b-8457fb"
+}

@@ -48,6 +48,49 @@ $blobs = @(
     }
 )
 
+# Path B (Hyper-V Gen-2 UEFI) -- vendored Debian cloud qcow2.
+# Pin = sha512 published by https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS.
+# We don't pin SHA256 upstream-side (the index only publishes SHA512), so the
+# script verifies SHA512 against the upstream pin AND records both SHA512+SHA256
+# in SHA256SUMS so downstream consumers can use either.
+$cloudBlobs = @(
+    [pscustomobject]@{
+        Name        = 'debian-12-genericcloud-amd64.qcow2'
+        # Snapshot of https://cloud.debian.org/images/cloud/bookworm/latest/
+        # taken 2026-06-12; the 'latest' symlink advanced to 2026-06-01's
+        # build of bookworm 12.10 (we pin against the binary's sha512,
+        # not the 'latest' label).
+        UpstreamUrl = 'https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2'
+        ExpectedSha512 = 'ff1c5b86c680bf29fb65a485296f45da744c9f636cb3c3ecc573b7c51ff88797ef207119e40f07ae9428b9bb539d57b490cdb2beecdfbac25dc95163e1418936'
+        Upstream    = 'https://cloud.debian.org/images/cloud/bookworm/'
+    }
+)
+
+function Fetch-HttpsBlob {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$OutPath
+    )
+    # Prefer curl.exe -- Invoke-WebRequest times out on slow https mirrors,
+    # and our debian image is 334 MB which can take >2 min on residential
+    # links. curl.exe ships in System32 on Win10+.
+    $curl = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
+    if ($curl) {
+        & $curl -fsSL --retry 3 --max-time 1800 -o $OutPath $Url
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl.exe failed (rc=$LASTEXITCODE) fetching $Url"
+        }
+        return
+    }
+    $oldPref = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $OutPath -UseBasicParsing -TimeoutSec 1800
+    } finally {
+        $ProgressPreference = $oldPref
+    }
+}
+
 function Get-DockerAuthToken {
     param([Parameter(Mandatory)][string]$Repository)
     $tokenUrl = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$Repository`:pull"
@@ -115,6 +158,40 @@ foreach ($blob in $blobs) {
     }
     Write-Host "  sha256 OK ($sha256)"
 
+    $sha256Lines += "$sha256  $($blob.Name)"
+}
+
+# Cloud-image blobs use sha512 (the upstream pin) + sha256 (recorded for
+# downstream tooling). We verify sha512 against the upstream pin first.
+foreach ($blob in $cloudBlobs) {
+    $target = Join-Path $here $blob.Name
+    Write-Host "[fetch] $($blob.Name) -> $target"
+
+    $needFetch = -not (Test-Path -LiteralPath $target)
+    if (-not $needFetch) {
+        $sha512Existing = (Get-FileHash -LiteralPath $target -Algorithm SHA512).Hash.ToLowerInvariant()
+        if ($sha512Existing -ne $blob.ExpectedSha512.ToLowerInvariant()) {
+            Write-Host "  sha512 mismatch on cached copy; re-downloading"
+            Remove-Item -LiteralPath $target -Force
+            $needFetch = $true
+        } else {
+            Write-Host "  cached sha512 OK"
+        }
+    }
+
+    if ($needFetch) {
+        Write-Host "  fetching $($blob.UpstreamUrl) ..."
+        Fetch-HttpsBlob -Url $blob.UpstreamUrl -OutPath $target
+    }
+
+    $sha512 = (Get-FileHash -LiteralPath $target -Algorithm SHA512).Hash.ToLowerInvariant()
+    if ($sha512 -ne $blob.ExpectedSha512.ToLowerInvariant()) {
+        throw "sha512 mismatch for $($blob.Name): got $sha512, expected $($blob.ExpectedSha512)"
+    }
+    Write-Host "  sha512 OK ($sha512)"
+
+    $sha256 = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Host "  sha256 (recorded): $sha256"
     $sha256Lines += "$sha256  $($blob.Name)"
 }
 
