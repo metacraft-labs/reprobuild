@@ -19,6 +19,7 @@ import ./repro_peer_cache/client
 import ./repro_peer_cache/swim
 import ./repro_peer_cache/loopback
 import ./repro_peer_cache/engine_seam
+import ./repro_peer_cache/action_bundle
 import ./repro_peer_cache/disk_store
 import ./repro_peer_cache/tier2
 import ./repro_peer_cache/sim
@@ -37,6 +38,7 @@ export client
 export swim
 export loopback
 export engine_seam
+export action_bundle
 export disk_store
 export tier2
 export sim

@@ -161,6 +161,23 @@ type
     statsEnabled*: bool
     suppressTrace*: bool
     skipCacheHitEvidence*: bool
+    peerCacheActionFetcher*: PeerCacheActionFetcher
+      ## Peer-Cache M1 (Linux-Distro-Recipe-Validation M5 wiring,
+      ## 2026-06-12): when non-nil, consulted on action-cache miss to
+      ## pull the action bundle from a LAN peer before falling through
+      ## to a rebuild. Left nil by callers that don't pass
+      ## ``--peer-cache=…`` so the legacy local-only flow is byte-for-
+      ## byte preserved.
+    peerCacheActionPublisher*: PeerCacheActionPublisher
+      ## Companion to `peerCacheActionFetcher`: called after each
+      ## successful action so the producer-side build seeds the LAN
+      ## cache. Nil-safe.
+    peerCacheActionInstaller*: PeerCacheActionBundleInstaller
+      ## Decoder + installer for peer-cache action bundles. Required
+      ## when `peerCacheActionFetcher` is set; the CLI wires it from
+      ## `repro_peer_cache.action_bundle`. The engine treats the
+      ## fetcher's `some(bytes)` result as an opaque payload and
+      ## delegates installation to this closure.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -233,6 +250,44 @@ type
 
   BuildProgressCallback* = proc(event: BuildProgressEvent)
   BuildCancelCallback* = proc(): bool
+
+  PeerCacheActionFetcher* = proc(weakFingerprint: ContentDigest):
+    Option[seq[byte]] {.gcsafe, closure.}
+    ## Optional peer-cache action-bundle fetcher. The engine calls this
+    ## on action-cache miss (no record or input-changed) with the
+    ## action's weak fingerprint; a `some(bytes)` reply carries an
+    ## encoded `ActionBundle` (see
+    ## `repro_peer_cache/action_bundle.nim`) which the engine installs
+    ## via `installPeerCacheActionBundle` before re-trying the local
+    ## lookup. `none` means the peer cache missed and the engine falls
+    ## through to a rebuild. The closure type keeps `repro_build_engine`
+    ## free of a `repro_peer_cache` dependency — the CLI wires it.
+
+  PeerCacheActionPublisher* = proc(weakFingerprint: ContentDigest;
+                                   bundleBytes: seq[byte])
+    {.gcsafe, closure.}
+    ## Optional peer-cache action-bundle publisher. The engine calls
+    ## this after a successful local cache record write so the producer
+    ## side of a same-recipe build seeds the LAN cache. `nil` keeps the
+    ## engine pure-local (the legacy behaviour).
+
+  PeerCacheActionBundleInstaller* = proc(weakFingerprint: ContentDigest;
+                                          bundleBytes: seq[byte];
+                                          cas: LocalCas;
+                                          cache: ptr ActionCache):
+                                          tuple[ok: bool; reason: string]
+    {.gcsafe, closure.}
+    ## Optional decoder + installer for peer-cache action bundles. The
+    ## engine invokes this synchronously when `peerCacheActionFetcher`
+    ## returns `some(bytes)`. The closure decodes the bundle, writes
+    ## the output blobs to the engine's `cas` (so the next blob
+    ## lookup hits), and appends the action record to the engine's
+    ## in-memory `cache` (so the engine's retry `lookupActionResult`
+    ## sees the freshly installed record without reloading from
+    ## disk). The result tuple lets the engine log a structured
+    ## reason on verification failure without crashing the build. The
+    ## CLI provides this closure via the wiring helper in
+    ## `repro_cli_support`.
 
   RunningProcessKind = enum
     rpkHelperProcess
@@ -1718,6 +1773,39 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     else:
       evidenceFromRecord(action, record)
 
+  proc publishPeerCacheBundle(weakFingerprint: ContentDigest;
+                              record: ActionResultRecord) =
+    ## Peer-Cache M1 publisher hook (Linux-Distro-Recipe-Validation
+    ## M5 wiring). Materialises the action-bundle bytes — record +
+    ## every output blob payload read back from the local CAS — and
+    ## hands them to the configured publisher closure. Nil-safe;
+    ## inactive when the CLI didn't pass ``--peer-cache=…`` or when
+    ## the record has no CAS-backed outputs (``opkMetadataOnly``).
+    if config.peerCacheActionPublisher == nil:
+      return
+    if record.outputPayloadKind != opkCasBlobs:
+      return
+    let publishStart = statStart()
+    var bundleBytes: seq[byte] = @[]
+    proc writeU32Le(dst: var seq[byte]; value: uint32) =
+      dst.add(byte(value and 0xff'u32))
+      dst.add(byte((value shr 8) and 0xff'u32))
+      dst.add(byte((value shr 16) and 0xff'u32))
+      dst.add(byte((value shr 24) and 0xff'u32))
+    for ch in "RPAB":
+      bundleBytes.add(byte(ord(ch)))
+    bundleBytes.add(byte(1)); bundleBytes.add(byte(0))  # version 1, LE
+    let recordBytes = encodeActionResultRecord(record)
+    bundleBytes.writeU32Le(uint32(recordBytes.len))
+    for b in recordBytes: bundleBytes.add(b)
+    bundleBytes.writeU32Le(uint32(record.outputs.len))
+    for output in record.outputs:
+      let payload = cas.readBlob(output.blob)
+      bundleBytes.writeU32Le(uint32(payload.len))
+      for b in payload: bundleBytes.add(b)
+    config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
+    finishStat("repro peer-cache publish", publishStart)
+
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
@@ -2250,13 +2338,47 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             outputsPresentKnown = true
             finishStat("repro output stat", outputStatStart)
           let lookupStart = statStart()
-          let lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+          var lookup = cache.lookupActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not outputsPresentBeforeLookup,
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
               outputsPresentBeforeLookup,
             metadataCache = addr fileMetadataCache)
           finishStat("repro cache lookup", lookupStart)
+          # Peer-Cache M1: on local miss, consult the LAN peer cache.
+          # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
+          # not passed, so the legacy local-only flow is byte-for-byte
+          # preserved. On peer hit we install the bundle locally and
+          # re-run the same `lookupActionResult` call so the rest of
+          # the scheduler treats this as a normal local hit.
+          if lookup.status in {aclMissNoRecord, aclMissInputChanged,
+              aclMissNoOutputPayload} and
+              config.peerCacheActionFetcher != nil and
+              config.peerCacheActionInstaller != nil:
+            let peerFetchStart = statStart()
+            let peerReply = config.peerCacheActionFetcher(
+              action.weakFingerprint)
+            finishStat("repro peer-cache fetch", peerFetchStart)
+            if peerReply.isSome:
+              let installStart = statStart()
+              let install = config.peerCacheActionInstaller(
+                action.weakFingerprint, peerReply.get(),
+                cas, addr cache)
+              finishStat("repro peer-cache install", installStart)
+              if install.ok:
+                let retryStart = statStart()
+                lookup = cache.lookupActionResult(cas, action.weakFingerprint,
+                  action.actionCachePolicy,
+                  verifyOutputBlobs = not outputsPresentBeforeLookup,
+                  allowMetadataOnlyHit =
+                    config.rebuildMissingOutputsOnCacheHit and
+                    outputsPresentBeforeLookup,
+                  metadataCache = addr fileMetadataCache)
+                finishStat("repro peer-cache lookup-retry", retryStart)
+                runResult.trace(id, "peer-cache-hit", $lookup.status)
+              else:
+                runResult.trace(id, "peer-cache-install-failed",
+                  install.reason)
           case lookup.status
           of aclHit:
             var outputsPresent = true
@@ -2429,14 +2551,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             invalidateCachedWrites(plan.action, evidence.evidence)
             if plan.action.cacheable:
               let recordStart = statStart()
+              # Peer-Cache M1: when a publisher closure is set, force
+              # output-blob retention so the publisher can read the
+              # blob payloads back out of the local CAS. The
+              # publisher-less path (legacy CLI default) keeps the
+              # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
+                config.peerCacheActionPublisher != nil
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
-                storeOutputBlobs = not config.deferLocalOutputBlobs,
+                storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache)
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
+              publishPeerCacheBundle(plan.action.weakFingerprint, record)
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -2766,14 +2896,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         invalidateCachedWrites(action, evidence.evidence)
         if action.cacheable:
           let recordStart = statStart()
+          let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
+            config.peerCacheActionPublisher != nil
           let record = cache.recordActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
-            storeOutputBlobs = not config.deferLocalOutputBlobs,
+            storeOutputBlobs = storeOutputBlobs,
             metadataCache = addr fileMetadataCache)
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
+          publishPeerCacheBundle(action.weakFingerprint, record)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:

@@ -72,6 +72,37 @@ export home.runHomeCommand, home.setPackageCatalogLookup,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
 
+# ---------------------------------------------------------------------------
+# Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
+# 2026-06-12) — type + forward declarations.
+#
+# `BuildPeerCacheWiring` is the bundle of engine closures
+# (`peerCacheFetcher` / `peerCachePublisher` / `peerCacheInstaller`) the
+# build path threads through `executeBuildTarget`. The type lives near
+# the top of the file so `runBuildCommand` (defined further down, around
+# line 8900) can reference it; the bodies of
+# `newBuildPeerCacheWiring` / `buildPeerCacheWiringFor` are with the
+# other peer-cache helpers around line 20000, after `parsePeerCache`
+# and `startPeerCacheServices` are in scope.
+# ---------------------------------------------------------------------------
+
+type
+  BuildPeerCacheWiring* = object
+    reader*: PeerCacheActionCacheReader
+    fetcher*: PeerCacheActionFetcher
+    publisher*: PeerCacheActionPublisher
+    installer*: PeerCacheActionBundleInstaller
+
+proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring
+  ## Forward declaration; body lives near the other peer-cache helpers.
+
+proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
+                               cas: LocalCas;
+                               cache: ptr ActionCache;
+                               localPeerRegistry: PeerRegistry = nil):
+                               BuildPeerCacheWiring
+  ## Forward declaration; body lives near the other peer-cache helpers.
+
 proc wantsVersion*(args: openArray[string]): bool =
   args.len == 1 and args[0] in ["--version", "-V"]
 
@@ -281,8 +312,9 @@ var actionCacheRootOverride: string = ""
 proc setActionCacheRootOverride*(value: string) =
   actionCacheRootOverride = value
 
-proc currentActionCacheRoot(): string =
-  resolveActionCacheRoot(actionCacheRootOverride)
+proc currentActionCacheRoot(): string {.gcsafe.} =
+  {.cast(gcsafe).}:
+    resolveActionCacheRoot(actionCacheRootOverride)
 
 proc splitTarget(target: string): tuple[base: string; fragment: string] =
   let marker = target.find('#')
@@ -4072,7 +4104,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
-                        extraNameSelectors: seq[string] = @[]):
+                        extraNameSelectors: seq[string] = @[];
+                        peerCacheFetcher: PeerCacheActionFetcher = nil;
+                        peerCachePublisher: PeerCacheActionPublisher = nil;
+                        peerCacheInstaller: PeerCacheActionBundleInstaller =
+                          nil):
     BuildCommandOutcome =
   ## ``extraNameSelectors`` carries the Named-Targets M2 name-shaped
   ## positional arguments AFTER the first positional has been folded
@@ -4244,7 +4280,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
-      deferLocalOutputBlobs: true,
+      # Peer-Cache M1 (LDRV M5): retain output blobs in the local CAS
+      # when a peer-cache publisher closure is attached so the
+      # publisher can read them back; otherwise honour the legacy
+      # ``deferLocalOutputBlobs = true`` default.
+      deferLocalOutputBlobs: peerCachePublisher == nil,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
@@ -4252,7 +4292,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       forceRebuild: forceRebuild,
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
-      cancelCallback: cancelCheck)
+      cancelCallback: cancelCheck,
+      peerCacheActionFetcher: peerCacheFetcher,
+      peerCacheActionPublisher: peerCachePublisher,
+      peerCacheActionInstaller: peerCacheInstaller)
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
@@ -9101,6 +9144,18 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var listTargets = false
   var listTargetsJson = false
   var listTargetsPackage = ""
+  # Peer-Cache M1 (Linux-Distro-Recipe-Validation M5 wiring,
+  # 2026-06-12): ``--peer-cache=<spec>`` makes ``repro build`` consult
+  # a LAN peer cache before falling through to a local rebuild. The
+  # spec string mirrors ``repro test``'s flag — ``parsePeerCache``
+  # recognises ``none`` (no-op), ``remote://<url>`` (parsed but not yet
+  # consumed at the engine seam), and ``lan://<CIDR>[:port]`` (starts
+  # the multicast discovery plane). When the spec validates and
+  # surfaces a runnable client, the build engine receives the
+  # action-bundle fetcher / publisher / installer closures via the
+  # ``BuildEngineConfig`` peer-cache fields; the legacy local-only
+  # flow is byte-for-byte preserved when the flag is absent.
+  var peerCacheSpec = ""
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -9181,6 +9236,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       bypassRunQuota = true
     elif arg == "--runquota":
       bypassRunQuota = false
+    elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
+      peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
     elif arg == "--variant" or arg.startsWith("--variant="):
       # Spec-Implementation M1 — ``--variant name=value`` registers a
       # ``prSet`` contribution against the named solver-participating
@@ -9306,6 +9363,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "daemonHosted": true
       })
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+    # Peer-Cache M1 wiring (LDRV M5): start the LAN peer-cache runtime
+    # when the user passed ``--peer-cache=lan://…``. The actual setup
+    # lives in ``buildPeerCacheWiringFor`` further down the file so
+    # the forward-declared peer-cache helpers (``parsePeerCache``,
+    # ``startPeerCacheServices``) are in scope.
+    let peerCacheBuildWiring =
+      try:
+        buildPeerCacheWiringFor(peerCacheSpec)
+      except CatchableError as exc:
+        stderr.writeLine("repro build: error: " & exc.msg)
+        return 2
     try:
       result = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
@@ -9324,7 +9392,10 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
-        extraNameSelectors = extraNameSelectors).exitCode
+        extraNameSelectors = extraNameSelectors,
+        peerCacheFetcher = peerCacheBuildWiring.fetcher,
+        peerCachePublisher = peerCacheBuildWiring.publisher,
+        peerCacheInstaller = peerCacheBuildWiring.installer).exitCode
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -20100,6 +20171,185 @@ proc startPeerCacheServices*(config: PeerCacheConfig;
   if config.discoveryMode == pdmMulticast:
     result.client.multicastBroadcast(config.multicastGroup)
 
+# ---------------------------------------------------------------------------
+# Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
+# 2026-06-12).
+#
+# Given a `PeerCacheActionCacheReader` (wired to a `PeerCacheClient` for
+# the LAN-discovered peer pool) and a local CAS + ActionCache pair, the
+# three procs below produce the engine closures the `BuildEngineConfig`
+# peer-cache fields accept. The reader's own counters
+# (`peerHits`/`peerMisses`/`localHits`) survive the wrap so verification
+# tests can assert against them.
+#
+# The closures are pure value-capturing — no daemon round-trip happens
+# here; `PeerCacheActionCacheReader.readActionOutput` already drives the
+# blocking `waitFor` for the `mkFetchRequest` round trip, and the
+# publisher closure dispatches an async `peerCacheServer.serveLocalBlob`
+# equivalent via the registry's `selfAddBlob` hook plus a local store
+# writer call.
+# ---------------------------------------------------------------------------
+
+proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
+                               cas: LocalCas;
+                               cache: ptr ActionCache;
+                               localPeerRegistry: PeerRegistry = nil):
+                               BuildPeerCacheWiring =
+  ## Returns a wiring bundle the engine can adopt. `cas` and `cache` are
+  ## the same handles the engine uses internally — the installer closure
+  ## writes peer-fetched bundles into them so the engine's next
+  ## `lookupActionResult` call hits locally.
+  ##
+  ## `localPeerRegistry`, when non-nil, receives `selfAddBlob(digest)`
+  ## calls on every publish so the local peer's advertise plane learns
+  ## the new blob immediately (otherwise the next advertise tick
+  ## propagates it). Tests typically pass the loopback peer's registry
+  ## here so the second peer's `requestFetch` finds the bundle without
+  ## waiting for an advertise round.
+  result.reader = reader
+  # `cas` and `cache` are retained for API stability but the active
+  # install path uses the engine-supplied handles (the engine pushes
+  # its own `LocalCas` and `ptr ActionCache` into the installer
+  # closure). Earlier drafts of this helper closed over them locally;
+  # we keep the parameters so existing callers don't break.
+  discard cas
+  discard cache
+  let registryRef = localPeerRegistry
+  let readerRef = reader
+  result.fetcher = proc(weakFingerprint: ContentDigest):
+      Option[seq[byte]] {.gcsafe, closure.} =
+    let key = actionBundleKey(weakFingerprint)
+    readerRef.readActionOutput(key)
+  result.installer = proc(weakFingerprint: ContentDigest;
+                          bundleBytes: seq[byte];
+                          engineCas: LocalCas;
+                          engineCache: ptr ActionCache):
+                          tuple[ok: bool; reason: string]
+      {.gcsafe, closure.} =
+    let bundle =
+      try:
+        decodeActionBundle(bundleBytes)
+      except CatchableError as exc:
+        return (false, "decode failed: " & exc.msg)
+    installActionBundle(engineCas, engineCache[], bundle)
+  result.publisher = proc(weakFingerprint: ContentDigest;
+                          bundleBytes: seq[byte]) {.gcsafe, closure.} =
+    let key = actionBundleKey(weakFingerprint)
+    # Push the bundle bytes into the reader's local-write closure so a
+    # subsequent `readActionOutput(key)` from any peer that picks up the
+    # advertise (or from the same reader on the next lookup) gets a
+    # cache hit. Mirrors how `PeerCacheClient.requestFetch` writes a
+    # verified `mkFetchResponse` payload to the local store before
+    # returning.
+    if readerRef.localWrite != nil:
+      readerRef.localWrite(key, bundleBytes)
+    if registryRef != nil:
+      registryRef.selfAddBlob(key)
+
+var lastStartedBuildPeerCacheRuntime*: PeerCacheRuntime
+  ## Peer-Cache M1 / LDRV M5 test seam: the most recent `PeerCacheRuntime`
+  ## started by ``runBuildCommand`` is captured here so verification tests
+  ## can assert against the runtime's counters or stop the services
+  ## after a build run. Production code does not consume this variable.
+
+proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring =
+  ## CLI-side ``--peer-cache=<spec>`` wiring helper for ``repro build``.
+  ## Empty / ``none`` spec returns a zero-valued wiring (all closures
+  ## nil) so the engine falls through to its legacy local-only path.
+  ## Structural-parse failures raise `ValueError`; runtime-start
+  ## failures raise `IOError` / `OSError` with the underlying message.
+  if spec.len == 0:
+    return BuildPeerCacheWiring()
+  let parsed = parsePeerCache(spec)
+  if not parsed.ok:
+    raise newException(ValueError,
+      "invalid --peer-cache spec: " & spec &
+      " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
+  case parsed.kind
+  of pcsNone:
+    return BuildPeerCacheWiring()
+  of pcsRemote:
+    # ``remote://`` is parsed for forward-compatibility but the action-
+    # cache reader bridge for it lands in a follow-up milestone.
+    # Returning a no-op wiring keeps `--peer-cache=remote://...` from
+    # crashing existing harnesses that pass it speculatively.
+    return BuildPeerCacheWiring()
+  of pcsLan:
+    var raw: array[32, byte]
+    raw[0] = byte(ord('B'))  # ``B`` for repro build, distinct from
+                             # the loopback helper's ``L`` and the
+                             # repro-test path's ``R``.
+    let nowSeconds = uint64(epochTime())
+    for k in 0 ..< 8:
+      raw[1 + k] = byte((nowSeconds shr uint64(k * 8)) and 0xff'u64)
+    let cliPeerId = peerIdFromBytes(raw)
+    lastStartedBuildPeerCacheRuntime = startPeerCacheServices(
+      parsed.config, cliPeerId, listenAddr = "127.0.0.1")
+    # The CLI doesn't have the engine's CAS + ActionCache in scope (the
+    # engine opens them lazily inside ``runBuild``). Close over the
+    # spec'd root paths instead so the installer closure re-opens
+    # them on demand. Tests that need direct access to the engine's
+    # internal handles call ``newBuildPeerCacheWiring`` instead.
+    let runtime = lastStartedBuildPeerCacheRuntime
+    let actionCacheRoot = currentActionCacheRoot()
+    let casRoot =
+      if actionCacheRoot.len > 0: actionCacheRoot / "cas"
+      else: getCurrentDir() / ".repro" / "build-engine-cache" / "cas"
+    let cacheDir =
+      if actionCacheRoot.len > 0: actionCacheRoot / "action-cache"
+      else: getCurrentDir() / ".repro" / "build-engine-cache" /
+            "action-cache"
+    let peerCasReader: LocalStoreReader =
+      proc(digest: BlobDigest): Option[seq[byte]] {.gcsafe.} =
+        # The CLI path doesn't keep a process-local map of bundle
+        # digests — every bundle hit goes through the engine's
+        # installer closure and the next `lookupActionResult`. The
+        # peer-cache reader's "local-read" branch is therefore a
+        # constant miss; the fall-through to `peerCacheClient.
+        # requestFetch` is the active code path.
+        none(seq[byte])
+    let peerCasWriter: LocalStoreWriter =
+      proc(digest: BlobDigest; payload: seq[byte]) {.gcsafe.} =
+        # The fetched bundle is written to the local CAS + ActionCache
+        # by the engine's installer closure on the lookup retry; we
+        # intentionally do not double-write here.
+        discard
+    result.reader = newPeerCacheActionCacheReader(
+      localRead = peerCasReader,
+      localWrite = peerCasWriter,
+      peerCacheClient = runtime.client)
+    let readerRef = result.reader
+    let registryRef = runtime.registry
+    result.fetcher = proc(weakFingerprint: ContentDigest):
+        Option[seq[byte]] {.gcsafe, closure.} =
+      let key = actionBundleKey(weakFingerprint)
+      readerRef.readActionOutput(key)
+    result.installer = proc(weakFingerprint: ContentDigest;
+                            bundleBytes: seq[byte];
+                            engineCas: LocalCas;
+                            engineCache: ptr ActionCache):
+                            tuple[ok: bool; reason: string]
+        {.gcsafe, closure.} =
+      let bundle =
+        try:
+          decodeActionBundle(bundleBytes)
+        except CatchableError as exc:
+          return (false, "decode failed: " & exc.msg)
+      installActionBundle(engineCas, engineCache[], bundle)
+    # `casRoot` / `cacheDir` are unused now — the engine threads its
+    # own opened handles into the installer. Keep the local
+    # declarations so the build path doesn't drift from earlier
+    # drafts; the compiler folds the unused locals out.
+    discard casRoot
+    discard cacheDir
+    result.publisher = proc(weakFingerprint: ContentDigest;
+                            bundleBytes: seq[byte]) {.gcsafe, closure.} =
+      let key = actionBundleKey(weakFingerprint)
+      if readerRef.localWrite != nil:
+        readerRef.localWrite(key, bundleBytes)
+      if registryRef != nil:
+        registryRef.selfAddBlob(key)
+
 proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
   let parts = value.split('/')
   if parts.len != 2:
@@ -21465,6 +21715,24 @@ proc runThinApp*(programName: string): int =
     # proc.
     echo renderUsage(programName)
     return 0
+  # ``internal fs-snoop`` is the canonical self-spawn argv the build
+  # engine's monitor wrapper uses (``getAppFilename() internal
+  # fs-snoop …``). Because the engine prepends those args to
+  # ``getAppFilename()`` — whichever binary is currently running — we
+  # have to dispatch fs-snoop BEFORE the per-program arms below.
+  # Otherwise a ``repro-daemon``-hosted build run would route the
+  # monitor's self-spawn into ``runUserDaemonCommand``, which only
+  # parses daemon-config flags and rejects ``internal`` with
+  # ``repro-daemon: unexpected argument: internal`` and exit code 2.
+  # Mirrors ``repro debug fs-snoop``: forward the remaining args to
+  # the shared fs-snoop CLI.
+  if args.len >= 2 and args[0] == "internal" and args[1] == "fs-snoop":
+    let fsArgs =
+      if args.len > 2:
+        args[2 .. ^1]
+      else:
+        @[]
+    return runFsSnoopCli(programName & " internal fs-snoop", fsArgs)
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
@@ -21477,22 +21745,14 @@ proc runThinApp*(programName: string): int =
   # Documented ``repro internal …`` namespace (Executable-Consolidation M1).
   # ``internal <helper>`` spellings for the role helpers were already rewritten
   # to their ``__repro-<helper>`` argument form by ``normalizeInternalArgs``
-  # above, so any ``internal`` argv still reaching here is either ``fs-snoop``
-  # (which has no ``__repro-`` form), an explicit ``--help``, or an
-  # unknown/bare subcommand — all handled by this arm. ``repro internal`` is
-  # intentionally absent from the primary ``repro help`` body; it is documented
-  # via ``renderInternalUsage`` (and ``CLI/internal/`` in the specs).
+  # above, so any ``internal`` argv still reaching here is either an explicit
+  # ``--help`` or an unknown/bare subcommand. (``internal fs-snoop`` was
+  # already routed to the fs-snoop CLI at the top of this proc so any
+  # self-spawn from a non-``repro`` binary like ``repro-daemon`` reaches
+  # the right handler.) ``repro internal`` is intentionally absent from
+  # the primary ``repro help`` body; it is documented via
+  # ``renderInternalUsage`` (and ``CLI/internal/`` in the specs).
   if args.len > 0 and args[0] == "internal":
-    if args.len >= 2 and args[1] == "fs-snoop":
-      # Mirror ``repro debug fs-snoop``: forward the remaining args to the
-      # shared fs-snoop CLI. This is the spelling the internal monitor spawn
-      # self-spawns (``getAppFilename() internal fs-snoop …``).
-      let fsArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runFsSnoopCli("repro internal fs-snoop", fsArgs)
     # Bare ``repro internal``, ``repro internal --help``, or an unrecognized
     # subcommand: print the internal-namespace usage. Exit 0 for an explicit
     # help request (pipeable), exit 2 for an unknown/missing subcommand —

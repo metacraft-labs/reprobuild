@@ -660,6 +660,18 @@ proc writeActionResultRecordFile*(path: string; record: ActionResultRecord) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), byteString(encodeRecord(record)))
 
+proc encodeActionResultRecord*(record: ActionResultRecord): seq[byte] =
+  ## Public wrapper over the on-disk record codec. Used by the peer-cache
+  ## action-bundle (`repro_peer_cache/action_bundle.nim`) so producer and
+  ## consumer agree byte-for-byte with the on-disk action-cache encoding.
+  encodeRecord(record)
+
+proc decodeActionResultRecord*(payload: openArray[byte]): ActionResultRecord =
+  ## Public wrapper over the on-disk record codec. Inverse of
+  ## `encodeActionResultRecord`. Raises `EnvelopeError` on malformed
+  ## input.
+  decodeRecord(payload)
+
 proc metadataOnly(input: FileFingerprint): FileFingerprint =
   FileFingerprint(
     path: input.path,
@@ -1078,6 +1090,17 @@ proc appendRecord(cache: var ActionCache; record: ActionResultRecord) =
     records = records[records.len - MaxRecordsPerWeakFingerprint .. ^1]
   cache.byWeak[key] = records
   cache.appendHotRecord(record)
+
+proc appendActionResultRecord*(cache: var ActionCache;
+                               record: ActionResultRecord) {.gcsafe.} =
+  ## Public wrapper over the internal `appendRecord` so the peer-cache
+  ## reader bridge can install a peer-fetched record into the local
+  ## action cache. Idempotency with respect to already-present records
+  ## is bounded by `MaxRecordsPerWeakFingerprint` — repeated installs
+  ## for the same weak fingerprint are coalesced by the internal
+  ## append.
+  {.cast(gcsafe).}:
+    cache.appendRecord(record)
 
 proc loadRecords(cache: var ActionCache) =
   cache.byWeak.clear()
