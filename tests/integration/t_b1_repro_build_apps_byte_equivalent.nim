@@ -80,7 +80,22 @@ suite "Bootstrap-And-Self-Build B1: engine-built apps stay functionally equivale
   test "every apps/entrypoints.txt entry yields a present binary":
     let repoRoot = findRepoRoot()
     let names = readEntrypointNames(repoRoot)
-    check names.len >= 11
+    # B1 originally shipped with 14 entrypoints (the test asserted
+    # ``>= 11``, matching the pre-B1 stub count plus 3 peer-cache
+    # binaries B1 added). Upstream commits since then dropped a
+    # number of placeholder binaries (``repro-controller``,
+    # ``repro-worker``, ``repro-fs-snoop``, ``repro-hcr-link``,
+    # ``repro-provider-host`` were retired into ``repro internal``
+    # subcommands; ``repro-daemon``/``reprostored`` were dropped
+    # too as part of the ``repro {daemon,store} serve`` consolidation)
+    # so the live count is in the 5-9 range depending on which
+    # consolidation step is in flight. Loosen the floor to ``>= 5``
+    # so the test still catches a "entrypoints.txt is empty / typoed"
+    # regression but doesn't false-fail when upstream consolidations
+    # land. The exact count check ``names.len == <expected>`` is
+    # owned by ``scripts/check_repo_requirements.sh``, not by this
+    # test.
+    check names.len >= 5
     var missing: seq[string] = @[]
     for name in names:
       let binary = repoRoot / "build" / "bin" / addFileExt(name, ExeExt)

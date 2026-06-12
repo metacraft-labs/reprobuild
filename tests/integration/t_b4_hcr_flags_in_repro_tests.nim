@@ -105,10 +105,17 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
     # --- repro.nim test-spec loop forwards the lists ---
     # The loop must call buildNimUnittest.build with extraPassC and
     # extraPassL parameters fed from spec.extraPassC / spec.extraPassL.
+    # The CI-break fix gated the forwarding on ``when hostIsMacos``
+    # (so binutils-ld on Linux doesn't reject the macOS-only
+    # ``-Wl,-segprot`` flag), so the assertion now checks for the
+    # substring fragments rather than the literal ``extraPassC =
+    # spec.extraPassC`` form. The structural intent — the spec's
+    # extraPassC/L values are routed through to buildNimUnittest's
+    # cli surface — is unchanged.
     check "spec.extraPassC" in reproNimText
     check "spec.extraPassL" in reproNimText
-    check "extraPassC = spec.extraPassC" in reproNimText
-    check "extraPassL = spec.extraPassL" in reproNimText
+    check "extraPassC =" in reproNimText
+    check "extraPassL =" in reproNimText
 
     # --- ct-test's adapter exposes the slots ---
     # Look up the ct-test source via CT_TEST_SRC (set by the verification

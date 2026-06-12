@@ -68,10 +68,17 @@ suite "Bootstrap-And-Self-Build B5: run_tests.sh is slimmed and engine-driven":
     let lines = lineCount(text)
     checkpoint("scripts/run_tests.sh line count: " & $lines)
 
-    # The original ran ~250 lines. B5 slimmed it; assert under 150
+    # The original ran ~250 lines. B5 slimmed it; assert under 200
     # so a regression that re-introduces the legacy HCR loop or the
-    # per-helper build_test_helper calls is caught.
-    check lines < 150
+    # per-helper build_test_helper calls is caught. The threshold is
+    # 200 (not 150) because two CI-survival additions land legitimately
+    # post-B5: the per-collection ``repro_build_collection`` helper
+    # (M3 multi-fragment selector workaround) and the
+    # ``timeout --kill-after=30s`` wrapper around the runner phase
+    # (orphan-daemon hang mitigation). Both bring the script to ~160
+    # lines; the 200-line cap still catches a full revert to the
+    # legacy script shape.
+    check lines < 200
 
     # The engine call — the single biggest delegation. The CLI
     # accepts ``--tool-provisioning=path`` either before or after the
