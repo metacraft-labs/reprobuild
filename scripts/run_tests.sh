@@ -66,21 +66,36 @@ if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
 fi
 printf 'Building apps + test-helpers + test-builds via repro (REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
-if ! ./build/bin/repro build --tool-provisioning=path --daemon=off \
-      .#apps .#test-helpers .#test-builds; then
-  report_path=".repro/build/repro/build-report.json"
-  if [[ -f "${report_path}" ]]; then
-    printf '\n=== Failed actions (from %s) ===\n' "${report_path}" >&2
-    if command -v jq >/dev/null 2>&1; then
-      jq '.actions[] | select(.exitCode != 0 and .exitCode != null) | {id, exitCode, executable, args, stdout, stderr, evidence}' "${report_path}" >&2 || true
-    else
-      printf '(jq not available; copying full report to test-logs/build-report.json)\n' >&2
+
+# Build each collection in its own invocation. The engine's M3
+# selector parser rejects multiple path/fragment selectors in a
+# single command ("multiple path / fragment selectors are not
+# supported in M3"); name-shaped selectors may follow a single
+# path anchor but ``.#apps``/``.#test-helpers``/``.#test-builds``
+# are all fragment-shaped and disambiguated against the on-disk
+# ``apps/`` directory. Looping is the M3 workaround; a future
+# milestone that grows multi-fragment selector support folds the
+# three invocations back into one.
+repro_build_collection() {
+  local collection="$1"
+  if ! ./build/bin/repro build --tool-provisioning=path --daemon=off "${collection}"; then
+    report_path=".repro/build/repro/build-report.json"
+    if [[ -f "${report_path}" ]]; then
+      printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${report_path}" >&2
+      if command -v jq >/dev/null 2>&1; then
+        jq '.actions[] | select(.exitCode != 0 and .exitCode != null) | {id, exitCode, executable, args, stdout, stderr, evidence}' "${report_path}" >&2 || true
+      else
+        printf '(jq not available; copying full report to test-logs/build-report.json)\n' >&2
+      fi
+      mkdir -p test-logs
+      cp "${report_path}" "test-logs/build-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
     fi
-    mkdir -p test-logs
-    cp "${report_path}" test-logs/build-report.json 2>/dev/null || true
+    return 1
   fi
-  exit 1
-fi
+}
+repro_build_collection ".#apps" || exit 1
+repro_build_collection ".#test-helpers" || exit 1
+repro_build_collection ".#test-builds" || exit 1
 
 # Step 4 (B5): Python tests + test-binary execution. The Python loop
 # runs before the Nim suite so a Python regression surfaces fast and
