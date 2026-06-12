@@ -72,21 +72,21 @@ ln -sf ../mpc-1.0.3 mpc
 log "Stage 2: apply patches"
 patch -Np1 -i "$PATCHES_ABS/no-system-headers.patch"
 
-# Disable fixincludes — on host systems with /usr/include present (Debian),
-# fixincludes scans it and copies glibc headers into include-fixed/, which
-# then trip on missing bits/endian.h etc when later compiles try to use them.
-# Replace the fixincludes script with a no-op.
-log "Stage 2b: disable fixincludes (avoids glibc /usr/include leak)"
-# Replace the fixincludes script with a noop that just creates an empty target.
-mkdir -p fixincludes
-printf '#!/bin/sh\nexit 0\n' > fixincludes/fixinc.sh.in
-# mkfixinc generates the script that gets called; make it a noop too.
+# Force fixincludes to produce a no-op fixinc.sh by overriding mkfixinc.sh.
+# Upstream mkfixinc.sh emits a real fixinc.sh that scans SYSTEM_HEADER_DIR
+# (= NATIVE_SYSTEM_HEADER_DIR after our patch) and rewrites headers into
+# include-fixed/.  Even though we point SYSTEM_HEADER_DIR at tinycc-musl-final's
+# clean musl headers (not /usr/include), the scan is unnecessary for a
+# bootstrap libc and a no-op avoids any host /usr/include leakage hazard
+# regardless of how fixincludes resolves relative paths.
+# IMPORTANT: mkfixinc.sh takes <target-triple> as $1 and writes fixinc.sh in
+# the build dir's $PWD.  Our replacement must honor that contract.
+log "Stage 2b: stub fixincludes to a no-op"
 cat > fixincludes/mkfixinc.sh <<'MKFIXEOF'
 #!/bin/sh
-target=$1
-mkdir -p `dirname $target`
-printf '#!/bin/sh\nexit 0\n' > $target
-chmod +x $target
+target=fixinc.sh
+(echo "#! /bin/sh" ; echo "exit 0") > ${target}
+chmod 755 ${target}
 MKFIXEOF
 chmod +x fixincludes/mkfixinc.sh
 
