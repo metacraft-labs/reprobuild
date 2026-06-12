@@ -108,7 +108,9 @@ which is a NAR hash (hex
 `0c2cd976e62b8b1f7239e2687a6fc9873fd60f302cb3b516c2365b91726ae8cb`),
 NOT a file sha256. Same bytes, different hashing.
 
-## Status (2026-06-12, R4 session 1)
+## Status (R4 LANDED, R5 session 1 PARTIAL)
+
+### R4 status (hex0 -> tcc), 2026-06-12
 
 | Phase | Status                  | Wall-clock | Bytes-stable? |
 |-------|-------------------------|------------|---------------|
@@ -116,9 +118,86 @@ NOT a file sha256. Same bytes, different hashing.
 | 2     | COMPLETE (hex0 builds, sha byte-matches input seed)            | ~1 s | yes (re-run verified) |
 | 3     | COMPLETE (12 stage0-posix binaries built end-to-end)           | 43 min cold | unverified (no re-run; deterministic by construction) |
 | 4     | COMPLETE (11 mescc-tools binaries; reproducibility fix landed for M2-Mesoplanet path-embed)   | 5 s | yes (re-run verified) |
-| 5     | NOT REACHED (mes + mes-libc, 298 .c files; mes-0.27.1.tar.gz + nyacc-1.09.1.tar.gz vendored; build-mes.sh skeleton authored but not run)  | est. 30-60 min | TBD |
-| 6     | NOT REACHED (tcc-bootstrappable → tcc; vendor pin pending)     | TBD | TBD |
-| 7     | NOT REACHED (M2-sim chain.json attestation flip)               | TBD | TBD |
+| 5     | COMPLETE (mes + mes-libc + libc-mini.a + libmescc.a + libc+tcc.a + crt1.o) | ~30 min | unverified |
+| 6     | COMPLETE (tinycc-bootstrappable: tcc 0.9.28-unstable-2024-07-07; janneke fork ea3900f6d) | ~30 min | unverified |
+
+R4 acceptance gate (`tcc -o hello hello.c; ./hello -> 42`) PASSES.
+
+### R5 status (tcc -> gcc 15.2.0), 2026-06-12 session 1
+
+| Phase | Status                                                                    | Wall-clock        |
+|-------|---------------------------------------------------------------------------|-------------------|
+| 1     | COMPLETE (R5 vendoring: 15 sources fetched + sha256 cross-checked vs nixpkgs) | ~5 min   |
+| 2     | COMPLETE (tcc-shim: stable include + lib paths for R4 tcc)                | <1 min            |
+| 3a    | NOT REACHED (tinycc-mes: latest tinycc cb41cbfe7 + CONFIG_TCC_PREDEFS=1)  | est. ~10 min      |
+| 3b    | BLOCKED (musl-tcc: tcc cannot parse `[static N]` array params in syscall.h:417; wall hit after crt*.o built) | est. ~30 min      |
+| 4     | NOT REACHED (tinycc-musl-intermediate)                                    | est. ~10 min      |
+| 5     | NOT REACHED (binutils 2.46.0)                                             | est. ~45 min      |
+| 6a    | NOT REACHED (gcc 4.6.4 C-only, tcc-built)                                 | est. 60-90 min    |
+| 6b    | NOT REACHED (gcc 4.6.4 cxx, musl-rebuilt)                                 | est. 30-45 min    |
+| 7     | NOT REACHED (gcc 10.4.0)                                                  | est. 2-3 hours    |
+| 8     | NOT REACHED (gcc 15.2.0 -- the R5 goal)                                   | est. 3-4 hours    |
+| 9     | NOT REACHED (DDC self-rebuild gate)                                       | est. 3-4 hours    |
+
+### R5 wall (session 1)
+
+R4's tcc (`tinycc-bootstrappable`, janneke fork ea3900f6d 2024-07-07)
+cannot directly compile musl 1.2.6.  Two falsified workarounds during
+session 1:
+
+1. **`__builtin_va_list` not recognised as a type** -- musl's
+   `include/alltypes.h.in` uses `typedef __builtin_va_list va_list`.
+   Sed-replace with `void *` allows crt/Scrt1.o + crt/{crt1,rcrt1}.o +
+   crti.o + crtn.o to build.
+2. **`[static N]` array parameter not recognised** -- musl's
+   `src/internal/syscall.h:417` uses
+   `void __procfdname(char __buf[static 15+3*sizeof(int)], unsigned)`.
+   No simple sed workaround.
+
+Root cause per nixpkgs `tinycc/mes.nix`: the chain uses an
+INTERMEDIATE tinycc (`tinycc-mes`, source cb41cbfe7 2025-12-03) with
+`CONFIG_TCC_PREDEFS=1` + a generated `tccdefs_.h` header -- this is
+what gives the chain's tcc modern C feature support.  R4 stopped at
+`tinycc-bootstrappable` (one step earlier in the chain than nixpkgs's
+`tinycc-mes`).
+
+### R5 next-session scope
+
+1. Author `scripts/build-tinycc-mes.sh`: vendor the cb41cbfe7 tinycc
+   source, apply the 3 nixpkgs patches (static-link, i386-asm reg-aware,
+   ptrdiff_t cast), generate `tccdefs_.h` via R4 tcc, two-pass build
+   (boot + main).  Output: `build/tinycc-mes/{bin/tcc, lib/libtcc1.a,
+   tccdefs/tccdefs_.h}`.
+2. Re-run `scripts/build-musl-tcc.sh` with the new `tinycc-mes` tcc
+   replacing the shim.  Expected to succeed because nixpkgs's identical
+   musl 1.2.6 + sigsetjmp patch chain works under tinycc-mes.
+3. Then proceed phase-by-phase: tinycc-musl-intermediate -> musl-tcc
+   -> tinycc-musl -> binutils -> gcc 4.6.4 (Stage A) -> gcc 4.6.4
+   (Stage B/cxx) -> gcc 10.4.0 -> gcc 15.2.0.  Each step has a
+   self-contained recipe stub at `recipes/<step>/repro.nim` with build
+   shape + expected wall-clock + external inputs documented.
+
+### R5 deliverables (session 1)
+
+- `vendor/fetch-r5.ps1` -- downloads 15 R5 source pins from upstream
+  and sha256-verifies against `vendor/SHA256SUMS-r5.txt`.
+- `vendor/SHA256SUMS-r5.txt` -- all 15 hashes byte-equal to the
+  nixpkgs pins (10 SRI base64 hashes + 5 nix-base32 file hashes;
+  decoded in PowerShell and cross-checked).
+- `vendor/MANIFEST.md` -- per-file provenance, upstream URLs, sizes,
+  license, nixpkgs ref.
+- `scripts/build-tcc-shim.sh` -- R5 Phase 2 driver.  4 smoke tests all
+  pass: ret-only + stdio.h-hello both via wrapper AND via baked-path
+  symlink rehydration.
+- `scripts/build-musl-tcc.sh` -- R5 Phase 3 driver; partial (crt*.o
+  built, src/aio/aio.o blocked on syscall.h:417).
+- `recipes/{tcc-shim,tinycc-mes,musl-tcc,binutils,gcc-4.6.4,
+  gcc-10.4.0,gcc-15.2.0}/repro.nim` -- typed reprobuild packages for
+  R5 Phase 2-8.  tcc-shim is LANDED (live).  The others are
+  BLOCKED-stubs with `exit 78` placeholders + detailed build-shape
+  documentation in the Nim comments.
+- `recipes/{binutils,gcc-4.6.4}/patches/*.patch` -- 3 small patches
+  vendored in-tree from nixpkgs (committable; total ~700 bytes).
 
 ### Phase 3 + 4 verified sha256 (canonical, x86_64-linux Debian 12 host)
 

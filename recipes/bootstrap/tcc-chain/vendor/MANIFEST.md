@@ -166,3 +166,107 @@ pwsh -c 'iwr https://ftpmirror.gnu.org/gnu/mes/mes-0.27.1.tar.gz -OutFile mes-0.
 pwsh -c 'iwr https://download.savannah.nongnu.org/releases/nyacc/nyacc-1.09.1.tar.gz -OutFile nyacc-1.09.1.tar.gz'
 pwsh -c 'iwr https://gitlab.com/janneke/tinycc/-/archive/ea3900f6d5e71776c5cfabcabee317652e3a19ee/tinycc-ea3900f6d5e71776c5cfabcabee317652e3a19ee.tar.gz -OutFile tinycc-bootstrappable.tar.gz'
 ```
+
+# R5 (tcc -> gcc bootstrap loop) vendored sources
+
+Pulled by `vendor/fetch-r5.ps1`.  Each file is sha256-verified against
+`SHA256SUMS-r5.txt` after download.  Every pin in this section was
+cross-checked against the corresponding nixpkgs derivation under
+`pkgs/os-specific/linux/minimal-bootstrap/` at commit `06a4933d0` and
+matches byte-for-byte (10 SRI hashes + 5 nix-base32 hashes verified
+2026-06-12).
+
+## binutils-2.46.0.tar.xz
+
+- **Upstream URL**: `mirror://gnu/binutils/binutils-2.46.0.tar.xz`.
+- **Size**: 28548776 bytes (~27.2 MiB).
+- **sha256**: `d75a94f4d73e7a4086f7513e67e439e8fcdcbb726ffe63f4661744e6256b2cf2`.
+- **nixpkgs ref**: `binutils/default.nix` (mesboot variant, NOT static).
+- **Patches needed** (vendored under `recipes/binutils/patches/`):
+  - `deterministic.patch` -- sets `BFD_DETERMINISTIC_OUTPUT` so `ld`
+    archives are stable.
+  - `fix-tinycc-attribute.patch` -- include/ansidecl.h: skip the
+    `__attribute__(x)` no-op define when `__TINYC__` is defined (tcc
+    DOES support `__attribute__((aligned(N)))`-style attributes used by
+    mmap argv handling in `binutils/bfd/mmap.c`).
+- **License**: GPL-3.0+.
+
+## musl-1.2.6.tar.gz + musl-sigsetjmp.patch
+
+- **Upstream URL**: `https://musl.libc.org/releases/musl-1.2.6.tar.gz`.
+- **Size**: 1082499 bytes (~1.0 MiB).
+- **musl sha256**: `d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a`.
+- **musl-sigsetjmp.patch URL**:
+  `https://github.com/fosslinux/live-bootstrap/raw/d98f97e21413efc32c770d0356f1feda66025686/sysa/musl-1.1.24/patches/sigsetjmp.patch`.
+- **patch sha256**: `c1dd807afd733c95f2deaf77dda8aea79a7520c2b354906ab80ca5de06cae0f5`.
+- **nixpkgs ref**: `musl/tcc.nix` (intermediate musl built with tcc).
+- **License**: musl is MIT; live-bootstrap patches are CC0.
+- **Note**: musl is the libc the chain uses from gcc 4.6.4 onward.
+  nixpkgs builds a 2-stage musl: `musl-tcc-intermediate` (with the
+  intermediate tcc) -> `musl-tcc` (with `tinycc-musl-intermediate`).
+  Both are the same 1.2.6 sources; the staging is about WHICH tcc
+  compiles them.
+
+## gcc-core-4.6.4.tar.gz + gcc-g++-4.6.4.tar.gz
+
+- **Upstream URLs**:
+  - `mirror://gnu/gcc/gcc-4.6.4/gcc-core-4.6.4.tar.gz`
+  - `mirror://gnu/gcc/gcc-4.6.4/gcc-g++-4.6.4.tar.gz`
+- **Sizes**: 38438255 bytes + 9178198 bytes (~36.7 MiB + ~8.8 MiB).
+- **sha256s**:
+  - core: `e534a5cb05ab839d7cf7b2496fd5df42e76352926c1cf0d94de76184c26a739c`
+  - g++:  `690a5d4f664180640db28079e3461468192c484c37d6f671dde4b53a7f9918bb`
+- **nixpkgs ref**: `gcc/4.6.nix` (C-only, tcc-built) + `gcc/4.6.cxx.nix`
+  (C++-also, musl-built; needs musl from the prior step).
+- **Patches needed**:
+  - `no-system-headers.patch` -- comment out the hardcoded
+    `NATIVE_SYSTEM_HEADER_DIR = /usr/include` in `gcc/Makefile.in`.
+- **License**: GPL-3.0+.
+- **Note**: gcc 4.6.4 is the LAST gcc that can self-build with tcc-mes
+  syntax; later gccs require a working C99/C11 compiler that tcc-mes
+  doesn't quite provide.
+
+## gmp/mpfr/mpc for gcc 4.6.4 (gmp-4.3.2 / mpfr-2.4.2 / mpc-1.0.3)
+
+- **sha256s**:
+  - gmp 4.3.2:  `7be3ad1641b99b17f6a8be6a976f1f954e997c41e919ad7e0c418fe848c13c97`
+  - mpfr 2.4.2: `246d7e184048b1fc48d3696dd302c9774e24e921204221540745e5464022b637`
+  - mpc 1.0.3:  `617decc6ea09889fb08ede330917a00b16809b8db88c29c31bfbb49cbf88ecc3`
+- **nixpkgs ref**: in-tree of `gcc/4.6.nix`.
+- **Note**: these are linked into `gcc-4.6.4/{gmp,mpfr,mpc}` so gcc's
+  build system bootstraps them statically (`./configure
+  --disable-shared` etc).  Hardcoded combinations -- not interchangeable
+  with the gcc 10 / 15 versions.
+
+## gcc-10.4.0.tar.xz + deps (gmp 6.2.1 / mpfr 4.2.2 / mpc 1.3.1 / isl 0.24)
+
+- **Sizes**: gcc 10 ~71.5 MiB + ~5.6 MiB of deps.
+- **sha256s**:
+  - gcc 10.4.0:  `c9297d5bcd7cb43f3dfc2fed5389e948c9312fd962ef6a4ce455cff963ebe4f1`
+  - gmp 6.2.1:   `fd4829912cddd12f84181c3451cc752be224643e87fac497b69edddadc49b4f2`
+  - mpfr 4.2.2:  `b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01`
+  - mpc 1.3.1:   `ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce930e706c1c759b8`
+  - isl 0.24:    `fcf78dd9656c10eb8cf9fbd5f59a0b6b01386205fe1934b3b287a0a1898145c0`
+- **nixpkgs ref**: `gcc/10.nix`.
+- **License**: GPL-3.0+ for gcc; LGPL-3.0+ for gmp/mpfr/mpc; MIT for
+  isl.
+- **Note**: nixpkgs explicitly avoids gcc 10.5 (per upstream bug
+  110716); 10.4.0 is the LAST 10.x that compiles cleanly with gcc 4.6.
+
+## gcc-15.2.0.tar.xz + gmp 6.3.0 (mpfr/mpc/isl reused from gcc 10)
+
+- **Size**: gcc 15 ~96.4 MiB + gmp 6.3.0 ~2.0 MiB.
+- **sha256s**:
+  - gcc 15.2.0: `438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e`
+  - gmp 6.3.0:  `a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898`
+- **nixpkgs ref**: `gcc/latest.nix`.
+- **Note**: same mpfr 4.2.2, mpc 1.3.1, isl 0.24 as gcc 10 -- no
+  separate vendoring required.
+
+## Refresh (R5)
+
+```
+pwsh recipes/bootstrap/tcc-chain/vendor/fetch-r5.ps1
+```
+
+Each file is sha256-checked against SHA256SUMS-r5.txt after download.
