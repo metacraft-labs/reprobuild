@@ -1,0 +1,17 @@
+# R8 (linux kernel — buildable) vendored sources -- sha256 pins.
+# Every line matches the upstream tarball sha256 AND the nixpkgs pin.
+# Cross-check tooling: vendor/fetch-r8.ps1 verifies all lines after download.
+
+# linux 6.6.142 LTS -- pin matches nixpkgs pkgs/os-specific/linux/kernel/kernels-org.json
+# at commit 06a4933d0 (entry "6.6" -> version 6.6.142,
+# hash `sha256-0w1bdzp9x1sqcr9xlk7dvylhs7kycghjabfgd3iv49ydfmx61xmj`
+# which decodes via `nix-hash --to-base16` to the hex below).
+#
+# Cross-checked against https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
+# (same sha256, signed by the kernel.org keys).
+#
+# This is the LTS branch matching M0's pin in the ReproOS-MVP spec, and
+# matches the UAPI header version R7's userspace was glibc-linked against
+# (linux 6.6 ABI -> linux 6.18 UAPI is forward-compatible since the
+# syscall surface is append-only on the LTS branches).
+b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70  linux-6.6.142.tar.xz

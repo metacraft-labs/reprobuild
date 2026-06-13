@@ -1,0 +1,30 @@
+# R8 outputs -- sha256 manifest.
+#
+# Reproducibility class: byte-stable given (linux 6.6.142 source +
+# x86_64-hyperv.config + host gcc 11.4 + host binutils 2.38 +
+# SOURCE_DATE_EPOCH=1735689600 + KBUILD_BUILD_USER=reproos +
+# KBUILD_BUILD_HOST=reproos + KBUILD_BUILD_TIMESTAMP="2025-01-01 00:00:00 UTC"
+# + KBUILD_BUILD_VERSION=1). Verified by two independent builds in
+# `repro-ubuntu` WSL (2026-06-13).
+#
+# Cross-rebuild caveat: changing the host gcc major version will change
+# the bytes (gcc emits different codegen / .note.gnu.build-id derivations
+# across major versions). gcc 11.4 is the Ubuntu 22.04 stock; pinning
+# the same WSL distro keeps the bytes stable. R10 will assert the same
+# sha256 across CI rebuilds.
+
+# bzImage -- the bootable kernel image (PE/COFF with EFI stub).
+# Boots under Hyper-V Gen-2 UEFI with Secure Boot off; produces
+# `Linux version 6.6.142 (reproos@reproos) ...` on serial COM1 and
+# `Hypervisor detected: Microsoft Hyper-V` once Hyper-V drivers init.
+03cbebd20c26dd9da8bbcb7df030f7220b55f81a30ccc6b143cddb89a3592462  bzImage
+
+# System.map -- ksym table; useful for kernel-side debugging.
+6d63c01958ccf0900e5e94541cd83b1b7e09d138694335c7931dacb6a810a120  System.map
+
+# config-used -- byte-identical copy of x86_64-hyperv.config that drove
+# this build. Verifies the snapshot in the recipe.
+26a915e1174263e5e31042ae4c5112851e459f256cd81cd42b1f3a885a98789d  config-used
+
+# KERNELRELEASE -- just "6.6.142\n". Trivial but pinned for the record.
+395f39b89f3a3298bcc5cf47e17c8849469a5a42d02e0d2f38ec03dc82f1821d  KERNELRELEASE

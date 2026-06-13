@@ -369,3 +369,47 @@ pwsh recipes/bootstrap/tcc-chain/vendor/fetch-r6.ps1
 ```
 
 Each file is sha256-checked against SHA256SUMS-r6.txt after download.
+
+# R8 (linux kernel) vendored sources
+
+R8 adds one tarball: the full Linux 6.6.142 LTS source tree that R8 builds
+into a bootable `bzImage` for Hyper-V Gen-2 UEFI guests.  R6 already pulled
+linux-6.18.7 down for sanitised glibc headers, but the 6.18 / 6.6 ABI is
+forward-compatible on the syscall surface (linux LTS branches are
+append-only); R8 deliberately drops back to the M0-spec'd 6.6 LTS pin to
+match the rest of the project.
+
+## linux-6.6.142.tar.xz
+
+- **Upstream URL**: `https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.142.tar.xz`.
+- **Size**: 140641384 bytes (~134 MiB).
+- **sha256**: `b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70`.
+- **kernel.org cross-check**: `https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc`
+  lists this exact sha256 (signed by the kernel.org keys).
+- **nixpkgs ref**: `pkgs/os-specific/linux/kernel/kernels-org.json` entry
+  `"6.6"` -> version `6.6.142`,
+  hash `sha256-0w1bdzp9x1sqcr9xlk7dvylhs7kycghjabfgd3iv49ydfmx61xmj`,
+  which decodes (`nix-hash --type sha256 --to-base16`) to the hex above
+  byte-for-byte.
+- **License**: GPL-2.0 with the syscall-interface "WITH Linux-syscall-note"
+  carve-out for the userspace UAPI subset (well-documented; same posture
+  every Linux distro builds under).
+- **R8 acceptance**: produces `arch/x86/boot/bzImage` (a self-contained
+  PE/COFF image with EFI stub) that boots under Hyper-V Gen-2 UEFI with
+  Secure Boot off and prints `Linux version 6.6.142` plus
+  `Hypervisor detected: Microsoft Hyper-V` on the serial console.
+- **Build environment**: built with the disposable WSL distro `repro-ubuntu`'s
+  host gcc 11.4 (the kernel is freestanding C — does not link glibc — so
+  using a host compiler for R8 is ideologically acceptable).  Kernel
+  reproducibility is driven by `SOURCE_DATE_EPOCH=1735689600` +
+  `KBUILD_BUILD_TIMESTAMP="2025-01-01 00:00:00 UTC"` +
+  `KBUILD_BUILD_USER=reproos` + `KBUILD_BUILD_HOST=reproos` +
+  `KBUILD_BUILD_VERSION=1`.
+
+## Refresh (R8)
+
+```
+pwsh recipes/bootstrap/tcc-chain/vendor/fetch-r8.ps1
+```
+
+The file is sha256-checked against SHA256SUMS-r8.txt after download.

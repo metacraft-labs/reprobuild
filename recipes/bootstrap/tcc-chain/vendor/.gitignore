@@ -30,3 +30,8 @@ gmp-6.3.0.tar.xz
 # SHA256SUMS-r6.txt.
 linux-6.18.7.tar.xz
 glibc-2.42.tar.xz
+
+# R8 (linux kernel) vendored sources.  All gitignored;
+# `fetch-r8.ps1` re-materialises from upstream and sha256-verifies against
+# SHA256SUMS-r8.txt.
+linux-6.6.142.tar.xz

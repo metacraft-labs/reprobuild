@@ -1,0 +1,82 @@
+# R8 kernel-config fragment — Hyper-V Gen-2 UEFI essentials on top of
+# `make x86_64_defconfig` + `make kvm_guest.config`.
+#
+# Applied via `scripts/kconfig/merge_config.sh` then snapshot-locked
+# into x86_64-hyperv.config.
+#
+# Rationale per stanza:
+#
+# Hyper-V drivers — Gen-2 VM exposes a synthetic-device hypervisor; without
+# these the kernel boots blind (no console output, no NIC, no storage) on
+# Hyper-V Gen-2.
+CONFIG_HYPERV=y
+CONFIG_HYPERV_TIMER=y
+CONFIG_HYPERV_UTILS=y
+CONFIG_HYPERV_BALLOON=y
+CONFIG_HYPERV_STORAGE=y
+CONFIG_HYPERV_NET=y
+CONFIG_HYPERV_KEYBOARD=y
+CONFIG_HYPERV_VSOCKETS=y
+CONFIG_FB_HYPERV=y
+CONFIG_DRM_HYPERV=y
+CONFIG_PCI_HYPERV=y
+CONFIG_PCI_HYPERV_INTERFACE=y
+
+# Serial console on COM1 @ 115200 8N1 — what vm-harness tails via the
+# Hyper-V serial-pipe-to-named-pipe path.
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_8250_PCI=y
+CONFIG_SERIAL_8250_NR_UARTS=4
+CONFIG_SERIAL_8250_RUNTIME_UARTS=4
+CONFIG_SERIAL_CORE=y
+CONFIG_SERIAL_CORE_CONSOLE=y
+
+# EFI boot path — Gen-2 is UEFI-only; CONFIG_EFI_STUB makes the bzImage
+# directly bootable by GRUB EFI (chainload) or by UEFI firmware itself.
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_EFI_MIXED=y
+CONFIG_EFI_VARS=y
+CONFIG_EFIVAR_FS=y
+CONFIG_EFI_PARTITION=y
+
+# ext4 + tmpfs + procfs + sysfs + devtmpfs — the minimum to mount a real
+# rootfs from disk OR mount an initramfs and pivot to one. Most other
+# filesystems left as defconfig defaults.
+CONFIG_EXT4_FS=y
+CONFIG_TMPFS=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# Initramfs support so the kernel can be paired with /initrd.img on the
+# R2 ISO. We do NOT compile an initramfs INTO the bzImage —
+# CONFIG_INITRAMFS_SOURCE is left empty (default); the initramfs is
+# loaded as a separate file via GRUB's `initrd` directive.
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_RD_XZ=y
+
+# Printk / earlyprintk — make boot diagnostics visible on COM1 even
+# before serial-console init.
+CONFIG_PRINTK=y
+CONFIG_EARLY_PRINTK=y
+CONFIG_EARLY_PRINTK_EFI=y
+
+# cgroup v2 — systemd's required interface; R9 will need this.
+CONFIG_CGROUPS=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CGROUP_DEVICE=y
+CONFIG_CGROUP_CPUACCT=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_MEMCG=y
+
+# UEFI Secure Boot is OFF in the vm-harness boot spec, so we do not need
+# CONFIG_MODULE_SIG. We also do not build modules; everything is =y.
+# Belt-and-braces: explicitly disable module support so any `=m` setting
+# from kvm_guest.config gets demoted to `=y` or `=n` rather than `=m`.
+# Disabling MODULES forces the issue.
+# CONFIG_MODULES is not set
