@@ -27,6 +27,20 @@
 ## zlib1g + libgcc-s1 + libcrypt1 + libnghttp2-14 + gcc-12-base +
 ## perl-base (via the perl virtual). 11 packages: 1 root + 10
 ## transitive deps. The harvester writes 11 catalog files.
+##
+## The fixture also carries vim + libtinfo6 + curl + libcurl4 (consumed
+## by ``t_c2_harvest_multipackage.sh`` which asserts the 15-entry union
+## closure of ``apt:{git,vim,curl}``) and the **D1 MVP additions**:
+## ``python3`` + ``python3-minimal`` + ``htop`` + ``libncursesw6``.
+##
+## The D1 additions deliberately keep their dep edges DISJOINT from the
+## git closure so ``t_c2_harvest_git`` and ``t_c3_launcher_*_git`` still
+## see exactly the historical 11-entry closure; only the new D1 roots
+## reach them. The D1 build driver
+## (``recipes/reproos-mvp-config/build-mvp-iso.sh``) harvests
+## ``apt:{git,vim,python3,curl,htop}`` against this fixture and feeds
+## each resulting catalog into the C3 ``materializeSandboxManifest`` to
+## produce one launcher manifest + per-binary shim per root package.
 
 import std/[os, strutils]
 
@@ -198,6 +212,50 @@ Size: 410000
 SHA256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 Depends: libc6 (>= 2.34), libnghttp2-14 (>= 1.41.0), zlib1g (>= 1:1.1.4)
 Description: easy-to-use client-side URL transfer library (OpenSSL flavour)
+
+Package: python3
+Version: 3.11.2-1+deb12u4
+Architecture: amd64
+Section: python
+Priority: optional
+Filename: pool/main/p/python3-defaults/python3_3.11.2-1+deb12u4_amd64.deb
+Size: 30000
+SHA256: aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11
+Depends: libc6 (>= 2.34), python3-minimal (>= 3.11.2-1)
+Description: interactive high-level object-oriented language (default python3 version)
+
+Package: python3-minimal
+Version: 3.11.2-1+deb12u4
+Architecture: amd64
+Section: python
+Priority: optional
+Filename: pool/main/p/python3-defaults/python3-minimal_3.11.2-1+deb12u4_amd64.deb
+Size: 1900000
+SHA256: bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22
+Depends: libc6 (>= 2.34)
+Description: minimal subset of the Python language (default python3 version)
+
+Package: htop
+Version: 3.2.2-2
+Architecture: amd64
+Section: utils
+Priority: optional
+Filename: pool/main/h/htop/htop_3.2.2-2_amd64.deb
+Size: 180000
+SHA256: cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33
+Depends: libc6 (>= 2.34), libncursesw6 (>= 6), libtinfo6 (>= 6)
+Description: interactive processes viewer
+
+Package: libncursesw6
+Version: 6.4-4
+Architecture: amd64
+Section: libs
+Priority: required
+Filename: pool/main/n/ncurses/libncursesw6_6.4-4_amd64.deb
+Size: 130000
+SHA256: dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44
+Depends: libc6 (>= 2.34), libtinfo6 (>= 6)
+Description: shared libraries for terminal handling (wide character support)
 """
 
 proc sha256HexBytes(bytes: string): string =

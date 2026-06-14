@@ -65,6 +65,16 @@ when isMainModule:
   for (k, v) in parseKvList(storePrefixesRaw):
     prefixes[k] = v
 
+  # D1 diagnostic: dump the prefix map + per-prefix dirExists checks.
+  if getEnv("C3_EMIT_DEBUG", "") == "1":
+    stderr.writeLine "[c3-debug] prefixes seen:"
+    for k, v in prefixes:
+      stderr.writeLine "  ", k, " = ", v
+      for sub in @["usr/bin", "usr/lib", "usr/lib/x86_64-linux-gnu",
+                   "lib", "lib/x86_64-linux-gnu", "etc", "usr/share"]:
+        let p = v / sub
+        stderr.writeLine "    ", sub, " = ", p, " exists=", dirExists(p)
+
   let closure = materializeSandboxManifest(
     rootCatalogPath = rootCatalog,
     catalogRoot = catalogRoot,
