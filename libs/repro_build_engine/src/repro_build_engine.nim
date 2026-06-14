@@ -50,6 +50,16 @@ type
     # executor is registered the engine fails closed with a clear
     # diagnostic rather than silently no-op'ing.
     bakWorkspaceVcs
+    # A2.5 (ReproOS-Generations-And-Foreign-Packages): a substitution
+    # task that fetches + materialises one cache-entry-key from a
+    # configured binary-cache server. The engine dispatches through
+    # the executor registered by ``repro_binary_cache_client/
+    # scheduler_executor.nim``. Each substitute action carries the
+    # cache-entry-key hex + the endpoint URL inside
+    # ``BuildAction.builtinText``; the closure walker emits one
+    # ``bakBinaryCacheSubstitute`` action per closure member and the
+    # engine's pool/parallelism semantics drive them.
+    bakBinaryCacheSubstitute
 
   EngineTypedOutput* = object
     ## Typed-Outputs M1: engine-side mirror of
@@ -1438,7 +1448,17 @@ type
     ## the engine library does not need to depend on the VCS library
     ## (which itself depends on the engine for ``BuildAction``).
 
+  BinaryCacheSubstituteExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## A2.5: hook installed by ``repro_binary_cache_client/
+    ## scheduler_executor.nim``. The engine routes every
+    ## ``bakBinaryCacheSubstitute`` action through the registered
+    ## executor; the executor reads the entry-key + endpoint URL out
+    ## of ``action.builtinText`` and calls into the streaming sink.
+    ## Indirect dispatch keeps the engine library free of a hard
+    ## dependency on the client library.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
 
 proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## Register the per-thread executor for ``bakWorkspaceVcs`` actions.
@@ -1451,6 +1471,18 @@ proc clearWorkspaceVcsExecutor*() =
   ## Clear the registered executor. Tests use this to assert the
   ## fail-closed behavior when no executor is registered.
   workspaceVcsExecutor = nil
+
+proc registerBinaryCacheSubstituteExecutor*(
+    executor: BinaryCacheSubstituteExecutor) =
+  ## Register the per-thread executor for ``bakBinaryCacheSubstitute``
+  ## actions. A2.5's ``scheduler_executor.nim`` calls this at module-
+  ## init time. Tests that exercise the engine in-process call it
+  ## explicitly with an executor bound to a fresh ``ClientContext`` +
+  ## ``HttpPool`` + ``ClientIndex``.
+  binaryCacheSubstituteExecutor = executor
+
+proc clearBinaryCacheSubstituteExecutor*() =
+  binaryCacheSubstituteExecutor = nil
 
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
@@ -1646,6 +1678,28 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       result.launched = vcsResult.launched
       result.runQuotaBackend = if vcsResult.runQuotaBackend.len > 0:
         vcsResult.runQuotaBackend else: result.runQuotaBackend
+      return
+    of bakBinaryCacheSubstitute:
+      # A2.5 dispatch: the substitute action routes through the
+      # executor registered by ``repro_binary_cache_client``. The
+      # executor performs the manifest fetch + signature verify +
+      # streaming payload sink + index update; we copy its
+      # status/exitCode/stderr through so cache-record + evidence
+      # paths see the same shape as any other built-in.
+      if binaryCacheSubstituteExecutor.isNil:
+        raiseEngine(
+          "bakBinaryCacheSubstitute action requires " &
+          "registerBinaryCacheSubstituteExecutor before runBuild: " &
+          action.id)
+      let subRes = binaryCacheSubstituteExecutor(action)
+      result.status = subRes.status
+      result.exitCode = subRes.exitCode
+      result.stdout = subRes.stdout
+      result.stderr = subRes.stderr
+      result.reason = subRes.reason
+      result.launched = subRes.launched
+      result.runQuotaBackend = if subRes.runQuotaBackend.len > 0:
+        subRes.runQuotaBackend else: "binary-cache-substitute"
       return
     of bakProcess:
       raiseEngine("process action cannot be executed as a built-in: " & action.id)

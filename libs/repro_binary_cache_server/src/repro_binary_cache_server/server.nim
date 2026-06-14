@@ -39,8 +39,8 @@
 ## Header parsing is RFC 7578-strict on the boundary delimiter only;
 ## arbitrary header attributes inside the parts are tolerated.
 
-import std/[asyncdispatch, asynchttpserver, httpcore, net, options,
-            strutils, tables]
+import std/[asyncdispatch, asynchttpserver, asyncnet, httpcore, net, options,
+            os, strutils, tables]
 
 import repro_local_store
 
@@ -296,6 +296,20 @@ proc handleGetManifest(s: BinaryCacheServerState;
 proc handleGetPayload(s: BinaryCacheServerState;
                       hex: string;
                       req: Request): Future[void] {.async.} =
+  ## Streams the CAS blob's bytes directly from disk into the client
+  ## socket, avoiding the A2 baseline's whole-payload RAM buffer (the
+  ## gap A2.5 closes for the throughput gate). Per the A2.5 design,
+  ## payloads that can reach ~85 MiB (R5 gcc-15.2.0) must NEVER ride
+  ## a ``seq[byte]`` of the same size — the substituter pipeline's
+  ## headline win lives on the server keeping memory flat too.
+  ##
+  ## The byte format matches what ``readPayload`` would have returned;
+  ## a peer that buffered against this stream sees identical bytes.
+  ## Transport framing: HTTP/1.1 ``Content-Length`` (known up front
+  ## from ``getFileSize``), no chunked encoding required — the file
+  ## size is determined at handler entry, so we can advertise it
+  ## verbatim and stream the bytes through ``client.send`` in 256 KiB
+  ## frames.
   if hex.len != 64:
     await req.respond(Http400, "binary-cache payload hex must be 64 chars")
     return
@@ -308,10 +322,33 @@ proc handleGetPayload(s: BinaryCacheServerState;
   if not payloadExists(s, prefixId):
     await req.respond(Http404, "payload not found")
     return
-  let bytes = readPayload(s, prefixId)
-  var headers = newHttpHeaders()
-  headers["Content-Type"] = PayloadContentType
-  await req.respond(Http200, cast[string](bytes), headers)
+  let casPath = s.store.casPath(prefixId)
+  let totalBytes = getFileSize(casPath)
+  # Build the response prefix: status line + headers + blank.
+  var prefix = "HTTP/1.1 200 OK\c\L"
+  prefix.add("Content-Type: " & PayloadContentType & "\c\L")
+  prefix.add("Content-Length: ")
+  prefix.add($totalBytes)
+  prefix.add("\c\L\c\L")
+  await req.client.send(prefix)
+  # Stream the body in 256 KiB frames straight from disk. Per the
+  # A2.5 spec § Architecture, we want the receive-side pipeline to
+  # observe bytes as they cross the wire, not as one big buffer.
+  const FrameBytes = 262144
+  var f = open(casPath, fmRead)
+  defer: f.close()
+  var buf = newString(FrameBytes)
+  var remaining = totalBytes
+  while remaining > 0:
+    let want = int(min(int64(FrameBytes), remaining))
+    let n = f.readBuffer(addr buf[0], want)
+    if n <= 0:
+      # File truncated under us. The client will see Content-Length
+      # mismatch on its end. Abort the body here; there's no clean
+      # way to retract the headers.
+      break
+    await req.client.send(buf[0 ..< n])
+    remaining -= int64(n)
 
 proc handlePublishHttp(s: BinaryCacheServerState;
                        req: Request): Future[void] {.async.} =
