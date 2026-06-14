@@ -4936,6 +4936,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
         cancelCallback: cancelCheck)
       providerCompileConfig.statsEnabled = statsEnabled
+      # Distinguish "running" from "checking" so a silent hang inside
+      # the build engine (e.g. inline runquota session that wedges on a
+      # stale daemon) is visibly attributed to the launch path rather
+      # than the cache-freshness check above.
+      progressRenderer.renderPhase("running provider compile")
       providerCompileResult = runBuild(graph([providerCompileAction]),
         providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
