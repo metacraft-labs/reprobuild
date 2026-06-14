@@ -75,6 +75,7 @@ when defined(windows):
     ERROR_IO_PENDING = 997'i32
     ERROR_FILE_NOT_FOUND = 2'i32
     ERROR_BROKEN_PIPE = 109'i32
+    ERROR_PIPE_BUSY = 231'i32
     PIPE_TYPE_BYTE = 0x0'i32
     PIPE_READMODE_BYTE = 0x0'i32
     PIPE_WAIT = 0x0'i32
@@ -120,6 +121,20 @@ when defined(windows):
       pendingEvent*: Handle
       pendingOverlapped*: OVERLAPPED
       pendingArmed*: bool
+      everArmed*: bool
+        ## True after the first ``armPending`` call. We pass
+        ## ``FILE_FLAG_FIRST_PIPE_INSTANCE`` ONLY on the very first
+        ## arm; subsequent rearms (after an acceptIpc transferred
+        ## ``pending`` to a connected client) must NOT request first-
+        ## instance semantics, otherwise ``CreateNamedPipeW`` fails
+        ## with ERROR_ACCESS_DENIED because instances already exist.
+        ## The previous logic used ``listener.pending == 0`` as the
+        ## first-instance signal, but that field also reads zero
+        ## immediately after every accept — so the post-accept rearm
+        ## silently failed (the ``try: armPending(...)
+        ## except: discard`` in ``acceptIpc`` swallowed it) and a
+        ## concurrent second client racing into ``connectIpc`` saw
+        ## ERROR_FILE_NOT_FOUND.
 
 proc endpointKindOf*(endpoint: string): EndpointKind =
   if endpoint.startsWith(WindowsNamedPipePrefix):
@@ -263,8 +278,9 @@ when defined(windows):
   proc armPending(listener: var IpcListener) =
     if listener.pendingArmed:
       return
-    let firstInstance = listener.pending == 0
+    let firstInstance = not listener.everArmed
     listener.pending = createServerInstance(listener.endpoint, firstInstance)
+    listener.everArmed = true
     listener.pendingEvent = createEvent(nil, 1, 0, nil)
     if listener.pendingEvent == 0:
       discard closeHandle(listener.pending)
@@ -330,13 +346,32 @@ when defined(windows):
   proc connectIpc*(endpoint: string): IpcConn =
     ensurePipeEndpoint(endpoint)
     let wpath = newWideCString(endpoint)
-    let h = createFileW(wpath,
-      (GENERIC_READ or GENERIC_WRITE).DWORD,
-      0.DWORD, nil, OPEN_EXISTING.DWORD, 0.DWORD, 0)
-    if h == INVALID_HANDLE_VALUE:
+    var attempt = 0
+    while true:
+      let h = createFileW(wpath,
+        (GENERIC_READ or GENERIC_WRITE).DWORD,
+        0.DWORD, nil, OPEN_EXISTING.DWORD, 0.DWORD, 0)
+      if h != INVALID_HANDLE_VALUE:
+        return IpcConn(handle: h, ownsHandle: true)
       let err = int32(osLastError())
+      if err == ERROR_PIPE_BUSY:
+        # All pipe instances are currently busy serving other clients.
+        # ``WaitNamedPipe`` blocks until either an instance becomes
+        # available OR the timeout elapses, then we retry the
+        # ``CreateFileW``. Total budget: ``DefaultPipeTimeoutMs`` per
+        # wait * up to 12 retries (~60 s on a healthy server, matching
+        # the auto-spawn deadline used elsewhere in the daemon).
+        if waitNamedPipeWRaw(wpath, DefaultPipeTimeoutMs.int32) == 0:
+          let waitErr = int32(osLastError())
+          if waitErr != ERROR_PIPE_BUSY:
+            raiseWin("WaitNamedPipe failed connecting to " & endpoint,
+              waitErr)
+        inc attempt
+        if attempt >= 12:
+          raiseWin("CreateFileW kept returning ERROR_PIPE_BUSY for " &
+            endpoint & " across 12 WaitNamedPipe retries", err)
+        continue
       raiseWin("CreateFileW failed connecting to " & endpoint, err)
-    result = IpcConn(handle: h, ownsHandle: true)
 
   proc closeIpcConn*(conn: IpcConn) =
     if conn.ownsHandle and conn.handle != 0 and

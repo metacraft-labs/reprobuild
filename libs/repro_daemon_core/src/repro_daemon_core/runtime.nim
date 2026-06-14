@@ -76,6 +76,13 @@ type
                                   cancelCheck: UserDaemonWatchCancelCheck):
                                   int
 
+  UserDaemonSubstituteExecutor* = proc(request: DaemonSubstituteIpcRequest):
+                                        DaemonSubstituteIpcResponse
+    ## ReproOS-Generations-And-Foreign-Packages A2.5 P6 — substitute
+    ## handler. The daemon entrypoint registers a closure that owns a
+    ## long-lived ``DaemonSubstituteService`` and dispatches the IPC
+    ## request through it. The runtime stays cache-client-agnostic.
+
   UserDaemonLock = object
     held: bool
     lockPath: string
@@ -105,6 +112,7 @@ const UserDaemonLockFileName = ".repro-daemon.lock"
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
 var userDaemonBuildPrewarmer: UserDaemonBuildPrewarmer
 var userDaemonWatchExecutor: UserDaemonWatchExecutor
+var userDaemonSubstituteExecutor: UserDaemonSubstituteExecutor
 
 proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
   userDaemonBuildExecutor = executor
@@ -114,6 +122,33 @@ proc setUserDaemonBuildPrewarmer*(prewarmer: UserDaemonBuildPrewarmer) =
 
 proc setUserDaemonWatchExecutor*(executor: UserDaemonWatchExecutor) =
   userDaemonWatchExecutor = executor
+
+proc setUserDaemonSubstituteExecutor*(executor: UserDaemonSubstituteExecutor) =
+  ## Wire the A2.5 P6 ``DaemonSubstituteService`` into the daemon's IPC
+  ## dispatch. The daemon entrypoint calls this once at startup with a
+  ## closure that captures the long-lived service singleton.
+  userDaemonSubstituteExecutor = executor
+
+proc dispatchRegisteredSubstitute*(request: DaemonSubstituteIpcRequest):
+                                    DaemonSubstituteIpcResponse {.gcsafe.} =
+  ## Invoke the currently-registered substitute executor and return its
+  ## ``DaemonSubstituteIpcResponse``. Public so embedded-daemon test
+  ## shells can drive the dispatch path WITHOUT reaching past
+  ## ``setUserDaemonSubstituteExecutor`` — keeping the GC-safety story
+  ## identical to production, where the daemon thread invokes the
+  ## closure registered by the entrypoint.
+  ##
+  ## ``{.gcsafe.}``: the read of ``userDaemonSubstituteExecutor`` races
+  ## with at most one ``setUserDaemonSubstituteExecutor`` call. Production
+  ## (and the embedded-daemon test shell) register the executor BEFORE
+  ## the listener thread accepts a client, so the read is observation-
+  ## only. The closure body itself owns whatever heap state it captures.
+  {.cast(gcsafe).}:
+    if userDaemonSubstituteExecutor == nil:
+      raise newException(UserDaemonRuntimeError,
+        "no substitute executor registered; call " &
+        "setUserDaemonSubstituteExecutor first")
+    userDaemonSubstituteExecutor(request)
 
 proc safePathSegment(value, fallback: string): string =
   for ch in value:
@@ -1193,6 +1228,32 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
     handleWatchStop(socket, config, parseWatchSessionRequestBody(frame.body))
   of udkWatchDetachRequest:
     handleWatchDetach(socket, config, parseWatchSessionRequestBody(frame.body))
+  of udkSubstituteRequest:
+    if userDaemonSubstituteExecutor == nil:
+      socket.writeFrame(udkError, errorBody(
+        "daemon-hosted substitute executor is not registered in " &
+        "repro-daemon (A2.5 P6 wiring missing)"))
+      return
+    let request =
+      try:
+        parseSubstituteRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkSubstituteRequest body: " & err.msg))
+        return
+    let response =
+      try:
+        userDaemonSubstituteExecutor(request)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "substitute executor raised: " & err.msg))
+        return
+    socket.writeFrame(udkSubstituteResponse, substituteResponseBody(response))
+    logLine(config.logPath, "substitute request handled roots=" &
+      $request.rootEntryKeyHex.len & " endpoint=" & request.endpoint.baseUrl &
+      " ok=" & $response.ok & " plan=" & $response.plan.len &
+      " realized=" & $response.realizedCasPaths.len &
+      " bytes=" & $response.totalBytesFetched)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &

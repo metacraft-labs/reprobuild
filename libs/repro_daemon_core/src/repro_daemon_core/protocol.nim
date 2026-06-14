@@ -14,7 +14,8 @@ const
   UserDaemonRole* = "repro-daemon/user"
   UserDaemonFeatureFlags* =
     "lifecycle,status,logs,shutdown,sessions,build-routing,build-events," &
-    "watch-routing,watch-events,watch-sessions,dev-self-restart"
+    "watch-routing,watch-events,watch-sessions,dev-self-restart," &
+    "substitute-routing"
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
@@ -38,6 +39,15 @@ type
     udkWatchStopRequest = 15
     udkWatchEvent = 16
     udkWatchListRequest = 17
+    udkSubstituteRequest = 18
+      ## ReproOS-Generations-And-Foreign-Packages A2.5 P6 — multi-user
+      ## substitute request. Carries a non-empty list of root cache-entry
+      ## keys (the closure to substitute) plus the upstream endpoint
+      ## (baseUrl + trusted-signer pubkeys + priority + single-writer
+      ## flag). The daemon answers with ``udkSubstituteResponse``.
+    udkSubstituteResponse = 19
+      ## Reply for ``udkSubstituteRequest``: the plan, per-step outcomes,
+      ## realized CAS paths, totals, and an aggregate ok/reason field.
     udkError = 255
 
   UserDaemonBuildEventKind* = enum
@@ -608,3 +618,151 @@ proc errorBody*(message: string): seq[byte] =
 proc parseErrorBody*(body: openArray[byte]): string =
   var pos = 0
   body.readString(pos)
+
+# ---------------------------------------------------------------------------
+# ReproOS-Generations-And-Foreign-Packages A2.5 P6 — substitute messages
+# ---------------------------------------------------------------------------
+#
+# Wire format choice: hand-rolled little-endian binary using the existing
+# ``writeString``/``readString``/``writeU32Le``/``writeBool``/``writeI64``
+# helpers, matching every other repro-daemon IPC message in this module
+# (helloBody, statusBody, buildRequestBody, watchRequestBody, etc.). All
+# upstream identity fields the cache client carries (``baseUrl``, hex-
+# encoded trusted signer pubkeys) are plain strings on the wire — that
+# keeps ``repro_daemon_core`` free of a ``repro_peer_cache`` dependency
+# and lets the cache-client wrapper hex-encode 65-byte P-256 pubkeys at
+# the serialization boundary.
+#
+# Backwards-compatibility: the new ``udkSubstituteRequest`` /
+# ``udkSubstituteResponse`` enum values are appended at 18/19. Existing
+# kinds (1-17 and 255 for ``udkError``) keep their numeric ids, so the
+# 2026-05-21 A2 daemon binary and a 2026-06-12 substitute-capable client
+# remain framewise compatible: the older daemon would respond with
+# ``udkError`` on the unknown kind, exactly the path
+# ``handleClient`` takes for unsupported messages today.
+
+type
+  DaemonSubstituteIpcEndpoint* = object
+    ## Wire shape of a single configured upstream cache endpoint. Mirrors
+    ## ``SubstituteEndpoint`` in ``repro_binary_cache_client/types.nim``
+    ## but uses ``string`` for the trusted-signer pubkeys (hex-encoded)
+    ## so the protocol module stays leaf-level.
+    baseUrl*: string
+    trustedSignerHex*: seq[string]
+      ## Each entry is the hex encoding of the 65-byte P-256 public key
+      ## (see ``repro_peer_cache/auth.nim``).
+    priority*: int32
+
+  DaemonSubstituteIpcRequest* = object
+    rootEntryKeyHex*: seq[string]
+      ## Non-empty list of cache-entry-key hex roots. For the v1 single-
+      ## root call the client populates this with a one-element seq;
+      ## the field is a seq rather than a single string so a future
+      ## multi-root closure request fits the same wire shape without a
+      ## protocol bump.
+    endpoint*: DaemonSubstituteIpcEndpoint
+    singleWriterMode*: bool
+      ## Forward-compat option. v1 servers always serialise concurrent
+      ## substitute calls behind the ``DaemonSubstituteService``'s
+      ## process-wide ``Lock``; the flag exists for the future case
+      ## where the daemon can dispatch parallel walks against
+      ## disjoint roots and the caller wants to opt back into the
+      ## serialised mode.
+
+  DaemonSubstituteIpcPlanStep* = object
+    entryKeyHex*: string
+    sourceEndpointBaseUrl*: string
+
+  DaemonSubstituteIpcOutcome* = object
+    entryKeyHex*: string
+    ok*: bool
+    skipped*: bool
+    reason*: string
+    casPath*: string
+    bytesFetched*: int64
+    wallclockMillis*: int64
+
+  DaemonSubstituteIpcResponse* = object
+    ok*: bool
+    reason*: string
+    plan*: seq[DaemonSubstituteIpcPlanStep]
+    outcomes*: seq[DaemonSubstituteIpcOutcome]
+    realizedCasPaths*: seq[string]
+    totalBytesFetched*: int64
+    totalWallclockMillis*: int64
+
+proc substituteRequestBody*(request: DaemonSubstituteIpcRequest): seq[byte] =
+  result.writeStringSeq(request.rootEntryKeyHex)
+  result.writeString(request.endpoint.baseUrl)
+  result.writeStringSeq(request.endpoint.trustedSignerHex)
+  result.writeI64(int64(request.endpoint.priority))
+  result.writeBool(request.singleWriterMode)
+
+proc parseSubstituteRequestBody*(body: openArray[byte]):
+    DaemonSubstituteIpcRequest =
+  var pos = 0
+  result.rootEntryKeyHex = body.readStringSeq(pos)
+  result.endpoint.baseUrl = body.readString(pos)
+  result.endpoint.trustedSignerHex = body.readStringSeq(pos)
+  result.endpoint.priority = int32(body.readI64(pos))
+  result.singleWriterMode = body.readBool(pos)
+
+proc writeSubstituteStep(buf: var seq[byte];
+                         step: DaemonSubstituteIpcPlanStep) =
+  buf.writeString(step.entryKeyHex)
+  buf.writeString(step.sourceEndpointBaseUrl)
+
+proc readSubstituteStep(body: openArray[byte]; pos: var int):
+    DaemonSubstituteIpcPlanStep =
+  result.entryKeyHex = body.readString(pos)
+  result.sourceEndpointBaseUrl = body.readString(pos)
+
+proc writeSubstituteOutcome(buf: var seq[byte];
+                            outcome: DaemonSubstituteIpcOutcome) =
+  buf.writeString(outcome.entryKeyHex)
+  buf.writeBool(outcome.ok)
+  buf.writeBool(outcome.skipped)
+  buf.writeString(outcome.reason)
+  buf.writeString(outcome.casPath)
+  buf.writeI64(outcome.bytesFetched)
+  buf.writeI64(outcome.wallclockMillis)
+
+proc readSubstituteOutcome(body: openArray[byte]; pos: var int):
+    DaemonSubstituteIpcOutcome =
+  result.entryKeyHex = body.readString(pos)
+  result.ok = body.readBool(pos)
+  result.skipped = body.readBool(pos)
+  result.reason = body.readString(pos)
+  result.casPath = body.readString(pos)
+  result.bytesFetched = body.readI64(pos)
+  result.wallclockMillis = body.readI64(pos)
+
+proc substituteResponseBody*(response: DaemonSubstituteIpcResponse): seq[byte] =
+  result.writeBool(response.ok)
+  result.writeString(response.reason)
+  result.writeU32Le(uint32(response.plan.len))
+  for step in response.plan:
+    result.writeSubstituteStep(step)
+  result.writeU32Le(uint32(response.outcomes.len))
+  for outcome in response.outcomes:
+    result.writeSubstituteOutcome(outcome)
+  result.writeStringSeq(response.realizedCasPaths)
+  result.writeI64(response.totalBytesFetched)
+  result.writeI64(response.totalWallclockMillis)
+
+proc parseSubstituteResponseBody*(body: openArray[byte]):
+    DaemonSubstituteIpcResponse =
+  var pos = 0
+  result.ok = body.readBool(pos)
+  result.reason = body.readString(pos)
+  let planCount = int(body.readU32Le(pos))
+  result.plan = newSeqOfCap[DaemonSubstituteIpcPlanStep](planCount)
+  for _ in 0 ..< planCount:
+    result.plan.add(body.readSubstituteStep(pos))
+  let outcomeCount = int(body.readU32Le(pos))
+  result.outcomes = newSeqOfCap[DaemonSubstituteIpcOutcome](outcomeCount)
+  for _ in 0 ..< outcomeCount:
+    result.outcomes.add(body.readSubstituteOutcome(pos))
+  result.realizedCasPaths = body.readStringSeq(pos)
+  result.totalBytesFetched = body.readI64(pos)
+  result.totalWallclockMillis = body.readI64(pos)
