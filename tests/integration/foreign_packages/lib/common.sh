@@ -96,3 +96,71 @@ c2_fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+
+# ---------------------------------------------------------------------------
+# C3 helpers
+# ---------------------------------------------------------------------------
+
+c3_launcher_binary() {
+  local repo_root
+  repo_root="$(c2_repo_root)"
+  if [[ -n "${C3_LAUNCHER_BIN:-}" ]]; then
+    echo "$C3_LAUNCHER_BIN"; return
+  fi
+  for candidate in \
+      "$repo_root/apps/reprobuild-sandbox-launcher/reprobuild-sandbox-launcher" \
+      "$repo_root/apps/reprobuild-sandbox-launcher/reprobuild-sandbox-launcher.exe"
+  do
+    if [[ -x "$candidate" ]]; then echo "$candidate"; return; fi
+  done
+  echo "ERROR: cannot locate reprobuild-sandbox-launcher; build it via:" >&2
+  echo "  ./apps/reprobuild-sandbox-launcher/build.sh" >&2
+  exit 1
+}
+
+c3_manifest_emit_helper() {
+  local repo_root
+  repo_root="$(c2_repo_root)"
+  for candidate in \
+      "$repo_root/tests/integration/foreign_packages/lib/c3_manifest_emit.exe" \
+      "$repo_root/tests/integration/foreign_packages/lib/c3_manifest_emit"
+  do
+    if [[ -x "$candidate" ]]; then echo "$candidate"; return; fi
+  done
+  echo "ERROR: cannot locate c3_manifest_emit helper; build it via:" >&2
+  echo "  nim c tests/integration/foreign_packages/lib/c3_manifest_emit.nim" >&2
+  exit 1
+}
+
+# c3_make_fake_prefix <root> <name>
+# Creates a content-addressed-shaped prefix at <root>/prefixes/<name>/
+# with a usr/bin/, usr/lib/x86_64-linux-gnu/ tree containing dummy
+# files so the launcher manifest generator picks the dirs up via the
+# default existsCheck.
+c3_make_fake_prefix() {
+  local root="$1"
+  local name="$2"
+  local prefix="$root/prefixes/$name"
+  mkdir -p "$prefix/usr/bin" "$prefix/usr/lib/x86_64-linux-gnu" "$prefix/lib"
+  echo "$prefix"
+}
+
+c3_skip_on_windows() {
+  case "$(uname -s 2>/dev/null || echo Unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "SKIP: $* (Windows: launcher namespace setup is a no-op stub)"
+      exit 0;;
+  esac
+}
+
+# c3_have_userns: returns 0 if the host kernel supports unprivileged
+# user namespaces. Used to gate tests that require real bind mounts.
+c3_have_userns() {
+  if [[ ! -e /proc/sys/kernel/unprivileged_userns_clone ]]; then
+    # File absent on older / non-Debian kernels; assume userns is on.
+    return 0
+  fi
+  local v
+  v="$(cat /proc/sys/kernel/unprivileged_userns_clone)"
+  [[ "$v" == "1" ]]
+}

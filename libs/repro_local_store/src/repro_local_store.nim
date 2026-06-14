@@ -17,9 +17,11 @@ import repro_hash
 import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
 import ./repro_local_store/lru_eviction
+import ./repro_local_store/sandbox_manifest
 export sqlite3_binding
 export store
 export lru_eviction
+export sandbox_manifest
 
 type
   LocalStoreError* = object of CatchableError
