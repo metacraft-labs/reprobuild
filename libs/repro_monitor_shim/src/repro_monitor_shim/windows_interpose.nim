@@ -402,6 +402,53 @@ type
                           EaLength: DWORD): NTSTATUS
                           {.stdcall, raises: [].}
 
+  # NtQueryAttributesFile / NtQueryFullAttributesFile catch libuv's
+  # uv_fs_stat fast-path (Node.js 20+). Path lives in OBJECT_ATTRIBUTES.
+  NtQueryAttributesFileProc = proc(ObjectAttributes: pointer;
+                                   FileInformation: pointer): NTSTATUS
+                                   {.stdcall, raises: [].}
+
+  # NtQueryDirectoryFile catches libuv's uv_fs_scandir. The directory
+  # handle was opened earlier via NtCreateFile / CreateFileW; we look
+  # up its path in handlePaths for attribution.
+  NtQueryDirectoryFileProc = proc(FileHandle: HANDLE;
+                                  Event: HANDLE;
+                                  ApcRoutine: pointer;
+                                  ApcContext: pointer;
+                                  IoStatusBlock: pointer;
+                                  FileInformation: pointer;
+                                  Length: DWORD;
+                                  FileInformationClass: DWORD;
+                                  ReturnSingleEntry: BOOL;
+                                  FileName: pointer;
+                                  RestartScan: BOOL): NTSTATUS
+                                  {.stdcall, raises: [].}
+
+  # NtQueryInformationByName — libuv 1.52's fs.statSync fast-path.
+  # Path lives in ObjectAttributes (same as NtCreateFile / etc.).
+  NtQueryInformationByNameProc = proc(ObjectAttributes: pointer;
+                                       IoStatusBlock: pointer;
+                                       FileInformation: pointer;
+                                       Length: DWORD;
+                                       FileInformationClass: DWORD): NTSTATUS
+                                       {.stdcall, raises: [].}
+
+  # NtQueryDirectoryFileEx — Win10 1709+ scandir API. Same handle-based
+  # contract as NtQueryDirectoryFile but uses a QueryFlags bitmask
+  # (SL_RESTART_SCAN = 0x01) instead of separate ReturnSingleEntry +
+  # RestartScan BOOL args. 10 stdcall args (vs 11 for the original).
+  NtQueryDirectoryFileExProc = proc(FileHandle: HANDLE;
+                                    Event: HANDLE;
+                                    ApcRoutine: pointer;
+                                    ApcContext: pointer;
+                                    IoStatusBlock: pointer;
+                                    FileInformation: pointer;
+                                    Length: DWORD;
+                                    FileInformationClass: DWORD;
+                                    QueryFlags: DWORD;
+                                    FileName: pointer): NTSTATUS
+                                    {.stdcall, raises: [].}
+
 # --- Original function pointer storage -------------------------------------
 
 var
@@ -429,6 +476,11 @@ var
   origSetCurrentDirectoryW: SetCurrentDirectoryWProc
   origSetCurrentDirectoryA: SetCurrentDirectoryAProc
   origNtCreateFile: NtCreateFileProc
+  origNtQueryAttributesFile: NtQueryAttributesFileProc
+  origNtQueryFullAttributesFile: NtQueryAttributesFileProc
+  origNtQueryDirectoryFile: NtQueryDirectoryFileProc
+  origNtQueryInformationByName: NtQueryInformationByNameProc
+  origNtQueryDirectoryFileEx: NtQueryDirectoryFileExProc
 
 # --- Runtime state ---------------------------------------------------------
 
@@ -526,6 +578,46 @@ proc widePtrToString(ws: LPCWSTR): string =
   result = newString(needed)
   discard WideCharToMultiByte(65001'u32, 0'u32, ws, wlen,
                               cast[LPSTR](addr result[0]), needed, nil, nil)
+
+proc unicodeStringToString(uniPtr: pointer): string =
+  ## Extract a Nim string from a Windows UNICODE_STRING.
+  ## Layout (x64): USHORT Length; USHORT MaxLen; PWSTR Buffer (offset 8).
+  if uniPtr == nil:
+    return ""
+  let lengthBytes = cast[ptr uint16](uniPtr)[]
+  if lengthBytes == 0:
+    return ""
+  let bufferPtr = cast[ptr ptr uint16](
+    cast[ByteAddress](uniPtr) + 8)[]
+  if bufferPtr == nil:
+    return ""
+  let codeUnits = int32(lengthBytes div 2)
+  let needed = WideCharToMultiByte(65001'u32, 0'u32,
+    cast[LPCWSTR](bufferPtr), codeUnits, nil, 0'i32, nil, nil)
+  if needed <= 0:
+    return ""
+  result = newString(needed)
+  discard WideCharToMultiByte(65001'u32, 0'u32,
+    cast[LPCWSTR](bufferPtr), codeUnits,
+    cast[LPSTR](addr result[0]), needed, nil, nil)
+
+proc objectAttributesToString(oaPtr: pointer): string =
+  ## Extract the path from a Windows OBJECT_ATTRIBUTES.
+  ## ObjectName field at offset 16 (x64). Strips NT-style prefixes
+  ## (\??\, \DosDevices\) so downstream record consumers see the same
+  ## form GetFileAttributesExW records.
+  if oaPtr == nil:
+    return ""
+  let objectName = cast[ptr pointer](
+    cast[ByteAddress](oaPtr) + 16)[]
+  if objectName == nil:
+    return ""
+  let raw = unicodeStringToString(objectName)
+  if raw.len >= 4 and raw[0 .. 3] == "\\??\\":
+    return raw[4 .. ^1]
+  if raw.len >= 12 and raw[0 .. 11] == "\\DosDevices\\":
+    return raw[12 .. ^1]
+  raw
 
 proc handleKey(h: HANDLE): uint64 {.inline.} =
   cast[uint64](h)
@@ -933,6 +1025,78 @@ proc originalNtCreateFile(ctx: var hr.HookContext) {.raises: [].} =
                             EaBuffer, EaLength)
   # NTSTATUS is signed 32-bit; pack as unsigned for the uint64 slot and
   # let the trampoline reinterpret on the way out.
+  ctx.result = uint64(uint32(r))
+
+proc originalNtQueryAttributesFile(ctx: var hr.HookContext) {.raises: [].} =
+  if origNtQueryAttributesFile == nil:
+    ctx.result = uint64(uint32(0xC0000001'u32))
+    return
+  let ObjectAttributes = cast[pointer](ctx.args[0])
+  let FileInformation  = cast[pointer](ctx.args[1])
+  let r = origNtQueryAttributesFile(ObjectAttributes, FileInformation)
+  ctx.result = uint64(uint32(r))
+
+proc originalNtQueryFullAttributesFile(ctx: var hr.HookContext) {.raises: [].} =
+  if origNtQueryFullAttributesFile == nil:
+    ctx.result = uint64(uint32(0xC0000001'u32))
+    return
+  let ObjectAttributes = cast[pointer](ctx.args[0])
+  let FileInformation  = cast[pointer](ctx.args[1])
+  let r = origNtQueryFullAttributesFile(ObjectAttributes, FileInformation)
+  ctx.result = uint64(uint32(r))
+
+proc originalNtQueryDirectoryFileEx(ctx: var hr.HookContext) {.raises: [].} =
+  if origNtQueryDirectoryFileEx == nil:
+    ctx.result = uint64(uint32(0xC0000001'u32))
+    return
+  let FileHandle           = cast[HANDLE](ctx.args[0])
+  let Event                = cast[HANDLE](ctx.args[1])
+  let ApcRoutine           = cast[pointer](ctx.args[2])
+  let ApcContext           = cast[pointer](ctx.args[3])
+  let IoStatusBlock        = cast[pointer](ctx.args[4])
+  let FileInformation      = cast[pointer](ctx.args[5])
+  let Length               = DWORD(ctx.args[6])
+  let FileInformationClass = DWORD(ctx.args[7])
+  let QueryFlags           = DWORD(ctx.args[8])
+  let FileName             = cast[pointer](ctx.args[9])
+  let r = origNtQueryDirectoryFileEx(FileHandle, Event, ApcRoutine, ApcContext,
+                                     IoStatusBlock, FileInformation, Length,
+                                     FileInformationClass, QueryFlags, FileName)
+  ctx.result = uint64(uint32(r))
+
+proc originalNtQueryInformationByName(ctx: var hr.HookContext) {.raises: [].} =
+  if origNtQueryInformationByName == nil:
+    ctx.result = uint64(uint32(0xC0000001'u32))
+    return
+  let ObjectAttributes     = cast[pointer](ctx.args[0])
+  let IoStatusBlock        = cast[pointer](ctx.args[1])
+  let FileInformation      = cast[pointer](ctx.args[2])
+  let Length               = DWORD(ctx.args[3])
+  let FileInformationClass = DWORD(ctx.args[4])
+  let r = origNtQueryInformationByName(ObjectAttributes, IoStatusBlock,
+                                       FileInformation, Length,
+                                       FileInformationClass)
+  ctx.result = uint64(uint32(r))
+
+proc originalNtQueryDirectoryFile(ctx: var hr.HookContext) {.raises: [].} =
+  if origNtQueryDirectoryFile == nil:
+    ctx.result = uint64(uint32(0xC0000001'u32))
+    return
+  let FileHandle           = cast[HANDLE](ctx.args[0])
+  let Event                = cast[HANDLE](ctx.args[1])
+  let ApcRoutine           = cast[pointer](ctx.args[2])
+  let ApcContext           = cast[pointer](ctx.args[3])
+  let IoStatusBlock        = cast[pointer](ctx.args[4])
+  let FileInformation      = cast[pointer](ctx.args[5])
+  let Length               = DWORD(ctx.args[6])
+  let FileInformationClass = DWORD(ctx.args[7])
+  let ReturnSingleEntry    = BOOL(ctx.args[8])
+  let FileName             = cast[pointer](ctx.args[9])
+  let RestartScan          = BOOL(ctx.args[10])
+  let r = origNtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext,
+                                   IoStatusBlock, FileInformation, Length,
+                                   FileInformationClass, ReturnSingleEntry,
+                                   FileName, RestartScan)
   ctx.result = uint64(uint32(r))
 
 # --- Snoop callbacks (registered against the chain at ShimSnoopPriority) ---
@@ -1688,26 +1852,159 @@ proc snoopNtCreateFile(ctx: var hr.HookContext) {.raises: [].} =
     SetLastError(savedLastError)
     return
   try:
-    # Path extraction deferred: the path lives inside
-    # OBJECT_ATTRIBUTES.ObjectName -> UNICODE_STRING.Buffer with an
-    # explicit Length field (bytes, not code units), and may be
-    # NULL-prefixed by "\??\" or "\DosDevices\". Decoding it correctly
-    # under the shim hot-path without recursing through other hooked
-    # APIs is more work than Phase 5 allows. The Phase-5 acceptance
-    # criterion only requires the snoop FIRES — the path field is left
-    # blank with a follow-up tagged via detail.
-    let r = NTSTATUS(int32(uint32(ctx.args[10])))  # not the result; placate -Wunused
-    discard r
-    var record = baseRecord(mrFileOpen, moFileOpen)
-    record.path = ""
-    # ctx.result was packed as uint64-of-uint32 by originalNtCreateFile;
-    # reinterpret as signed NTSTATUS for record.result. Use a same-size
-    # cast to avoid Nim's range-checked narrowing (see the
-    # nim_cast_narrowing_rangecheck memo).
+    let oaPtr = cast[pointer](ctx.args[2])
+    let path = objectAttributesToString(oaPtr)
+    let desiredAccess = uint32(ctx.args[1] and 0xFFFFFFFF'u64)
+    let createDisposition = uint32(ctx.args[7] and 0xFFFFFFFF'u64)
+    # Data-access bits in ACCESS_MASK. None set ⇒ stat-class probe.
+    const dataAccessBits =
+      0x00000001'u32 or  # FILE_READ_DATA / FILE_LIST_DIRECTORY
+      0x00000002'u32 or  # FILE_WRITE_DATA / FILE_ADD_FILE
+      0x00000004'u32 or  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+      0x80000000'u32 or  # GENERIC_READ
+      0x40000000'u32 or  # GENERIC_WRITE
+      0x10000000'u32     # GENERIC_ALL
+    let isProbe = (desiredAccess and dataAccessBits) == 0'u32
+    let writeAccess =
+      (desiredAccess and (0x00000002'u32 or 0x00000004'u32 or
+                          0x40000000'u32)) != 0'u32
+    let writeDisposition = createDisposition == 2'u32 or
+                           createDisposition == 3'u32 or
+                           createDisposition == 5'u32
+    let isWrite = writeAccess or writeDisposition
     let nt = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+    if isProbe:
+      var record = baseRecord(mrPathProbe, moPathProbe)
+      record.path = path
+      record.result = int64(nt)
+      record.detail = "NtCreateFile"
+      emitRecord(record)
+    else:
+      let recKind = if isWrite: mrFileWrite else: mrFileOpen
+      let recMode = if isWrite: moFileWrite else: moFileOpen
+      var record = baseRecord(recKind, recMode)
+      record.path = path
+      record.result = int64(nt)
+      record.detail = "NtCreateFile"
+      emitRecord(record)
+      if path.len > 0 and nt >= 0:
+        let phPtr = cast[ptr HANDLE](ctx.args[0])
+        if phPtr != nil:
+          let h = phPtr[]
+          if h != nil and h != INVALID_HANDLE_VALUE:
+            rememberHandlePath(h, path)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopNtQueryAttributesFileImpl(ctx: var hr.HookContext;
+                                     detail: string) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let oaPtr = cast[pointer](ctx.args[0])
+    let path = objectAttributesToString(oaPtr)
+    let nt = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+    var record = baseRecord(mrPathProbe, moPathProbe)
+    record.path = path
     record.result = int64(nt)
-    record.detail = "NtCreateFile"
+    record.detail = detail
     emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopNtQueryAttributesFile(ctx: var hr.HookContext) {.raises: [].} =
+  snoopNtQueryAttributesFileImpl(ctx, "NtQueryAttributesFile")
+
+proc snoopNtQueryFullAttributesFile(ctx: var hr.HookContext) {.raises: [].} =
+  snoopNtQueryAttributesFileImpl(ctx, "NtQueryFullAttributesFile")
+
+proc snoopNtQueryInformationByName(ctx: var hr.HookContext) {.raises: [].} =
+  ## libuv's uv_fs_stat fast-path on Win11. Emits an mrPathProbe.
+  snoopNtQueryAttributesFileImpl(ctx, "NtQueryInformationByName")
+
+proc snoopNtQueryDirectoryFileEx(ctx: var hr.HookContext) {.raises: [].} =
+  ## libuv's uv_fs_scandir on Win10 1709+. The handle was opened via
+  ## NtCreateFile / CreateFileW with FILE_LIST_DIRECTORY; lookup its
+  ## remembered path. Multiple chunked calls per readdir() — record
+  ## only the first per handle.
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    # SL_RESTART_SCAN = 0x00000001. Anything else (SL_RETURN_ON_DISK_FULL,
+    # SL_QUERY_DIRECTORY_MASK, SL_INDEX_SPECIFIED, ...) is irrelevant
+    # for the first-call-per-handle gate.
+    let queryFlags = DWORD(ctx.args[8])
+    let restartScan = (queryFlags and 0x00000001'u32) != 0'u32
+    let h = cast[HANDLE](ctx.args[0])
+    var shouldRecord = restartScan
+    var dirPath = ""
+    acquire(fdLock)
+    try:
+      let key = handleKey(h)
+      if handlePaths.hasKey(key):
+        dirPath = handlePaths[key]
+        if not dirPath.startsWith("[enum]:"):
+          shouldRecord = true
+          handlePaths[key] = "[enum]:" & dirPath
+        elif restartScan:
+          shouldRecord = true
+          dirPath = dirPath["[enum]:".len .. ^1]
+    finally:
+      release(fdLock)
+    let nt = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+    if shouldRecord and dirPath.len > 0:
+      var record = baseRecord(mrDirectoryEnumerate, moDirectoryEnumerate)
+      record.path = dirPath
+      record.result = int64(nt)
+      record.detail = "NtQueryDirectoryFileEx"
+      emitRecord(record)
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopNtQueryDirectoryFile(ctx: var hr.HookContext) {.raises: [].} =
+  ## libuv's uv_fs_scandir → NtQueryDirectoryFile on a handle that was
+  ## opened earlier via NtCreateFile / CreateFileW. Multiple calls per
+  ## readdir() typically occur (chunked enumeration); we record only
+  ## the first call per handle by mutating its entry in handlePaths.
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let restartScan = BOOL(ctx.args[10])
+    let h = cast[HANDLE](ctx.args[0])
+    var shouldRecord = restartScan != 0
+    var dirPath = ""
+    acquire(fdLock)
+    try:
+      let key = handleKey(h)
+      if handlePaths.hasKey(key):
+        dirPath = handlePaths[key]
+        if not dirPath.startsWith("[enum]:"):
+          shouldRecord = true
+          handlePaths[key] = "[enum]:" & dirPath
+        elif restartScan != 0:
+          shouldRecord = true
+          dirPath = dirPath["[enum]:".len .. ^1]
+    finally:
+      release(fdLock)
+    let nt = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+    if shouldRecord and dirPath.len > 0:
+      var record = baseRecord(mrDirectoryEnumerate, moDirectoryEnumerate)
+      record.path = dirPath
+      record.result = int64(nt)
+      record.detail = "NtQueryDirectoryFile"
+      emitRecord(record)
   except CatchableError:
     discard
   SetLastError(savedLastError)
@@ -2048,6 +2345,106 @@ proc trampolineNtCreateFile(FileHandle: ptr HANDLE,
   # nim_cast_narrowing_rangecheck memo).
   result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
 
+proc trampolineNtQueryAttributesFile(ObjectAttributes: pointer;
+                                      FileInformation: pointer):
+                                      NTSTATUS {.stdcall.} =
+  if origNtQueryAttributesFile == nil:
+    return NTSTATUS(0xC0000001'i32)
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](ObjectAttributes),
+    cast[uint64](FileInformation)
+  ])
+  hr.dispatchShimHook(hr.HookNtQueryAttributesFile, ctx)
+  result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+
+proc trampolineNtQueryFullAttributesFile(ObjectAttributes: pointer;
+                                          FileInformation: pointer):
+                                          NTSTATUS {.stdcall.} =
+  if origNtQueryFullAttributesFile == nil:
+    return NTSTATUS(0xC0000001'i32)
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](ObjectAttributes),
+    cast[uint64](FileInformation)
+  ])
+  hr.dispatchShimHook(hr.HookNtQueryFullAttributesFile, ctx)
+  result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+
+proc trampolineNtQueryDirectoryFileEx(FileHandle: HANDLE;
+                                       Event: HANDLE;
+                                       ApcRoutine: pointer;
+                                       ApcContext: pointer;
+                                       IoStatusBlock: pointer;
+                                       FileInformation: pointer;
+                                       Length: DWORD;
+                                       FileInformationClass: DWORD;
+                                       QueryFlags: DWORD;
+                                       FileName: pointer):
+                                       NTSTATUS {.stdcall.} =
+  if origNtQueryDirectoryFileEx == nil:
+    return NTSTATUS(0xC0000001'i32)
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](FileHandle),
+    cast[uint64](Event),
+    cast[uint64](ApcRoutine),
+    cast[uint64](ApcContext),
+    cast[uint64](IoStatusBlock),
+    cast[uint64](FileInformation),
+    uint64(Length),
+    uint64(FileInformationClass),
+    uint64(QueryFlags),
+    cast[uint64](FileName)
+  ])
+  hr.dispatchShimHook(hr.HookNtQueryDirectoryFileEx, ctx)
+  result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+
+proc trampolineNtQueryInformationByName(ObjectAttributes: pointer;
+                                         IoStatusBlock: pointer;
+                                         FileInformation: pointer;
+                                         Length: DWORD;
+                                         FileInformationClass: DWORD):
+                                         NTSTATUS {.stdcall.} =
+  if origNtQueryInformationByName == nil:
+    return NTSTATUS(0xC0000001'i32)
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](ObjectAttributes),
+    cast[uint64](IoStatusBlock),
+    cast[uint64](FileInformation),
+    uint64(Length),
+    uint64(FileInformationClass)
+  ])
+  hr.dispatchShimHook(hr.HookNtQueryInformationByName, ctx)
+  result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+
+proc trampolineNtQueryDirectoryFile(FileHandle: HANDLE;
+                                     Event: HANDLE;
+                                     ApcRoutine: pointer;
+                                     ApcContext: pointer;
+                                     IoStatusBlock: pointer;
+                                     FileInformation: pointer;
+                                     Length: DWORD;
+                                     FileInformationClass: DWORD;
+                                     ReturnSingleEntry: BOOL;
+                                     FileName: pointer;
+                                     RestartScan: BOOL):
+                                     NTSTATUS {.stdcall.} =
+  if origNtQueryDirectoryFile == nil:
+    return NTSTATUS(0xC0000001'i32)
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](FileHandle),
+    cast[uint64](Event),
+    cast[uint64](ApcRoutine),
+    cast[uint64](ApcContext),
+    cast[uint64](IoStatusBlock),
+    cast[uint64](FileInformation),
+    uint64(Length),
+    uint64(FileInformationClass),
+    uint64(ReturnSingleEntry),
+    cast[uint64](FileName),
+    uint64(RestartScan)
+  ])
+  hr.dispatchShimHook(hr.HookNtQueryDirectoryFile, ctx)
+  result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
+
 # --- Registry wiring -------------------------------------------------------
 #
 # Called once from repro_monitor_shim_init AFTER the registry has been
@@ -2085,6 +2482,24 @@ proc registerMonitorSnoopCallbacks*() =
   hr.registerMonitorHook(hr.HookSetCurrentDirectoryA,
                          snoopSetCurrentDirectoryA)
   hr.registerMonitorHook(hr.HookNtCreateFile,       snoopNtCreateFile)
+  hr.registerMonitorHook(hr.HookNtQueryAttributesFile,
+                         snoopNtQueryAttributesFile)
+  hr.registerMonitorHook(hr.HookNtQueryFullAttributesFile,
+                         snoopNtQueryFullAttributesFile)
+  # Temporarily disabled — the inline detour on NtQueryDirectoryFile /
+  # NtQueryDirectoryFileEx is destabilising libuv's readdir path. The
+  # crash is reproducible with the readdir-bundle fixture; the cause
+  # is most likely a thread-safety issue in handlePaths access during
+  # the chunked enumeration. The hooks remain compiled in (HookSpec
+  # entries still install the inline detour) but the snoop callback
+  # is not registered, so the chain calls the original directly. Fix
+  # tracked separately; stat-class hooks are unaffected.
+  # hr.registerMonitorHook(hr.HookNtQueryDirectoryFile,
+  #                        snoopNtQueryDirectoryFile)
+  hr.registerMonitorHook(hr.HookNtQueryInformationByName,
+                         snoopNtQueryInformationByName)
+  # hr.registerMonitorHook(hr.HookNtQueryDirectoryFileEx,
+  #                        snoopNtQueryDirectoryFileEx)
 
 # --- Unified install backend (M73 Phase 1) ---------------------------------
 #
@@ -2280,6 +2695,40 @@ let hookTable {.global.}: seq[HookSpec] = @[
     trampoline: cast[pointer](trampolineNtCreateFile),
     origStorage: cast[ptr pointer](addr origNtCreateFile),
     origCallback: originalNtCreateFile,
+    iatDlls: ntdllNtIatDlls,
+    moduleDll: "ntdll.dll"),
+  # NT stat-class hooks (libuv fast-path for fs.statSync).
+  HookSpec(name: hr.HookNtQueryAttributesFile,
+    trampoline: cast[pointer](trampolineNtQueryAttributesFile),
+    origStorage: cast[ptr pointer](addr origNtQueryAttributesFile),
+    origCallback: originalNtQueryAttributesFile,
+    iatDlls: ntdllNtIatDlls,
+    moduleDll: "ntdll.dll"),
+  HookSpec(name: hr.HookNtQueryFullAttributesFile,
+    trampoline: cast[pointer](trampolineNtQueryFullAttributesFile),
+    origStorage: cast[ptr pointer](addr origNtQueryFullAttributesFile),
+    origCallback: originalNtQueryFullAttributesFile,
+    iatDlls: ntdllNtIatDlls,
+    moduleDll: "ntdll.dll"),
+  # NT directory-enumerate hook (libuv fast-path for fs.readdirSync).
+  HookSpec(name: hr.HookNtQueryDirectoryFile,
+    trampoline: cast[pointer](trampolineNtQueryDirectoryFile),
+    origStorage: cast[ptr pointer](addr origNtQueryDirectoryFile),
+    origCallback: originalNtQueryDirectoryFile,
+    iatDlls: ntdllNtIatDlls,
+    moduleDll: "ntdll.dll"),
+  # NT path-information hook (libuv 1.52 fast-path on Win11 for stat).
+  HookSpec(name: hr.HookNtQueryInformationByName,
+    trampoline: cast[pointer](trampolineNtQueryInformationByName),
+    origStorage: cast[ptr pointer](addr origNtQueryInformationByName),
+    origCallback: originalNtQueryInformationByName,
+    iatDlls: ntdllNtIatDlls,
+    moduleDll: "ntdll.dll"),
+  # NT directory-enumerate Ex hook (Win10 1709+ readdir fast-path).
+  HookSpec(name: hr.HookNtQueryDirectoryFileEx,
+    trampoline: cast[pointer](trampolineNtQueryDirectoryFileEx),
+    origStorage: cast[ptr pointer](addr origNtQueryDirectoryFileEx),
+    origCallback: originalNtQueryDirectoryFileEx,
     iatDlls: ntdllNtIatDlls,
     moduleDll: "ntdll.dll")
 ]

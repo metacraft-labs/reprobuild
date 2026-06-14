@@ -108,8 +108,26 @@ const
   HookSetCurrentDirectoryA* = "SetCurrentDirectoryA"
   # NT Native API backstop — lives in ntdll.dll, not kernel32.
   HookNtCreateFile* = "NtCreateFile"
+  # libuv on Windows routes fs.statSync through NtQueryAttributesFile /
+  # NtQueryFullAttributesFile (no handle is opened), and fs.readdirSync
+  # through NtQueryDirectoryFile. None of these cross the kernel32 layer
+  # so they're invisible to the GetFileAttributesExW / FindFirstFileW
+  # hooks — we need to catch them in ntdll directly.
+  HookNtQueryAttributesFile* = "NtQueryAttributesFile"
+  HookNtQueryFullAttributesFile* = "NtQueryFullAttributesFile"
+  HookNtQueryDirectoryFile* = "NtQueryDirectoryFile"
+  # NtQueryInformationByName — libuv 1.52's fs.statSync fast-path on
+  # Win11 22000+. Lowered from kernel32!GetFileInformationByName. Without
+  # this hook, fs.statSync on non-existent paths is invisible to the
+  # shim because libuv returns ENOENT directly without falling through
+  # to CreateFileW.
+  HookNtQueryInformationByName* = "NtQueryInformationByName"
+  # NtQueryDirectoryFileEx — Win10 1709+ replacement for
+  # NtQueryDirectoryFile. libuv may use either depending on the OS
+  # capability probe; we hook both for coverage.
+  HookNtQueryDirectoryFileEx* = "NtQueryDirectoryFileEx"
 
-const MonitorShimHookNames*: array[23, string] = [
+const MonitorShimHookNames*: array[28, string] = [
   HookCreateFileW, HookCreateFileA, HookReadFile, HookWriteFile,
   HookCloseHandle,
   HookGetFileAttributesExW, HookGetFileAttributesExA,
@@ -121,7 +139,10 @@ const MonitorShimHookNames*: array[23, string] = [
   HookMoveFileExW, HookMoveFileExA,
   HookGetFileInformationByHandleEx,
   HookSetCurrentDirectoryW, HookSetCurrentDirectoryA,
-  HookNtCreateFile
+  HookNtCreateFile,
+  HookNtQueryAttributesFile, HookNtQueryFullAttributesFile,
+  HookNtQueryDirectoryFile, HookNtQueryInformationByName,
+  HookNtQueryDirectoryFileEx
 ]
 
 # --- Standard hook priorities ----------------------------------------------
