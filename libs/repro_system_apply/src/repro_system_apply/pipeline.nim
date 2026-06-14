@@ -85,8 +85,13 @@ import std/[algorithm, options, os, sequtils, strutils, tables, times]
 from repro_core/paths import extendedPath
 
 import ./errors
+import ./locks
 import ./lower
 import ./types
+
+export locks.SystemApplyLock, locks.acquireApplyLock,
+       locks.releaseApplyLock, locks.applyLockPath,
+       locks.DefaultLockTimeoutSeconds
 
 # ---------------------------------------------------------------------------
 # Diagnostic helper for the diff pass.
@@ -1116,6 +1121,67 @@ proc recordGeneration*(applyResult: ApplyResult;
 # simulate the boot promotion without a real reboot.
 # ---------------------------------------------------------------------------
 
+proc rotateCurrentPointer*(stateDir: string; genDir: string;
+                           generationNumber: int) =
+  ## B3 P2 risk #3: flip the ``<state>/current`` pointer atomically.
+  ##
+  ## On POSIX:
+  ##   1. Create a temp symlink ``<state>/current.tmp`` pointing at
+  ##      ``genDir``.
+  ##   2. ``moveFile`` it onto the final ``<state>/current`` path —
+  ##      ``rename(2)`` is atomic on the same filesystem, so a crash
+  ##      mid-rotation never leaves the system without a ``current``
+  ##      pointer (it either still points at the old generation or it
+  ##      now points at the new one).
+  ##   3. Fall back to a plain text file if symlink creation fails
+  ##      (e.g. unprivileged user on a filesystem that forbids symlinks).
+  ##
+  ## On Windows we keep B2's text-file shape: the body is the absolute
+  ## generation directory path. Windows ``MoveFileExW`` with
+  ## ``MOVEFILE_REPLACE_EXISTING`` is the atomic equivalent the
+  ## ``moveFile`` standard-lib wrapper invokes for us.
+  ensureDir(stateDir)
+  let curPath = currentPathFor(stateDir)
+  let tmpPath = curPath & ".tmp"
+  # Clean up any stale temp pointer from a prior crash.
+  if symlinkExists(extendedPath(tmpPath)) or
+     fileExists(extendedPath(tmpPath)):
+    try: removeFile(extendedPath(tmpPath))
+    except OSError: discard
+  when defined(windows):
+    writeFile(extendedPath(tmpPath), genDir & "\n")
+    if fileExists(extendedPath(curPath)):
+      try: removeFile(extendedPath(curPath))
+      except OSError: discard
+    moveFile(extendedPath(tmpPath), extendedPath(curPath))
+  else:
+    var madeSymlink = false
+    try:
+      createSymlink(extendedPath(genDir), extendedPath(tmpPath))
+      madeSymlink = true
+    except OSError:
+      madeSymlink = false
+    if madeSymlink:
+      # POSIX `rename(2)` over an existing symlink is atomic — no need
+      # to remove the old `current` first.
+      try:
+        moveFile(extendedPath(tmpPath), extendedPath(curPath))
+      except OSError:
+        # Fall through to text-file fallback.
+        if symlinkExists(extendedPath(tmpPath)) or
+           fileExists(extendedPath(tmpPath)):
+          try: removeFile(extendedPath(tmpPath))
+          except OSError: discard
+        madeSymlink = false
+    if not madeSymlink:
+      writeFile(extendedPath(tmpPath), genDir & "\n")
+      if symlinkExists(extendedPath(curPath)) or
+         fileExists(extendedPath(curPath)):
+        try: removeFile(extendedPath(curPath))
+        except OSError: discard
+      moveFile(extendedPath(tmpPath), extendedPath(curPath))
+  discard generationNumber  # carried for diagnostics; no-op here.
+
 proc confirmStagedGeneration*(stateDir: string): tuple[
     promoted: bool, generationNumber: int] =
   ## Flip ``<state>/current`` to the staged generation's directory and
@@ -1134,16 +1200,123 @@ proc confirmStagedGeneration*(stateDir: string): tuple[
   if not dirExists(extendedPath(genDir)):
     removeFile(extendedPath(stagedPath))
     return (promoted: false, generationNumber: 0)
-  let curPath = currentPathFor(stateDir)
-  # On Windows we write a text file; on POSIX we'd write a symlink. For
-  # B2 we keep the implementation portable: a text file whose body is
-  # the absolute generation directory path. The reproos-confirm-
-  # generation systemd unit on Linux ALSO writes the symlink form (see
-  # apps/reproos-rebuild/reproos_rebuild.nim's ``confirm`` subcommand).
-  ensureDir(stateDir)
-  writeFile(extendedPath(curPath), genDir & "\n")
+  rotateCurrentPointer(stateDir, genDir, n)
   removeFile(extendedPath(stagedPath))
   (promoted: true, generationNumber: n)
+
+type
+  RepairKind* = enum
+    rrkPartial = "partial-apply"   ## directory exists but manifest.txt
+                                    ## is missing — apply crashed between
+                                    ## creating the gen dir and writing
+                                    ## the manifest.
+    rrkMalformed = "malformed"     ## manifest.txt exists but does not
+                                    ## parse (or carries no generation
+                                    ## number).
+    rrkOrphanStaged = "orphan-staged"
+                                    ## staged-next records a generation
+                                    ## number whose on-disk directory is
+                                    ## missing — typically a partial
+                                    ## ``recordGeneration``.
+
+  RepairFinding* = object
+    ## One row of the ``repairPartialApply`` report. ``removed`` is true
+    ## when the sweep dropped the offending directory or stale flag;
+    ## ``detail`` carries operator-visible context.
+    kind*: RepairKind
+    generationNumber*: int
+    path*: string
+    removed*: bool
+    detail*: string
+
+  RepairResult* = object
+    findings*: seq[RepairFinding]
+    removedCount*: int
+
+proc isLikelyIncompleteGenerationDir(p: string): bool =
+  ## Heuristic: a "partial" generation dir is one whose ``manifest.txt``
+  ## file is missing. We deliberately do NOT delete a generation that
+  ## merely has a sub-tree we don't understand — only the missing
+  ## manifest tells us the apply was interrupted mid-write.
+  not fileExists(extendedPath(p / ManifestFileName))
+
+proc isManifestParsable(path: string): bool =
+  if not fileExists(extendedPath(path)): return false
+  try:
+    let body = readFile(extendedPath(path))
+    let m = parseManifest(body)
+    return m.generationNumber > 0
+  except CatchableError:
+    return false
+
+proc repairPartialApply*(stateDir: string;
+                        dryRun = false): RepairResult =
+  ## B3 P2 risk #4 + risk #5: walk ``<state>/generations/<N>/`` and
+  ## drop any half-written directories (no ``manifest.txt`` = crashed
+  ## mid-apply; manifest present but unparsable = malformed). The sweep
+  ## is idempotent — running it twice on a clean state directory is a
+  ## no-op.
+  ##
+  ## ``dryRun = true`` reports what would be removed without touching
+  ## the filesystem; the CLI ``reproos-rebuild repair --dry-run`` flag
+  ## maps onto this.
+  let root = generationsRoot(stateDir)
+  if not dirExists(extendedPath(root)):
+    return
+  for kind, path in walkDir(extendedPath(root)):
+    if kind != pcDir: continue
+    let name = path.lastPathPart
+    var n: int
+    try: n = parseInt(name)
+    except ValueError: continue
+    let manifestPath = path / ManifestFileName
+    if isLikelyIncompleteGenerationDir(path):
+      var finding = RepairFinding(kind: rrkPartial,
+        generationNumber: n, path: path,
+        detail: "manifest.txt missing — apply crashed mid-write")
+      if not dryRun:
+        try:
+          removeDir(extendedPath(path))
+          finding.removed = true
+          inc result.removedCount
+        except OSError as e:
+          finding.detail.add " (removal failed: " & e.msg & ")"
+      result.findings.add finding
+      continue
+    if not isManifestParsable(manifestPath):
+      var finding = RepairFinding(kind: rrkMalformed,
+        generationNumber: n, path: path,
+        detail: "manifest.txt failed to parse")
+      if not dryRun:
+        try:
+          removeDir(extendedPath(path))
+          finding.removed = true
+          inc result.removedCount
+        except OSError as e:
+          finding.detail.add " (removal failed: " & e.msg & ")"
+      result.findings.add finding
+  # Orphan staged-next: the staged flag references a directory that
+  # vanished (e.g. operator wiped <state>/generations/<N>/ manually).
+  let stagedPath = stagedNextPathFor(stateDir)
+  if fileExists(extendedPath(stagedPath)):
+    let raw = readFile(extendedPath(stagedPath)).strip()
+    let n = try: parseInt(raw) except ValueError: 0
+    if n > 0:
+      let genDir = generationDirFor(stateDir, n)
+      if not dirExists(extendedPath(genDir)) or
+         not fileExists(extendedPath(genDir / ManifestFileName)):
+        var finding = RepairFinding(kind: rrkOrphanStaged,
+          generationNumber: n, path: stagedPath,
+          detail: "staged-next points at " & genDir &
+            " but the generation is missing or malformed")
+        if not dryRun:
+          try:
+            removeFile(extendedPath(stagedPath))
+            finding.removed = true
+            inc result.removedCount
+          except OSError as e:
+            finding.detail.add " (removal failed: " & e.msg & ")"
+        result.findings.add finding
 
 proc readCurrentGeneration*(stateDir: string): int =
   ## Returns the confirmed-current generation number, or 0 if no
@@ -1168,19 +1341,39 @@ proc planApplyRecord*(cfg: SystemConfig;
   ## previous one), the returned record has
   ## ``manifest.generationNumber == previous.generationNumber`` and
   ## ``manifestPath`` points at the previous manifest.
-  var ctx = resolveApplyContext(cfg, opts)
-  let desired = buildDesiredManifest(cfg, ctx)
-  # Idempotency check against the previous manifest.
-  if manifestsAreEquivalent(ctx.previousManifest, desired):
-    var noop: ApplyResult
-    noop.diff = SystemConfigDiff2(transitions: @[])
-    noop.isNoOp = true
-    noop.desiredManifest = ctx.previousManifest
-    # Re-point at the previous generation; do NOT bump the number.
-    ctx.nextGenerationNumber = ctx.previousManifest.generationNumber
-    ctx.nextGenerationDir = generationDirFor(
-      ctx.options.stateDir, ctx.nextGenerationNumber)
-    return recordGeneration(noop, ctx)
-  let diff = planTransitions(ctx.previousManifest, cfg)
-  let applied = applyTransitions(diff, ctx, desired)
-  recordGeneration(applied, ctx)
+  ##
+  ## B3 P2 risk #1: wraps the whole apply in the system apply lock so
+  ## concurrent invocations are mutually exclusive. The default
+  ## 30 s timeout matches the home-scope contract; raise
+  ## ``ESystemApplyBusy`` on contention.
+  ##
+  ## B3 P2 risk #4: lazily reaps any half-written generation
+  ## directories before computing ``nextGenerationNumber`` so a prior
+  ## crash mid-apply cannot leak a stale slot that biases the next
+  ## generation number.
+  # Resolve the state directory eagerly so we can take the lock against
+  # the same path the rest of the pipeline writes into.
+  var resolvedOpts = opts
+  if resolvedOpts.stateDir.len == 0:
+    resolvedOpts.stateDir = defaultStateDir()
+  var lock = acquireApplyLock(resolvedOpts.stateDir)
+  try:
+    discard repairPartialApply(resolvedOpts.stateDir, dryRun = false)
+    var ctx = resolveApplyContext(cfg, resolvedOpts)
+    let desired = buildDesiredManifest(cfg, ctx)
+    # Idempotency check against the previous manifest.
+    if manifestsAreEquivalent(ctx.previousManifest, desired):
+      var noop: ApplyResult
+      noop.diff = SystemConfigDiff2(transitions: @[])
+      noop.isNoOp = true
+      noop.desiredManifest = ctx.previousManifest
+      # Re-point at the previous generation; do NOT bump the number.
+      ctx.nextGenerationNumber = ctx.previousManifest.generationNumber
+      ctx.nextGenerationDir = generationDirFor(
+        ctx.options.stateDir, ctx.nextGenerationNumber)
+      return recordGeneration(noop, ctx)
+    let diff = planTransitions(ctx.previousManifest, cfg)
+    let applied = applyTransitions(diff, ctx, desired)
+    return recordGeneration(applied, ctx)
+  finally:
+    releaseApplyLock(lock)

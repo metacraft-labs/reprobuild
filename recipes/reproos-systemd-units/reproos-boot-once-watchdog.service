@@ -1,0 +1,37 @@
+[Unit]
+Description=ReproOS boot-once watchdog (B3 auto-rollback)
+Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/main/ReproOS-Generations-And-Foreign-Packages.milestones.org
+# Boot-once watchdog: if multi-user.target is not reached within the
+# deadline (default 60 s), invoke the auto-rollback primitive. The
+# primitive clears <state>/staged-next and rewrites grub.cfg so the
+# next reboot loads the previously-confirmed generation.
+After=local-fs.target
+DefaultDependencies=no
+# Only meaningful when a generation has just been staged for boot.
+ConditionPathExists=/var/lib/reproos/staged-next
+
+[Service]
+Type=oneshot
+# Wait up to TimeoutStartSec for multi-user.target. systemd-ctl's
+# 'is-active' subcommand returns 0 when the target is active. If the
+# target never reaches active within the budget, the watchdog fires
+# the rollback.
+ExecStart=/bin/sh -c '\
+  deadline=$$(( $$(date +%%s) + 60 )); \
+  while [ "$$(date +%%s)" -lt "$$deadline" ]; do \
+    if systemctl is-active --quiet multi-user.target; then \
+      exit 0; \
+    fi; \
+    sleep 2; \
+  done; \
+  /usr/local/bin/reproos-rebuild watchdog --deadline 60; \
+  # systemctl reboot is intentional: the next boot picks up the
+  # rewritten grub.cfg default (= the previously-confirmed gen).
+  /sbin/reboot \
+'
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

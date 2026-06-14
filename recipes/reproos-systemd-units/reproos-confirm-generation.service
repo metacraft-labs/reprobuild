@@ -1,0 +1,35 @@
+[Unit]
+Description=ReproOS confirm generation (B3 boot-success hook)
+Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/main/ReproOS-Generations-And-Foreign-Packages.milestones.org
+# Confirm-generation runs ONLY after multi-user.target has been
+# reached. If the boot fails before multi-user.target, this unit
+# never fires, <state>/staged-next is left untouched, and the next
+# reboot picks up the GRUB boot-prev fallback (B2 + B3 wiring).
+After=multi-user.target
+Requires=multi-user.target
+# We deliberately want this unit to run AFTER the watchdog has had a
+# chance to declare the boot "successful". Letting it run before
+# multi-user.target's wantedBy graph completes would defeat the
+# auto-rollback story.
+ConditionPathExists=/var/lib/reproos/staged-next
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/reproos-rebuild confirm
+# Pinned exit codes:
+#   0 -> confirmed (staged-next removed; <state>/current rotated)
+#   non-zero -> staged-next left in place; the next reboot will load
+#               the GRUB boot-prev fallback (= the previous-newest
+#               recorded generation).
+# We intentionally do NOT use Restart= here. A one-shot confirm
+# failure should NOT be retried — the failure surface (manifest gone,
+# permission denied, ...) is operator-facing and surfaces via
+# systemctl status.
+StandardOutput=journal
+StandardError=journal
+# No sandboxing: reproos-rebuild needs write access to
+# /var/lib/reproos and the boot directory.
+
+[Install]
+WantedBy=multi-user.target

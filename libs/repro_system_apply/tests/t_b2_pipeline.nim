@@ -308,7 +308,11 @@ system tflip:
 
 suite "B2 GRUB menu generator":
 
-  test "single-generation menu has one entry and a degenerate boot-prev":
+  test "single-generation menu omits boot-prev (B3 P2 risk #6 + #7)":
+    ## B3 fix: when only 1 generation is recorded the menu drops the
+    ## ``set fallback`` directive AND the redundant ``boot-prev``
+    ## menuentry. A single-generation system has nothing to fall back
+    ## TO, so emitting either is misleading.
     let state = freshStateDir("grub-single")
     let cfg = parseSystemConfigFile(SampleConfigPath)
     var opts: ApplyOptions
@@ -322,11 +326,11 @@ suite "B2 GRUB menu generator":
     let menu = generateGrubMenu(inputs, 1)
     check "menuentry" in menu
     check "reproos-gen-1" in menu
-    # A single-generation system: boot-prev falls back to the only
-    # generation.
-    check "reproos-boot-prev" in menu
     check "set default=\"reproos-gen-1\"" in menu
-    check "set fallback=\"reproos-boot-prev\"" in menu
+    # Boot-prev fallback is suppressed when there is no second-newest
+    # generation.
+    check "set fallback=" notin menu
+    check "reproos-boot-prev" notin menu
 
   test "two-generation menu is newest-first and default points at the new one":
     let state = freshStateDir("grub-double")

@@ -77,6 +77,31 @@ type
     importPath*: string
     resolvedPath*: string
 
+  ESystemApplyBusy* = object of ESystemConfig
+    ## B3 P2 risk #1: a concurrent ``reproos-rebuild apply`` /
+    ## ``switch`` / ``rollback`` is already holding the system apply
+    ## lock at ``<state>/locks/apply.lock``. ``lockPath`` is the file
+    ## the call was contending on; ``timeoutSeconds`` is the wait
+    ## budget that elapsed without acquiring the lock.
+    lockPath*: string
+    timeoutSeconds*: int
+
+  ESystemRollback* = object of ESystemConfig
+    ## Generic B3 rollback diagnostic. ``detail`` carries the structured
+    ## context the CLI renders.
+    detail*: string
+
+  ENoGenerationAvailable* = object of ESystemConfig
+    ## ``rollback`` was called but there is no previous generation to
+    ## revert to (e.g. only one generation has ever been applied).
+    detail*: string
+
+  EUnknownGeneration* = object of ESystemConfig
+    ## ``switch <N>`` referenced a generation number that does not
+    ## exist on disk.
+    generationNumber*: int
+    known*: seq[int]
+
 proc raiseUnstructured*(configPath: string; line, column: int;
                         seen, expected: string) {.noreturn.} =
   var msg = "unstructured config at " & configPath & ":" & $line
@@ -164,4 +189,33 @@ proc raiseImportNotFound*(configPath, importPath,
   e.configPath = configPath
   e.importPath = importPath
   e.resolvedPath = resolvedPath
+  raise e
+
+proc raiseSystemApplyBusy*(lockPath: string;
+                           timeoutSeconds: int) {.noreturn.} =
+  var e = newException(ESystemApplyBusy,
+    "apply lock held; another reproos-rebuild operation is in " &
+    "progress (lock=" & lockPath & ", waited " & $timeoutSeconds & "s)")
+  e.lockPath = lockPath
+  e.timeoutSeconds = timeoutSeconds
+  raise e
+
+proc raiseNoPreviousGeneration*(detail = "") {.noreturn.} =
+  var msg = "no previous generation available for rollback"
+  if detail.len > 0: msg.add ": " & detail
+  var e = newException(ENoGenerationAvailable, msg)
+  e.detail = detail
+  raise e
+
+proc raiseUnknownGeneration*(n: int; known: seq[int]) {.noreturn.} =
+  var msg = "generation " & $n & " is not recorded"
+  if known.len > 0:
+    msg.add " (known: "
+    for i, k in known:
+      if i > 0: msg.add ", "
+      msg.add $k
+    msg.add ")"
+  var e = newException(EUnknownGeneration, msg)
+  e.generationNumber = n
+  e.known = known
   raise e

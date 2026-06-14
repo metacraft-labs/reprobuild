@@ -119,7 +119,10 @@ proc generateGrubMenu*(generations: seq[GrubGenerationInput];
   ## ``staged-next`` generation, or — if no apply is staged — the
   ## currently-confirmed generation). One ``boot-prev`` recovery
   ## entry is appended at the end and is also configured as the
-  ## ``fallback`` target.
+  ## ``fallback`` target — UNLESS only one generation is recorded, in
+  ## which case the menu omits both the ``set fallback`` directive
+  ## (B3 P2 risk #7) and the redundant ``boot-prev`` menuentry
+  ## (B3 P2 risk #6).
   if generations.len == 0:
     return GrubHeader & "# (no generations recorded yet)\n"
   var sorted = generations
@@ -128,16 +131,18 @@ proc generateGrubMenu*(generations: seq[GrubGenerationInput];
   # Default entry selection.
   let defaultId = generationEntryId(current)
   out_buf.add "set default=\"" & defaultId & "\"\n"
-  # Boot-failure fallback: pick the second-newest generation if
-  # available; otherwise fall back to the same default (best effort
-  # only — a single-generation system has no previous to fall back
-  # to).
-  var prevId = defaultId
+  # Resolve the previous-newest generation that is NOT the current
+  # default. If no such generation exists (single-generation system)
+  # we omit both the fallback directive AND the boot-prev entry.
+  var prevId = ""
   for g in sorted:
     if g.number != current:
       prevId = generationEntryId(g.number)
       break
-  out_buf.add "set fallback=\"" & BootPrevEntryId & "\"\n"
+  if prevId.len > 0:
+    out_buf.add "set fallback=\"" & BootPrevEntryId & "\"\n"
+  else:
+    out_buf.add "# (single generation — no boot-prev fallback emitted)\n"
   out_buf.add "\n"
   for g in sorted:
     out_buf.add renderMenuentry(g, generationEntryId(g.number), "")
@@ -145,13 +150,15 @@ proc generateGrubMenu*(generations: seq[GrubGenerationInput];
   # boot-prev recovery entry — duplicates the previous-newest
   # generation's kernel + cmdline so the operator can pick it from
   # the menu manually OR the GRUB fallback wiring activates it
-  # automatically.
-  for g in sorted:
-    let id = generationEntryId(g.number)
-    if id == prevId:
-      out_buf.add renderMenuentry(g, BootPrevEntryId,
-        "(boot-prev fallback)")
-      break
+  # automatically. Omitted entirely when there is no other generation
+  # to fall back to.
+  if prevId.len > 0:
+    for g in sorted:
+      let id = generationEntryId(g.number)
+      if id == prevId:
+        out_buf.add renderMenuentry(g, BootPrevEntryId,
+          "(boot-prev fallback)")
+        break
   out_buf
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,10 @@ for libName in [
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
+  # ReproOS-Generations-And-Foreign-Packages B3: system-scope
+  # switch / rollback / list / gc / repair primitives. Lifts the
+  # home-profile rollback contract into system scope.
+  "repro_system_rollback",
   "repro_home_resources",
   "repro_homebrew_adapter",
   "repro_elevation",
