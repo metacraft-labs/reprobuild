@@ -1,0 +1,19 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "package": {
+    "distro": "dnf",
+    "name": "htop",
+    "snapshot": "fedora/39/20260601",
+    "version": "3.3.0-1.fc39-c1-placeholder"
+  },
+  "provisioning_methods": [
+    {
+      "kind": "direct-snapshot-url",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0,
+      "url": "https://kojipkgs.fedoraproject.org/packages/htop/3.3.0/1.fc39/x86_64/htop-3.3.0-1.fc39.x86_64.rpm"
+    }
+  ],
+  "signed_envelope": null
+}

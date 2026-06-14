@@ -1,0 +1,19 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "package": {
+    "distro": "apt",
+    "name": "git",
+    "snapshot": "debian/bookworm/20260601T000000Z",
+    "version": "1:2.39.5-0+deb12u2-c1-placeholder"
+  },
+  "provisioning_methods": [
+    {
+      "kind": "direct-snapshot-url",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0,
+      "url": "https://snapshot.debian.org/archive/debian/20260601T000000Z/pool/main/g/git/git_2.39.5-0+deb12u2_amd64.deb"
+    }
+  ],
+  "signed_envelope": null
+}

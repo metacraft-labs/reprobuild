@@ -1,0 +1,19 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "package": {
+    "distro": "pacman",
+    "name": "neovim",
+    "snapshot": "archlinux/rolling/20260601",
+    "version": "0.10.2-1-c1-placeholder"
+  },
+  "provisioning_methods": [
+    {
+      "kind": "direct-snapshot-url",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 0,
+      "url": "https://archive.archlinux.org/packages/n/neovim/neovim-0.10.2-1-x86_64.pkg.tar.zst"
+    }
+  ],
+  "signed_envelope": null
+}
