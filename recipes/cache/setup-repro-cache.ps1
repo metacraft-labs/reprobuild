@@ -132,6 +132,23 @@ function Invoke-WslExec {
   }
 }
 
+function Convert-ToWslPath {
+  param(
+    [string] $Distro,
+    [string] $WindowsPath
+  )
+  # WSL's argument layer strips backslashes when forwarded via
+  # ``wsl.exe -- wslpath <arg>``: ``C:\foo\bar`` arrives as ``C:foobar``.
+  # Forward-slash the path first so wslpath sees the structure intact.
+  $fwd = $WindowsPath -replace '\\', '/'
+  $out = & wsl.exe -d $Distro -- wslpath $fwd 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "wslpath failed for $WindowsPath (distro=$Distro): $out"
+  }
+  # Some WSL builds emit a trailing CR.
+  return ($out -replace "`r", "").Trim()
+}
+
 function Write-WslFile {
   param([string] $Distro, [string] $Path, [string] $Content)
   # Pipe the content via stdin so we don't have to quote-escape it
@@ -139,8 +156,8 @@ function Write-WslFile {
   $tmp = [System.IO.Path]::GetTempFileName()
   try {
     Set-Content -Path $tmp -Value $Content -NoNewline -Encoding utf8
-    $wslSrc = & wsl.exe -d $Distro -- wslpath ([string](Resolve-Path $tmp))
-    Invoke-WslExec $Distro @("sh", "-c", "install -D -m 0644 $wslSrc $Path")
+    $wslSrc = Convert-ToWslPath -Distro $Distro -WindowsPath $tmp
+    Invoke-WslExec $Distro @("sh", "-c", "install -D -m 0644 '$wslSrc' '$Path'")
   } finally {
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
   }
@@ -203,12 +220,23 @@ generateResolvConf=true
 Write-Host "[setup-repro-cache] installing runtime deps ..."
 Invoke-WslExec $DistroName @("sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync ca-certificates curl >/dev/null")
 
+# Resolve the recipes/ source dir once; needed for both the daemon
+# binary install (step 5) AND the rsync-mirror script install (5b).
+$thisDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
 # 5. Stage daemon binary.
-$daemonWslPath = & wsl.exe -d $DistroName -- wslpath ([string](Resolve-Path $DaemonBinary))
+$daemonWslPath = Convert-ToWslPath -Distro $DistroName -WindowsPath ([string](Resolve-Path $DaemonBinary))
 Invoke-WslExec $DistroName @("install", "-D", "-m", "0755", $daemonWslPath, "/usr/local/bin/repro-binary-cache")
 
+# 5b. Stage the rsync mirror helper script. The systemd unit's
+# ExecStart= references /usr/local/bin/repro-binary-cache-rsync-snapshot
+# (no .sh suffix) — install with that name from the recipes/ copy.
+$rsyncSnapshotSrc = (Resolve-Path (Join-Path $thisDir "repro-binary-cache-rsync-snapshot.sh")).Path
+$rsyncSnapshotWsl = Convert-ToWslPath -Distro $DistroName -WindowsPath $rsyncSnapshotSrc
+Invoke-WslExec $DistroName @("install", "-D", "-m", "0755", $rsyncSnapshotWsl,
+                             "/usr/local/bin/repro-binary-cache-rsync-snapshot")
+
 # 6. Drop systemd units.
-$thisDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $serviceUnit = Get-Content -Raw -Path (Join-Path $thisDir "systemd-units/repro-binary-cache.service")
 $serviceUnit = $serviceUnit -replace "@@LISTEN@@", $Listen
 Write-WslFile -Distro $DistroName -Path "/etc/systemd/system/repro-binary-cache.service" -Content $serviceUnit

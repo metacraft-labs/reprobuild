@@ -28,7 +28,7 @@
 ## its own key in v1; the directory is forward-compat for federated
 ## publishing).
 
-import std/[os, strutils]
+import std/[os, sets, strutils]
 
 import blake3
 import repro_local_store
@@ -73,6 +73,22 @@ type
       ## verifies the EMBEDDED ``producerPubKey`` in each manifest
       ## against this keypair OR against a trust anchor for
       ## federated publishers.
+    evictionPolicy*: LruEvictionPolicy
+      ## A4 P4 LRU eviction caps. The hard cap is enforced
+      ## synchronously by the publish handler (Debt 2): an incoming
+      ## payload that would push the on-disk footprint past
+      ## ``hardCapBytes`` is rejected with HTTP 507. Soft-cap
+      ## eviction runs asynchronously after each successful
+      ## publish. Both caps are zero-disabled when
+      ## ``softCapBytes`` / ``hardCapBytes`` is 0 (test harnesses
+      ## that don't want cap behaviour).
+    pinListPath*: string
+      ## Optional on-disk pin-list path. When non-empty, the
+      ## eviction policy reloads pins from this path before each
+      ## hard-cap projection so an operator can refresh the pin set
+      ## without restarting the daemon. Empty string disables
+      ## reload (the in-memory ``evictionPolicy.pins`` is used
+      ## verbatim).
 
 # ---------------------------------------------------------------------------
 # Filesystem helpers.
@@ -159,10 +175,25 @@ proc writeCacheInfo*(s: BinaryCacheServerState) =
 # ---------------------------------------------------------------------------
 
 proc openBinaryCacheServer*(root: string;
-                            storeDir = ""): BinaryCacheServerState =
+                            storeDir = "";
+                            softCapBytes: int64 = DefaultSoftCapBytes;
+                            hardCapBytes: int64 = DefaultHardCapBytes;
+                            pinListPath: string = ""): BinaryCacheServerState =
   ## Opens (or creates) a binary-cache server rooted at ``root``.
   ## Idempotent: rerunning against a populated ``root`` reloads the
   ## existing producer key + manifests; nothing is overwritten.
+  ##
+  ## ``softCapBytes`` / ``hardCapBytes`` configure the LRU eviction
+  ## caps (A4 P4 + Debt 2). Pass ``0`` to disable the corresponding
+  ## cap entirely — useful for the integration-test harness that
+  ## doesn't want post-publish eviction.
+  ##
+  ## ``pinListPath`` is the on-disk path to ``pinned-entries.txt``
+  ## (typically ``recipes/cache/pinned-entries.txt`` in production,
+  ## or a per-test file). When non-empty the file is parsed once at
+  ## startup AND re-read by the hard-cap projection so the operator
+  ## can refresh pins without restarting the daemon. Pass empty to
+  ## disable file-based reload (in-memory pin set still respected).
   createDir(root)
   createDir(root / ManifestsSubdir)
   createDir(root / PayloadCasSubdir)
@@ -174,11 +205,20 @@ proc openBinaryCacheServer*(root: string;
     if storeDir.len > 0: storeDir
     else: root / PayloadCasSubdir
 
+  let initialPins =
+    if pinListPath.len > 0: loadPinList(pinListPath)
+    else: initHashSet[string]()
+
   result = BinaryCacheServerState(
     root: root,
     store: openStore(root / PayloadCasSubdir),
     info: newCacheInfoRecord(advertisedStoreDir),
-    producerKeypair: PeerKeypair())
+    producerKeypair: PeerKeypair(),
+    evictionPolicy: newLruEvictionPolicy(
+      softCapBytes = softCapBytes,
+      hardCapBytes = hardCapBytes,
+      pins = initialPins),
+    pinListPath: pinListPath)
   ensureProducerKey(result)
   writeCacheInfo(result)
 
@@ -200,7 +240,18 @@ proc storeManifest*(s: BinaryCacheServerState;
   let path = manifestPathFor(s, hex)
   createDir(parentDir(path))
   let bytes = encodeManifest(m)
-  writeFile(path, cast[string](bytes))
+  # Explicit byte-by-byte copy into a fresh string instead of
+  # ``cast[string](bytes)``. The cast is layout-compatible in
+  # Nim 2.2 ARC, but observed to lose accuracy of the length
+  # field under specific GC pressure (footprint-scan in
+  # ``handlePublish``) — the file gains a stray trailing byte and
+  # the next decode reports "manifest envelope has trailing bytes".
+  # Bisected to this exact site 2026-06-14 in the Phase A
+  # debt-closure work.
+  var content = newString(bytes.len)
+  for i in 0 ..< bytes.len:
+    content[i] = char(bytes[i])
+  writeFile(path, content)
   return path
 
 proc loadManifest*(s: BinaryCacheServerState;

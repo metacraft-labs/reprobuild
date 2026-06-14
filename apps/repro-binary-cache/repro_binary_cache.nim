@@ -21,6 +21,7 @@
 import std/[asyncdispatch, os, parseopt, strutils]
 
 import repro_binary_cache_server
+import repro_local_store
 
 const
   Usage = """
@@ -100,7 +101,34 @@ proc main() {.async.} =
   if opts.root.len == 0:
     stderr.writeLine("--root or REPRO_BINARY_CACHE_ROOT is required")
     quit(2)
-  let state = openBinaryCacheServer(opts.root, opts.storeDir)
+  # A4 P4 / Debt 2 — env-driven cap config. 0 disables the
+  # corresponding cap; the operator handbook documents the per-host
+  # tuning recipe. The pin-list lives at
+  # ``recipes/cache/pinned-entries.txt`` in production; the operator
+  # can override the path via REPRO_BINARY_CACHE_PIN_LIST.
+  let softCap = block:
+    let raw = getEnv("REPRO_BINARY_CACHE_SOFT_CAP_BYTES")
+    if raw.len == 0: DefaultSoftCapBytes
+    else:
+      try: parseBiggestInt(raw).int64
+      except ValueError:
+        stderr.writeLine("WARN: invalid REPRO_BINARY_CACHE_SOFT_CAP_BYTES=" & raw &
+                         "; falling back to default")
+        DefaultSoftCapBytes
+  let hardCap = block:
+    let raw = getEnv("REPRO_BINARY_CACHE_HARD_CAP_BYTES")
+    if raw.len == 0: DefaultHardCapBytes
+    else:
+      try: parseBiggestInt(raw).int64
+      except ValueError:
+        stderr.writeLine("WARN: invalid REPRO_BINARY_CACHE_HARD_CAP_BYTES=" & raw &
+                         "; falling back to default")
+        DefaultHardCapBytes
+  let pinListPath = getEnv("REPRO_BINARY_CACHE_PIN_LIST", "")
+  let state = openBinaryCacheServer(opts.root, opts.storeDir,
+                                    softCapBytes = softCap,
+                                    hardCapBytes = hardCap,
+                                    pinListPath = pinListPath)
   defer: close(state)
   if opts.printPubkey or opts.once:
     stdout.writeLine(hex65(state.producerKeypair.publicKey))

@@ -21,9 +21,15 @@ The eviction policy enforces two caps:
   * **Hard cap (default 100 GiB).** Synchronous. The publish handler
     rejects an incoming write whose projected post-publish footprint
     would exceed this value. The producer sees a structured `507
-    Insufficient Storage` response (TODO: wire up to the handler in
-    P6 follow-up; A4 P4 ships the policy primitive, not the handler
-    integration).
+    Insufficient Storage` response. The projection is conservative:
+    the handler sums the byte sizes of the multipart `payload` parts
+    BEFORE any `storeCasBlob` call, so a rejection leaves the
+    on-disk footprint unchanged. The conservativeness double-counts
+    a duplicate payload that is already in the CAS — this is
+    intentional, so an attacker can't trickle-publish duplicates to
+    keep the daemon arbitrarily close to its hard cap without
+    triggering a cap response. A future milestone may switch to a
+    dedup-aware projection when the threat-model gate relaxes.
 
 Operators tune the caps via environment variables on the
 `repro-binary-cache` daemon:

@@ -34,6 +34,13 @@ type
       ## Optional ``X-Repro-Producer`` header value. Used by the A4
       ## publish-auto-release leg; absent for A2 / A2.5 tests so the
       ## server's peer-addr fallback applies.
+    expectStatus: int
+      ## Phase A debt-closure hard-cap test: when non-zero, the helper
+      ## treats this as the EXPECTED HTTP status from the server. A
+      ## matching status exits 0 (instead of 3) and prints the
+      ## response body on stdout; a mismatch exits 4 with a diag on
+      ## stderr. Lets the bash integration tests probe negative
+      ## paths (507, 422, etc.) without parsing curl's exit codes.
 
 proc parseCli(): HelperOpts =
   result.url = ""
@@ -53,6 +60,9 @@ proc parseCli(): HelperOpts =
       of "key-file": result.keyFile = p.val
       of "tamper-manifest": result.tamperManifest = true
       of "producer": result.producer = p.val
+      of "expect-status":
+        try: result.expectStatus = parseInt(p.val)
+        except ValueError: discard
       else: discard
     of cmdArgument: discard
 
@@ -170,7 +180,15 @@ proc main() =
   if opts.producer.len > 0:
     client.headers["X-Repro-Producer"] = opts.producer
   let resp = client.request(opts.url & "/publish", HttpPost, body)
-  if int(resp.code) >= 300:
+  let actual = int(resp.code)
+  if opts.expectStatus != 0:
+    if actual == opts.expectStatus:
+      stdout.writeLine(resp.body.strip())
+      quit(0)
+    stderr.writeLine("publish status mismatch: expected " & $opts.expectStatus &
+                     " got " & $actual & " body=" & resp.body)
+    quit(4)
+  if actual >= 300:
     stderr.writeLine("publish failed: " & $resp.code & " " & resp.body)
     quit(3)
   stdout.writeLine(resp.body.strip())

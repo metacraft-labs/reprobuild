@@ -66,6 +66,15 @@ type
     ## signature. The HTTP layer maps each to ``Http400`` /
     ## ``Http403`` / ``Http422``.
 
+  PublishCapacityError* = object of CatchableError
+    ## Raised by ``handlePublish`` when ingesting the request's
+    ## payloads would push the on-disk footprint past the hard cap
+    ## (A4 P4 / Debt 2). The HTTP layer maps this to ``Http507``
+    ## (Insufficient Storage). NO bytes are written to the CAS
+    ## before this raises — the projection runs against the
+    ## sum of ``payloadBlocks.len`` BEFORE any ``storeCasBlob``
+    ## call.
+
   BinaryCacheHttpServer* = ref object
     state*: BinaryCacheServerState
     server*: AsyncHttpServer
@@ -224,6 +233,22 @@ proc handlePublish*(s: BinaryCacheServerState;
   ## Validates + ingests a publish request. Returns the decoded
   ## manifest so the HTTP layer can echo the entry-key hex back to
   ## the client.
+  ##
+  ## Debt 2 / A4 P4 — hard-cap rejection: BEFORE any payload bytes
+  ## are written to the CAS the handler projects the post-publish
+  ## footprint = ``currentFootprintBytes`` + sum(``payloadBlocks``).
+  ## If the projection exceeds ``evictionPolicy.hardCapBytes`` the
+  ## publish is rejected with a ``PublishCapacityError`` which the
+  ## HTTP layer maps to ``Http507``. The projection is conservative:
+  ## it double-counts a payload that is already in the CAS under
+  ## the same digest. This is intentional — the publisher MUST
+  ## still see the over-cap signal even if a deduplicated blob
+  ## happens to leave the actual footprint unchanged; otherwise an
+  ## attacker could trickle-publish duplicates to keep the daemon
+  ## arbitrarily close to its hard cap without triggering the cap
+  ## response. We document the conservativeness in
+  ## ``EVICTION-POLICY.md`` and leave the dedup-aware variant for
+  ## a future milestone.
   if req.manifestBytes.len == 0:
     raise newException(PublishError, "publish missing manifest part")
   let manifest = decodeManifest(req.manifestBytes)
@@ -234,6 +259,28 @@ proc handlePublish*(s: BinaryCacheServerState;
   if not verifyManifest(manifest):
     raise newException(PublishError,
       "manifest signature failed verification against embedded pubkey")
+  # Hard-cap projection — runs BEFORE any storeCasBlob call so a
+  # rejection leaves the on-disk footprint unchanged.
+  if s.evictionPolicy.hardCapBytes > 0:
+    var incoming: int64 = 0
+    for blob in req.payloadBlocks:
+      incoming += int64(blob.len)
+    let current = currentFootprintBytes(s.store)
+    # Refresh pins from disk if a pin-list path is configured so
+    # the operator can adjust pin coverage without bouncing the
+    # daemon. The pin set isn't used in the projection itself but
+    # we keep it fresh for the soft-cap sweep that may run
+    # immediately after a successful publish.
+    if s.pinListPath.len > 0:
+      try:
+        s.evictionPolicy.pins = loadPinList(s.pinListPath)
+      except CatchableError: discard
+    if willExceedHardCap(s.evictionPolicy, current, incoming):
+      raise newException(PublishCapacityError,
+        "publish rejected: hard-cap=" & $s.evictionPolicy.hardCapBytes &
+        " current=" & $current & " incoming=" & $incoming &
+        " (would exceed by " &
+        $((current + incoming) - s.evictionPolicy.hardCapBytes) & " bytes)")
   # Verify every declared payload object has a matching attached blob.
   var attachedByDigest = initTable[Blake3Hash, seq[byte]]()
   for blob in req.payloadBlocks:
@@ -396,6 +443,13 @@ proc handlePublishHttp(s: BinaryCacheServerState;
     var headers = newHttpHeaders()
     headers["Content-Type"] = "text/plain; charset=utf-8"
     await req.respond(Http200, hex & "\n", headers)
+  except PublishCapacityError as e:
+    # Map the hard-cap rejection to 507 Insufficient Storage. The
+    # producer's retry logic sees a structured signal it can act on
+    # (e.g. trim its publishing batch or escalate to the operator).
+    var headers = newHttpHeaders()
+    headers["Content-Type"] = "text/plain; charset=utf-8"
+    await req.respond(Http507, e.msg & "\n", headers)
   except PublishError as e:
     await req.respond(Http422, e.msg)
   except BinaryCacheCodecError as e:
