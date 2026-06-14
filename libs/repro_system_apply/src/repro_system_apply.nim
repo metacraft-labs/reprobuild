@@ -24,8 +24,12 @@ import repro_system_apply/types
 import repro_system_apply/errors
 import repro_system_apply/dsl
 import repro_system_apply/lower
+import repro_system_apply/pipeline
+import repro_system_apply/grub
 
 export types
 export errors
 export dsl
 export lower
+export pipeline
+export grub
