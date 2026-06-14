@@ -92,6 +92,10 @@ for libName in [
   "repro_test_support",
   "repro_workspace_manifests",
   "repro_peer_cache",
+  # ReproOS-Generations-And-Foreign-Packages A2: binary-cache server
+  # library + apps/repro-binary-cache HTTP daemon. Layer-3 substitute
+  # plane per Binary-Caches.md; see THREE-LAYER-TAXONOMY.md.
+  "repro_binary_cache_server",
   # Spec-Implementation M2a: ``repro_solver`` ships the clingo Nim
   # bindings + the high-level Solver/Solution/Constraint placeholder
   # types. M2b-M2e extend it with the ASP encoder; downstream libs

@@ -1,0 +1,36 @@
+[Unit]
+Description=Reprobuild binary-cache server (ReproOS-Generations-And-Foreign-Packages A2)
+Documentation=https://github.com/metacraft-labs/reprobuild-specs/blob/main/Binary-Caches.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reprocache
+Group=reprocache
+ExecStart=/usr/local/bin/repro-binary-cache --root=/var/lib/repro-binary-cache --listen=@@LISTEN@@
+Restart=always
+RestartSec=5
+WorkingDirectory=/var/lib/repro-binary-cache
+# Read+write only to the cache state dir; the rest of the filesystem
+# is read-only / inaccessible. Combined with User=reprocache this
+# matches the threat model documented in recipes/cache/README.md
+# § "Threat model".
+ProtectSystem=strict
+ReadWritePaths=/var/lib/repro-binary-cache
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Restart-on-failure semantics: the service MUST stay up even if a
+# crash leaves the on-disk index half-written (the local-store SQLite
+# WAL covers the corner cases). The systemd unit's Restart=always
+# combined with the daemon's openStore() recovery primitive guarantees
+# state restoration on the next boot.
+
+[Install]
+WantedBy=multi-user.target
