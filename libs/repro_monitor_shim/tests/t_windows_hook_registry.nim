@@ -17,7 +17,7 @@
 ## the platform gate that windows_hook_registry itself enforces).
 
 when defined(windows):
-  import ct_interpose/hook_registry
+  import stackable_hooks/hook_registry
   import repro_monitor_shim/windows_hook_registry as hr
 
   proc test_register_initialises_lazily() =

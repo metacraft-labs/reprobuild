@@ -2,7 +2,7 @@ when not defined(macosx):
   {.error: "repro_monitor_hooks/macos_interpose_runtime is macOS-only".}
 
 import std/os
-import ct_interpose/propagation as ct_propagation
+import stackable_hooks/propagation as ct_propagation
 
 # Bridge from C-level spawn hooks back into ct_interpose's SIP-rewrite
 # helper. On macOS, /bin/, /sbin/, /usr/bin/, /usr/sbin/ are SIP-protected,

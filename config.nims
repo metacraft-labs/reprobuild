@@ -161,14 +161,16 @@ addPackagePath("STINT_SRC", [
   "libs" / "stint" / "src",
 ], "stint.nim")
 
-# M26: ct_interpose's hook_registry powers the Windows monitor shim's
-# hook chain. Prefer an explicit CT_INTERPOSE_SRC, then the
-# codetracer-native-recorder sibling checkout, then a vendored copy under
-# libs/repro_monitor_shim/vendor/ct_interpose if present.
-addPackagePath("CT_INTERPOSE_SRC", [
-  ".." / "codetracer-native-recorder" / "ct_interpose" / "src",
-  "libs" / "repro_monitor_shim" / "vendor" / "ct_interpose" / "src",
-], "ct_interpose" / "hook_registry.nim")
+# The Windows monitor shim's hook chain is implemented on top of
+# ``metacraft-labs/nim-stackable-hooks`` (the framework portion that
+# the spec at MCR-OS-Interposition.status.org §M0 describes as the
+# Nim port of agent-harbor's stackable-hooks Rust library). Prefer
+# an explicit STACKABLE_HOOKS_SRC, then the sibling-repo checkout,
+# then a vendored copy under libs/repro_monitor_shim/vendor.
+addPackagePath("STACKABLE_HOOKS_SRC", [
+  ".." / "nim-stackable-hooks" / "src",
+  "libs" / "repro_monitor_shim" / "vendor" / "nim-stackable-hooks" / "src",
+], "stackable_hooks.nim")
 
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test

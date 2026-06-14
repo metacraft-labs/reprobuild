@@ -294,23 +294,26 @@ type
     shim*: string
 
 proc ctInterposeSrcPath*(repoRoot: string): string =
-  ## Locate the ct_interpose source tree the Windows monitor shim
-  ## depends on. Honours ``CT_INTERPOSE_SRC`` (the same env knob
-  ## ``scripts/build_apps.sh`` honours), then falls back to the
-  ## codetracer-native-recorder sibling checkout, then the in-tree
-  ## vendor copy. Returns the empty string when nothing is found —
-  ## the caller's compileNim call will then surface the missing
-  ## ``hook_registry.nim`` path as a normal compile error rather
+  ## Locate the stackable-hooks source tree the Windows monitor shim
+  ## depends on. The legacy name is preserved (used by 25+ existing
+  ## tests) so callers don't need a rename pass — the source-of-truth
+  ## moved from codetracer-native-recorder/ct_interpose to
+  ## metacraft-labs/nim-stackable-hooks, but the resolver shape is
+  ## unchanged. Honours ``STACKABLE_HOOKS_SRC`` (the same env knob
+  ## ``scripts/build_apps.sh`` and ``env.ps1`` honour), then falls
+  ## back to the sibling checkout, then the in-tree vendor copy.
+  ## Returns the empty string when nothing is found — the caller's
+  ## compileNim call will then surface the missing
+  ## ``stackable_hooks.nim`` path as a normal compile error rather
   ## than silently degrading.
-  let explicit = getEnv("CT_INTERPOSE_SRC")
+  let explicit = getEnv("STACKABLE_HOOKS_SRC")
   if explicit.len > 0 and dirExists(explicit):
     return explicit
-  let sibling = repoRoot.parentDir / "codetracer-native-recorder" /
-    "ct_interpose" / "src"
+  let sibling = repoRoot.parentDir / "nim-stackable-hooks" / "src"
   if dirExists(sibling):
     return sibling
   let vendored = repoRoot / "libs" / "repro_monitor_shim" / "vendor" /
-    "ct_interpose" / "src"
+    "nim-stackable-hooks" / "src"
   if dirExists(vendored):
     return vendored
   ""

@@ -24,7 +24,7 @@ when defined(windows):
 # the dev-env activation pipeline reach for. When ct_interpose grows a
 # canonical populate routine, this list collapses to a single call.
 when defined(macosx):
-  import ct_interpose/propagation as ct_propagation
+  import stackable_hooks/propagation as ct_propagation
 
   const reproSandboxBinaries = [
     "/bin/sh",

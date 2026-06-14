@@ -30,6 +30,11 @@ import repro_monitor_shim/windows_iat_patcher
 import repro_monitor_shim/windows_hook_registry as hr
 import repro_monitor_shim/install_audit
 
+# Framework's safer grandchild-injection primitive — replaces the
+# bespoke INFINITE-wait inject_dll path with concurrent-injection cap
+# + per-call deadline + already-mapped probe + resume-before-init.
+import stackable_hooks/propagation_windows as shProp
+
 {.push raises: [].}
 
 # ---------------------------------------------------------------------------
@@ -62,32 +67,28 @@ import repro_monitor_shim/install_audit
 # ``libs/repro_monitor_shim/vendor/ct_inline_hook`` would also work
 # if the recorder sibling checkout is missing.
 
-const ctInlineHookDir {.strdefine.}: string =
-  currentSourcePath().parentDir().parentDir().parentDir().parentDir()
-    .parentDir().parentDir() /
-    "codetracer-native-recorder" / "ct_inline_hook"
+# M73 used to {.compile.} the ct_inline_hook C sources directly out of
+# the codetracer-native-recorder sibling checkout. That entangled
+# reprobuild's build with the recorder's source tree; with the
+# stackable-hooks split the inline-detour primitive now lives in
+# ``metacraft-labs/nim-stackable-hooks`` and we pull it via a Nim
+# wrapper that handles the {.compile.} blocks under the hood.
+import stackable_hooks/inline_hook/windows_inline_hook
 
-when fileExists(ctInlineHookDir / "install_windows.c"):
-  {.passC: "-I" & ctInlineHookDir & " -D_CRT_SECURE_NO_WARNINGS".}
-  {.compile: ctInlineHookDir / "length_decoder.c".}
-  {.compile: ctInlineHookDir / "rel32_fixup.c".}
-  {.compile: ctInlineHookDir / "install_windows.c".}
-  const ctInlineHookAvailable = true
-else:
-  {.warning: "ct_inline_hook sources not found at " & ctInlineHookDir &
-    "; Nim dynlib-resolved CreateProcessW calls will bypass the monitor.".}
-  const ctInlineHookAvailable = false
+const ctInlineHookAvailable = true
 
-when ctInlineHookAvailable:
-  proc ctInlineHookInstall(target: pointer, hook: pointer,
-                           outTrampoline: ptr pointer): cint
-    {.importc: "ct_inline_hook_install", cdecl.}
-  proc ctInlineHookBeginTransaction(): cint
-    {.importc: "ct_inline_hook_begin_transaction", cdecl.}
-  proc ctInlineHookCommitTransaction(): cint
-    {.importc: "ct_inline_hook_commit_transaction", cdecl.}
-  proc ctInlineHookAbortTransaction(): cint
-    {.importc: "ct_inline_hook_abort_transaction", cdecl.}
+template ctInlineHookInstall(target, hook: pointer;
+                             outTrampoline: ptr pointer): cint =
+  inlineHookInstall(target, hook, outTrampoline)
+
+template ctInlineHookBeginTransaction(): cint =
+  inlineHookBeginTransaction()
+
+template ctInlineHookCommitTransaction(): cint =
+  inlineHookCommitTransaction()
+
+template ctInlineHookAbortTransaction(): cint =
+  inlineHookAbortTransaction()
 
 # --- Win32 typedefs ---------------------------------------------------------
 
@@ -1184,6 +1185,19 @@ proc ensureSelfDllPath() =
   selfDllPathW[int(n)] = 0'u16
   selfDllPathReady = true
 
+proc selfDllPath(): string {.raises: [].} =
+  ## Narrow string form of ``selfDllPathW`` for callers that need a
+  ## native ``string`` (e.g. the stackable-hooks framework's
+  ## ``injectShimIntoChild`` takes the library path as a UTF-8 string
+  ## and re-widens it internally). The shim DLL path is always plain
+  ## ASCII so the ``[i] and 0xFF`` low-byte extract is lossless.
+  let last = selfDllPathW.len - 1
+  if last <= 0:
+    return ""
+  result = newString(last)
+  for i in 0 ..< last:
+    result[i] = char(selfDllPathW[i] and 0xFF)
+
 # Inject the shim DLL into ``hProcess`` by allocating a buffer in the
 # remote address space, writing our own DLL path into it, and firing
 # LoadLibraryW via CreateRemoteThread. LoadLibraryW's entry-point
@@ -1193,6 +1207,16 @@ proc ensureSelfDllPath() =
 # Returns true on success. Failures are swallowed silently — child
 # might still run with degraded (but correct) monitoring evidence,
 # which beats crashing the child or killing the parent.
+#
+# **Legacy code path**: This proc is retained for backwards compat
+# with non-snoop callers that still reach for the bespoke injector.
+# The snoop hooks now route through
+# ``stackable_hooks/propagation_windows`` which adds the four safety
+# knobs documented in that module (maxInFlight semaphore, deadline
+# replacing INFINITE wait, EnumProcessModulesEx skip,
+# resume-before-init ordering). For new call sites, prefer the
+# framework's ``injectShimIntoChild(hProcess, libraryPath,
+# initSymbol)``.
 proc injectShimIntoChild(hProcess: HANDLE): bool {.raises: [].} =
   if selfDllPathW.len == 0:
     return false
@@ -1331,7 +1355,8 @@ proc snoopCreateProcessW(ctx: var hr.HookContext) {.raises: [].} =
     # double-resumes.
     if r != 0 and lpProcessInfo != nil and selfDllPathW.len > 0:
       let pi = lpProcessInfo[]
-      discard injectShimIntoChild(pi.hProcess)
+      discard shProp.injectShimIntoChild(pi.hProcess, selfDllPath(),
+        "repro_runtime_init")
       if not callerAskedForSuspended:
         discard ResumeThread(pi.hThread)
   except CatchableError:
@@ -1370,7 +1395,8 @@ proc snoopCreateProcessA(ctx: var hr.HookContext) {.raises: [].} =
     emitRecord(record)
     if r != 0 and lpProcessInfo != nil and selfDllPathW.len > 0:
       let pi = lpProcessInfo[]
-      discard injectShimIntoChild(pi.hProcess)
+      discard shProp.injectShimIntoChild(pi.hProcess, selfDllPath(),
+        "repro_runtime_init")
       if not callerAskedForSuspendedA:
         discard ResumeThread(pi.hThread)
   except CatchableError:

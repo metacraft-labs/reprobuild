@@ -15,7 +15,7 @@
 #                                       libs/nim-serialization, libs/nimcrypto
 #                                       submodules under it)
 #       - runquota/                    (Nim libs under libs/runquota_*)
-#       - codetracer-native-recorder/  (ct_interpose/src for the monitor shim)
+#       - nim-stackable-hooks/         (framework primitives the monitor shim builds on)
 #
 #   Once the sibling layout is satisfied, `config.nims` resolves every
 #   third-party package without touching `nimble install`.
@@ -32,7 +32,7 @@
 #   $env:WINDOWS_DIY_INSTALL_ROOT = <dir>  where toolchains land
 #
 # Knobs specific to reprobuild:
-#   $env:CT_INTERPOSE_SRC = <path>  override `../codetracer-native-recorder/ct_interpose/src`.
+#   $env:STACKABLE_HOOKS_SRC = <path>  override `../nim-stackable-hooks/src`.
 #   $env:RUNQUOTA_SRC     = <path>  override `../runquota`.
 #   $env:NIMCRYPTO_SRC    = <path>  override `../codetracer/libs/nimcrypto`.
 #   $env:NIM_STEW_SRC     = <path>  override `../codetracer/libs/nim-stew`.
@@ -63,7 +63,7 @@ function Test-SiblingRepo {
 
 $codetracerDir = Test-SiblingRepo -Name "codetracer" -Marker "libs"
 $runquotaDir = Test-SiblingRepo -Name "runquota" -Marker "libs"
-$nativeRecorderDir = Test-SiblingRepo -Name "codetracer-native-recorder" -Marker "ct_interpose"
+$stackableHooksDir = Test-SiblingRepo -Name "nim-stackable-hooks" -Marker "stackable_hooks.nimble"
 
 if ([string]::IsNullOrEmpty($codetracerDir)) {
     Write-Warning "reprobuild env.ps1: ../codetracer sibling missing -- nimcrypto/nim-stew/nim-faststreams/nim-serialization come from there. Clone it and run 'git submodule update --init libs/nimcrypto libs/nim-stew libs/nim-faststreams libs/nim-serialization' before building."
@@ -71,16 +71,16 @@ if ([string]::IsNullOrEmpty($codetracerDir)) {
 if ([string]::IsNullOrEmpty($runquotaDir)) {
     Write-Warning "reprobuild env.ps1: ../runquota sibling missing -- the runquota_* libraries are required by config.nims. Clone metacraft-labs/runquota and run 'git checkout dev'."
 }
-if ([string]::IsNullOrEmpty($nativeRecorderDir)) {
-    Write-Warning "reprobuild env.ps1: ../codetracer-native-recorder sibling missing -- the monitor shim's hook_registry comes from ct_interpose/src. Clone metacraft-labs/codetracer-native-recorder if you plan to build the Windows monitor shim."
+if ([string]::IsNullOrEmpty($stackableHooksDir)) {
+    Write-Warning "reprobuild env.ps1: ../nim-stackable-hooks sibling missing -- the monitor shim's hook_registry, reentrancy guard, and inline-detour primitive all come from there. Clone metacraft-labs/nim-stackable-hooks if you plan to build the Windows monitor shim."
 }
 
 # Re-export the resolved sibling paths so `config.nims` doesn't have to
 # walk relative-path candidates. Only the entries that have no vendored
 # fallback inside `reprobuild/libs/` are exported here:
 #
-#   * RUNQUOTA_SRC / CT_INTERPOSE_SRC -- no vendored fallback, must point
-#     at the sibling checkout.
+#   * RUNQUOTA_SRC / STACKABLE_HOOKS_SRC -- no vendored fallback, must
+#     point at the sibling checkout.
 #
 # `NIMCRYPTO_SRC` / `NIM_STEW_SRC` / `NIM_FASTSTREAMS_SRC` are
 # DELIBERATELY NOT exported, even though their codetracer-side copies
@@ -91,8 +91,8 @@ if ([string]::IsNullOrEmpty($nativeRecorderDir)) {
 # (notably `stew/ptrops.baseAddr` which the vendored
 # `nim-faststreams/buffers.nim` depends on).
 if ($runquotaDir) { $env:RUNQUOTA_SRC = $runquotaDir }
-if ($nativeRecorderDir) {
-    $env:CT_INTERPOSE_SRC = Join-Path $nativeRecorderDir "ct_interpose\src"
+if ($stackableHooksDir) {
+    $env:STACKABLE_HOOKS_SRC = Join-Path $stackableHooksDir "src"
 }
 
 # --- 3. Status summary -------------------------------------------------------
@@ -117,7 +117,7 @@ Write-Host "  gcc          = $(Get-CommandSource 'gcc')"
 Write-Host "  just         = $(Get-CommandSource 'just')"
 Write-Host "  codetracer   = $(if ($codetracerDir) { $codetracerDir } else { '(missing -- see warning)' })"
 Write-Host "  runquota     = $(if ($runquotaDir) { $runquotaDir } else { '(missing -- see warning)' })"
-Write-Host "  ct_interpose = $(if ($nativeRecorderDir) { $nativeRecorderDir } else { '(missing -- see warning)' })"
+Write-Host "  stackable-hooks = $(if ($stackableHooksDir) { $stackableHooksDir } else { '(missing -- see warning)' })"
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  bash scripts/build_apps.sh      # compile every app entry point under build/bin/"

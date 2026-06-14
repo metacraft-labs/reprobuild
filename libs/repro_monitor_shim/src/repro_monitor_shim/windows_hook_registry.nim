@@ -27,7 +27,7 @@ when not defined(windows):
 ## §M26 for the spec and §M11 (outstanding tasks) for the rationale.
 
 import std/tables
-import ct_interpose/hook_registry
+import stackable_hooks/hook_registry
 export hook_registry
 
 {.push raises: [].}
