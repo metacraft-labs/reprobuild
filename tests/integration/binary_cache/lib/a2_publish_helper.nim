@@ -30,6 +30,10 @@ type
     depHex: string
     keyFile: string
     tamperManifest: bool
+    producer: string
+      ## Optional ``X-Repro-Producer`` header value. Used by the A4
+      ## publish-auto-release leg; absent for A2 / A2.5 tests so the
+      ## server's peer-addr fallback applies.
 
 proc parseCli(): HelperOpts =
   result.url = ""
@@ -48,6 +52,7 @@ proc parseCli(): HelperOpts =
       of "dep": result.depHex = p.val
       of "key-file": result.keyFile = p.val
       of "tamper-manifest": result.tamperManifest = true
+      of "producer": result.producer = p.val
       else: discard
     of cmdArgument: discard
 
@@ -162,6 +167,8 @@ proc main() =
   let client = newHttpClient()
   defer: client.close()
   client.headers["Content-Type"] = "multipart/form-data; boundary=" & boundary
+  if opts.producer.len > 0:
+    client.headers["X-Repro-Producer"] = opts.producer
   let resp = client.request(opts.url & "/publish", HttpPost, body)
   if int(resp.code) >= 300:
     stderr.writeLine("publish failed: " & $resp.code & " " & resp.body)

@@ -1,0 +1,51 @@
+# ReproOS-Generations-And-Foreign-Packages A4 P4 — pinned entries.
+#
+# One CAS payload-digest hex (or binary-cache entry-key hex) per line.
+# Lines starting with `#` and blank lines are ignored. Inline `#`
+# trailing comments are tolerated. Hex is case-insensitive (lowercased
+# at parse time).
+#
+# Pinned entries are NEVER evicted by the LRU policy. They survive
+# every eviction sweep regardless of how stale their mtime gets. The
+# pin set typically covers:
+#
+#   * Hex0 — the irreducible root of the bootstrap chain. Re-bootstrapping
+#     hex0 requires the upstream stage0-posix repository to still be
+#     accessible; pinning prevents a network-loss incident from cutting
+#     the chain.
+#   * GCC 15.2.0 (multiple host variants) — building R5 from scratch
+#     takes ~90 min wall-clock; one pin per (host gcc, host ld.so) ABI
+#     fingerprint we support.
+#   * glibc 2.42 — built on top of R5 gcc; ~20 min.
+#   * Linux 6.6.142 bzImage — the system kernel from R8; ~25 min.
+#   * systemd-257.9 — the PID-1 service manager from R9; ~10 min.
+#
+# Pins listed by binary-cache entry-key map to one or more CAS payload
+# digests via the manifest's `payloads` list. The operator tool
+# `recipes/cache/scripts/resolve-pins.py` (TODO; not yet shipped)
+# walks each entry-key, queries its manifest, and emits the resolved
+# payload-digest list to a sidecar file consumed by the eviction
+# policy at runtime.
+#
+# The initial list below uses placeholder hex strings (all-zero +
+# package-name-suffix) so the file parses cleanly during unit tests.
+# The production deployment pipeline will overwrite this file via
+# `recipes/cache/scripts/refresh-pinned-entries.sh` once the R4-R9
+# rebuild completes and the producer publishes real entry keys.
+
+# hex0
+0000000000000000000000000000000000000000000000000000000000000001  # hex0
+
+# GCC 15.2.0 (host variants — each line is one fingerprint)
+0000000000000000000000000000000000000000000000000000000000000002  # gcc-15.2.0 / glibc-host
+0000000000000000000000000000000000000000000000000000000000000003  # gcc-15.2.0 / musl-host
+0000000000000000000000000000000000000000000000000000000000000004  # gcc-15.2.0 / windows-msvc
+
+# glibc 2.42
+0000000000000000000000000000000000000000000000000000000000000005  # glibc-2.42
+
+# Linux 6.6.142 bzImage
+0000000000000000000000000000000000000000000000000000000000000006  # linux-6.6.142-bzImage
+
+# systemd 257.9
+0000000000000000000000000000000000000000000000000000000000000007  # systemd-257.9

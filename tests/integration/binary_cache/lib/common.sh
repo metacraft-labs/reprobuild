@@ -139,6 +139,32 @@ a2_publish_entry() {
             ${depHex:+--dep="$depHex"}
 }
 
+# Publish-and-pass-producer-header variant used by A4 P1's auto-release
+# leg. The X-Repro-Producer header tells the server "release any
+# sentinel held by ME on success". The A2/A2.5/A3 tests omit the
+# header — the server's peer-addr fallback keeps semantics intact for
+# legacy callers.
+a2_publish_entry_with_producer() {
+  local pkg="$1"
+  local ver="$2"
+  local payload="$3"
+  local producer="$4"
+  local depHex="${5:-}"
+  local helper
+  helper="$(a2_repo_root)/build/test-bin/a2_publish_helper.exe"
+  if [[ ! -f "$helper" ]]; then
+    echo "a2_publish_helper not built. Build with:" >&2
+    echo "  nim c -o:build/test-bin/a2_publish_helper.exe tests/integration/binary_cache/lib/a2_publish_helper.nim" >&2
+    return 1
+  fi
+  "$helper" --url="$A2_BASE_URL" \
+            --package="$pkg" \
+            --version="$ver" \
+            --payload="$payload" \
+            --producer="$producer" \
+            ${depHex:+--dep="$depHex"}
+}
+
 a2_fetch_manifest_bytes() {
   local entryHex="$1"
   curl -fsS "$A2_BASE_URL/manifests/$entryHex"

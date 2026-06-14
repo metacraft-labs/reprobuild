@@ -25,10 +25,12 @@ import ./repro_binary_cache_server/types
 import ./repro_binary_cache_server/key
 import ./repro_binary_cache_server/manifest_codec
 import ./repro_binary_cache_server/index
+import ./repro_binary_cache_server/sentinel
 import ./repro_binary_cache_server/server
 
 export types
 export key
 export manifest_codec
 export index
+export sentinel
 export server

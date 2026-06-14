@@ -21,6 +21,7 @@ import repro_binary_cache_client/scheduler_executor
 import repro_binary_cache_client/in_process
 import repro_binary_cache_client/daemon_service
 import repro_binary_cache_client/cache_key
+import repro_binary_cache_client/sentinel_policy
 
 export types
 export http_pool
@@ -34,3 +35,4 @@ export scheduler_executor
 export in_process
 export daemon_service
 export cache_key
+export sentinel_policy

@@ -16,8 +16,10 @@ import repro_hash
 # `repro_local_store/sqlite3_binding.nim`.
 import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
+import ./repro_local_store/lru_eviction
 export sqlite3_binding
 export store
+export lru_eviction
 
 type
   LocalStoreError* = object of CatchableError

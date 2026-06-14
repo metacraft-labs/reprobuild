@@ -40,7 +40,7 @@
 ## arbitrary header attributes inside the parts are tolerated.
 
 import std/[asyncdispatch, asynchttpserver, asyncnet, httpcore, net, options,
-            os, strutils, tables]
+            os, strutils, tables, uri]
 
 import repro_local_store
 
@@ -48,6 +48,7 @@ import ./types
 import ./key
 import ./manifest_codec
 import ./index
+import ./sentinel
 
 const
   ManifestContentType* = "application/octet-stream"
@@ -264,6 +265,9 @@ proc handlePublish*(s: BinaryCacheServerState;
 const
   RoutePrefixManifests = "/manifests/"
   RoutePrefixPayloads = "/payloads/"
+  RoutePrefixSentinel = "/sentinel/"
+  SentinelProducerHeader = "x-repro-producer"
+  SentinelTtlHeader = "x-repro-sentinel-ttl"
 
 proc readWholeBody(req: Request): Future[string] {.async.} =
   ## Nim's ``asynchttpserver.Request.body`` already holds the full
@@ -350,6 +354,8 @@ proc handleGetPayload(s: BinaryCacheServerState;
     await req.client.send(buf[0 ..< n])
     remaining -= int64(n)
 
+proc producerIdFor(req: Request; fallback: string): string
+
 proc handlePublishHttp(s: BinaryCacheServerState;
                        req: Request): Future[void] {.async.} =
   let ct =
@@ -376,6 +382,17 @@ proc handlePublishHttp(s: BinaryCacheServerState;
   try:
     let manifest = handlePublish(s, parsed)
     let hex = cacheEntryKeyHex(manifest.entryKey)
+    # Auto-release any sentinel the publishing producer was holding
+    # for this entry. The producer self-identifies via the same
+    # ``X-Repro-Producer`` header the sentinel POST used. Absent
+    # header is tolerated — the sentinel will be reaped by the
+    # sweeper on TTL expiry.
+    let peer =
+      try: $getPeerAddr(req.client)[0]
+      except CatchableError: "anonymous"
+    let producer = producerIdFor(req, peer)
+    if producer.len > 0:
+      discard releaseSentinelIfHeldBy(s, hex, producer)
     var headers = newHttpHeaders()
     headers["Content-Type"] = "text/plain; charset=utf-8"
     await req.respond(Http200, hex & "\n", headers)
@@ -385,6 +402,109 @@ proc handlePublishHttp(s: BinaryCacheServerState;
     await req.respond(Http400, "manifest codec error: " & e.msg)
   except BinaryCacheSignatureError as e:
     await req.respond(Http403, e.msg)
+
+# ---------------------------------------------------------------------------
+# In-flight sentinel handlers (A4 P1).
+# ---------------------------------------------------------------------------
+
+proc parseSentinelKey(path: string): string =
+  ## Strips the ``/sentinel/`` prefix + any trailing slash and returns
+  ## the entry-key hex. Returns the empty string on a missing key.
+  if not path.startsWith(RoutePrefixSentinel):
+    return ""
+  var k = path[RoutePrefixSentinel.len .. ^1]
+  while k.len > 0 and k[^1] == '/':
+    k.setLen(k.len - 1)
+  return k
+
+proc producerIdFor(req: Request; fallback: string): string =
+  ## The A4 sentinel protocol identifies producers via an opaque header
+  ## (``X-Repro-Producer``). When absent we fall back to the client's
+  ## peer-addr so a misbehaving producer can't squat on an entry by
+  ## omitting the header — the next claim from a different peer takes
+  ## over once the original's TTL expires.
+  if req.headers.hasKey(SentinelProducerHeader):
+    return ($req.headers[SentinelProducerHeader]).strip()
+  return fallback
+
+proc parseTtlFromHeader(req: Request): uint32 =
+  ## Reads the ``X-Repro-Sentinel-TTL`` header. Falls back to the
+  ## ``DefaultSentinelTtlSeconds`` when absent / malformed. Caps the
+  ## TTL at 86400 (24h) so a misbehaving producer can't pin an entry
+  ## indefinitely.
+  if req.headers.hasKey(SentinelTtlHeader):
+    let raw = ($req.headers[SentinelTtlHeader]).strip()
+    if raw.len > 0:
+      try:
+        let v = parseInt(raw)
+        if v <= 0:
+          return DefaultSentinelTtlSeconds
+        if v > 86400:
+          return 86400'u32
+        return uint32(v)
+      except ValueError:
+        discard
+  return DefaultSentinelTtlSeconds
+
+proc handleSentinelGet(s: BinaryCacheServerState;
+                       hex: string;
+                       req: Request): Future[void] {.async.} =
+  if hex.len != 64:
+    await req.respond(Http400, "sentinel entry-key hex must be 64 chars")
+    return
+  let now = nowUnix()
+  let prior = loadSentinelIfExists(s, hex)
+  if not prior.ok:
+    await req.respond(Http404, "no sentinel for entry-key")
+    return
+  if isExpired(prior.rec, now):
+    # Lazy sweep: an expired record is observably "absent" — drop it
+    # so the next POST starts clean.
+    removeSentinel(s, hex)
+    await req.respond(Http404, "sentinel expired")
+    return
+  let remaining = remainingSeconds(prior.rec, now)
+  var headers = newHttpHeaders()
+  headers["Content-Type"] = "text/plain; charset=utf-8"
+  headers["X-Repro-Sentinel-Producer"] = prior.rec.producer
+  headers["X-Repro-Sentinel-Ttl-Remaining"] = $remaining
+  await req.respond(Http200, $remaining & "\n", headers)
+
+proc handleSentinelPost(s: BinaryCacheServerState;
+                        hex: string;
+                        req: Request): Future[void] {.async.} =
+  if hex.len != 64:
+    await req.respond(Http400, "sentinel entry-key hex must be 64 chars")
+    return
+  let peer =
+    try: $getPeerAddr(req.client)[0]
+    except CatchableError: "anonymous"
+  let producer = producerIdFor(req, peer)
+  if producer.len == 0:
+    await req.respond(Http400, "sentinel claim missing producer id")
+    return
+  let ttl = parseTtlFromHeader(req)
+  let outcome = claimSentinel(s, hex, producer, ttl)
+  case outcome
+  of scClaimed:
+    var headers = newHttpHeaders()
+    headers["Content-Type"] = "text/plain; charset=utf-8"
+    await req.respond(Http201, "claimed\n", headers)
+  of scRefreshed:
+    var headers = newHttpHeaders()
+    headers["Content-Type"] = "text/plain; charset=utf-8"
+    await req.respond(Http200, "refreshed\n", headers)
+  of scAlreadyClaimed:
+    await req.respond(Http409, "sentinel already claimed by another producer")
+
+proc handleSentinelDelete(s: BinaryCacheServerState;
+                          hex: string;
+                          req: Request): Future[void] {.async.} =
+  if hex.len != 64:
+    await req.respond(Http400, "sentinel entry-key hex must be 64 chars")
+    return
+  releaseSentinel(s, hex)
+  await req.respond(Http200, "released\n")
 
 proc handleRequest*(srv: BinaryCacheHttpServer;
                     req: Request): Future[void] {.async.} =
@@ -405,12 +525,25 @@ proc handleRequest*(srv: BinaryCacheHttpServer;
       elif path.startsWith(RoutePrefixPayloads):
         let hex = path[RoutePrefixPayloads.len .. ^1]
         await handleGetPayload(srv.state, hex, req)
+      elif path.startsWith(RoutePrefixSentinel):
+        let hex = parseSentinelKey(path)
+        await handleSentinelGet(srv.state, hex, req)
       else:
         await req.respond(Http404, "no such route")
   of HttpPost:
     case path
     of "/publish":
       await handlePublishHttp(srv.state, req)
+    else:
+      if path.startsWith(RoutePrefixSentinel):
+        let hex = parseSentinelKey(path)
+        await handleSentinelPost(srv.state, hex, req)
+      else:
+        await req.respond(Http404, "no such route")
+  of HttpDelete:
+    if path.startsWith(RoutePrefixSentinel):
+      let hex = parseSentinelKey(path)
+      await handleSentinelDelete(srv.state, hex, req)
     else:
       await req.respond(Http404, "no such route")
   else:
@@ -437,15 +570,39 @@ proc parseListenAddr*(addrSpec: string): (string, Port) =
   let port = Port(parseInt(addrSpec[idx + 1 .. ^1]))
   (host, port)
 
+proc sweeperLoop(srv: BinaryCacheHttpServer) {.async.} =
+  ## Background sentinel-eviction tick. Wakes every
+  ## ``SweepIntervalMs`` and drops every on-disk sentinel whose TTL
+  ## has elapsed. The lazy ``GET /sentinel/<key>`` path also evicts on
+  ## demand; this loop is the durable safety net for the case where a
+  ## producer crashes between claim + publish and no client polls in
+  ## the meantime.
+  while srv.running:
+    await sleepAsync(SweepIntervalMs)
+    if not srv.running:
+      break
+    {.cast(gcsafe).}:
+      try:
+        discard sweepExpiredSentinels(srv.state)
+      except CatchableError as e:
+        stderr.writeLine("sentinel sweep failed: " & e.msg)
+
 proc start*(srv: BinaryCacheHttpServer; listenAddr: string) {.async.} =
   let (host, port) = parseListenAddr(listenAddr)
   srv.listenHost = host
   srv.listenPort = port
   srv.running = true
+  # One-shot startup sweep so a stale sentinel from a crashed
+  # pre-restart producer doesn't survive across reboots.
+  {.cast(gcsafe).}:
+    try:
+      discard sweepExpiredSentinels(srv.state)
+    except CatchableError: discard
   proc cb(req: Request) {.async, gcsafe.} =
     {.cast(gcsafe).}:
       await handleRequest(srv, req)
   asyncCheck srv.server.serve(port, cb, host)
+  asyncCheck sweeperLoop(srv)
 
 proc close*(srv: BinaryCacheHttpServer) =
   if srv.isNil or not srv.running:

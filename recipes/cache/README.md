@@ -195,11 +195,16 @@ wsl -d repro-cache -e curl -fsS http://localhost:7878/cache-info | xxd | head
 
 ### Eviction (in-cache, NOT in-backup)
 
-- v1 has no LRU eviction inside the cache distro itself. Operators
-  can `wsl --terminate repro-cache && wsl --unregister repro-cache`
-  then re-provision when disk pressure demands it. The campaign A4
-  milestone lands proper LRU + pin lists.
-- The backup-side retention is fixed at 7 daily snapshots until A4.
+- **A4 P4 (this campaign):** LRU eviction is implemented in
+  `libs/repro_local_store/src/repro_local_store/lru_eviction.nim`
+  with a default 50 GiB soft cap + 100 GiB hard cap. See
+  [`EVICTION-POLICY.md`](EVICTION-POLICY.md) for thresholds, the
+  pin/unpin process, and monitoring.
+- Pinned entries listed in [`pinned-entries.txt`](pinned-entries.txt)
+  are never evicted. Initial pin set covers hex0, gcc-15.2.0
+  (multiple host variants), glibc-2.42, linux-6.6.142-bzImage, and
+  systemd-257.9.
+- The backup-side retention remains fixed at 7 daily snapshots.
 
 ### Recovery time objective
 
