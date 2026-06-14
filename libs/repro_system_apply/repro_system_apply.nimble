@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild system-scope configuration DSL + apply pipeline (B1)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

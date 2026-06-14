@@ -60,6 +60,7 @@ for libName in [
   "repro_project_dsl_runtime_dll",
   "repro_dsl_stdlib",
   "repro_home_intent",
+  "repro_system_apply",
   "repro_profile",
   "repro_profile_intent",
   "repro_profile_compile",
