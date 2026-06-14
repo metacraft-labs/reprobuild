@@ -64,6 +64,42 @@ for bin in "$M2" "$M1" "$HEX2" "$BLOOD_ELF_0" "$KAEM_UNWRAPPED"; do
   fi
 done
 
+# ---- A3 P4 cache prelude ---------------------------------------------------
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_repo_root="$(cd "${_script_dir}/../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "${_repo_root}/recipes/cache/scripts/cache-helper.sh"
+
+if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
+  _mescc_deps=()
+  _stage0_keyfile="${STAGE0_ABS}/.cache-key.hex"
+  if [[ -f "${_stage0_keyfile}" ]]; then
+    _mescc_deps+=( --dep="$(cat "${_stage0_keyfile}")" )
+  fi
+  cache_phase_prepare "${BASH_SOURCE[0]}" "${OUT_ABS}" \
+    --package-name=mescc-tools \
+    --package-version=Release_1.9.1 \
+    --toolchain-name=stage0-posix \
+    --toolchain-version=Release_1.9.1 \
+    "${_mescc_deps[@]}"
+  echo "[mescc-tools] cache-entry-key=${CACHE_KEY_HEX}"
+  echo "${CACHE_KEY_HEX}" > "${OUT_ABS}/.cache-key.hex"
+  if [[ "${CACHE_HIT}" == "1" ]]; then
+    if [[ -d "${OUT_ABS}/prefix" ]]; then
+      cp -a "${OUT_ABS}/prefix/." "${OUT_ABS}/"
+      rm -rf "${OUT_ABS}/prefix"
+      echo "[cache hit] mescc-tools from cache"
+      exit 0
+    fi
+    rm -rf "${OUT_ABS}/prefix"
+  elif [[ "${CACHE_HIT}" == "2" ]]; then
+    echo "[mescc-tools] REPRO_CACHE_DRY_RUN=1; skipping build."
+    exit 0
+  fi
+  echo "[mescc-tools] cache miss; proceeding with build."
+fi
+# ---- /A3 P4 cache prelude --------------------------------------------------
+
 log() { echo "[mescc-tools] $*"; }
 
 mkdir -p "$OUT_ABS/bin"
@@ -324,3 +360,9 @@ log "writing SHA256SUMS"
 } > "$OUT_ABS/SHA256SUMS"
 cat "$OUT_ABS/SHA256SUMS"
 log "wrote $OUT_ABS/SHA256SUMS"
+
+# ---- A3 P4 cache postlude --------------------------------------------------
+if [[ -n "${CACHE_KEY_HEX:-}" ]]; then
+  cache_phase_publish "${OUT_ABS}"
+fi
+# ---- /A3 P4 cache postlude -------------------------------------------------

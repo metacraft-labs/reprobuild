@@ -20,6 +20,7 @@ import repro_binary_cache_client/closure_walk
 import repro_binary_cache_client/scheduler_executor
 import repro_binary_cache_client/in_process
 import repro_binary_cache_client/daemon_service
+import repro_binary_cache_client/cache_key
 
 export types
 export http_pool
@@ -32,3 +33,4 @@ export closure_walk
 export scheduler_executor
 export in_process
 export daemon_service
+export cache_key

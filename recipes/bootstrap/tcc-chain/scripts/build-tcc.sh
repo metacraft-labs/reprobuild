@@ -86,6 +86,46 @@ if [ ! -f "$VENDOR_ABS/tinycc-bootstrappable.tar.gz" ]; then
   exit 1
 fi
 
+# ---- A3 P4 cache prelude ---------------------------------------------------
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_repo_root="$(cd "${_script_dir}/../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "${_repo_root}/recipes/cache/scripts/cache-helper.sh"
+
+if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
+  _tcc_deps=()
+  _mes_keyfile="${MES_ABS}/.cache-key.hex"
+  _mescc_keyfile="${MESCC_TOOLS_ABS}/.cache-key.hex"
+  if [[ -f "${_mes_keyfile}" ]]; then
+    _tcc_deps+=( --dep="$(cat "${_mes_keyfile}")" )
+  fi
+  if [[ -f "${_mescc_keyfile}" ]]; then
+    _tcc_deps+=( --dep="$(cat "${_mescc_keyfile}")" )
+  fi
+  cache_phase_prepare "${BASH_SOURCE[0]}" "${OUT_ABS}" \
+    --package-name=tinycc-bootstrappable \
+    --package-version=ea3900f6 \
+    --toolchain-name=mes \
+    --toolchain-version=0.27.1 \
+    "${_tcc_deps[@]}"
+  echo "[tcc] cache-entry-key=${CACHE_KEY_HEX}"
+  echo "${CACHE_KEY_HEX}" > "${OUT_ABS}/.cache-key.hex"
+  if [[ "${CACHE_HIT}" == "1" ]]; then
+    if [[ -d "${OUT_ABS}/prefix" ]]; then
+      cp -a "${OUT_ABS}/prefix/." "${OUT_ABS}/"
+      rm -rf "${OUT_ABS}/prefix"
+      echo "[cache hit] tcc from cache"
+      exit 0
+    fi
+    rm -rf "${OUT_ABS}/prefix"
+  elif [[ "${CACHE_HIT}" == "2" ]]; then
+    echo "[tcc] REPRO_CACHE_DRY_RUN=1; skipping build."
+    exit 0
+  fi
+  echo "[tcc] cache miss; proceeding with build."
+fi
+# ---- /A3 P4 cache prelude --------------------------------------------------
+
 WORK="$(mktemp -d -t reproos-r4e-tcc-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 echo "[tcc] WORK=$WORK"
@@ -802,3 +842,9 @@ log "writing SHA256SUMS"
 } > "$OUT_ABS/SHA256SUMS"
 cat "$OUT_ABS/SHA256SUMS"
 log "done; tcc binary at $OUT_ABS/bin/tcc"
+
+# ---- A3 P4 cache postlude --------------------------------------------------
+if [[ -n "${CACHE_KEY_HEX:-}" ]]; then
+  cache_phase_publish "${OUT_ABS}"
+fi
+# ---- /A3 P4 cache postlude -------------------------------------------------

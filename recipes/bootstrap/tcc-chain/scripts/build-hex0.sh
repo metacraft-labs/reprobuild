@@ -12,6 +12,11 @@
 #
 # Env determinism flags (caller may pre-set; defaults are wired):
 #   SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC
+#
+# A3 P3 cache-wiring: the script consults the binary cache before
+# running the build. On hit, the prefix bytes are materialised at
+# $OUT and the build is skipped. On miss, after the build, the
+# prefix is published. See ``recipes/cache/scripts/cache-helper.sh``.
 
 set -euo pipefail
 
@@ -29,6 +34,39 @@ OUT_ABS="$(cd "$OUT" && pwd)"
 
 echo "[build-hex0] VENDOR_ABS=$VENDOR_ABS"
 echo "[build-hex0] OUT_ABS=$OUT_ABS"
+
+# ---- A3 P3 cache prelude ---------------------------------------------------
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_repo_root="$(cd "${_script_dir}/../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "${_repo_root}/recipes/cache/scripts/cache-helper.sh"
+
+if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
+  cache_phase_prepare "${BASH_SOURCE[0]}" "${OUT_ABS}" \
+    --package-name=hex0 \
+    --package-version=stage0-posix-Release_1.9.1 \
+    --toolchain-name=stage0-posix \
+    --toolchain-version=Release_1.9.1
+  echo "[build-hex0] cache-entry-key=${CACHE_KEY_HEX}"
+  echo "${CACHE_KEY_HEX}" > "${OUT_ABS}/.cache-key.hex"
+  if [[ "${CACHE_HIT}" == "1" ]]; then
+    if [[ -f "${OUT_ABS}/prefix/hex0" ]]; then
+      mv "${OUT_ABS}/prefix/hex0" "${OUT_ABS}/hex0"
+      rm -rf "${OUT_ABS}/prefix"
+      sha256sum "${OUT_ABS}/hex0" | awk '{print $1}' > "${OUT_ABS}/hex0.sha256"
+      echo "[cache hit] hex0 from cache; sha256=$(cat "${OUT_ABS}/hex0.sha256")"
+      exit 0
+    fi
+    echo "[build-hex0] cache hit produced unexpected prefix shape; rebuilding"
+    rm -rf "${OUT_ABS}/prefix"
+  elif [[ "${CACHE_HIT}" == "2" ]]; then
+    echo "[build-hex0] REPRO_CACHE_DRY_RUN=1; skipping build."
+    exit 0
+  else
+    echo "[build-hex0] cache miss; proceeding with build."
+  fi
+fi
+# ---- /A3 P3 cache prelude --------------------------------------------------
 
 WORK="$(mktemp -d -t reproos-r4a-hex0-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -53,3 +91,9 @@ chmod +x "$OUT_ABS/hex0"
 sha256sum "$OUT_ABS/hex0" | awk '{print $1}' > "$OUT_ABS/hex0.sha256"
 echo "[build-hex0] hex0 sha256: $(cat "$OUT_ABS/hex0.sha256")"
 echo "[build-hex0] hex0 size:   $(stat -c %s "$OUT_ABS/hex0")"
+
+# ---- A3 P3 cache postlude ---------------------------------------------------
+if [[ -n "${CACHE_KEY_HEX:-}" ]]; then
+  cache_phase_publish "${OUT_ABS}/hex0"
+fi
+# ---- /A3 P3 cache postlude --------------------------------------------------

@@ -55,6 +55,46 @@ if [ -z "$HEX0" ]; then
   exit 1
 fi
 
+# ---- A3 P4 cache prelude ---------------------------------------------------
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_repo_root="$(cd "${_script_dir}/../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "${_repo_root}/recipes/cache/scripts/cache-helper.sh"
+
+if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
+  # Pick up hex0's published cache-entry-key if recorded by build-hex0.sh.
+  _stage0_deps=()
+  _hex0_keyfile="$(dirname "${HEX0}")/.cache-key.hex"
+  if [[ -f "${_hex0_keyfile}" ]]; then
+    _stage0_deps+=( --dep="$(cat "${_hex0_keyfile}")" )
+  fi
+  cache_phase_prepare "${BASH_SOURCE[0]}" "${OUT_ABS}" \
+    --package-name=stage0-posix \
+    --package-version=Release_1.9.1 \
+    --toolchain-name=stage0-posix \
+    --toolchain-version=Release_1.9.1 \
+    "${_stage0_deps[@]}"
+  echo "[stage0-posix] cache-entry-key=${CACHE_KEY_HEX}"
+  echo "${CACHE_KEY_HEX}" > "${OUT_ABS}/.cache-key.hex"
+  if [[ "${CACHE_HIT}" == "1" ]]; then
+    if [[ -d "${OUT_ABS}/prefix" ]]; then
+      # Migrate substituted prefix bytes into $OUT_ABS at the
+      # expected layout.
+      cp -a "${OUT_ABS}/prefix/." "${OUT_ABS}/"
+      rm -rf "${OUT_ABS}/prefix"
+      echo "[cache hit] stage0-posix from cache"
+      exit 0
+    fi
+    rm -rf "${OUT_ABS}/prefix"
+  elif [[ "${CACHE_HIT}" == "2" ]]; then
+    echo "[stage0-posix] REPRO_CACHE_DRY_RUN=1; skipping build."
+    exit 0
+  else
+    echo "[stage0-posix] cache miss; proceeding with build."
+  fi
+fi
+# ---- /A3 P4 cache prelude --------------------------------------------------
+
 # Stage source tree
 WORK="$(mktemp -d -t reproos-r4b-stage0-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -367,3 +407,9 @@ log "stage0-posix chain complete; binaries:"
 } > "$B/SHA256SUMS"
 cat "$B/SHA256SUMS"
 log "wrote $B/SHA256SUMS"
+
+# ---- A3 P4 cache postlude --------------------------------------------------
+if [[ -n "${CACHE_KEY_HEX:-}" ]]; then
+  cache_phase_publish "${OUT_ABS}"
+fi
+# ---- /A3 P4 cache postlude -------------------------------------------------

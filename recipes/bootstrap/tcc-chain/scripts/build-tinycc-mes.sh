@@ -43,6 +43,45 @@ SHIM_ABS="$(cd "$SHIM" && pwd)"
 MES_SHARE_ABS="$(cd "$MES_SHARE" && pwd)"
 mkdir -p "$OUT"
 OUT_ABS="$(cd "$OUT" && pwd)"
+# ---- A3 P5 cache prelude (auto-wired) ----
+
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_repo_root="$(cd "${_script_dir}/../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "${_repo_root}/recipes/cache/scripts/cache-helper.sh"
+
+if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
+  _phase_deps=()
+  _depfile="${MES_ABS%/bin}/.cache-key.hex"
+  if [[ -f "${_depfile}" ]]; then
+    _phase_deps+=( --dep="$(cat "${_depfile}")" )
+  fi
+  _depfile="${TCC_ABS%/bin}/.cache-key.hex"
+  if [[ -f "${_depfile}" ]]; then
+    _phase_deps+=( --dep="$(cat "${_depfile}")" )
+  fi
+  cache_phase_prepare "${BASH_SOURCE[0]}" "${OUT_ABS}" \
+    --package-name=tinycc-mes \
+    --package-version=0.9.27 \
+    --toolchain-name=mes \
+    --toolchain-version=0.27.1 \
+    "${_phase_deps[@]}"
+  echo "[cache] tinycc-mes cache-entry-key=${CACHE_KEY_HEX}"
+  echo "${CACHE_KEY_HEX}" > "${OUT_ABS}/.cache-key.hex"
+  if [[ "${CACHE_HIT}" == "1" ]]; then
+    if [[ -d "${OUT_ABS}/prefix" ]]; then
+      cp -a "${OUT_ABS}/prefix/." "${OUT_ABS}/"
+      rm -rf "${OUT_ABS}/prefix"
+      echo "[cache hit] tinycc-mes from cache"
+      exit 0
+    fi
+    rm -rf "${OUT_ABS}/prefix"
+  elif [[ "${CACHE_HIT}" == "2" ]]; then
+    echo "[cache] tinycc-mes: REPRO_CACHE_DRY_RUN=1; skipping build."
+    exit 0
+  fi
+fi
+# ---- /A3 P5 cache prelude --------------------
 
 log() { echo "[tinycc-mes] $*"; }
 log "VENDOR=$VENDOR_ABS"
@@ -549,3 +588,9 @@ log "writing SHA256SUMS"
 cat "$OUT_ABS/SHA256SUMS"
 
 log "tinycc-mes ready at $OUT_ABS"
+
+# ---- A3 P5 cache postlude (auto-wired) ----
+if [[ -n "${CACHE_KEY_HEX:-}" ]]; then
+  cache_phase_publish "${OUT_ABS}"
+fi
+# ---- /A3 P5 cache postlude -------------------

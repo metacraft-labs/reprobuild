@@ -53,6 +53,42 @@ BUILD_ABS="$(cd "$BUILD_ROOT" && pwd)"
 # We deliberately do NOT cd into SHIM_OUT before mkdir-ing it.
 mkdir -p "$SHIM_OUT"
 SHIM_ABS="$(cd "$SHIM_OUT" && pwd)"
+# ---- A3 P5 cache prelude (auto-wired) ----
+OUT_ABS="${SHIM_ABS:-${OUT_ABS:-}}"
+
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_repo_root="$(cd "${_script_dir}/../../../.." && pwd)"
+# shellcheck source=/dev/null
+source "${_repo_root}/recipes/cache/scripts/cache-helper.sh"
+
+if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
+  _phase_deps=()
+  _depfile="${BUILD_ABS%/bin}/.cache-key.hex"
+  if [[ -f "${_depfile}" ]]; then
+    _phase_deps+=( --dep="$(cat "${_depfile}")" )
+  fi
+  cache_phase_prepare "${BASH_SOURCE[0]}" "${OUT_ABS}" \
+    --package-name=tcc-shim \
+    --package-version=0.1 \
+    --toolchain-name=tcc \
+    --toolchain-version=boot \
+    "${_phase_deps[@]}"
+  echo "[cache] tcc-shim cache-entry-key=${CACHE_KEY_HEX}"
+  echo "${CACHE_KEY_HEX}" > "${OUT_ABS}/.cache-key.hex"
+  if [[ "${CACHE_HIT}" == "1" ]]; then
+    if [[ -d "${OUT_ABS}/prefix" ]]; then
+      cp -a "${OUT_ABS}/prefix/." "${OUT_ABS}/"
+      rm -rf "${OUT_ABS}/prefix"
+      echo "[cache hit] tcc-shim from cache"
+      exit 0
+    fi
+    rm -rf "${OUT_ABS}/prefix"
+  elif [[ "${CACHE_HIT}" == "2" ]]; then
+    echo "[cache] tcc-shim: REPRO_CACHE_DRY_RUN=1; skipping build."
+    exit 0
+  fi
+fi
+# ---- /A3 P5 cache prelude --------------------
 
 log() { echo "[tcc-shim] $*"; }
 log "VENDOR=$VENDOR_ABS"
@@ -234,3 +270,9 @@ log "writing SHA256SUMS"
 } > "$SHIM_ABS/SHA256SUMS"
 cat "$SHIM_ABS/SHA256SUMS"
 log "tcc shim ready at $SHIM_ABS"
+
+# ---- A3 P5 cache postlude (auto-wired) ----
+if [[ -n "${CACHE_KEY_HEX:-}" ]]; then
+  cache_phase_publish "${OUT_ABS}"
+fi
+# ---- /A3 P5 cache postlude -------------------
