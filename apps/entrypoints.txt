@@ -6,3 +6,9 @@ repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint
 repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_fragment.nim
 repro-cmake-trycompile-provider apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim --define:reproProviderMode
 repro-standard-provider apps/repro-standard-provider/repro_standard_provider.nim --define:reproProviderMode
+# ReproOS-Generations-And-Foreign-Packages C2: apt foreign-package
+# harvester. Walks snapshot.debian.org's Packages index + InRelease
+# signature chain, emits per-package catalog files under
+# ``recipes/catalog/foreign/apt/``. SSL-enabled because
+# snapshot.debian.org is HTTPS-only.
+repro-harvest-apt apps/repro-harvest-apt/repro_harvest_apt.nim --define:ssl --path:apps/repro-harvest-apt/src

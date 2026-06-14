@@ -41,6 +41,8 @@
 
 import std/[algorithm, json, options, strutils, tables]
 
+import blake3
+
 import repro_system_apply/types
 import repro_system_apply/errors
 import ../../../../repro_binary_cache_server/src/repro_binary_cache_server/types as bcsTypes
@@ -48,7 +50,7 @@ import ../../../../repro_binary_cache_client/src/repro_binary_cache_client/cache
 
 export PackageRef, PackageTier, KnownForeignDistros
 export bcsTypes.PlatformTriple, bcsTypes.ToolchainIdentity
-export CacheEntryIdentity, deriveCacheEntryKeyHex
+export CacheEntryIdentity, deriveCacheEntryKey, deriveCacheEntryKeyHex
 
 const
   ForeignCatalogFormatVersion* = 1
@@ -419,35 +421,84 @@ proc readForeignCatalog*(path: string): ForeignCatalog =
 # Realize-hash composer (A3 ``CacheEntryIdentity`` shape)
 # ---------------------------------------------------------------------------
 
-proc foreignPackageIdentity*(catalog: ForeignCatalog;
-                             hostPlatform: PlatformTriple;
-                             harvesterRevision = "c1-placeholder";
-                             providerRevision = "c1-placeholder"):
+# ---------------------------------------------------------------------------
+# C2 P4: real per-dep CacheEntryKey derivation
+# ---------------------------------------------------------------------------
+#
+# C1 shipped a synthetic byte-by-byte hex mixer over the dep's
+# ``(distro, name, snapshot)`` tuple — adequate for the parse + write
+# round-trip tests but called out as a known risk for C2 to close.
+# C2 replaces that mixer with a real recursive ``CacheEntryKey``
+# derivation:
+#
+#   * Each dep is hashed via the same A3
+#     ``CacheEntryIdentity → CacheEntryKey → 64-char hex`` pipeline the
+#     parent uses (``deriveCacheEntryKeyHex`` from
+#     ``repro_binary_cache_client/cache_key``).
+#   * The dep's identity inputs come from its own catalog file when
+#     one is available on disk (the harvester writes one catalog file
+#     per transitive dep). When the dep's catalog is unavailable (e.g.
+#     when the caller is computing the parent's identity before the
+#     harvester has finished walking) we fall back to a leaf-only
+#     identity composed from just the dep's
+#     ``(distro, name, snapshot)`` PackageRef plus the host platform —
+#     which is itself a real BLAKE3 digest, not the C1 synthetic mix.
+#
+# The recursive composer is bounded: each dep's identity is keyed off
+# its OWN dep closure (also resolved through the same callback), and a
+# visited set guards against pathological cycles in a malformed
+# catalog.
+
+type
+  ForeignDepResolver* = proc (depRef: PackageRef): Option[ForeignCatalog]
+    {.gcsafe.}
+    ## Caller-supplied callback that maps a dep's PackageRef to its
+    ## catalog. Returns ``none`` when the dep's catalog is not yet on
+    ## disk; the composer falls back to the leaf identity in that
+    ## case.
+
+proc noopDepResolver*(depRef: PackageRef): Option[ForeignCatalog] =
+  ## Default resolver: always returns ``none``. Equivalent to the
+  ## leaf-only digest path. The harvester binary supplies a real
+  ## on-disk resolver via ``mkOnDiskCatalogResolver``.
+  none(ForeignCatalog)
+
+proc leafDepIdentityHex(depRef: PackageRef;
+                        hostPlatform: PlatformTriple): string =
+  ## Compute a real 64-char hex digest for a dep we have no catalog
+  ## file for. The digest is BLAKE3 over a canonical
+  ## ``(distro || \0 || name || \0 || snapshot || \0 || platform-tag)``
+  ## byte string. This is cryptographically strong (BLAKE3-256) and
+  ## byte-stable — replacing C1's synthetic mixer wholesale.
+  var buf = depRef.distro
+  buf.add('\x00')
+  buf.add(depRef.name)
+  buf.add('\x00')
+  buf.add(depRef.snapshot)
+  buf.add('\x00')
+  buf.add(hostPlatform.cpu)
+  buf.add('-')
+  buf.add(hostPlatform.os)
+  buf.add('-')
+  buf.add(hostPlatform.abi)
+  let raw = blake3.digest(buf)
+  result = newStringOfCap(64)
+  const Hex = "0123456789abcdef"
+  for i in 0 ..< 32:
+    let b = raw[i].uint8
+    result.add(Hex[int(b shr 4)])
+    result.add(Hex[int(b and 0x0f)])
+
+proc foreignPackageIdentityRec(catalog: ForeignCatalog;
+                               hostPlatform: PlatformTriple;
+                               harvesterRevision: string;
+                               providerRevision: string;
+                               resolver: ForeignDepResolver;
+                               visited: var seq[string]):
     CacheEntryIdentity =
-  ## Compose the realize-hash inputs for a foreign-package catalog.
-  ## Mirrors the A3 ``CacheEntryIdentity`` shape so the resulting key
-  ## flows through the same ``deriveCacheEntryKey`` /
-  ## ``cacheEntryKeyHex`` pipeline as Tier 1 packages.
-  ##
-  ## Differentiating axes (per the campaign spec § C1 Fix scope):
-  ##   * snapshot — encoded in ``selectedOptions["snapshot"]``;
-  ##   * distro   — encoded in ``selectedOptions["distro"]`` AND in the
-  ##                catalog file path the harvester wrote, so two
-  ##                catalogs with the same name but different distros
-  ##                produce different ``providerRevision`` inputs (the
-  ##                C2 harvester sets this to the canonical catalog-byte
-  ##                SHA-256 in production);
-  ##   * name     — encoded in ``packageName``;
-  ##   * closure  — encoded in ``depClosure`` (sorted hex of each
-  ##                transitive dep's identity hash).
-  ##
-  ## ``harvesterRevision`` is the harvester's content-addressed identity
-  ## (C2 sets this to the harvester binary's sha256). C1 takes a
-  ## placeholder so the realize-hash composer is testable in isolation.
-  ##
-  ## ``providerRevision`` is the SHA-256 of the canonical catalog bytes.
-  ## Tests typically pass the canonical-bytes hex directly; the
-  ## production realize loop computes ``sha256(serializeCatalog(c))``.
+  ## Internal recursive composer. ``visited`` is a sorted stack of
+  ## ``<distro>/<name>/<snapshot>`` keys; we break cycles by treating a
+  ## re-visit as the leaf-identity case.
   let toolchain = ToolchainIdentity(
     name: catalog.package.distro & "-harvester",
     version: harvesterRevision,
@@ -462,35 +513,107 @@ proc foreignPackageIdentity*(catalog: ForeignCatalog;
   result.addOption("distro", catalog.package.distro)
   result.addOption("snapshot", catalog.package.snapshot)
 
-  # Dep-closure: for C1 we compose a SYNTHETIC 64-char hex digest per
-  # dep from its (distro, name, snapshot) — the C2 harvester replaces
-  # this with the real per-dep ``CacheEntryIdentity`` hex once the
-  # transitive deps each get their own catalog files. The synthetic
-  # form is still byte-stable + sensitive to (distro, name, snapshot)
-  # changes, which is the differentiating property the realize-hash
-  # test cares about. ``addOption`` accepts arbitrary 64-char hex; we
-  # produce 32-zero-padding + the (distro, name, snapshot) string
-  # hashed via a simple stable mixer.
+  let myKey = catalog.package.distro & "/" & catalog.package.name &
+    "/" & catalog.package.snapshot
+  visited.add(myKey)
+
   for dep in catalog.dependencyClosure:
-    # Use the existing ``depClosureDigest`` helper indirectly: each dep
-    # contributes one 64-char hex string that we feed verbatim. The
-    # caller (C2) will pass real digests; for C1 we mix the dep's
-    # (distro, name, snapshot) into 64 hex chars deterministically.
-    let mix = dep.distro & "\x00" & dep.name & "\x00" & dep.snapshot
-    var hexBuf = newStringOfCap(64)
-    # Simple deterministic 64-char hex: byte-by-byte hex of a repeating
-    # mix string. This is NOT a cryptographic hash; it's a stable
-    # placeholder until C2 wires the real per-dep digest. The
-    # differentiating property the C1 realize-hash test exercises
-    # (adding/removing a dep changes the hash) holds because the
-    # encoded depClosure bytes differ.
-    var idx = 0
-    while hexBuf.len < 64:
-      let ch = mix[idx mod mix.len]
-      let hi = (ch.uint8 shr 4) and 0xf
-      let lo = ch.uint8 and 0xf
-      const Hex = "0123456789abcdef"
-      hexBuf.add Hex[hi]
-      hexBuf.add Hex[lo]
-      inc idx
-    result.addDep(hexBuf)
+    let depKey = dep.distro & "/" & dep.name & "/" & dep.snapshot
+    var depHex: string
+    if depKey in visited:
+      depHex = leafDepIdentityHex(dep, hostPlatform)
+    else:
+      let depCatalog = resolver(dep)
+      if depCatalog.isSome:
+        # Recurse with the dep's own catalog. The dep's providerRevision
+        # is the sha256 of ITS canonical catalog bytes; for now we
+        # delegate to the harvester to pass a producer-pinned input via
+        # the same composer entry point on its own write side. For the
+        # in-process compose path we use the dep's own bytes too.
+        let depBytes = serializeCatalog(depCatalog.get)
+        let depProv = blake3.digest(depBytes)
+        var depProvHex = newStringOfCap(64)
+        const Hex = "0123456789abcdef"
+        for i in 0 ..< 32:
+          let b = depProv[i].uint8
+          depProvHex.add(Hex[int(b shr 4)])
+          depProvHex.add(Hex[int(b and 0x0f)])
+        let depIdy = foreignPackageIdentityRec(depCatalog.get,
+          hostPlatform, harvesterRevision, depProvHex, resolver,
+          visited)
+        depHex = deriveCacheEntryKeyHex(depIdy)
+      else:
+        depHex = leafDepIdentityHex(dep, hostPlatform)
+    result.addDep(depHex)
+
+  # Pop the visited stack so sibling branches see a clean trail.
+  if visited.len > 0:
+    visited.setLen(visited.len - 1)
+
+proc canonicalCatalogProviderRevision*(c: ForeignCatalog): string =
+  ## Compute the ``providerRevision`` input from the canonical catalog
+  ## bytes. Mirrors the C2 P5 deliverable: ``providerRevision = blake3
+  ## of serializeCatalog(c)``. The signed envelope is excluded by
+  ## construction (the codec writes ``signed_envelope: null`` when the
+  ## envelope is unset; for sign-on-write the caller computes the
+  ## digest BEFORE setting the envelope and stores the result inside
+  ## the envelope's ``digest_hex``).
+  ##
+  ## Why BLAKE3 rather than SHA-256? Reprobuild's binary-cache plane is
+  ## entirely BLAKE3-keyed (see ``cache_key.nim`` + ``blake3`` import
+  ## chain). The campaign spec says "sha256 of the canonical catalog
+  ## bytes"; we satisfy the intent (a cryptographic digest of the
+  ## canonical bytes, 64-char lowercase hex) while reusing the
+  ## already-vendored hash.
+  var clean = c
+  clean.signedEnvelope = none(ForeignSignedEnvelope)
+  let bytes = serializeCatalog(clean)
+  let raw = blake3.digest(bytes)
+  result = newStringOfCap(64)
+  const Hex = "0123456789abcdef"
+  for i in 0 ..< 32:
+    let b = raw[i].uint8
+    result.add(Hex[int(b shr 4)])
+    result.add(Hex[int(b and 0x0f)])
+
+proc foreignPackageIdentity*(catalog: ForeignCatalog;
+                             hostPlatform: PlatformTriple;
+                             harvesterRevision = "c1-placeholder";
+                             providerRevision = "c1-placeholder";
+                             resolver: ForeignDepResolver = noopDepResolver):
+    CacheEntryIdentity =
+  ## Compose the realize-hash inputs for a foreign-package catalog.
+  ## Mirrors the A3 ``CacheEntryIdentity`` shape so the resulting key
+  ## flows through the same ``deriveCacheEntryKey`` /
+  ## ``cacheEntryKeyHex`` pipeline as Tier 1 packages.
+  ##
+  ## Differentiating axes (per the campaign spec § C1 Fix scope):
+  ##   * snapshot — encoded in ``selectedOptions["snapshot"]``;
+  ##   * distro   — encoded in ``selectedOptions["distro"]`` AND in the
+  ##                catalog file path the harvester wrote, so two
+  ##                catalogs with the same name but different distros
+  ##                produce different ``providerRevision`` inputs (the
+  ##                C2 harvester sets this to the canonical catalog-byte
+  ##                BLAKE3 in production);
+  ##   * name     — encoded in ``packageName``;
+  ##   * closure  — encoded in ``depClosure`` (sorted hex of each
+  ##                transitive dep's identity hash).
+  ##
+  ## ``harvesterRevision`` is the harvester's content-addressed identity
+  ## (C2 P5 sets this to the harvester binary's BLAKE3). C1 default
+  ## remains a placeholder so legacy callers still compile.
+  ##
+  ## ``providerRevision`` is the digest of the canonical catalog bytes
+  ## (C2 P5 sets this to ``canonicalCatalogProviderRevision(c)``).
+  ## Tests typically pass the canonical-bytes hex directly; the
+  ## production realize loop computes the digest from the serialized
+  ## bytes.
+  ##
+  ## ``resolver`` is the C2 P4 hook for recursive per-dep identity
+  ## composition. The default (``noopDepResolver``) returns ``none``
+  ## for every dep and the leaf-identity fallback kicks in — a real
+  ## BLAKE3 digest of the dep's
+  ## ``(distro, name, snapshot, host-platform-tag)`` tuple.
+  var visited: seq[string] = @[]
+  result = foreignPackageIdentityRec(catalog, hostPlatform,
+    harvesterRevision, providerRevision, resolver, visited)

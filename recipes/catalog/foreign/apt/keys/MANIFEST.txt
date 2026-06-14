@@ -1,0 +1,24 @@
+# C2 fingerprint allowlist (placeholder).
+#
+# Format: one entry per non-comment line, two whitespace-separated
+# fields:
+#
+#     <id>  <64-char-lowercase-hex-blake3-of-canonical-InRelease-bytes>
+#
+# The C2 ``repro-harvest-apt`` fingerprint-allowlist signature backend
+# refuses to proceed with an InRelease unless its BLAKE3 fingerprint
+# appears here. This is the fallback path used when ``gpg`` is not on
+# $PATH; the preferred backend is ``external-gpg`` (run the real
+# OpenPGP verification against the vendored Debian archive key
+# .gpg blobs).
+#
+# C2 ships this file empty by design: production operators MUST either
+# (a) install ``gpg`` and use the external-gpg backend (verify the
+# signed_envelope against the real archive keys), or (b) explicitly
+# vendor the fingerprints of the InRelease files they intend to trust
+# for the snapshots they harvest from.
+#
+# The integration-test fixtures under ``tests/integration/foreign_packages/``
+# generate their OWN local MANIFEST.txt at fixture build time (see
+# ``tests/integration/foreign_packages/lib/fixture_build.nim``); those
+# tests do NOT depend on this file.

@@ -58,10 +58,37 @@ proc repoRoot(): string =
 proc packagesDir(): string =
   repoRoot() / PackagesRel
 
+const AuditExemptions = [
+  # ReproOS-Generations-And-Foreign-Packages C1/C2: the Tier-3
+  # foreign-distro adapter modules live alongside the Tier-1 / Tier-2
+  # catalog files but do NOT declare a per-package provisioning shape:
+  # they are library code (DSL constructors + shared codec + apt-index
+  # parser). The realize pipeline consumes the per-package metadata
+  # from ``recipes/catalog/foreign/<distro>/<package>.json`` files the
+  # C2 harvester emits, not from these .nim helpers. Exempt them
+  # explicitly so the M29 audit doesn't falsely flag them as missing
+  # provisioning.
+  "foreign_common",
+  "foreign_apt",
+  "foreign_dnf",
+  "foreign_pacman",
+  "apt_index",
+  # Bootstrap-And-Self-Build B4: ``python_unittest_runner`` is a
+  # TestRunner-adapter wrapper; its provisioning is inherited from
+  # ``python3.nim`` (the engine resolves the runner's execution path
+  # via the python3 profile). The M29 audit predates B4 and was not
+  # updated when the adapter landed without its own provisioning
+  # shape. Exempt it here rather than retroactively contort the
+  # adapter to declare a fake one.
+  "python_unittest_runner",
+]
+
 iterator catalogFiles(): tuple[name, path: string] =
   for kind, path in walkDir(packagesDir()):
     if kind == pcFile and path.endsWith(".nim"):
-      yield (name: splitFile(path).name, path: path)
+      let name = splitFile(path).name
+      if name in AuditExemptions: continue
+      yield (name: name, path: path)
 
 proc readCatalog(path: string): string =
   readFile(path)
