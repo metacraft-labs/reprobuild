@@ -517,15 +517,33 @@ static int do_sys(void) {
 static int setup_namespace(const manifest_t *m) {
     uid_t outer_uid = getuid();
     gid_t outer_gid = getgid();
+    /* Decide whether we need CLONE_NEWUSER. We only need it when the
+     * caller is unprivileged — mount(2) inside a mount namespace
+     * requires CAP_SYS_ADMIN, and an unprivileged user gets it only
+     * via a freshly-created user namespace where we are root.
+     *
+     * When the caller is already real root (e.g. inside ReproOS
+     * where root auto-logs in to a getty + invokes the shim), the
+     * mount(2)s are allowed in the host user namespace and we skip
+     * CLONE_NEWUSER entirely. This also works around kernels built
+     * without CONFIG_USER_NS (which would otherwise fail unshare
+     * with EINVAL). */
+    int need_userns = (outer_uid != 0);
 
     if (g_dry_run) {
-        vlog("dry-run: would unshare(CLONE_NEWUSER|CLONE_NEWNS)");
+        vlog("dry-run: would unshare(%sCLONE_NEWNS)",
+             need_userns ? "CLONE_NEWUSER|" : "");
     } else {
-        if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) {
-            err_log("unshare(NEWUSER|NEWNS) failed: %s", strerror(errno));
+        int clone_flags = CLONE_NEWNS;
+        if (need_userns) clone_flags |= CLONE_NEWUSER;
+        if (unshare(clone_flags) != 0) {
+            err_log("unshare(%sNEWNS) failed: %s",
+                    need_userns ? "NEWUSER|" : "", strerror(errno));
             return -2;
         }
-        if (setup_userns_id_map(outer_uid, outer_gid) != 0) return -2;
+        if (need_userns) {
+            if (setup_userns_id_map(outer_uid, outer_gid) != 0) return -2;
+        }
         /* Make the mount namespace's propagation private so bind mounts
            don't leak back to the host. */
         if (mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {

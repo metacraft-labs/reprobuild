@@ -125,9 +125,20 @@ if [[ ! -f "$shim_dir/git" ]]; then
 fi
 c2_ok "per-binary shim emitted at $shim_dir/git"
 
-# Verify the shim calls the launcher with the right args.
-grep -q "$launcher_bin" "$shim_dir/git" || c2_fail "shim missing launcher path"
-grep -q "$manifest_path" "$shim_dir/git" || c2_fail "shim missing manifest path"
+# Verify the shim calls the launcher with the right args. The Nim
+# helper running on Windows normalizes paths to forward-slash drive-
+# letter form (D:/foo/bar) but bash MSYS exposes them as /d/foo/bar;
+# convert both before comparing so the grep is independent of the
+# path-style the shell happened to expose.
+to_winpath() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w -m -- "$1"
+  else echo "$1"
+  fi
+}
+launcher_bin_w="$(to_winpath "$launcher_bin")"
+manifest_path_w="$(to_winpath "$manifest_path")"
+grep -q "$launcher_bin_w" "$shim_dir/git" || c2_fail "shim missing launcher path"
+grep -q "$manifest_path_w" "$shim_dir/git" || c2_fail "shim missing manifest path"
 c2_ok "shim contents reference launcher + manifest"
 
 # Cross-platform: launcher --dry-run accepts the manifest.

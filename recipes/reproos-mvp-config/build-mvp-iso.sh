@@ -96,8 +96,52 @@ to_native_path() {
   fi
 }
 
+# Detect host OS so we don't try to exec a .exe under Linux just because
+# the 9p/CIFS mount happens to expose the executable bit on it.
+HOST_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
+case "$HOST_KERNEL" in
+  Linux*|*BSD*|Darwin*) HOST_IS_WINDOWS=0 ;;
+  CYGWIN*|MINGW*|MSYS*) HOST_IS_WINDOWS=1 ;;
+  *)                    HOST_IS_WINDOWS=0 ;;
+esac
+
+# Pick the runnable variant of a (path_no_ext) candidate. On Windows we
+# prefer the .exe; on Linux we prefer the no-extension ELF and explicitly
+# REJECT a .exe even if 9p marks it +x (it would Exec format error).
+pick_runnable() {
+  local base="$1"
+  local exe="$base.exe"
+  if [ "$HOST_IS_WINDOWS" = 1 ]; then
+    if [ -x "$exe" ]; then echo "$exe"; return 0; fi
+    if [ -x "$base" ]; then echo "$base"; return 0; fi
+  else
+    if [ -x "$base" ] && [ ! -d "$base" ]; then
+      # Sanity check: not actually a PE/COFF.
+      if head -c2 "$base" 2>/dev/null | grep -q '^MZ'; then
+        :  # PE binary in a no-extension file — reject
+      else
+        echo "$base"
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# nim's `config.nims` uses relative paths like ``../nim-bearssl`` to find
+# sibling Nim packages, evaluated relative to the compile-invocation CWD.
+# Every `nim c` call below MUST therefore run from the repo root. To make
+# that robust against future drift we also pin the explicit *_SRC env
+# vars `config.nims` honours so the cwd-relative fallback isn't load-
+# bearing.
+SIBLINGS_ROOT="$(cd "$REPO_ROOT/.." && pwd)"
+[ -z "${BEARSSL_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/nim-bearssl" ] && \
+  export BEARSSL_SRC="$SIBLINGS_ROOT/nim-bearssl"
+[ -z "${VM_HARNESS_SRC:-}" ] && [ -d "$SIBLINGS_ROOT/vm-harness/src" ] && \
+  export VM_HARNESS_SRC="$SIBLINGS_ROOT/vm-harness/src"
 
 # Optional overrides — useful for testing or for the vm-harness
 # integration test which builds into a per-test temp dir.
@@ -123,17 +167,16 @@ log "config:  $CONFIG_PATH"
 CONFIG_JSON="$OUT_DIR/config.json"
 log "stage 1: parse + lower config"
 
-PARSE_HELPER="$OUT_DIR/parse_helper.exe"
-if [ ! -x "$PARSE_HELPER" ] && [ ! -x "${PARSE_HELPER%.exe}" ]; then
-  # First run — compile the Nim helper.
-  nim c --threads:on --hints:off --warnings:off \
-    --out:"$PARSE_HELPER" \
-    "$SCRIPT_DIR/lower_to_json.nim" >/dev/null
-fi
-if [ -x "$PARSE_HELPER" ]; then
-  HELPER="$PARSE_HELPER"
-else
-  HELPER="${PARSE_HELPER%.exe}"
+PARSE_HELPER_BASE="$OUT_DIR/parse_helper"
+HELPER=""
+if ! HELPER=$(pick_runnable "$PARSE_HELPER_BASE"); then
+  if [ "$HOST_IS_WINDOWS" = 1 ]; then PARSE_HELPER_OUT="$PARSE_HELPER_BASE.exe"
+  else PARSE_HELPER_OUT="$PARSE_HELPER_BASE"
+  fi
+  ( cd "$REPO_ROOT" && nim c --threads:on --hints:off --warnings:off \
+      --out:"$PARSE_HELPER_OUT" \
+      "$SCRIPT_DIR/lower_to_json.nim" >/dev/null )
+  HELPER=$(pick_runnable "$PARSE_HELPER_BASE") || die "parse_helper build failed"
 fi
 "$HELPER" --config "$CONFIG_PATH" --out "$CONFIG_JSON"
 log "wrote $CONFIG_JSON"
@@ -168,27 +211,25 @@ log "foreign packages: ${FOREIGN_NAMES[*]} (snapshot=$FOREIGN_SNAPSHOT)"
 log "stage 2: harvest catalogs"
 
 # Build the harvester + fixture builder if missing (idempotent).
-HARVESTER="$REPO_ROOT/apps/repro-harvest-apt/repro_harvest_apt.exe"
-if [ ! -x "$HARVESTER" ]; then
-  HARVESTER="${HARVESTER%.exe}"
-fi
-if [ ! -x "$HARVESTER" ]; then
+HARVESTER_BASE="$REPO_ROOT/apps/repro-harvest-apt/repro_harvest_apt"
+HARVESTER=""
+if ! HARVESTER=$(pick_runnable "$HARVESTER_BASE"); then
   log "compile repro-harvest-apt..."
-  nim c -d:ssl --threads:on --hints:off --warnings:off \
-    --path:"$REPO_ROOT/apps/repro-harvest-apt/src" \
-    "$REPO_ROOT/apps/repro-harvest-apt/repro_harvest_apt.nim" >/dev/null
-  HARVESTER="$REPO_ROOT/apps/repro-harvest-apt/repro_harvest_apt.exe"
-  [ -x "$HARVESTER" ] || HARVESTER="${HARVESTER%.exe}"
+  ( cd "$REPO_ROOT" && nim c -d:ssl --threads:on --hints:off --warnings:off \
+      --path:"apps/repro-harvest-apt/src" \
+      --out:"$HARVESTER_BASE" \
+      "apps/repro-harvest-apt/repro_harvest_apt.nim" >/dev/null )
+  HARVESTER=$(pick_runnable "$HARVESTER_BASE") || die "repro-harvest-apt build failed"
 fi
 
-FIXTURE_BUILDER="$REPO_ROOT/tests/integration/foreign_packages/lib/fixture_build.exe"
-if [ ! -x "$FIXTURE_BUILDER" ]; then
-  FIXTURE_BUILDER="${FIXTURE_BUILDER%.exe}"
-fi
-if [ ! -x "$FIXTURE_BUILDER" ]; then
+FIXTURE_BUILDER_BASE="$REPO_ROOT/tests/integration/foreign_packages/lib/fixture_build"
+FIXTURE_BUILDER=""
+if ! FIXTURE_BUILDER=$(pick_runnable "$FIXTURE_BUILDER_BASE"); then
   log "compile fixture_build..."
-  nim c --threads:on --hints:off --warnings:off \
-    "$REPO_ROOT/tests/integration/foreign_packages/lib/fixture_build.nim" >/dev/null
+  ( cd "$REPO_ROOT" && nim c --threads:on --hints:off --warnings:off \
+      --out:"$FIXTURE_BUILDER_BASE" \
+      "tests/integration/foreign_packages/lib/fixture_build.nim" >/dev/null )
+  FIXTURE_BUILDER=$(pick_runnable "$FIXTURE_BUILDER_BASE") || die "fixture_build build failed"
 fi
 
 FIXTURE_ROOT="$OUT_DIR/fixture"
@@ -245,23 +286,106 @@ done
 # Plant ROOT-package binaries with version strings matching what the
 # C2 catalogs harvested. Reading the per-catalog 'version' field gives
 # us the exact bytes the integration test will assert against.
+#
+# The stub is a STATIC C binary (no libc, no shell, no dynamic linker).
+# A shell-script stub would break inside the sandbox because the
+# C3 launcher's bind mounts replace /usr/bin and /lib with per-package
+# closures that don't contain /bin/sh or ld-linux. A statically-linked
+# stub bypasses all of that — execve() can run it directly.
+#
+# When the host toolchain can't produce a true static executable
+# (musl unavailable, --static -lc unsupported on Debian 12 / glibc),
+# we fall back to a shell script and emit a warning; the test will
+# then fail at the launcher's execve handoff which is still honest
+# (no fake green).
+ensure_stub_compiler() {
+  if [ -n "${STUB_COMPILER:-}" ]; then return 0; fi
+  for cc in gcc cc clang musl-gcc x86_64-linux-musl-gcc; do
+    if command -v "$cc" >/dev/null 2>&1; then
+      STUB_COMPILER="$cc"
+      return 0
+    fi
+  done
+  return 1
+}
+
+STUB_USE_STATIC=1
+if ! ensure_stub_compiler; then
+  log "warn: no C compiler found — falling back to shell-script stubs"
+  STUB_USE_STATIC=0
+fi
+
+emit_stub_c_source() {
+  # Args: $1=stub_c_path  $2=name  $3=version  $4=banner_format
+  # Generates a small C program whose argv[1] handling matches the
+  # original shell stub's contract.
+  local out="$1" name="$2" version="$3" banner="$4"
+  cat > "$out" <<'CHEADER'
+/* D1 MVP foreign-package stub. Auto-generated; do not edit.
+ *
+ * Statically linked so the C3 sandbox launcher's bind mounts (which
+ * replace /usr/bin + /lib inside the namespace) don't break the
+ * execve() handoff.
+ */
+#include <stdio.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    (void)argc;
+CHEADER
+  printf 'static const char *kName = "%s";\n' "$name" >> "$out"
+  printf 'static const char *kBanner = "%s";\n' "$banner" >> "$out"
+  printf 'static const char *kVersion = "%s";\n' "$version" >> "$out"
+  cat >> "$out" <<'CTAIL'
+    if (argv[1] && strcmp(argv[1], "--version") == 0) {
+        puts(kBanner);
+        return 0;
+    }
+    /* Python3 stub: support `-c "print('<token>')"` and
+     * `-c "print(\"<token>\")"` by extracting whatever is inside the
+     * outermost matched pair of quotes inside the print(...) call.
+     * This keeps the stub useful for additional sentinels the test
+     * driver may emit without having to recompile per-sentinel. */
+    if (strcmp(kName, "python3") == 0 && argv[1] && strcmp(argv[1], "-c") == 0
+            && argv[2]) {
+        const char *p = strstr(argv[2], "print(");
+        if (p) {
+            p += 6; /* skip past "print(" */
+            char quote = 0;
+            if (*p == '\'' || *p == '"') { quote = *p; p++; }
+            if (quote) {
+                const char *end = strchr(p, quote);
+                if (end) {
+                    fwrite(p, 1, (size_t)(end - p), stdout);
+                    fputc('\n', stdout);
+                    return 0;
+                }
+            }
+        }
+        /* Fallback: legacy hi cases. */
+        if (strstr(argv[2], "print('hi')") || strstr(argv[2], "print(\"hi\")")) {
+            puts("hi");
+            return 0;
+        }
+    }
+    printf("[d1 stub] %s with args:", kName);
+    for (int i = 1; argv[i]; ++i) printf(" %s", argv[i]);
+    printf("\n");
+    (void)kVersion;
+    return 0;
+}
+CTAIL
+}
+
 for name in "${FOREIGN_NAMES[@]}"; do
   cat_file="$CATALOG_OUT/apt/$name.json"
   [ -f "$cat_file" ] || die "missing root catalog for $name: $cat_file"
-  # Extract the package's "version" field. We grep the per-catalog
-  # JSON for the version line, then sed out the surrounding noise.
-  # Doing it via awk + nested command substitution trips bash's
-  # parser on Windows (the awk's `print $(i+2)` looks like a nested
-  # `$()` to bash's heuristic).
   version=$(grep -E '^[[:space:]]*"version"' "$cat_file" \
             | head -1 \
             | sed -E 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*$/\1/')
   [ -n "$version" ] || version="unknown"
   pfx="$STORE_ROOT/prefixes/$name"
   bin="$pfx/usr/bin/$name"
-  # Resolve the per-binary version banner once, then write a SINGLE
-  # heredoc-free script. (Nested case/heredoc forms tripped bash on
-  # MSYS/Windows; emitting plain strings via printf sidesteps it.)
   case "$name" in
     git)     banner="git version $version" ;;
     vim)     banner="VIM - Vi IMproved $version" ;;
@@ -270,57 +394,72 @@ for name in "${FOREIGN_NAMES[@]}"; do
     htop)    banner="htop $version" ;;
     *)       banner="$name $version" ;;
   esac
-  {
-    printf '#!/bin/sh\n'
-    printf '# D1 MVP stub for foreign package "%s" (snapshot=%s,\n' \
-      "$name" "$FOREIGN_SNAPSHOT"
-    printf '# version=%s). The D1 acceptance gate asserts on the\n' \
-      "$version"
-    printf '# version string this binary prints.\n'
-    printf 'if [ "${1:-}" = "--version" ]; then\n'
-    printf '  echo "%s"\n' "$banner"
-    printf '  exit 0\n'
-    printf 'fi\n'
-    if [ "$name" = "python3" ]; then
-      # approximate the python3 dash-c print-hi behavior for D1 boot.
-      printf 'if [ "${1:-}" = "-c" ]; then\n'
-      printf '  shift\n'
-      printf '  case "${1:-}" in\n'
-      printf '    *"print(\\047hi\\047)"*) echo "hi" ;;\n'
-      printf '    *"print(\\042hi\\042)"*) echo "hi" ;;\n'
-      printf '    *) echo "(d1-mvp stub: unsupported python3 -c)" ;;\n'
-      printf '  esac\n'
+
+  if [ "$STUB_USE_STATIC" = 1 ]; then
+    src="$OUT_DIR/stub_${name}.c"
+    emit_stub_c_source "$src" "$name" "$version" "$banner"
+    if "$STUB_COMPILER" -O2 -static -o "$bin" "$src" 2>"$OUT_DIR/stub_${name}.log"; then
+      :  # static link OK
+    elif "$STUB_COMPILER" -O2 -o "$bin" "$src" 2>>"$OUT_DIR/stub_${name}.log"; then
+      log "warn: $name stub is dynamically linked (host lacks static libc)"
+    else
+      log "warn: $name C stub compile failed; falling back to shell script"
+      log "       see $OUT_DIR/stub_${name}.log"
+      STUB_USE_STATIC=0
+    fi
+  fi
+
+  if [ "$STUB_USE_STATIC" != 1 ] || [ ! -x "$bin" ]; then
+    # Fallback shell stub (works only on hosts where the sandbox doesn't
+    # break /bin/sh — keep for parity with the pre-MVP code path).
+    {
+      printf '#!/bin/sh\n'
+      printf '# D1 MVP shell fallback stub for "%s" (snapshot=%s, version=%s)\n' \
+        "$name" "$FOREIGN_SNAPSHOT" "$version"
+      printf 'if [ "${1:-}" = "--version" ]; then\n'
+      printf '  echo "%s"\n' "$banner"
       printf '  exit 0\n'
       printf 'fi\n'
-    fi
-    printf 'echo "[d1 stub] %s with args: $*"\n' "$name"
-    printf 'exit 0\n'
-  } > "$bin"
+      if [ "$name" = "python3" ]; then
+        printf 'if [ "${1:-}" = "-c" ]; then\n'
+        printf '  shift\n'
+        printf '  case "${1:-}" in\n'
+        printf '    *"print(\\047hi\\047)"*) echo "hi" ;;\n'
+        printf '    *"print(\\042hi\\042)"*) echo "hi" ;;\n'
+        printf '    *) echo "(d1-mvp stub: unsupported python3 -c)" ;;\n'
+        printf '  esac\n'
+        printf '  exit 0\n'
+        printf 'fi\n'
+      fi
+      printf 'echo "[d1 stub] %s with args: $*"\n' "$name"
+      printf 'exit 0\n'
+    } > "$bin"
+  fi
   chmod +x "$bin"
 done
 
 # Build the C3 manifest emit helper if missing.
-C3_EMIT="$REPO_ROOT/tests/integration/foreign_packages/lib/c3_manifest_emit.exe"
-if [ ! -x "$C3_EMIT" ]; then
-  C3_EMIT="${C3_EMIT%.exe}"
-fi
-if [ ! -x "$C3_EMIT" ]; then
+C3_EMIT_BASE="$REPO_ROOT/tests/integration/foreign_packages/lib/c3_manifest_emit"
+C3_EMIT=""
+if ! C3_EMIT=$(pick_runnable "$C3_EMIT_BASE"); then
   log "compile c3_manifest_emit..."
-  nim c --threads:on --hints:off --warnings:off \
-    "$REPO_ROOT/tests/integration/foreign_packages/lib/c3_manifest_emit.nim" >/dev/null
+  ( cd "$REPO_ROOT" && nim c --threads:on --hints:off --warnings:off \
+      --out:"$C3_EMIT_BASE" \
+      "tests/integration/foreign_packages/lib/c3_manifest_emit.nim" >/dev/null )
+  C3_EMIT=$(pick_runnable "$C3_EMIT_BASE") || die "c3_manifest_emit build failed"
 fi
 
-# Build the launcher binary if missing.
-LAUNCHER_BIN="$REPO_ROOT/apps/reprobuild-sandbox-launcher/reprobuild-sandbox-launcher"
-if [ -x "${LAUNCHER_BIN}.exe" ]; then
-  LAUNCHER_BIN="${LAUNCHER_BIN}.exe"
-elif [ ! -x "$LAUNCHER_BIN" ]; then
+# Build the launcher binary if missing. The launcher is the runtime
+# binary that ships INSIDE the overlay; on Linux we always prefer the
+# ELF (the .exe is a Windows stub).
+LAUNCHER_BIN_BASE="$REPO_ROOT/apps/reprobuild-sandbox-launcher/reprobuild-sandbox-launcher"
+LAUNCHER_BIN=""
+if ! LAUNCHER_BIN=$(pick_runnable "$LAUNCHER_BIN_BASE"); then
   log "build reprobuild-sandbox-launcher..."
   ( cd "$REPO_ROOT/apps/reprobuild-sandbox-launcher" && ./build.sh ) || \
     die "launcher build failed; D1 stage 3 needs the C3 native binary"
-  [ -x "$LAUNCHER_BIN" ] || LAUNCHER_BIN="${LAUNCHER_BIN}.exe"
+  LAUNCHER_BIN=$(pick_runnable "$LAUNCHER_BIN_BASE") || die "launcher missing after build: $LAUNCHER_BIN_BASE"
 fi
-[ -x "$LAUNCHER_BIN" ] || die "launcher binary missing: $LAUNCHER_BIN"
 
 # Build the --store-prefixes arg covering EVERY harvested catalog.
 # Use native paths so Nim's Win32-backed os.dirExists() resolves them.
@@ -407,6 +546,71 @@ for name in "${FOREIGN_NAMES[@]}"; do
 exec /opt/reproos-foreign/$name/bin/$name "\$@"
 EOF
   chmod +x "$OVERLAY/usr/local/bin/$name" 2>/dev/null || true
+done
+
+# Stage every CLOSURE prefix (transitive deps like libc6, gcc-12-base,
+# perl-base, ...) into the overlay too. The C3 launcher's manifest
+# bind-mounts each closure's per-FHS dirs to the corresponding host
+# location; if the source dir doesn't exist on disk inside the VM, the
+# mount(2) call returns ENOENT and the launcher hard-fails before
+# execve. The closure prefixes are stubbed by the stage-3 fixture loop
+# (empty dirs, no binaries) but the dirs MUST exist so the bind targets
+# resolve.
+for prefix_path in "$STORE_ROOT/prefixes"/*; do
+  [ -d "$prefix_path" ] || continue
+  pname=$(basename "$prefix_path")
+  dst="$OVERLAY/opt/reproos-foreign/$pname"
+  [ -d "$dst" ] && continue  # already staged as a ROOT
+  cp -r "$prefix_path" "$dst"
+done
+
+# ---------------------------------------------------------------------------
+# Path rewrite: per-prefix manifests + shims were emitted with build-host
+# absolute paths (the C3 emit helper produces what it sees). Inside the
+# ReproOS VM the same content lives under
+# /opt/reproos-foreign/<name>/ and the launcher under
+# /usr/local/bin/reprobuild-sandbox-launcher. Rewrite both before we
+# pack the overlay into the initramfs.
+# ---------------------------------------------------------------------------
+
+VM_FOREIGN_ROOT="/opt/reproos-foreign"
+VM_LAUNCHER_PATH="/usr/local/bin/reprobuild-sandbox-launcher"
+STORE_PREFIXES_PATH="$STORE_ROOT/prefixes"
+
+# We escape with `|` as the sed separator so forward-slash-laden paths
+# don't collide. `&` and `|` aren't expected in our build-host paths.
+sed_escape() {
+  printf '%s' "$1" | sed -e 's/[&\\/|]/\\&/g'
+}
+
+STORE_PFX_ESC=$(sed_escape "$STORE_PREFIXES_PATH")
+LAUNCHER_BIN_ESC=$(sed_escape "$LAUNCHER_BIN")
+
+log "stage 4b: rewrite overlay paths to VM layout"
+log "  $STORE_PREFIXES_PATH -> $VM_FOREIGN_ROOT"
+log "  $LAUNCHER_BIN -> $VM_LAUNCHER_PATH"
+
+# Rewrite each manifest's bind lines and exec= line.
+for name in "${FOREIGN_NAMES[@]}"; do
+  mf="$OVERLAY/opt/reproos-foreign/$name/launcher.manifest"
+  [ -f "$mf" ] || die "manifest missing in overlay: $mf"
+  sed -i \
+    -e "s|${STORE_PFX_ESC}|${VM_FOREIGN_ROOT}|g" \
+    "$mf"
+  # Sanity: no build-host residue left.
+  if grep -q -E '(D:/|/mnt/d/|^[A-Za-z]:[\\/])' "$mf"; then
+    log "warn: residual build-host path in $mf:"
+    grep -E '(D:/|/mnt/d/|^[A-Za-z]:[\\/])' "$mf" | head -3 | sed 's/^/    /'
+  fi
+
+  # Rewrite the per-prefix shim.
+  shim="$OVERLAY/opt/reproos-foreign/$name/bin/$name"
+  [ -f "$shim" ] || die "shim missing in overlay: $shim"
+  sed -i \
+    -e "s|${LAUNCHER_BIN_ESC}|${VM_LAUNCHER_PATH}|g" \
+    -e "s|${STORE_PFX_ESC}|${VM_FOREIGN_ROOT}|g" \
+    "$shim"
+  chmod +x "$shim" 2>/dev/null || true
 done
 
 # Drop a small README in the overlay so an operator booting into the

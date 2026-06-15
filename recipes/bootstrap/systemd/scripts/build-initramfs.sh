@@ -90,9 +90,14 @@ find "$WORK/usr/lib" "$WORK/usr/bin" "$WORK/usr/sbin" -type f -executable 2>/dev
 done
 copy_libs /usr/bin/busybox 2>/dev/null || true
 
-# /etc/passwd, /etc/group, /etc/shadow - minimal
+# /etc/passwd, /etc/group, /etc/shadow - minimal.
+# Root's login shell is `/bin/sh` (busybox's `ash` applet). The
+# initramfs busybox doesn't carry a `bash` applet, so attempting to
+# exec `/bin/bash` would respawn the getty in a tight loop. The D1
+# acceptance test only needs `echo`, `&&`, and the C3 launcher shim
+# invocation pipeline, all of which ash supports.
 cat > "$WORK/etc/passwd" <<EOF
-root:x:0:0:root:/root:/bin/bash
+root:x:0:0:root:/root:/bin/sh
 nobody:x:65534:65534:nobody:/:/usr/sbin/nologin
 EOF
 cat > "$WORK/etc/group" <<EOF
@@ -136,6 +141,18 @@ auth    sufficient pam_permit.so
 account sufficient pam_permit.so
 password sufficient pam_permit.so
 session sufficient pam_permit.so
+EOF
+
+# /etc/profile: ensure the autologin shell picks up /usr/local/bin
+# so the C3 sandbox-launcher shims at /usr/local/bin/<name> resolve
+# without a full path. Without this, ash defaults to a bare
+# /sbin:/usr/sbin:/bin:/usr/bin PATH and the D1 foreign-package
+# assertions all fail with "not found" even though the binaries exist.
+cat > "$WORK/etc/profile" <<EOF
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root
+export TERM=linux
+umask 022
 EOF
 
 # Ensure default target is multi-user

@@ -17,6 +17,8 @@
 ##     [--launcher-bin <abs-path>]   # required when --shim-out is set
 
 import std/[os, strutils, tables]
+when not defined(windows):
+  import std/posix
 
 import repro_local_store
 
@@ -100,8 +102,9 @@ when isMainModule:
     let shimPath = shimOut / name
     writeFile(shimPath, shimText)
     when not defined(windows):
-      # chmod +x via stdlib
-      import std/posix
-      discard chmod(shimPath.cstring, S_IRWXU or S_IRGRP or S_IXGRP or
-        S_IROTH or S_IXOTH)
+      # chmod +x via std/posix (imported at module top so it's visible
+      # at toplevel; the explicit toplevel `import` form is the only
+      # legal placement in Nim 2.x).
+      let mode = Mode(S_IRWXU or S_IRGRP or S_IXGRP or S_IROTH or S_IXOTH)
+      discard chmod(shimPath.cstring, mode)
     stderr.writeLine "shim emitted: ", shimPath
