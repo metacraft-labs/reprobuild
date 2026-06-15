@@ -15,7 +15,7 @@
 ## that performs the actual lint pass; cargo-clippy spawns it via
 ## the prefix's bin/ entry).
 ##
-## The catalog intentionally pins Rust 1.85.0 to match the
+## The catalog intentionally pins Rust 1.92.0 to match the
 ## recorder dev shells' constraint (``rustc >=1.85``). Bumping the
 ## pin requires harvesting fresh ``static.rust-lang.org/dist/`` SHAs.
 ##
@@ -37,7 +37,7 @@ package clippy:
 
 let clippyCatalog* = @[
   VersionedProvisioning(
-    version: "1.85.0",
+    version: "1.92.0",
     archive_format: afTarXz,
     install_method: imExtract,
     bin_relpath: @[
@@ -46,26 +46,26 @@ let clippyCatalog* = @[
     ],
     platforms: @[
       PlatformBinary(cpu: pcX86_64, os: poWindows,
-        url: "https://static.rust-lang.org/dist/rust-1.85.0-x86_64-pc-windows-msvc.tar.xz",
-        sha256: "6f04dd4cc0ce1bb69507fb7b61ce8d502a58d70abc3dfb0b90b8ae12222b8f46",
+        url: "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
+        sha256: "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
         sha512: "",
-        extract_path: "rust-1.85.0-x86_64-pc-windows-msvc"),
+        extract_path: "rust-1.92.0-x86_64-pc-windows-msvc"),
       PlatformBinary(cpu: pcX86_64, os: poLinux,
-        url: "https://static.rust-lang.org/dist/rust-1.85.0-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "6f8b323ed2a34ccf0031631b85d79e1133da662094566bc910432da9bd3a5b42",
+        url: "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c",
         sha512: "",
         sha1: "",
-        extract_path: "rust-1.85.0-x86_64-unknown-linux-gnu",
+        extract_path: "rust-1.92.0-x86_64-unknown-linux-gnu",
         bin_relpath_override: @[
           "clippy-preview/bin/cargo-clippy",
           "clippy-preview/bin/clippy-driver"
         ]),
       PlatformBinary(cpu: pcX86_64, os: poMacos,
-        url: "https://static.rust-lang.org/dist/rust-1.85.0-x86_64-apple-darwin.tar.xz",
-        sha256: "c8626ba816961e6913f0db29fdf212706d193afff44ab96fe6afb431627a3434",
+        url: "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-apple-darwin.tar.xz",
+        sha256: "ef71fcdcd50efd3301144e701faf15124113a1b2efe9a111175d7d1e4f2d31d2",
         sha512: "",
         sha1: "",
-        extract_path: "rust-1.85.0-x86_64-apple-darwin",
+        extract_path: "rust-1.92.0-x86_64-apple-darwin",
         bin_relpath_override: @[
           "clippy-preview/bin/cargo-clippy",
           "clippy-preview/bin/clippy-driver"
@@ -74,5 +74,23 @@ let clippyCatalog* = @[
     installer_args: @[],
     pacman_packages: @[],
     bootstrap_argv: @[],
-    env: initTable[string, string]())
+    env: initTable[string, string](),
+    # See ``rustc.nim`` for the rationale: clippy-driver.exe is itself
+    # a rustc-shim that needs the standard library in the canonical
+    # sysroot layout. piaMoveItem is a silent no-op when the source
+    # does not exist, so all three triples can be listed.
+    pre_install_actions: @[
+      PreInstallAction(kind: piaMoveItem,
+        source: "$dir/rust-std-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/lib",
+        target: "$dir/rustc/lib/rustlib/x86_64-pc-windows-msvc/lib",
+        recurse: false, literal: ""),
+      PreInstallAction(kind: piaMoveItem,
+        source: "$dir/rust-std-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib",
+        target: "$dir/rustc/lib/rustlib/x86_64-unknown-linux-gnu/lib",
+        recurse: false, literal: ""),
+      PreInstallAction(kind: piaMoveItem,
+        source: "$dir/rust-std-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/lib",
+        target: "$dir/rustc/lib/rustlib/x86_64-apple-darwin/lib",
+        recurse: false, literal: "")
+    ])
 ]

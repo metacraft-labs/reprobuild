@@ -2610,7 +2610,23 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
     lockIdentity: plan.lockIdentity,
     realizationBoundary: prefix,
     executableName: useDef.executableName,
-    pathSearchList: @[junctionTarget.parentDir / "bin"],
+    pathSearchList:
+      # The junction is named ``bin`` and maps to the whole scoop
+      # app version dir. Some apps place their primary executable
+      # at the junction root (e.g. rg.exe directly under bin/),
+      # while others use a nested layout (e.g. rustup-msvc keeps
+      # cargo.exe at ``.cargo/bin/cargo.exe`` via a persist
+      # junction). Surface both: the junction root AND, when the
+      # resolved executable lives in a deeper subdir, that subdir
+      # too — so sibling binaries (cargo→rustc lookup, npm→node
+      # lookup) can resolve via PATH at build time.
+      block:
+        var dirs = @[junctionTarget.parentDir / "bin"]
+        if resolvedExecutable.len > 0:
+          let exeDir = resolvedExecutable.parentDir
+          if exeDir.len > 0 and exeDir notin dirs:
+            dirs.add(exeDir)
+        dirs,
     resolvedExecutablePath: resolvedExecutable,
     adapterStrength: asWeak,
     cachePortability: portability,
