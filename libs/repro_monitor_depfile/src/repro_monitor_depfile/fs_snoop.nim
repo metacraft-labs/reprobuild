@@ -269,11 +269,21 @@ proc parseRun(args: seq[string]): ParsedFsSnoopCommand =
       result.request.streamMode = parseOutputMode(requireValue(args, i, "--format"))
     of "--event-stream":
       result.request.eventStreamPath = requireValue(args, i, "--event-stream")
+    of "--capture-stdio":
+      # Flag form (no value) — turn capture on; subsequent
+      # ``--capture-stdio-path=…`` controls where the captured bytes
+      # are written.
+      result.request.captureChildStdio = true
+    of "--capture-stdio-path":
+      result.request.captureStdioPath = requireValue(args, i,
+        "--capture-stdio-path")
+      result.request.captureChildStdio = true
     else:
       let depValue = splitFlagValue(arg, "--depfile")
       let eventsValue = splitFlagValue(arg, "--events")
       let formatValue = splitFlagValue(arg, "--format")
       let streamValue = splitFlagValue(arg, "--event-stream")
+      let stdioPathValue = splitFlagValue(arg, "--capture-stdio-path")
       if depValue.len > 0:
         result.request.depFilePath = depValue
         result.depfileWasExplicit = true
@@ -283,6 +293,9 @@ proc parseRun(args: seq[string]): ParsedFsSnoopCommand =
         result.request.streamMode = parseOutputMode(formatValue)
       elif streamValue.len > 0:
         result.request.eventStreamPath = streamValue
+      elif stdioPathValue.len > 0:
+        result.request.captureStdioPath = stdioPathValue
+        result.request.captureChildStdio = true
       else:
         raise newException(ValueError, "unsupported fs-snoop argument: " & arg)
     inc i
@@ -496,7 +509,9 @@ proc runMonitoredCommand(request: FsSnoopRequest): int =
     setEnvVar("REPRO_MONITOR_SHIM_LIB", shimLib, oldEnv)
     defer: restoreEnv(oldEnv)
 
-    let injection = runWithMonitorShim(request.command, shimLib)
+    let injection = runWithMonitorShim(request.command, shimLib,
+                                       captureStdio = request.captureChildStdio,
+                                       captureStdioPath = request.captureStdioPath)
     result = injection.exitCode
 
     discard mergeFragments(fragmentDir, request.depFilePath)

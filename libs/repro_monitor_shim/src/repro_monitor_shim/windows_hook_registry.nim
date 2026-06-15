@@ -126,8 +126,17 @@ const
   # NtQueryDirectoryFile. libuv may use either depending on the OS
   # capability probe; we hook both for coverage.
   HookNtQueryDirectoryFileEx* = "NtQueryDirectoryFileEx"
+  # FindFirstFile / FindNextFile / FindClose — Node.js / libuv 1.52
+  # imports these directly from kernel32 for fs.readdirSync rather than
+  # going through the NtQueryDirectoryFile NT export. Hooking them at
+  # the kernel32 layer is the safe coverage point (the NT-layer detour
+  # crashed Node — see project_codetracer_webpack_wedge_postsuccess).
+  HookFindFirstFileW* = "FindFirstFileW"
+  HookFindFirstFileExW* = "FindFirstFileExW"
+  HookFindNextFileW* = "FindNextFileW"
+  HookFindClose* = "FindClose"
 
-const MonitorShimHookNames*: array[28, string] = [
+const MonitorShimHookNames*: array[32, string] = [
   HookCreateFileW, HookCreateFileA, HookReadFile, HookWriteFile,
   HookCloseHandle,
   HookGetFileAttributesExW, HookGetFileAttributesExA,
@@ -142,7 +151,8 @@ const MonitorShimHookNames*: array[28, string] = [
   HookNtCreateFile,
   HookNtQueryAttributesFile, HookNtQueryFullAttributesFile,
   HookNtQueryDirectoryFile, HookNtQueryInformationByName,
-  HookNtQueryDirectoryFileEx
+  HookNtQueryDirectoryFileEx,
+  HookFindFirstFileW, HookFindFirstFileExW, HookFindNextFileW, HookFindClose
 ]
 
 # --- Standard hook priorities ----------------------------------------------

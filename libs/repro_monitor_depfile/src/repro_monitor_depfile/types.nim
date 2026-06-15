@@ -174,6 +174,18 @@ type
     streamMode*: FsSnoopOutputMode
     passthroughChildStdout*: bool
     passthroughChildStderr*: bool
+    # When ``captureChildStdio`` is true, fs-snoop creates a pipe for
+    # the child's stdout+stderr (merged) and drains it on its own
+    # thread/poll rather than inheriting the parent's stdio. This
+    # mirrors how the reprobuild engine launches monitored actions
+    # (osproc.startProcess with the default pipe-captured stdio +
+    # pollCompletion drain), so integration tests can reproduce the
+    # build-engine-only wedges without going through repro_cli_support.
+    captureChildStdio*: bool
+    # Optional path to dump the captured stdio for inspection. Empty
+    # means stdio is read+discarded (mimicking the engine when it
+    # only cares about completion).
+    captureStdioPath*: string
 
 const
   RmdfVersion* = 1'u16

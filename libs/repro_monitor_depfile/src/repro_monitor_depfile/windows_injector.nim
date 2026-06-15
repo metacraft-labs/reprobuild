@@ -133,6 +133,29 @@ proc GetStdHandle(nStdHandle: DWORD): HANDLE
   {.importc, stdcall, dynlib: "kernel32".}
 proc SetHandleInformation(hObject: HANDLE, dwMask: DWORD, dwFlags: DWORD): BOOL
   {.importc, stdcall, dynlib: "kernel32".}
+proc CreatePipe(hReadPipe: ptr HANDLE; hWritePipe: ptr HANDLE;
+                lpPipeAttributes: LPSECURITY_ATTRIBUTES;
+                nSize: DWORD): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc ReadFile(hFile: HANDLE; lpBuffer: LPVOID; nNumberOfBytesToRead: DWORD;
+              lpNumberOfBytesRead: ptr DWORD;
+              lpOverlapped: pointer): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc WriteFile(hFile: HANDLE; lpBuffer: LPCVOID; nNumberOfBytesToWrite: DWORD;
+               lpNumberOfBytesWritten: ptr DWORD;
+               lpOverlapped: pointer): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc PeekNamedPipe(hNamedPipe: HANDLE; lpBuffer: LPVOID;
+                   nBufferSize: DWORD; lpBytesRead: ptr DWORD;
+                   lpTotalBytesAvail: ptr DWORD;
+                   lpBytesLeftThisMessage: ptr DWORD): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+
+type
+  SECURITY_ATTRIBUTES {.bycopy.} = object
+    nLength: DWORD
+    lpSecurityDescriptor: LPVOID
+    bInheritHandle: BOOL
 
 proc toWideCStringSeq(s: string): seq[uint16] =
   ## Convert a UTF-8 string to a NUL-terminated UTF-16 buffer.
@@ -186,11 +209,19 @@ type
     exitCode*: int
 
 proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
-    cwd = ""): WindowsInjectionResult =
+    cwd = ""; captureStdio = false;
+    captureStdioPath = ""): WindowsInjectionResult =
   ## Windows: Spawn `argv` in a CREATE_SUSPENDED state, inject the monitor
   ## shim DLL via CreateRemoteThread+LoadLibraryW, optionally invoke the
   ## shim's `repro_runtime_init` entry point, then resume the main thread.
   ## Returns when the child process exits.
+  ##
+  ## When ``captureStdio`` is true, the child's stdout+stderr (merged) are
+  ## captured into a pipe owned by this proc and drained while waiting
+  ## for the child to exit. This mirrors the reprobuild engine's
+  ## ``osproc.startProcess`` default behaviour (pipe-captured stdio +
+  ## pollCompletion drain) so integration tests at the fs-snoop level can
+  ## reproduce wedges that only manifest under the build engine.
   if argv.len == 0:
     raise newException(OSError, "runWithMonitorShim: empty argv")
   let dllExists =
@@ -205,16 +236,38 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
   if cwd.len > 0:
     cwdW = toWideCStringSeq(cwd)
 
+  # Pipe for captured stdio mode (anonymous pipe; merged stdout+stderr).
+  var stdoutReadPipe: HANDLE = nil
+  var stdoutWritePipe: HANDLE = nil
+  if captureStdio:
+    var sa: SECURITY_ATTRIBUTES
+    sa.nLength = DWORD(sizeof(sa))
+    sa.bInheritHandle = BOOL(1)
+    sa.lpSecurityDescriptor = nil
+    if CreatePipe(addr stdoutReadPipe, addr stdoutWritePipe,
+                  cast[LPSECURITY_ATTRIBUTES](addr sa), 0'u32) == 0:
+      raise newException(OSError,
+        "CreatePipe failed (err=" & $GetLastError() & ")")
+    # The READ end stays with us; mark it non-inheritable so the child
+    # doesn't accidentally inherit a copy of the read handle.
+    discard SetHandleInformation(stdoutReadPipe, HANDLE_FLAG_INHERIT, 0'u32)
+
   var si: STARTUPINFOW
   si.cb = DWORD(sizeof(si))
   si.dwFlags = STARTF_USESTDHANDLES
-  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
-  si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE)
-  si.hStdError = GetStdHandle(STD_ERROR_HANDLE)
+  if captureStdio:
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
+    si.hStdOutput = stdoutWritePipe
+    si.hStdError = stdoutWritePipe
+  else:
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE)
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE)
   # Make the parent's std handles inheritable for the child.
   discard SetHandleInformation(si.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-  discard SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-  discard SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+  if not captureStdio:
+    discard SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+    discard SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
 
   var pi: PROCESS_INFORMATION
 
@@ -340,8 +393,76 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
     # 6. Resume the suspended main thread.
     discard ResumeThread(pi.hThread)
 
-    # 7. Wait for the child to exit.
-    discard WaitForSingleObject(pi.hProcess, INFINITE)
+    # 7. Wait for the child to exit. In capture mode we close our write
+    # end first so the read returns EOF when the child closes its end,
+    # then drain in a poll loop alongside the WaitForSingleObject.
+    if captureStdio:
+      # Close the parent-side write end. The child still holds its
+      # inheritable copy so PeekNamedPipe / ReadFile on our read end
+      # will keep returning data until the child closes everything.
+      if stdoutWritePipe != nil:
+        discard CloseHandle(stdoutWritePipe)
+        stdoutWritePipe = nil
+      var captureBuf: array[8192, char]
+      var captureOut: File
+      let writeToFile = captureStdioPath.len > 0
+      if writeToFile:
+        try:
+          captureOut = open(captureStdioPath, fmWrite)
+        except IOError, OSError:
+          captureOut = nil
+      while true:
+        # Drain everything PeekNamedPipe reports as available, then
+        # check process exit. WaitForSingleObject with 50ms timeout
+        # caps the drain latency so we don't spin.
+        while true:
+          var avail: DWORD = 0
+          if PeekNamedPipe(stdoutReadPipe, nil, 0, nil, addr avail, nil) == 0:
+            break
+          if avail == 0:
+            break
+          var got: DWORD = 0
+          if ReadFile(stdoutReadPipe, addr captureBuf[0],
+                      DWORD(captureBuf.len), addr got, nil) == 0:
+            break
+          if got == 0:
+            break
+          if writeToFile and captureOut != nil:
+            try:
+              discard captureOut.writeBuffer(addr captureBuf[0], int(got))
+              captureOut.flushFile()
+            except IOError:
+              discard
+          # If no path was specified we just discard — the goal in
+          # tests is to mimic the engine's "drain to /dev/null" path
+          # (engine keeps the bytes in memory but tests rarely need
+          # them).
+        let waitStatus = WaitForSingleObject(pi.hProcess, 50'u32)
+        if waitStatus == WAIT_OBJECT_0:
+          break
+      # Final drain after exit — anything in the buffer that wasn't
+      # consumed during the 50ms slice.
+      while true:
+        var got: DWORD = 0
+        if ReadFile(stdoutReadPipe, addr captureBuf[0],
+                    DWORD(captureBuf.len), addr got, nil) == 0:
+          break
+        if got == 0:
+          break
+        if writeToFile and captureOut != nil:
+          try:
+            discard captureOut.writeBuffer(addr captureBuf[0], int(got))
+            captureOut.flushFile()
+          except IOError:
+            discard
+      if writeToFile and captureOut != nil:
+        try: captureOut.close()
+        except IOError: discard
+      if stdoutReadPipe != nil:
+        discard CloseHandle(stdoutReadPipe)
+        stdoutReadPipe = nil
+    else:
+      discard WaitForSingleObject(pi.hProcess, INFINITE)
     var exit: DWORD = 0
     discard GetExitCodeProcess(pi.hProcess, addr exit)
     result.exitCode = int(exit)
@@ -349,8 +470,18 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
     discard TerminateProcess(pi.hProcess, 1'u32)
     safeClose(pi.hThread)
     safeClose(pi.hProcess)
+    if stdoutWritePipe != nil:
+      discard CloseHandle(stdoutWritePipe)
+      stdoutWritePipe = nil
+    if stdoutReadPipe != nil:
+      discard CloseHandle(stdoutReadPipe)
+      stdoutReadPipe = nil
     raise
   safeClose(pi.hThread)
   safeClose(pi.hProcess)
+  if stdoutWritePipe != nil:
+    discard CloseHandle(stdoutWritePipe)
+  if stdoutReadPipe != nil:
+    discard CloseHandle(stdoutReadPipe)
 
 {.pop.}

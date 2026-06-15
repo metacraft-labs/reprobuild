@@ -449,6 +449,28 @@ type
                                     FileName: pointer): NTSTATUS
                                     {.stdcall, raises: [].}
 
+  # FindFirstFileW / FindFirstFileExW / FindNextFileW / FindClose —
+  # kernel32 directory-enumerate surface used by libuv 1.52 / Node 24
+  # for fs.readdirSync. The HANDLE returned by FindFirstFile* is the
+  # SEARCH handle (distinct from the file-handle type), but we only
+  # need to record the path that the search was started on, so we
+  # don't track it across FindNextFileW.
+  FindFirstFileWProc = proc(lpFileName: LPCWSTR;
+                             lpFindFileData: pointer): HANDLE
+                             {.stdcall, raises: [].}
+  FindFirstFileExWProc = proc(lpFileName: LPCWSTR;
+                              fInfoLevelId: DWORD;
+                              lpFindFileData: pointer;
+                              fSearchOp: DWORD;
+                              lpSearchFilter: pointer;
+                              dwAdditionalFlags: DWORD): HANDLE
+                              {.stdcall, raises: [].}
+  FindNextFileWProc = proc(hFindFile: HANDLE;
+                            lpFindFileData: pointer): BOOL
+                            {.stdcall, raises: [].}
+  FindCloseProc = proc(hFindFile: HANDLE): BOOL
+                  {.stdcall, raises: [].}
+
 # --- Original function pointer storage -------------------------------------
 
 var
@@ -481,6 +503,10 @@ var
   origNtQueryDirectoryFile: NtQueryDirectoryFileProc
   origNtQueryInformationByName: NtQueryInformationByNameProc
   origNtQueryDirectoryFileEx: NtQueryDirectoryFileExProc
+  origFindFirstFileW: FindFirstFileWProc
+  origFindFirstFileExW: FindFirstFileExWProc
+  origFindNextFileW: FindNextFileWProc
+  origFindClose: FindCloseProc
 
 # --- Runtime state ---------------------------------------------------------
 
@@ -1062,6 +1088,46 @@ proc originalNtQueryDirectoryFileEx(ctx: var hr.HookContext) {.raises: [].} =
   let r = origNtQueryDirectoryFileEx(FileHandle, Event, ApcRoutine, ApcContext,
                                      IoStatusBlock, FileInformation, Length,
                                      FileInformationClass, QueryFlags, FileName)
+  ctx.result = uint64(uint32(r))
+
+proc originalFindFirstFileW(ctx: var hr.HookContext) {.raises: [].} =
+  if origFindFirstFileW == nil:
+    ctx.result = cast[uint64](INVALID_HANDLE_VALUE)
+    return
+  let lpFileName    = cast[LPCWSTR](ctx.args[0])
+  let lpFindFileData = cast[pointer](ctx.args[1])
+  let r = origFindFirstFileW(lpFileName, lpFindFileData)
+  ctx.result = cast[uint64](r)
+
+proc originalFindFirstFileExW(ctx: var hr.HookContext) {.raises: [].} =
+  if origFindFirstFileExW == nil:
+    ctx.result = cast[uint64](INVALID_HANDLE_VALUE)
+    return
+  let lpFileName       = cast[LPCWSTR](ctx.args[0])
+  let fInfoLevelId     = DWORD(ctx.args[1])
+  let lpFindFileData   = cast[pointer](ctx.args[2])
+  let fSearchOp        = DWORD(ctx.args[3])
+  let lpSearchFilter   = cast[pointer](ctx.args[4])
+  let dwAdditionalFlags = DWORD(ctx.args[5])
+  let r = origFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData,
+                                fSearchOp, lpSearchFilter, dwAdditionalFlags)
+  ctx.result = cast[uint64](r)
+
+proc originalFindNextFileW(ctx: var hr.HookContext) {.raises: [].} =
+  if origFindNextFileW == nil:
+    ctx.result = uint64(0'u32)
+    return
+  let hFindFile       = cast[HANDLE](ctx.args[0])
+  let lpFindFileData  = cast[pointer](ctx.args[1])
+  let r = origFindNextFileW(hFindFile, lpFindFileData)
+  ctx.result = uint64(uint32(r))
+
+proc originalFindClose(ctx: var hr.HookContext) {.raises: [].} =
+  if origFindClose == nil:
+    ctx.result = uint64(0'u32)
+    return
+  let hFindFile = cast[HANDLE](ctx.args[0])
+  let r = origFindClose(hFindFile)
   ctx.result = uint64(uint32(r))
 
 proc originalNtQueryInformationByName(ctx: var hr.HookContext) {.raises: [].} =
@@ -1927,6 +1993,72 @@ proc snoopNtQueryInformationByName(ctx: var hr.HookContext) {.raises: [].} =
   ## libuv's uv_fs_stat fast-path on Win11. Emits an mrPathProbe.
   snoopNtQueryAttributesFileImpl(ctx, "NtQueryInformationByName")
 
+proc emitFindFirstRecord(searchPath: string; resultHandle: HANDLE;
+                         detail: string) {.raises: [].} =
+  ## Emit mrDirectoryEnumerate for a FindFirstFile*W call. The search
+  ## ``lpFileName`` is typically a directory followed by ``\*`` or
+  ## ``\<pattern>``; strip the trailing pattern so the path identifies
+  ## the directory itself. We don't track the returned HANDLE for
+  ## subsequent FindNextFileW because each readdir() typically issues
+  ## ONE FindFirstFileExW plus FindNextFileW calls until end-of-list,
+  ## so one mrDirectoryEnumerate per FindFirstFileExW is the right
+  ## granularity.
+  if searchPath.len == 0:
+    return
+  var dirPath = searchPath
+  # Strip trailing "\*" or "\\*" or "/*"/"\*.<ext>" — keep the directory.
+  let lastSep = max(dirPath.rfind('\\'), dirPath.rfind('/'))
+  if lastSep > 0:
+    let tail = dirPath[lastSep + 1 .. ^1]
+    if tail.startsWith("*") or tail == "*.*" or tail == "*":
+      dirPath = dirPath[0 ..< lastSep]
+  let success =
+    resultHandle != INVALID_HANDLE_VALUE and resultHandle != nil
+  var record = baseRecord(mrDirectoryEnumerate, moDirectoryEnumerate)
+  record.path = dirPath
+  record.result = if success: 1'i64 else: 0'i64
+  record.detail = detail
+  emitRecord(record)
+
+proc snoopFindFirstFileW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpFileName = cast[LPCWSTR](ctx.args[0])
+    let searchPath = widePtrToString(lpFileName)
+    let hFind = cast[HANDLE](ctx.result)
+    emitFindFirstRecord(searchPath, hFind, "FindFirstFileW")
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopFindFirstFileExW(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+  let savedLastError = GetLastError()
+  if disabled > 0 or not initialized:
+    SetLastError(savedLastError)
+    return
+  try:
+    let lpFileName = cast[LPCWSTR](ctx.args[0])
+    let searchPath = widePtrToString(lpFileName)
+    let hFind = cast[HANDLE](ctx.result)
+    emitFindFirstRecord(searchPath, hFind, "FindFirstFileExW")
+  except CatchableError:
+    discard
+  SetLastError(savedLastError)
+
+proc snoopFindNextFileW(ctx: var hr.HookContext) {.raises: [].} =
+  # FindNextFileW iterates the search handle — no per-call record is
+  # emitted (the enclosing FindFirstFile already accounted for the
+  # readdir). Forward through the chain unobserved.
+  hr.callNext(ctx)
+
+proc snoopFindClose(ctx: var hr.HookContext) {.raises: [].} =
+  hr.callNext(ctx)
+
 proc snoopNtQueryDirectoryFileEx(ctx: var hr.HookContext) {.raises: [].} =
   ## libuv's uv_fs_scandir on Win10 1709+. The handle was opened via
   ## NtCreateFile / CreateFileW with FILE_LIST_DIRECTORY; lookup its
@@ -2415,6 +2547,57 @@ proc trampolineNtQueryInformationByName(ObjectAttributes: pointer;
   hr.dispatchShimHook(hr.HookNtQueryInformationByName, ctx)
   result = cast[NTSTATUS](uint32(ctx.result and 0xFFFFFFFF'u64))
 
+proc trampolineFindFirstFileW(lpFileName: LPCWSTR;
+                               lpFindFileData: pointer):
+                               HANDLE {.stdcall.} =
+  if origFindFirstFileW == nil:
+    return INVALID_HANDLE_VALUE
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpFileName),
+    cast[uint64](lpFindFileData)
+  ])
+  hr.dispatchShimHook(hr.HookFindFirstFileW, ctx)
+  result = cast[HANDLE](ctx.result)
+
+proc trampolineFindFirstFileExW(lpFileName: LPCWSTR;
+                                 fInfoLevelId: DWORD;
+                                 lpFindFileData: pointer;
+                                 fSearchOp: DWORD;
+                                 lpSearchFilter: pointer;
+                                 dwAdditionalFlags: DWORD):
+                                 HANDLE {.stdcall.} =
+  if origFindFirstFileExW == nil:
+    return INVALID_HANDLE_VALUE
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](lpFileName),
+    uint64(fInfoLevelId),
+    cast[uint64](lpFindFileData),
+    uint64(fSearchOp),
+    cast[uint64](lpSearchFilter),
+    uint64(dwAdditionalFlags)
+  ])
+  hr.dispatchShimHook(hr.HookFindFirstFileExW, ctx)
+  result = cast[HANDLE](ctx.result)
+
+proc trampolineFindNextFileW(hFindFile: HANDLE;
+                              lpFindFileData: pointer):
+                              BOOL {.stdcall.} =
+  if origFindNextFileW == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](hFindFile),
+    cast[uint64](lpFindFileData)
+  ])
+  hr.dispatchShimHook(hr.HookFindNextFileW, ctx)
+  result = BOOL(ctx.result)
+
+proc trampolineFindClose(hFindFile: HANDLE): BOOL {.stdcall.} =
+  if origFindClose == nil:
+    return 0
+  var ctx = hr.HookContext(args: @[cast[uint64](hFindFile)])
+  hr.dispatchShimHook(hr.HookFindClose, ctx)
+  result = BOOL(ctx.result)
+
 proc trampolineNtQueryDirectoryFile(FileHandle: HANDLE;
                                      Event: HANDLE;
                                      ApcRoutine: pointer;
@@ -2498,6 +2681,11 @@ proc registerMonitorSnoopCallbacks*() =
   #                        snoopNtQueryDirectoryFile)
   hr.registerMonitorHook(hr.HookNtQueryInformationByName,
                          snoopNtQueryInformationByName)
+  # kernel32 directory-enumerate hooks (libuv 1.52 fs.readdirSync).
+  hr.registerMonitorHook(hr.HookFindFirstFileW, snoopFindFirstFileW)
+  hr.registerMonitorHook(hr.HookFindFirstFileExW, snoopFindFirstFileExW)
+  hr.registerMonitorHook(hr.HookFindNextFileW, snoopFindNextFileW)
+  hr.registerMonitorHook(hr.HookFindClose, snoopFindClose)
   # hr.registerMonitorHook(hr.HookNtQueryDirectoryFileEx,
   #                        snoopNtQueryDirectoryFileEx)
 
@@ -2710,13 +2898,6 @@ let hookTable {.global.}: seq[HookSpec] = @[
     origCallback: originalNtQueryFullAttributesFile,
     iatDlls: ntdllNtIatDlls,
     moduleDll: "ntdll.dll"),
-  # NT directory-enumerate hook (libuv fast-path for fs.readdirSync).
-  HookSpec(name: hr.HookNtQueryDirectoryFile,
-    trampoline: cast[pointer](trampolineNtQueryDirectoryFile),
-    origStorage: cast[ptr pointer](addr origNtQueryDirectoryFile),
-    origCallback: originalNtQueryDirectoryFile,
-    iatDlls: ntdllNtIatDlls,
-    moduleDll: "ntdll.dll"),
   # NT path-information hook (libuv 1.52 fast-path on Win11 for stat).
   HookSpec(name: hr.HookNtQueryInformationByName,
     trampoline: cast[pointer](trampolineNtQueryInformationByName),
@@ -2724,13 +2905,34 @@ let hookTable {.global.}: seq[HookSpec] = @[
     origCallback: originalNtQueryInformationByName,
     iatDlls: ntdllNtIatDlls,
     moduleDll: "ntdll.dll"),
-  # NT directory-enumerate Ex hook (Win10 1709+ readdir fast-path).
-  HookSpec(name: hr.HookNtQueryDirectoryFileEx,
-    trampoline: cast[pointer](trampolineNtQueryDirectoryFileEx),
-    origStorage: cast[ptr pointer](addr origNtQueryDirectoryFileEx),
-    origCallback: originalNtQueryDirectoryFileEx,
-    iatDlls: ntdllNtIatDlls,
-    moduleDll: "ntdll.dll")
+  # kernel32 directory-enumerate hooks (libuv 1.52 fs.readdirSync uses
+  # FindFirstFileExW + FindNextFileW + FindClose, not the NT
+  # NtQueryDirectoryFile export; the NT-layer detour crashed Node so
+  # we hook the kernel32 entry points instead).
+  HookSpec(name: hr.HookFindFirstFileW,
+    trampoline: cast[pointer](trampolineFindFirstFileW),
+    origStorage: cast[ptr pointer](addr origFindFirstFileW),
+    origCallback: originalFindFirstFileW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookFindFirstFileExW,
+    trampoline: cast[pointer](trampolineFindFirstFileExW),
+    origStorage: cast[ptr pointer](addr origFindFirstFileExW),
+    origCallback: originalFindFirstFileExW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookFindNextFileW,
+    trampoline: cast[pointer](trampolineFindNextFileW),
+    origStorage: cast[ptr pointer](addr origFindNextFileW),
+    origCallback: originalFindNextFileW,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  HookSpec(name: hr.HookFindClose,
+    trampoline: cast[pointer](trampolineFindClose),
+    origStorage: cast[ptr pointer](addr origFindClose),
+    origCallback: originalFindClose,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll")
 ]
 
 proc queueInlineInstall(spec: HookSpec; hModule: HANDLE): cint =
