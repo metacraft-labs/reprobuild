@@ -80,8 +80,37 @@ When `runtime=wine` is set, the following three keys are consulted:
 * `wine_bin=<absolute-path>` — the WINE binary. Defaults to
   `/usr/bin/wine` if absent.
 
-Any value other than `native` or `wine` for `runtime=` is rejected at
-parse time.
+#### D2 runtime=darling selection keys
+
+The D2 milestone adds a third runtime alongside `native` and `wine`.
+The shape mirrors the wine triple exactly; pre-D2 launchers ignore
+unknown keys per the forward-compatibility contract below.
+
+* `runtime=darling` — Darling runtime (Mach-O Linux execution). The
+  launcher:
+    1. Performs the bind set as usual.
+    2. Verifies `${darling_prefix}/Applications/` exists post-bind.
+    3. Sets `$DPREFIX = darling_prefix`.
+    4. exec()s `darling_bin` with argv = `[darling_bin, "shell",
+       darling_exec, <forwarded args after `--`>]`. The `shell` form
+       is the documented one-shot invocation per D1 P3; `--command`
+       is NOT supported by current Darling.
+
+When `runtime=darling` is set, the following three keys are consulted:
+
+* `darling_prefix=<absolute-path>` — DPREFIX root on the host. Visible
+  inside the launcher's mount namespace via inherited propagation (do
+  NOT add an identity rbind — it breaks Darling's internal overlayfs;
+  see the runtime=darling example below). Exported as `$DPREFIX` by
+  the launcher. Required.
+* `darling_exec=<path>` — the macOS-style POSIX path Darling will run,
+  e.g. `/Applications/repro-store/<hash>/bin/<binary>`. Passed verbatim
+  to `darling shell`. Required.
+* `darling_bin=<absolute-path>` — the Darling launcher binary. Defaults
+  to `/usr/bin/darling` if absent.
+
+Any value other than `native`, `wine`, or `darling` for `runtime=` is
+rejected at parse time.
 
 ### Bind-mount lines
 
@@ -150,6 +179,45 @@ Notes:
   skips the duplicate so manifest generators don't have to dedupe.
 * The `proc` directive is required because `wine` and `wineserver`
   walk `/proc` to discover sibling processes.
+
+### Minimal `runtime=darling` example (D2)
+
+```manifest
+# Darling-runtime manifest for the jq macOS CLI.
+
+runtime=darling
+darling_prefix=/opt/reproos-foreign/darling-prefix
+darling_exec=/Applications/repro-store/<jq-hash>/bin/jq
+darling_bin=/usr/bin/darling
+
+# Darling binaries closure (.deb-harvested; see D1 architecture doc).
+/opt/reproos-foreign/darling-binaries:/opt/reproos-foreign/darling-binaries:rbind,ro
+
+# NOTE: do NOT add an identity rbind on darling_prefix here. Unlike
+# WINEPREFIX, an identity rbind on darling_prefix breaks Darling's
+# internal overlayfs setup and MUST NOT be added. The DPREFIX path is
+# visible inside the mount namespace via inherited propagation.
+
+# darlingserver needs procfs + /dev/fuse for the macOS-shaped overlay.
+proc
+/dev/fuse:/dev/fuse:rbind
+```
+
+Notes:
+
+* `exec=` is intentionally absent — the launcher exec()s `darling_bin`
+  (defaulting to `/usr/bin/darling`) with `shell <darling_exec>` as
+  the first two arguments.
+* Unlike WINEPREFIX, an identity rbind on `darling_prefix` (src == dest
+  == darling_prefix) MUST NOT be added: Darling mounts overlayfs with
+  upperdir/workdir under DPREFIX during `darling shell`, and overlay
+  rejects a directory that is itself a bind-mount under `MS_PRIVATE`
+  propagation. The DPREFIX is visible inside `CLONE_NEWNS` via inherited
+  propagation without an explicit bind.
+* The duplicate-target dedup table (originally added for W2) still
+  covers other darling binds: if a manifest pairs `darling_binaries=`
+  with an explicit bind to the same host path, the second bind silently
+  no-ops.
 
 ## Determinism contract
 

@@ -68,6 +68,27 @@
  *     ``wine_bin=/abs/path``         WINE binary (defaults to
  *                                    /usr/bin/wine if absent).
  *
+ *   D2 runtime=darling key/value lines (additive; symmetric to W2 wine):
+ *
+ *     ``runtime=darling``            select the Darling launcher path;
+ *                                    when set, three more keys are
+ *                                    required.
+ *     ``darling_prefix=/abs/path``   DPREFIX root on the host; bound
+ *                                    into the namespace (read-write —
+ *                                    Darling writes overlay state) and
+ *                                    exported as $DPREFIX before
+ *                                    execve().
+ *     ``darling_exec=/Applications/repro-store/<hash>/bin/<binary>``
+ *                                    the macOS-style POSIX path Darling
+ *                                    will execute; expressed relative
+ *                                    to the DPREFIX overlay root.
+ *                                    Passed verbatim to ``darling shell``
+ *                                    (positional form per D1 P3 —
+ *                                    ``--command`` is NOT supported by
+ *                                    current Darling).
+ *     ``darling_bin=/abs/path``      Darling launcher binary (defaults
+ *                                    to /usr/bin/darling if absent).
+ *
  *   Empty / comment / unknown-key lines are tolerated for forward
  *   compatibility.
  *
@@ -170,6 +191,10 @@ typedef struct {
     char       wine_prefix[MAX_PATH_LEN];
     char       wine_exec[MAX_PATH_LEN];
     char       wine_bin[MAX_PATH_LEN];
+    /* D2 runtime=darling extensions; shape mirrors the wine_* triple. */
+    char       darling_prefix[MAX_PATH_LEN];
+    char       darling_exec[MAX_PATH_LEN];
+    char       darling_bin[MAX_PATH_LEN];
 } manifest_t;
 
 static int g_verbose = 0;
@@ -402,6 +427,28 @@ static int parse_manifest(const char *path, manifest_t *m) {
         }
         if (starts_with(p, "wine_bin=")) {
             if (copy_field(m->wine_bin, sizeof(m->wine_bin), p + 9) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
+        /* D2: darling_* keys (symmetric to wine_*). */
+        if (starts_with(p, "darling_prefix=")) {
+            if (copy_field(m->darling_prefix, sizeof(m->darling_prefix),
+                           p + 15) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
+        if (starts_with(p, "darling_exec=")) {
+            if (copy_field(m->darling_exec, sizeof(m->darling_exec),
+                           p + 13) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
+        if (starts_with(p, "darling_bin=")) {
+            if (copy_field(m->darling_bin, sizeof(m->darling_bin),
+                           p + 12) != 0) {
                 fclose(fp); return -1;
             }
             continue;
@@ -723,13 +770,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* W2: runtime=wine validation. When runtime=wine is set, the
-     * launcher does NOT require an exec= line — the actual executable
-     * is wine_bin, and the user-facing target is wine_exec. */
-    int is_wine_runtime = (strcmp(m.runtime, "wine") == 0);
-    if (m.runtime[0] != '\0' && !is_wine_runtime &&
+    /* W2/D2: runtime=wine/darling validation. When runtime=wine or
+     * runtime=darling is set, the launcher does NOT require an exec=
+     * line — the actual executable is {wine,darling}_bin and the
+     * user-facing target is {wine,darling}_exec. */
+    int is_wine_runtime    = (strcmp(m.runtime, "wine")    == 0);
+    int is_darling_runtime = (strcmp(m.runtime, "darling") == 0);
+    if (m.runtime[0] != '\0' &&
+        !is_wine_runtime && !is_darling_runtime &&
         strcmp(m.runtime, "native") != 0) {
-        err_log("unknown runtime=%s (supported: native, wine)", m.runtime);
+        err_log("unknown runtime=%s (supported: native, wine, darling)",
+                m.runtime);
         return 1;
     }
     if (is_wine_runtime) {
@@ -748,6 +799,22 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
+    } else if (is_darling_runtime) {
+        if (m.darling_prefix[0] == '\0') {
+            err_log("runtime=darling requires darling_prefix=");
+            return 1;
+        }
+        if (m.darling_exec[0] == '\0') {
+            err_log("runtime=darling requires darling_exec=");
+            return 1;
+        }
+        if (m.darling_bin[0] == '\0') {
+            /* Default to /usr/bin/darling. */
+            if (copy_field(m.darling_bin, sizeof(m.darling_bin),
+                           "/usr/bin/darling") != 0) {
+                return 1;
+            }
+        }
     } else {
         if (m.exec_path[0] == '\0') {
             err_log("no exec= line in manifest and no --exec override");
@@ -759,6 +826,11 @@ int main(int argc, char **argv) {
         vlog("manifest=%s runtime=wine wine_bin=%s wine_exec=%s "
              "wine_prefix=%s n_ops=%d",
              manifest_path, m.wine_bin, m.wine_exec, m.wine_prefix,
+             m.n_ops);
+    } else if (is_darling_runtime) {
+        vlog("manifest=%s runtime=darling darling_bin=%s darling_exec=%s "
+             "darling_prefix=%s n_ops=%d",
+             manifest_path, m.darling_bin, m.darling_exec, m.darling_prefix,
              m.n_ops);
     } else {
         vlog("manifest=%s exec=%s n_ops=%d",
@@ -813,6 +885,39 @@ int main(int argc, char **argv) {
                 getenv("WINEDLLOVERRIDES") : "(unset)");
     }
 
+    /* D2 runtime=darling: verify Applications/ exists post-bind, set
+     * DPREFIX, and rewrite argv to invoke darling_bin via the
+     * positional `shell <exec> <args>` form. Mirrors the wine block
+     * one-for-one (Darling's prefix shape is Applications/ instead of
+     * drive_c/). */
+    if (is_darling_runtime) {
+#ifndef _WIN32
+        if (!g_dry_run) {
+            char apps_dir[MAX_PATH_LEN];
+            int n = snprintf(apps_dir, sizeof(apps_dir),
+                             "%s/Applications", m.darling_prefix);
+            if (n <= 0 || n >= (int)sizeof(apps_dir)) {
+                err_log("darling_prefix path too long: %s",
+                        m.darling_prefix);
+                return 1;
+            }
+            struct stat st;
+            if (stat(apps_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+                err_log("darling_prefix has no Applications/: %s "
+                        "(did you forget to bind-mount the prefix? "
+                        "or run darling-prefix-init.sh?)",
+                        apps_dir);
+                return 5;
+            }
+        }
+#endif
+        if (setenv("DPREFIX", m.darling_prefix, 1) != 0) {
+            err_log("setenv DPREFIX failed: %s", strerror(errno));
+            return 5;
+        }
+        vlog("darling env: DPREFIX=%s", m.darling_prefix);
+    }
+
     /* Build argv for the child.
      *
      * Native runtime:
@@ -823,6 +928,12 @@ int main(int argc, char **argv) {
      *   argv[0] = m.wine_bin
      *   argv[1] = m.wine_exec
      *   argv[2..] = post-`--` forwarded args
+     *
+     * runtime=darling:
+     *   argv[0] = m.darling_bin
+     *   argv[1] = "shell"           (Darling sub-command per D1 P3)
+     *   argv[2] = m.darling_exec
+     *   argv[3..] = post-`--` forwarded args
      */
     char *child_argv[MAX_EXEC_ARGS];
     int ci = 0;
@@ -831,6 +942,11 @@ int main(int argc, char **argv) {
         child_argv[ci++] = m.wine_bin;
         child_argv[ci++] = m.wine_exec;
         exec_target = m.wine_bin;
+    } else if (is_darling_runtime) {
+        child_argv[ci++] = m.darling_bin;
+        child_argv[ci++] = (char *)"shell";
+        child_argv[ci++] = m.darling_exec;
+        exec_target = m.darling_bin;
     } else {
         child_argv[ci++] = m.exec_path;
         exec_target = m.exec_path;
