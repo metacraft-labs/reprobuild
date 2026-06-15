@@ -88,9 +88,39 @@ proc CreateProcessW(lpApplicationName: LPCWSTR, lpCommandLine: LPWSTR,
                     lpThreadAttributes: LPSECURITY_ATTRIBUTES,
                     bInheritHandles: BOOL, dwCreationFlags: DWORD,
                     lpEnvironment: LPVOID, lpCurrentDirectory: LPCWSTR,
-                    lpStartupInfo: ptr STARTUPINFOW,
+                    lpStartupInfo: pointer,
                     lpProcessInformation: ptr PROCESS_INFORMATION): BOOL
   {.importc, stdcall, dynlib: "kernel32".}
+proc InitializeProcThreadAttributeList(lpAttributeList: pointer;
+                                        dwAttributeCount: DWORD;
+                                        dwFlags: DWORD;
+                                        lpSize: ptr SIZE_T): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc UpdateProcThreadAttribute(lpAttributeList: pointer;
+                                dwFlags: DWORD;
+                                Attribute: SIZE_T;
+                                lpValue: pointer;
+                                cbSize: SIZE_T;
+                                lpPreviousValue: pointer;
+                                lpReturnSize: ptr SIZE_T): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc DeleteProcThreadAttributeList(lpAttributeList: pointer): void
+  {.importc, stdcall, dynlib: "kernel32".}
+proc HeapAlloc(hHeap: HANDLE; dwFlags: DWORD; dwBytes: SIZE_T): pointer
+  {.importc, stdcall, dynlib: "kernel32".}
+proc HeapFree(hHeap: HANDLE; dwFlags: DWORD; lpMem: pointer): BOOL
+  {.importc, stdcall, dynlib: "kernel32".}
+proc GetProcessHeap(): HANDLE
+  {.importc, stdcall, dynlib: "kernel32".}
+
+type
+  STARTUPINFOEXW {.bycopy.} = object
+    StartupInfo: STARTUPINFOW
+    lpAttributeList: pointer
+
+const
+  EXTENDED_STARTUPINFO_PRESENT = 0x00080000'u32
+  PROC_THREAD_ATTRIBUTE_HANDLE_LIST = SIZE_T(0x00020002)
 proc VirtualAllocEx(hProcess: HANDLE, lpAddress: LPVOID, dwSize: SIZE_T,
                     flAllocationType: DWORD, flProtect: DWORD): LPVOID
   {.importc, stdcall, dynlib: "kernel32".}
@@ -252,33 +282,107 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
     # doesn't accidentally inherit a copy of the read handle.
     discard SetHandleInformation(stdoutReadPipe, HANDLE_FLAG_INHERIT, 0'u32)
 
-  var si: STARTUPINFOW
-  si.cb = DWORD(sizeof(si))
-  si.dwFlags = STARTF_USESTDHANDLES
+  # Use STARTUPINFOEX with a PROC_THREAD_ATTRIBUTE_HANDLE_LIST so we
+  # ONLY pass stdin/stdout/stderr to the child instead of every
+  # inheritable handle in our process. When fs-snoop is spawned from
+  # the reprobuild engine, the engine's process holds many other
+  # inheritable handles (named pipes for daemon/runquota, cache
+  # files, etc.) that would otherwise pollute the child's handle
+  # table — bash's Git-Bash fork emulation, in particular, has been
+  # observed to wedge on those inherited handles (no node spawn from
+  # the action's webpack invocation). Explicit whitelisting is the
+  # canonical Windows fix.
+  var siex: STARTUPINFOEXW
+  siex.StartupInfo.cb = DWORD(sizeof(siex))
+  siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES
   if captureStdio:
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
-    si.hStdOutput = stdoutWritePipe
-    si.hStdError = stdoutWritePipe
+    siex.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
+    siex.StartupInfo.hStdOutput = stdoutWritePipe
+    siex.StartupInfo.hStdError = stdoutWritePipe
   else:
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE)
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE)
-  # Make the parent's std handles inheritable for the child.
-  discard SetHandleInformation(si.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+    siex.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE)
+    siex.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE)
+    siex.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE)
+  discard SetHandleInformation(siex.StartupInfo.hStdInput,
+                                HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
   if not captureStdio:
-    discard SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-    discard SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+    discard SetHandleInformation(siex.StartupInfo.hStdOutput,
+                                  HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+    discard SetHandleInformation(siex.StartupInfo.hStdError,
+                                  HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+  # Build the attribute list with exactly stdin/stdout/stderr.
+  var attrListSize: SIZE_T = 0
+  discard InitializeProcThreadAttributeList(nil, 1'u32, 0'u32,
+                                             addr attrListSize)
+  let processHeap = GetProcessHeap()
+  let attrList = HeapAlloc(processHeap, 0'u32, attrListSize)
+  if attrList == nil:
+    if stdoutWritePipe != nil:
+      discard CloseHandle(stdoutWritePipe); stdoutWritePipe = nil
+    if stdoutReadPipe != nil:
+      discard CloseHandle(stdoutReadPipe); stdoutReadPipe = nil
+    raise newException(OSError, "HeapAlloc for attr list failed")
+  if InitializeProcThreadAttributeList(attrList, 1'u32, 0'u32,
+                                        addr attrListSize) == 0:
+    discard HeapFree(processHeap, 0'u32, attrList)
+    if stdoutWritePipe != nil:
+      discard CloseHandle(stdoutWritePipe); stdoutWritePipe = nil
+    if stdoutReadPipe != nil:
+      discard CloseHandle(stdoutReadPipe); stdoutReadPipe = nil
+    raise newException(OSError,
+      "InitializeProcThreadAttributeList failed (err=" &
+        $GetLastError() & ")")
+  siex.lpAttributeList = attrList
+  # The HANDLE_LIST attribute value is an array of HANDLEs. Skip any
+  # nil/INVALID handles — passing one to UpdateProcThreadAttribute
+  # produces ERROR_INVALID_PARAMETER (err=87) from the subsequent
+  # CreateProcessW. GetStdHandle returns nil for missing standard
+  # streams (common when launched from a service-style context).
+  var handleVec: seq[HANDLE] = @[]
+  for h in [siex.StartupInfo.hStdInput,
+             siex.StartupInfo.hStdOutput,
+             siex.StartupInfo.hStdError]:
+    if h != nil and cast[int](h) != -1 and h notin handleVec:
+      handleVec.add(h)
+  if handleVec.len == 0:
+    DeleteProcThreadAttributeList(attrList)
+    discard HeapFree(processHeap, 0'u32, attrList)
+    if stdoutWritePipe != nil:
+      discard CloseHandle(stdoutWritePipe); stdoutWritePipe = nil
+    if stdoutReadPipe != nil:
+      discard CloseHandle(stdoutReadPipe); stdoutReadPipe = nil
+    raise newException(OSError,
+      "no valid stdio handle to pass to child")
+  if UpdateProcThreadAttribute(attrList, 0'u32,
+                                PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                addr handleVec[0],
+                                SIZE_T(handleVec.len * sizeof(HANDLE)),
+                                nil, nil) == 0:
+    DeleteProcThreadAttributeList(attrList)
+    discard HeapFree(processHeap, 0'u32, attrList)
+    if stdoutWritePipe != nil:
+      discard CloseHandle(stdoutWritePipe); stdoutWritePipe = nil
+    if stdoutReadPipe != nil:
+      discard CloseHandle(stdoutReadPipe); stdoutReadPipe = nil
+    raise newException(OSError,
+      "UpdateProcThreadAttribute failed (err=" & $GetLastError() & ")")
 
   var pi: PROCESS_INFORMATION
 
   let ok = CreateProcessW(nil,
     cast[LPWSTR](addr cmdLineW[0]),
     nil, nil, BOOL(1),
-    CREATE_SUSPENDED,
+    CREATE_SUSPENDED or EXTENDED_STARTUPINFO_PRESENT,
     nil,
     if cwdW.len > 0: cast[LPCWSTR](addr cwdW[0]) else: nil,
-    addr si, addr pi)
+    cast[pointer](addr siex), addr pi)
   if ok == 0:
+    DeleteProcThreadAttributeList(attrList)
+    discard HeapFree(processHeap, 0'u32, attrList)
+    if stdoutWritePipe != nil:
+      discard CloseHandle(stdoutWritePipe); stdoutWritePipe = nil
+    if stdoutReadPipe != nil:
+      discard CloseHandle(stdoutReadPipe); stdoutReadPipe = nil
     raise newException(OSError,
       "CreateProcessW failed (err=" & $GetLastError() & "): " & commandLine)
 
@@ -476,6 +580,8 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
     if stdoutReadPipe != nil:
       discard CloseHandle(stdoutReadPipe)
       stdoutReadPipe = nil
+    DeleteProcThreadAttributeList(attrList)
+    discard HeapFree(processHeap, 0'u32, attrList)
     raise
   safeClose(pi.hThread)
   safeClose(pi.hProcess)
@@ -483,5 +589,7 @@ proc runWithMonitorShim*(argv: openArray[string], dllPath: string,
     discard CloseHandle(stdoutWritePipe)
   if stdoutReadPipe != nil:
     discard CloseHandle(stdoutReadPipe)
+  DeleteProcThreadAttributeList(attrList)
+  discard HeapFree(processHeap, 0'u32, attrList)
 
 {.pop.}
