@@ -1571,10 +1571,40 @@ proc hostCCompilerPath(): string =
     return BuiltCCompilerPath
   ""
 
+var cachedHostCCompilerFamily = ""
+
+proc hostCCompilerFamily(cc: string): string =
+  ## Detect whether the provisioned C compiler is clang- or gcc-flavoured
+  ## so Nim's selected compiler *family* matches the actual binary.
+  ##
+  ## ``hostCCompilerFlags`` aliases BOTH ``--gcc.exe`` and ``--clang.exe``
+  ## to this single compiler but, historically, left the compiler family
+  ## at Nim's platform default (clang on macOS, gcc on Linux). When the
+  ## provisioned ``cc`` is gcc (e.g. the Nix gcc-wrapper used by path-mode
+  ## provisioning) but Nim still thinks it is clang, Nim emits clang-only
+  ## flags such as ``-ferror-limit=3`` (from ``clang.options.always``)
+  ## and the gcc binary rejects them, breaking interface extraction.
+  ## Pinning ``--cc`` to the detected family keeps the always-on flag set
+  ## consistent with the binary on every platform.
+  if cachedHostCCompilerFamily.len > 0:
+    return cachedHostCCompilerFamily
+  cachedHostCCompilerFamily = "gcc"
+  try:
+    let (output, exitCode) = execCmdEx(quoteShell(cc) & " --version")
+    if exitCode == 0 and "clang" in output.toLowerAscii:
+      cachedHostCCompilerFamily = "clang"
+  except CatchableError, OSError:
+    discard
+  cachedHostCCompilerFamily
+
 proc hostCCompilerFlags(): seq[string] =
   let cc = hostCCompilerPath()
   if cc.len == 0:
     return
+  # Match Nim's compiler family to the provisioned binary so the family's
+  # always-on flags (e.g. clang's -ferror-limit) are not handed to the
+  # wrong compiler. See hostCCompilerFamily for the failure this avoids.
+  result.add("--cc:" & hostCCompilerFamily(cc))
   result.add("--gcc.exe:" & cc)
   result.add("--gcc.linkerexe:" & cc)
   result.add("--clang.exe:" & cc)
@@ -2067,6 +2097,32 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passC:-I" & xxhashPrefix / "include")
     result.add("--passL:-L" & xxhashPrefix / "lib")
     result.add("--passL:-lxxhash")
+
+  # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
+  # time through a ``{.dynlib.}`` const. When repro runs as a CLI against an
+  # arbitrary project, the extract_runner links repro's DSL (which pulls in
+  # the solver), so the runner must resolve libclingo at runtime regardless
+  # of whether the *host project's* environment provisions it. Replay
+  # clingo's lib dir the same way blake3/xxhash are replayed so the runner
+  # is self-contained instead of depending on the caller's NIX_LDFLAGS /
+  # dyld search path. clingo is dlopened, not linked, so no ``-lclingo`` and
+  # no ``-I`` (the bindings are header-free); the ``-L`` search dir plus an
+  # ``-rpath`` are both required — on macOS ``-L`` alone does not let the
+  # baked dlopen find the library (verified), the rpath is what resolves it.
+  let clingoPrefix = block:
+    let direct = firstExistingPrefix(
+      [getEnv("CLINGO_PREFIX"), "/opt/homebrew/opt/clingo",
+        "/usr/local/opt/clingo"],
+      "include/clingo.h",
+      ["libclingo.dylib", "libclingo.so"])
+    if direct.len > 0:
+      direct
+    else:
+      nixPrefix("*-clingo-*", "include/clingo.h",
+        ["libclingo.dylib", "libclingo.so"])
+  if clingoPrefix.len > 0:
+    result.add("--passL:-L" & clingoPrefix / "lib")
+    result.add("--passL:-Wl,-rpath," & clingoPrefix / "lib")
 
 proc fnvHex64(parts: openArray[string]): string =
   ## FNV-1a 64-bit hex digest of the concatenation of `parts` (with a NUL

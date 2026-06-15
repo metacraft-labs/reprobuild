@@ -250,6 +250,32 @@ proc parseToolProvisioning(value: string): ToolProvisioningMode =
   else:
     raise newException(ValueError, "unsupported --tool-provisioning=" & value)
 
+const ToolProvisioningEnvVar = "REPRO_TOOL_PROVISIONING"
+
+proc resolveToolProvisioningWithEnv(cliMode: ToolProvisioningMode):
+    ToolProvisioningMode =
+  ## Apply the ``REPRO_TOOL_PROVISIONING`` env var when the CLI did not pin
+  ## ``--tool-provisioning`` explicitly. Precedence is: explicit CLI flag >
+  ## env var > the package's ``defaultToolProvisioning`` (resolved later, in
+  ## ``executeBuildTarget``).
+  ##
+  ## Today the in-repo ``repro.nim`` project files declare
+  ## ``defaultToolProvisioning "path"`` on Linux/macOS (toolchains supplied
+  ## by Nix on ``$PATH`` via ``nix develop``) and ``scoop`` is the intended
+  ## Windows default — a deliberately temporary arrangement. This env var
+  ## lets a developer opt a Linux/macOS checkout into reprobuild-managed Nix
+  ## provisioning (``REPRO_TOOL_PROVISIONING=nix``) without editing every
+  ## project's ``repro.nim`` or threading ``--tool-provisioning=nix`` through
+  ## every invocation. An explicit flag still wins, so scripted callers are
+  ## unaffected. Accepts the same ``path|nix|tarball|scoop`` vocabulary as
+  ## the flag; an unset/empty value is a no-op.
+  if cliMode != tpmUnspecified:
+    return cliMode
+  let raw = getEnv(ToolProvisioningEnvVar).strip()
+  if raw.len == 0:
+    return cliMode
+  parseToolProvisioning(raw)
+
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
   for i, ch in text:
@@ -8326,6 +8352,19 @@ const
     "REPRO_STATS_DIR", "REPROBUILD_NO_RUNQUOTA",
     "REPROBUILD_AUTO_RUNQUOTA",
     "REPRO_DAEMON_TEST_STATS_FLUSH_DELAY_MS",
+    # Tool-provisioning selection. The daemon-hosted executor re-parses the
+    # request's rawArgs (which carry no --tool-provisioning when the user
+    # selected the mode via the env var), so REPRO_TOOL_PROVISIONING must
+    # follow the user into the daemon for resolveToolProvisioningWithEnv to
+    # observe it there. Without forwarding, an env-only selection is silently
+    # ignored under the default daemon-hosted build path.
+    "REPRO_TOOL_PROVISIONING",
+    # Monitor-shim lookup override. ``repro internal fs-snoop`` (the
+    # automatic-monitor launcher) needs to locate librepro_monitor_shim.{dylib,so}
+    # when repro runs against an arbitrary project outside its own build tree;
+    # the launchd/systemd-spawned daemon does not inherit the user's shell, so
+    # this must follow the user for monitored actions to run.
+    "REPRO_MONITOR_SHIM_LIB",
     # Reprobuild's own build-time env vars consumed by config.nims and the
     # interface-extraction nim subprocesses. Without these, config.nims
     # defaults to vendored-hash mode and tries to compile from
@@ -9460,6 +9499,11 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
+
+  # Apply the REPRO_TOOL_PROVISIONING env override before any dispatch so
+  # both ``--list-targets`` and the engine build observe the same mode. A
+  # value here only takes effect when ``--tool-provisioning`` was not passed.
+  mode = resolveToolProvisioningWithEnv(mode)
 
   # Named-Targets M5: ``--list-targets`` short-circuits the engine pass.
   # The flag's job is to list every implicit / explicit target name
