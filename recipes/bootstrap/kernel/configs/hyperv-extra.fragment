@@ -59,6 +59,25 @@ CONFIG_BLK_DEV_INITRD=y
 CONFIG_RD_GZIP=y
 CONFIG_RD_XZ=y
 
+# FUSE filesystem — required by D4 (Darling runtime mounts a FUSE-backed
+# macOS-shaped overlay; without this Darling errors out with
+# "FUSE: No such file or directory"). R8 kernel disables CONFIG_MODULES,
+# so this MUST be built-in (=y, not =m). /dev/fuse char device is
+# created by the reproos-darling-fuse.service systemd oneshot.
+CONFIG_FUSE_FS=y
+
+# User namespaces + overlay filesystem — required by D4 (Darling's
+# darlingserver does `unshare(CLONE_NEWUSER | CLONE_NEWNS)` to build
+# its rootless macOS-shaped overlay). Without USER_NS the unshare()
+# fails with "Cannot open mnt namespace file: No such file or
+# directory" and darlingserver aborts. Without OVERLAY_FS the
+# subsequent mount(2) of the rootless overlay fails. CONFIG_NAMESPACES,
+# CONFIG_MULTIUSER, and CONFIG_PID_NS/CONFIG_NET_NS/CONFIG_IPC_NS are
+# already on in the snapshot; this stanza closes the remaining two
+# gaps. Built-in (=y) because R8 disables CONFIG_MODULES.
+CONFIG_USER_NS=y
+CONFIG_OVERLAY_FS=y
+
 # Printk / earlyprintk — make boot diagnostics visible on COM1 even
 # before serial-console init.
 CONFIG_PRINTK=y

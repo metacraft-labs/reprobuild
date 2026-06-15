@@ -1,0 +1,30 @@
+[Unit]
+Description=ReproOS Darling DPREFIX cold-init (first boot)
+# Run after the rootfs is mounted (/opt is part of the augmented initramfs
+# tmpfs, but local-fs.target gates "all configured local filesystems"
+# which is the conservative ordering for any future variant that moves
+# /opt onto a separate volume).
+After=local-fs.target
+# Gate completion before multi-user.target AND getty.target. The shims
+# (/usr/local/bin/darling-<tool>) are invoked from a console login
+# session that activates on getty; without `Before=getty.target` the
+# autologin getty fires before our oneshot completes and banner checks
+# race against the cold-init.
+Before=multi-user.target getty.target
+# Idempotency sentinel: skip on every boot after the first successful run.
+ConditionPathExists=!/var/lib/reproos-darling-coldinit-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/reproos-darling-prefix-coldinit.sh
+RemainAfterExit=yes
+# Mirror to console so the boot serial log shows coldinit progress
+# (~5 s per DPREFIX cold-init; ~17 s total for 3 tools). Also useful
+# for triaging if the oneshot fails: the journal output goes to ttyS0
+# and lands in the VM-harness serial log.
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
