@@ -105,6 +105,33 @@ proc dump(label, depPath, marker: string) =
     if r.detail == "NtQueryDirectoryFile" and ntDirSeen < 8:
       echo "  '" & r.path & "' | " & $r.result
       ntDirSeen.inc
+  echo "NtQueryDirectoryFileEx samples (path | result):"
+  var ntDirExSeen = 0
+  for r in dep.records:
+    if r.detail == "NtQueryDirectoryFileEx" and ntDirExSeen < 8:
+      echo "  '" & r.path & "' | " & $r.result
+      ntDirExSeen.inc
+  echo "records with paths that LOOK LIKE a directory (no extension after last slash):"
+  var dirLike = 0
+  for r in dep.records:
+    if r.path.len == 0: continue
+    let basename = r.path.splitFile.name
+    let ext = r.path.splitFile.ext
+    if ext == "" and basename.len > 0 and basename[0] != '\\' and
+       basename != "CONIN$" and basename != "CONOUT$" and
+       ("diag-readdir" in r.path or "rb-src" in r.path):
+      echo "  [" & $r.kind & "/" & r.detail & "] " & r.path
+      inc dirLike
+      if dirLike >= 8: break
+  echo "all win32-detail counts:"
+  var byDetailFull = initCountTable[string]()
+  for r in dep.records:
+    byDetailFull.inc(r.detail)
+  for (det, cnt) in byDetailFull.pairs:
+    if det.startsWith("Nt") or det == "CreateFileW" or
+       det.startsWith("Find") or det.startsWith("Get") or
+       det.startsWith("Read") or det.startsWith("Write"):
+      echo "  " & det & " = " & $cnt
   # CRITICAL: scan EVERY record for the marker substring to identify
   # WHICH API libuv used. If "probe." appears anywhere, the detail
   # column tells us the API.

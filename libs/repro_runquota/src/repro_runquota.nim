@@ -7,6 +7,7 @@ from repro_core/paths import extendedPath
 import runquota_client
 import runquota_codec
 import runquota_core
+import runquota_ipc except connectDefault
 import runquota_process
 import runquota_protocol
 
@@ -182,16 +183,63 @@ proc helperCliArgs*(request: ReproResourceRequest;
   result.add("--")
   result.add(command.argv)
 
-proc isRunQuotaDaemonReachable*(): bool =
-  ## Cheap probe used by the CLI to decide whether to fall back to the
-  ## path-mode bypass. Returns true iff a Hello/HelloOk round-trip with the
-  ## default endpoint succeeded.
+type
+  RunQuotaProbeResult = object
+    success: bool
+    completed: bool
+
+var probeSlot: RunQuotaProbeResult
+
+proc runProbeOnce(arg: pointer) {.thread.} =
+  var local = RunQuotaProbeResult(success: false, completed: false)
   try:
     var client = connectDefault()
     client.close()
-    true
+    local.success = true
   except CatchableError:
-    false
+    discard
+  local.completed = true
+  let slotPtr = cast[ptr RunQuotaProbeResult](arg)
+  slotPtr[] = local
+
+when defined(windows):
+  proc waitNamedPipeW(name: WideCString; ms: uint32): int32 {.
+    stdcall, dynlib: "kernel32", importc: "WaitNamedPipeW".}
+
+proc isRunQuotaDaemonReachable*(): bool =
+  ## Cheap probe used by the CLI to decide whether to fall back to the
+  ## path-mode bypass.
+  ##
+  ## Two-phase: a fast existence check via ``WaitNamedPipeW`` (Windows)
+  ## or a direct connect attempt (POSIX). If the daemon isn't running,
+  ## the existence check fails in milliseconds. If a daemon IS running
+  ## but is wedged (pipe exists, handshake never completes — the
+  ## stale-runquotad scenario from memory), the responsiveness check
+  ## runs on a separate thread with a 2-second deadline so the build
+  ## never blocks forever. On timeout the probe thread is intentionally
+  ## leaked: joinThread would block on the wedged I/O too, and the
+  ## process is about to fall back to bypass anyway.
+  when defined(windows):
+    let endpoint = defaultEndpoint()
+    if endpoint.kind == endpointNamedPipe:
+      let wide = newWideCString(endpoint.path)
+      if waitNamedPipeW(wide, 100'u32) == 0:
+        return false  # pipe doesn't exist / no instance free — daemon down
+  probeSlot = RunQuotaProbeResult(success: false, completed: false)
+  var thr: Thread[pointer]
+  createThread(thr, runProbeOnce, cast[pointer](addr probeSlot))
+  const deadlineMs = 2000
+  let pollMs = 25
+  var waited = 0
+  while waited < deadlineMs:
+    if probeSlot.completed:
+      break
+    sleep(pollMs)
+    waited += pollMs
+  if not probeSlot.completed:
+    return false
+  joinThread(thr)
+  probeSlot.success
 
 proc runWithRunQuota*(request: ReproResourceRequest;
                       command: ReproCommandSpec): ReproRunQuotaExecution =
