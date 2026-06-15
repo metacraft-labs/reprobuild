@@ -1,0 +1,35 @@
+{
+  "_canary_note": "RESERVED CANARY — NOT INCLUDED IN DEFAULT BUILDS. This catalog pins fzf 0.55.0, the known-broken-under-Darling-0.1.20260609 version (Go-1.22 TLV / pthread gap). It is intentionally kept so a future Darling release can be tested for the regression: drop this catalog into the catalog-dir alongside fzf.json (or use --canary-fzf flag in a future build script) and confirm whether the 0.55.0 binary now exits 0 with banner output. If it does, the upstream Darling gap is closed and the fzf version pin in fzf.json can be relaxed. The build-mvp-darling-prefix.sh driver skips any catalog with a leading underscore key '_canary_note' present, so this file is inert by default.",
+  "darling_prefix_id": "shared",
+  "darling_version_banner": "0.55.0 (3814b51)",
+  "dependency_closure": [],
+  "exec_path": "/Applications/repro-store/fzf-canary/bin/fzf",
+  "format_version": 1,
+  "package": {
+    "distro": "macos",
+    "name": "fzf-canary",
+    "snapshot": "github/junegunn-fzf/v0.55.0",
+    "version": "0.55.0"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "fzf",
+      "install_relpath": "bin/fzf",
+      "kind": "macho_exe",
+      "sha256": "UNVERIFIED-fill-in-when-re-running-canary"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "archive_format": "tar.gz",
+      "kind": "direct-snapshot-url",
+      "sha256": "UNVERIFIED-fill-in-when-re-running-canary",
+      "size_bytes": 0,
+      "url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-darwin_amd64.tar.gz"
+    }
+  ],
+  "runtime": "darling",
+  "signed_envelope": null,
+  "tool_smoke_args": ["--version"],
+  "version_pin_rationale": "fzf 0.55.0 silent failure under Darling 0.1.20260609 is the cross-toolchain coverage marker. Re-fetch + re-sha256 if/when re-running the canary."
+}

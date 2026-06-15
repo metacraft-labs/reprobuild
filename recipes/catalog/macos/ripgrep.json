@@ -1,0 +1,34 @@
+{
+  "darling_prefix_id": "shared",
+  "darling_version_banner": "ripgrep 14.1.1",
+  "dependency_closure": [],
+  "exec_path": "/Applications/repro-store/ripgrep/bin/rg",
+  "format_version": 1,
+  "package": {
+    "distro": "macos",
+    "name": "ripgrep",
+    "snapshot": "github/BurntSushi-ripgrep/14.1.1",
+    "version": "14.1.1"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "ripgrep-14.1.1-x86_64-apple-darwin/rg",
+      "install_relpath": "bin/rg",
+      "kind": "macho_exe",
+      "sha256": "923dcc25cab57d33f4e7dd0476d4b74a554401a38817e246a8d6101dcd51c50f"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "archive_format": "tar.gz",
+      "kind": "direct-snapshot-url",
+      "sha256": "fc87e78f7cb3fea12d69072e7ef3b21509754717b746368fd40d88963630e2b3",
+      "size_bytes": 2082672,
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-apple-darwin.tar.gz"
+    }
+  ],
+  "runtime": "darling",
+  "signed_envelope": null,
+  "tool_smoke_args": ["--version"],
+  "version_pin_rationale": "ripgrep 14.1.1 (released 2024-09-09) is the D1 P3-verified version: 'ripgrep 14.1.1 (rev 4649aa9700)' + the SIMD/PCRE2 feature lines emit cleanly under Darling 0.1.20260609. The tarball contains a top-level directory ripgrep-14.1.1-x86_64-apple-darwin/ holding rg + docs + completions; payload_files extracts only rg."
+}

@@ -1,0 +1,34 @@
+{
+  "darling_prefix_id": "shared",
+  "darling_version_banner": "0.60.0 (3347d61)",
+  "dependency_closure": [],
+  "exec_path": "/Applications/repro-store/fzf/bin/fzf",
+  "format_version": 1,
+  "package": {
+    "distro": "macos",
+    "name": "fzf",
+    "snapshot": "github/junegunn-fzf/v0.60.0",
+    "version": "0.60.0"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "fzf",
+      "install_relpath": "bin/fzf",
+      "kind": "macho_exe",
+      "sha256": "0c12f0f17f7afbc9bea09c885e590d64c779987ec4e271cd213f3b88b7dae6c0"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "archive_format": "tar.gz",
+      "kind": "direct-snapshot-url",
+      "sha256": "1b075e0cc29e815845b6387e23a7004c85c95d3fe723b6b8e60269fd0f3013c5",
+      "size_bytes": 1697918,
+      "url": "https://github.com/junegunn/fzf/releases/download/v0.60.0/fzf-0.60.0-darwin_amd64.tar.gz"
+    }
+  ],
+  "runtime": "darling",
+  "signed_envelope": null,
+  "tool_smoke_args": ["--version"],
+  "version_pin_rationale": "Pin fzf >= 0.60.0 — fzf 0.55.0 (built with Go 1.22) crashes silently under Darling 0.1.20260609 (exit 1, empty stdout). The Go-1.22 macOS TLV / pthread emulation path trips an unimplemented Darling syscall. fzf 0.60.0 (Go 1.23) is the first known-good release. The 0.55.0 binary is reserved as a Darling-loader-regression canary; see recipes/catalog/macos/fzf-0.55-canary.json. DO NOT downgrade without re-verifying under Darling."
+}

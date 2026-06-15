@@ -1,0 +1,34 @@
+{
+  "darling_prefix_id": "shared",
+  "darling_version_banner": "jq-1.7.1",
+  "dependency_closure": [],
+  "exec_path": "/Applications/repro-store/jq/bin/jq",
+  "format_version": 1,
+  "package": {
+    "distro": "macos",
+    "name": "jq",
+    "snapshot": "github/jqlang-jq/jq-1.7.1",
+    "version": "1.7.1"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "jq-macos-amd64",
+      "install_relpath": "bin/jq",
+      "kind": "macho_exe",
+      "sha256": "4155822bbf5ea90f5c79cf254665975eb4274d426d0709770c21774de5407443"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "archive_format": "bare",
+      "kind": "direct-snapshot-url",
+      "sha256": "4155822bbf5ea90f5c79cf254665975eb4274d426d0709770c21774de5407443",
+      "size_bytes": 851328,
+      "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-amd64"
+    }
+  ],
+  "runtime": "darling",
+  "signed_envelope": null,
+  "tool_smoke_args": ["--version"],
+  "version_pin_rationale": "jq 1.7.1 ships as a single bare Mach-O binary (jq-macos-amd64, not a tar.gz). The provisioning_methods entry uses archive_format=bare to signal the build script to treat the downloaded artifact as the payload file directly — no extraction step. Note: jq's pre-1.7 releases used the legacy 'jq-osx-amd64' asset name; D1 P3's smoke cache at /tmp/jq-osx matches this sha256."
+}
