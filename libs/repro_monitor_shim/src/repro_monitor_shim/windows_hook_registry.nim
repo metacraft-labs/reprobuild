@@ -135,8 +135,15 @@ const
   HookFindFirstFileExW* = "FindFirstFileExW"
   HookFindNextFileW* = "FindNextFileW"
   HookFindClose* = "FindClose"
+  # GetProcAddress — intercepted so we can substitute our wrapper for
+  # ntdll!NtQueryDirectoryFile when libuv requests its address at
+  # init. The inline detour on NtQueryDirectoryFile itself is
+  # irrelocatable on Win11 26100 (length-decoder bug on the syscall
+  # stub prologue), so we have to intercept the pointer LOOKUP
+  # instead of the function body.
+  HookGetProcAddress* = "GetProcAddress"
 
-const MonitorShimHookNames*: array[32, string] = [
+const MonitorShimHookNames*: array[33, string] = [
   HookCreateFileW, HookCreateFileA, HookReadFile, HookWriteFile,
   HookCloseHandle,
   HookGetFileAttributesExW, HookGetFileAttributesExA,
@@ -152,7 +159,8 @@ const MonitorShimHookNames*: array[32, string] = [
   HookNtQueryAttributesFile, HookNtQueryFullAttributesFile,
   HookNtQueryDirectoryFile, HookNtQueryInformationByName,
   HookNtQueryDirectoryFileEx,
-  HookFindFirstFileW, HookFindFirstFileExW, HookFindNextFileW, HookFindClose
+  HookFindFirstFileW, HookFindFirstFileExW, HookFindNextFileW, HookFindClose,
+  HookGetProcAddress
 ]
 
 # --- Standard hook priorities ----------------------------------------------

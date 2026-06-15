@@ -471,6 +471,11 @@ type
   FindCloseProc = proc(hFindFile: HANDLE): BOOL
                   {.stdcall, raises: [].}
 
+  # kernel32!GetProcAddress signature.
+  GetProcAddressProc = proc(hModule: HANDLE;
+                             lpProcName: LPCSTR): pointer
+                             {.stdcall, raises: [].}
+
 # --- Original function pointer storage -------------------------------------
 
 var
@@ -507,6 +512,11 @@ var
   origFindFirstFileExW: FindFirstFileExWProc
   origFindNextFileW: FindNextFileWProc
   origFindClose: FindCloseProc
+  origGetProcAddress: GetProcAddressProc
+  # Resolved ntdll!NtQueryDirectoryFile address. Captured lazily on
+  # the first GetProcAddress("NtQueryDirectoryFile") query so the
+  # wrapper has the real function to forward to.
+  realNtQueryDirectoryFile: NtQueryDirectoryFileProc
 
 # --- Runtime state ---------------------------------------------------------
 
@@ -1129,6 +1139,88 @@ proc originalFindClose(ctx: var hr.HookContext) {.raises: [].} =
   let hFindFile = cast[HANDLE](ctx.args[0])
   let r = origFindClose(hFindFile)
   ctx.result = uint64(uint32(r))
+
+proc originalGetProcAddress(ctx: var hr.HookContext) {.raises: [].} =
+  if origGetProcAddress == nil:
+    ctx.result = uint64(0'u64)
+    return
+  let hModule    = cast[HANDLE](ctx.args[0])
+  let lpProcName = cast[LPCSTR](ctx.args[1])
+  let r = origGetProcAddress(hModule, lpProcName)
+  ctx.result = cast[uint64](r)
+
+proc shimNtQueryDirectoryFile(FileHandle: HANDLE; Event: HANDLE;
+                               ApcRoutine: pointer; ApcContext: pointer;
+                               IoStatusBlock: pointer;
+                               FileInformation: pointer; Length: DWORD;
+                               FileInformationClass: DWORD;
+                               ReturnSingleEntry: BOOL;
+                               FileName: pointer;
+                               RestartScan: BOOL): NTSTATUS
+                               {.stdcall, raises: [].} =
+  ## Wrapper substituted for ntdll!NtQueryDirectoryFile via our hooked
+  ## GetProcAddress. Records mrDirectoryEnumerate on the first call
+  ## per handle (or whenever RestartScan=TRUE), then forwards to the
+  ## REAL ntdll function captured at install time.
+  if realNtQueryDirectoryFile == nil:
+    return NTSTATUS(0xC0000001'i32)
+  let r = realNtQueryDirectoryFile(FileHandle, Event, ApcRoutine,
+                                   ApcContext, IoStatusBlock,
+                                   FileInformation, Length,
+                                   FileInformationClass, ReturnSingleEntry,
+                                   FileName, RestartScan)
+  if disabled == 0 and initialized:
+    try:
+      # Inline gate: emit ONE mrDirectoryEnumerate record per readdir
+      # session. RestartScan=TRUE opens a fresh enumeration; FALSE
+      # iterates the chunk we already counted. Look up the directory's
+      # remembered path from handlePaths.
+      let isFirstCall = RestartScan != 0
+      var dirPath = ""
+      acquire(fdLock)
+      try:
+        let key = handleKey(FileHandle)
+        if handlePaths.hasKey(key):
+          try:
+            dirPath = handlePaths[key]
+          except KeyError:
+            dirPath = ""
+      finally:
+        release(fdLock)
+      if isFirstCall and dirPath.len > 0:
+        var record = baseRecord(mrDirectoryEnumerate, moDirectoryEnumerate)
+        record.path = dirPath
+        record.result = int64(r)
+        record.detail = "NtQueryDirectoryFile"
+        emitRecord(record)
+    except CatchableError:
+      discard
+  r
+
+proc snoopGetProcAddress(ctx: var hr.HookContext) {.raises: [].} =
+  ## Forwards GetProcAddress to the real kernel32 entry, then if the
+  ## resolved name is "NtQueryDirectoryFile" from ntdll, swaps the
+  ## returned pointer for our wrapper. Caches the real address in
+  ## ``realNtQueryDirectoryFile`` for the wrapper to forward through.
+  hr.callNext(ctx)
+  if disabled > 0 or not initialized:
+    return
+  try:
+    let lpProcName = cast[LPCSTR](ctx.args[1])
+    if lpProcName == nil:
+      return
+    # Procname can be an integer ordinal (low 16 bits set) or a real
+    # cstring pointer. Skip the ordinal case quickly.
+    if (cast[uint](lpProcName) shr 16) == 0'u:
+      return
+    let name = $lpProcName
+    if name == "NtQueryDirectoryFile":
+      let resolved = cast[NtQueryDirectoryFileProc](ctx.result)
+      if resolved != nil:
+        realNtQueryDirectoryFile = resolved
+        ctx.result = cast[uint64](shimNtQueryDirectoryFile)
+  except CatchableError:
+    discard
 
 proc originalNtQueryInformationByName(ctx: var hr.HookContext) {.raises: [].} =
   if origNtQueryInformationByName == nil:
@@ -2598,6 +2690,17 @@ proc trampolineFindClose(hFindFile: HANDLE): BOOL {.stdcall.} =
   hr.dispatchShimHook(hr.HookFindClose, ctx)
   result = BOOL(ctx.result)
 
+proc trampolineGetProcAddress(hModule: HANDLE;
+                               lpProcName: LPCSTR): pointer {.stdcall.} =
+  if origGetProcAddress == nil:
+    return nil
+  var ctx = hr.HookContext(args: @[
+    cast[uint64](hModule),
+    cast[uint64](lpProcName)
+  ])
+  hr.dispatchShimHook(hr.HookGetProcAddress, ctx)
+  result = cast[pointer](ctx.result)
+
 proc trampolineNtQueryDirectoryFile(FileHandle: HANDLE;
                                      Event: HANDLE;
                                      ApcRoutine: pointer;
@@ -2681,11 +2784,17 @@ proc registerMonitorSnoopCallbacks*() =
   #                        snoopNtQueryDirectoryFile)
   hr.registerMonitorHook(hr.HookNtQueryInformationByName,
                          snoopNtQueryInformationByName)
-  # kernel32 directory-enumerate hooks (libuv 1.52 fs.readdirSync).
+  # kernel32 directory-enumerate hooks (libuv's streaming uv_fs_opendir
+  # API uses FindFirstFileW + FindNextFileW; Node.js fs.opendirSync
+  # routes through this. fs.readdirSync uses NtQueryDirectoryFile
+  # which we catch via the GetProcAddress interception below — its
+  # snoop is registered against the synthetic trampoline returned to
+  # libuv from our hooked GetProcAddress.)
   hr.registerMonitorHook(hr.HookFindFirstFileW, snoopFindFirstFileW)
   hr.registerMonitorHook(hr.HookFindFirstFileExW, snoopFindFirstFileExW)
   hr.registerMonitorHook(hr.HookFindNextFileW, snoopFindNextFileW)
   hr.registerMonitorHook(hr.HookFindClose, snoopFindClose)
+  hr.registerMonitorHook(hr.HookGetProcAddress, snoopGetProcAddress)
   # hr.registerMonitorHook(hr.HookNtQueryDirectoryFileEx,
   #                        snoopNtQueryDirectoryFileEx)
 
@@ -2905,6 +3014,14 @@ let hookTable {.global.}: seq[HookSpec] = @[
     origCallback: originalNtQueryInformationByName,
     iatDlls: ntdllNtIatDlls,
     moduleDll: "ntdll.dll"),
+  # NtQueryDirectoryFile inline detour is NOT installed: the function's
+  # syscall-stub prologue on Win11 26100 is irrelocatable by the
+  # length-decoder in ct_inline_hook (relocating the JMP-thunk lands
+  # in the middle of a MOV EAX,imm32 instruction → crash). Instead we
+  # intercept libuv's GetProcAddress(ntdll, "NtQueryDirectoryFile")
+  # lookup at the kernel32 layer (registered as snoopGetProcAddress
+  # below) and return our wrapper. libuv 1.52's saved pointer then
+  # calls into our code without needing the inline detour.
   # kernel32 directory-enumerate hooks (libuv 1.52 fs.readdirSync uses
   # FindFirstFileExW + FindNextFileW + FindClose, not the NT
   # NtQueryDirectoryFile export; the NT-layer detour crashed Node so
@@ -2931,6 +3048,14 @@ let hookTable {.global.}: seq[HookSpec] = @[
     trampoline: cast[pointer](trampolineFindClose),
     origStorage: cast[ptr pointer](addr origFindClose),
     origCallback: originalFindClose,
+    iatDlls: kernel32FileIatDlls,
+    moduleDll: "kernel32.dll"),
+  # kernel32!GetProcAddress — intercepted to substitute our wrapper
+  # for ntdll!NtQueryDirectoryFile (see comment near snoop body).
+  HookSpec(name: hr.HookGetProcAddress,
+    trampoline: cast[pointer](trampolineGetProcAddress),
+    origStorage: cast[ptr pointer](addr origGetProcAddress),
+    origCallback: originalGetProcAddress,
     iatDlls: kernel32FileIatDlls,
     moduleDll: "kernel32.dll")
 ]
