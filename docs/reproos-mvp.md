@@ -203,6 +203,118 @@ Expected passing scenario:
 [d1] target wall-clock budget: 60s
 ```
 
+## D2: multi-distro extension (9 packages from 3 distros)
+
+D2 closes the campaign acceptance gate by extending the MVP from 5 apt
+packages to **9 mixed-distro packages**:
+
+| Distro | Snapshot pin                          | Packages         |
+|--------|---------------------------------------|------------------|
+| apt    | debian/bookworm/20260601T000000Z       | git, vim, python3, curl, htop |
+| dnf    | fedora/39/20260601                     | htop, neovim     |
+| pacman | archlinux/rolling/20260601             | htop, fzf        |
+
+`htop` is intentionally pinned across all three distros to prove the
+architecture isn't distro-specific: three different upstreams provide
+htop, each with its own pinned dep closure, no FHS collisions because
+each lives in its own bind-mount namespace.
+
+### D2 build pipeline
+
+```bash
+. D:/metacraft/env.ps1
+cd D:/metacraft/reprobuild
+
+# 1. Build the dnf + pacman harvesters (one-time).
+nim c -d:ssl --threads:on --hints:off --warnings:off \
+  --path:apps/repro-harvest-dnf/src \
+  --path:apps/repro-harvest-apt/src \
+  --out:apps/repro-harvest-dnf/repro_harvest_dnf \
+  apps/repro-harvest-dnf/repro_harvest_dnf.nim
+nim c -d:ssl --threads:on --hints:off --warnings:off \
+  --path:apps/repro-harvest-pacman/src \
+  --path:apps/repro-harvest-apt/src \
+  --out:apps/repro-harvest-pacman/repro_harvest_pacman \
+  apps/repro-harvest-pacman/repro_harvest_pacman.nim
+
+# 2. Build the multi-distro overlay.
+bash recipes/reproos-mvp-config/build-mvp-multi-iso.sh
+```
+
+Output lands under `build/d2-mvp-multi/`:
+
+```
+build/d2-mvp-multi/
+├── D2-STAGE-SUMMARY.txt
+├── catalogs/
+│   ├── apt/      (19 catalogs — union closure of 5 apt roots)
+│   ├── dnf/      (6 catalogs)
+│   └── pacman/   (6 catalogs)
+├── overlay/
+│   ├── opt/reproos-foreign/
+│   │   ├── apt/{git,vim,python3,curl,htop,...}/
+│   │   ├── dnf/{htop,neovim,glibc,ncurses-libs,...}/
+│   │   └── pacman/{htop,fzf,glibc,ncurses,...}/
+│   └── usr/local/bin/
+│       ├── reprobuild-sandbox-launcher
+│       ├── git, vim, python3, curl, htop      (apt copies; first-claim)
+│       ├── apt-git, apt-vim, ...               (apt distro-tagged shims)
+│       ├── dnf-htop, dnf-neovim                (Fedora copies)
+│       └── pacman-htop, pacman-fzf             (Arch copies)
+└── store/prefixes/{apt,dnf,pacman}/...
+```
+
+The dnf and pacman harvesters mirror the apt harvester's structure:
+
+- **Source spec**:
+  - dnf: `dnf:<pkgs>@<distro>/<release>:<snapshot>` e.g.
+    `dnf:{htop,neovim}@fedora/39:20260601`.
+  - pacman: `pacman:<pkgs>@<distro>/<release>:<snapshot>` e.g.
+    `pacman:{htop,fzf}@archlinux/rolling:20260601`.
+- **Index fetch**:
+  - dnf walks `repodata/repomd.xml` → `primary.xml(.gz)` from
+    `kojipkgs.fedoraproject.org`.
+  - pacman walks `<repo>.db` (a USTAR tarball of `desc` files) from
+    `archive.archlinux.org`.
+- **Signature verification**: same two backends as apt
+  (external GPG via `gpg --verify`; fingerprint-allowlist for CI).
+- **Catalog emission**: same C1 schema; one JSON file per package
+  in the union closure under `<output-dir>/<distro>/<name>.json`.
+
+### D2 vm-harness gates
+
+Two new tests land in `vm-harness/tests/e2e/`:
+
+- `t_vm_harness_hyperv_reproos_multi_distro.nim` — 9-package boot test.
+  Asserts all 9 shims produce their expected version banner via the
+  C3 launcher. The dnf/pacman htop shims include a `(distro)` tag in
+  their banner so the regex can disambiguate against the apt-htop run.
+- `t_vm_harness_hyperv_reproos_gen_switch.nim` — generation switch.
+  Boots gen-A ISO, applies config; reboots into gen-B ISO's config via
+  `reproos-rebuild switch`, asserts the snapshot-B git banner; then
+  `reproos-rebuild rollback` and asserts the snapshot-A banner is
+  back. Requires a persistent state VHD attached at
+  `/var/lib/reproos` (the campaign's B3 contract).
+
+Both tests SKIP cleanly when their ISO artifacts are absent.
+
+### Per-distro integration tests
+
+`tests/integration/foreign_packages/`:
+
+- `t_d2_harvest_dnf.sh` — harvest htop from the Fedora-39 fixture;
+  assert 3 catalog files, the snapshot URL host, and the per-catalog
+  sha256 against the fixture's primary.xml.
+- `t_d2_harvest_pacman.sh` — harvest htop from the Arch rolling
+  fixture; assert 4 catalog files, the archive URL host, and the
+  closure shape.
+
+Plus parser unit tests under `libs/repro_dsl_stdlib/tests/`:
+
+- `t_d2_dnf_index.nim` — primary.xml + repomd.xml parsing (7 cases).
+- `t_d2_pacman_index.nim` — desc file parser + USTAR tar reader +
+  closure walker (7 cases).
+
 ## Honest scope caveats
 
 1. **Binaries are version-printing stubs in the D1 MVP.** The build
