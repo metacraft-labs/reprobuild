@@ -987,6 +987,71 @@ while [ "$i" -lt "${#FOREIGN_NAMES[@]}" ]; do
   i=$((i + 1))
 done
 
+# ---------------------------------------------------------------------------
+# Stage 4c (X2): ship the reproos-rebuild CLI binary + initial generation
+# state in the rootfs so the t_vm_harness_hyperv_reproos_gen_switch test
+# can exercise apply / switch / rollback against a real generation tree.
+# ---------------------------------------------------------------------------
+
+log "stage 4c: X2 — install reproos-rebuild CLI + initial state"
+
+REPROOS_REBUILD_BIN="${REPROOS_REBUILD_BIN:-$REPO_ROOT/build/x2/reproos-rebuild}"
+if [ ! -x "$REPROOS_REBUILD_BIN" ]; then
+  log "warn: $REPROOS_REBUILD_BIN missing or not executable; skipping X2 CLI install"
+  log "      (build via repro-ubuntu WSL: nim c -o:build/x2/reproos-rebuild apps/reproos-rebuild/reproos_rebuild.nim)"
+else
+  cp "$REPROOS_REBUILD_BIN" "$OVERLAY/usr/local/bin/reproos-rebuild"
+  chmod +x "$OVERLAY/usr/local/bin/reproos-rebuild" 2>/dev/null || true
+  log "  CLI: $OVERLAY/usr/local/bin/reproos-rebuild"
+
+  # Initial generation-1 state. The B3 rollback / list / switch paths
+  # require a parsable manifest at <state>/generations/<N>/manifest.txt
+  # and a <state>/current file whose last path segment is the gen number.
+  # The minimal manifest matches the B2 serializeManifest contract
+  # (schema=1, generation=<N>, activationTimestamp + ISO time, empty
+  # collections).
+  mkdir -p "$OVERLAY/var/lib/reproos/generations/1"
+  mkdir -p "$OVERLAY/var/lib/reproos/locks"
+  mkdir -p "$OVERLAY/run/reproos"
+  mkdir -p "$OVERLAY/etc/reproos"
+
+  # Deterministic activation timestamp: SOURCE_DATE_EPOCH-style.
+  : "${SOURCE_DATE_EPOCH:=1735689600}"
+  REPROOS_INIT_TS="$SOURCE_DATE_EPOCH"
+  REPROOS_INIT_ISO="$(date -u -d "@$REPROOS_INIT_TS" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
+                      date -u -r "$REPROOS_INIT_TS" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || \
+                      echo '2025-01-01T00:00:00Z')"
+
+  cat > "$OVERLAY/var/lib/reproos/generations/1/manifest.txt" <<EOF
+schema = 1
+generation = 1
+activationTimestamp = $REPROOS_INIT_TS
+activationTimeIso = $REPROOS_INIT_ISO
+sourceConfigPath = /etc/reproos/configuration.nim
+packages.count = 0
+users.count = 0
+services.count = 0
+mounts.count = 0
+buildGraphSerialized.lines = 1
+buildGraph:
+EOF
+
+  # <state>/current — plain text file whose last path segment is parsed
+  # by readCurrentGeneration as the gen number.
+  echo "/var/lib/reproos/generations/1" > "$OVERLAY/var/lib/reproos/current"
+
+  # Ship the source configuration.nim as the on-disk reference; apply +
+  # plan default to /etc/reproos/configuration.nim.
+  cp "$CONFIG_PATH" "$OVERLAY/etc/reproos/configuration.nim"
+
+  : > "$OVERLAY/var/lib/reproos/locks/.keep"
+  : > "$OVERLAY/run/reproos/.keep"
+
+  log "  state: $OVERLAY/var/lib/reproos/generations/1/manifest.txt"
+  log "  current pointer: $OVERLAY/var/lib/reproos/current"
+  log "  config: $OVERLAY/etc/reproos/configuration.nim"
+fi
+
 cat > "$OVERLAY/opt/reproos-foreign/README" <<EOF
 ReproOS D2 multi-distro MVP foreign-package overlay.
 

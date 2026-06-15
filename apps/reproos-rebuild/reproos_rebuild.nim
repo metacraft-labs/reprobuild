@@ -296,11 +296,17 @@ proc cmdApply(args: ParsedArgs): int =
   # ReproOS apply also wires the file into /boot/grub/grub.cfg.
   let bootDir = if opts.bootDir.len > 0: opts.bootDir
                 else: recorded.generationDir / ".." / ".." / "boot"
-  let bootDirAbs = expandFilename(bootDir)
-  let grubDir = bootDirAbs / "grub"
-  let grubCfgPath = grubDir / "grub.cfg"
+  var grubCfgPath = bootDir / "grub" / "grub.cfg"
   try:
+    # Resolve to an absolute path AFTER the parent dirs exist; on
+    # Linux ``expandFilename`` calls ``realpath`` which raises OSError
+    # when any path segment is missing. The B3 unit tests run inside
+    # tmp dirs where ``bootDir`` is pre-created; on ReproOS first-apply
+    # ``/var/lib/reproos/boot`` does not yet exist.
+    let grubDir = bootDir / "grub"
     createDir(grubDir)
+    let bootDirAbs = expandFilename(bootDir)
+    grubCfgPath = bootDirAbs / "grub" / "grub.cfg"
     let inputs = enumerateGenerations(ctx.options.stateDir)
     writeFile(grubCfgPath,
       generateGrubMenu(inputs, recorded.manifest.generationNumber))
