@@ -52,6 +52,22 @@
  *                                    overridden via --exec on the CLI)
  *     ``cwd=/abs/path``              chdir after namespace setup
  *
+ *   W2 runtime=wine key/value lines (additive; runtime=native is the
+ *   default and preserves the C3 behaviour exactly):
+ *
+ *     ``runtime=wine``               select the WINE launcher path; when
+ *                                    set, three more keys are required.
+ *     ``wine_prefix=/abs/path``      WINEPREFIX root on the host; bound
+ *                                    into the namespace and exported as
+ *                                    $WINEPREFIX before execve().
+ *     ``wine_exec=C:/path/to.exe``   the path WINE will execute; may be
+ *                                    a WINE drive-letter form
+ *                                    (``C:/...``) or a POSIX path
+ *                                    inside the prefix. Passed verbatim
+ *                                    to wine.
+ *     ``wine_bin=/abs/path``         WINE binary (defaults to
+ *                                    /usr/bin/wine if absent).
+ *
  *   Empty / comment / unknown-key lines are tolerated for forward
  *   compatibility.
  *
@@ -99,6 +115,14 @@
 #  include <process.h>
 #  include <io.h>
 #  define PATH_SEP_C '\\'
+/* Shim setenv() onto _putenv_s. The Windows path uses setenv() for
+ * the WINE-runtime env exports; on Windows we fall through to
+ * `_execv` regardless and let the (no-op stub) process inherit the
+ * env we set here, so semantic parity is sufficient. */
+static int setenv(const char *name, const char *value, int overwrite) {
+    if (!overwrite && getenv(name) != NULL) return 0;
+    return _putenv_s(name, value);
+}
 #else
 #  include <fcntl.h>
 #  include <sched.h>
@@ -141,6 +165,11 @@ typedef struct {
     int        n_ops;
     char       exec_path[MAX_PATH_LEN];
     char       cwd[MAX_PATH_LEN];
+    /* W2 runtime=wine extensions; runtime[0]=='\0' means native. */
+    char       runtime[32];
+    char       wine_prefix[MAX_PATH_LEN];
+    char       wine_exec[MAX_PATH_LEN];
+    char       wine_bin[MAX_PATH_LEN];
 } manifest_t;
 
 static int g_verbose = 0;
@@ -352,6 +381,31 @@ static int parse_manifest(const char *path, manifest_t *m) {
             }
             continue;
         }
+        /* W2: runtime / wine_* keys. */
+        if (starts_with(p, "runtime=")) {
+            if (copy_field(m->runtime, sizeof(m->runtime), p + 8) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
+        if (starts_with(p, "wine_prefix=")) {
+            if (copy_field(m->wine_prefix, sizeof(m->wine_prefix), p + 12) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
+        if (starts_with(p, "wine_exec=")) {
+            if (copy_field(m->wine_exec, sizeof(m->wine_exec), p + 10) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
+        if (starts_with(p, "wine_bin=")) {
+            if (copy_field(m->wine_bin, sizeof(m->wine_bin), p + 9) != 0) {
+                fclose(fp); return -1;
+            }
+            continue;
+        }
         if (strcmp(p, "proc") == 0) {
             if (m->n_ops >= MAX_MOUNTS) { fclose(fp); return -1; }
             mount_op_t *op = &m->ops[m->n_ops++];
@@ -466,10 +520,39 @@ static int setup_userns_id_map(uid_t outer_uid, gid_t outer_gid) {
     return 0;
 }
 
+/* Track already-bound targets so a manifest that lists the same target
+ * twice (e.g. W2 wine_prefix overlapping with a per-package payload
+ * subtree) does not produce a double-bind error. The second bind is
+ * silently skipped — Linux would otherwise stack the bind, which is
+ * usually fine, but stacked binds confuse cleanup and surprise the
+ * eventual --umount-on-exit code path. */
+static char g_bound_targets[MAX_MOUNTS][MAX_PATH_LEN];
+static int  g_n_bound_targets = 0;
+
+static int already_bound(const char *target) {
+    for (int i = 0; i < g_n_bound_targets; i++) {
+        if (strcmp(g_bound_targets[i], target) == 0) return 1;
+    }
+    return 0;
+}
+
+static void remember_bound(const char *target) {
+    if (g_n_bound_targets >= MAX_MOUNTS) return;
+    size_t n = strlen(target);
+    if (n + 1 > MAX_PATH_LEN) return;
+    memcpy(g_bound_targets[g_n_bound_targets], target, n + 1);
+    g_n_bound_targets++;
+}
+
 static int do_bind(const mount_op_t *op) {
     if (g_dry_run) {
         vlog("dry-run bind: %s -> %s%s", op->source, op->target,
              op->read_only ? " (ro)" : "");
+        return 0;
+    }
+    if (already_bound(op->target)) {
+        vlog("bind: %s -> %s skipped (target already bound)",
+             op->source, op->target);
         return 0;
     }
     if (ensure_dir(op->target) != 0) return -1;
@@ -489,6 +572,7 @@ static int do_bind(const mount_op_t *op) {
             return -1;
         }
     }
+    remember_bound(op->target);
     vlog("bind: %s -> %s%s", op->source, op->target,
          op->read_only ? " (ro)" : "");
     return 0;
@@ -638,13 +722,48 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    if (m.exec_path[0] == '\0') {
-        err_log("no exec= line in manifest and no --exec override");
+
+    /* W2: runtime=wine validation. When runtime=wine is set, the
+     * launcher does NOT require an exec= line — the actual executable
+     * is wine_bin, and the user-facing target is wine_exec. */
+    int is_wine_runtime = (strcmp(m.runtime, "wine") == 0);
+    if (m.runtime[0] != '\0' && !is_wine_runtime &&
+        strcmp(m.runtime, "native") != 0) {
+        err_log("unknown runtime=%s (supported: native, wine)", m.runtime);
         return 1;
     }
+    if (is_wine_runtime) {
+        if (m.wine_prefix[0] == '\0') {
+            err_log("runtime=wine requires wine_prefix=");
+            return 1;
+        }
+        if (m.wine_exec[0] == '\0') {
+            err_log("runtime=wine requires wine_exec=");
+            return 1;
+        }
+        if (m.wine_bin[0] == '\0') {
+            /* Default to /usr/bin/wine. */
+            if (copy_field(m.wine_bin, sizeof(m.wine_bin),
+                           "/usr/bin/wine") != 0) {
+                return 1;
+            }
+        }
+    } else {
+        if (m.exec_path[0] == '\0') {
+            err_log("no exec= line in manifest and no --exec override");
+            return 1;
+        }
+    }
 
-    vlog("manifest=%s exec=%s n_ops=%d",
-         manifest_path, m.exec_path, m.n_ops);
+    if (is_wine_runtime) {
+        vlog("manifest=%s runtime=wine wine_bin=%s wine_exec=%s "
+             "wine_prefix=%s n_ops=%d",
+             manifest_path, m.wine_bin, m.wine_exec, m.wine_prefix,
+             m.n_ops);
+    } else {
+        vlog("manifest=%s exec=%s n_ops=%d",
+             manifest_path, m.exec_path, m.n_ops);
+    }
 
 #ifdef _WIN32
     /* Windows: stub. Validate parsed manifest, then exec the target. */
@@ -656,11 +775,66 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    /* Build argv for the child. m.exec_path is argv[0]; remaining args
-       come from after the ``--`` delimiter. */
+    /* W2 runtime=wine: verify drive_c exists post-bind, set WINE env
+     * vars, and rewrite argv to invoke wine_bin with wine_exec as its
+     * first argument. */
+    if (is_wine_runtime) {
+#ifndef _WIN32
+        if (!g_dry_run) {
+            char drive_c[MAX_PATH_LEN];
+            int n = snprintf(drive_c, sizeof(drive_c), "%s/drive_c",
+                             m.wine_prefix);
+            if (n <= 0 || n >= (int)sizeof(drive_c)) {
+                err_log("wine_prefix path too long: %s", m.wine_prefix);
+                return 1;
+            }
+            struct stat st;
+            if (stat(drive_c, &st) != 0 || !S_ISDIR(st.st_mode)) {
+                err_log("wine_prefix has no drive_c/: %s "
+                        "(did you forget to bind-mount the prefix?)",
+                        drive_c);
+                return 5;
+            }
+        }
+#endif
+        if (setenv("WINEPREFIX", m.wine_prefix, 1) != 0) {
+            err_log("setenv WINEPREFIX failed: %s", strerror(errno));
+            return 5;
+        }
+        /* Suppress fixme/warn channel + Mono/Gecko nags. The manifest
+         * may override these later; for the PoC we hard-wire the
+         * defaults from docs/multi-os-windows-runtime.md. */
+        setenv("WINEDEBUG", "-all", 0);
+        setenv("WINEDLLOVERRIDES", "mscoree,mshtml=", 0);
+        vlog("wine env: WINEPREFIX=%s WINEDEBUG=%s WINEDLLOVERRIDES=%s",
+             m.wine_prefix,
+             getenv("WINEDEBUG") ? getenv("WINEDEBUG") : "(unset)",
+             getenv("WINEDLLOVERRIDES") ?
+                getenv("WINEDLLOVERRIDES") : "(unset)");
+    }
+
+    /* Build argv for the child.
+     *
+     * Native runtime:
+     *   argv[0] = m.exec_path
+     *   argv[1..] = post-`--` forwarded args
+     *
+     * runtime=wine:
+     *   argv[0] = m.wine_bin
+     *   argv[1] = m.wine_exec
+     *   argv[2..] = post-`--` forwarded args
+     */
     char *child_argv[MAX_EXEC_ARGS];
     int ci = 0;
-    child_argv[ci++] = m.exec_path;
+    const char *exec_target;
+    if (is_wine_runtime) {
+        child_argv[ci++] = m.wine_bin;
+        child_argv[ci++] = m.wine_exec;
+        exec_target = m.wine_bin;
+    } else {
+        child_argv[ci++] = m.exec_path;
+        exec_target = m.exec_path;
+    }
     if (double_dash >= 0) {
         for (int j = double_dash + 1; j < argc && ci < MAX_EXEC_ARGS - 1; j++) {
             child_argv[ci++] = argv[j];
@@ -669,7 +843,7 @@ int main(int argc, char **argv) {
     child_argv[ci] = NULL;
 
     if (g_dry_run) {
-        vlog("dry-run: would execve(%s)", m.exec_path);
+        vlog("dry-run: would execve(%s)", exec_target);
         for (int j = 0; j < ci; j++) {
             vlog("  argv[%d]=%s", j, child_argv[j]);
         }
@@ -678,13 +852,13 @@ int main(int argc, char **argv) {
 
 #ifdef _WIN32
     /* _execv on Windows replaces the current process. */
-    if (_execv(m.exec_path, (const char *const *)child_argv) < 0) {
-        err_log("_execv '%s' failed: %s", m.exec_path, strerror(errno));
+    if (_execv(exec_target, (const char *const *)child_argv) < 0) {
+        err_log("_execv '%s' failed: %s", exec_target, strerror(errno));
         return 4;
     }
 #else
-    if (execv(m.exec_path, child_argv) < 0) {
-        err_log("execv '%s' failed: %s", m.exec_path, strerror(errno));
+    if (execv(exec_target, child_argv) < 0) {
+        err_log("execv '%s' failed: %s", exec_target, strerror(errno));
         return 4;
     }
 #endif

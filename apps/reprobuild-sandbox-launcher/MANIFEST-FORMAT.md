@@ -40,10 +40,48 @@ The parser accepts the following line forms.
 
 * `exec=<absolute-path>` — the wrapped binary the launcher will
   `execve()` after namespace setup. The CLI's `--exec=<path>` overrides
-  this line. Exactly one `exec=` line is required (either in the
-  manifest or via `--exec`).
+  this line. Required when `runtime=` is absent or `runtime=native`;
+  ignored when `runtime=wine` (the launcher exec()s `wine_bin`
+  instead).
 * `cwd=<absolute-path>` — `chdir()` to this directory immediately
   before `execve()`. Optional.
+
+#### W2 runtime selection keys
+
+The following keys select between the native C3 runtime (default) and
+the WINE runtime added in W2. Older launcher binaries (pre-W2) ignore
+unknown keys per the forward-compatibility contract below, so a W2
+manifest will degrade to a native-style execve(wine_bin), which is
+still well-defined; pre-W2 launchers simply skip the env setup +
+argv-rewrite that the W2 launcher performs.
+
+* `runtime=native` — explicit selection of the C3 behaviour
+  (equivalent to omitting the key). The launcher exec()s `exec=`.
+* `runtime=wine` — WINE runtime. The launcher:
+    1. Performs the bind set as usual.
+    2. Verifies `${wine_prefix}/drive_c/` exists post-bind.
+    3. Sets `$WINEPREFIX = wine_prefix`,
+       `$WINEDEBUG = -all`, and
+       `$WINEDLLOVERRIDES = mscoree,mshtml=`
+       (the latter two are set with overwrite=0, so the caller can
+       override them via the host environment).
+    4. exec()s `wine_bin` with argv = `[wine_bin, wine_exec, <forwarded
+       args after `--`>]`.
+
+When `runtime=wine` is set, the following three keys are consulted:
+
+* `wine_prefix=<absolute-path>` — WINEPREFIX root on the host. Bound
+  into the namespace by the manifest's bind lines and exported as
+  `$WINEPREFIX` by the launcher. Required.
+* `wine_exec=<path>` — the executable WINE is asked to run. WINE
+  accepts both forward-slash POSIX paths under the prefix and
+  drive-letter form (`C:/path/to.exe`); both are passed verbatim.
+  Required.
+* `wine_bin=<absolute-path>` — the WINE binary. Defaults to
+  `/usr/bin/wine` if absent.
+
+Any value other than `native` or `wine` for `runtime=` is rejected at
+parse time.
 
 ### Bind-mount lines
 
@@ -81,6 +119,37 @@ exec=/store/prefixes/git/a1b2c3.../usr/bin/git
 proc
 sys
 ```
+
+### Minimal `runtime=wine` example (W2)
+
+```manifest
+# WINE-runtime manifest for the gh Windows CLI.
+
+runtime=wine
+wine_prefix=/opt/reproos-foreign/wine-prefix
+wine_exec=C:/repro-store/<gh-hash>/bin/gh.exe
+wine_bin=/usr/bin/wine
+
+# WINE binaries closure (apt-harvested; see W1 architecture doc).
+/opt/reproos-foreign/wine-binaries:/opt/reproos-foreign/wine-binaries:rbind,ro
+
+# Shared WINEPREFIX (read-write — wine writes to drive_c/users/...).
+/opt/reproos-foreign/wine-prefix:/opt/reproos-foreign/wine-prefix:rbind
+
+# wine needs procfs for process discovery.
+proc
+```
+
+Notes:
+
+* `exec=` is intentionally absent — the launcher exec()s `wine_bin`
+  (defaulting to `/usr/bin/wine`) and passes `wine_exec` as the first
+  argument.
+* If a per-package payload subtree is also listed as an explicit bind
+  with the same target as the prefix bind, the launcher silently
+  skips the duplicate so manifest generators don't have to dedupe.
+* The `proc` directive is required because `wine` and `wineserver`
+  walk `/proc` to discover sibling processes.
 
 ## Determinism contract
 
