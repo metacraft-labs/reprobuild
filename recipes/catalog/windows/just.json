@@ -1,0 +1,32 @@
+{
+  "dependency_closure": [],
+  "dependency_dll_closure": [],
+  "exec_path": "drive_c/repro-store/just/bin/just.exe",
+  "format_version": 1,
+  "package": {
+    "distro": "windows",
+    "name": "just",
+    "snapshot": "github/casey-just/1.24.0",
+    "version": "1.24.0"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "just.exe",
+      "install_relpath": "bin/just.exe",
+      "kind": "exe",
+      "sha256": "3384fd9e090251e3090c59a5559ee78ef4e1f5ee7ce0a2c635f4680e064d0c2b"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "direct-snapshot-url",
+      "sha256": "325ed382221ac9189ec9beedcf4b97e6fc229b4e49ede7ca36e47a5b651bb09c",
+      "size_bytes": 1485728,
+      "url": "https://github.com/casey/just/releases/download/1.24.0/just-1.24.0-x86_64-pc-windows-msvc.zip"
+    }
+  ],
+  "runtime": "wine",
+  "signed_envelope": null,
+  "wine_prefix_id": "shared",
+  "wine_version_banner": "just 1.24.0"
+}

@@ -1,0 +1,32 @@
+{
+  "dependency_closure": [],
+  "dependency_dll_closure": [],
+  "exec_path": "drive_c/repro-store/ninja/bin/ninja.exe",
+  "format_version": 1,
+  "package": {
+    "distro": "windows",
+    "name": "ninja",
+    "snapshot": "github/ninja-build-ninja/v1.12.1",
+    "version": "1.12.1"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "ninja.exe",
+      "install_relpath": "bin/ninja.exe",
+      "kind": "exe",
+      "sha256": "68865c3276d449d746cea5065fdec2baf755d7813e161ab04205b0907b2629b8"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "direct-snapshot-url",
+      "sha256": "f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a",
+      "size_bytes": 275425,
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
+    }
+  ],
+  "runtime": "wine",
+  "signed_envelope": null,
+  "wine_prefix_id": "shared",
+  "wine_version_banner": "1.12.1"
+}

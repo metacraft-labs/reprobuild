@@ -1,0 +1,32 @@
+{
+  "dependency_closure": [],
+  "dependency_dll_closure": [],
+  "exec_path": "drive_c/repro-store/gh/bin/gh.exe",
+  "format_version": 1,
+  "package": {
+    "distro": "windows",
+    "name": "gh",
+    "snapshot": "github/cli-cli/v2.40.0",
+    "version": "2.40.0"
+  },
+  "payload_files": [
+    {
+      "archive_relpath": "bin/gh.exe",
+      "install_relpath": "bin/gh.exe",
+      "kind": "exe",
+      "sha256": "5ce4d10b466ab8666711190785b9a5e163b18eb6002dc90c5861e2d9f88f85a2"
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "direct-snapshot-url",
+      "sha256": "6d27beeedf5d445ba7bdc92e3e85694c375ee558dca4d0c47ae37c5d2c42b071",
+      "size_bytes": 10747825,
+      "url": "https://github.com/cli/cli/releases/download/v2.40.0/gh_2.40.0_windows_amd64.zip"
+    }
+  ],
+  "runtime": "wine",
+  "signed_envelope": null,
+  "wine_prefix_id": "shared",
+  "wine_version_banner": "gh version 2.40.0"
+}
