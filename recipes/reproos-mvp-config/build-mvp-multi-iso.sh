@@ -292,6 +292,227 @@ if ! ensure_stub_compiler; then
   STUB_USE_STATIC=0
 fi
 
+# X1: when MVP_REAL_ARCHIVES=1, the build extracts real upstream
+# .deb/.rpm/.pkg.tar.zst archives instead of compiling stubs. The
+# vendored archives must exist under recipes/reproos-mvp-config/
+# vendored-archives/{apt,dnf,pacman}/ (fetched by fetch-real-archives.sh).
+MVP_REAL_ARCHIVES="${MVP_REAL_ARCHIVES:-0}"
+ARCHIVES_ROOT="${X1_ARCHIVES_DIR:-$SCRIPT_DIR/vendored-archives}"
+if [ "$MVP_REAL_ARCHIVES" = "1" ]; then
+  if [ ! -d "$ARCHIVES_ROOT" ]; then
+    die "MVP_REAL_ARCHIVES=1 but vendored archives missing at $ARCHIVES_ROOT (run fetch-real-archives.sh first)"
+  fi
+  for tool in ar tar zstd cpio rpm2cpio; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      die "MVP_REAL_ARCHIVES=1 but '$tool' missing on PATH"
+    fi
+  done
+  log "X1: real-archive extraction enabled (archives root: $ARCHIVES_ROOT)"
+fi
+
+# X1 extraction helpers. Each extracts an archive INTO an already-created
+# target prefix dir (merging files atop whatever's there). The launcher's
+# bind set later picks up only existing subdirs.
+extract_deb() {
+  local deb="$1" dest="$2"
+  local tmp
+  tmp=$(mktemp -d)
+  ( cd "$tmp" && ar x "$deb" 2>/dev/null ) || { rm -rf "$tmp"; return 1; }
+  local data_tar
+  data_tar=$(ls "$tmp"/data.tar.* 2>/dev/null | head -1)
+  [ -n "$data_tar" ] || { rm -rf "$tmp"; return 1; }
+  mkdir -p "$dest"
+  case "$data_tar" in
+    *.xz)  tar -xJf "$data_tar" -C "$dest" ;;
+    *.zst) tar --use-compress-program=unzstd -xf "$data_tar" -C "$dest" ;;
+    *.gz)  tar -xzf "$data_tar" -C "$dest" ;;
+    *)     rm -rf "$tmp"; return 1 ;;
+  esac
+  rm -rf "$tmp"
+}
+
+extract_rpm() {
+  local rpm="$1" dest="$2"
+  mkdir -p "$dest"
+  ( cd "$dest" && rpm2cpio "$rpm" | cpio -idmu --no-absolute-filenames \
+    2>/dev/null ) || return 1
+}
+
+extract_pkg() {
+  local pkg="$1" dest="$2"
+  mkdir -p "$dest"
+  zstd -dq -c "$pkg" | tar -x -C "$dest"
+  # Drop pacman metadata files.
+  rm -f "$dest/.PKGINFO" "$dest/.BUILDINFO" "$dest/.MTREE" "$dest/.INSTALL"
+}
+
+# Find the archive file for a given (distro, name). Tries to match by
+# package name prefix against the vendored archives dir. Returns "" if
+# not found. Uses literal string-prefix matching (no regex) so package
+# names with '+' (e.g. libstdc++) and '.' work correctly.
+find_archive() {
+  local distro="$1" name="$2"
+  local dir="$ARCHIVES_ROOT/$distro"
+  [ -d "$dir" ] || return 1
+  local sep
+  case "$distro" in
+    apt)    sep='_' ;;
+    dnf)    sep='-' ;;
+    pacman) sep='-' ;;
+  esac
+  local prefix="${name}${sep}"
+  local match=""
+  local f
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    local bn
+    bn=$(basename "$f")
+    # Literal-prefix match: ${bn} must start with "$prefix" and the
+    # character right after "$prefix" must be a digit (so "git" doesn't
+    # accidentally match "git-man").
+    if [ "${bn#$prefix}" != "$bn" ]; then
+      local rest="${bn#$prefix}"
+      case "$rest" in
+        [0-9]*) match="$f"; break ;;
+      esac
+    fi
+  done
+  [ -n "$match" ] && echo "$match"
+}
+
+# Build the merged closure prefix for one root package: extract the root
+# package's archive + every closure dep's archive into the SAME prefix
+# dir. This sidesteps the launcher's mount-stack shadowing where
+# multiple closure prefixes' lib/x86_64-linux-gnu binds at the same FHS
+# target only keep the topmost.
+build_merged_prefix() {
+  local distro="$1" name="$2" pfx="$3" cat_file="$4"
+  rm -rf "$pfx"
+  mkdir -p "$pfx"
+  # Collect closure names from dep_closure[] in the catalog JSON.
+  local deps
+  deps=$(python3 - "$cat_file" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+for dep in d.get('dependency_closure', []):
+    print(dep['name'])
+PYEOF
+)
+  # Extract root.
+  local root_archive
+  root_archive=$(find_archive "$distro" "$name") || true
+  if [ -z "$root_archive" ]; then
+    log "  $distro/$name: no archive found, skipping (stub fallback)"
+    return 1
+  fi
+  log "  $distro/$name: extracting root archive $(basename "$root_archive")"
+  case "$distro" in
+    apt)    extract_deb "$root_archive" "$pfx" || return 1 ;;
+    dnf)    extract_rpm "$root_archive" "$pfx" || return 1 ;;
+    pacman) extract_pkg "$root_archive" "$pfx" || return 1 ;;
+  esac
+  # X1: synthetic extras the harvested catalog's dep_closure misses
+  # (the harvester walks the fictional fixture Packages and was tuned
+  # to the stubs; real upstream binaries pull in additional libs).
+  local extra=""
+  case "$distro/$name" in
+    apt/vim)
+      # Real vim needs libselinux + libtinfo + libacl + libgpm + libsodium.
+      extra="libselinux1 libacl1 libgpm2 libsodium23 libpcre2-8-0 libtinfo6"
+      ;;
+    apt/curl)
+      # Real curl needs libidn2 + librtmp + libssh2 + libgnutls + libgssapi-krb5 ...
+      extra="libidn2-0 librtmp1 libssh2-1 libgnutls30 libgmp10 libgcrypt20 libgpg-error0 libnettle8 libhogweed6 libp11-kit0 libtasn1-6 libffi8 libunistring2 libldap-2.5-0 libsasl2-2 libkrb5-3 libk5crypto3 libcom-err2 libkrb5support0 libssl3 libbrotli1 libpsl5 libnghttp2-14 libzstd1 libgssapi-krb5-2 libkeyutils1"
+      ;;
+    apt/htop)
+      # Real htop needs libnl + libsystemd + libcap + libcrypt + libtinfo + libnl-genl.
+      extra="libnl-3-200 libnl-genl-3-200 libsystemd0 libcap2 libcrypt1 libtinfo6 liblzma5 libgcrypt20"
+      ;;
+    apt/python3)
+      extra="python3.11 python3.11-minimal libpython3.11-minimal libpython3.11-stdlib libexpat1 media-types libuuid1"
+      ;;
+    dnf/htop)
+      # Real Fedora htop needs libhwloc + libcap + libcrypt + ncurses.
+      extra="hwloc-libs libcap libxcrypt"
+      ;;
+    dnf/neovim)
+      # Real Fedora neovim needs libuv + libluv (libluv.so.1; NOT
+      # lua-luv which only ships /usr/lib64/lua/5.4/luv.so) + lua-libs
+      # + libtree-sitter + libtermkey + libvterm + msgpack-c + etc.
+      extra="libuv libluv lua-luv lua-libs libtree-sitter libtermkey libvterm msgpack-c unibilium gpm-libs"
+      ;;
+    pacman/htop)
+      # Real Arch htop needs libcap + libnl + libsystemd.
+      extra="libcap libnl"
+      ;;
+  esac
+
+  # Extract each closure dep + extras into the SAME prefix.
+  local missing=()
+  for dep in $deps $extra; do
+    local dep_archive
+    dep_archive=$(find_archive "$distro" "$dep") || true
+    if [ -z "$dep_archive" ]; then
+      missing+=("$dep")
+      continue
+    fi
+    case "$distro" in
+      apt)    extract_deb "$dep_archive" "$pfx" || missing+=("$dep") ;;
+      dnf)    extract_rpm "$dep_archive" "$pfx" || missing+=("$dep") ;;
+      pacman) extract_pkg "$dep_archive" "$pfx" || missing+=("$dep") ;;
+    esac
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    log "  $distro/$name: WARN missing closure archives: ${missing[*]}"
+  fi
+  # Ensure the FHS-canonical bind targets exist even if the archive
+  # didn't create them (so the launcher's bindEntriesForPrefix walk
+  # picks them up).
+  for sub in usr/bin lib lib/x86_64-linux-gnu lib64 \
+             usr/lib usr/lib/x86_64-linux-gnu usr/share etc; do
+    mkdir -p "$pfx/$sub"
+  done
+
+  # Pacman / Fedora layout patch: real upstream binaries dynamic-link
+  # against /lib64/ld-linux-x86-64.so.2, but Arch + Fedora glibc
+  # packages place the loader at usr/lib/ld-linux-x86-64.so.2 (Arch)
+  # or usr/lib64/ld-linux-x86-64.so.2 (Fedora). Materialize the
+  # standard /lib64/ld-linux-x86-64.so.2 inside the prefix so the
+  # launcher's /lib64 bind makes the loader visible.
+  if [ ! -e "$pfx/lib64/ld-linux-x86-64.so.2" ]; then
+    for cand in "$pfx/usr/lib/ld-linux-x86-64.so.2" \
+                "$pfx/usr/lib64/ld-linux-x86-64.so.2" \
+                "$pfx/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" \
+                "$pfx/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"; do
+      if [ -e "$cand" ]; then
+        cp -P "$cand" "$pfx/lib64/ld-linux-x86-64.so.2" 2>/dev/null || \
+        cp -L "$cand" "$pfx/lib64/ld-linux-x86-64.so.2"
+        break
+      fi
+    done
+  fi
+
+  # Fedora binaries link against /lib64/* but the rpm payload places
+  # libs at /usr/lib64/*; mirror EVERY usr/lib64 entry into lib64 so
+  # the launcher's /lib64 bind exposes the full closure (libcap.so.2,
+  # libcrypt.so.2, etc.). Use --no-clobber via -n so we don't trample
+  # the ld-linux that's already there.
+  if [ -d "$pfx/usr/lib64" ]; then
+    cp -an "$pfx/usr/lib64/." "$pfx/lib64/" 2>/dev/null || true
+  fi
+
+  # Arch payloads put libs at /usr/lib/* (flat). Mirror those into
+  # /lib/x86_64-linux-gnu/ since the launcher binds the latter and
+  # /lib64 (already populated above with anything from /usr/lib64
+  # which Arch doesn't use). Specifically, Arch ld.so resolves
+  # /lib64/ld-linux-x86-64.so.2 then searches /usr/lib for libs, but
+  # the launcher binds /usr/lib so Arch libs are already visible
+  # without this step.
+
+  return 0
+}
+
 emit_stub_c_source() {
   local out="$1" name="$2" version="$3" banner="$4" distro_tag="$5"
   cat > "$out" <<'CHEADER'
@@ -355,28 +576,41 @@ CTAIL
 # Iterate every harvested catalog (apt + dnf + pacman) and fabricate a
 # prefix.
 declare -A IS_ROOT
+declare -A FOREIGN_RESOLVED_EXEC
 i=0
 while [ "$i" -lt "${#FOREIGN_NAMES[@]}" ]; do
   IS_ROOT["${FOREIGN_DISTROS[$i]}/${FOREIGN_NAMES[$i]}"]=1
   i=$((i + 1))
 done
 
-for d in apt dnf pacman; do
-  [ -d "$CATALOG_OUT/$d" ] || continue
-  for f in "$CATALOG_OUT/$d"/*.json; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f" .json)
-    pfx="$STORE_ROOT/prefixes/$d/$name"
-    mkdir -p "$pfx/usr/bin" "$pfx/usr/lib/x86_64-linux-gnu" \
-             "$pfx/lib" "$pfx/lib/x86_64-linux-gnu" \
-             "$pfx/usr/share" "$pfx/etc"
-    : > "$pfx/usr/lib/x86_64-linux-gnu/.keep"
-    : > "$pfx/lib/x86_64-linux-gnu/.keep"
+# D2 stub mode: pre-create FHS skeleton dirs in every closure prefix
+# so the launcher's bindEntriesForPrefix picks them up (even empty).
+# X1 real-archives mode: skip — the merged-root extraction handles
+# the root's dirs; dep prefixes only need to EXIST (no FHS skeleton)
+# so c3_manifest_emit's prefixesMap key lookup doesn't KeyError. The
+# stage-3 emit loop later overrides --store-prefixes to map every
+# closure entry to the merged-root prefix path.
+if [ "$MVP_REAL_ARCHIVES" != "1" ]; then
+  for d in apt dnf pacman; do
+    [ -d "$CATALOG_OUT/$d" ] || continue
+    for f in "$CATALOG_OUT/$d"/*.json; do
+      [ -f "$f" ] || continue
+      name=$(basename "$f" .json)
+      pfx="$STORE_ROOT/prefixes/$d/$name"
+      mkdir -p "$pfx/usr/bin" "$pfx/usr/lib/x86_64-linux-gnu" \
+               "$pfx/lib" "$pfx/lib/x86_64-linux-gnu" \
+               "$pfx/usr/share" "$pfx/etc"
+      : > "$pfx/usr/lib/x86_64-linux-gnu/.keep"
+      : > "$pfx/lib/x86_64-linux-gnu/.keep"
+    done
   done
-done
+fi
 
-# Plant binaries for every ROOT package. The dep prefixes stay empty
-# (the launcher manifest's bind targets only need the dirs to exist).
+# Plant binaries for every ROOT package. In D2 stub mode the dep
+# prefixes stay empty (statically-linked stubs don't need libs). In X1
+# real-archives mode, build_merged_prefix extracts the root + every
+# closure dep INTO the root prefix so the launcher's bind set picks
+# up a self-contained closure for the root binary.
 i=0
 while [ "$i" -lt "${#FOREIGN_NAMES[@]}" ]; do
   name="${FOREIGN_NAMES[$i]}"
@@ -390,49 +624,114 @@ while [ "$i" -lt "${#FOREIGN_NAMES[@]}" ]; do
   [ -n "$version" ] || version="unknown"
   pfx="$STORE_ROOT/prefixes/$distro/$name"
   bin="$pfx/usr/bin/$name"
-  case "$name" in
-    git)     banner_base="git version $version" ;;
-    vim)     banner_base="VIM - Vi IMproved $version" ;;
-    python3) banner_base="Python $version" ;;
-    curl)    banner_base="curl $version reproos-mvp" ;;
-    htop)    banner_base="htop $version" ;;
-    neovim)  banner_base="NVIM v$version" ;;
-    fzf)     banner_base="$version" ;;
-    *)       banner_base="$name $version" ;;
-  esac
-  distro_tag="distro=$distro snapshot=$snapshot"
-  banner="$banner_base ($distro)"
 
-  if [ "$STUB_USE_STATIC" = 1 ]; then
-    src="$OUT_DIR/stub_${distro}_${name}.c"
-    emit_stub_c_source "$src" "$name" "$version" "$banner" "$distro_tag"
-    if "$STUB_COMPILER" -O2 -static -o "$bin" "$src" 2>"$OUT_DIR/stub_${distro}_${name}.log"; then
-      :  # static link OK
-    elif "$STUB_COMPILER" -O2 -o "$bin" "$src" 2>>"$OUT_DIR/stub_${distro}_${name}.log"; then
-      log "warn: $distro/$name stub dynamically linked (host lacks static libc)"
+  if [ "$MVP_REAL_ARCHIVES" = "1" ]; then
+    if build_merged_prefix "$distro" "$name" "$pfx" "$cat_file"; then
+      # Real binaries: figure out where the binary actually lives.
+      # apt/debian uses usr/bin (most cases) or bin (a few). dnf and
+      # pacman both standardise on usr/bin.
+      #
+      # Per-package quirks (Debian alternatives + Python python3.11
+      # being in a separate package): try canonical-name fallbacks.
+      local_fallbacks=""
+      case "$name" in
+        vim)     local_fallbacks="vim.basic" ;;
+        python3) local_fallbacks="python3.11 python3.10 python3.12" ;;
+        neovim)  local_fallbacks="nvim" ;;
+      esac
+      try_names="$name $local_fallbacks"
+      bin=""
+      for tn in $try_names; do
+        for tdir in usr/bin bin usr/sbin; do
+          tp="$pfx/$tdir/$tn"
+          if [ -x "$tp" ] || { [ -L "$tp" ] && [ -e "$tp" ]; }; then
+            bin="$tp"
+            break 2
+          fi
+        done
+      done
+      # If we landed on a fallback path (e.g. usr/bin/vim.basic) and
+      # the canonical name's location isn't yet populated, create a
+      # convenience symlink so /usr/local/bin/<name> + the manifest's
+      # exec= path can both refer to the canonical name. This also
+      # gives the VM-side /usr/local/bin/<name> wrapper a stable
+      # target.
+      if [ -n "$bin" ]; then
+        canonical="$pfx/usr/bin/$name"
+        if [ "$bin" != "$canonical" ] && [ ! -e "$canonical" ]; then
+          mkdir -p "$pfx/usr/bin"
+          ln -sf "$(basename "$bin")" "$canonical"
+        fi
+        # Always present the canonical path to the manifest emitter
+        # so the per-binary shim filename matches the package name.
+        bin="$canonical"
+      fi
+      # An -L test catches dangling symlinks too; the closure dep was
+      # extracted before this check so the symlink target should exist.
+      if [ -z "$bin" ] || { [ ! -e "$bin" ]; }; then
+        log "  $distro/$name: WARN real binary not found in expected paths; falling back to stub"
+        MVP_FALLBACK_TO_STUB=1
+      else
+        sz=$(stat -L -c%s "$bin" 2>/dev/null || echo symlink)
+        log "  $distro/$name: REAL binary at $bin ($sz bytes)"
+        MVP_FALLBACK_TO_STUB=0
+      fi
     else
-      log "warn: $distro/$name C stub compile failed; falling back to shell script"
-      STUB_USE_STATIC=0
+      log "  $distro/$name: real-archive build failed; falling back to stub"
+      MVP_FALLBACK_TO_STUB=1
     fi
+  else
+    MVP_FALLBACK_TO_STUB=1
   fi
-  if [ "$STUB_USE_STATIC" != 1 ] || [ ! -x "$bin" ]; then
-    {
-      printf '#!/bin/sh\n'
-      printf '# D2 multi shell fallback stub for %s/%s (version=%s)\n' \
-        "$distro" "$name" "$version"
-      printf 'if [ "${1:-}" = "--version" ]; then\n'
-      printf '  echo "%s"\n' "$banner"
-      printf '  exit 0\n'
-      printf 'fi\n'
-      printf 'if [ "${1:-}" = "--distro" ]; then\n'
-      printf '  echo "%s"\n' "$distro_tag"
-      printf '  exit 0\n'
-      printf 'fi\n'
-      printf 'echo "[d2 stub %s] %s with args: $*"\n' "$distro" "$name"
-      printf 'exit 0\n'
-    } > "$bin"
+
+  if [ "$MVP_FALLBACK_TO_STUB" = "1" ]; then
+    case "$name" in
+      git)     banner_base="git version $version" ;;
+      vim)     banner_base="VIM - Vi IMproved $version" ;;
+      python3) banner_base="Python $version" ;;
+      curl)    banner_base="curl $version reproos-mvp" ;;
+      htop)    banner_base="htop $version" ;;
+      neovim)  banner_base="NVIM v$version" ;;
+      fzf)     banner_base="$version" ;;
+      *)       banner_base="$name $version" ;;
+    esac
+    distro_tag="distro=$distro snapshot=$snapshot"
+    banner="$banner_base ($distro)"
+
+    if [ "$STUB_USE_STATIC" = 1 ]; then
+      src="$OUT_DIR/stub_${distro}_${name}.c"
+      emit_stub_c_source "$src" "$name" "$version" "$banner" "$distro_tag"
+      if "$STUB_COMPILER" -O2 -static -o "$bin" "$src" 2>"$OUT_DIR/stub_${distro}_${name}.log"; then
+        :  # static link OK
+      elif "$STUB_COMPILER" -O2 -o "$bin" "$src" 2>>"$OUT_DIR/stub_${distro}_${name}.log"; then
+        log "warn: $distro/$name stub dynamically linked (host lacks static libc)"
+      else
+        log "warn: $distro/$name C stub compile failed; falling back to shell script"
+        STUB_USE_STATIC=0
+      fi
+    fi
+    if [ "$STUB_USE_STATIC" != 1 ] || [ ! -x "$bin" ]; then
+      {
+        printf '#!/bin/sh\n'
+        printf '# D2 multi shell fallback stub for %s/%s (version=%s)\n' \
+          "$distro" "$name" "$version"
+        printf 'if [ "${1:-}" = "--version" ]; then\n'
+        printf '  echo "%s"\n' "$banner"
+        printf '  exit 0\n'
+        printf 'fi\n'
+        printf 'if [ "${1:-}" = "--distro" ]; then\n'
+        printf '  echo "%s"\n' "$distro_tag"
+        printf '  exit 0\n'
+        printf 'fi\n'
+        printf 'echo "[d2 stub %s] %s with args: $*"\n' "$distro" "$name"
+        printf 'exit 0\n'
+      } > "$bin"
+    fi
+    chmod +x "$bin"
   fi
-  chmod +x "$bin"
+  # Stash the resolved binary location so the manifest emit stage can
+  # use --exec-path correctly.
+  FOREIGN_RESOLVED_EXEC["$distro/$name"]="$bin"
   i=$((i + 1))
 done
 
@@ -487,11 +786,48 @@ while [ "$i" -lt "${#FOREIGN_NAMES[@]}" ]; do
   manifest_native="$(to_native_path "$manifest")"
   shim_dir_native="$(to_native_path "$shim_dir")"
 
+  # Resolve the actual binary path: X1 real-archives mode may place
+  # binaries at usr/bin, bin, or usr/sbin; D2 stubs always go to
+  # usr/bin. The earlier stage 3 loop stashed the resolved path in
+  # FOREIGN_RESOLVED_EXEC; falling back to usr/bin for forward compat.
+  resolved_bin="${FOREIGN_RESOLVED_EXEC[$distro/$name]:-}"
+  if [ -z "$resolved_bin" ]; then
+    resolved_bin="$pfx/usr/bin/$name"
+  fi
+  resolved_bin_native="$(to_native_path "$resolved_bin")"
+
+  # X1 override: in real-archives mode, EVERY closure entry needs to
+  # map to the merged-root prefix (not a per-dep prefix that doesn't
+  # exist) because we extracted all deps into the root. Build a
+  # per-root prefixes_arg that re-uses the same path for the closure
+  # entries the catalog references.
+  if [ "$MVP_REAL_ARCHIVES" = "1" ]; then
+    closure_names=$(python3 - "$CATALOG_OUT/$distro/$name.json" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+print(d['package']['name'])
+for dep in d.get('dependency_closure', []):
+    print(dep['name'])
+PYEOF
+)
+    per_root_prefixes_arg=""
+    for cn in $closure_names; do
+      entry="$distro/$cn=$(to_native_path "$pfx")"
+      if [ -z "$per_root_prefixes_arg" ]; then per_root_prefixes_arg="$entry"
+      else per_root_prefixes_arg="$per_root_prefixes_arg,$entry"
+      fi
+    done
+    use_prefixes_arg="$per_root_prefixes_arg"
+  else
+    use_prefixes_arg="$prefixes_arg"
+  fi
+
   "$C3_EMIT" \
     --catalog-root "$CATALOG_OUT_NATIVE" \
     --root-catalog "$catalog_native" \
-    --store-prefixes "$prefixes_arg" \
-    --exec-path "$pfx_native/usr/bin/$name" \
+    --store-prefixes "$use_prefixes_arg" \
+    --exec-path "$resolved_bin_native" \
     --manifest-out "$manifest_native" \
     --shim-out "$shim_dir_native" \
     --launcher-bin "$LAUNCHER_BIN_NATIVE" 2>"$OUT_DIR/emit_${distro}_${name}.log"
@@ -503,6 +839,23 @@ while [ "$i" -lt "${#FOREIGN_NAMES[@]}" ]; do
   if [ ! -f "$shim_dir/$name" ]; then
     die "shim missing for $distro/$name: $shim_dir/$name"
   fi
+
+  # X1: in real-archives mode the merged-root prefix is shared across
+  # every closure-name key in the prefixes map, so c3_manifest_emit
+  # produces N copies of the same bind line. Dedup while preserving
+  # section order (header comments / exec / blank line then unique
+  # bind lines then trailing directives).
+  if [ "$MVP_REAL_ARCHIVES" = "1" ]; then
+    awk '
+      /^#/ { print; next }
+      /^$/ { print; next }
+      /^exec=/ { print; next }
+      /^cwd=/ { print; next }
+      /^proc$/ || /^sys$/ { print; next }
+      { if (!seen[$0]++) print }
+    ' "$manifest" > "$manifest.dedup" && mv "$manifest.dedup" "$manifest"
+  fi
+
   log "  $distro/$name: manifest + shim emitted"
   i=$((i + 1))
 done

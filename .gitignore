@@ -7,6 +7,11 @@ nimcache/
 htmldocs/
 *.nimble-link
 
+# X1 vendored upstream archives (.deb/.rpm/.pkg.tar.zst) fetched by
+# recipes/reproos-mvp-config/fetch-real-archives.sh. ~80 MB of binary
+# blobs; not source. Fetcher is reproducible via SHA256SUMS.
+recipes/reproos-mvp-config/vendored-archives/
+
 # Standard-provider scratch path. ``ScratchDirName = ".repro/build"`` in
 # libs/repro_standard_provider; if anyone runs the Nim convention against
 # an in-tree fixture under this repo, the resulting ``.repro/`` tree
