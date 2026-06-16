@@ -5,7 +5,9 @@
 # SOURCE_DATE_EPOCH=1735689600 + KBUILD_BUILD_USER=reproos +
 # KBUILD_BUILD_HOST=reproos + KBUILD_BUILD_TIMESTAMP="2025-01-01 00:00:00 UTC"
 # + KBUILD_BUILD_VERSION=1). Verified by two independent builds in
-# `repro-ubuntu` WSL (2026-06-13).
+# `repro-ubuntu` WSL (re-pinned 2026-06-16 after D4 fix #1 + fix #3
+# kernel config flips: CONFIG_FUSE_FS=y + CONFIG_USER_NS=y +
+# CONFIG_OVERLAY_FS=y for Darling FUSE overlay + unshare CLONE_NEWUSER).
 #
 # Cross-rebuild caveat: changing the host gcc major version will change
 # the bytes (gcc emits different codegen / .note.gnu.build-id derivations
@@ -17,14 +19,20 @@
 # Boots under Hyper-V Gen-2 UEFI with Secure Boot off; produces
 # `Linux version 6.6.142 (reproos@reproos) ...` on serial COM1 and
 # `Hypervisor detected: Microsoft Hyper-V` once Hyper-V drivers init.
-03cbebd20c26dd9da8bbcb7df030f7220b55f81a30ccc6b143cddb89a3592462  bzImage
+6eb7508e09d5ec3ad797b0da67baee088f9b85ab874097460f501a97abbc5d88  bzImage
 
 # System.map -- ksym table; useful for kernel-side debugging.
-6d63c01958ccf0900e5e94541cd83b1b7e09d138694335c7931dacb6a810a120  System.map
+fcc0146e2aed22511842cec10f7f491a2225dd8608e8af09570b8638390cfdde  System.map
 
-# config-used -- byte-identical copy of x86_64-hyperv.config that drove
-# this build. Verifies the snapshot in the recipe.
-26a915e1174263e5e31042ae4c5112851e459f256cd81cd42b1f3a885a98789d  config-used
+# config-used -- the .config snapshot produced by `make olddefconfig`
+# from the recipe's x86_64-hyperv.config. NOT byte-identical to the
+# recipe config: olddefconfig expands any sub-options newly enabled by
+# the recipe (e.g. CUSE / VIRTIO_FS knobs gated on CONFIG_FUSE_FS=y;
+# OVERLAY_FS_* knobs gated on CONFIG_OVERLAY_FS=y) by filling them with
+# their kernel-source default values. The expansion is deterministic
+# given (kernel source tree + recipe config), so config-used has a
+# stable sha256 across rebuilds in the same host class.
+857904662b587975e4e80be6a6887a81aa5a60acca530f7031f6658474a3c045  config-used
 
 # KERNELRELEASE -- just "6.6.142\n". Trivial but pinned for the record.
 395f39b89f3a3298bcc5cf47e17c8849469a5a42d02e0d2f38ec03dc82f1821d  KERNELRELEASE
