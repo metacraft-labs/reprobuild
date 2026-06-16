@@ -667,8 +667,19 @@ unset __deg1_extra_data
 EOF
 
   log "wiring gdm.service into multi-user.target.wants"
-  # Symlink target lives inside the store (the catalog planted it).
-  ln -sf "/opt/reproos-linux/store/$gdm_hash/lib/systemd/system/gdm.service" \
+  # Cascade H fix: R9 systemd UnitPath does NOT search /lib/systemd/system/
+  # (only /usr/lib/systemd/system/ + /etc/systemd/system/). The store-
+  # planted gdm.service ships under lib/systemd/system/<unit>, so
+  # symlink resolution from sockets.target.wants/ fails ("Unit
+  # gdm.service could not be found"). Same root cause shape as cascade
+  # G's dbus.socket fix. Copy the unit into /etc/systemd/system/ (which
+  # IS on UnitPath) AND keep the target.wants symlink pointing there.
+  gdm_store_unit="/opt/reproos-linux/store/$gdm_hash/lib/systemd/system/gdm.service"
+  gdm_overlay_unit_src="$OVERLAY_DIR/opt/reproos-linux/store/$gdm_hash/lib/systemd/system/gdm.service"
+  if [ -f "$gdm_overlay_unit_src" ]; then
+    cp -a "$gdm_overlay_unit_src" "$OVERLAY_DIR/etc/systemd/system/gdm.service"
+  fi
+  ln -sf "/etc/systemd/system/gdm.service" \
          "$OVERLAY_DIR/etc/systemd/system/multi-user.target.wants/gdm.service"
 
   # DE-H2 cascade E inheritance: refresh the LD_LIBRARY_PATH env-export

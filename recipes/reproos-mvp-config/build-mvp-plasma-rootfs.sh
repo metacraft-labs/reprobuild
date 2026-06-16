@@ -713,10 +713,17 @@ unset __dek1_extra_data
 EOF
 
   log "wiring sddm.service into multi-user.target.wants"
-  ln -sf "/opt/reproos-linux/store/$sddm_hash/lib/systemd/system/sddm.service" \
+  # Cascade H fix: R9 systemd UnitPath does NOT search /lib/systemd/system/
+  # so the store-planted /lib/.../sddm.service is invisible. Copy into
+  # /etc/systemd/system/ (which IS on UnitPath).
+  sddm_overlay_unit_src="$OVERLAY_DIR/opt/reproos-linux/store/$sddm_hash/lib/systemd/system/sddm.service"
+  if [ -f "$sddm_overlay_unit_src" ]; then
+    cp -a "$sddm_overlay_unit_src" "$OVERLAY_DIR/etc/systemd/system/sddm.service"
+  fi
+  ln -sf "/etc/systemd/system/sddm.service" \
          "$OVERLAY_DIR/etc/systemd/system/multi-user.target.wants/sddm.service"
   log "wiring /etc/systemd/system/display-manager.service convention symlink"
-  ln -sf "/opt/reproos-linux/store/$sddm_hash/lib/systemd/system/sddm.service" \
+  ln -sf "/etc/systemd/system/sddm.service" \
          "$OVERLAY_DIR/etc/systemd/system/display-manager.service"
 
   # DE-H2 cascade E inheritance: refresh the LD_LIBRARY_PATH env-export
