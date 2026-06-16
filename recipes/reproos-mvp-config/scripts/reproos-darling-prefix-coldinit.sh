@@ -67,6 +67,23 @@ fi
 [ -x "$DARLING_BIN" ]   || { log "darling-bin not executable: $DARLING_BIN"; exit 1; }
 [ -x "$INIT_SCRIPT" ]   || { log "init-script not executable: $INIT_SCRIPT"; exit 1; }
 
+# D4 fifth-fix: darlingserver does `mount("/", "/", MS_SLAVE|MS_REC)` to
+# isolate its overlay mount from the parent NS. On the R9 initramfs
+# rootfs, `/` is not a normal mount point and the remount fails with
+# EINVAL, leaving the cold-init half-done (shellspawn.sock un-created).
+#
+# Belt-and-braces: the unit file requests PrivateMounts=yes +
+# MountFlags=slave; in addition we explicitly slave-remount every
+# mount under this NS via busybox `mount --make-rslave /`. If that
+# also fails (e.g. systemd PrivateMounts already left `/` slavable),
+# the failure is logged but ignored — darlingserver's own remount
+# becomes a no-op when the propagation type is already slave.
+if command -v mount >/dev/null 2>&1; then
+  log "ensuring / propagation is slave (darlingserver MS_SLAVE remount)"
+  mount --make-rslave / 2>&1 | sed 's/^/[coldinit][mount] /' >&2 || \
+    log "  mount --make-rslave / failed (non-fatal if PrivateMounts already slaved)"
+fi
+
 mkdir -p "$PREFIXES_ROOT"
 mkdir -p "$(dirname "$SENTINEL")"
 
@@ -96,6 +113,22 @@ for tool_dir in "$PAYLOADS_ROOT"/*/; do
   sed "s/^/[coldinit][$tool] /" < "$init_log" >&2 || true
   if [ "$init_status" -ne 0 ]; then
     log "$tool: darling-prefix-init.sh failed with exit $init_status"
+    # D4 fifth-fix diagnostics: dump prefix state + parent NS info so
+    # the cascade-7 investigator has data without needing a second
+    # rebuild. Cheap (<1 KB serial output) — only emitted on failure.
+    log "$tool: DIAG: /proc/self/mountinfo (first 5 lines)"
+    head -n 5 /proc/self/mountinfo 2>&1 | sed "s/^/[diag][$tool] /" >&2 || true
+    log "$tool: DIAG: prefix tree top-level"
+    ls -la "$prefix/" 2>&1 | head -25 | sed "s/^/[diag][$tool] /" >&2 || true
+    log "$tool: DIAG: var/run state"
+    ls -la "$prefix/var/run/" 2>&1 | head -15 | sed "s/^/[diag][$tool] /" >&2 || true
+    ls -la "$prefix/private/var/run/" 2>&1 | head -15 | sed "s/^/[diag][$tool] /" >&2 || true
+    log "$tool: DIAG: dserver.log"
+    cat "$prefix/private/var/log/dserver.log" 2>&1 | tail -20 | sed "s/^/[diag][$tool] /" >&2 || true
+    log "$tool: DIAG: live launchd/darlingserver/shellspawn procs"
+    ps -o pid,ppid,stat,comm 2>&1 | grep -E 'darling|launchd|shellspawn|mldr' | head -10 | sed "s/^/[diag][$tool] /" >&2 || true
+    log "$tool: DIAG: core_pattern"
+    cat /proc/sys/kernel/core_pattern 2>&1 | sed "s/^/[diag][$tool] /" >&2 || true
     exit 1
   fi
   rm -f "$init_log"

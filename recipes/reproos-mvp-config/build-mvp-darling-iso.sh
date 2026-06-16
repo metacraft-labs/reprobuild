@@ -890,6 +890,11 @@ if [ "$DRY_RUN" != 1 ]; then
     sed grep awk mktemp date du file
     sort head tail tr wc readlink stat
     test true false sleep pwd uname
+    # D4 fifth-fix: `mount --make-rslave /` in the coldinit script.
+    # `mount` is already in R9 base (busybox applet), but we re-link
+    # it here in case future R9 variants drop it. `unshare` is needed
+    # if we ever need to do unshare(CLONE_NEWNS) manually from script.
+    mount unshare
   )
   mkdir -p "$OVERLAY/sbin"
   for applet in "${BUSYBOX_APPLETS[@]}"; do
@@ -902,6 +907,27 @@ if [ "$DRY_RUN" != 1 ]; then
   # systemd's modprobe.service references /sbin/modprobe specifically.
   ln -sf /usr/bin/busybox "$OVERLAY/sbin/modprobe"
   vlog "  busybox applet symlinks planted (/usr/bin/{${BUSYBOX_APPLETS[*]// /,}} + /sbin/modprobe)"
+
+  # D4 fifth-fix: plant a stub `xdg-user-dir` so darlingserver's setup
+  # of the macOS Users/<name>/{Desktop,Documents,Downloads,Movies,Music,
+  # Pictures,Public} directories doesn't fail 7 times. Darling shells out
+  # to `xdg-user-dir KIND` to determine where on the host the user's
+  # corresponding directory is, then mkdir + chown the macOS-named
+  # equivalent inside the DPREFIX. R9's minimal rootfs doesn't ship
+  # xdg-user-dirs (a Debian/Ubuntu-only package); the stub prints
+  # $HOME for any KIND so darling defaults the symlink targets back to
+  # the user's home. Effectively a no-op for the headless container.
+  cat > "$OVERLAY/usr/bin/xdg-user-dir" <<'EOF'
+#!/bin/sh
+# D4 fifth-fix stub for Darling cold-init.
+# Real xdg-user-dir queries ~/.config/user-dirs.dirs; on a headless
+# minimal rootfs that file doesn't exist, so fall back to $HOME for
+# every KIND. Darling then symlinks $DPREFIX/Users/<user>/<MacName>
+# to $HOME, which is correct enough for a CLI-only container.
+echo "${HOME:-/root}"
+EOF
+  chmod 0755 "$OVERLAY/usr/bin/xdg-user-dir"
+  vlog "  xdg-user-dir stub planted at /usr/bin/xdg-user-dir"
 fi
 
 # Stage 4e: README for the overlay.
