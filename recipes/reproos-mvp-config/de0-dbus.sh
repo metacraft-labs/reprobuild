@@ -337,7 +337,9 @@ log "stage 5: wire dbus.service into multi-user.target.wants"
 
 mkdir -p "$OVERLAY/etc/systemd/system" \
          "$OVERLAY/etc/systemd/system/multi-user.target.wants" \
-         "$OVERLAY/etc/systemd/system/sockets.target.wants"
+         "$OVERLAY/etc/systemd/system/sockets.target.wants" \
+         "$OVERLAY/usr/lib/systemd/system" \
+         "$OVERLAY/lib/systemd/system"
 
 if [ "$DAEMON" = "broker" ]; then
   # dbus.service -> dbus-broker.service (Alias contract).
@@ -345,12 +347,27 @@ if [ "$DAEMON" = "broker" ]; then
          "$OVERLAY/etc/systemd/system/dbus.service"
   ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
          "$OVERLAY/etc/systemd/system/multi-user.target.wants/dbus.service"
+  # DE-H2 cascade C fix: belt-and-braces plant of dbus.service alias under
+  # both /usr/lib and /lib system-unit-path entries. R9 systemd's default
+  # UnitPath includes both /etc/systemd/system, /usr/lib/systemd/system
+  # AND /lib/systemd/system; planting a same-name unit under each
+  # guarantees `systemctl status dbus.service` resolves regardless of
+  # which dir the augmented-initramfs cpio segment ordering puts on top.
+  ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
+         "$OVERLAY/usr/lib/systemd/system/dbus.service"
+  ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
+         "$OVERLAY/lib/systemd/system/dbus.service"
 else
   # dbus-daemon variant: dbus.service shipped at /lib/systemd/system/.
   ln -sf "/lib/systemd/system/dbus.service" \
          "$OVERLAY/etc/systemd/system/dbus.service"
   ln -sf "/lib/systemd/system/dbus.service" \
          "$OVERLAY/etc/systemd/system/multi-user.target.wants/dbus.service"
+  # Belt-and-braces alias under /usr/lib so lookups via either prefix
+  # resolve. /lib/systemd/system/dbus.service is the dbus package
+  # original; we leave it as-is.
+  ln -sf "/lib/systemd/system/dbus.service" \
+         "$OVERLAY/usr/lib/systemd/system/dbus.service"
 fi
 
 # dbus.socket -> /lib/systemd/system/dbus.socket (always from dbus pkg).
@@ -424,6 +441,7 @@ Planted:
   Packages:    libdbus-1-3 dbus dbus-user-session$([ "$DAEMON" = broker ] && echo " dbus-broker")
   Support libs: ${SUPPORT_LIBS[*]}
   System unit: /etc/systemd/system/dbus.service -> $([ "$DAEMON" = broker ] && echo "/usr/lib/systemd/system/dbus-broker.service" || echo "/lib/systemd/system/dbus.service")
+               /usr/lib/systemd/system/dbus.service -> (same target)$([ "$DAEMON" = broker ] && echo " [+ /lib/systemd/system/dbus.service]")
   Socket:      /etc/systemd/system/sockets.target.wants/dbus.socket -> /lib/systemd/system/dbus.socket
   User unit:   /etc/systemd/user/sockets.target.wants/dbus.socket -> /usr/lib/systemd/user/dbus.socket
   User svc:    $([ "$DAEMON" = broker ] && echo "/etc/systemd/user/dbus.service -> /usr/lib/systemd/user/dbus-broker.service" || echo "(default: /usr/lib/systemd/user/dbus.service from dbus-user-session)")

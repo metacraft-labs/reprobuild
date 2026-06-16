@@ -145,6 +145,7 @@ if [ "$DRY_RUN" = 0 ]; then
   mkdir -p "$OVERLAY_DIR" "$VENDORED_DIR" \
            "$OVERLAY_DIR/opt/reproos-linux/store" \
            "$OVERLAY_DIR/etc/ld.so.conf.d" \
+           "$OVERLAY_DIR/usr/local/bin" \
            "$OVERLAY_DIR/var/lib"
 fi
 
@@ -305,7 +306,25 @@ for catalog in "${CATALOGS[@]}"; do
         mkdir -p "$(dirname "$dst")"
         cp -a "$src" "$dst"
         case "$ef_kind" in
-          binary) chmod +x "$dst" ;;
+          binary)
+            chmod +x "$dst"
+            # DE-H2 cascade B fix: plant a /usr/local/bin/<name>
+            # symlink pointing at the store binary so the autologin
+            # shell finds it on PATH (the default ash PATH includes
+            # /usr/local/bin per the R9 base /etc/profile). Only do
+            # this for binaries that live under usr/bin/ or usr/sbin/
+            # in the store — other layouts (e.g. libexec) are not
+            # PATH-visible by convention.
+            case "$ef_path" in
+              usr/bin/*|usr/sbin/*)
+                bin_name="$(basename "$ef_path")"
+                ln_target="/opt/reproos-linux/store/$cat_hash/$ef_path"
+                ln_path="$OVERLAY_DIR/usr/local/bin/$bin_name"
+                ln -sf "$ln_target" "$ln_path"
+                vlog "  $cat_name/$deb_pkg: bin /usr/local/bin/$bin_name -> $ln_target"
+                ;;
+            esac
+            ;;
           shared_library)
             chmod 0644 "$dst"
             if [ -n "$ef_soname" ]; then
@@ -390,6 +409,7 @@ if [ "$DRY_RUN" = 0 ]; then
 
   # Pin mtimes for determinism (matches DE0-D's pattern).
   find "$OVERLAY_DIR/opt/reproos-linux" "$OVERLAY_DIR/etc/ld.so.conf.d" \
+       "$OVERLAY_DIR/usr/local/bin" \
        -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
 fi
 

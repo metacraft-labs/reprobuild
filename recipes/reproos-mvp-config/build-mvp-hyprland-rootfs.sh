@@ -342,7 +342,23 @@ for catalog in "${CATALOGS[@]}"; do
           cp -a "$src" "$dst"
         fi
         case "$ef_kind" in
-          binary) chmod +x "$dst" ;;
+          binary)
+            chmod +x "$dst"
+            # DE-H2 cascade B fix: plant a /usr/local/bin/<name>
+            # symlink pointing at the store binary so the autologin
+            # shell finds it on PATH. Only do this for binaries that
+            # live under usr/bin/ or usr/sbin/ in the store; libexec
+            # binaries are not PATH-visible by convention.
+            case "$ef_path" in
+              usr/bin/*|usr/sbin/*)
+                bin_name="$(basename "$ef_path")"
+                ln_target="/opt/reproos-linux/store/$cat_hash/$ef_path"
+                ln_path="$OVERLAY_DIR/usr/local/bin/$bin_name"
+                ln -sf "$ln_target" "$ln_path"
+                vlog "  $cat_name/$deb_pkg: bin /usr/local/bin/$bin_name -> $ln_target"
+                ;;
+            esac
+            ;;
           shared_library)
             chmod 0644 "$dst"
             if [ -n "$ef_soname" ]; then
@@ -522,14 +538,24 @@ if [ "${REPRO_HEADLESS:-0}" = "1" ]; then
 fi
 
 # Dispatch to the planted compositor.
+#   DE-H2 cascade B fix: hardcode /usr/local/bin/<name> so the shim does
+#   not depend on PATH being correctly set in the autologin shell. The
+#   DE0-G + DE-H1 builders plant /usr/local/bin/{sway,swaymsg,foot,waybar}
+#   as symlinks into /opt/reproos-linux/store/<hash>/usr/bin/ via the
+#   post-extract binary-symlink farm.
+#
 #   Future: when /usr/local/bin/Hyprland exists (upstream Hyprland built
 #   from source), exec it directly. For now: sway.
-if command -v Hyprland >/dev/null 2>&1; then
+if [ -x /usr/local/bin/Hyprland ]; then
+  exec /usr/local/bin/Hyprland "$@"
+elif [ -x /usr/local/bin/sway ]; then
+  exec /usr/local/bin/sway "$@"
+elif command -v Hyprland >/dev/null 2>&1; then
   exec Hyprland "$@"
 elif command -v sway >/dev/null 2>&1; then
   exec sway "$@"
 else
-  echo "[repro-start-hyprland] FATAL: no compositor on PATH (looked for Hyprland, sway)" >&2
+  echo "[repro-start-hyprland] FATAL: no compositor on PATH or at /usr/local/bin/{sway,Hyprland}" >&2
   exit 127
 fi
 EOF
@@ -547,7 +573,9 @@ EOF
 export __EGL_VENDOR_LIBRARY_DIRS="/opt/reproos-linux/store/$mesa_hash/usr/share/glvnd/egl_vendor.d"
 EOF
 
-  # Pin mtimes for determinism.
+  # Pin mtimes for determinism. /usr/local/bin includes both the shim
+  # (repro-start-hyprland.sh) and the cascade-B store -> /usr/local/bin
+  # binary-symlink farm planted in the per-catalog loop above.
   find "$OVERLAY_DIR/opt/reproos-linux" \
        "$OVERLAY_DIR/etc/ld.so.conf.d" \
        "$OVERLAY_DIR/etc/hyprland.conf" \

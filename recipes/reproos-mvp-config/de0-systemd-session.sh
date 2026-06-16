@@ -376,6 +376,48 @@ chmod 0644 "$OVERLAY/etc/tmpfiles.d/repro-home.conf"
 log "  planted /etc/{passwd,group,shadow,gshadow} + /home/repro + tmpfiles.d/repro-home.conf"
 
 # ---------------------------------------------------------------------------
+# Stage 5b: serial-getty@ttyS0 autologin override (DE-H2 cascade A fix).
+#
+# The R9 base initramfs (build-initramfs.sh stage "Patch serial-getty
+# to use busybox login + autologin root for MVP") plants
+#   /etc/systemd/system/serial-getty@ttyS0.service.d/override.conf
+# with ExecStart= followed by
+#   ExecStart=-/usr/bin/agetty --autologin root --noclear %I 115200 linux
+# which autologins as `root` (uid 0). For the Wayland-DE boot path we
+# need autologin as `repro` (uid 1000) so logind allocates an
+# XDG_RUNTIME_DIR=/run/user/1000 that the compositor + wlroots can
+# consume. Overlay a SECOND drop-in (higher lex sort order) that
+# overrides the ExecStart= again — systemd processes drop-ins in
+# alphabetical order so `90-repro-autologin.conf` wins over `override.conf`.
+#
+# The default user is `repro`; set MVP_DEFAULT_USER=root in the build
+# env to keep the legacy R9 root-autologin behaviour (e.g. for the bare
+# D1 MVP ISO without a logind layer).
+# ---------------------------------------------------------------------------
+
+MVP_DEFAULT_USER="${MVP_DEFAULT_USER:-repro}"
+log "stage 5b: plant serial-getty@ttyS0 autologin drop-in for user=$MVP_DEFAULT_USER"
+
+mkdir -p "$OVERLAY/etc/systemd/system/serial-getty@ttyS0.service.d"
+# File name MUST sort AFTER 'override.conf' so systemd processes it
+# last and the final `ExecStart=` block wins. ASCII '9' (0x39) <
+# 'o' (0x6F), so '90-*.conf' actually loses to 'override.conf' — use
+# 'zz-*.conf' instead to guarantee lex order.
+cat > "$OVERLAY/etc/systemd/system/serial-getty@ttyS0.service.d/zz-repro-autologin.conf" <<EOF
+# DE0-S: overlay-drop-in that wins over the R9 base's
+# /etc/systemd/system/serial-getty@ttyS0.service.d/override.conf
+# (alphabetical sort: zz-* > o*). Autologins as $MVP_DEFAULT_USER so
+# logind allocates XDG_RUNTIME_DIR=/run/user/\$(id -u) for the
+# Wayland-DE session entry shim.
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/agetty --autologin $MVP_DEFAULT_USER --noclear %I 115200 linux
+EOF
+chmod 0644 "$OVERLAY/etc/systemd/system/serial-getty@ttyS0.service.d/zz-repro-autologin.conf"
+
+log "  planted /etc/systemd/system/serial-getty@ttyS0.service.d/zz-repro-autologin.conf (user=$MVP_DEFAULT_USER)"
+
+# ---------------------------------------------------------------------------
 # Stage 6: sentinel + summary.
 # ---------------------------------------------------------------------------
 
@@ -390,6 +432,7 @@ Planted:
   PAM stacks:     /etc/pam.d/login /etc/pam.d/su /etc/pam.d/system-auth
   Systemd units:  /etc/systemd/system/systemd-logind.service (un-masked)
                   /etc/systemd/system/multi-user.target.wants/systemd-logind.service
+                  /etc/systemd/system/serial-getty@ttyS0.service.d/zz-repro-autologin.conf (user=$MVP_DEFAULT_USER)
   User targets:   /etc/systemd/user/graphical-session.target
                   /etc/systemd/user/graphical-session-pre.target
                   /etc/systemd/user/default.target -> basic.target

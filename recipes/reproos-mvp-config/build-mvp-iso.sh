@@ -674,6 +674,21 @@ log "overlay staged at $OVERLAY"
 log "summary at $OUT_DIR/D1-STAGE-SUMMARY.txt"
 
 # ---------------------------------------------------------------------------
+# DE-H1 implication pre-stage. MVP_INCLUDE_HYPRLAND=1 implies the full
+# DE0 foundation; set the implies BEFORE the per-stage gates so each
+# stage's `if [ "${VAR:-0}" = "1" ]` check sees the implied value.
+# Without this pre-stage the implies in stage 4h fire too late and
+# stages 4e/4f/4g skip silently — DE-H2 cascade A (autologin) +
+# cascade C (dbus.service registration) both surface as a result.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_HYPRLAND:-0}" = "1" ]; then
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+fi
+
+# ---------------------------------------------------------------------------
 # Stage 4e (opt-in): DE0-S systemd-session foundation overlay-plant.
 #
 # Set MVP_INCLUDE_DE0_SESSION=1 to plant the Wayland-prerequisite layer
