@@ -61,15 +61,23 @@ mkdir -p "$OVERLAY" "$VENDORED"
 ok()   { echo "OK: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# DE-G1 catalogs (33 planted).
+# DE-G1 catalogs (40 planted; 33 base + 7 cross-DE inherits for binary
+# resolution: libevdev2 / libglib2.0 / libglvnd / libinput / libxcb-extras /
+# libxcb-extras-kde / libxkbregistry).
 DE_G1_PLANTED=(
   accountsservice adwaita-icon-theme dconf gdm gjs
   gnome-session gnome-settings-daemon gnome-shell
-  gsettings-desktop-schemas libcanberra libgcr3 libgjs
+  gsettings-desktop-schemas libcanberra libevdev2 libgcr3 libgjs
+  libglib2.0 libglvnd
   libgnome-desktop libgraphene libgtk4 libgudev libice
+  libinput
   libjson-glib libmozjs91 libnss libpipewire libpolkit
   libsecret libsm libsoup2.4 libstartup-notification
-  libsystemd libwacom libxkbcommon-x11 libxkbfile mutter
+  libsystemd libwacom
+  libxcb-extras libxcb-extras-kde
+  libxkbcommon-x11 libxkbfile
+  libxkbregistry
+  mutter
   xdg-desktop-portal-gnome xdg-desktop-portal-gtk
 )
 
@@ -96,8 +104,8 @@ assert len(d["payload_files"]) >= 1, "payload_files empty"
 PYEOF
   seen=$((seen + 1))
 done
-[ "$seen" = 33 ] || fail "expected 33 DE-G1 catalogs, found $seen"
-ok "all 33 DE-G1 catalog JSONs parse and carry schema fields"
+[ "$seen" = 40 ] || fail "expected 40 DE-G1 catalogs, found $seen"
+ok "all 40 DE-G1 catalog JSONs parse and carry schema fields"
 
 # ---------------------------------------------------------------------------
 # Stage B: apply the recipe with --allow-online (composes DE0-G first).
@@ -245,7 +253,9 @@ print(hashlib.sha256(f\"{c['package']['name']}|{c['package']['version']}|{c['pac
 ok "gdm.service file present in the gdm store"
 
 # ---------------------------------------------------------------------------
-# Stage I: registry.json has 39 entries (DE0-G's 6 + DE-G1's 33).
+# Stage I: registry.json has 44 entries (DE0-G's 6 + DE-G1's 38).
+# DE-G1 broadened to include 5 cross-DE inherits for binary resolution:
+# libglib2.0, libglvnd, libinput, libxcb-extras, libxkbregistry.
 # ---------------------------------------------------------------------------
 
 REG="$STORE_ROOT/registry.json"
@@ -256,23 +266,27 @@ import json, sys
 with open(sys.argv[1]) as f:
     reg = json.load(f)
 assert isinstance(reg, list), "registry not a list"
-assert len(reg) == 39, f"expected 39 entries (6 DE0-G + 33 DE-G1), got {len(reg)}"
+assert len(reg) == 46, f"expected 46 entries (6 DE0-G + 40 DE-G1), got {len(reg)}"
 names = [e["name"] for e in reg]
 assert names == sorted(names), f"registry not sorted by name: {names}"
 
 de0_g = {"dejavu-fonts","fontconfig","libdrm","libwayland","libxkbcommon","mesa"}
 de_g1 = {"accountsservice","adwaita-icon-theme","dconf","gdm","gjs",
          "gnome-session","gnome-settings-daemon","gnome-shell",
-         "gsettings-desktop-schemas","libcanberra","libgcr3","libgjs",
+         "gsettings-desktop-schemas","libcanberra","libevdev2",
+         "libgcr3","libgjs","libglib2.0","libglvnd",
          "libgnome-desktop","libgraphene","libgtk4","libgudev","libice",
+         "libinput",
          "libjson-glib","libmozjs91","libnss","libpipewire","libpolkit",
          "libsecret","libsm","libsoup2.4","libstartup-notification",
-         "libsystemd","libwacom","libxkbcommon-x11","libxkbfile","mutter",
+         "libsystemd","libwacom",
+         "libxcb-extras","libxcb-extras-kde",
+         "libxkbcommon-x11","libxkbfile","libxkbregistry","mutter",
          "xdg-desktop-portal-gnome","xdg-desktop-portal-gtk"}
 expected = de0_g | de_g1
 assert set(names) == expected, f"registry names mismatch:\n  missing: {expected - set(names)}\n  extra:   {set(names) - expected}"
 PYEOF
-ok "registry.json has 39 entries (6 DE0-G + 33 DE-G1), sorted"
+ok "registry.json has 44 entries (6 DE0-G + 38 DE-G1), sorted"
 
 # ---------------------------------------------------------------------------
 # Stage J: ld.so.conf.d lists all DE-G1 catalogs with shared_library kinds,
@@ -289,11 +303,15 @@ with open(ldconf_path) as f:
     lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
 de_g1_names = {"accountsservice","adwaita-icon-theme","dconf","gdm","gjs",
                "gnome-session","gnome-settings-daemon","gnome-shell",
-               "gsettings-desktop-schemas","libcanberra","libgcr3","libgjs",
+               "gsettings-desktop-schemas","libcanberra","libevdev2",
+               "libgcr3","libgjs","libglib2.0","libglvnd",
                "libgnome-desktop","libgraphene","libgtk4","libgudev","libice",
+               "libinput",
                "libjson-glib","libmozjs91","libnss","libpipewire","libpolkit",
                "libsecret","libsm","libsoup2.4","libstartup-notification",
-               "libsystemd","libwacom","libxkbcommon-x11","libxkbfile","mutter",
+               "libsystemd","libwacom",
+               "libxcb-extras","libxcb-extras-kde",
+               "libxkbcommon-x11","libxkbfile","libxkbregistry","mutter",
                "xdg-desktop-portal-gnome","xdg-desktop-portal-gtk"}
 missing = []
 mutter_sublib_seen = False
@@ -363,7 +381,7 @@ SENTINEL="$OVERLAY/var/lib/reproos-de-gnome-done"
 [ -f "$SENTINEL" ] || fail "sentinel missing"
 
 grep -q "DE-G1" "$SENTINEL" || fail "sentinel body missing DE-G1 marker"
-grep -q "Planted catalogs (33)" "$SENTINEL" || fail "sentinel didn't record 33 planted catalogs"
+grep -q "Planted catalogs (40)" "$SENTINEL" || fail "sentinel didn't record 40 planted catalogs"
 ok "sentinel present + records correct planted count"
 
 # ---------------------------------------------------------------------------

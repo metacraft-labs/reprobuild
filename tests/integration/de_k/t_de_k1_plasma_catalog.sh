@@ -62,12 +62,19 @@ mkdir -p "$OVERLAY" "$VENDORED"
 ok()   { echo "OK: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# DE-K1 catalogs (30 planted).
+# DE-K1 catalogs (45 planted; 30 base + 15 cross-DE inherits for binary
+# resolution: libcanberra / libevdev2 / libglib2.0 / libglvnd / libgudev /
+# libice / libinput / libnss / libpipewire / libpolkit / libsm /
+# libsystemd / libwacom / libxcb-extras / libxkbregistry).
 DE_K1_PLANTED=(
   breeze kactivities kded kdelibs4support kf5-core
   kf5-declarative kf5-extras kf5-frameworks kf5-gui kf5-newstuff
-  kf5-runner kio kwin kwin-libs libkscreenlocker
-  libksysguard libxcb-extras-kde oxygen-sounds phonon plasma-desktop
+  kf5-runner kio kwin kwin-libs
+  libcanberra libevdev2 libglib2.0 libglvnd libgudev libice libinput
+  libkscreenlocker libksysguard
+  libnss libpipewire libpolkit libsm libsystemd libwacom libxcb-extras
+  libxcb-extras-kde libxkbregistry
+  oxygen-sounds phonon plasma-desktop
   plasma-framework plasma-integration plasma-workspace qml-modules qt5-base
   qt5-declarative qt5-svg qt5-wayland sddm xdg-desktop-portal-kde
 )
@@ -95,8 +102,8 @@ assert len(d["payload_files"]) >= 1, "payload_files empty"
 PYEOF
   seen=$((seen + 1))
 done
-[ "$seen" = 30 ] || fail "expected 30 DE-K1 catalogs, found $seen"
-ok "all 30 DE-K1 catalog JSONs parse and carry schema fields"
+[ "$seen" = 45 ] || fail "expected 45 DE-K1 catalogs, found $seen"
+ok "all 45 DE-K1 catalog JSONs parse and carry schema fields"
 
 # ---------------------------------------------------------------------------
 # Stage B: apply the recipe with --allow-online (composes DE0-G first).
@@ -255,7 +262,8 @@ print(hashlib.sha256(f\"{c['package']['name']}|{c['package']['version']}|{c['pac
 ok "sddm.service file present in the sddm store"
 
 # ---------------------------------------------------------------------------
-# Stage I: registry.json has 36 entries (DE0-G's 6 + DE-K1's 30).
+# Stage I: registry.json has 51 entries (DE0-G's 6 + DE-K1's 45).
+# DE-K1 broadened to include 15 cross-DE inherits for binary resolution.
 # ---------------------------------------------------------------------------
 
 REG="$STORE_ROOT/registry.json"
@@ -266,22 +274,26 @@ import json, sys
 with open(sys.argv[1]) as f:
     reg = json.load(f)
 assert isinstance(reg, list), "registry not a list"
-assert len(reg) == 36, f"expected 36 entries (6 DE0-G + 30 DE-K1), got {len(reg)}"
+assert len(reg) == 51, f"expected 51 entries (6 DE0-G + 45 DE-K1), got {len(reg)}"
 names = [e["name"] for e in reg]
 assert names == sorted(names), f"registry not sorted by name: {names}"
 
 de0_g = {"dejavu-fonts","fontconfig","libdrm","libwayland","libxkbcommon","mesa"}
 de_k1 = {"breeze","kactivities","kded","kdelibs4support","kf5-core",
          "kf5-declarative","kf5-extras","kf5-frameworks","kf5-gui","kf5-newstuff",
-         "kf5-runner","kio","kwin","kwin-libs","libkscreenlocker",
-         "libksysguard","libxcb-extras-kde","oxygen-sounds","phonon","plasma-desktop",
+         "kf5-runner","kio","kwin","kwin-libs",
+         "libcanberra","libevdev2","libglib2.0","libglvnd","libgudev","libice","libinput",
+         "libkscreenlocker","libksysguard",
+         "libnss","libpipewire","libpolkit","libsm","libsystemd","libwacom","libxcb-extras",
+         "libxcb-extras-kde","libxkbregistry",
+         "oxygen-sounds","phonon","plasma-desktop",
          "plasma-framework","plasma-integration","plasma-workspace","qml-modules",
          "qt5-base","qt5-declarative","qt5-svg","qt5-wayland","sddm",
          "xdg-desktop-portal-kde"}
 expected = de0_g | de_k1
 assert set(names) == expected, f"registry names mismatch:\n  missing: {expected - set(names)}\n  extra:   {set(names) - expected}"
 PYEOF
-ok "registry.json has 36 entries (6 DE0-G + 30 DE-K1), sorted"
+ok "registry.json has 51 entries (6 DE0-G + 45 DE-K1), sorted"
 
 # ---------------------------------------------------------------------------
 # Stage J: ld.so.conf.d lists DE-K1 catalogs with libs + qt5/plugins +
@@ -325,7 +337,7 @@ SENTINEL="$OVERLAY/var/lib/reproos-de-plasma-done"
 [ -f "$SENTINEL" ] || fail "sentinel missing"
 
 grep -q "DE-K1" "$SENTINEL" || fail "sentinel body missing DE-K1 marker"
-grep -q "Planted catalogs (30)" "$SENTINEL" || fail "sentinel didn't record 30 planted catalogs"
+grep -q "Planted catalogs (45)" "$SENTINEL" || fail "sentinel didn't record 45 planted catalogs"
 ok "sentinel present + records correct planted count"
 
 # ---------------------------------------------------------------------------

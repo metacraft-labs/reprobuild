@@ -207,9 +207,24 @@ DE_K1_CATALOG_NAMES=(
   kio
   kwin
   kwin-libs
+  libcanberra
+  libevdev2
+  libglib2.0
+  libglvnd
+  libgudev
+  libice
+  libinput
   libkscreenlocker
   libksysguard
+  libnss
+  libpipewire
+  libpolkit
+  libsm
+  libsystemd
+  libwacom
+  libxcb-extras
   libxcb-extras-kde
+  libxkbregistry
   oxygen-sounds
   phonon
   plasma-desktop
@@ -776,7 +791,10 @@ reg = json.load(open('$REG_PATH'))
 de_k1_names = {'breeze','kactivities','kded','kdelibs4support','kf5-core',
                'kf5-declarative','kf5-extras','kf5-frameworks','kf5-gui',
                'kf5-newstuff','kf5-runner','kio','kwin','kwin-libs',
-               'libkscreenlocker','libksysguard','libxcb-extras-kde',
+               'libcanberra','libevdev2','libglib2.0','libglvnd','libgudev',
+               'libice','libinput','libkscreenlocker','libksysguard',
+               'libnss','libpipewire','libpolkit','libsm','libsystemd',
+               'libwacom','libxcb-extras','libxcb-extras-kde','libxkbregistry',
                'oxygen-sounds','phonon','plasma-desktop','plasma-framework',
                'plasma-integration','plasma-workspace','qml-modules',
                'qt5-base','qt5-declarative','qt5-svg','qt5-wayland','sddm',

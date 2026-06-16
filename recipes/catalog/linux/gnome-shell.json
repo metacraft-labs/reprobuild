@@ -150,6 +150,26 @@
           "path": "usr/libexec/gnome-shell-portal-helper"
         },
         {
+          "kind": "shared_library",
+          "path": "usr/lib/gnome-shell/libgnome-shell.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/gnome-shell/libgnome-shell-menu.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/gnome-shell/libgvc.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/gnome-shell/libshew-0.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/gnome-shell/libst-1.0.so"
+        },
+        {
           "kind": "data",
           "path": "usr/share/applications/org.gnome.Shell.desktop"
         },

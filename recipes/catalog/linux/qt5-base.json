@@ -117,8 +117,23 @@
       "expected_files": [
         {
           "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Gui.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Gui.so.5"
+        },
+        {
+          "kind": "shared_library",
           "path": "usr/lib/x86_64-linux-gnu/libQt5XcbQpa.so.5.15.3",
           "soname_link": "usr/lib/x86_64-linux-gnu/libQt5XcbQpa.so.5"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5EglFSDeviceIntegration.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5EglFSDeviceIntegration.so.5"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5EglFsKmsSupport.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5EglFsKmsSupport.so.5"
         }
       ]
     },

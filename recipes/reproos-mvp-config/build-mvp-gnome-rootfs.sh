@@ -204,13 +204,17 @@ DE_G1_CATALOG_NAMES=(
   gnome-shell
   gsettings-desktop-schemas
   libcanberra
+  libevdev2
   libgcr3
   libgjs
+  libglib2.0
+  libglvnd
   libgnome-desktop
   libgraphene
   libgtk4
   libgudev
   libice
+  libinput
   libjson-glib
   libmozjs91
   libnss
@@ -222,8 +226,11 @@ DE_G1_CATALOG_NAMES=(
   libstartup-notification
   libsystemd
   libwacom
+  libxcb-extras
+  libxcb-extras-kde
   libxkbcommon-x11
   libxkbfile
+  libxkbregistry
   mutter
   xdg-desktop-portal-gnome
   xdg-desktop-portal-gtk
@@ -430,7 +437,10 @@ for catalog in "${CATALOGS[@]}"; do
   #                                     symmetry)
   #   - usr/lib/x86_64-linux-gnu/mutter-10/  (libmutter's sub-lib dir)
   if [ "$DRY_RUN" = 0 ]; then
-    for libdir in "usr/lib/x86_64-linux-gnu" "lib/x86_64-linux-gnu" "usr/lib/x86_64-linux-gnu/mutter-10"; do
+    for libdir in "usr/lib/x86_64-linux-gnu" \
+                  "lib/x86_64-linux-gnu" \
+                  "usr/lib/x86_64-linux-gnu/mutter-10" \
+                  "usr/lib/gnome-shell"; do
       if [ -d "$store_dir/$libdir" ]; then
         ldconf_line="/opt/reproos-linux/store/$cat_hash/$libdir"
         # Avoid duplicate lines if rerun without sentinel.
@@ -711,12 +721,14 @@ import json
 reg = json.load(open('$REG_PATH'))
 de_g1_names = {'accountsservice','adwaita-icon-theme','dconf','gdm','gjs',
                'gnome-session','gnome-settings-daemon','gnome-shell',
-               'gsettings-desktop-schemas','libcanberra','libgcr3',
-               'libgjs','libgnome-desktop','libgraphene','libgtk4',
-               'libgudev','libice','libjson-glib','libmozjs91','libnss',
-               'libpipewire','libpolkit','libsecret','libsm','libsoup2.4',
+               'gsettings-desktop-schemas','libcanberra','libevdev2',
+               'libgcr3','libgjs','libglib2.0','libglvnd','libgnome-desktop',
+               'libgraphene','libgtk4','libgudev','libice','libinput',
+               'libjson-glib','libmozjs91','libnss','libpipewire',
+               'libpolkit','libsecret','libsm','libsoup2.4',
                'libstartup-notification','libsystemd','libwacom',
-               'libxkbcommon-x11','libxkbfile','mutter',
+               'libxcb-extras','libxcb-extras-kde','libxkbcommon-x11',
+               'libxkbfile','libxkbregistry','mutter',
                'xdg-desktop-portal-gnome','xdg-desktop-portal-gtk'}
 for e in reg:
     if e['name'] in de_g1_names:
