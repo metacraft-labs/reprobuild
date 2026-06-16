@@ -518,6 +518,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim",
+    binary: "build/test-bin/t_nde0d_dbus_broker",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim",
     binary: "build/test-bin/t_smoke_catalog_audit_m29",
     defines: @[],
