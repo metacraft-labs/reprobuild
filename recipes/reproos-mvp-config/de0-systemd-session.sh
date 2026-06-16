@@ -230,6 +230,101 @@ fi
 log "  systemd-logind un-masked + wired into multi-user.target.wants"
 
 # ---------------------------------------------------------------------------
+# Stage 3b (DE-H2 cascade F fix): systemd-logind drop-in to neutralise
+# sandbox directives that the R8 minimal kernel + R9 minimal initramfs
+# cannot satisfy.
+#
+# Symptom: cascade E run shows logind crashing 6x in 5s ("Failed to
+# start User Login Management") with no journal entry surfacing the
+# actual error. R9's from-source systemd 257.9 ships logind with a
+# heavyweight sandbox section that includes:
+#   MemoryDenyWriteExecute=yes  - needs CONFIG_SECCOMP_FILTER + a
+#                                  permissive seccomp default for the
+#                                  JIT mappings systemd-shared makes.
+#   RestrictNamespaces=yes      - blocks unshare() which logind uses
+#                                  for per-user dirs on some paths.
+#   ProtectHostname=yes         - needs CLONE_NEWUTS; R8 kernel may
+#                                  not have CONFIG_UTS_NS=y.
+#   ProtectClock=yes            - clock_settime() seccomp block; OK
+#                                  in theory but combined with the
+#                                  others is fragile.
+#   ProtectKernelModules=yes    - module-loading seccomp; OK by itself.
+#   ProtectKernelLogs=yes       - syslog() seccomp; OK by itself.
+#   RestrictAddressFamilies=AF_UNIX AF_NETLINK
+#                                - logind needs nothing else; OK.
+#   PrivateTmp=yes              - needs a writable /tmp + mount NS;
+#                                  R9's initramfs /tmp is tmpfs OK.
+#   ProtectSystem=strict        - mounts /usr,/boot,/efi read-only;
+#                                  OK with initramfs.
+#   ProtectHome=yes              - mounts /home,/root,/run/user/* RO;
+#                                  blocks /run/user creation.
+#
+# We don't know exactly which one(s) trip on R8/R9. The PROPORTIONAL
+# fix per the brief: neutralise the most-likely-to-fail directives via
+# an /etc/systemd/system/systemd-logind.service.d/zz-cascade-f.conf
+# drop-in. Sandbox surface that REMAINS active:
+#   CapabilityBoundingSet=...   - cap-bounding stays; doesn't need
+#                                  kernel features beyond CAP_*.
+#   DeviceAllow=...             - cgroup device controller; R8 OK.
+#   NoNewPrivileges=yes         - already in the unit; keeps no-suid.
+#
+# Future tightening: when R8/R9 grows the missing kernel configs
+# (CONFIG_USER_NS, CONFIG_SECCOMP_FILTER for MDWX, CONFIG_UTS_NS), the
+# drop-in's directives can be removed one by one.
+# ---------------------------------------------------------------------------
+
+log "stage 3b: cascade-F sandbox-neutralise drop-in for systemd-logind"
+
+LOGIND_DROPIN_DIR="$OVERLAY/etc/systemd/system/systemd-logind.service.d"
+mkdir -p "$LOGIND_DROPIN_DIR"
+
+cat > "$LOGIND_DROPIN_DIR/zz-cascade-f-sandbox.conf" <<'EOF'
+# DE-H2 cascade F (de0-systemd-session.sh stage 3b): neutralise the
+# logind sandbox directives that R8/R9 cannot satisfy. The R9 base
+# unit at /usr/lib/systemd/system/systemd-logind.service ships these
+# enabled; the lex-last drop-in here resets them via explicit boolean
+# false values (R9's systemd 257.9 rejects empty RHS with "Failed to
+# parse ... Invalid argument"; explicit "no" / "default" works).
+# Once R8/R9 kernel configs catch up (CONFIG_USER_NS, CONFIG_UTS_NS,
+# CONFIG_SECCOMP_FILTER with permissive MDWX) the corresponding
+# lines can be removed.
+[Service]
+# Filesystem sandbox - keep ProtectSystem=strict + ReadWritePaths but
+# drop ProtectHome (logind needs to create /run/user/<uid> trees).
+ProtectHome=no
+# Namespace + capability sandboxes that need optional kernel CONFIGs.
+ProtectHostname=no
+ProtectClock=no
+ProtectKernelLogs=no
+ProtectKernelModules=no
+ProtectControlGroups=no
+RestrictNamespaces=no
+RestrictRealtime=no
+RestrictSUIDSGID=no
+# Seccomp directives that the from-source systemd built without
+# permissive defaults can't satisfy on the minimal R8 kernel.
+MemoryDenyWriteExecute=no
+LockPersonality=no
+# SystemCallFilter is reset by listing an empty default (the "reset"
+# value documented in systemd.exec(5)).
+SystemCallFilter=
+SystemCallArchitectures=
+# IP firewalling (BPF/cgroup) is not enabled in R8; the journal
+# warning at boot ("local system does not support BPF/cgroup
+# firewalling") is the parent. Reset to empty list.
+IPAddressDeny=
+# Sandbox /tmp + dev still safe on initramfs; keep PrivateTmp + the
+# heavy DeviceAllow list as-is.
+EOF
+chmod 0644 "$LOGIND_DROPIN_DIR/zz-cascade-f-sandbox.conf"
+
+# Plant /var/lib/systemd/linger empty dir so StateDirectory=
+# doesn't have to create it under the relaxed sandbox.
+mkdir -p "$OVERLAY/var/lib/systemd/linger"
+
+log "  planted systemd-logind.service.d/zz-cascade-f-sandbox.conf + /var/lib/systemd/linger"
+
+# ---------------------------------------------------------------------------
 # Stage 4: per-user graphical-session targets.
 #
 # The R9 systemd install ships the user-instance targets under
@@ -432,7 +527,9 @@ Planted:
   PAM stacks:     /etc/pam.d/login /etc/pam.d/su /etc/pam.d/system-auth
   Systemd units:  /etc/systemd/system/systemd-logind.service (un-masked)
                   /etc/systemd/system/multi-user.target.wants/systemd-logind.service
+                  /etc/systemd/system/systemd-logind.service.d/zz-cascade-f-sandbox.conf (cascade F)
                   /etc/systemd/system/serial-getty@ttyS0.service.d/zz-repro-autologin.conf (user=$MVP_DEFAULT_USER)
+  Linger dir:     /var/lib/systemd/linger (logind StateDirectory)
   User targets:   /etc/systemd/user/graphical-session.target
                   /etc/systemd/user/graphical-session-pre.target
                   /etc/systemd/user/default.target -> basic.target
@@ -449,6 +546,7 @@ EOF
 # Pin mtimes for determinism.
 find "$OVERLAY/etc/pam.d" "$OVERLAY/etc/systemd" "$OVERLAY/etc/tmpfiles.d" \
      "$OVERLAY/lib/x86_64-linux-gnu/security" "$OVERLAY/home/repro" \
+     "$OVERLAY/var/lib/systemd" \
      "$OVERLAY/etc/passwd" "$OVERLAY/etc/group" "$OVERLAY/etc/shadow" \
      "$OVERLAY/etc/gshadow" "$SENTINEL" \
      -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true

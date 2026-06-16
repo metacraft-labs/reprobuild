@@ -342,10 +342,17 @@ mkdir -p "$OVERLAY/etc/systemd/system" \
          "$OVERLAY/lib/systemd/system"
 
 if [ "$DAEMON" = "broker" ]; then
-  # dbus.service -> dbus-broker.service (Alias contract).
-  ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
+  # DE-H2 cascade F fix: dbus-broker.service is shipped by Ubuntu jammy's
+  # dbus-broker .deb at /lib/systemd/system/, NOT /usr/lib/systemd/system/.
+  # R9 ships /lib as a real directory (NOT merged-/usr symlink) so a
+  # symlink pointing at /usr/lib/systemd/system/dbus-broker.service is
+  # broken at runtime. Always target the path where the file actually
+  # lives (`/lib/systemd/system/dbus-broker.service`) AND plant a copy at
+  # `/usr/lib/systemd/system/dbus-broker.service` so consumers that look
+  # in either dir resolve.
+  ln -sf "/lib/systemd/system/dbus-broker.service" \
          "$OVERLAY/etc/systemd/system/dbus.service"
-  ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
+  ln -sf "/lib/systemd/system/dbus-broker.service" \
          "$OVERLAY/etc/systemd/system/multi-user.target.wants/dbus.service"
   # DE-H2 cascade C fix: belt-and-braces plant of dbus.service alias under
   # both /usr/lib and /lib system-unit-path entries. R9 systemd's default
@@ -353,10 +360,17 @@ if [ "$DAEMON" = "broker" ]; then
   # AND /lib/systemd/system; planting a same-name unit under each
   # guarantees `systemctl status dbus.service` resolves regardless of
   # which dir the augmented-initramfs cpio segment ordering puts on top.
-  ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
+  ln -sf "/lib/systemd/system/dbus-broker.service" \
          "$OVERLAY/usr/lib/systemd/system/dbus.service"
-  ln -sf "/usr/lib/systemd/system/dbus-broker.service" \
+  ln -sf "/lib/systemd/system/dbus-broker.service" \
          "$OVERLAY/lib/systemd/system/dbus.service"
+  # DE-H2 cascade F: plant the actual broker unit file at /usr/lib too,
+  # so `WantedBy=` consumers that resolve via /usr/lib's UnitPath entry
+  # don't follow a broken symlink. Source is the host's /lib copy.
+  if [ -f /lib/systemd/system/dbus-broker.service ]; then
+    cp -a /lib/systemd/system/dbus-broker.service \
+          "$OVERLAY/usr/lib/systemd/system/dbus-broker.service"
+  fi
 else
   # dbus-daemon variant: dbus.service shipped at /lib/systemd/system/.
   ln -sf "/lib/systemd/system/dbus.service" \
