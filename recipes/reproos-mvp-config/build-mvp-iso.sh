@@ -672,6 +672,32 @@ done
 
 log "overlay staged at $OVERLAY"
 log "summary at $OUT_DIR/D1-STAGE-SUMMARY.txt"
+
+# ---------------------------------------------------------------------------
+# Stage 4e (opt-in): DE0-S systemd-session foundation overlay-plant.
+#
+# Set MVP_INCLUDE_DE0_SESSION=1 to plant the Wayland-prerequisite layer
+# (logind un-mask + PAM stack + per-user graphical-session targets +
+# default repro:1000 user) on top of the foreign-package overlay. The
+# planter lives in recipes/reproos-mvp-config/de0-systemd-session.sh and
+# is also called by every future Wayland-DE builder
+# (build-mvp-hyprland-rootfs.sh, build-mvp-gnome-rootfs.sh, etc).
+#
+# Default off: the bare D1 MVP ISO does not need logind (autologin
+# root + serial getty is sufficient for the foreign-package smoke
+# gate). Wayland-DE builders flip this to 1.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_DE0_SESSION:-0}" = "1" ]; then
+  log "stage 4e: DE0-S systemd-session overlay-plant"
+  DE0_S_SH="$SCRIPT_DIR/de0-systemd-session.sh"
+  if [ ! -f "$DE0_S_SH" ]; then
+    die "MVP_INCLUDE_DE0_SESSION=1 but $DE0_S_SH missing"
+  fi
+  bash "$DE0_S_SH" "$OVERLAY" 2>&1 | sed 's/^/[d1]   /'
+  log "stage 4e DONE"
+fi
+
 log ""
 log "============================================================"
 log "D1-stage1 COMPLETE: overlay tree ready."
