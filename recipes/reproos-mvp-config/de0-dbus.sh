@@ -384,9 +384,53 @@ else
          "$OVERLAY/usr/lib/systemd/system/dbus.service"
 fi
 
-# dbus.socket -> /lib/systemd/system/dbus.socket (always from dbus pkg).
-ln -sf "/lib/systemd/system/dbus.socket" \
+# dbus.socket: cascade G fix (2026-06-16).
+#
+# Background: Ubuntu jammy's dbus package ships dbus.socket at
+# /lib/systemd/system/dbus.socket. R9 boots with `/lib` as a REAL
+# directory (not the merged-/usr symlink to /usr/lib that modern
+# distros use), and systemd 257.9's default UnitPath dropped
+# /lib/systemd/system/ — it searches only:
+#   /etc/systemd/system, /run/systemd/system,
+#   /usr/local/lib/systemd/system, /usr/lib/systemd/system.
+#
+# Consequence pre-fix: the symlink
+#   /etc/systemd/system/sockets.target.wants/dbus.socket
+#     -> /lib/systemd/system/dbus.socket
+# enumerates the unit name "dbus.socket" via the .wants/ dropin, but
+# systemd resolves the unit by NAME against UnitPath and fails:
+#   "Unit dbus.socket not found."
+# sockets.target then activates 7 sockets (Credential, initctl, Journal
+# (/dev/log), Journal sockets, udev Control, udev Kernel, Hostname) but
+# NOT dbus.socket. dbus-broker.service can't start (Requires=dbus.socket
+# unmet), systemd-logind keeps failing (Wants=dbus.service), no
+# /run/user/1000 ever materialises, and the graphical session can't
+# activate.
+#
+# Fix: plant dbus.socket under BOTH the legacy /lib/systemd/system/
+# location (where the dbus package installs it; mirror cpio segment)
+# AND a copy at /usr/lib/systemd/system/dbus.socket (where R9 systemd
+# 257.9 actually searches). The sockets.target.wants/ symlink targets
+# the /usr/lib/... path so the unit-name lookup resolves on the first
+# UnitPath hit. Same pattern as the cascade-F fix for
+# dbus.service -> dbus-broker.service above.
+#
+# The /lib/systemd/system/dbus.socket plant from `plant_pkg dbus` in
+# stage 2 stays in place: this matches Ubuntu's on-disk layout and
+# satisfies any tool that hard-codes the path (e.g. dpkg). The
+# /usr/lib/... copy is the one systemd actually loads.
+if [ -f /lib/systemd/system/dbus.socket ]; then
+  cp -a /lib/systemd/system/dbus.socket \
+        "$OVERLAY/usr/lib/systemd/system/dbus.socket"
+fi
+ln -sf "/usr/lib/systemd/system/dbus.socket" \
        "$OVERLAY/etc/systemd/system/sockets.target.wants/dbus.socket"
+# Belt-and-braces: also plant a /etc/systemd/system/dbus.socket symlink
+# (parallel to the dbus.service alias we already maintain at /etc/...).
+# This makes `systemctl status dbus.socket` / `is-enabled dbus.socket`
+# work even if a future overlay segment shadows /usr/lib.
+ln -sf "/usr/lib/systemd/system/dbus.socket" \
+       "$OVERLAY/etc/systemd/system/dbus.socket"
 
 # ---------------------------------------------------------------------------
 # Stage 6: user-instance bus wiring.
@@ -456,7 +500,8 @@ Planted:
   Support libs: ${SUPPORT_LIBS[*]}
   System unit: /etc/systemd/system/dbus.service -> $([ "$DAEMON" = broker ] && echo "/usr/lib/systemd/system/dbus-broker.service" || echo "/lib/systemd/system/dbus.service")
                /usr/lib/systemd/system/dbus.service -> (same target)$([ "$DAEMON" = broker ] && echo " [+ /lib/systemd/system/dbus.service]")
-  Socket:      /etc/systemd/system/sockets.target.wants/dbus.socket -> /lib/systemd/system/dbus.socket
+  Socket:      /etc/systemd/system/sockets.target.wants/dbus.socket -> /usr/lib/systemd/system/dbus.socket
+               (+ copy at /usr/lib/systemd/system/dbus.socket; original /lib/systemd/system/dbus.socket from dbus pkg retained)
   User unit:   /etc/systemd/user/sockets.target.wants/dbus.socket -> /usr/lib/systemd/user/dbus.socket
   User svc:    $([ "$DAEMON" = broker ] && echo "/etc/systemd/user/dbus.service -> /usr/lib/systemd/user/dbus-broker.service" || echo "(default: /usr/lib/systemd/user/dbus.service from dbus-user-session)")
   Policy:      /etc/dbus-1/system.conf -> /usr/share/dbus-1/system.conf
