@@ -102,9 +102,31 @@ cp "$INITRAMFS" "$WORK/initrd.img"
 # options to decide where to write its early UI; piping it to ttyS0 at
 # 115200 8N1 produces the text-mode installer's serial console banner.
 # That banner is the assertion target for the boot gate.
-cat > "$WORK/boot/grub/grub.cfg" <<'EOF'
-set timeout=0
-set default=0
+#
+# Variants (env-gated, defaults preserve the historical single-entry
+# behaviour for non-DEM1 builds):
+#
+#   REPRO_GRUB_VARIANT=single  (default)
+#     one menuentry; matches the R2 historical layout.
+#
+#   REPRO_GRUB_VARIANT=multi-de
+#     four menuentries (DEM1): Hyprland (default), GNOME, KDE Plasma,
+#     Recovery (no-DE). Each entry passes a different `repro.de=<name>`
+#     kernel cmdline parameter that repro-de-select.service consumes.
+#     REPRO_GRUB_DEFAULT picks the 0-based default entry index
+#     (default 0 = Hyprland).
+#
+# The variant is invoked by build-mvp-iso.sh stage 4k when
+# MVP_INCLUDE_MULTI_DE=1.
+REPRO_GRUB_VARIANT="${REPRO_GRUB_VARIANT:-single}"
+REPRO_GRUB_DEFAULT="${REPRO_GRUB_DEFAULT:-0}"
+REPRO_GRUB_TIMEOUT="${REPRO_GRUB_TIMEOUT:-0}"
+
+case "$REPRO_GRUB_VARIANT" in
+  single)
+    cat > "$WORK/boot/grub/grub.cfg" <<EOF
+set timeout=$REPRO_GRUB_TIMEOUT
+set default=$REPRO_GRUB_DEFAULT
 
 serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1
 terminal_input  serial console
@@ -115,6 +137,47 @@ menuentry 'ReproOS (R2 vendored kernel + initramfs)' {
   initrd /initrd.img
 }
 EOF
+    ;;
+  multi-de)
+    # DEM1: four menu entries, one per DE + recovery. Each linux line
+    # passes `repro.de=<name>` so /usr/local/sbin/repro-de-select.sh
+    # arranges the display-manager.service symlink before
+    # graphical.target. Default = Hyprland (index 0; smallest, validates
+    # fastest).
+    cat > "$WORK/boot/grub/grub.cfg" <<EOF
+set timeout=$REPRO_GRUB_TIMEOUT
+set default=$REPRO_GRUB_DEFAULT
+
+serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1
+terminal_input  serial console
+terminal_output serial console
+
+menuentry 'ReproOS -- Hyprland (default)' {
+  linux  /vmlinuz repro.de=hyprland console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  initrd /initrd.img
+}
+
+menuentry 'ReproOS -- GNOME' {
+  linux  /vmlinuz repro.de=gnome console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  initrd /initrd.img
+}
+
+menuentry 'ReproOS -- KDE Plasma' {
+  linux  /vmlinuz repro.de=plasma console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  initrd /initrd.img
+}
+
+menuentry 'ReproOS -- Recovery (single user, no DE)' {
+  linux  /vmlinuz single console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  initrd /initrd.img
+}
+EOF
+    ;;
+  *)
+    echo "build-iso.sh: invalid REPRO_GRUB_VARIANT='$REPRO_GRUB_VARIANT' (must be 'single' or 'multi-de')" >&2
+    exit 64
+    ;;
+esac
 
 mkdir -p "$(dirname "$OUT_ISO")"
 

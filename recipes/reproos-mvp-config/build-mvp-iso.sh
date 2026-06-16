@@ -713,6 +713,26 @@ if [ "${MVP_INCLUDE_PLASMA:-0}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# DEM1 implication pre-stage. MVP_INCLUDE_MULTI_DE=1 implies HYPRLAND +
+# GNOME + PLASMA (which in turn imply the full DE0 foundation). Flip
+# REPRO_GRUB_VARIANT=multi-de now so the downstream build-iso.sh call
+# (stage 5) picks up the 4-entry menu.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_MULTI_DE:-0}" = "1" ]; then
+  : "${MVP_INCLUDE_HYPRLAND:=1}"
+  : "${MVP_INCLUDE_GNOME:=1}"
+  : "${MVP_INCLUDE_PLASMA:=1}"
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+  export REPRO_GRUB_VARIANT=multi-de
+  : "${REPRO_GRUB_DEFAULT:=0}"
+  : "${REPRO_GRUB_TIMEOUT:=5}"
+  export REPRO_GRUB_DEFAULT REPRO_GRUB_TIMEOUT
+fi
+
+# ---------------------------------------------------------------------------
 # Stage 4e (opt-in): DE0-S systemd-session foundation overlay-plant.
 #
 # Set MVP_INCLUDE_DE0_SESSION=1 to plant the Wayland-prerequisite layer
@@ -918,6 +938,51 @@ if [ "${MVP_INCLUDE_PLASMA:-0}" = "1" ]; then
     --allow-online \
     2>&1 | sed 's/^/[d1]   /'
   log "stage 4j DONE"
+fi
+
+# ---------------------------------------------------------------------------
+# Stage 4k (opt-in): DEM1 multi-DE composition.
+#
+# Reference: docs/wayland-de-* + reprobuild-specs/
+# ReproOS-Wayland-DEs-PoC.milestones.org (DEM1).
+#
+# Plants ALL THREE DEs (DE-H1 + DE-G1 + DE-K1) into the SAME overlay +
+# the DEM1 selector (/usr/local/sbin/repro-de-select.sh +
+# /etc/systemd/system/repro-de-select.service) + the union-composed
+# /etc/profile.d/reproos-libpath.sh + the /usr/share/wayland-sessions
+# canonical session files.
+#
+# Implies HYPRLAND + GNOME + PLASMA (and through them DE0-G + DE0-D +
+# DE0-S). Set MVP_INCLUDE_MULTI_DE=1 to plant.
+#
+# Also flips REPRO_GRUB_VARIANT=multi-de so the GRUB config carries the
+# 4-entry menu (Hyprland default + GNOME + KDE Plasma + Recovery). The
+# kernel cmdline `repro.de=<name>` selects the display-manager.service
+# at boot time via repro-de-select.service.
+#
+# Note: large ISO (~250-300 MB per DE per DE-K2 risk estimate; full
+# multi-DE ISO is bounded at ~500 MB).
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_MULTI_DE:-0}" = "1" ]; then
+  # Implies HYPRLAND + GNOME + PLASMA + DE0-* already set in the pre-stage
+  # implication block above. This stage runs AFTER 4h/4i/4j (each
+  # individually idempotent + their sentinels short-circuit a re-apply);
+  # the DEM1 composer just plants the DE-selector + the union-composed
+  # /etc/profile.d/reproos-libpath.sh + the /usr/share/wayland-sessions
+  # canonical session files + rips out the per-DE display-manager.service
+  # wiring so repro-de-select.service owns the choice at boot.
+  log "stage 4k: DEM1 multi-DE composition (selector + GRUB menu + libpath compose)"
+  DEM1_SH="$SCRIPT_DIR/build-mvp-multi-de-iso.sh"
+  if [ ! -f "$DEM1_SH" ]; then
+    die "MVP_INCLUDE_MULTI_DE=1 but $DEM1_SH missing"
+  fi
+  MVP_OVERLAY_DIR="$OVERLAY" bash "$DEM1_SH" \
+    --overlay-dir "$OVERLAY" \
+    --allow-online \
+    --default-de hyprland \
+    2>&1 | sed 's/^/[d1]   /'
+  log "stage 4k DONE"
 fi
 
 log ""
