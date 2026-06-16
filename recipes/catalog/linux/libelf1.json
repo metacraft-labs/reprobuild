@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libelf.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libelf1",
+    "snapshot": "ubuntu/jammy/20231201T000000Z",
+    "version": "0.188-1~bpo22.04.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libelf1",
+      "deb_sha256": "280b71b2f310fa637e325a4923db4c634964994de1a75f5e5770ef6247179c55",
+      "deb_size_bytes": 188492,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/e/elfutils/libelf1_0.188-1~bpo22.04.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libelf-0.188.so",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libelf.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libelf1 0.188-1~bpo22.04.1 is the jammy backports build (preferred over the older 0.186-1build1 release-pocket build because Mesa 23.2's GBM backend probes ELF symbol tables via libelf 0.187+ API). THIS WAS THE HIDDEN DE0-G DEP CALLED OUT BY THE DE0-G REPORT — Mesa's libgbm.so.1 dlopens libelf.so.1 at first GBM-buffer-import call; without it Mesa emits 'GBM: ELF probe failed' and Hyprland/sway's DRM backend can't allocate scanout buffers. NOTE: the .deb ships the file as libelf-0.188.so (with the version embedded) and the libelf.so.1 SONAME as a symlink (visible via dpkg-deb -c). DE-H1's build script extracts BOTH but writes the SONAME link itself for relocatability (matches DE0-G's libdrm pattern)."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libinput.so.10",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libinput",
+    "snapshot": "ubuntu/jammy/20221024T000000Z",
+    "version": "1.20.0-1ubuntu0.3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libinput10",
+      "deb_sha256": "20c673af0618caf3bd9a6eca16b64f6763dd352a5372dc056e1f167f2bb40b68",
+      "deb_size_bytes": 131402,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libi/libinput/libinput10_1.20.0-1ubuntu0.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libinput.so.10.13.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libinput.so.10"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libinput 1.20.0-1ubuntu0.3 is the jammy security-pocket build. Input event abstraction wlroots dispatches keyboard/pointer/touch events through. libudev1 + libevdev2 are runtime deps expected on the host (DE0-D precedent). Without libinput.so.10 sway/Hyprland can't process /dev/input/event* and the compositor stays mute on every input."
+}

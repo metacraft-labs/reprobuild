@@ -1,0 +1,43 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "fontconfig", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "dejavu-fonts", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "/etc/fonts/fonts.conf",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "fontconfig-config",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "2.13.1-4.2ubuntu5"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "fontconfig-config",
+      "deb_sha256": "c40405fa036d1732e269fabd4c5b40076b973a226da1df6921d4b7e7a1e2ff72",
+      "deb_size_bytes": 29096,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig/fontconfig-config_2.13.1-4.2ubuntu5_all.deb",
+      "expected_files": [
+        {"kind": "config", "path": "etc/fonts/fonts.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/10-antialias.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/30-metric-aliases.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/45-generic.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/50-user.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/51-local.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/60-generic.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/60-latin.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.d/README"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "fontconfig-config 2.13.1-4.2ubuntu5 (Architecture: all) ships /etc/fonts/fonts.conf and the 38 /etc/fonts/conf.avail/*.conf defaults. THIS WAS THE HIDDEN DE0-G DEP CALLED OUT BY THE DE0-G REPORT — libfontconfig.so.1's FcInit() reads /etc/fonts/fonts.conf at runtime; without it `fc-list` returns empty and Hyprland/sway/foot render zero glyphs. DE0-G's fontconfig.json catalog ships ONLY the libs + fc-cache binary; this catalog provides the missing /etc/ surface. expected_files[] gates a 9-file subset (the 38 conf.avail files all get extracted under the store dir by dpkg-deb -x but only 9 gate the test). dependency_closure[] reflects the .deb's Depends: chain via the umbrella package fonts-dejavu-core."
+}

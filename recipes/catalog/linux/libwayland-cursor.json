@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libwayland", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libwayland-cursor.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libwayland-cursor",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.20.0-1ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libwayland-cursor0",
+      "deb_sha256": "23a4253600cd8f75161747d3c4dcfc37c92a0074455b3883c46caef7aade34da",
+      "deb_size_bytes": 10664,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-cursor0_1.20.0-1ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0.20.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libwayland-cursor 1.20.0-1ubuntu0.1 is the jammy security-pocket build. Standalone .deb separated from the libwayland trio (client0/server0/egl1) in DE0-G's libwayland.json because the cursor library has a different consumer set (foot terminal + sway compositor link it; Mesa does not). Kept as its own catalog to keep DE0-G's libwayland intact (DE0-G regressions don't touch this entry)."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libpixman-1.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libpixman",
+    "snapshot": "ubuntu/jammy/20231201T000000Z",
+    "version": "0.40.0-1ubuntu0.22.04.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libpixman-1-0",
+      "deb_sha256": "ebcd65ac9bff8412e07d9d54f754d832169de71f1744bdb2ca10744bb5554e73",
+      "deb_size_bytes": 264202,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pixman/libpixman-1-0_0.40.0-1ubuntu0.22.04.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpixman-1.so.0.40.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpixman-1.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libpixman-1-0 0.40.0-1ubuntu0.22.04.1 is the jammy security-pocket build. Pixel-manipulation library Mesa's software path (llvmpipe) and sway's wlr_renderer_pixman backend link. Required as the rendering fallback when WLR_BACKENDS=headless skips DRM."
+}

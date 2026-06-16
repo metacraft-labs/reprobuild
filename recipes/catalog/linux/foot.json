@@ -1,0 +1,51 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libwayland", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libwayland-cursor", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libxkbcommon", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "fontconfig", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libfcft", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libpixman", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "foot version",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "foot",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.11.0-2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "foot",
+      "deb_sha256": "a3a9696ade079b572537a134c7a83d7f836a5a0ba16745a41a41fa8968f71daf",
+      "deb_size_bytes": 240444,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/f/foot/foot_1.11.0-2_amd64.deb",
+      "expected_files": [
+        {"kind": "binary", "path": "usr/bin/foot"},
+        {"kind": "binary", "path": "usr/bin/footclient"},
+        {"kind": "config", "path": "usr/share/foot/foot.ini"}
+      ]
+    },
+    {
+      "deb_pkg": "foot-terminfo",
+      "deb_sha256": "f96344f31bc8f02aea4c3e82e451bca8ea2c723954dd5cbe5725f1eb2c0feffd",
+      "deb_size_bytes": 9446,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/f/foot/foot-terminfo_1.11.0-2_all.deb",
+      "expected_files": [
+        {"kind": "data", "path": "usr/share/terminfo/f/foot"},
+        {"kind": "data", "path": "usr/share/terminfo/f/foot-direct"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "foot 1.11.0-2 is the jammy universe release build. Default DE terminal per the campaign spec. foot-terminfo (Architecture: all) ships /usr/share/terminfo/f/foot which apps consult when TERM=foot. Both must land in the overlay; without foot-terminfo every shell session inside foot reports 'foot: unknown terminal type' on most coreutils that use ncurses. Hyprland config 'bind = SUPER, Return, exec, foot' lands the terminal; sway config translates this to bindsym Mod4+Return exec foot."
+}

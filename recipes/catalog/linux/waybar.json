@@ -1,0 +1,37 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libwayland", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libxkbregistry", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "waybar",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "waybar",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "0.9.9-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "waybar",
+      "deb_sha256": "dff6afdd18f6546b35fef9d9c24a316c592c5c6212348ec0ca7654f7d799e911",
+      "deb_size_bytes": 390222,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/w/waybar/waybar_0.9.9-1_amd64.deb",
+      "expected_files": [
+        {"kind": "binary", "path": "usr/bin/waybar"},
+        {"kind": "config", "path": "etc/xdg/waybar/config"},
+        {"kind": "config", "path": "etc/xdg/waybar/style.css"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "waybar 0.9.9-1 is the jammy universe release. Wayland status bar. Spec lists it as part of the DE-H1 user-facing surface ('exec-once = waybar' in /etc/hyprland.conf). DEPENDS: list is large (gtk-3, gtkmm, glibmm, jsoncpp, mpdclient, pulse, libnl, dbusmenu-gtk3, libfmt8, libsigc++, libspdlog1-fmt8) — all expected on the jammy host (DE0-D / DE0-G precedent). Waybar systemd user unit ships at usr/lib/systemd/user/waybar.service but is NOT enabled by DE-H1 (the Hyprland config 'exec-once = waybar' invokes it from the compositor instead)."
+}

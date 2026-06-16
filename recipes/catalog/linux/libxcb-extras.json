@@ -1,0 +1,194 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libxcb1", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libxcb-dri3.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxcb-extras",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.14-3ubuntu3+xcb-util-0.4-renderutil-0.3-wm-0.4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxcb-dri2-0",
+      "deb_sha256": "b407841216a9d36d2f688bc108ff23fca9daeccc763844eb532c4ec3b46379d9",
+      "deb_size_bytes": 7206,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-dri2-0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-dri2.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-dri2.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-dri3-0",
+      "deb_sha256": "88f306f8421abb5e0a70057925405b98162e6ade8fa2e9cdf67f798012e39b7f",
+      "deb_size_bytes": 6968,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-dri3-0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-dri3.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-dri3.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-composite0",
+      "deb_sha256": "4bd7c8631ff166a43e476e31c04da8cb84e587f1d6e6d4562f86cb1cef43f51c",
+      "deb_size_bytes": 5354,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-composite0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-composite.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-composite.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-icccm4",
+      "deb_sha256": "4dfe14a0ce681b823b740dabb3de84b3ce0958c9a404af61823b11f64047b0ef",
+      "deb_size_bytes": 11460,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-wm/libxcb-icccm4_0.4.1-1.1build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-icccm.so.4.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-icccm.so.4"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-present0",
+      "deb_sha256": "8039b58072834435f37269416597ca5f09231acad134a9658f3a2ea0386a162c",
+      "deb_size_bytes": 5734,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-present0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-present.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-present.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-randr0",
+      "deb_sha256": "39dc0f73fa3bd43f3f7755cb7d12bfd1cd59dd8966f747d66fba47dfc8652f62",
+      "deb_size_bytes": 18300,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-randr0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-randr.so.0.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-randr.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-render0",
+      "deb_sha256": "26d331ed6e1219485dbd6a35b7c9cf552e1470f41bf2158b44a1331405f05250",
+      "deb_size_bytes": 16356,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-render0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-render.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-render.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-render-util0",
+      "deb_sha256": "f87659a2369430ed2acb1cdae54a06fa9d60727a6545594e213173ddb4377727",
+      "deb_size_bytes": 10272,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-renderutil/libxcb-render-util0_0.3.9-1build3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-render-util.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-render-util.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-res0",
+      "deb_sha256": "9072a6e1cffa3888479ccfe3ee7dcc08667f896b0454f8429448f8aeefd07170",
+      "deb_size_bytes": 6704,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-res0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-res.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-res.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-shm0",
+      "deb_sha256": "6d86c9ea2666276c862e64e8a1daa6cb1dd3e4da5ad9165eeb2507311c8a09bd",
+      "deb_size_bytes": 5780,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-shm0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-shm.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-shm.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-sync1",
+      "deb_sha256": "81281149575a3e2cfee5629150bd5a7e52b2c16ed0d6c86b96108b520ab154b8",
+      "deb_size_bytes": 9416,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-sync1_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-sync.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-sync.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-xfixes0",
+      "deb_sha256": "c5fdfad628e4ccdc663fcb391d72a2510a8788dc680c070c76cea3e501791756",
+      "deb_size_bytes": 9996,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-xfixes0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-xfixes.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-xfixes.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-xinput0",
+      "deb_sha256": "02fcdc8a865964792368eac800f84522622aa3597f5fafc7fbc35aa536b6999d",
+      "deb_size_bytes": 34334,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-xinput0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-xinput.so.0.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-xinput.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libxcb-extras umbrella catalog covering 13 libxcb-* family .debs (dri2, dri3, composite, icccm4, present, randr, render, render-util, res, shm, sync, xfixes, xinput) that wlroots + Mesa + sway probe at runtime. THIS WAS THE HIDDEN DE0-G DEP CALLED OUT BY THE DE0-G REPORT. Bundled as ONE catalog (rather than 13 separate ones) to keep the catalog-file count manageable; the dependency_closure[] lists libxcb1 as the single parent. Two .debs in this set ship from non-libxcb1 source packages: libxcb-icccm4 (xcb-util-wm 0.4.1-1.1build2) and libxcb-render-util0 (xcb-util-renderutil 0.3.9-1build3); their version pins are encoded in the version string suffix and in the per-deb deb_url + deb_sha256. The mixed-version umbrella is a deliberate convenience; if a future regression needs to bisect ONE libxcb-* version independently, split it into its own catalog. Note that DE-H1's catalog count goes up by 1 here instead of 13."
+}

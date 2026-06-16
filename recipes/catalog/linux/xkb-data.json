@@ -1,0 +1,40 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "xkeyboard-config",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "xkb-data",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "2.33-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "xkb-data",
+      "deb_sha256": "26f74d6ac0caf3f7b2926d9c1fca85bc868531c8159f943fb78fbb4b6c5a8c80",
+      "deb_size_bytes": 394460,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xkeyboard-config/xkb-data_2.33-1_all.deb",
+      "expected_files": [
+        {"kind": "data", "path": "usr/share/X11/xkb/rules/evdev"},
+        {"kind": "data", "path": "usr/share/X11/xkb/rules/base"},
+        {"kind": "data", "path": "usr/share/X11/xkb/symbols/us"},
+        {"kind": "data", "path": "usr/share/X11/xkb/symbols/pc"},
+        {"kind": "data", "path": "usr/share/X11/xkb/types/basic"},
+        {"kind": "data", "path": "usr/share/X11/xkb/types/complete"},
+        {"kind": "data", "path": "usr/share/X11/xkb/keycodes/evdev"},
+        {"kind": "data", "path": "usr/share/X11/xkb/compat/complete"},
+        {"kind": "data", "path": "usr/share/X11/xkb/geometry/pc"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "xkb-data 2.33-1 (Architecture: all) is the jammy release. THIS WAS THE HIDDEN DE0-G DEP CALLED OUT BY THE DE0-G REPORT — libxkbcommon hard-codes the lookup prefix /usr/share/X11/xkb/ at compile time; without xkb-data Hyprland/sway emit 'no keymap found' and freeze on first input event. Catalog ships the canonical evdev/base rules + pc + us layout + the four xkb dataset directories (compat, geometry, keycodes, symbols, types) that libxkbcommon's keymap-compile path actually reads. DE-H1's build script writes a /etc/profile.d/xkb-data.sh exporting XKB_CONFIG_ROOT=/opt/reproos-linux/store/<hash>/usr/share/X11/xkb so libxkbcommon picks up the overlay path at runtime — sourced by repro-start-hyprland.sh and any TTY login. expected_files[] hand-picks 9 critical files; the .deb ships ~5000 layout files total, all extracted under the store dir by dpkg-deb -x but only these 9 are gated by the integration test."
+}

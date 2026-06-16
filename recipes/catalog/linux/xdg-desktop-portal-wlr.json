@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "xdg-desktop-portal", "snapshot": "ubuntu/jammy/20240501T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "xdg-desktop-portal-wlr",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "xdg-desktop-portal-wlr",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "0.5.0-3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "xdg-desktop-portal-wlr",
+      "deb_sha256": "2665507d47454ceba7fbb8d7c2bb0f20f2ca7ccd079c02a3fd2675d36662dc00",
+      "deb_size_bytes": 33642,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/x/xdg-desktop-portal-wlr/xdg-desktop-portal-wlr_0.5.0-3_amd64.deb",
+      "expected_files": [
+        {"kind": "binary", "path": "usr/libexec/xdg-desktop-portal-wlr"},
+        {"kind": "config", "path": "usr/lib/systemd/user/xdg-desktop-portal-wlr.service"},
+        {"kind": "config", "path": "usr/share/xdg-desktop-portal/portals/wlr.portal"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "xdg-desktop-portal-wlr 0.5.0-3 is the jammy universe release. wlroots-family backend for the xdg-desktop-portal framework. Hyprland upstream would use xdg-desktop-portal-hyprland (NOT in jammy — see docs/wayland-de-hyprland.md); the wlr backend covers both sway and Hyprland at the wlroots-protocol level for screenshot/screencast. SHIPPED BUT NOT ENABLED BY DE-H1: same rationale as xdg-desktop-portal — the framework daemon's pipewire dep blocks runtime activation. wlr.portal manifest plants UseIn=wlroots so any sway-or-Hyprland session sees it once the parent daemon runs."
+}

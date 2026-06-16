@@ -1,0 +1,37 @@
+{
+  "advisory_only": true,
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "wlroots", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libwayland", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libxkbcommon", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "Hyprland v0.41.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "hyprland",
+    "snapshot": "upstream/github/v0.41.2",
+    "version": "0.41.2"
+  },
+  "package_source": "upstream-github-releases",
+  "payload_files": [
+    {
+      "deb_pkg": "source-v0.41.2.tar.gz",
+      "deb_sha256": "DEFERRED_BUILD_FROM_SOURCE_NOT_IN_DE_H1_SCOPE",
+      "deb_size_bytes": 54821598,
+      "deb_url": "https://github.com/hyprwm/Hyprland/releases/download/v0.41.2/source-v0.41.2.tar.gz",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "upstream-source-tarball",
+      "pocket": "github-releases",
+      "skip_in_de_h1": true,
+      "future_milestone": "DE-H-build-hyprland-from-source"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Hyprland v0.41.2 is the last upstream release that links cleanly against Mesa 23.x (later versions need Mesa 25's DRM_FORMAT_MOD changes). THIS CATALOG IS ADVISORY ONLY — DE-H1's build script SKIPS catalog entries where provisioning_methods[].kind == 'upstream-source-tarball'. Reasons (see docs/wayland-de-hyprland.md 'Why sway (not Hyprland)'): (1) Hyprland is NOT in jammy main/universe at all; apt-cache show hyprland returns 'no packages found'. (2) Hyprland's GitHub Releases ship ONLY source tarballs (~52 MB); there is no statically-linked binary asset. (3) Building from source needs C++23 (jammy's g++-11 is C++20; needs g++-13 backport), meson, hyprwayland-scanner (itself a Hyprland-org C++ utility), 12 dev deps. Multi-day build cascade outside DE-H1 scope. This catalog reserves the slot with the upstream URL + size pin; a future DE-H-build-hyprland-from-source milestone fills in the sha256 (currently DEFERRED) + the from-source build recipe + the expected_files[] list. DE-H1's active compositor is sway (see sway.json) — same wlroots-based architecture, same DE0-G dep set, jammy-native."
+}

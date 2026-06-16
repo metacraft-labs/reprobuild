@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "fontconfig", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libfcft.so.4",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libfcft",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "3.0.1-2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libfcft4",
+      "deb_sha256": "10df3df18ecfd0f6e49c95fb9578bac4e0e90d1f3a9c62abe86ec4a51fe03361",
+      "deb_size_bytes": 26734,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/f/fcft/libfcft4_3.0.1-2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libfcft.so.4.0.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libfcft.so.4"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libfcft 3.0.1-2 is the jammy universe release. foot's font/character/freetype dispatcher library — foot 1.11 hard-depends on libfcft4 (>= 3.0.1). The .deb's SONAME is libfcft.so.4; the versioned filename is libfcft.so.4.0.1. Without it foot prints 'failed to load libfcft' and the terminal exits before drawing any glyphs."
+}

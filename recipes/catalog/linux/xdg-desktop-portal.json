@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "xdg-desktop-portal",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "xdg-desktop-portal",
+    "snapshot": "ubuntu/jammy/20240501T000000Z",
+    "version": "1.14.4-1ubuntu2~22.04.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "xdg-desktop-portal",
+      "deb_sha256": "b4cf43aae0deebeb9e8ff0e7b0db83aa18a0dec36f204699ec7e78dd31e0ce34",
+      "deb_size_bytes": 264930,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xdg-desktop-portal/xdg-desktop-portal_1.14.4-1ubuntu2~22.04.2_amd64.deb",
+      "expected_files": [
+        {"kind": "binary", "path": "usr/libexec/xdg-desktop-portal"},
+        {"kind": "binary", "path": "usr/libexec/xdg-document-portal"},
+        {"kind": "binary", "path": "usr/libexec/xdg-permission-store"},
+        {"kind": "config", "path": "usr/lib/systemd/user/xdg-desktop-portal.service"},
+        {"kind": "config", "path": "usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "xdg-desktop-portal 1.14.4-1ubuntu2~22.04.2 is the jammy security-pocket build. Framework portal daemon that forwards screenshot/screencast/openfile requests from sandboxed Wayland clients to compositor-specific backends. SHIPPED BUT NOT ENABLED BY DE-H1: the daemon's hard `Depends: libpipewire-0.3-0` would crash it at socket activation, and the PoC compositor (sway) doesn't need the portal. DE-H1 plants the binaries + systemd user units (DISABLED) for DEM-tier readiness. Future DE-G1 / DE-K1 milestones flip the units on once PipeWire is added to the closure. The /usr/share/dbus-1/services/ activation files are planted but the daemon won't actually start at runtime until the unit is enabled."
+}

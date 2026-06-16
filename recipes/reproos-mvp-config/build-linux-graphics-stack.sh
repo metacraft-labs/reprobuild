@@ -171,15 +171,27 @@ catalog_hash() {
 }
 
 # ---------------------------------------------------------------------------
-# Enumerate catalogs. The order is name-sorted so registry.json is
-# byte-stable.
+# Enumerate catalogs. DE0-G uses an explicit allowlist (matches DE-H1
+# pattern) so newer catalog tiers (DE-H1, DE-G1, DE-K1) dropping JSONs
+# into recipes/catalog/linux/ don't get picked up by the DE0-G base
+# pass. The order is name-sorted so registry.json is byte-stable.
 # ---------------------------------------------------------------------------
 
+DE0_G_CATALOG_NAMES=(
+  dejavu-fonts
+  fontconfig
+  libdrm
+  libwayland
+  libxkbcommon
+  mesa
+)
+
 CATALOGS=()
-while IFS= read -r f; do
-  [ -f "$f" ] || continue
+for name in "${DE0_G_CATALOG_NAMES[@]}"; do
+  f="$CATALOG_ROOT/$name.json"
+  [ -f "$f" ] || die "DE0-G catalog missing: $f" 2
   CATALOGS+=("$f")
-done < <(find "$CATALOG_ROOT" -maxdepth 1 -name '*.json' | LC_ALL=C sort)
+done
 
 [ "${#CATALOGS[@]}" -gt 0 ] || die "no catalogs in $CATALOG_ROOT" 2
 

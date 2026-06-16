@@ -161,21 +161,27 @@ LDCONF="$OVERLAY/etc/ld.so.conf.d/00-reproos-linux.conf"
 # Each catalog that ships at least one shared_library should have a
 # corresponding line. dejavu-fonts has no libs (fonts only), so it
 # does NOT need a line; same for libdrm-common's amdgpu.ids data.
+# DE0-G owns only its 6 catalog names; later DE tiers (DE-H1 etc.) add
+# their own JSONs to the same dir but are NOT planted by DE0-G's
+# builder. Hard-pin the DE0-G allowlist here so a fresh DE-H1 catalog
+# drop doesn't break the DE0-G gate.
 python3 - "$LDCONF" "$STORE_ROOT" "$CATALOG_ROOT" <<'PYEOF' || fail "ld.so.conf check failed"
-import json, sys, os, hashlib, glob
+import json, sys, os, hashlib
 ldconf_path, store_root, catalog_root = sys.argv[1], sys.argv[2], sys.argv[3]
+DE0_G_NAMES = ["dejavu-fonts", "fontconfig", "libdrm", "libwayland", "libxkbcommon", "mesa"]
 with open(ldconf_path) as f:
     lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
 catalogs_with_libs = []
-for jp in sorted(glob.glob(os.path.join(catalog_root, "*.json"))):
+for name in DE0_G_NAMES:
+    jp = os.path.join(catalog_root, f"{name}.json")
     with open(jp) as f:
         c = json.load(f)
     has_lib = any(ef["kind"] == "shared_library"
                   for pf in c["payload_files"] for ef in pf["expected_files"])
     if has_lib:
-        name, version, snapshot = c["package"]["name"], c["package"]["version"], c["package"]["snapshot"]
+        version, snapshot = c["package"]["version"], c["package"]["snapshot"]
         h = hashlib.sha256(f"{name}|{version}|{snapshot}".encode()).hexdigest()[:16]
-        catalogs_with_libs.append((c["package"]["name"], h))
+        catalogs_with_libs.append((name, h))
 for name, h in catalogs_with_libs:
     want = f"/opt/reproos-linux/store/{h}/usr/lib/x86_64-linux-gnu"
     assert want in lines, f"ld.so.conf.d missing line for {name}: {want}\nlines: {lines}"

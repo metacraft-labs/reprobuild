@@ -1,0 +1,51 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "mesa", "snapshot": "ubuntu/jammy/20240130T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libEGL.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libglvnd",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.4.0-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libegl1",
+      "deb_sha256": "4a35c0e925e15a076e7ce11d7c76f8ecb16615fc347c2c09afa4c205a7ca8ec4",
+      "deb_size_bytes": 28564,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libg/libglvnd/libegl1_1.4.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libEGL.so.1.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libEGL.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libgles2",
+      "deb_sha256": "d69a414b91f420531e813b08a8b48e594312b29a3b666aa584f221ec19b07346",
+      "deb_size_bytes": 18016,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libg/libglvnd/libgles2_1.4.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libGLESv2.so.2.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libGLESv2.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libglvnd 1.4.0-1 is the jammy release build. GL Vendor Neutral Dispatch library. THIS WAS A HIDDEN DE0-G DEP — DE0-G's mesa.json installs libEGL_mesa.so.0 (the Mesa vendor implementation) but NOT libEGL.so.1 (the libglvnd dispatcher). sway 1.7 + wlroots 0.15 dlsym against libEGL.so.1 + libGLESv2.so.2 via the libglvnd dispatcher API; if the binary linker walks ld.so.conf.d and finds Mesa's libEGL_mesa.so.0 first without the dispatcher present, the GL_VERSION query returns NULL and sway aborts at startup. Plant BOTH .debs (libegl1 for EGL dispatch, libgles2 for GLES dispatch). The dispatcher reads /usr/share/glvnd/egl_vendor.d/*.json to find vendor libraries; DE0-G's mesa.json already plants 50_mesa.json under the mesa store dir, and DE-H1's build script writes a /etc/profile.d/glvnd.sh exporting __EGL_VENDOR_LIBRARY_DIRS to find it."
+}

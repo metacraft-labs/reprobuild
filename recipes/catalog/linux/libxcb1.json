@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libxcb.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxcb1",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.14-3ubuntu3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxcb1",
+      "deb_sha256": "9258f04136434e7a0ccd76041505421934284209693373cfa9c24acb3a641ec5",
+      "deb_size_bytes": 49030,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb1_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb.so.1.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libxcb1 1.14-3ubuntu3 is the jammy release build. XCB base library all xcb-* family libs (including the libxcb-extras catalog) chain off. Mesa's xcb-egl path links it; wlroots' Xwayland-bridge integration links it. THIS WAS THE HIDDEN DE0-G DEP CALLED OUT BY THE DE0-G REPORT (the report said 'libxcb-* transitive deps' meaning the xcb family; libxcb1 itself is the root). Catalog tier intentionally isolates libxcb1 from the libxcb-extras umbrella catalog so the dependency_closure[] graph stays accurate (all libxcb-* depend on libxcb1, not on each other)."
+}

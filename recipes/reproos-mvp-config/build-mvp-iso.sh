@@ -759,6 +759,48 @@ if [ "${MVP_INCLUDE_DE0_GRAPHICS:-0}" = "1" ]; then
   log "stage 4g DONE"
 fi
 
+# ---------------------------------------------------------------------------
+# Stage 4h (opt-in): DE-H1 Hyprland-equivalent Wayland compositor tier.
+#
+# Plants 18 catalog entries on top of DE0-G (sway compositor + wlroots +
+# foot terminal + waybar + xkb-data + fontconfig-config + libxcb-extras +
+# the libelf1 / libpixman / libseat / libinput / libglvnd / libfcft /
+# libxkbregistry / libwayland-cursor support libs + xdg-desktop-portal
+# framework + wlroots-family backend) plus the Hyprland config layer
+# (/etc/hyprland.conf, /etc/sway/config, /etc/wayland-sessions/hyprland.desktop,
+# /usr/local/bin/repro-start-hyprland.sh, /etc/profile.d/xkb-data.sh,
+# /etc/profile.d/glvnd.sh). Per the campaign spec
+# `reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org` (DE-H1).
+#
+# Implies graphics (DE0-G) + dbus (DE0-D) + session (DE0-S). Set
+# MVP_INCLUDE_HYPRLAND=1 to plant. Default off: the bare D1 MVP ISO
+# does not need Hyprland.
+#
+# The Hyprland catalog (hyprland.json) itself is ADVISORY ONLY — its
+# provisioning_methods[].kind = "upstream-source-tarball" gates the
+# builder to SKIP it. The planted compositor is sway (jammy-native);
+# see docs/wayland-de-hyprland.md for the substitution rationale.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_HYPRLAND:-0}" = "1" ]; then
+  # Hyprland implies the full DE0 foundation.
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+
+  log "stage 4h: DE-H1 Hyprland-equivalent compositor overlay-plant"
+  DE_H1_SH="$SCRIPT_DIR/build-mvp-hyprland-rootfs.sh"
+  if [ ! -f "$DE_H1_SH" ]; then
+    die "MVP_INCLUDE_HYPRLAND=1 but $DE_H1_SH missing"
+  fi
+  MVP_OVERLAY_DIR="$OVERLAY" bash "$DE_H1_SH" \
+    --overlay-dir "$OVERLAY" \
+    --skip-de0-g \
+    --allow-online \
+    2>&1 | sed 's/^/[d1]   /'
+  log "stage 4h DONE"
+fi
+
 log ""
 log "============================================================"
 log "D1-stage1 COMPLETE: overlay tree ready."

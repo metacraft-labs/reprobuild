@@ -1,0 +1,35 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libseat.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libseat",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "0.6.4-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libseat1",
+      "deb_sha256": "4016336fd05fba0bd58d04a98bf581e10f5c63eb61af3d834cd3537f7f913623",
+      "deb_size_bytes": 28226,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/seatd/libseat1_0.6.4-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libseat.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libseat 0.6.4-1 is the jammy universe release (the .deb is built from the seatd source package which also ships the seatd daemon — NOT planted by DE-H1 because DE0-S already selected systemd-logind as the seat manager). wlroots links libseat.so.1 at compile time and probes for logind via the system DBus first (which DE0-D provides), then falls back to a seatd socket. Without libseat.so.1 wlroots can't open /dev/dri/card0 with the right ACL inheritance and sway emits 'failed to open DRM node'. NOTE: the .deb ships ONLY libseat.so.1 (no separate .so.X.Y.Z file); the .so.1 IS the file. No soname_link needed (same shape as libwlroots10)."
+}
