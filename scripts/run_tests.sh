@@ -95,6 +95,15 @@ repro_build_collection() {
 }
 repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
+# Test-Fixtures-In-Build-Graph M2: build the monitor-shim fixture
+# (``build/lib/librepro_monitor_shim.<ext>``) through the graph before
+# the tests run. ``prepareMonitorTools`` and the three self-shim outlier
+# tests now ``requireBinary`` this artifact instead of compiling it per
+# test. ``just bootstrap`` only runs ``build_apps.sh`` (which also
+# produces the shim) when ``build/bin/repro`` is MISSING, so on a warm
+# checkout the shim would otherwise never be built — this explicit
+# fixture build closes that gap.
+repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
 # Step 4 (B5): Python tests + test-binary execution. The Python loop

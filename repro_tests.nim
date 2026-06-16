@@ -3102,6 +3102,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_no_runtime_compilation_in_tests.nim",
+    binary: "build/test-bin/t_no_runtime_compilation_in_tests",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_action_cache_fingerprint_policies.nim",
     binary: "build/test-bin/t_action_cache_fingerprint_policies",
     defines: @[],

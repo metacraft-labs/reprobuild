@@ -59,17 +59,13 @@ proc requireGit(command: string; cwd = ""): string =
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
 
-proc compileRepro(tempRoot: string): string =
-  result = tempRoot / "bin" / addFileExt("repro", ExeExt)
-  createDir(parentDir(result))
-  let root = repoRoot()
-  let args = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--nimcache:" & root / "build" / "nimcache" / "m10-workspace-sync-repro",
-    "--out:" & result,
-    root / "apps" / "repro" / "repro.nim",
-  ]
-  discard requireSuccess(shellCommand(args), root)
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary(): string =
+  requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 # ---- bare-repo seed fixture ----------------------------------------------
 
@@ -187,7 +183,7 @@ type
 
 proc setupFixture(gitBin, slug: string): M10Fixture =
   result.scratch = createTempDir("repro-m10-" & slug & "-", "")
-  result.reproBin = compileRepro(result.scratch)
+  result.reproBin = reproBinary()
 
   let libOrigin = result.scratch / "origin-lib.git"
   result.libSeedPath = result.scratch / "seed-lib"

@@ -27,6 +27,7 @@
 import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_hcr_agent
+from repro_test_support import requireBinary, monitorShimPath
 
 const
   SupportProfile = "macos-arm64-direct-hcr-in-codetracer-v1"
@@ -141,17 +142,13 @@ proc requireSuccess(command: string; cwd = getCurrentDir()) =
     raise newException(ValueError,
       "command failed: " & command & "\n" & res.output)
 
+# Test-Fixtures-In-Build-Graph M1/M3: ``repro`` is a graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``); the same consolidated image
+# serves the fs-snoop role (``repro internal fs-snoop``). Assert it exists
+# instead of recompiling ``apps/repro/repro.nim`` at test runtime.
 proc compileRepro(repoRoot: string): string =
-  result = repoRoot / "build" / "test-bin" / "repro"
-  createDir(parentDir(result))
-  createDir(repoRoot / "build" / "nimcache")
-  requireSuccess(shellCommand([
-    "nim", "c", "--threads:on",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      "hcr-inject-failure-repro",
-    "--out:" & result,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc prepareGccProxy(tempRoot: string): string =
   let binDir = tempRoot / "bin"
@@ -162,64 +159,26 @@ proc prepareGccProxy(tempRoot: string): string =
   requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
   binDir & $PathSep & getEnv("PATH")
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath,
-    sourcePath
-  ]), repoRoot)
-
 when defined(macosx):
-  proc compileShim(repoRoot, outputPath: string) =
-    let arm64Path = outputPath & ".arm64"
-    let arm64ePath = outputPath & ".arm64e"
-    let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
-    let shimSource = repoRoot / "libs" / "repro_monitor_shim" / "src" /
-      "repro_monitor_shim" / "macos_interpose.nim"
-    requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on",
-      "--verbosity:0", "--hints:off",
-      "--path:" & monitorHooksPath,
-      "--nimcache:" & repoRoot / "build" / "nimcache" /
-        "hcr-inject-failure-shim-arm64",
-      "--out:" & arm64Path,
-      shimSource
-    ]), repoRoot)
-    requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on",
-      "--verbosity:0", "--hints:off",
-      "--passC:-arch arm64e", "--passL:-arch arm64e",
-      "--path:" & monitorHooksPath,
-      "--nimcache:" & repoRoot / "build" / "nimcache" /
-        "hcr-inject-failure-shim-arm64e",
-      "--out:" & arm64ePath,
-      shimSource
-    ]), repoRoot)
-    requireSuccess(shellCommand([
-      "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
-    ]), repoRoot)
-
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
     let binDir = tempRoot / "bin"
     let libDir = tempRoot / "lib"
     createDir(binDir)
     createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim = libDir / "librepro_monitor_shim.dylib"
-    # Executable-Consolidation M1 deleted apps/repro-fs-snoop; reproduce the
-    # standalone driver by compiling the same four-line wrapper, written
-    # under repoRoot so config.nims resolves as before.
-    let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
-      "hcr-inject-failure-repro-fs-snoop" / "repro_fs_snoop.nim"
-    createDir(parentDir(fsSnoopSource))
-    writeFile(fsSnoopSource,
-      "import repro_cli_support\n\nwhen isMainModule:\n" &
-      "  quit runThinApp(\"repro-fs-snoop\")\n")
-    compileNim(repoRoot, fsSnoopSource, result.fsSnoop,
-      "hcr-inject-failure-repro-fs-snoop")
-    compileShim(repoRoot, result.shim)
+    # Test-Fixtures-In-Build-Graph M3: the fs-snoop driver is the graph-built
+    # ``build/bin/repro`` (reached via ``repro internal fs-snoop``); ``repro``
+    # honors ``REPRO_FS_SNOOP`` pointing at this consolidated image. Assert it
+    # exists instead of compiling a standalone wrapper at test runtime.
+    result.fsSnoop = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
+    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+    # per test. The host-native single-arch shim is correct: the test process is
+    # host-arch, so the former universal (lipo) build is unnecessary.
+    result.shim = requireBinary(monitorShimPath(repoRoot),
+      "reprobuild.test_fixtures.monitor_shim")
 
 proc waitForLogContains(logPath, needle, context: string; timeoutMs = 30_000) =
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)

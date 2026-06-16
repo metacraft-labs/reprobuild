@@ -29,6 +29,16 @@ proc pathExists(path: string): bool =
   except OSError:
     false
 
+proc reproBinary(): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime. The repo root is the test's working directory (the suite
+  ## runs from the reprobuild checkout root).
+  requireBinary(getCurrentDir() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
+
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
@@ -139,13 +149,7 @@ suite "m54_verified_tarball_profile":
       let tempRoot = createTempDir("repro-m54-tarball", "")
       defer: removeDir(tempRoot)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      let reproBin = reproBinary()
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
       defer:

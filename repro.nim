@@ -510,6 +510,63 @@ package reprobuild:
 
     discard collect("test-helpers", reprobuildTestHelpersActions)
 
+    # Test-Fixtures-In-Build-Graph M2: the monitor-shim ``test-fixtures``
+    # collection.
+    #
+    # The monitor shim (``repro_monitor_shim``, built ``nim c --app:lib``)
+    # was compiled per test by ``repro_test_support.prepareMonitorTools``
+    # (22 callers) and again, ad hoc, by three self-shim outlier tests.
+    # M2 lifts that compilation into a single graph edge that produces the
+    # shim at the SAME stable path ``scripts/build_apps.sh`` writes —
+    # ``build/lib/librepro_monitor_shim.<ext>`` — so the per-test code can
+    # ``requireBinary`` it instead of shelling out to a compiler.
+    #
+    # The platform arm (source file, output extension, and the extra
+    # ``--path:`` / ``--mm:`` / ``--cc:`` flags the Windows IAT patcher
+    # needs) mirrors ``scripts/build_apps.sh`` byte-for-byte and is gated
+    # on ``when defined(...)`` of the project-interface DLL's host OS, the
+    # same compile-time-host pattern the B4 ``hostIsMacos`` HCR gate uses
+    # above. The shim is a host-native artifact (LD_PRELOAD / DYLD_INSERT
+    # / IAT-patch DLL), so the host arm is the correct (and only) target.
+    var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
+
+    when defined(macosx):
+      reprobuildTestFixturesActions.add(nim.c(
+        source = "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim",
+        binary = "build/lib/librepro_monitor_shim.dylib",
+        appLib = true,
+        threadsOn = true,
+        actionId = "reprobuild.test_fixtures.monitor_shim"))
+    elif defined(windows):
+      # The Windows shim imports the stackable-hooks framework primitives;
+      # the path list + ``--mm:orc`` / ``--cc:gcc`` mirror the Windows arm
+      # of ``scripts/build_apps.sh`` and ``prepareMonitorTools``. The
+      # stackable-hooks source is resolved by ``config.nims`` /
+      # ``STACKABLE_HOOKS_SRC`` the same way the script resolves it; the
+      # vendored fallback path is added unconditionally because a
+      # missing ``--path:`` directory is harmless to ``nim c``.
+      reprobuildTestFixturesActions.add(nim.c(
+        source = "libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim",
+        binary = "build/lib/librepro_monitor_shim.dll",
+        appLib = true,
+        threadsOn = true,
+        paths = @[
+          "libs/repro_monitor_depfile/src",
+          "libs/repro_core/src",
+          "libs/repro_monitor_shim/src",
+          "libs/repro_monitor_shim/vendor/nim-stackable-hooks/src",
+        ],
+        actionId = "reprobuild.test_fixtures.monitor_shim"))
+    else:
+      reprobuildTestFixturesActions.add(nim.c(
+        source = "libs/repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim",
+        binary = "build/lib/librepro_monitor_shim.so",
+        appLib = true,
+        threadsOn = true,
+        actionId = "reprobuild.test_fixtures.monitor_shim"))
+
+    discard collect("test-fixtures", reprobuildTestFixturesActions)
+
     # Option (A) from the repo packaging memo: wrap scripts/build_apps.sh
     # byte-for-byte so the action's behaviour is identical to ``just
     # build`` today. The action declares the union of source roots the

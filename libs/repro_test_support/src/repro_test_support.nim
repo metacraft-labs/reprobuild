@@ -361,54 +361,41 @@ proc fsSnoopWrapperSource*(repoRoot, cacheKey: string): string =
     "when isMainModule:\n" &
     "  quit runThinApp(\"repro-fs-snoop\")\n")
 
+proc monitorShimPath*(repoRoot: string): string =
+  ## Test-Fixtures-In-Build-Graph M2: the stable on-disk location of the
+  ## graph-built monitor-shim library. This is the exact path
+  ## ``scripts/build_apps.sh`` writes and the ``test-fixtures`` collection
+  ## in ``repro.nim`` (edge ``reprobuild.test_fixtures.monitor_shim``)
+  ## produces, so ``prepareMonitorTools`` and the self-shim outlier tests
+  ## resolve the same artifact rather than each compiling their own copy.
+  ## Centralised here so the path convention lives in one place.
+  let libDir = repoRoot / "build" / "lib"
+  when defined(linux): libDir / "librepro_monitor_shim.so"
+  elif defined(windows): libDir / "librepro_monitor_shim.dll"
+  else: libDir / "librepro_monitor_shim.dylib"
+
 proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
-  ## Compile the per-test ``repro-fs-snoop`` binary AND the monitor
-  ## shim library on demand. The same surface that ``compileRepro``
-  ## (above) uses for the per-test ``repro`` binary, but for the
-  ## fs-snoop + shim pair.
+  ## Resolve the monitor shim (a graph-built ``test-fixtures`` artifact)
+  ## and compile the per-test ``repro-fs-snoop`` binary on demand.
+  ##
+  ## Test-Fixtures-In-Build-Graph M2: the monitor shim is no longer
+  ## compiled here. It is produced once by the
+  ## ``reprobuild.test_fixtures.monitor_shim`` graph edge (the
+  ## ``test-fixtures`` collection in ``repro.nim``, built by
+  ## ``scripts/run_tests.sh`` before the suite runs) at the stable path
+  ## ``monitorShimPath`` returns; this proc asserts its presence via
+  ## ``requireBinary`` instead of shelling out to ``nim c --app:lib`` on
+  ## every call. The fs-snoop wrapper compile (Executable-Consolidation
+  ## M1) stays runtime for now — M3 hoists it.
   ##
   ## ``cacheKey`` differentiates per-suite ``nimcache`` directories
   ## so two dev-env suites compiled into the same process don't
   ## stomp each other's IR.
   let binDir = tempRoot / "bin"
-  let libDir = tempRoot / "lib"
   createDir(binDir)
-  createDir(libDir)
   result.fsSnoop = binDir / addFileExt("repro-fs-snoop", ExeExt)
-  result.shim =
-    when defined(linux): libDir / "librepro_monitor_shim.so"
-    elif defined(windows): libDir / "repro_monitor_shim.dll"
-    else: libDir / "librepro_monitor_shim.dylib"
-  let shimSource =
-    when defined(linux):
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "linux_preload.nim"
-    elif defined(windows):
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "windows_interpose.nim"
-    else:
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-
-  var shimArgs = @[
-    "nim", "c", "--app:lib", "--threads:on", "--verbosity:0",
-    "--hints:off", "--warnings:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      (cacheKey & "-monitor-shim"),
-    "--out:" & result.shim
-  ]
-  when defined(windows):
-    # Same shape as the Windows arm of ``scripts/build_apps.sh`` so
-    # the in-test shim build picks up the IAT patcher's stack.
-    let ctInterpose = ctInterposeSrcPath(repoRoot)
-    shimArgs.add(["--mm:orc", "--cc:gcc",
-      "--path:" & repoRoot / "libs" / "repro_monitor_depfile" / "src",
-      "--path:" & repoRoot / "libs" / "repro_core" / "src",
-      "--path:" & repoRoot / "libs" / "repro_monitor_shim" / "src"])
-    if ctInterpose.len > 0:
-      shimArgs.add("--path:" & ctInterpose)
-  shimArgs.add(shimSource)
-  discard requireSuccess(shellCommand(shimArgs), repoRoot)
+  result.shim = requireBinary(monitorShimPath(repoRoot),
+    "reprobuild.test_fixtures.monitor_shim")
 
   # Executable-Consolidation M1: compile the synthesized fs-snoop wrapper
   # (see ``fsSnoopWrapperSource``) instead of the deleted standalone entry

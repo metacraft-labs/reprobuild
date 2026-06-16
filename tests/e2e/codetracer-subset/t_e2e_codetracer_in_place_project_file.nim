@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_tool_profiles
+from repro_test_support import requireBinary, monitorShimPath
 
 const GccProxySource = r"""
 #include <fcntl.h>
@@ -371,24 +372,14 @@ proc pathExists(path: string): bool =
   except OSError:
     false
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath,
-    sourcePath
-  ]), repoRoot)
-
+# Test-Fixtures-In-Build-Graph M1/M3: ``repro`` is a graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``); the same consolidated image
+# also serves the fs-snoop role (``repro internal fs-snoop``). Assert the graph
+# artifact exists instead of recompiling ``apps/repro/repro.nim`` at test
+# runtime.
 proc compilePublicReproTestBin(repoRoot: string): string =
-  result = repoRoot / "build" / "test-bin" / "repro"
-  createDir(result.splitPath.head)
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      "m35-codetracer-relative-public-repro",
-    "--out:" & result,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc writeExecutable(path, content: string) =
   createDir(path.splitPath.head)
@@ -397,63 +388,25 @@ proc writeExecutable(path, content: string) =
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 when defined(macosx) or defined(linux):
-  proc compileShim(repoRoot, outputPath: string) =
-    when defined(macosx):
-      let arm64Path = outputPath & ".arm64"
-      let arm64ePath = outputPath & ".arm64e"
-      let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-        "--path:" & monitorHooksPath,
-        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim",
-        "--out:" & arm64Path,
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-      ]), repoRoot)
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-        "--passC:-arch arm64e", "--passL:-arch arm64e",
-        "--path:" & monitorHooksPath,
-        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim-arm64e",
-        "--out:" & arm64ePath,
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-      ]), repoRoot)
-      discard requireSuccess(shellCommand([
-        "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
-      ]), repoRoot)
-    else:
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-ct-shim",
-        "--out:" & outputPath,
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      ]), repoRoot)
-
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
     let binDir = tempRoot / "bin"
     let libDir = tempRoot / "lib"
     createDir(binDir)
     createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    compileShim(repoRoot, result.shim)
-    # Executable-Consolidation M1 deleted apps/repro-fs-snoop; reproduce the
-    # standalone driver by compiling the same four-line wrapper, written
-    # under repoRoot so config.nims resolves as before.
-    let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
-      "m32-ct-repro-fs-snoop" / "repro_fs_snoop.nim"
-    createDir(parentDir(fsSnoopSource))
-    writeFile(fsSnoopSource,
-      "import repro_cli_support\n\nwhen isMainModule:\n" &
-      "  quit runThinApp(\"repro-fs-snoop\")\n")
-    compileNim(repoRoot, fsSnoopSource, result.fsSnoop, "m32-ct-repro-fs-snoop")
+    # Test-Fixtures-In-Build-Graph M3: the fs-snoop driver is the graph-built
+    # ``build/bin/repro`` (reached via ``repro internal fs-snoop``); ``repro``
+    # honors ``REPRO_FS_SNOOP`` pointing at this consolidated image. Assert it
+    # exists instead of compiling a standalone wrapper at test runtime.
+    result.fsSnoop = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
+    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+    # per test. The host-native single-arch shim is correct: the test process is
+    # host-arch, so the former universal (lipo) build is unnecessary.
+    result.shim = requireBinary(monitorShimPath(repoRoot),
+      "reprobuild.test_fixtures.monitor_shim")
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
@@ -1035,8 +988,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1120,8 +1072,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1214,8 +1165,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1315,8 +1265,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1419,8 +1368,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1515,8 +1463,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1801,8 +1748,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1893,8 +1839,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1999,8 +1944,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)
@@ -2039,8 +1983,7 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -2245,13 +2188,9 @@ when defined(macosx) or defined(linux):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      # Test-Fixtures-In-Build-Graph M1: assert the graph-built ``repro``
+      # instead of recompiling ``apps/repro/repro.nim`` into tempRoot.
+      let reproBin = compilePublicReproTestBin(repoRoot)
 
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)

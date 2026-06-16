@@ -33,17 +33,13 @@ proc q(value: string): string = quoteShell(value)
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
 
-proc compileRepro(tempRoot: string): string =
-  result = tempRoot / "bin" / addFileExt("repro", ExeExt)
-  createDir(parentDir(result))
-  let root = repoRoot()
-  let args = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--nimcache:" & root / "build" / "nimcache" / "m12-workspace-list-repro",
-    "--out:" & result,
-    root / "apps" / "repro" / "repro.nim",
-  ]
-  discard requireSuccess(shellCommand(args), root)
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary(): string =
+  requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 # ---- manifest TOML strings ------------------------------------------------
 
@@ -103,7 +99,7 @@ type
 
 proc setupFixture(slug: string): M12ListFixture =
   result.scratch = createTempDir("repro-m12-list-" & slug & "-", "")
-  result.reproBin = compileRepro(result.scratch)
+  result.reproBin = reproBinary()
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)

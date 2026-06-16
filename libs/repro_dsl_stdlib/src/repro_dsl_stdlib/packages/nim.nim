@@ -92,6 +92,13 @@ package nim:
           alias = "--mm:",
           format = concat
         boolFlag threadsOn is bool, alias = "--threads:on"
+        # Test-Fixtures-In-Build-Graph M2: ``--app:lib`` produces a shared
+        # library (``.so`` / ``.dylib`` / ``.dll``) rather than an
+        # executable. The monitor shim (``repro_monitor_shim``) is built
+        # this way; expressing it as a typed flag lets the shim become a
+        # graph edge (the ``test-fixtures`` collection in ``repro.nim``)
+        # instead of a per-test runtime ``nim c --app:lib`` shell-out.
+        boolFlag appLib is bool, alias = "--app:lib"
         boolFlag hintsOff is bool, alias = "--hints:off"
         boolFlag warningsOff is bool, alias = "--warnings:off"
         flag disabledHints is seq[string],
@@ -205,13 +212,21 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        appLib = false;
+        threadsOn = false;
         actionId = "";
         deps: openArray[string] = [];
         after: openArray[BuildActionDef] = []): BuildActionDef
     {.discardable.} =
+  ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
+  ## added to the convenience alias so the monitor-shim fixture edge in
+  ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` through
+  ## the ``binary``-shorthand surface the rest of the build block uses
+  ## (the long-form ``output = ...`` proc already exposed these flags).
   discard imports
   c(pkg = pkg, source = source, output = binary, defines = defines,
-    paths = paths, actionId = actionId, deps = deps, after = after)
+    paths = paths, appLib = appLib, threadsOn = threadsOn,
+    actionId = actionId, deps = deps, after = after)
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

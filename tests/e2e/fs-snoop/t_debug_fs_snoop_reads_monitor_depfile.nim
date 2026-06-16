@@ -1,6 +1,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_monitor_depfile
+from repro_test_support import requireBinary, monitorShimPath
 
 when not (defined(macosx) or defined(linux)):
   {.warning[UnreachableCode]: off.}
@@ -186,29 +187,6 @@ proc shellCommand(args: openArray[string]; env: openArray[(string, string)] = []
     parts.add(q(arg))
   parts.join(" ")
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath,
-    sourcePath
-  ]), repoRoot)
-
-proc compileShim(repoRoot, outputPath: string) =
-  var args = @[
-    "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / "e2e-fs-snoop-shim",
-    "--out:" & outputPath
-  ]
-  when defined(macosx):
-    args.add("--path:" & repoRoot / "libs" / "repro_monitor_hooks" / "src")
-    args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
-      "repro_monitor_shim" / "macos_interpose.nim")
-  else:
-    args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
-      "repro_monitor_shim" / "linux_preload.nim")
-  discard requireSuccess(shellCommand(args), repoRoot)
-
 proc compileFixture(sourcePath, outputPath: string) =
   discard requireSuccess(shellCommand(["cc", "-pthread", sourcePath, "-o", outputPath]))
 
@@ -234,13 +212,21 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     createDir(binDir)
     createDir(outDir)
 
-    let shimDylib =
-      when defined(linux):
-        binDir / "librepro_monitor_shim.so"
-      else:
-        binDir / "librepro_monitor_shim.dylib"
-    let fsSnoopBin = binDir / "repro-fs-snoop"
-    let reproBin = binDir / "repro"
+    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling
+    # one per test; ``prepareMonitorTools`` resolves the identical path.
+    let shimDylib = requireBinary(monitorShimPath(repoRoot),
+      "reprobuild.test_fixtures.monitor_shim")
+    # Test-Fixtures-In-Build-Graph M3: the standalone fs-snoop driver and the
+    # ``repro`` CLI are now the SAME graph-built ``build/bin/repro`` image
+    # (Executable-Consolidation M1 folded fs-snoop into ``repro internal
+    # fs-snoop``). Assert the graph artifact exists instead of compiling either
+    # one at test runtime; the fs-snoop invocation prepends the ``internal
+    # fs-snoop`` selector below.
+    let reproBin = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
+    let fsSnoopBin = reproBin
     let fixtureSource = tempRoot / "fs_snoop_fixture.c"
     let fixtureBin = binDir / "fs-snoop-fixture"
     let inputPath = tempRoot / "input.txt"
@@ -254,24 +240,10 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     writeFile(inputPath, "parent input\n")
     writeFile(childInputPath, "child input\n")
 
-    compileShim(repoRoot, shimDylib)
-    # Executable-Consolidation M1 deleted apps/repro-fs-snoop; the standalone
-    # fs-snoop driver this test invokes directly is reproduced by compiling the
-    # same four-line wrapper (runThinApp("repro-fs-snoop") → runFsSnoopCli),
-    # written under repoRoot so config.nims resolves as before.
-    let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
-      "e2e-repro-fs-snoop" / "repro_fs_snoop.nim"
-    createDir(parentDir(fsSnoopSource))
-    writeFile(fsSnoopSource,
-      "import repro_cli_support\n\nwhen isMainModule:\n" &
-      "  quit runThinApp(\"repro-fs-snoop\")\n")
-    compileNim(repoRoot, fsSnoopSource, fsSnoopBin, "e2e-repro-fs-snoop")
-    compileNim(repoRoot, repoRoot / "apps" / "repro" / "repro.nim",
-      reproBin, "e2e-repro")
     compileFixture(fixtureSource, fixtureBin)
 
     let fsOutput = requireSuccess(shellCommand([
-      fsSnoopBin,
+      fsSnoopBin, "internal", "fs-snoop",
       "--depfile", depfile,
       "--events", "jsonl",
       "--event-stream", eventsPath,

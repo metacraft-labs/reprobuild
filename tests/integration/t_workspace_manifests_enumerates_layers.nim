@@ -49,17 +49,13 @@ proc requireGit(command: string; cwd = ""): string =
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
 
-proc compileRepro(tempRoot: string): string =
-  result = tempRoot / "bin" / addFileExt("repro", ExeExt)
-  createDir(parentDir(result))
-  let root = repoRoot()
-  let args = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--nimcache:" & root / "build" / "nimcache" / "m12-workspace-manifests-repro",
-    "--out:" & result,
-    root / "apps" / "repro" / "repro.nim",
-  ]
-  discard requireSuccess(shellCommand(args), root)
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary(): string =
+  requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 # ---- bare-repo seed fixture (mirror M8 composer test) ----------------------
 
@@ -199,7 +195,7 @@ suite "M12 — repro workspace manifests (enumerates layers)":
     else:
       let scratch = createTempDir("repro-m12-manifests-twolayer-", "")
       defer: removeDir(scratch)
-      let reproBin = compileRepro(scratch)
+      let reproBin = reproBinary()
 
       let publicBare = scratch / "bare-public.git"
       let privateBare = scratch / "bare-private.git"
@@ -282,7 +278,7 @@ suite "M12 — repro workspace manifests (enumerates layers)":
     # ``.repo/workspace.toml``.
     let scratch = createTempDir("repro-m12-manifests-bare-", "")
     defer: removeDir(scratch)
-    let reproBin = compileRepro(scratch)
+    let reproBin = reproBinary()
     let workspaceRoot = scratch / "workspace"
     createDir(workspaceRoot)
     createDir(workspaceRoot / ".repo")  # empty .repo dir
@@ -305,7 +301,7 @@ suite "M12 — repro workspace manifests (enumerates layers)":
     else:
       let scratch = createTempDir("repro-m12-manifests-json-", "")
       defer: removeDir(scratch)
-      let reproBin = compileRepro(scratch)
+      let reproBin = reproBinary()
 
       let publicBare = scratch / "bare-public.git"
       seedBareWithFiles(gitBin, scratch, publicBare, [

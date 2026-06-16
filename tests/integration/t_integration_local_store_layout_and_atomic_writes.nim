@@ -26,10 +26,15 @@
 ## emits its outcome to a per-worker JSON status file. This is a real
 ## concurrency exercise — no synchronous stand-ins.
 
-import std/[json, monotimes, os, osproc, sequtils, streams, strutils,
+import std/[json, monotimes, os, osproc, streams, strutils,
     tempfiles, times, unittest]
 
 import repro_local_store
+# Only ``requireBinary`` / ``MissingTestFixtureError`` are pulled in from the
+# test-support library: this file drives the ``repro`` CLI via its own
+# ``quoteShell`` + ``execCmdEx`` plumbing and has no need for the rest of the
+# surface.
+from repro_test_support import requireBinary, MissingTestFixtureError
 
 const BarrierFileName = "go.barrier"
 
@@ -155,6 +160,30 @@ proc readStatusJson(path: string): JsonNode =
         discard
     sleep(10)
   raise newException(OSError, "status file never materialized: " & path)
+
+proc findReproRepoRoot(): string =
+  ## Locate the in-repo root by walking up from the test binary location
+  ## until the tree containing ``libs`` and ``apps/repro/repro.nim`` is found.
+  var current = getAppFilename().parentDir
+  for _ in 0 .. 8:
+    if dirExists(current / "libs") and
+        fileExists(current / "apps" / "repro" / "repro.nim"):
+      return current
+    let p = current.parentDir
+    if p == current: break
+    current = p
+  ""
+
+proc reproBinary(): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime.
+  let root = findReproRepoRoot()
+  doAssert root.len > 0, "could not locate the reprobuild repo root"
+  requireBinary(root / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 # ---------------------------------------------------------------------------
 # Entry point: if invoked as a worker, dispatch and exit before unittest.
@@ -472,27 +501,8 @@ suite "integration_local_store_layout_and_atomic_writes":
     defer:
       try: removeDir(root) except OSError: discard
 
-    # Compile the public `repro` CLI binary.
-    proc findReproSource(): string =
-      var current = getAppFilename().parentDir
-      for _ in 0 .. 8:
-        if dirExists(current / "libs") and
-            fileExists(current / "apps" / "repro" / "repro.nim"):
-          return current / "apps" / "repro" / "repro.nim"
-        let p = current.parentDir
-        if p == current: break
-        current = p
-      ""
-    let source = findReproSource()
-    check source.len > 0
-    let outBin = root / "repro-bin" / "repro.exe"
-    createDir(outBin.parentDir)
-    let buildArgs = @["nim", "c", "--hints:off", "--verbosity:0",
-      "--nimcache:" & (root / "nimcache-repro"),
-      "--out:" & outBin, source]
-    let buildCmd = buildArgs.mapIt(quoteShell(it)).join(" ")
-    let buildRes = execCmdEx(buildCmd)
-    check buildRes.exitCode == 0
+    # Drive the graph-built public `repro` CLI binary.
+    let outBin = reproBinary()
     check fileExists(outBin)
 
     let storeRoot = root / "store"

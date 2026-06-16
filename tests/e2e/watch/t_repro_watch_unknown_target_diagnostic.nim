@@ -114,13 +114,13 @@ suite "t_repro_watch_unknown_target_diagnostic":
       if pathExists(daemon.socket):
         removeFile(daemon.socket)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+    # Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+    # (``reprobuild.apps.repro`` → ``build/bin/repro``, built by the apps
+    # collection before tests run). Assert it exists instead of recompiling
+    # ``apps/repro/repro.nim`` at test runtime.
+    let reproBin = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
 
     let binDir = tempRoot / "bin"
     writeM3Tool(binDir)

@@ -282,40 +282,6 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
   ]), repoRoot)
 
 when defined(macosx) or defined(linux):
-  proc compileShim(repoRoot, outputPath: string) =
-    when defined(macosx):
-      let arm64Path = outputPath & ".arm64"
-      let arm64ePath = outputPath & ".arm64e"
-      let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-        "--path:" & monitorHooksPath,
-        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim",
-        "--out:" & arm64Path,
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-      ]), repoRoot)
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-        "--passC:-arch arm64e", "--passL:-arch arm64e",
-        "--path:" & monitorHooksPath,
-        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim-arm64e",
-        "--out:" & arm64ePath,
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "macos_interpose.nim"
-      ]), repoRoot)
-      discard requireSuccess(shellCommand([
-        "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
-      ]), repoRoot)
-    else:
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-        "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-local-shim",
-        "--out:" & outputPath,
-        repoRoot / "libs" / "repro_monitor_shim" / "src" /
-          "repro_monitor_shim" / "linux_preload.nim"
-      ]), repoRoot)
-
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
     let binDir = tempRoot / "bin"
@@ -323,12 +289,12 @@ when defined(macosx) or defined(linux):
     createDir(binDir)
     createDir(libDir)
     result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    compileShim(repoRoot, result.shim)
+    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+    # per test. The host-native single-arch shim is correct: the test process is
+    # host-arch, so the former universal (lipo) build is unnecessary.
+    result.shim = requireBinary(monitorShimPath(repoRoot),
+      "reprobuild.test_fixtures.monitor_shim")
     # Executable-Consolidation M1: apps/repro-fs-snoop was deleted; compile the
     # synthesized standalone fs-snoop wrapper instead (same runFsSnoopCli path).
     compileNim(repoRoot,
@@ -968,16 +934,14 @@ proc buildCurrentProject(reproBin, projectRoot, pathValue: string;
     args.add(arg)
   requireSuccess(shellCommand(args, entries), projectRoot)
 
-proc compilePublicReproTestBin(repoRoot: string): string =
-  result = repoRoot / "build" / "test-bin" / "repro"
-  createDir(result.splitPath.head)
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      "m35-relative-public-repro",
-    "--out:" & result,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
+proc reproBinary(repoRoot: string): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime.
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc reportAction(report: JsonNode; id: string): JsonNode =
   for item in report{"actions"}:
@@ -1005,13 +969,7 @@ suite "e2e_local_reprobuild_project_build":
           if pathExists(daemon.socket):
             removeFile(daemon.socket)
 
-        let reproBin = tempRoot / "repro"
-        discard requireSuccess(shellCommand([
-          "nim", "c", "--verbosity:0", "--hints:off",
-          "--nimcache:" & (tempRoot / "nimcache-repro"),
-          "--out:" & reproBin,
-          repoRoot / "apps" / "repro" / "repro.nim"
-        ]), repoRoot)
+        let reproBin = reproBinary(repoRoot)
         let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
 
         let binDir = tempRoot / "fixture-bin"
@@ -1074,13 +1032,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
@@ -1125,13 +1077,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
@@ -1196,13 +1142,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
@@ -1250,7 +1190,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let binDir = tempRoot / "bin"
       writeM46FixtureTool(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")
@@ -1310,7 +1250,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let binDir = tempRoot / "bin"
       writeM47GccFixtureTool(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")
@@ -1365,7 +1305,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       when defined(macosx) or defined(linux):
         let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
         let monitorEnv = [
@@ -1433,7 +1373,7 @@ suite "e2e_local_reprobuild_project_build":
           if pathExists(daemon.socket):
             removeFile(daemon.socket)
 
-        let reproBin = compilePublicReproTestBin(repoRoot)
+        let reproBin = reproBinary(repoRoot)
         let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
         let monitorEnv = [
           ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
@@ -1490,7 +1430,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
       let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
@@ -1575,7 +1515,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
       discard buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
@@ -1649,7 +1589,7 @@ suite "e2e_local_reprobuild_project_build":
       let tempRoot = createTempDir("repro-m55-provider-fast-path", "")
       defer: removeDir(tempRoot)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       let modulePath = projectRoot / "reprobuild.nim"
       writeM53BuiltinFsProject(modulePath)
@@ -1681,7 +1621,7 @@ suite "e2e_local_reprobuild_project_build":
       let tempRoot = createTempDir("repro-m54-work-root", "")
       defer: removeDir(tempRoot)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let sharedWorkRoot = tempRoot / "shared-work"
       let projectA = tempRoot / "a" / "project"
       let projectB = tempRoot / "b" / "project"
@@ -1717,7 +1657,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
@@ -1731,7 +1671,7 @@ suite "e2e_local_reprobuild_project_build":
       writeProject(projectRoot / "reprobuild.nim")
 
       let selected = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", projectRoot & "#consume",
+        reproBin, "build", projectRoot & "#consume",
         "--daemon=off", "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check selected.contains("selectedTarget: consume")
@@ -1758,7 +1698,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
@@ -1773,7 +1713,7 @@ suite "e2e_local_reprobuild_project_build":
 
       let target = projectRoot & "#aggregate"
       let first = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check first.contains("selectedTarget: aggregate")
@@ -1787,7 +1727,7 @@ suite "e2e_local_reprobuild_project_build":
 
       writeFile(projectRoot / "src" / "resources" / "gamma.txt", "gamma\n")
       let added = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check added.contains("providerInvocations: 1")
@@ -1798,7 +1738,7 @@ suite "e2e_local_reprobuild_project_build":
 
       removeFile(projectRoot / "src" / "resources" / "beta.txt")
       let removed = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], [("PATH", pathValue)]), repoRoot)
       check removed.contains("providerInvocations: 1")
@@ -1823,7 +1763,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeM52StylusFixtureTool(binDir)
@@ -1839,7 +1779,7 @@ suite "e2e_local_reprobuild_project_build":
       let traceEnv = [("PATH", pathValue), ("REPRO_PROVIDER_TRACE", tracePath)]
 
       let first = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check first.contains("providerInvocations: 3")
@@ -1853,7 +1793,7 @@ suite "e2e_local_reprobuild_project_build":
 
       resetTrace(tracePath)
       let second = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check second.contains("providerInvocations: 0")
@@ -1864,7 +1804,7 @@ suite "e2e_local_reprobuild_project_build":
       writeFile(projectRoot / "styles" / "alpha.styl", "alpha-v2\n")
       resetTrace(tracePath)
       let contentChanged = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check contentChanged.contains("providerInvocations: 0")
@@ -1877,7 +1817,7 @@ suite "e2e_local_reprobuild_project_build":
       writeFile(projectRoot / "styles" / "gamma.styl", "gamma-v1\n")
       resetTrace(tracePath)
       let added = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check added.contains("providerInvocations: 1")
@@ -1891,7 +1831,7 @@ suite "e2e_local_reprobuild_project_build":
       removeFile(projectRoot / "styles" / "beta.styl")
       resetTrace(tracePath)
       let removed = requireSuccess(shellCommand([
-        "build/test-bin/repro", "build", target, "--daemon=off",
+        reproBin, "build", target, "--daemon=off",
         "--tool-provisioning=path", "--log=actions"
       ], traceEnv), repoRoot)
       check removed.contains("providerInvocations: 0")
@@ -1916,13 +1856,7 @@ suite "e2e_local_reprobuild_project_build":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      let reproBin = reproBinary(repoRoot)
 
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)

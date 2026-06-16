@@ -33,16 +33,14 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   daemon.terminate()
   raise newException(OSError, "runquotad socket did not appear")
 
-proc compilePublicReproTestBin(repoRoot: string): string =
-  result = repoRoot / "build" / "test-bin" / "repro"
-  createDir(result.splitPath.head)
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      "m51-dsl-stdlib-repro",
-    "--out:" & result,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
+proc reproBinary(repoRoot: string): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime.
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc build(reproBin, target, repoRoot: string): string =
   # Pass `--log=actions` so the per-action lines (carrying
@@ -183,7 +181,7 @@ suite "m51_dsl_stdlib_file_ops":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "src")
       writeFile(projectRoot / "src" / "input.txt", "alpha\n")
@@ -225,7 +223,7 @@ suite "m51_dsl_stdlib_file_ops":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "assets" / "nested")
       writeFile(projectRoot / "assets" / "keep.txt", "keep\n")
@@ -276,7 +274,7 @@ suite "m51_dsl_stdlib_file_ops":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "assets" / "real-dir")
       createDir(projectRoot / "assets" / "links")
@@ -334,7 +332,7 @@ suite "m51_dsl_stdlib_file_ops":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "src")
       createDir(projectRoot / "assets")
@@ -385,7 +383,7 @@ suite "m51_dsl_stdlib_file_ops":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = compilePublicReproTestBin(repoRoot)
+      let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       createDir(projectRoot / "assets" / "dist")
       createDir(projectRoot / "assets" / "tmp" / "generated")

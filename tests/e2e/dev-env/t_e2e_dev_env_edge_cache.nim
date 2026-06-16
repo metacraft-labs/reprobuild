@@ -6,27 +6,18 @@ import repro_dev_env_engine
 import repro_provider_runtime
 import repro_test_support
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
-                appLib = false) =
-  var args = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath
-  ]
-  if appLib:
-    args.insert("--app:lib", 2)
-  args.add(sourcePath)
-  discard requireSuccess(shellCommand(args), repoRoot)
-
 # prepareMonitorTools moved to libs/repro_test_support so the Windows
 # shim build (which needs ct_interpose source on the path) lives in
 # one place. cacheKey "m3-dev-env" matches the per-suite nimcache the
 # in-test copy used.
 
-proc compileRepro(repoRoot, tempRoot: string): string =
-  result = tempRoot / "repro"
-  compileNim(repoRoot, repoRoot / "apps" / "repro" / "repro.nim",
-    result, "m3-dev-env-repro")
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary(repoRoot: string): string =
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc providerText(modeValue, taskCommand: string): string =
   "import std/strutils\n" &
@@ -105,7 +96,7 @@ proc prepareCase(prefix: string): tuple[tempRoot, projectRoot, outDir,
   result.outDir = result.tempRoot / "out"
   writeFixture(result.projectRoot)
   createDir(result.outDir)
-  result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
+  result.reproBin = reproBinary(result.repoRoot)
   when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
       result.tempRoot / "monitor", "m3-dev-env")

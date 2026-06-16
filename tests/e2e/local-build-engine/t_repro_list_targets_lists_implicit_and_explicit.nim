@@ -47,6 +47,15 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   daemon.terminate()
   raise newException(OSError, "runquotad socket did not appear")
 
+proc reproBinary(repoRoot: string): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime.
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
+
 proc writeExecutable(path, content: string) =
   createDir(path.splitPath.head)
   writeFile(path, content)
@@ -124,13 +133,7 @@ suite "t_repro_list_targets_lists_implicit_and_explicit":
       if pathExists(daemon.socket):
         removeFile(daemon.socket)
 
-    let reproBin = tempRoot / "repro"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & (tempRoot / "nimcache-repro"),
-      "--out:" & reproBin,
-      repoRoot / "apps" / "repro" / "repro.nim"
-    ]), repoRoot)
+    let reproBin = reproBinary(repoRoot)
 
     let binDir = tempRoot / "bin"
     writeM5Tool(binDir)

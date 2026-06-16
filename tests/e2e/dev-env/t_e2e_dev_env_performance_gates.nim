@@ -3,25 +3,15 @@ import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
 
 import repro_test_support
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string;
-                appLib = false) =
-  var args = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath
-  ]
-  if appLib:
-    args.insert("--app:lib", 2)
-  args.add(sourcePath)
-  discard requireSuccess(shellCommand(args), repoRoot)
-
 # prepareMonitorTools is exported from libs/repro_test_support.
 
-proc compileRepro(repoRoot, tempRoot: string): string =
-  result = tempRoot / "bin" / addFileExt("repro", ExeExt)
-  createDir(parentDir(result))
-  compileNim(repoRoot, repoRoot / "apps" / "repro" / "repro.nim",
-    result, "m9-dev-env-repro")
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary(repoRoot: string): string =
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc providerText(modeValue, toolCommand: string): string =
   "import std/strutils\n" &
@@ -67,7 +57,7 @@ proc prepareCase(prefix: string): M9Case =
   result.tempRoot = createTempDir(prefix, "")
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
-  result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
+  result.reproBin = reproBinary(result.repoRoot)
   when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m9-performance-gates")
     result.fsSnoop = monitor.fsSnoop

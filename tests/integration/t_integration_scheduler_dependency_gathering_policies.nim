@@ -161,21 +161,6 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
   ]), repoRoot)
 
 when defined(macosx) or defined(linux):
-  proc compileShim(repoRoot, outputPath: string) =
-    var args = @[
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m17-shim",
-      "--out:" & outputPath
-    ]
-    when defined(macosx):
-      args.add("--path:" & repoRoot / "libs" / "repro_monitor_hooks" / "src")
-      args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim")
-    else:
-      args.add(repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "linux_preload.nim")
-    discard requireSuccess(shellCommand(args), repoRoot)
-
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
     let binDir = tempRoot / "monitor-bin"
@@ -183,12 +168,12 @@ when defined(macosx) or defined(linux):
     createDir(binDir)
     createDir(libDir)
     result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim =
-      when defined(linux):
-        libDir / "librepro_monitor_shim.so"
-      else:
-        libDir / "librepro_monitor_shim.dylib"
-    compileShim(repoRoot, result.shim)
+    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+    # per test. The host-native single-arch shim is correct: the test process is
+    # host-arch.
+    result.shim = requireBinary(monitorShimPath(repoRoot),
+      "reprobuild.test_fixtures.monitor_shim")
     # Executable-Consolidation M1: apps/repro-fs-snoop was deleted; compile the
     # synthesized standalone fs-snoop wrapper instead (same runFsSnoopCli path).
     compileNim(repoRoot,

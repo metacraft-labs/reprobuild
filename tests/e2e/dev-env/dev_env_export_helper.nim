@@ -34,21 +34,13 @@ type
     stdout*: string
     stderr*: string
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  var args = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--warnings:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath
-  ]
-  args.add(sourcePath)
-  discard requireSuccess(shellCommand(args), repoRoot)
-
-proc compileRepro*(repoRoot, tempRoot: string): string =
-  result = tempRoot / "bin" / addFileExt("repro", ExeExt)
-  createDir(parentDir(result))
-  compileNim(repoRoot, repoRoot / "apps" / "repro" / "repro.nim",
-    result, "m74-dev-env-export-repro")
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary*(repoRoot: string): string =
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc providerText*(): string =
   ## The fixture project declares a devEnv with the three signals the
@@ -85,7 +77,7 @@ proc prepareCase*(prefix: string): M74Case =
   result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
-  result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
+  result.reproBin = reproBinary(result.repoRoot)
   when isFsSnoopSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
       result.tempRoot, "m74-dev-env-export")

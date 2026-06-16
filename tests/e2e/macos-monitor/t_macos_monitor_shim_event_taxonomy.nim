@@ -1,6 +1,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_monitor_depfile
+from repro_test_support import requireBinary, monitorShimPath
 
 when defined(macosx):
   const FixtureSource = r"""
@@ -169,25 +170,6 @@ int main(int argc, char **argv) {
       parts.add(q(arg))
     parts.join(" ")
 
-  proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--verbosity:0", "--hints:off",
-      "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-      "--out:" & outputPath,
-      sourcePath
-    ]), repoRoot)
-
-  proc compileShim(repoRoot, outputPath: string) =
-    let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:" & monitorHooksPath,
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "e2e-m14-shim",
-      "--out:" & outputPath,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" / "repro_monitor_shim" /
-        "macos_interpose.nim"
-    ]), repoRoot)
-
   proc compileFixture(sourcePath, outputPath: string) =
     discard requireSuccess(shellCommand([
       "cc", "-pthread", sourcePath, "-o", outputPath
@@ -223,8 +205,18 @@ int main(int argc, char **argv) {
       createDir(binDir)
       createDir(outDir)
 
-      let shimDylib = binDir / "librepro_monitor_shim.dylib"
-      let fsSnoopBin = binDir / "repro-fs-snoop"
+      # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+      # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling
+      # one per test; ``prepareMonitorTools`` resolves the identical path.
+      let shimDylib = requireBinary(monitorShimPath(repoRoot),
+        "reprobuild.test_fixtures.monitor_shim")
+      # Test-Fixtures-In-Build-Graph M3: the standalone fs-snoop driver is now
+      # the graph-built ``build/bin/repro`` reached via ``internal fs-snoop``
+      # (Executable-Consolidation M1). Assert the artifact exists instead of
+      # compiling a wrapper; the invocation prepends ``internal fs-snoop``.
+      let fsSnoopBin = requireBinary(
+        repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+        "reprobuild.apps.repro")
       let fixtureSource = tempRoot / "macos_monitor_fixture.c"
       let fixtureBin = binDir / "macos-monitor-fixture"
       let inputPath = tempRoot / "input.txt"
@@ -236,21 +228,10 @@ int main(int argc, char **argv) {
       writeFile(inputPath, "parent input\n")
       writeFile(childInputPath, "child input\n")
 
-      compileShim(repoRoot, shimDylib)
-      # Executable-Consolidation M1 deleted apps/repro-fs-snoop; reproduce the
-      # standalone driver by compiling the same four-line wrapper, written
-      # under repoRoot so config.nims resolves as before.
-      let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
-        "e2e-m14-repro-fs-snoop" / "repro_fs_snoop.nim"
-      createDir(parentDir(fsSnoopSource))
-      writeFile(fsSnoopSource,
-        "import repro_cli_support\n\nwhen isMainModule:\n" &
-        "  quit runThinApp(\"repro-fs-snoop\")\n")
-      compileNim(repoRoot, fsSnoopSource, fsSnoopBin, "e2e-m14-repro-fs-snoop")
       compileFixture(fixtureSource, fixtureBin)
 
       discard requireSuccess(shellCommand([
-        fsSnoopBin,
+        fsSnoopBin, "internal", "fs-snoop",
         "--depfile", depfile,
         "--events", "jsonl",
         "--event-stream", eventsPath,

@@ -17,6 +17,16 @@ type
 proc q(value: string): string =
   quoteShell(value)
 
+proc reproBinary(): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime. The repo root is the test's working directory (the suite
+  ## runs from the reprobuild checkout root).
+  requireBinary(getCurrentDir() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
+
 proc pathHasExecutable(name, pathValue: string): bool =
   when defined(windows):
     findExe(name).len > 0
@@ -414,13 +424,7 @@ suite "e2e_codetracer_build_subset_without_tup":
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(shellCommand([
-        "nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin,
-        repoRoot / "apps" / "repro" / "repro.nim"
-      ]), repoRoot)
+      let reproBin = reproBinary()
 
       let projectRoot = tempRoot / "project"
       createDir(projectRoot)

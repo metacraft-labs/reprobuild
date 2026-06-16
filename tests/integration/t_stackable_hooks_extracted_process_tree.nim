@@ -2,6 +2,7 @@ import std/[algorithm, os, osproc, streams, strutils, tables, tempfiles, unittes
 
 import repro_monitor_hooks
 import repro_monitor_depfile
+from repro_test_support import requireBinary, monitorShimPath
 
 when defined(macosx) or defined(linux):
   const ParentSource = r"""
@@ -249,21 +250,6 @@ int main(int argc, char **argv) {
     if result.exitCode != 0:
       echo result.output
 
-  proc compileShim(root, outPath: string) =
-    var command =
-      "nim c --app:lib --threads:on " &
-      "--path:" & quoteShell(root / "libs/repro_monitor_shim/src") & " "
-    when defined(macosx):
-      command.add("--path:" & quoteShell(root / "libs/repro_monitor_hooks/src") & " ")
-    command.add(
-      "--nimcache:" & quoteShell(root / "build/nimcache/integration-repro-monitor-shim") & " " &
-      "--out:" & quoteShell(outPath) & " ")
-    when defined(macosx):
-      command.add(quoteShell(root / "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim"))
-    else:
-      command.add(quoteShell(root / "libs/repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim"))
-    runCommand(command)
-
   when defined(linux):
     proc compileStackableShim(root, sourcePath, outPath: string) =
       let command =
@@ -311,11 +297,11 @@ int main(int argc, char **argv) {
       let childSource = buildDir / "fixture_child.c"
       let parentExe = buildDir / "fixture_parent"
       let childExe = buildDir / "fixture_child"
-      let shimDylib =
-        when defined(linux):
-          buildDir / "librepro_monitor_shim.so"
-        else:
-          buildDir / "librepro_monitor_shim.dylib"
+      # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+      # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling
+      # one per test; ``prepareMonitorTools`` resolves the identical path.
+      let shimDylib = requireBinary(monitorShimPath(repoRoot),
+        "reprobuild.test_fixtures.monitor_shim")
       let depfile = tempRoot / "evidence.rdep"
       let parentInput = tempRoot / "parent-input.txt"
       let childInput = tempRoot / "child-input.txt"
@@ -325,7 +311,6 @@ int main(int argc, char **argv) {
       writeFile(parentInput, "parent input\n")
       writeFile(childInput, "child input\n")
 
-      compileShim(repoRoot, shimDylib)
       compileFixture(parentSource, parentExe)
       compileFixture(childSource, childExe)
 

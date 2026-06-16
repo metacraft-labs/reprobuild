@@ -241,16 +241,13 @@ proc writeScoopInstallFixtureProject(projectRoot, bucket, app, version,
     "      output = \"build/scoop-install-output.txt\")\n" &
     "    defaultBuildAction(produced)\n")
 
-proc compileReproForTest(repoRoot, tempRoot: string): string =
-  let outBin = tempRoot / "repro-bin" / "repro.exe"
-  createDir(outBin.parentDir)
-  discard requireSuccessShell(shellCmd2([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & (tempRoot / "nimcache-repro"),
-    "--out:" & outBin,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
-  outBin
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime.
+proc reproBinary(): string =
+  requireBinary(getCurrentDir() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 suite "e2e_scoop_repro_build_drives_real_install":
   when isNixSupported:
@@ -267,8 +264,9 @@ suite "e2e_scoop_repro_build_drives_real_install":
       let tempRoot = createTempDir("repro-m55-cli-install-", "")
       defer: safeRemoveTempRoot(tempRoot)
 
-      # Compile the actual `repro` CLI binary the spec says we must drive.
-      let reproBin = compileReproForTest(repoRoot, tempRoot)
+      # Drive the actual `repro` CLI binary the spec says we must drive;
+      # it is the graph-built artifact, not a runtime recompile.
+      let reproBin = reproBinary()
       check fileExists(reproBin)
 
       # Sandboxed Scoop root, installable bucket manifest (file:// URL to a

@@ -1,5 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
+from repro_test_support import requireBinary, monitorShimPath
+
 const GccProxySource = r"""
 #include <fcntl.h>
 #include <stdio.h>
@@ -936,79 +938,42 @@ proc checkConfigOutputs(projectRoot: string) =
   check readFile(projectRoot / "src" / "config" / "default_config.yaml") ==
     readFile(buildDebug / "config" / "default_config.yaml")
 
+# Test-Fixtures-In-Build-Graph M1/M3: ``repro`` is a graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``); the same consolidated image
+# also serves the fs-snoop role (``repro internal fs-snoop``). Both former
+# compile helpers (``compileRepro`` for a tempRoot copy, ``compilePublic
+# ReproTestBin`` for ``build/test-bin/repro``) targeted the SAME vanilla
+# ``apps/repro/repro.nim``, so both now assert the single graph artifact.
+proc reproGraphBinary(repoRoot: string): string =
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
+
 proc compileRepro(repoRoot, tempRoot: string): string =
-  result = tempRoot / "repro"
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & (tempRoot / "nimcache-repro"),
-    "--out:" & result,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
+  reproGraphBinary(repoRoot)
 
 proc compilePublicReproTestBin(repoRoot: string): string =
-  result = repoRoot / "build" / "test-bin" / "repro"
-  createDir(result.splitPath.head)
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      "m35-watch-relative-public-repro",
-    "--out:" & result,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
-
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath,
-    sourcePath
-  ]), repoRoot)
+  reproGraphBinary(repoRoot)
 
 when defined(macosx):
-  proc compileShim(repoRoot, outputPath: string) =
-    let arm64Path = outputPath & ".arm64"
-    let arm64ePath = outputPath & ".arm64e"
-    let monitorHooksPath = repoRoot / "libs" / "repro_monitor_hooks" / "src"
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--path:" & monitorHooksPath,
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-watch-shim",
-      "--out:" & arm64Path,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
-    discard requireSuccess(shellCommand([
-      "nim", "c", "--app:lib", "--threads:on", "--verbosity:0", "--hints:off",
-      "--passC:-arch arm64e", "--passL:-arch arm64e",
-      "--path:" & monitorHooksPath,
-      "--nimcache:" & repoRoot / "build" / "nimcache" / "m32-watch-shim-arm64e",
-      "--out:" & arm64ePath,
-      repoRoot / "libs" / "repro_monitor_shim" / "src" /
-        "repro_monitor_shim" / "macos_interpose.nim"
-    ]), repoRoot)
-    discard requireSuccess(shellCommand([
-      "lipo", "-create", "-output", outputPath, arm64Path, arm64ePath
-    ]), repoRoot)
-
   proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
       shim: string] =
     let binDir = tempRoot / "bin"
     let libDir = tempRoot / "lib"
     createDir(binDir)
     createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
-    result.shim = libDir / "librepro_monitor_shim.dylib"
-    compileShim(repoRoot, result.shim)
-    # Executable-Consolidation M1 deleted apps/repro-fs-snoop; reproduce the
-    # standalone driver by compiling the same four-line wrapper, written
-    # under repoRoot so config.nims resolves as before.
-    let fsSnoopSource = repoRoot / "build" / "test-fs-snoop" /
-      "m32-watch-repro-fs-snoop" / "repro_fs_snoop.nim"
-    createDir(parentDir(fsSnoopSource))
-    writeFile(fsSnoopSource,
-      "import repro_cli_support\n\nwhen isMainModule:\n" &
-      "  quit runThinApp(\"repro-fs-snoop\")\n")
-    compileNim(repoRoot, fsSnoopSource, result.fsSnoop, "m32-watch-repro-fs-snoop")
+    # Test-Fixtures-In-Build-Graph M3: the fs-snoop driver is the graph-built
+    # ``build/bin/repro`` (reached via ``repro internal fs-snoop``); ``repro``
+    # honors ``REPRO_FS_SNOOP`` pointing at this consolidated image. Assert it
+    # exists instead of compiling a standalone wrapper at test runtime.
+    result.fsSnoop = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
+    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+    # per test. The host-native single-arch shim is correct: the test process is
+    # host-arch, so the former universal (lipo) build is unnecessary.
+    result.shim = requireBinary(monitorShimPath(repoRoot),
+      "reprobuild.test_fixtures.monitor_shim")
 
 proc runWatchAndEdit(reproBin, target, repoRoot, pathValue, logPath, editPath,
                      editText: string; debounceMs = 50;
@@ -1205,8 +1170,7 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")
@@ -1300,8 +1264,7 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
       let binDir = tempRoot / "bin"
       writeFixtureTools(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")
@@ -1406,8 +1369,7 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
         ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
@@ -1489,8 +1451,7 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
         ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
@@ -1599,8 +1560,7 @@ when defined(macosx):
         if pathExists(daemon.socket):
           removeFile(daemon.socket)
 
-      discard compilePublicReproTestBin(repoRoot)
-      let reproBin = "build/test-bin/repro"
+      let reproBin = compilePublicReproTestBin(repoRoot)
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
       copySelectedCodeTracerProject(codeTracerRoot, projectRoot)

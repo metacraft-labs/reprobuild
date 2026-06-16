@@ -9,38 +9,39 @@
 import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_local_store
+# Only ``requireBinary`` is pulled in from the test-support library: the
+# module also exports a ``shellCommand`` that returns a ``CmdSpec``, which
+# would clash with this file's local string-returning ``shellCommand`` helper.
+from repro_test_support import requireBinary, MissingTestFixtureError
 
 proc q(value: string): string = quoteShell(value)
 
 proc shellCommand(args: openArray[string]): string =
   args.mapIt(q(it)).join(" ")
 
-proc findReproSource(): string =
-  ## Locate the in-repo `apps/repro/repro.nim` by walking up from the
-  ## test binary location.
+proc findReproRepoRoot(): string =
+  ## Locate the in-repo root by walking up from the test binary location
+  ## until the tree containing ``libs`` and ``apps/repro/repro.nim`` is found.
   var current = getAppFilename().parentDir
   for _ in 0 .. 8:
     if dirExists(current / "libs") and
         fileExists(current / "apps" / "repro" / "repro.nim"):
-      return current / "apps" / "repro" / "repro.nim"
+      return current
     let p = current.parentDir
     if p == current: break
     current = p
   ""
 
-proc compileReproCli(tempRoot: string): string =
-  ## Compile the actual `repro` CLI binary in a temp dir so the gate
-  ## drives the spec-named `repro store gc` command end-to-end.
-  let outBin = tempRoot / "repro-bin" / "repro.exe"
-  createDir(outBin.parentDir)
-  let source = findReproSource()
-  doAssert source.len > 0, "could not locate apps/repro/repro.nim"
-  let res = execCmdEx(shellCommand(["nim", "c", "--hints:off",
-    "--verbosity:0",
-    "--nimcache:" & (tempRoot / "nimcache-repro"),
-    "--out:" & outBin, source]))
-  doAssert res.exitCode == 0, "repro CLI compile failed:\n" & res.output
-  outBin
+proc reproBinary(): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime.
+  let root = findReproRepoRoot()
+  doAssert root.len > 0, "could not locate the reprobuild repo root"
+  requireBinary(root / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc realizeSimple(store: var Store; packageName, version: string;
                   payload: string): RealizeResult =
@@ -170,7 +171,7 @@ suite "integration_local_store_gc":
     let root = createTempDir("repro-m56-gc-cli-", "")
     defer:
       try: removeDir(root) except OSError: discard
-    let reproBin = compileReproCli(root)
+    let reproBin = reproBinary()
     check fileExists(reproBin)
 
     let storeRoot = root / "store"

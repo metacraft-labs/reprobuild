@@ -46,11 +46,15 @@ proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
   args.add(sourcePath)
   discard requireSuccess(shellCommand(args), repoRoot)
 
-proc compileRepro*(repoRoot, tempRoot: string): string =
-  result = tempRoot / "bin" / addFileExt("repro", ExeExt)
-  createDir(parentDir(result))
-  compileNim(repoRoot, repoRoot / "apps" / "repro" / "repro.nim",
-    result, "m76-shell-hook-repro")
+# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
+# / the apps collection before tests run). Assert it exists and use it instead
+# of recompiling ``apps/repro/repro.nim`` at test runtime. ``compileNim`` is
+# kept because ``compileShim`` still compiles the counting shim from source
+# (a later milestone moves that into the build graph).
+proc reproBinary*(repoRoot: string): string =
+  requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc shimSource(): string =
   ## Counting shim: opens the file at ``$REPRO_M76_SHIM_COUNTER``,
@@ -125,7 +129,7 @@ proc prepareShellHookCase*(prefix: string): ShellHookCase =
   result.tempRoot = expandFilename(createTempDir(prefix, ""))
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
-  result.reproBin = compileRepro(result.repoRoot, result.tempRoot)
+  result.reproBin = reproBinary(result.repoRoot)
   result.shimBin = compileShim(result.repoRoot, result.tempRoot)
   result.shimCounter = result.tempRoot / "shim-counter.bin"
   writeFile(result.shimCounter, "")  # start at zero

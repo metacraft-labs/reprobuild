@@ -144,15 +144,15 @@ proc findAlternateCc(currentCc: string): string =
         return candidate
   ""
 
-proc buildRepro(repoRoot, tempRoot: string): string =
-  let reproBin = tempRoot / "repro"
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & (tempRoot / "nimcache-repro"),
-    "--out:" & reproBin,
-    repoRoot / "apps" / "repro" / "repro.nim"
-  ]), repoRoot)
-  reproBin
+proc reproBinary(): string =
+  ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
+  ## (``reprobuild.apps.repro`` → ``build/bin/repro``, built by
+  ## ``just bootstrap`` / the apps collection before tests run). Assert it
+  ## exists and drive it instead of recompiling ``apps/repro/repro.nim`` at
+  ## test runtime. The repo root is the test's working directory (the suite
+  ## runs from the reprobuild checkout root).
+  requireBinary(getCurrentDir() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
 
 proc writeFixture(projectRoot: string) =
   createDir(projectRoot)
@@ -229,7 +229,7 @@ suite "e2e_repro_develop_cmake":
       else:
         let tempRoot = createTempDir("repro-m9-cmake-build", "")
         defer: removeDir(tempRoot)
-        let reproBin = buildRepro(repoRoot, tempRoot)
+        let reproBin = reproBinary()
         let projectRoot = tempRoot / "project"
         writeFixture(projectRoot)
 
@@ -264,7 +264,7 @@ suite "e2e_repro_develop_cmake":
 
         let tempRoot = createTempDir("repro-m9-cmake-identity", "")
         defer: removeDir(tempRoot)
-        let reproBin = buildRepro(repoRoot, tempRoot)
+        let reproBin = reproBinary()
         let projectRoot = tempRoot / "project"
         writeFixture(projectRoot)
 
@@ -301,7 +301,7 @@ suite "e2e_repro_develop_cmake":
       else:
         let tempRoot = createTempDir("repro-m9-cmake-portability", "")
         defer: removeDir(tempRoot)
-        let reproBin = buildRepro(repoRoot, tempRoot)
+        let reproBin = reproBinary()
         let pathProject = tempRoot / "path-project"
         let nixProject = tempRoot / "nix-project"
         writeFixture(pathProject)
