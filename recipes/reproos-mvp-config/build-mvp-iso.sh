@@ -726,10 +726,29 @@ if [ "${MVP_INCLUDE_MULTI_DE:-0}" = "1" ]; then
   : "${MVP_INCLUDE_DE0_SESSION:=1}"
   : "${MVP_INCLUDE_DE0_DBUS:=1}"
   : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
-  export REPRO_GRUB_VARIANT=multi-de
-  : "${REPRO_GRUB_DEFAULT:=0}"
-  : "${REPRO_GRUB_TIMEOUT:=5}"
-  export REPRO_GRUB_DEFAULT REPRO_GRUB_TIMEOUT
+
+  # DEM1 vs DEM2 selection model. Default is "grub" (DEM1: 4-entry GRUB
+  # menu + repro-de-select.service flips display-manager.service at
+  # boot from `repro.de=<name>` cmdline). Set MVP_DE_SELECTION_MODE=login
+  # for DEM2 (single-image SDDM greeter that lists 3 sessions; user
+  # picks at greeter UI).
+  : "${MVP_DE_SELECTION_MODE:=grub}"
+  case "$MVP_DE_SELECTION_MODE" in
+    grub)
+      export REPRO_GRUB_VARIANT=multi-de
+      : "${REPRO_GRUB_DEFAULT:=0}"
+      : "${REPRO_GRUB_TIMEOUT:=5}"
+      export REPRO_GRUB_DEFAULT REPRO_GRUB_TIMEOUT
+      ;;
+    login)
+      # DEM2: single-entry GRUB (SDDM does the selection at login). No
+      # need to expose `repro.de=<name>` cmdline parameters.
+      export REPRO_GRUB_VARIANT=single
+      ;;
+    *)
+      die "MVP_DE_SELECTION_MODE='$MVP_DE_SELECTION_MODE' invalid (must be 'grub' or 'login')"
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -967,20 +986,39 @@ fi
 if [ "${MVP_INCLUDE_MULTI_DE:-0}" = "1" ]; then
   # Implies HYPRLAND + GNOME + PLASMA + DE0-* already set in the pre-stage
   # implication block above. This stage runs AFTER 4h/4i/4j (each
-  # individually idempotent + their sentinels short-circuit a re-apply);
-  # the DEM1 composer just plants the DE-selector + the union-composed
-  # /etc/profile.d/reproos-libpath.sh + the /usr/share/wayland-sessions
-  # canonical session files + rips out the per-DE display-manager.service
-  # wiring so repro-de-select.service owns the choice at boot.
-  log "stage 4k: DEM1 multi-DE composition (selector + GRUB menu + libpath compose)"
-  DEM1_SH="$SCRIPT_DIR/build-mvp-multi-de-iso.sh"
-  if [ ! -f "$DEM1_SH" ]; then
-    die "MVP_INCLUDE_MULTI_DE=1 but $DEM1_SH missing"
+  # individually idempotent + their sentinels short-circuit a re-apply).
+  #
+  # MVP_DE_SELECTION_MODE picks the composer (default: grub).
+  #
+  #   grub  -> DEM1: build-mvp-multi-de-iso.sh
+  #            (GRUB-cmdline repro.de=<name> + repro-de-select.service
+  #            flips display-manager.service at boot)
+  #
+  #   login -> DEM2: build-mvp-multi-de-sddm-iso.sh
+  #            (single SDDM greeter lists 3 sessions; user picks at
+  #            greeter UI; no per-DE GRUB entries)
+  case "${MVP_DE_SELECTION_MODE:-grub}" in
+    grub)
+      log "stage 4k: DEM1 multi-DE composition (GRUB selection: selector + 4-entry menu + libpath compose)"
+      DEM_SH="$SCRIPT_DIR/build-mvp-multi-de-iso.sh"
+      DEM_EXTRA_ARGS=( --default-de hyprland )
+      ;;
+    login)
+      log "stage 4k: DEM2 multi-DE composition (login selection: SDDM greeter + 3 sessions + libpath compose)"
+      DEM_SH="$SCRIPT_DIR/build-mvp-multi-de-sddm-iso.sh"
+      DEM_EXTRA_ARGS=()
+      ;;
+    *)
+      die "MVP_DE_SELECTION_MODE='$MVP_DE_SELECTION_MODE' invalid (must be 'grub' or 'login')"
+      ;;
+  esac
+  if [ ! -f "$DEM_SH" ]; then
+    die "MVP_INCLUDE_MULTI_DE=1 MVP_DE_SELECTION_MODE=${MVP_DE_SELECTION_MODE:-grub} but composer missing: $DEM_SH"
   fi
-  MVP_OVERLAY_DIR="$OVERLAY" bash "$DEM1_SH" \
+  MVP_OVERLAY_DIR="$OVERLAY" bash "$DEM_SH" \
     --overlay-dir "$OVERLAY" \
     --allow-online \
-    --default-de hyprland \
+    "${DEM_EXTRA_ARGS[@]}" \
     2>&1 | sed 's/^/[d1]   /'
   log "stage 4k DONE"
 fi
