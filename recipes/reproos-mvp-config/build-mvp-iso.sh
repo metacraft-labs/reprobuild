@@ -1060,6 +1060,47 @@ if [ "$STAGE" = "iso" ] || [ "$STAGE" = "initramfs" ]; then
   AUGMENTED_INITRAMFS="$OUT_DIR/initramfs-mvp.cpio.gz"
   EXTRA_CPIO="$OUT_DIR/overlay.cpio.gz"
 
+  # Catalog completeness fix #2: build /etc/ld.so.cache AT BUILD TIME
+  # via host's `ldconfig -r $OVERLAY` (chroot-style cache build). This
+  # makes the runtime linker resolve all catalog-planted libs without
+  # ANY shell-env dependency (no LD_LIBRARY_PATH, no /etc/profile.d
+  # sourcing, no login-shell requirement). Critical for the case where
+  # gnome-shell / kwin_wayland / etc are invoked from a non-login
+  # subshell context (e.g. the vm-harness assertion runner).
+  #
+  # Only runs if ld.so.conf.d/00-reproos-linux.conf was planted (i.e.
+  # DE0-G ran). Idempotent (re-runs are cheap).
+  if [ -f "$OVERLAY/etc/ld.so.conf.d/00-reproos-linux.conf" ]; then
+    # Probe for host's ldconfig (real ELF, not the libc-bin wrapper).
+    LDCONFIG_HOST=""
+    for cand in /sbin/ldconfig.real /usr/sbin/ldconfig.real \
+                /sbin/ldconfig /usr/sbin/ldconfig; do
+      if [ -x "$cand" ]; then LDCONFIG_HOST="$cand"; break; fi
+    done
+    if [ -n "$LDCONFIG_HOST" ]; then
+      # Ensure /etc/ld.so.conf exists; ldconfig -r reads from
+      # $OVERLAY/etc/ld.so.conf.
+      if [ ! -f "$OVERLAY/etc/ld.so.conf" ]; then
+        echo 'include /etc/ld.so.conf.d/*.conf' > "$OVERLAY/etc/ld.so.conf"
+      fi
+      # Run inside fakeroot semantics: -r chroots without needing root.
+      # -X skips updating /etc/ld.so.cache symlinks (we want the cache
+      # itself; symlinks may already be planted by the per-catalog
+      # SONAME-link step).
+      log "stage 5a: building /etc/ld.so.cache at build time via $LDCONFIG_HOST -r $OVERLAY"
+      "$LDCONFIG_HOST" -X -r "$OVERLAY" 2>&1 | sed 's|^|  ldconfig: |' || \
+        log "  warn: ldconfig -r exited non-zero (cache build may be partial)"
+      if [ -f "$OVERLAY/etc/ld.so.cache" ]; then
+        cache_size=$(stat -c %s "$OVERLAY/etc/ld.so.cache" 2>/dev/null || echo 0)
+        log "  /etc/ld.so.cache built: $cache_size bytes"
+      else
+        log "  warn: /etc/ld.so.cache NOT created"
+      fi
+    else
+      log "stage 5a: skipped (no host ldconfig found)"
+    fi
+  fi
+
   ( cd "$OVERLAY" && \
     find . -print0 | LC_ALL=C sort -z | \
     cpio --null --owner=0:0 -o -H newc 2>/dev/null ) | \
