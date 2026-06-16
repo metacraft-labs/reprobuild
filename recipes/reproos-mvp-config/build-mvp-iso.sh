@@ -696,6 +696,32 @@ if [ "${MVP_INCLUDE_DE0_SESSION:-0}" = "1" ]; then
   fi
   bash "$DE0_S_SH" "$OVERLAY" 2>&1 | sed 's/^/[d1]   /'
   log "stage 4e DONE"
+
+  # DE0-S has a hard prerequisite on DE0-D (logind's Wants=dbus.service
+  # fails silently without a running bus; CreateSession() never returns
+  # a usable XDG_RUNTIME_DIR). Imply DE0-D here so flipping the session
+  # knob also brings up D-Bus, matching the recipe's documented graph
+  # in ReproOS-Wayland-DEs-PoC.milestones.org.
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+fi
+
+# ---------------------------------------------------------------------------
+# Stage 4f (opt-in): DE0-D D-Bus foundation overlay-plant.
+#
+# Plants dbus-broker (or dbus-daemon) + system & user units +
+# messagebus user. Auto-implied by MVP_INCLUDE_DE0_SESSION=1 (see
+# stage 4e comment above) but can be set independently for a D-Bus-
+# only smoke build.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_DE0_DBUS:-0}" = "1" ]; then
+  log "stage 4f: DE0-D D-Bus overlay-plant"
+  DE0_D_SH="$SCRIPT_DIR/de0-dbus.sh"
+  if [ ! -f "$DE0_D_SH" ]; then
+    die "MVP_INCLUDE_DE0_DBUS=1 but $DE0_D_SH missing"
+  fi
+  bash "$DE0_D_SH" "$OVERLAY" 2>&1 | sed 's/^/[d1]   /'
+  log "stage 4f DONE"
 fi
 
 log ""
