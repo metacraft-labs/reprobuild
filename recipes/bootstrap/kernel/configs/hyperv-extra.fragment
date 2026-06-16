@@ -22,6 +22,29 @@ CONFIG_DRM_HYPERV=y
 CONFIG_PCI_HYPERV=y
 CONFIG_PCI_HYPERV_INTERFACE=y
 
+# DE0-K — DRM + framebuffer subsystem for Wayland compositors on
+# /dev/dri/card0. DRM_HYPERV (above) is the Hyper-V SyntheticVideo KMS
+# driver; it depends on CONFIG_DRM and (effectively) CONFIG_DRM_KMS_HELPER
+# + CONFIG_DRM_GEM_SHMEM_HELPER, all already on in the defconfig base.
+# This stanza adds the legacy framebuffer + fbdev-emulation surface so
+# (a) the boot console shows up via FRAMEBUFFER_CONSOLE even before DRM
+# probes, and (b) Wayland compositors that fall back to fbdev work too.
+# CONFIG_FB_SIMPLE provides a generic FB driver for firmware-handed-off
+# framebuffers (UEFI GOP); it depends on FB and on !DRM_SIMPLEDRM (we keep
+# DRM_SIMPLEDRM off). CONFIG_DRM_FBDEV_EMULATION is the fbdev compat shim
+# layered on top of DRM modesetting drivers (e.g. hyperv_drm). Built-in
+# (=y) because R8 disables CONFIG_MODULES.
+CONFIG_DRM=y
+CONFIG_FB=y
+CONFIG_FB_SIMPLE=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_DRM_FBDEV_EMULATION=y
+
+# DRM_VIRTIO_GPU — keep enabled so the same kernel boots under KVM/QEMU
+# for cross-host smoke runs (already on in the defconfig base; pinning
+# explicitly here so the intent survives a future merge_config sweep).
+CONFIG_DRM_VIRTIO_GPU=y
+
 # Serial console on COM1 @ 115200 8N1 — what vm-harness tails via the
 # Hyper-V serial-pipe-to-named-pipe path.
 CONFIG_SERIAL_8250=y
