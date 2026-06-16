@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libffi.so.8",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libffi8",
+    "snapshot": "ubuntu/jammy/20220117T000000Z",
+    "version": "3.4.2-4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libffi8",
+      "deb_sha256": "b4f88c91fa6f4c942097be6abfc365fb133c5e147640168cbb7704fd855eac10",
+      "deb_size_bytes": 22326,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.4.2-4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libffi.so.8.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libffi.so.8"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libffi 3.4.2-4 is the jammy release build. CASCADE-E DEPENDENCY: chained from libgobject-2.0.so.0 (DT_NEEDED libffi.so.8) which the glib2 stack pulls in to implement GValue/GClosure marshalling. Foreign function interface library."
+}

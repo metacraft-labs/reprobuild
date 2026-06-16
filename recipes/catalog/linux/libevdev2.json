@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libevdev.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libevdev2",
+    "snapshot": "ubuntu/jammy/20220401T000000Z",
+    "version": "1.12.1+dfsg-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libevdev2",
+      "deb_sha256": "78895bf7fc3506bcf2e8aca1f2c777075c00365d2a7934033352b90d5447b86d",
+      "deb_size_bytes": 39504,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libe/libevdev/libevdev2_1.12.1+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libevdev.so.2.3.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libevdev.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libevdev 1.12.1+dfsg-1 is the jammy release build. CASCADE-E SECOND BLOCKER for sway: DT_NEEDED libevdev.so.2 not provided by R9 base or any prior catalog. libinput catalog notes claim libevdev2 is a 'host runtime dep' but the R9 from-source base has no host libevdev. libevdev2 is a thin wrapper over /dev/input/event* providing key/abs/rel-axis dispatch; sway uses it to translate raw input events into its own input-device abstraction. waybar's keyboard-state module also links it. No transitive deps beyond libc."
+}

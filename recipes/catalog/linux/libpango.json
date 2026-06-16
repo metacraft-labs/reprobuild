@@ -1,0 +1,68 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libglib2.0", "snapshot": "ubuntu/jammy/20240901T000000Z"},
+    {"distro": "linux-graphics", "name": "libfribidi0", "snapshot": "ubuntu/jammy/20220427T000000Z"},
+    {"distro": "linux-graphics", "name": "libthai0", "snapshot": "ubuntu/jammy/20220325T000000Z"},
+    {"distro": "linux-graphics", "name": "libharfbuzz0b", "snapshot": "ubuntu/jammy/20250203T000000Z"},
+    {"distro": "linux-graphics", "name": "libfreetype6", "snapshot": "ubuntu/jammy/20250317T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libpango-1.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libpango",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.50.6+ds-2ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libpango-1.0-0",
+      "deb_sha256": "cbc98b6f1676ea97454639c573f81ac7578224b7733dc80b377eca82d1eb0c86",
+      "deb_size_bytes": 229548,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pango1.0/libpango-1.0-0_1.50.6+ds-2ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpango-1.0.so.0.5000.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpango-1.0.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libpangoft2-1.0-0",
+      "deb_sha256": "6590177d0dff28a473bee0f7965f3bc12302464f8fb43fdd3b3a1cddd69453b1",
+      "deb_size_bytes": 53954,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pango1.0/libpangoft2-1.0-0_1.50.6+ds-2ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0.5000.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libpangocairo-1.0-0",
+      "deb_sha256": "112050121990441b7ad72b12fdfd32a52adfb71c2cf8b466634eb925c5076706",
+      "deb_size_bytes": 39822,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pango1.0/libpangocairo-1.0-0_1.50.6+ds-2ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0.5000.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libpango 1.50.6+ds-2ubuntu1 is the jammy release build. CASCADE-E DEPENDENCY: sway DT_NEEDED libpango-1.0.so.0 + libpangocairo-1.0.so.0 (for window-title text rendering). Umbrella bundles the 3 .debs that ship under one upstream pango1.0 source package (pango-1.0, pangoft2-1.0, pangocairo-1.0)."
+}

@@ -1,0 +1,45 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libpixman", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "fontconfig", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libfreetype6", "snapshot": "ubuntu/jammy/20250317T000000Z"},
+    {"distro": "linux-graphics", "name": "libpng16-16", "snapshot": "ubuntu/jammy/20250507T000000Z"},
+    {"distro": "linux-graphics", "name": "libxcb-extras", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libxcb1", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libx11-extras", "snapshot": "ubuntu/jammy/20231003T000000Z"},
+    {"distro": "linux-graphics", "name": "zlib1g", "snapshot": "ubuntu/jammy/20221017T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libcairo.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libcairo2",
+    "snapshot": "ubuntu/jammy/20240301T000000Z",
+    "version": "1.16.0-5ubuntu2.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libcairo2",
+      "deb_sha256": "096c5309b8fb37aeb32636f13c58309005ef4aa73aaa4c4299c2e824c1fbd359",
+      "deb_size_bytes": 627714,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/c/cairo/libcairo2_1.16.0-5ubuntu2.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libcairo.so.2.11600.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libcairo.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libcairo2 1.16.0-5ubuntu2.1 is the jammy security-pocket build. CASCADE-E DEPENDENCY: sway DT_NEEDED libcairo.so.2 (for 2D drawing of window decorations, titles, and the IPC status drawing). Drags in the entire X11 + freetype + png + fontconfig closure even on a Wayland-only system because cairo's X11 backend is compiled-in unconditionally on jammy."
+}

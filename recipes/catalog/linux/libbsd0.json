@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libmd0", "snapshot": "ubuntu/jammy/20220325T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libbsd.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libbsd0",
+    "snapshot": "ubuntu/jammy/20220125T000000Z",
+    "version": "0.11.5-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libbsd0",
+      "deb_sha256": "09367acdf59f28ffb71ba7bc36c516cff03b2765930cf9be7bb7ea7273e4c312",
+      "deb_size_bytes": 44760,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libb/libbsd/libbsd0_0.11.5-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libbsd.so.0.11.5",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libbsd.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libbsd0 0.11.5-1 is the jammy release build. CASCADE-E DEPENDENCY: chained from libXdmcp (DT_NEEDED libbsd.so.0 for arc4random helpers)."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libjson-c.so.5",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libjson-c5",
+    "snapshot": "ubuntu/jammy/20230828T000000Z",
+    "version": "0.15-3~ubuntu1.22.04.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libjson-c5",
+      "deb_sha256": "5c2e5b01a03b8f185058db3946a8e01ac3750887c0a7f22dc32e49573a0c7529",
+      "deb_size_bytes": 33454,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/j/json-c/libjson-c5_0.15-3~ubuntu1.22.04.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libjson-c.so.5.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libjson-c.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libjson-c 0.15-3~ubuntu1.22.04.2 is the jammy security-pocket build (CVE updates). THIS WAS THE CASCADE-E ROOT CAUSE: swaymsg DT_NEEDED libjson-c.so.5 but neither the R9 from-source initramfs (which ships only libc/libm/libcap/libpcre2-8/libudev/libcrypt) nor any DE0-G / DE-H1 catalog supplied it. The previous DE-H2 VM run aborted with 'swaymsg: error while loading shared libraries: libjson-c.so.5: cannot open shared object file'. sway 1.7 also links libjson-c.so.5 for its IPC protocol marshalling. No transitive deps beyond libc."
+}

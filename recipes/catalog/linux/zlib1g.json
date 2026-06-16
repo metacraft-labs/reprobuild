@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libz.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "zlib1g",
+    "snapshot": "ubuntu/jammy/20221017T000000Z",
+    "version": "1:1.2.11.dfsg-2ubuntu9.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "zlib1g",
+      "deb_sha256": "9dc17e51a1be2d9ed63b7b84ef0e4e29c5abe6f1bc62cb03e7181483cce8a2f2",
+      "deb_size_bytes": 58406,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "lib/x86_64-linux-gnu/libz.so.1.2.11",
+          "soname_link": "lib/x86_64-linux-gnu/libz.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "zlib1g 1.2.11.dfsg-2ubuntu9.2 is the jammy security-pocket build. CASCADE-E DEPENDENCY: chained from libcairo / libfreetype / libpng / libgio (all DT_NEEDED libz.so.1). R9 base ships no zlib since the from-source systemd build dlopens nothing compressed. Lives under /lib/x86_64-linux-gnu/ per Debian policy for libraries needed before /usr is mounted (legacy)."
+}

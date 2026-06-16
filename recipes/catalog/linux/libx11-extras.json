@@ -1,0 +1,91 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libxcb1", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libbsd0", "snapshot": "ubuntu/jammy/20220125T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libX11.so.6",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libx11-extras",
+    "snapshot": "ubuntu/jammy/20231003T000000Z",
+    "version": "1.7.5-1ubuntu0.3+xext-1.3.4-1build1+xrender-0.9.10-1build4+xau-1.0.9-1build5+xdmcp-1.1.3-0ubuntu5"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libx11-6",
+      "deb_sha256": "d382a3064ecd7576f24661a6d234adc737b854a9a0ec1d9f42cb4d007e77d547",
+      "deb_size_bytes": 666946,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libX11.so.6.4.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libX11.so.6"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxext6",
+      "deb_sha256": "875ec849749511dff61c8cc5a775f6f93427b9c3f392fdcec6925f14428e89cd",
+      "deb_size_bytes": 31808,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxext/libxext6_1.3.4-1build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXext.so.6.4.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXext.so.6"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxrender1",
+      "deb_sha256": "a68f6db4320b5963dd499b83b6cc8c7b5cd39b05e84862d5945da9244e4c96d6",
+      "deb_size_bytes": 19678,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxrender/libxrender1_0.9.10-1build4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXrender.so.1.3.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXrender.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxau6",
+      "deb_sha256": "551fa4101394af894f5f401285eeca9756da94bb31ecb08ed36a549ec580cd10",
+      "deb_size_bytes": 7634,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxau/libxau6_1.0.9-1build5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXau.so.6.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXau.so.6"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxdmcp6",
+      "deb_sha256": "6f6c869dcfc072fa77d24b72ba127bdf15d606bdffbeba4314fb39f4f324363d",
+      "deb_size_bytes": 10904,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXdmcp.so.6.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXdmcp.so.6"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libx11-extras umbrella catalog covering libX11/libXext/libXrender/libXau/libXdmcp (5 .debs from 5 different source packages). CASCADE-E DEPENDENCY: chained from libcairo (DT_NEEDED libX11.so.6 + libXrender.so.1 + libXext.so.6 for X11 backend) and libXcb's authentication (libXau/libXdmcp). sway runs Wayland-only but libcairo still links against the X11 family unconditionally. Bundled as ONE catalog (libxcb-extras precedent) to keep the file count manageable; the dependency_closure[] lists libxcb1 + libbsd0 as parents."
+}

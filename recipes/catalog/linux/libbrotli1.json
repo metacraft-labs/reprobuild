@@ -1,0 +1,46 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libbrotlidec.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libbrotli1",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.0.9-2build6"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libbrotli1",
+      "deb_sha256": "8e6aa2dfd44df287b9fb227862f3b6062ec074dd39a247874edfe12e1dcc3841",
+      "deb_size_bytes": 315164,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/b/brotli/libbrotli1_1.0.9-2build6_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1.0.9",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1.0.9",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libbrotlidec.so.1"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libbrotlienc.so.1.0.9",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libbrotlienc.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libbrotli1 1.0.9-2build6 is the jammy release build. CASCADE-E DEPENDENCY: chained from libfreetype (DT_NEEDED libbrotlidec.so.1 for WOFF2 font decompression). Ships three SONAMEs (common+dec+enc) in one .deb; we plant all three to match the .deb layout even though only libbrotlidec is referenced at compositor start."
+}

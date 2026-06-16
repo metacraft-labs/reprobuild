@@ -8,7 +8,7 @@
 # shape.
 #
 # What this test DOES gate:
-#   - All 19 catalog JSONs parse + have the DE0-G schema fields (the 18
+#   - All 38 catalog JSONs parse + have the DE0-G schema fields (the 37
 #     planted catalogs + 1 advisory hyprland.json).
 #   - The driver composes DE0-G first then DE-H1.
 #   - Each PLANTED catalog's expected_files[] lands under
@@ -21,7 +21,7 @@
 #   - /usr/local/bin/repro-start-hyprland.sh exists, is executable, and
 #     passes `bash -n` syntax check.
 #   - /etc/profile.d/{xkb-data,glvnd}.sh export the expected env vars.
-#   - registry.json carries 24 entries (DE0-G's 6 + DE-H1's 18), sorted.
+#   - registry.json carries 43 entries (DE0-G's 6 + DE-H1's 37), sorted.
 #   - /etc/ld.so.conf.d/00-reproos-linux.conf lists DE-H1's lib store dirs.
 #   - Re-applying is a no-op (sentinel short-circuit).
 #   - --dry-run leaves the overlay untouched.
@@ -63,11 +63,14 @@ mkdir -p "$OVERLAY" "$VENDORED"
 ok()   { echo "OK: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# DE-H1 catalogs (18 planted + 1 advisory = 19).
+# DE-H1 catalogs (37 planted + 1 advisory = 38).
 DE_H1_PLANTED=(
-  fontconfig-config foot libelf1 libfcft libglvnd libinput libpixman
-  libseat libwayland-cursor libxcb-extras libxcb1 libxkbregistry sway
-  waybar wlroots xdg-desktop-portal xdg-desktop-portal-wlr xkb-data
+  fontconfig-config foot libbrotli1 libbsd0 libcairo2 libdatrie1 libelf1
+  libevdev2 libfcft libffi8 libfreetype6 libfribidi0 libglib2.0 libglvnd
+  libgraphite2-3 libharfbuzz0b libinput libjson-c5 libmd0 libpango
+  libpcre3 libpixman libpng16-16 libseat libthai0 libwayland-cursor
+  libx11-extras libxcb-extras libxcb1 libxkbregistry sway waybar wlroots
+  xdg-desktop-portal xdg-desktop-portal-wlr xkb-data zlib1g
 )
 DE_H1_ADVISORY=(hyprland)
 
@@ -94,8 +97,8 @@ assert len(d["payload_files"]) >= 1, "payload_files empty"
 PYEOF
   seen=$((seen + 1))
 done
-[ "$seen" = 19 ] || fail "expected 19 DE-H1 catalogs, found $seen"
-ok "all 19 DE-H1 catalog JSONs parse and carry schema fields"
+[ "$seen" = 38 ] || fail "expected 38 DE-H1 catalogs, found $seen"
+ok "all 38 DE-H1 catalog JSONs parse and carry schema fields"
 
 # Advisory catalog has the skip marker.
 python3 - "$CATALOG_ROOT/hyprland.json" <<'PYEOF' || fail "hyprland.json missing skip marker"
@@ -265,21 +268,26 @@ import json, sys
 with open(sys.argv[1]) as f:
     reg = json.load(f)
 assert isinstance(reg, list), "registry not a list"
-assert len(reg) == 24, f"expected 24 entries (6 DE0-G + 18 DE-H1), got {len(reg)}"
+assert len(reg) == 43, f"expected 43 entries (6 DE0-G + 37 DE-H1), got {len(reg)}"
 names = [e["name"] for e in reg]
 assert names == sorted(names), f"registry not sorted by name: {names}"
 
 de0_g = {"dejavu-fonts","fontconfig","libdrm","libwayland","libxkbcommon","mesa"}
-de_h1 = {"fontconfig-config","foot","libelf1","libfcft","libglvnd","libinput",
-         "libpixman","libseat","libwayland-cursor","libxcb-extras","libxcb1",
-         "libxkbregistry","sway","waybar","wlroots","xdg-desktop-portal",
-         "xdg-desktop-portal-wlr","xkb-data"}
+de_h1 = {"fontconfig-config","foot","libbrotli1","libbsd0","libcairo2",
+         "libdatrie1","libelf1","libevdev2","libfcft","libffi8",
+         "libfreetype6","libfribidi0","libglib2.0","libglvnd",
+         "libgraphite2-3","libharfbuzz0b","libinput","libjson-c5",
+         "libmd0","libpango","libpcre3","libpixman","libpng16-16",
+         "libseat","libthai0","libwayland-cursor","libx11-extras",
+         "libxcb-extras","libxcb1","libxkbregistry","sway","waybar",
+         "wlroots","xdg-desktop-portal","xdg-desktop-portal-wlr",
+         "xkb-data","zlib1g"}
 expected = de0_g | de_h1
 assert set(names) == expected, f"registry names mismatch:\n  missing: {expected - set(names)}\n  extra:   {set(names) - expected}"
 # Specifically: hyprland must NOT be in the registry (advisory skipped).
 assert "hyprland" not in names, "hyprland advisory catalog leaked into registry"
 PYEOF
-ok "registry.json has 24 entries (6 DE0-G + 18 DE-H1, advisory excluded), sorted"
+ok "registry.json has 43 entries (6 DE0-G + 37 DE-H1, advisory excluded), sorted"
 
 # ---------------------------------------------------------------------------
 # Stage K: ld.so.conf.d lists all DE-H1 catalogs with shared_library kinds.
@@ -293,24 +301,40 @@ import json, sys, os, hashlib, glob
 ldconf_path, store_root, catalog_root = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(ldconf_path) as f:
     lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-de_h1_names = {"fontconfig-config","foot","libelf1","libfcft","libglvnd",
-               "libinput","libpixman","libseat","libwayland-cursor",
+de_h1_names = {"fontconfig-config","foot","libbrotli1","libbsd0","libcairo2",
+               "libdatrie1","libelf1","libevdev2","libfcft","libffi8",
+               "libfreetype6","libfribidi0","libglib2.0","libglvnd",
+               "libgraphite2-3","libharfbuzz0b","libinput","libjson-c5",
+               "libmd0","libpango","libpcre3","libpixman","libpng16-16",
+               "libseat","libthai0","libwayland-cursor","libx11-extras",
                "libxcb-extras","libxcb1","libxkbregistry","sway","waybar",
-               "wlroots","xdg-desktop-portal","xdg-desktop-portal-wlr","xkb-data"}
+               "wlroots","xdg-desktop-portal","xdg-desktop-portal-wlr",
+               "xkb-data","zlib1g"}
 missing = []
 for name in de_h1_names:
     jp = os.path.join(catalog_root, f"{name}.json")
     with open(jp) as f:
         c = json.load(f)
-    has_lib = any(ef["kind"] == "shared_library"
-                  for pf in c["payload_files"] for ef in pf["expected_files"])
-    if has_lib:
+    # Determine the libdir(s) the catalog plants under by inspecting paths.
+    # libpcre3 + zlib1g historically install under /lib/x86_64-linux-gnu/.
+    libdirs = set()
+    for pf in c["payload_files"]:
+        for ef in pf["expected_files"]:
+            if ef["kind"] != "shared_library":
+                continue
+            p = ef["path"]
+            if p.startswith("usr/lib/x86_64-linux-gnu/"):
+                libdirs.add("usr/lib/x86_64-linux-gnu")
+            elif p.startswith("lib/x86_64-linux-gnu/"):
+                libdirs.add("lib/x86_64-linux-gnu")
+    if libdirs:
         version = c["package"]["version"]
         snapshot = c["package"]["snapshot"]
         h = hashlib.sha256(f"{name}|{version}|{snapshot}".encode()).hexdigest()[:16]
-        want = f"/opt/reproos-linux/store/{h}/usr/lib/x86_64-linux-gnu"
-        if want not in lines:
-            missing.append((name, want))
+        for ld in libdirs:
+            want = f"/opt/reproos-linux/store/{h}/{ld}"
+            if want not in lines:
+                missing.append((name, want))
 if missing:
     print("MISSING ld.so.conf.d entries:")
     for n, w in missing:
@@ -327,7 +351,7 @@ SENTINEL="$OVERLAY/var/lib/reproos-de-hyprland-done"
 [ -f "$SENTINEL" ] || fail "sentinel missing"
 
 grep -q "DE-H1" "$SENTINEL" || fail "sentinel body missing DE-H1 marker"
-grep -q "Planted catalogs (18)" "$SENTINEL" || fail "sentinel didn't record 18 planted catalogs"
+grep -q "Planted catalogs (37)" "$SENTINEL" || fail "sentinel didn't record 37 planted catalogs"
 grep -q "Skipped catalogs (1, advisory-only)" "$SENTINEL" || fail "sentinel didn't record 1 skipped catalog"
 ok "sentinel present + records correct planted/skipped counts"
 

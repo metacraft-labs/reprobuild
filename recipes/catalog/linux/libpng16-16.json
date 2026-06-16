@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "zlib1g", "snapshot": "ubuntu/jammy/20221017T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libpng16.so.16",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libpng16-16",
+    "snapshot": "ubuntu/jammy/20250507T000000Z",
+    "version": "1.6.37-3ubuntu0.5"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libpng16-16",
+      "deb_sha256": "aedaf460f093190489beb5fada5259d8ad7bd9182d527fee3c74aa8bc28fd93f",
+      "deb_size_bytes": 192392,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libp/libpng1.6/libpng16-16_1.6.37-3ubuntu0.5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpng16.so.16.37.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpng16.so.16"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libpng16-16 1.6.37-3ubuntu0.5 is the jammy security-pocket build. CASCADE-E DEPENDENCY: chained from libcairo / libfreetype (DT_NEEDED libpng16.so.16). The .16 ABI shipped throughout jammy lifecycle."
+}

@@ -1,0 +1,60 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libpcre3", "snapshot": "ubuntu/jammy/20240701T000000Z"},
+    {"distro": "linux-graphics", "name": "libffi8", "snapshot": "ubuntu/jammy/20220117T000000Z"},
+    {"distro": "linux-graphics", "name": "zlib1g", "snapshot": "ubuntu/jammy/20221017T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libglib-2.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libglib2.0",
+    "snapshot": "ubuntu/jammy/20240901T000000Z",
+    "version": "2.72.4-0ubuntu2.9"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libglib2.0-0",
+      "deb_sha256": "aeae7e349026617aa2a5109257631589646c8890996da1778115ac57c840f6fc",
+      "deb_size_bytes": 1467084,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/glib2.0/libglib2.0-0_2.72.4-0ubuntu2.9_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.7200.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libglib-2.0.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0.7200.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0.7200.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgio-2.0.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0.7200.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgthread-2.0.so.0.7200.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgthread-2.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libglib2.0-0 2.72.4-0ubuntu2.9 is the jammy security-pocket build. CASCADE-E DEPENDENCY: sway DT_NEEDED libglib-2.0.so.0 + libgobject-2.0.so.0 (for GObject-based pango integration). One .deb provides FIVE SONAMEs (glib, gobject, gio, gmodule, gthread) so we plant all five from one extraction. libmount + libselinux (chained from libgio) are provided by R9 base. The libglibmm-2.4 catalog (separate, planned for waybar's Gtkmm closure) depends on this catalog."
+}

@@ -4,7 +4,10 @@
 # Reads recipes/catalog/linux/{sway,wlroots,foot,waybar,xkb-data,
 # fontconfig-config,xdg-desktop-portal,xdg-desktop-portal-wlr,libelf1,
 # libxcb1,libxcb-extras,libwayland-cursor,libseat,libinput,libpixman,
-# libglvnd,libxkbregistry,libfcft}.json (18 catalogs) and for each:
+# libglvnd,libxkbregistry,libfcft,libjson-c5,libevdev2,libcairo2,
+# libglib2.0,libpango,libpcre3,libfreetype6,libpng16-16,libbrotli1,
+# libffi8,libharfbuzz0b,libfribidi0,libthai0,libdatrie1,libgraphite2-3,
+# libx11-extras,libbsd0,libmd0,zlib1g}.json (37 catalogs) and for each:
 #
 #   1. Fetches the .debs into vendored-archives/linux/ (shared with DE0-G).
 #   2. Verifies sha256 + size pins.
@@ -193,13 +196,31 @@ DE_H1_CATALOG_NAMES=(
   fontconfig-config
   foot
   hyprland
+  libbrotli1
+  libbsd0
+  libcairo2
+  libdatrie1
   libelf1
+  libevdev2
   libfcft
+  libffi8
+  libfreetype6
+  libfribidi0
+  libglib2.0
   libglvnd
+  libgraphite2-3
+  libharfbuzz0b
   libinput
+  libjson-c5
+  libmd0
+  libpango
+  libpcre3
   libpixman
+  libpng16-16
   libseat
+  libthai0
   libwayland-cursor
+  libx11-extras
   libxcb-extras
   libxcb1
   libxkbregistry
@@ -209,6 +230,7 @@ DE_H1_CATALOG_NAMES=(
   xdg-desktop-portal
   xdg-desktop-portal-wlr
   xkb-data
+  zlib1g
 )
 
 CATALOGS=()
@@ -388,12 +410,16 @@ for catalog in "${CATALOGS[@]}"; do
   PLANTED_COUNT=$((PLANTED_COUNT + 1))
 
   # ld.so.conf.d snippet line for this catalog (libs only).
+  # Some Debian packages historically install under /lib/x86_64-linux-gnu/
+  # (libpcre3, zlib1g — early-init legacy path); cover both.
   if [ "$DRY_RUN" = 0 ]; then
-    if [ -d "$store_dir/usr/lib/x86_64-linux-gnu" ]; then
-      ldconf_line="/opt/reproos-linux/store/$cat_hash/usr/lib/x86_64-linux-gnu"
-      # Avoid duplicate lines if rerun without sentinel.
-      grep -qxF "$ldconf_line" "$LDCONF" 2>/dev/null || echo "$ldconf_line" >> "$LDCONF"
-    fi
+    for libdir in "usr/lib/x86_64-linux-gnu" "lib/x86_64-linux-gnu"; do
+      if [ -d "$store_dir/$libdir" ]; then
+        ldconf_line="/opt/reproos-linux/store/$cat_hash/$libdir"
+        # Avoid duplicate lines if rerun without sentinel.
+        grep -qxF "$ldconf_line" "$LDCONF" 2>/dev/null || echo "$ldconf_line" >> "$LDCONF"
+      fi
+    done
   fi
 
   # Append registry entry.
@@ -573,6 +599,74 @@ EOF
 export __EGL_VENDOR_LIBRARY_DIRS="/opt/reproos-linux/store/$mesa_hash/usr/share/glvnd/egl_vendor.d"
 EOF
 
+  # DE-H2 cascade E fix: the R9 from-source initramfs ships NO ldconfig
+  # and NO /etc/ld.so.cache builder. Without a cache the dynamic linker
+  # ignores /etc/ld.so.conf.d/*.conf entries entirely; only DT_RPATH /
+  # DT_RUNPATH / default-path lookups succeed. We work around this by
+  # exporting LD_LIBRARY_PATH derived from the same per-catalog libdirs
+  # that landed in 00-reproos-linux.conf. The compositor's start shim
+  # sources /etc/profile.d/*.sh; the autologin user shell does too.
+  log "planting /etc/profile.d/reproos-libpath.sh (DE-H2 cascade E)"
+  # Build the colon-separated path list from non-comment lines of LDCONF.
+  LD_PATHS=""
+  while IFS= read -r line; do
+    case "$line" in
+      ""|"#"*) continue ;;
+    esac
+    if [ -z "$LD_PATHS" ]; then
+      LD_PATHS="$line"
+    else
+      LD_PATHS="$LD_PATHS:$line"
+    fi
+  done < "$LDCONF"
+  cat > "$OVERLAY_DIR/etc/profile.d/reproos-libpath.sh" <<EOF
+# DE-H1+H2: LD_LIBRARY_PATH for the catalog-planted store-tier libs.
+#
+# The R9 from-source base ships no ldconfig / ld.so.cache so the
+# /etc/ld.so.conf.d/*.conf entries are NOT consumed by the linker at
+# binary launch. Exporting LD_LIBRARY_PATH gives the same effect at
+# the user-shell level (and the repro-start-hyprland.sh shim sources
+# this file before exec'ing the compositor).
+#
+# Order matches /etc/ld.so.conf.d/00-reproos-linux.conf (DE0-G + DE-H1).
+export LD_LIBRARY_PATH="$LD_PATHS\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+EOF
+
+  # DE-H2 cascade E fix (continued): the R9 base /etc/profile is a
+  # 4-line static export and does NOT source /etc/profile.d/*.sh
+  # because the BusyBox ash login shell follows the literal POSIX
+  # /etc/profile contract. Splice in a profile.d-sourcing block so the
+  # autologin user shell inherits LD_LIBRARY_PATH + XKB_CONFIG_ROOT +
+  # __EGL_VENDOR_LIBRARY_DIRS. Idempotent via the sentinel marker.
+  log "splicing /etc/profile.d sourcing into /etc/profile (DE-H2 cascade E)"
+  PROFILE_FILE="$OVERLAY_DIR/etc/profile"
+  if [ ! -f "$PROFILE_FILE" ]; then
+    # R9 base normally plants /etc/profile but be defensive if a future
+    # variant ships a minimal initramfs without it.
+    cat > "$PROFILE_FILE" <<'EOF'
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root
+export TERM=linux
+umask 022
+EOF
+  fi
+  if ! grep -qxF "# DE-H1: source /etc/profile.d/*.sh" "$PROFILE_FILE"; then
+    cat >> "$PROFILE_FILE" <<'EOF'
+
+# DE-H1: source /etc/profile.d/*.sh
+# (The R9 base /etc/profile follows the POSIX contract that does not
+# automatically source /etc/profile.d/*.sh; add it explicitly so the
+# autologin user shell picks up the DE-H1 catalog-store env exports,
+# including LD_LIBRARY_PATH for the catalog-planted shared libraries.)
+if [ -d /etc/profile.d ]; then
+  for __f in /etc/profile.d/*.sh; do
+    [ -r "$__f" ] && . "$__f"
+  done
+  unset __f
+fi
+EOF
+  fi
+
   # Pin mtimes for determinism. /usr/local/bin includes both the shim
   # (repro-start-hyprland.sh) and the cascade-B store -> /usr/local/bin
   # binary-symlink farm planted in the per-catalog loop above.
@@ -581,6 +675,7 @@ EOF
        "$OVERLAY_DIR/etc/hyprland.conf" \
        "$OVERLAY_DIR/etc/sway" \
        "$OVERLAY_DIR/etc/wayland-sessions" \
+       "$OVERLAY_DIR/etc/profile" \
        "$OVERLAY_DIR/etc/profile.d" \
        "$OVERLAY_DIR/usr/local/bin" \
        -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
@@ -601,10 +696,15 @@ Planted catalogs ($PLANTED_COUNT):
 $(python3 -c "
 import json
 reg = json.load(open('$REG_PATH'))
-de_h1_names = {'fontconfig-config','foot','libelf1','libfcft','libglvnd',
-               'libinput','libpixman','libseat','libwayland-cursor',
+de_h1_names = {'fontconfig-config','foot','libbrotli1','libbsd0','libcairo2',
+               'libdatrie1','libelf1','libevdev2','libfcft','libffi8',
+               'libfreetype6','libfribidi0','libglib2.0','libglvnd',
+               'libgraphite2-3','libharfbuzz0b','libinput','libjson-c5',
+               'libmd0','libpango','libpcre3','libpixman','libpng16-16',
+               'libseat','libthai0','libwayland-cursor','libx11-extras',
                'libxcb-extras','libxcb1','libxkbregistry','sway','waybar',
-               'wlroots','xdg-desktop-portal','xdg-desktop-portal-wlr','xkb-data'}
+               'wlroots','xdg-desktop-portal','xdg-desktop-portal-wlr',
+               'xkb-data','zlib1g'}
 for e in reg:
     if e['name'] in de_h1_names:
         print(f\"  - {e['name']:24} {e['version']:32}  hash={e['store_hash']}  files={e['file_count']}\")

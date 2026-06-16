@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libdatrie.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libdatrie1",
+    "snapshot": "ubuntu/jammy/20220120T000000Z",
+    "version": "0.2.13-2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libdatrie1",
+      "deb_sha256": "7203107da01abcaf8f88db41e4ccc949285e20326edacdfe59ebb321a16026a0",
+      "deb_size_bytes": 19886,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libd/libdatrie/libdatrie1_0.2.13-2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libdatrie.so.1.4.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libdatrie.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libdatrie1 0.2.13-2 is the jammy release build. CASCADE-E DEPENDENCY: chained from libthai (DT_NEEDED libdatrie.so.1 for double-array trie dictionary lookup, used for Thai word breaking)."
+}

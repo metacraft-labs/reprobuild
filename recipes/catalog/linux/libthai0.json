@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libdatrie1", "snapshot": "ubuntu/jammy/20220120T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libthai.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libthai0",
+    "snapshot": "ubuntu/jammy/20220325T000000Z",
+    "version": "0.1.29-1build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libthai0",
+      "deb_sha256": "cf035ace18e725828442635a90109a05958a2f0941eaddeac863cd0145e47f73",
+      "deb_size_bytes": 19228,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libt/libthai/libthai0_0.1.29-1build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libthai.so.0.3.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libthai.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libthai0 0.1.29-1build1 is the jammy release build. CASCADE-E DEPENDENCY: chained from libpango (DT_NEEDED libthai.so.0 for Thai script shaping). pango unconditionally links libthai even when not displaying Thai text."
+}

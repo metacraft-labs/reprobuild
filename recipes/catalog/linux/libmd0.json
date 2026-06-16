@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libmd.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libmd0",
+    "snapshot": "ubuntu/jammy/20220325T000000Z",
+    "version": "1.0.4-1build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libmd0",
+      "deb_sha256": "bcdad5e400aeb660f0337a1c5c1a77e3effa91d0803e64ce2d000e9006f67cdb",
+      "deb_size_bytes": 22964,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libm/libmd/libmd0_1.0.4-1build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libmd.so.0.0.5",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libmd.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libmd0 1.0.4-1build1 is the jammy release build. CASCADE-E DEPENDENCY: chained from libbsd (DT_NEEDED libmd.so.0 for digest functions). BSD-equivalent message-digest library extracted from libbsd to avoid circular deps."
+}

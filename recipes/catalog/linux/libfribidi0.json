@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libfribidi.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libfribidi0",
+    "snapshot": "ubuntu/jammy/20220427T000000Z",
+    "version": "1.0.8-2ubuntu3.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libfribidi0",
+      "deb_sha256": "75d7d833d35a0eef11501c542bd31c0b52fc937be0fcc08384674455439223a1",
+      "deb_size_bytes": 26096,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fribidi/libfribidi0_1.0.8-2ubuntu3.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libfribidi.so.0.4.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libfribidi.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libfribidi 1.0.8-2ubuntu3.1 is the jammy security-pocket build. CASCADE-E DEPENDENCY: chained from libpango (DT_NEEDED libfribidi.so.0 for bidirectional text shaping)."
+}

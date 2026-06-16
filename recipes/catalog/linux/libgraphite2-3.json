@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libgraphite2.so.3",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgraphite2-3",
+    "snapshot": "ubuntu/jammy/20220325T000000Z",
+    "version": "1.3.14-1build2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgraphite2-3",
+      "deb_sha256": "33104e06f5bd1fc7d91fe21e4dc9e4395035f52e614da1dce70e749879cdefe4",
+      "deb_size_bytes": 71268,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/graphite2/libgraphite2-3_1.3.14-1build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgraphite2.so.3.2.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgraphite2.so.3"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgraphite2-3 1.3.14-1build2 is the jammy release build. CASCADE-E DEPENDENCY: chained from libharfbuzz (DT_NEEDED libgraphite2.so.3 for SIL Graphite font shaping)."
+}
