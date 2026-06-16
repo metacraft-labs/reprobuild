@@ -85,3 +85,41 @@ recipes/reproos-ref-iso/vendor/*.src-sha256
 # gitignored.
 recipes/bootstrap/tcc-chain/vendor/*.tar.gz
 recipes/bootstrap/tcc-chain/vendor/*.tar.xz
+
+# Stray Nim app entry-point binaries compiled in-place (e.g.
+# `nim c apps/repro-harvest-apt/repro_harvest_apt.nim` drops a binary next
+# to the .nim source). Same shape as the `repro_peer_cache_*` rule above.
+apps/repro-harvest-apt/repro_harvest_apt
+apps/repro-harvest-dnf/repro_harvest_dnf
+apps/repro-harvest-pacman/repro_harvest_pacman
+apps/reprobuild-sandbox-launcher/reprobuild-sandbox-launcher
+
+# Test-fixture / unit-test binaries dropped beside their .nim sources.
+tests/integration/foreign_packages/lib/c3_manifest_emit
+tests/integration/foreign_packages/lib/dnf_fixture_build
+tests/integration/foreign_packages/lib/fixture_build
+tests/integration/foreign_packages/lib/pacman_fixture_build
+tests/unit/t_config_nims_lib_resolution
+
+# Local backups created by tooling (e.g. pre-commit / migration scripts).
+*.local-backup
+
+# WSL/cross-filesystem trash that drops at repo root when Windows tools
+# touch a WSL-mounted path (NUL device, roaming AppData echo).
+/NUL
+/AppData/
+
+# D4 (and prior milestones') diagnostic dumps + scratch logs that land at
+# repo root during local iteration / review runs.
+/_adv.log
+/_build_apps.log
+/_build_shim.log
+/_cap.log
+/_diag.log
+/_diag_tmp/
+/_review-tmp/
+/err.txt
+/log_data.o
+/full-suite-*.log
+/m*-review-suite.log
+/test-tmp/
