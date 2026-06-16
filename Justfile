@@ -43,6 +43,21 @@ integration-stackable-hooks:
         tests/integration/t_stackable_hooks_extracted_process_tree.nim \
         2>&1 | tee test-logs/integration-stackable-hooks.log
 
+# NDE0-A apt-jammy adapter unit tests.
+# Exercises spec'd extractAptDeb / installAptDeb / installSystemdUnit
+# against pre-fetched jammy .deb fixtures under
+# recipes/reproos-mvp-config/vendored-archives/linux/.
+unit_nde0a_apt_jammy:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_nde0a_apt_jammy \
+        --out:build/test-bin/t_nde0a_apt_jammy \
+        libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim \
+        2>&1 | tee test-logs/unit_nde0a_apt_jammy.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
