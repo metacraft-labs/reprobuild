@@ -293,6 +293,48 @@ fi
 ok "libdrm.so.2 SONAME chain resolves to planted libdrm.so.2.4.0"
 
 # ---------------------------------------------------------------------------
+# Stage F2: linker cascade fix — /sbin/ldconfig bundled, repro-ldconfig.service
+# present + wired into multi-user.target.wants.
+#
+# Why: DE-G2 / DE-K2 banner gates need /etc/ld.so.cache populated at boot;
+# R9's minimal initramfs ships no ldconfig, so DE0-G bundles one from the
+# build host + plants a systemd oneshot that runs it before multi-user.
+# ---------------------------------------------------------------------------
+
+LDCONFIG_BIN="$OVERLAY/sbin/ldconfig"
+[ -f "$LDCONFIG_BIN" ] || fail "linker cascade: /sbin/ldconfig not planted in overlay"
+[ -x "$LDCONFIG_BIN" ] || fail "linker cascade: /sbin/ldconfig not executable"
+
+# Assert the planted ldconfig is a real ELF binary, NOT a #!/bin/sh
+# wrapper (jammy/bookworm libc-bin ships /sbin/ldconfig as a deferred-
+# trigger shell wrapper around /sbin/ldconfig.real). Our R9 rootfs has
+# no dpkg triggers so the wrapper would no-op silently. Probe the
+# first 4 bytes for the ELF magic.
+ldc_magic="$(head -c 4 "$LDCONFIG_BIN" | od -An -tx1 | tr -d ' \n')"
+if [ "$ldc_magic" != "7f454c46" ]; then
+  fail "linker cascade: planted /sbin/ldconfig is not ELF (magic=$ldc_magic); shell-wrapper pivot didn't fire"
+fi
+
+LDCONFIG_UNIT="$OVERLAY/etc/systemd/system/repro-ldconfig.service"
+[ -f "$LDCONFIG_UNIT" ] || fail "linker cascade: repro-ldconfig.service unit missing"
+grep -q '^Type=oneshot' "$LDCONFIG_UNIT" || fail "linker cascade: repro-ldconfig.service not Type=oneshot"
+grep -q '^ExecStart=/sbin/ldconfig' "$LDCONFIG_UNIT" || fail "linker cascade: repro-ldconfig.service ExecStart not /sbin/ldconfig"
+grep -q '^WantedBy=multi-user.target' "$LDCONFIG_UNIT" || fail "linker cascade: repro-ldconfig.service WantedBy missing"
+grep -q '^Before=multi-user.target' "$LDCONFIG_UNIT" || fail "linker cascade: repro-ldconfig.service Before=multi-user.target missing"
+
+LDCONFIG_SYMLINK="$OVERLAY/etc/systemd/system/multi-user.target.wants/repro-ldconfig.service"
+[ -L "$LDCONFIG_SYMLINK" ] || fail "linker cascade: multi-user.target.wants/repro-ldconfig.service symlink missing"
+LDCONFIG_SYMLINK_TARGET="$(readlink "$LDCONFIG_SYMLINK")"
+case "$LDCONFIG_SYMLINK_TARGET" in
+  *repro-ldconfig.service)
+    ok "linker cascade: ldconfig + systemd oneshot + WantedBy symlink all planted"
+    ;;
+  *)
+    fail "linker cascade: WantedBy symlink target wrong: $LDCONFIG_SYMLINK_TARGET"
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Stage G: sentinel.
 # ---------------------------------------------------------------------------
 

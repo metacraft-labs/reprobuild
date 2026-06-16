@@ -400,6 +400,129 @@ PYEOF
 done
 
 # ---------------------------------------------------------------------------
+# Linker cascade fix: ensure /sbin/ldconfig is present + a systemd
+# oneshot wires `ldconfig` into boot so /etc/ld.so.cache gets built.
+#
+# Why this matters
+# ----------------
+#
+# DE-G2 + DE-K2 vm-harness boot tests showed bare /usr/local/bin/<bin>
+# invocations under agetty miss /etc/ld.so.conf.d/00-reproos-linux.conf
+# because:
+#   1. R9's minimal initramfs ships NO `ldconfig`, so /etc/ld.so.cache
+#      is never built (ld.so falls back to walking ld.so.conf at every
+#      exec, but only for non-cached search paths — DT_RUNPATH and
+#      direct DT_NEEDED still bypass the configured directories).
+#   2. BusyBox `ash` login shell follows POSIX and does NOT auto-source
+#      /etc/profile.d/*.sh — so LD_LIBRARY_PATH workarounds don't fire.
+#
+# DE-H1 + DE-G1 + DE-K1 worked around (2) by splicing /etc/profile.
+# Fix (1) here by:
+#   (a) Bundling /sbin/ldconfig from the build host if R9 didn't ship it
+#       (we know jammy provides it at /usr/sbin/ldconfig);
+#   (b) Planting a Type=oneshot `repro-ldconfig.service` that runs
+#       `/sbin/ldconfig` before multi-user.target, populating
+#       /etc/ld.so.cache from /etc/ld.so.conf.d/00-reproos-linux.conf.
+#
+# Idempotent: skip the binary copy if already planted; skip the unit
+# write if already planted; skip the WantedBy symlink if already linked.
+# ---------------------------------------------------------------------------
+
+if [ "$DRY_RUN" = 0 ]; then
+  mkdir -p "$OVERLAY_DIR/sbin" \
+           "$OVERLAY_DIR/etc/systemd/system" \
+           "$OVERLAY_DIR/etc/systemd/system/multi-user.target.wants"
+
+  # (a) Plant /sbin/ldconfig if absent. Debian/Ubuntu jammy installs a
+  # /sbin/ldconfig shell-wrapper from libc-bin that exec's the real
+  # binary at /sbin/ldconfig.real (so dpkg triggers can defer cache
+  # rebuilds during package install). Inside our R9 rootfs there are no
+  # dpkg triggers, so we want the real ELF binary, not the wrapper.
+  # Probe order:
+  #   1. /sbin/ldconfig.real   (jammy/bookworm libc-bin real binary)
+  #   2. /usr/sbin/ldconfig.real
+  #   3. /sbin/ldconfig        (older Debian / Alpine / unwrapped hosts)
+  #   4. /usr/sbin/ldconfig
+  #   5. `command -v ldconfig` PATH fallback
+  # Defence: if the picked source is itself a `#!/bin/sh` shell wrapper,
+  # walk one `exec <path>` line to find the real binary. Use -L to
+  # dereference any symlink, then chmod 0755 to be explicit.
+  if [ ! -e "$OVERLAY_DIR/sbin/ldconfig" ]; then
+    host_ldconfig=""
+    for cand in /sbin/ldconfig.real /usr/sbin/ldconfig.real \
+                /sbin/ldconfig /usr/sbin/ldconfig; do
+      if [ -x "$cand" ]; then host_ldconfig="$cand"; break; fi
+    done
+    if [ -z "$host_ldconfig" ]; then
+      host_ldconfig="$(command -v ldconfig 2>/dev/null || true)"
+    fi
+    if [ -z "$host_ldconfig" ] || [ ! -x "$host_ldconfig" ]; then
+      die "linker cascade: /sbin/ldconfig not present in overlay and host has no ldconfig on PATH" 1
+    fi
+
+    # Wrapper detection: if first 4 bytes are "#!", grep for the
+    # exec line and pivot to the real binary.
+    head4="$(head -c 4 "$host_ldconfig" 2>/dev/null || true)"
+    if [ "${head4:0:2}" = "#!" ]; then
+      real_path="$(grep -oE '^[[:space:]]*exec[[:space:]]+/[^[:space:]\"]+' "$host_ldconfig" \
+                   | head -1 | awk '{print $2}')"
+      if [ -n "$real_path" ] && [ -x "$real_path" ]; then
+        vlog "  ldconfig wrapper detected at $host_ldconfig -> pivoting to $real_path"
+        host_ldconfig="$real_path"
+      else
+        die "linker cascade: $host_ldconfig is a shell wrapper but couldn't resolve real binary" 1
+      fi
+    fi
+
+    cp -L "$host_ldconfig" "$OVERLAY_DIR/sbin/ldconfig"
+    chmod 0755 "$OVERLAY_DIR/sbin/ldconfig"
+    log "  planted /sbin/ldconfig from $host_ldconfig"
+  else
+    vlog "  /sbin/ldconfig already present; skipping bundle"
+  fi
+
+  # (b) Plant /etc/systemd/system/repro-ldconfig.service oneshot.
+  LDCONF_UNIT="$OVERLAY_DIR/etc/systemd/system/repro-ldconfig.service"
+  if [ ! -f "$LDCONF_UNIT" ]; then
+    cat > "$LDCONF_UNIT" <<'EOF'
+[Unit]
+Description=ReproOS ldconfig refresh (linker cascade fix)
+DefaultDependencies=no
+After=local-fs.target
+Before=multi-user.target sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ldconfig
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    # Explicit mode pin for systemd's parse-time hygiene (silences
+    # "marked executable / world-writable" warnings). NB: this chmod
+    # is a no-op on /mnt/* DrvFs mounts under WSL (Windows-side
+    # filesystem reports 0777 regardless), so the warnings will still
+    # surface from the de-g1-iso build directory; they're cosmetic
+    # only (systemd parses + uses the unit normally), and the chmod
+    # IS effective on native Linux fs (CI / reproOS-final build).
+    chmod 0644 "$LDCONF_UNIT"
+    log "  planted /etc/systemd/system/repro-ldconfig.service"
+  else
+    vlog "  /etc/systemd/system/repro-ldconfig.service already present; skipping write"
+  fi
+
+  # (c) WantedBy symlink so systemd activates the unit at boot.
+  LDCONF_SYMLINK="$OVERLAY_DIR/etc/systemd/system/multi-user.target.wants/repro-ldconfig.service"
+  if [ ! -L "$LDCONF_SYMLINK" ] && [ ! -e "$LDCONF_SYMLINK" ]; then
+    ln -sf "../repro-ldconfig.service" "$LDCONF_SYMLINK"
+    log "  wired repro-ldconfig.service into multi-user.target.wants"
+  else
+    vlog "  multi-user.target.wants/repro-ldconfig.service symlink already present"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Emit registry.json into the overlay (skipped on dry-run).
 # ---------------------------------------------------------------------------
 
@@ -407,9 +530,13 @@ if [ "$DRY_RUN" = 0 ]; then
   cp "$REG_TMP" "$OVERLAY_DIR/opt/reproos-linux/store/registry.json"
   log "registry.json: $OVERLAY_DIR/opt/reproos-linux/store/registry.json"
 
-  # Pin mtimes for determinism (matches DE0-D's pattern).
+  # Pin mtimes for determinism (matches DE0-D's pattern). Include the
+  # linker-cascade artefacts so /sbin/ldconfig + the systemd unit +
+  # the WantedBy symlink all get SOURCE_DATE_EPOCH mtimes too.
   find "$OVERLAY_DIR/opt/reproos-linux" "$OVERLAY_DIR/etc/ld.so.conf.d" \
-       "$OVERLAY_DIR/usr/local/bin" \
+       "$OVERLAY_DIR/usr/local/bin" "$OVERLAY_DIR/sbin" \
+       "$OVERLAY_DIR/etc/systemd/system/repro-ldconfig.service" \
+       "$OVERLAY_DIR/etc/systemd/system/multi-user.target.wants/repro-ldconfig.service" \
        -exec touch -h --date="@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
 fi
 
