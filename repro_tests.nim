@@ -446,19 +446,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    # NDE0-A apt-jammy adapter (Tier-1 native): unit tests for
-    # extractAptDeb / installAptDeb / installSystemdUnit per
-    # External-Package-Catalog-Adapters.md §"Distro-Snapshot Adapters".
-    # Fixtures: pre-fetched .debs under
-    # recipes/reproos-mvp-config/vendored-archives/linux/.
-    source: "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
-    binary: "build/test-bin/t_nde0a_apt_jammy",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim",
     binary: "build/test-bin/t_c2_recursive_identity",
     defines: @[],
@@ -509,6 +496,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_m8_bulk_catalog.nim",
     binary: "build/test-bin/t_m8_bulk_catalog",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
+    binary: "build/test-bin/t_nde0a_apt_jammy",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nde0s_systemd_session.nim",
+    binary: "build/test-bin/t_nde0s_systemd_session",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
