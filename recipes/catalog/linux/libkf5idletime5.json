@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "qt5-base", "snapshot": "ubuntu/jammy/20260615T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libKF5IdleTime.so.5",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libkf5idletime5",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5idletime5",
+      "deb_sha256": "b9aed238bdf4c02dcdd242bd34d79b2fa2eb60178b4ed83820052b78e6feac27",
+      "deb_size_bytes": 31938,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kidletime/libkf5idletime5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5IdleTime.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5IdleTime.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libkf5idletime5 5.92.0-0ubuntu1 is the jammy release build. KF5 idle-time monitor; kscreenlocker + plasma-workspace DT_NEEDED libKF5IdleTime.so.5 for screen-saver activation. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

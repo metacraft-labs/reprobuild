@@ -208,22 +208,38 @@ DE_K1_CATALOG_NAMES=(
   kwin
   kwin-libs
   libcanberra
+  libdbusmenu-qt5-2
+  libdouble-conversion3
   libevdev2
+  libgamin0
   libglib2.0
   libglvnd
   libgudev
   libice
+  libimobiledevice6
   libinput
+  libkf5idletime5
+  libkf5waylandclient5
   libkscreenlocker
   libksysguard
+  libkwaylandserver5
+  libmd4c0
+  libnm0
   libnss
   libpipewire
+  libplist3
   libpolkit
+  libqaccessibilityclient-qt5-0
+  libqt5printsupport5
+  libqt5qmlmodels5
+  libqt5texttospeech5
   libsm
   libsystemd
   libwacom
+  libxcb-damage0
   libxcb-extras
   libxcb-extras-kde
+  libxcb-xkb1
   libxkbregistry
   oxygen-sounds
   phonon

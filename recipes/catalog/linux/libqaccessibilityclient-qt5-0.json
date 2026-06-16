@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libqaccessibilityclient-qt5.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libqaccessibilityclient-qt5-0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "0.4.1-1build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libqaccessibilityclient-qt5-0",
+      "deb_sha256": "f5548c537d346d34f4b71f0383ebd62f52e1ad828e2c43fe53dac2543cce0829",
+      "deb_size_bytes": 64788,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libq/libqaccessibilityclient/libqaccessibilityclient-qt5-0_0.4.1-1build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libqaccessibilityclient-qt5.so.0.4.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libqaccessibilityclient-qt5.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libqaccessibilityclient-qt5-0 0.4.1-1build1 is the jammy release build. Qt5 AT-SPI accessibility client; kwin + plasma-workspace DT_NEEDED libqaccessibilityclient-qt5.so.0 for the screen-reader bridge. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

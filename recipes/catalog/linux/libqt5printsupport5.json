@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "qt5-base", "snapshot": "ubuntu/jammy/20260615T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libQt5PrintSupport.so.5",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libqt5printsupport5",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "5.15.3+dfsg-2ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libqt5printsupport5",
+      "deb_sha256": "b3ce7558b589344b25996e0e670d3280a606755b36b6c710715240aeb084cf53",
+      "deb_size_bytes": 214456,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5printsupport5_5.15.3%2bdfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5PrintSupport.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5PrintSupport.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libqt5printsupport5 5.15.3+dfsg-2ubuntu0.2 is the jammy security-pocket build. Qt5 print dialog + page setup; plasma-print-manager + okular DT_NEEDED libQt5PrintSupport.so.5. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

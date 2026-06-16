@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libmd4c.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libmd4c0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "0.4.8-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libmd4c0",
+      "deb_sha256": "a4b590a9ac2101e396f1c35f421c53d75fa1afe3a5029709ceddd8cd66d1d475",
+      "deb_size_bytes": 42008,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/m/md4c/libmd4c0_0.4.8-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libmd4c.so.0.4.8",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libmd4c.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libmd4c0 0.4.8-1 is the jammy release build. Markdown parser; Qt5 GUI's QTextDocument markdown loader DT_NEEDED libmd4c.so.0 since Qt 5.14. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libnm.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libnm0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.36.6-0ubuntu2.4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libnm0",
+      "deb_sha256": "795a6522d8c3ed495db60dfbba7c4fe2aa28ebebd8365aa2d7bc5c5b72e6a80b",
+      "deb_size_bytes": 455950,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/n/network-manager/libnm0_1.36.6-0ubuntu2.4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libnm.so.0.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libnm.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libnm0 1.36.6-0ubuntu2.4 is the jammy security-pocket build. NetworkManager client library; gnome-shell + plasma-workspace DT_NEEDED libnm.so.0 for the network applet. Closes a DE-G2 + DE-K2 leaf gap surfaced by the DE-K1 / DE-G1 ldd-audit allowlist."
+}

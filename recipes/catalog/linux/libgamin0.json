@@ -1,0 +1,41 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libfam.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgamin0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "0.1.10-6"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgamin0",
+      "deb_sha256": "5adfebfbcbccaa3e532ed5ab51800ffdc7051c16b41b26afd7be408c3114f61c",
+      "deb_size_bytes": 16172,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/g/gamin/libgamin0_0.1.10-6_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libfam.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libfam.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgamin-1.so.0.1.10",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgamin-1.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgamin0 0.1.10-6 is the jammy release build. File alteration monitor (FAM) compatibility shim over inotify; the gamin .deb ships BOTH libfam.so.0 (legacy FAM ABI) and libgamin-1.so.0 (gamin's native ABI). KF5 frameworks DT_NEEDED libfam.so.0 for KDirWatch's FAM backend. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

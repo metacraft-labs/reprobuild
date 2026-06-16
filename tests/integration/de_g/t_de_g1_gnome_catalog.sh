@@ -61,7 +61,7 @@ mkdir -p "$OVERLAY" "$VENDORED"
 ok()   { echo "OK: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# DE-G1 catalogs (40 planted; 33 base + 7 cross-DE inherits for binary
+# DE-G1 catalogs (45 planted; 38 base + 7 cross-DE inherits for binary
 # resolution: libevdev2 / libglib2.0 / libglvnd / libinput / libxcb-extras /
 # libxcb-extras-kde / libxkbregistry).
 DE_G1_PLANTED=(
@@ -71,10 +71,10 @@ DE_G1_PLANTED=(
   libglib2.0 libglvnd
   libgnome-desktop libgraphene libgtk4 libgudev libice
   libinput
-  libjson-glib libmozjs91 libnss libpipewire libpolkit
+  libjson-glib libmozjs91 libmtdev1 libnm0 libnss libpipewire libpolkit
   libsecret libsm libsoup2.4 libstartup-notification
-  libsystemd libwacom
-  libxcb-extras libxcb-extras-kde
+  libsystemd libtdb1 libvorbisfile3 libwacom
+  libxcb-extras libxcb-extras-kde libxcb-xkb1
   libxkbcommon-x11 libxkbfile
   libxkbregistry
   mutter
@@ -104,8 +104,8 @@ assert len(d["payload_files"]) >= 1, "payload_files empty"
 PYEOF
   seen=$((seen + 1))
 done
-[ "$seen" = 40 ] || fail "expected 40 DE-G1 catalogs, found $seen"
-ok "all 40 DE-G1 catalog JSONs parse and carry schema fields"
+[ "$seen" = 45 ] || fail "expected 45 DE-G1 catalogs, found $seen"
+ok "all 45 DE-G1 catalog JSONs parse and carry schema fields"
 
 # ---------------------------------------------------------------------------
 # Stage B: apply the recipe with --allow-online (composes DE0-G first).
@@ -253,9 +253,9 @@ print(hashlib.sha256(f\"{c['package']['name']}|{c['package']['version']}|{c['pac
 ok "gdm.service file present in the gdm store"
 
 # ---------------------------------------------------------------------------
-# Stage I: registry.json has 44 entries (DE0-G's 6 + DE-G1's 38).
-# DE-G1 broadened to include 5 cross-DE inherits for binary resolution:
-# libglib2.0, libglvnd, libinput, libxcb-extras, libxkbregistry.
+# Stage I: registry.json has 51 entries (DE0-G's 6 + DE-G1's 45).
+# DE-G1 broadened with 5 new leaf libs (libmtdev1, libnm0, libtdb1,
+# libvorbisfile3, libxcb-xkb1) closing the DE-G2 banner cascade.
 # ---------------------------------------------------------------------------
 
 REG="$STORE_ROOT/registry.json"
@@ -266,7 +266,7 @@ import json, sys
 with open(sys.argv[1]) as f:
     reg = json.load(f)
 assert isinstance(reg, list), "registry not a list"
-assert len(reg) == 46, f"expected 46 entries (6 DE0-G + 40 DE-G1), got {len(reg)}"
+assert len(reg) == 51, f"expected 51 entries (6 DE0-G + 45 DE-G1), got {len(reg)}"
 names = [e["name"] for e in reg]
 assert names == sorted(names), f"registry not sorted by name: {names}"
 
@@ -277,16 +277,16 @@ de_g1 = {"accountsservice","adwaita-icon-theme","dconf","gdm","gjs",
          "libgcr3","libgjs","libglib2.0","libglvnd",
          "libgnome-desktop","libgraphene","libgtk4","libgudev","libice",
          "libinput",
-         "libjson-glib","libmozjs91","libnss","libpipewire","libpolkit",
+         "libjson-glib","libmozjs91","libmtdev1","libnm0","libnss","libpipewire","libpolkit",
          "libsecret","libsm","libsoup2.4","libstartup-notification",
-         "libsystemd","libwacom",
-         "libxcb-extras","libxcb-extras-kde",
+         "libsystemd","libtdb1","libvorbisfile3","libwacom",
+         "libxcb-extras","libxcb-extras-kde","libxcb-xkb1",
          "libxkbcommon-x11","libxkbfile","libxkbregistry","mutter",
          "xdg-desktop-portal-gnome","xdg-desktop-portal-gtk"}
 expected = de0_g | de_g1
 assert set(names) == expected, f"registry names mismatch:\n  missing: {expected - set(names)}\n  extra:   {set(names) - expected}"
 PYEOF
-ok "registry.json has 44 entries (6 DE0-G + 38 DE-G1), sorted"
+ok "registry.json has 51 entries (6 DE0-G + 45 DE-G1), sorted"
 
 # ---------------------------------------------------------------------------
 # Stage J: ld.so.conf.d lists all DE-G1 catalogs with shared_library kinds,
@@ -307,10 +307,10 @@ de_g1_names = {"accountsservice","adwaita-icon-theme","dconf","gdm","gjs",
                "libgcr3","libgjs","libglib2.0","libglvnd",
                "libgnome-desktop","libgraphene","libgtk4","libgudev","libice",
                "libinput",
-               "libjson-glib","libmozjs91","libnss","libpipewire","libpolkit",
+               "libjson-glib","libmozjs91","libmtdev1","libnm0","libnss","libpipewire","libpolkit",
                "libsecret","libsm","libsoup2.4","libstartup-notification",
-               "libsystemd","libwacom",
-               "libxcb-extras","libxcb-extras-kde",
+               "libsystemd","libtdb1","libvorbisfile3","libwacom",
+               "libxcb-extras","libxcb-extras-kde","libxcb-xkb1",
                "libxkbcommon-x11","libxkbfile","libxkbregistry","mutter",
                "xdg-desktop-portal-gnome","xdg-desktop-portal-gtk"}
 missing = []
@@ -381,7 +381,7 @@ SENTINEL="$OVERLAY/var/lib/reproos-de-gnome-done"
 [ -f "$SENTINEL" ] || fail "sentinel missing"
 
 grep -q "DE-G1" "$SENTINEL" || fail "sentinel body missing DE-G1 marker"
-grep -q "Planted catalogs (40)" "$SENTINEL" || fail "sentinel didn't record 40 planted catalogs"
+grep -q "Planted catalogs (45)" "$SENTINEL" || fail "sentinel didn't record 45 planted catalogs"
 ok "sentinel present + records correct planted count"
 
 # ---------------------------------------------------------------------------
@@ -479,7 +479,6 @@ libgnome-bluetooth-3.0.so.13
 libmutter-cogl-path-10.so.0
 libnma.so.0
 libupower-glib.so.3
-libimobiledevice-1.0.so.6
 libecal-2.0.so.1
 libedataserver-1.2.so.26
 libebook-1.2.so.20
@@ -507,7 +506,6 @@ libadwaita-1.so.0
 libxapp.so.1
 libgnome-bg-4.so.1
 libgnome-desktop-4.so.1
-libnm.so.0
 libgbm.so.1
 libpipewire-0.3.so.0
 libmm-glib.so.0

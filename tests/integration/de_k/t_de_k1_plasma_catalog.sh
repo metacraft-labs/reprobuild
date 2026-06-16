@@ -62,18 +62,31 @@ mkdir -p "$OVERLAY" "$VENDORED"
 ok()   { echo "OK: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# DE-K1 catalogs (45 planted; 30 base + 15 cross-DE inherits for binary
+# DE-K1 catalogs (61 planted; 46 base + 15 cross-DE inherits for binary
 # resolution: libcanberra / libevdev2 / libglib2.0 / libglvnd / libgudev /
 # libice / libinput / libnss / libpipewire / libpolkit / libsm /
-# libsystemd / libwacom / libxcb-extras / libxkbregistry).
+# libsystemd / libwacom / libxcb-extras / libxkbregistry). The 14 new
+# leaf libs close the DE-K2 banner cascade: libdbusmenu-qt5-2,
+# libdouble-conversion3, libgamin0, libimobiledevice6, libkf5idletime5,
+# libkf5waylandclient5, libkwaylandserver5, libmd4c0, libnm0, libplist3,
+# libqaccessibilityclient-qt5-0, libqt5printsupport5, libqt5qmlmodels5,
+# libqt5texttospeech5, libxcb-damage0, libxcb-xkb1.
 DE_K1_PLANTED=(
   breeze kactivities kded kdelibs4support kf5-core
   kf5-declarative kf5-extras kf5-frameworks kf5-gui kf5-newstuff
   kf5-runner kio kwin kwin-libs
-  libcanberra libevdev2 libglib2.0 libglvnd libgudev libice libinput
-  libkscreenlocker libksysguard
-  libnss libpipewire libpolkit libsm libsystemd libwacom libxcb-extras
-  libxcb-extras-kde libxkbregistry
+  libcanberra
+  libdbusmenu-qt5-2 libdouble-conversion3
+  libevdev2 libgamin0 libglib2.0 libglvnd libgudev libice
+  libimobiledevice6 libinput
+  libkf5idletime5 libkf5waylandclient5 libkscreenlocker libksysguard
+  libkwaylandserver5 libmd4c0
+  libnm0 libnss libpipewire libplist3 libpolkit
+  libqaccessibilityclient-qt5-0 libqt5printsupport5 libqt5qmlmodels5
+  libqt5texttospeech5
+  libsm libsystemd libwacom
+  libxcb-damage0 libxcb-extras libxcb-extras-kde libxcb-xkb1
+  libxkbregistry
   oxygen-sounds phonon plasma-desktop
   plasma-framework plasma-integration plasma-workspace qml-modules qt5-base
   qt5-declarative qt5-svg qt5-wayland sddm xdg-desktop-portal-kde
@@ -102,8 +115,8 @@ assert len(d["payload_files"]) >= 1, "payload_files empty"
 PYEOF
   seen=$((seen + 1))
 done
-[ "$seen" = 45 ] || fail "expected 45 DE-K1 catalogs, found $seen"
-ok "all 45 DE-K1 catalog JSONs parse and carry schema fields"
+[ "$seen" = 61 ] || fail "expected 61 DE-K1 catalogs, found $seen"
+ok "all 61 DE-K1 catalog JSONs parse and carry schema fields"
 
 # ---------------------------------------------------------------------------
 # Stage B: apply the recipe with --allow-online (composes DE0-G first).
@@ -262,8 +275,8 @@ print(hashlib.sha256(f\"{c['package']['name']}|{c['package']['version']}|{c['pac
 ok "sddm.service file present in the sddm store"
 
 # ---------------------------------------------------------------------------
-# Stage I: registry.json has 51 entries (DE0-G's 6 + DE-K1's 45).
-# DE-K1 broadened to include 15 cross-DE inherits for binary resolution.
+# Stage I: registry.json has 67 entries (DE0-G's 6 + DE-K1's 61).
+# DE-K1 broadened with 14 new leaf libs closing the DE-K2 banner cascade.
 # ---------------------------------------------------------------------------
 
 REG="$STORE_ROOT/registry.json"
@@ -274,7 +287,7 @@ import json, sys
 with open(sys.argv[1]) as f:
     reg = json.load(f)
 assert isinstance(reg, list), "registry not a list"
-assert len(reg) == 51, f"expected 51 entries (6 DE0-G + 45 DE-K1), got {len(reg)}"
+assert len(reg) == 67, f"expected 67 entries (6 DE0-G + 61 DE-K1), got {len(reg)}"
 names = [e["name"] for e in reg]
 assert names == sorted(names), f"registry not sorted by name: {names}"
 
@@ -282,10 +295,19 @@ de0_g = {"dejavu-fonts","fontconfig","libdrm","libwayland","libxkbcommon","mesa"
 de_k1 = {"breeze","kactivities","kded","kdelibs4support","kf5-core",
          "kf5-declarative","kf5-extras","kf5-frameworks","kf5-gui","kf5-newstuff",
          "kf5-runner","kio","kwin","kwin-libs",
-         "libcanberra","libevdev2","libglib2.0","libglvnd","libgudev","libice","libinput",
+         "libcanberra",
+         "libdbusmenu-qt5-2","libdouble-conversion3",
+         "libevdev2","libgamin0","libglib2.0","libglvnd","libgudev","libice",
+         "libimobiledevice6","libinput",
+         "libkf5idletime5","libkf5waylandclient5",
          "libkscreenlocker","libksysguard",
-         "libnss","libpipewire","libpolkit","libsm","libsystemd","libwacom","libxcb-extras",
-         "libxcb-extras-kde","libxkbregistry",
+         "libkwaylandserver5","libmd4c0",
+         "libnm0","libnss","libpipewire","libplist3","libpolkit",
+         "libqaccessibilityclient-qt5-0","libqt5printsupport5",
+         "libqt5qmlmodels5","libqt5texttospeech5",
+         "libsm","libsystemd","libwacom",
+         "libxcb-damage0","libxcb-extras","libxcb-extras-kde","libxcb-xkb1",
+         "libxkbregistry",
          "oxygen-sounds","phonon","plasma-desktop",
          "plasma-framework","plasma-integration","plasma-workspace","qml-modules",
          "qt5-base","qt5-declarative","qt5-svg","qt5-wayland","sddm",
@@ -293,7 +315,7 @@ de_k1 = {"breeze","kactivities","kded","kdelibs4support","kf5-core",
 expected = de0_g | de_k1
 assert set(names) == expected, f"registry names mismatch:\n  missing: {expected - set(names)}\n  extra:   {set(names) - expected}"
 PYEOF
-ok "registry.json has 51 entries (6 DE0-G + 45 DE-K1), sorted"
+ok "registry.json has 67 entries (6 DE0-G + 61 DE-K1), sorted"
 
 # ---------------------------------------------------------------------------
 # Stage J: ld.so.conf.d lists DE-K1 catalogs with libs + qt5/plugins +
@@ -337,7 +359,7 @@ SENTINEL="$OVERLAY/var/lib/reproos-de-plasma-done"
 [ -f "$SENTINEL" ] || fail "sentinel missing"
 
 grep -q "DE-K1" "$SENTINEL" || fail "sentinel body missing DE-K1 marker"
-grep -q "Planted catalogs (45)" "$SENTINEL" || fail "sentinel didn't record 45 planted catalogs"
+grep -q "Planted catalogs (61)" "$SENTINEL" || fail "sentinel didn't record 61 planted catalogs"
 ok "sentinel present + records correct planted count"
 
 # ---------------------------------------------------------------------------
@@ -410,7 +432,6 @@ if [ -x "$KWIN_BIN" ] && command -v ldd >/dev/null 2>&1; then
       #   * libbluedevil-related libs (Bluetooth) not in PoC scope.
       KNOWN_MISSING="
 libpipewire-0.3.so.0
-libnm.so.0
 libcanberra.so.0
 libcolord.so.2
 libgbm.so.1
@@ -419,7 +440,6 @@ libpulse-mainloop-glib.so.0
 libgstreamer-1.0.so.0
 libgstpbutils-1.0.so.0
 libQt5Quick.so.5
-libqaccessibilityclient-qt5.so.0
 libupower-glib.so.3
 libsecret-1.so.0
 libsmbclient.so.0

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libtdb.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libtdb1",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.4.5-2build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libtdb1",
+      "deb_sha256": "7caa07ad7657bebb64fdc40444d19674a6d92e2495588b75a23146874c9c1656",
+      "deb_size_bytes": 46376,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/t/tdb/libtdb1_1.4.5-2build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libtdb.so.1.4.5",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libtdb.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libtdb1 1.4.5-2build1 is the jammy release build. Samba's trivial database; gnome-settings-daemon + various gvfs backends DT_NEEDED libtdb.so.1. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

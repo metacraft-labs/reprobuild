@@ -1,0 +1,39 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "qt5-base", "snapshot": "ubuntu/jammy/20260615T000000Z"},
+    {"distro": "linux-graphics", "name": "libwayland", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libKF5WaylandClient.so.5",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libkf5waylandclient5",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "4:5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5waylandclient5",
+      "deb_sha256": "dd4be3445edc6df9f684efc94f4ee4c3f151aba17cfc5019c437dc833656bef2",
+      "deb_size_bytes": 225914,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwayland/libkf5waylandclient5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5WaylandClient.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5WaylandClient.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libkf5waylandclient5 5.92.0-0ubuntu1 (epoch 4) is the jammy release build. KWayland client-side Qt5 wrapper; plasma-workspace + plasma-integration + kwin's client-side helpers DT_NEEDED libKF5WaylandClient.so.5. Distinct from libkwaylandserver5 (compositor side). Closes a leaf gap surfaced by the second-layer catalog audit."
+}

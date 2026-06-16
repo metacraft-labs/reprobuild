@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "qt5-base", "snapshot": "ubuntu/jammy/20260615T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libQt5TextToSpeech.so.5",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libqt5texttospeech5",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "5.15.3-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libqt5texttospeech5",
+      "deb_sha256": "3ecaf89ecb55e7a28b1c01ddc3bd2b90d3708d4aae8470b3c5d6f87e1d6f5692",
+      "deb_size_bytes": 21030,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtspeech-opensource-src/libqt5texttospeech5_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5TextToSpeech.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5TextToSpeech.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libqt5texttospeech5 5.15.3-1 is the jammy release build. Qt5 TTS API; KF5's accessibility helpers + kate's text-to-speech plugin DT_NEEDED libQt5TextToSpeech.so.5. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

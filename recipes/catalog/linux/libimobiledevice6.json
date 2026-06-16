@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libimobiledevice-1.0.so.6",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libimobiledevice6",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.3.0-6build3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libimobiledevice6",
+      "deb_sha256": "7a573d8d7a866ccfa951f8cfbbe4ddd7fa0766954d33938117c3a24f8ae16541",
+      "deb_size_bytes": 71084,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libi/libimobiledevice/libimobiledevice6_1.3.0-6build3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libimobiledevice-1.0.so.6.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libimobiledevice-1.0.so.6"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libimobiledevice6 1.3.0-6build3 is the jammy release build. iOS device communication library; gvfs-afc DT_NEEDED libimobiledevice-1.0.so.6 (the soname is the -1.0 form even though the deb name is libimobiledevice6). gnome-shell's design-doc allowlist callout libimobiledevice-1.0.so.6.0.0. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

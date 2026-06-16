@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "qt5-base", "snapshot": "ubuntu/jammy/20260615T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libdbusmenu-qt5.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libdbusmenu-qt5-2",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "0.9.3+16.04.20160218-2build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libdbusmenu-qt5-2",
+      "deb_sha256": "ca9a6f11841e332a4328f04c1712ca678e21f763b58e7c1264d17583e5cb5c01",
+      "deb_size_bytes": 78560,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libd/libdbusmenu-qt/libdbusmenu-qt5-2_0.9.3%2b16.04.20160218-2build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libdbusmenu-qt5.so.2.6.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libdbusmenu-qt5.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libdbusmenu-qt5-2 0.9.3+16.04.20160218-2build1 is the jammy release build. DBusMenu protocol Qt5 binding; plasma-workspace + system-tray apps DT_NEEDED libdbusmenu-qt5.so.2 for app-indicator menus over DBus. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

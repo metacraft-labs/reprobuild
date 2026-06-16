@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libdouble-conversion.so.3",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libdouble-conversion3",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "3.1.7-4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libdouble-conversion3",
+      "deb_sha256": "541e10ca8534d30b6915dd15746c832467b3f9d405915e527282ddc38a471146",
+      "deb_size_bytes": 39022,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/d/double-conversion/libdouble-conversion3_3.1.7-4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libdouble-conversion.so.3.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libdouble-conversion.so.3"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libdouble-conversion3 3.1.7-4 is the jammy release build. Fast double-precision to string conversion; libQt5Core DT_NEEDED libdouble-conversion.so.3 since Qt 5.14. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

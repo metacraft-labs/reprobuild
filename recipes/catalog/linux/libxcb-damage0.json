@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libxcb1", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libxcb-damage.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxcb-damage0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.14-3ubuntu3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxcb-damage0",
+      "deb_sha256": "cc7ca97fc49c735c52403c4a540ad61c068d002e14b30b0b8d6060c55990f324",
+      "deb_size_bytes": 4994,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-damage0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-damage.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-damage.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libxcb-damage0 1.14-3ubuntu3 is the jammy release build. xcb DAMAGE extension; kwin's xwayland bridge DT_NEEDED libxcb-damage.so.0. Split out from libxcb-extras umbrella because kwin pulls it without the rest of the libxcb-extras set. Closes a leaf gap surfaced by the second-layer catalog audit."
+}

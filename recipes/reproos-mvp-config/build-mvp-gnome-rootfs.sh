@@ -217,6 +217,8 @@ DE_G1_CATALOG_NAMES=(
   libinput
   libjson-glib
   libmozjs91
+  libmtdev1
+  libnm0
   libnss
   libpipewire
   libpolkit
@@ -225,9 +227,12 @@ DE_G1_CATALOG_NAMES=(
   libsoup2.4
   libstartup-notification
   libsystemd
+  libtdb1
+  libvorbisfile3
   libwacom
   libxcb-extras
   libxcb-extras-kde
+  libxcb-xkb1
   libxkbcommon-x11
   libxkbfile
   libxkbregistry
