@@ -722,6 +722,41 @@ if [ "${MVP_INCLUDE_DE0_DBUS:-0}" = "1" ]; then
   fi
   bash "$DE0_D_SH" "$OVERLAY" 2>&1 | sed 's/^/[d1]   /'
   log "stage 4f DONE"
+
+  # DE0-G (graphics catalog tier) is auto-implied once DE0-D opens
+  # the dbus dependency. Set MVP_INCLUDE_DE0_GRAPHICS=0 to opt out
+  # (e.g. for the bare dbus-only smoke build).
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+fi
+
+# ---------------------------------------------------------------------------
+# Stage 4g (opt-in): DE0-G Linux graphics catalog tier overlay-plant.
+#
+# Plants Mesa + libdrm + libwayland + libxkbcommon + fontconfig +
+# dejavu-fonts under /opt/reproos-linux/store/<hash>/ with SONAME
+# symlinks + /etc/ld.so.conf.d/00-reproos-linux.conf wiring. This is
+# the Wayland-graphics prerequisite layer per the campaign spec in
+# `reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org` (DE0-G).
+# Implied by MVP_INCLUDE_DE0_DBUS=1 (see stage 4f comment above) but
+# can be set independently.
+#
+# The planter fetches Ubuntu jammy .debs from archive.ubuntu.com when
+# they're missing from vendored-archives/linux/. CI / offline builds
+# pre-populate the vendor dir; this driver passes --allow-online so
+# the first developer run JUST WORKS.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_DE0_GRAPHICS:-0}" = "1" ]; then
+  log "stage 4g: DE0-G Linux graphics catalog overlay-plant"
+  DE0_G_SH="$SCRIPT_DIR/build-linux-graphics-stack.sh"
+  if [ ! -f "$DE0_G_SH" ]; then
+    die "MVP_INCLUDE_DE0_GRAPHICS=1 but $DE0_G_SH missing"
+  fi
+  MVP_OVERLAY_DIR="$OVERLAY" bash "$DE0_G_SH" \
+    --overlay-dir "$OVERLAY" \
+    --allow-online \
+    2>&1 | sed 's/^/[d1]   /'
+  log "stage 4g DONE"
 fi
 
 log ""

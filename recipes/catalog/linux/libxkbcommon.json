@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libxkbcommon.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxkbcommon",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.4.0-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxkbcommon0",
+      "deb_sha256": "a0470edb237d52b71ad41f755c043164abed01423585ed5ea19525b3baaf84f7",
+      "deb_size_bytes": 124684,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxkbcommon/libxkbcommon0_1.4.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libxkbcommon 1.4.0 is the jammy release build (no security-pocket bump as of 2026-06). Hyprland 0.50 needs >= 1.0; jammy's 1.4 is comfortable headroom. NOTE: libxkbcommon at runtime loads /usr/share/X11/xkb/ rules; the `xkb-data` package (not in this catalog tier) is required for keyboard layout resolution. DE-H1 will need to either add xkb-data as a separate catalog entry or rely on the jammy host shipping it (matches DE0-D's PAM-modules convention)."
+}

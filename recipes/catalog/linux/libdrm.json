@@ -1,0 +1,48 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libdrm.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libdrm",
+    "snapshot": "ubuntu/jammy/20221216T000000Z",
+    "version": "2.4.113-2~ubuntu0.22.04.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libdrm-common",
+      "deb_sha256": "35a306712d8b15b30c42ecd73ec087813eb01c0b3125dc8f7ca2b5134e133522",
+      "deb_size_bytes": 5450,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libd/libdrm/libdrm-common_2.4.113-2~ubuntu0.22.04.1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/libdrm/amdgpu.ids"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libdrm2",
+      "deb_sha256": "555925f1caedfd98d89bae3bc11b4fe3401c2c4817dbbafcab25e1144582e946",
+      "deb_size_bytes": 38106,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libd/libdrm/libdrm2_2.4.113-2~ubuntu0.22.04.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libdrm.so.2.4.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libdrm.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libdrm 2.4.113 is the jammy security-pocket build. libdrm-common (Architecture: all) ships amdgpu.ids (the AMD GPU device-id database libdrm queries at runtime); without it libdrm.so.2's amdgpu_query_gpu_info() returns ENOENT and Hyprland's GPU-detection probe fails. Both .debs must be planted; the SONAME link libdrm.so.2 -> libdrm.so.2.4.0 is created by the build script (no ldconfig dep on host)."
+}

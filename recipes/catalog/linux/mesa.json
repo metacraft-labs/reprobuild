@@ -1,0 +1,69 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libdrm", "snapshot": "ubuntu/jammy/20220422T000000Z"},
+    {"distro": "linux-graphics", "name": "libwayland", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libgbm.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "mesa",
+    "snapshot": "ubuntu/jammy/20240130T000000Z",
+    "version": "23.2.1-1ubuntu3.1~22.04.3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libegl-mesa0",
+      "deb_sha256": "3f7066355233c54a82332c009169b8156de48e2be9f15b54cadfb0ab03f95122",
+      "deb_size_bytes": 118314,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mesa/libegl-mesa0_23.2.1-1ubuntu3.1~22.04.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0"
+        },
+        {
+          "kind": "config",
+          "path": "usr/share/glvnd/egl_vendor.d/50_mesa.json"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libgbm1",
+      "deb_sha256": "ac2ccbd5cb1cb1630da8281e8b5af280b14ecd31a0b06f1e591864704565cc3e",
+      "deb_size_bytes": 33526,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mesa/libgbm1_23.2.1-1ubuntu3.1~22.04.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgbm.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgbm.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libglapi-mesa",
+      "deb_sha256": "6a1a64062d386a0a9ca651057e369b1d418ceebb6c71584c2d0cda324166caea",
+      "deb_size_bytes": 35404,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mesa/libglapi-mesa_23.2.1-1ubuntu3.1~22.04.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libglapi.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libglapi.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "mesa 23.2.1-1ubuntu3.1~22.04.3 is the jammy security-pocket build (as of 2026-06). Ships llvmpipe SW rasterizer (required for VM-suitable graphics per spec section 1.4) + EGL + GLAPI. libgl1-mesa-glx (legacy GLX runtime) intentionally NOT included: Wayland compositors use EGL not GLX. mesa transitively depends on libelf/zlib/libdrm-amdgpu/libxcb-* which the jammy host already ships (same precedent as DE0-D's support-libs handling)."
+}

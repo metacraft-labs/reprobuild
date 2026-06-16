@@ -1,0 +1,62 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libwayland-client.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libwayland",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "1.20.0-1ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libwayland-client0",
+      "deb_sha256": "2c06ef99bc387136e6357014fcb9fa6f47e0cb4e54d9b5ee10c750743a216e5a",
+      "deb_size_bytes": 25950,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-client0_1.20.0-1ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libwayland-client.so.0.20.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libwayland-client.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libwayland-egl1",
+      "deb_sha256": "1b95b4ed225a6ab3c6a5e35e76eefa6896625e9d6cf139f0ea594ececb8348d0",
+      "deb_size_bytes": 5582,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-egl1_1.20.0-1ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libwayland-egl.so.1.20.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libwayland-egl.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libwayland-server0",
+      "deb_sha256": "b5d514dc17edac6b93ba2476d90806337ca4afcc914952a7e78af2e5cd0c4a7b",
+      "deb_size_bytes": 34268,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-server0_1.20.0-1ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libwayland-server.so.0.20.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libwayland-server.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libwayland 1.20.0 is the jammy security-pocket build (all three .debs share a version). client0 is what Wayland clients (foot terminal, waybar) link against; server0 is what the compositor (Hyprland) links against; egl1 is what Mesa's EGL backend links against to integrate the compositor's surface with EGL contexts. Hyprland 0.50 needs >= 1.20; jammy's 1.20.0 just clears the floor."
+}

@@ -1,0 +1,49 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "dejavu-fonts", "snapshot": "ubuntu/jammy/20220422T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libfontconfig.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "fontconfig",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "2.13.1-4.2ubuntu5"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "fontconfig",
+      "deb_sha256": "9a844b4e8c27b76f39a00dd36dc833b2c99bfa24959df9b6b0749659c31a5c1c",
+      "deb_size_bytes": 177468,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig/fontconfig_2.13.1-4.2ubuntu5_amd64.deb",
+      "expected_files": [
+        {"kind": "binary", "path": "usr/bin/fc-cache"},
+        {"kind": "binary", "path": "usr/bin/fc-list"},
+        {"kind": "binary", "path": "usr/bin/fc-match"}
+      ]
+    },
+    {
+      "deb_pkg": "libfontconfig1",
+      "deb_sha256": "6be0c141aed23d9eb801658d248fd667bea2b8a9ccab4db7b596a69ffe3393fd",
+      "deb_size_bytes": 131434,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig/libfontconfig1_2.13.1-4.2ubuntu5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libfontconfig.so.1.12.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libfontconfig.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "fontconfig 2.13.1-4.2ubuntu5 is the jammy release build. fontconfig (the .deb) ships the fc-* CLI tools; libfontconfig1 (separate .deb, same version) ships the .so. Both are required: Hyprland's render path calls into libfontconfig for glyph lookups; first-boot needs fc-cache to populate /var/cache/fontconfig. fontconfig-config (the system-wide /etc/fonts/fonts.conf) is a transitive dep; we rely on the jammy host shipping it (same precedent as DE0-D's support-libs). dejavu-fonts is a hard dep: fontconfig with zero fonts emits 'no fonts found' and Hyprland renders empty surfaces."
+}

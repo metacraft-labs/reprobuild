@@ -1,0 +1,38 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "DejaVuSans.ttf",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "dejavu-fonts",
+    "snapshot": "ubuntu/jammy/20220422T000000Z",
+    "version": "2.37-2build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "fonts-dejavu-core",
+      "deb_sha256": "c33fe8bf33b50d99d6448804a090123b1bbba37d7a8703c630695676d110a47d",
+      "deb_size_bytes": 1041300,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/f/fonts-dejavu/fonts-dejavu-core_2.37-2build1_all.deb",
+      "expected_files": [
+        {"kind": "font", "path": "usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"},
+        {"kind": "font", "path": "usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"},
+        {"kind": "font", "path": "usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"},
+        {"kind": "font", "path": "usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/57-dejavu-sans.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/57-dejavu-sans-mono.conf"},
+        {"kind": "config", "path": "etc/fonts/conf.avail/57-dejavu-serif.conf"}
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "fonts-dejavu-core 2.37-2build1 is the jammy release build. Architecture: all (no ABI concern). Ships TTF + fontconfig snippets enabling DejaVu as the default sans/sans-mono/serif. The transitional umbrella `fonts-dejavu` and `fonts-dejavu-extra` (11 MB of bitmap variants) are intentionally NOT included: Wayland compositors only need the core TTFs at boot. Extra/umbrella can be added in a follow-up tier if user-mode apps need them."
+}
