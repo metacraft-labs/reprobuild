@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libgraphene-1.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgraphene",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1.10.8-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgraphene-1.0-0",
+      "deb_sha256": "8af39f36795940e3fd7d5813a13955b128827fa2e7d122828b81008051886cd3",
+      "deb_size_bytes": 48218,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/graphene/libgraphene-1.0-0_1.10.8-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgraphene-1.0.so.0.1000.8",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgraphene-1.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgraphene 1.10.8-1. Math primitives library (vec3/4, mat4, quaternions). libmutter-10 + libgtk-4 + libclutter (vendored inside libmutter) all hard-link it."
+}

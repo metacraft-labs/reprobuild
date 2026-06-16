@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libcanberra.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libcanberra",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.30-10ubuntu1.22.04.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libcanberra0",
+      "deb_sha256": "5d79dfe622dc2f88f20d4a827fa840ec4b90a2695f2ffe0554c643cc3524e640",
+      "deb_size_bytes": 40042,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libc/libcanberra/libcanberra0_0.30-10ubuntu1.22.04.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libcanberra.so.0.2.5",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libcanberra.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libcanberra 0.30-10ubuntu1.22.04.1 is the jammy security-pocket build. Event sound library. Ships a libcanberra-alsa.so plugin too, but the alsa-lib stack is NOT in our closure, so canberra falls back to the null backend at runtime \u2014 events are silent but gsd-sound doesn't crash."
+}

@@ -1,0 +1,49 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libgudev",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libwacom.so.9",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libwacom",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "2.2.0-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libwacom9",
+      "deb_sha256": "8d2b65dacab053530e7e205d476870adb34137247ed6f8f8182502a5fe879d8e",
+      "deb_size_bytes": 22028,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libw/libwacom/libwacom9_2.2.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libwacom.so.9.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libwacom.so.9"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libwacom-common",
+      "deb_sha256": "a54bf57ec81a2dc9ba624a99aa49dc7a933834411e902ed66f1cc2b4713394bd",
+      "deb_size_bytes": 54338,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libw/libwacom/libwacom-common_2.2.0-1_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libwacom 2.2.0-1. Wacom tablet device database. libmutter + gsd-wacom dep on it. The -common deb is all-arch; ships /usr/share/libwacom/data/ which libwacom.so.9 walks at init."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libglib2.0",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "gsettings-desktop-schemas",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "gsettings-desktop-schemas",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.0-1ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "gsettings-desktop-schemas",
+      "deb_sha256": "5b420af7d77735d1bcc0494134b6810d20d168cd9407febed32d77baccd9e993",
+      "deb_size_bytes": 31068,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gsettings-desktop-schemas/gsettings-desktop-schemas_42.0-1ubuntu1_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "gsettings-desktop-schemas 42.0-1ubuntu1. all-arch deb; ships /usr/share/glib-2.0/schemas/*.xml. Without this, mutter + gnome-shell + gsd-* all log 'Schema not installed' on startup. Full-extract: copied via the catalog's full-tree path (parallel to DE-H1's xkb-data / fontconfig-config handling)."
+}

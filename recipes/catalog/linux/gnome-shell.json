@@ -1,0 +1,179 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "mutter",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgjs",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgnome-desktop",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgcr3",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsoup2.4",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsecret",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpolkit",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgudev",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwacom",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbfile",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libjson-glib",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libstartup-notification",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libcanberra",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libcairo2",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpango",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libharfbuzz0b",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "gsettings-desktop-schemas",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "dconf",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "adwaita-icon-theme",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "gnome-shell",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "gnome-shell",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.9-0ubuntu2.3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "gnome-shell",
+      "deb_sha256": "83876ed9b2fdae5e6796ab01386d6902c83818832c5b0b8162935588b6bebcc6",
+      "deb_size_bytes": 876690,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-shell/gnome-shell_42.9-0ubuntu2.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-shell"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-extensions"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-shell-extension-tool"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-shell-perf-tool"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-shell-calendar-server"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-shell-hotplug-sniffer"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-shell-perf-helper"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-shell-portal-helper"
+        },
+        {
+          "kind": "data",
+          "path": "usr/share/applications/org.gnome.Shell.desktop"
+        },
+        {
+          "kind": "data",
+          "path": "usr/share/applications/org.gnome.Shell.Extensions.desktop"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "gnome-shell-common",
+      "deb_sha256": "1e85d446354f50892e185a4790e7545ae4da6d33c286e5171e45854e58f0520b",
+      "deb_size_bytes": 182900,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-shell/gnome-shell-common_42.9-0ubuntu2.3_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "gnome-shell 42.9-0ubuntu2.3 is the jammy security-pocket build. The JS-driven compositor session UI. /usr/bin/gnome-shell embeds gjs + libmozjs-91; cross-referenced via libgjs.json + libmozjs91.json. gnome-shell-common ships the JS sources under /usr/share/gnome-shell/ (full tree planted via the catalog's --full-extract path so the in-process JS module loader walks it at startup; same xkb-data / fontconfig-config / waybar full-tree-copy class DE-H1 introduced)."
+}

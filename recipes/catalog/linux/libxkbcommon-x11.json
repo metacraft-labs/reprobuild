@@ -1,0 +1,52 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb1",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb-extras",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libxkbcommon-x11.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxkbcommon-x11",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1.4.0-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxkbcommon-x11-0",
+      "deb_sha256": "e29c40fab6e0f055218aee4c7e60cd61ea82283229d7ac7ac02e226e92a5b0d5",
+      "deb_size_bytes": 14368,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxkbcommon/libxkbcommon-x11-0_1.4.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libxkbcommon-x11 1.4.0-1 (same source as DE0-G's libxkbcommon). The X11-specific helper. libmutter dep on it for the X11 fallback path."
+}

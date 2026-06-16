@@ -1,0 +1,41 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libgjs",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "gjs-console",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "gjs",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1.72.4-0ubuntu0.22.04.4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "gjs",
+      "deb_sha256": "9f06e574447cc06bd0a680eb95e6aa41563c7945212cfff1e5218f267d508bc3",
+      "deb_size_bytes": 105664,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gjs/gjs_1.72.4-0ubuntu0.22.04.4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/gjs-console"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "gjs 1.72.4-0ubuntu0.22.04.4. CLI wrapper around libgjs0g, used by the DE-G2 integration test smoke probe (`gjs-console --version`). Optional for the runtime session; gnome-shell embeds libgjs directly."
+}

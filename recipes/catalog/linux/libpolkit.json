@@ -1,0 +1,55 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libpolkit-gobject-1.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libpolkit",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.105-33ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libpolkit-agent-1-0",
+      "deb_sha256": "bf78fbd0e46b0faf3e942dd88260ce216f310520ebb137c2354338622a14da41",
+      "deb_size_bytes": 16874,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/libpolkit-agent-1-0_0.105-33ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpolkit-agent-1.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpolkit-agent-1.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libpolkit-gobject-1-0",
+      "deb_sha256": "e91137381c4645d4c7cc4fd5ec69722ce9cd7d43dd61753f753010a50646fe78",
+      "deb_size_bytes": 43316,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/libpolkit-gobject-1-0_0.105-33ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpolkit-gobject-1.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpolkit-gobject-1.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libpolkit 0.105-33ubuntu0.1 is the jammy security-pocket build. Polkit client libraries (agent + gobject). gnome-shell + gsd-color + gsd-power link them for auth checks. The polkit daemon itself is NOT shipped; auth checks fail closed."
+}

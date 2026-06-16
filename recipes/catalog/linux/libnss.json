@@ -1,0 +1,67 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libnss3.so",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libnss",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "2:3.98-0ubuntu0.22.04.3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libnss3",
+      "deb_sha256": "c293e2259e606b40680dee472ac5cf86ca80e6da9db631d7b4f5cb337a2f9b9e",
+      "deb_size_bytes": 1347212,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libnss3.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libnssutil3.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libsmime3.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libssl3.so"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libnspr4",
+      "deb_sha256": "b3c96e4a61675c87f8d9655109346748847d859abc95f20493159d06b5aa30ef",
+      "deb_size_bytes": 119208,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nspr/libnspr4_4.35-0ubuntu0.22.04.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libnspr4.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libplc4.so"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libplds4.so"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libnss 2:3.98-0ubuntu0.22.04.3 + libnspr 4.35. Mozilla NSS (TLS / cert) + NSPR (portable runtime). Mozilla libs use SONAME == filename (no .0 suffix); the DE-G1 build script's soname-link logic treats these as no-link entries."
+}

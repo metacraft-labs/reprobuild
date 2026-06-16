@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libgudev-1.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgudev",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1:237-2build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgudev-1.0-0",
+      "deb_sha256": "a6683b34922bbf31c93e4903eb796d357ea0909b212a453f2c361c2919f108d8",
+      "deb_size_bytes": 16266,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libg/libgudev/libgudev-1.0-0_237-2build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgudev-1.0.so.0.3.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgudev-1.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgudev 1:237-2build1. GObject wrapper around libudev. Hard-deped by libmutter + gnome-shell + gsd-rfkill + gsd-power."
+}

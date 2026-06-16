@@ -1,0 +1,42 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libpipewire-0.3.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libpipewire",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.3.48-1ubuntu3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libpipewire-0.3-0",
+      "deb_sha256": "ed46b4bc8d650f96ccd2c80a3319d7db024fee33cd3415ec67f48c61f0d3a02c",
+      "deb_size_bytes": 273646,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/p/pipewire/libpipewire-0.3-0_0.3.48-1ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0.348.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpipewire-0.3.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libpipewire 0.3.48-1ubuntu3. PipeWire client shared library. Required by xdg-desktop-portal + gnome-shell + libmutter at DT_NEEDED load time. The PipeWire daemon (`pipewire`, `wireplumber`) is NOT planted; the client connects and ENOENTs, and gnome-shell falls back to 'no screencast' gracefully."
+}

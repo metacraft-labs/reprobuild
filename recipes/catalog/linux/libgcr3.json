@@ -1,0 +1,49 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libgcr-base-3.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgcr3",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "3.40.0-4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgcr-base-3-1",
+      "deb_sha256": "4f4e926a9e917d1fb79c5bf8e798c0523bba8447e0395fa19a1ff8e5f58a164a",
+      "deb_size_bytes": 208962,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gcr/libgcr-base-3-1_3.40.0-4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgcr-base-3.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgcr-base-3.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libgck-1-0",
+      "deb_sha256": "ebf4ffb2e0c3eb0bf4829b9e27bd2e4af37c2721ca5c48e7341a1f7779d44d00",
+      "deb_size_bytes": 81380,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gcr/libgck-1-0_3.40.0-4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgck-1.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgck-1.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgcr3 3.40.0-4 + libgck 3.40.0-4 (both ship from the gcr source package). GCR is GNOME's PKCS#11 + DBus secret-service binding; libgck is the PKCS#11 wrapper. gnome-shell + gnome-settings-daemon link libgcr-base for the keyring sub-component (read-only)."
+}

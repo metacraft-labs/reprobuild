@@ -1,0 +1,54 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libaccountsservice.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "accountsservice",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "22.07.5-2ubuntu1.5"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "accountsservice",
+      "deb_sha256": "95ef667f9ada1acb2629bb98d3aa004dcf49a694430ac46b72d9add43adc569d",
+      "deb_size_bytes": 69982,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/a/accountsservice/accountsservice_22.07.5-2ubuntu1.5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/libexec/accounts-daemon"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libaccountsservice0",
+      "deb_sha256": "180fdaa976ea829588ae8a6a664e3b812c402394a6ef98996e808e2f034efb6c",
+      "deb_size_bytes": 62626,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/a/accountsservice/libaccountsservice0_22.07.5-2ubuntu1.5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libaccountsservice.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libaccountsservice.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "accountsservice 22.07.5-2ubuntu1.5 is the jammy security-pocket build. User account info via DBus. gdm3 + gnome-shell read user lists through it. /usr/libexec/accounts-daemon is the system DBus service worker."
+}

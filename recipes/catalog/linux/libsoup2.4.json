@@ -1,0 +1,54 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libnss",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libglib2.0",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libsoup-2.4.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libsoup2.4",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "2.74.2-3ubuntu0.6"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libsoup2.4-1",
+      "deb_sha256": "a66cd9ff6e880e90534b7561fd72e005ad31dbab2e26c1d19c2d32bb5738aa5f",
+      "deb_size_bytes": 287638,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsoup2.4/libsoup2.4-1_2.74.2-3ubuntu0.6_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libsoup-2.4.so.1.11.2",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libsoup-2.4.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libsoup2.4-common",
+      "deb_sha256": "1d05a4b0b79bea1e77b48bc056e83fd53d06cc1990cb84360284cce12616a8cd",
+      "deb_size_bytes": 4778,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsoup2.4/libsoup2.4-common_2.74.2-3ubuntu0.6_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libsoup 2.74.2-3ubuntu0.6 is the jammy security-pocket build. HTTP library v2 (the legacy API; gnome-shell 42 still uses v2; v3 was introduced for GNOME 43+)."
+}

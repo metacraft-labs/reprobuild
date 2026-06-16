@@ -1,0 +1,47 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb1",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb-extras",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libstartup-notification-1.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libstartup-notification",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.12-6build2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libstartup-notification0",
+      "deb_sha256": "322f39b6748e4d8ed339b4cd8dd6880d9d33e62acca3c0a6c8aef60ec7bc5443",
+      "deb_size_bytes": 19536,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/s/startup-notification/libstartup-notification0_0.12-6build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libstartup-notification-1.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libstartup-notification-1.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libstartup-notification0 0.12-6build2. X11 startup notification protocol helper. libmutter + gnome-shell link it for the splash screen path even on Wayland."
+}

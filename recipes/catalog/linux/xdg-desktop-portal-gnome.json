@@ -1,0 +1,46 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "xdg-desktop-portal",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgtk4",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "xdg-desktop-portal-gnome",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "xdg-desktop-portal-gnome",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.1-0ubuntu2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "xdg-desktop-portal-gnome",
+      "deb_sha256": "3190750a962bb0c95695cc6d2430ea76e642bfa2b814df294a42fa1f5b9db690",
+      "deb_size_bytes": 106766,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xdg-desktop-portal-gnome/xdg-desktop-portal-gnome_42.1-0ubuntu2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/libexec/xdg-desktop-portal-gnome"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "xdg-desktop-portal-gnome 42.1-0ubuntu2. GNOME-specific backend for the xdg-desktop-portal framework (file-chooser, screenshot, screencast). DE-H1 ships the framework + the wlr backend; DE-G1 swaps in the gnome backend instead."
+}

@@ -1,0 +1,113 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "accountsservice",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgnome-desktop",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "dconf",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libgdm.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "gdm",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.0-1ubuntu7.22.04.4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "gdm3",
+      "deb_sha256": "d3361adfbc926c7e0d44643420b92ae61e966966c286aaff8759f14b0dc63fb3",
+      "deb_size_bytes": 313882,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gdm3/gdm3_42.0-1ubuntu7.22.04.4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/sbin/gdm3"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gdm-screenshot"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gdm-session-worker"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gdm-wayland-session"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gdm-x-session"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gdm-runtime-config"
+        },
+        {
+          "kind": "config",
+          "path": "etc/pam.d/gdm-autologin"
+        },
+        {
+          "kind": "config",
+          "path": "etc/pam.d/gdm-launch-environment"
+        },
+        {
+          "kind": "config",
+          "path": "etc/pam.d/gdm-password"
+        },
+        {
+          "kind": "config",
+          "path": "etc/dbus-1/system.d/gdm.conf"
+        },
+        {
+          "kind": "data",
+          "path": "lib/systemd/system/gdm.service"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libgdm1",
+      "deb_sha256": "c485ee158139972bcd8417be852fc59bd4dc33e1d82d5757d8b0c03501332211",
+      "deb_size_bytes": 61924,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gdm3/libgdm1_42.0-1ubuntu7.22.04.4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgdm.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgdm.so.1"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gdmflexiserver"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "gdm3 42.0-1ubuntu7.22.04.4 is the jammy security-pocket build. Bundles gdm3 sbin + libgdm.so.1 client lib + 4 PAM stacks + the systemd unit + dbus system.d conf so the DE-G1 builder can plant the whole display manager from one catalog. Same multi-deb-per-catalog shape as DE-H1's sway.json (sway + swaybg)."
+}

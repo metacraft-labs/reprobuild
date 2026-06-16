@@ -1,0 +1,42 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libice",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libSM.so.6",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libsm",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "2:1.2.3-1build2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libsm6",
+      "deb_sha256": "e652e286a79d9e8e15189d79b290bdce20aca83651f3dfed1b9b7dc0bbf0702f",
+      "deb_size_bytes": 16736,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsm/libsm6_1.2.3-1build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libSM.so.6.0.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libSM.so.6"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libsm6 2:1.2.3-1build2. X11 Session Management Protocol library. Cairo + gtk3 hard-link via libICE; gnome-shell pulls it via libcairo2's X11 backend even on a Wayland-only session."
+}

@@ -1,0 +1,30 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "adwaita-icon-theme",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "adwaita-icon-theme",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "41.0-1ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "adwaita-icon-theme",
+      "deb_sha256": "9391c87c5479507895be429434d6ebd60593e8f3a708fec6cd7950579128debc",
+      "deb_size_bytes": 3444050,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/a/adwaita-icon-theme/adwaita-icon-theme_41.0-1ubuntu1_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "adwaita-icon-theme 41.0-1ubuntu1. Default GNOME icon theme. Without this, mutter's cursor is undefined (X11 ? fallback) and gnome-shell logs 'icon not found' for every app. Full-extract: copied via the catalog's full-tree path (3.4 MB compressed; ~13 MB extracted to /usr/share/icons/Adwaita/)."
+}

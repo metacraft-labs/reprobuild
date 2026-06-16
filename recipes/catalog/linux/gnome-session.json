@@ -1,0 +1,86 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "gsettings-desktop-schemas",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "dconf",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "gnome-session",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "gnome-session",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.0-1ubuntu2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "gnome-session-bin",
+      "deb_sha256": "53a1ddf0752af0d9319ecd1e6c25852a99b822770da7dc4b9cb63f235d22b65f",
+      "deb_size_bytes": 122532,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-session/gnome-session-bin_42.0-1ubuntu2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-session"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-session-custom-session"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-session-inhibit"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/gnome-session-quit"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-session-binary"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-session-ctl"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gnome-session-failed"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/run-systemd-session"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "gnome-session-common",
+      "deb_sha256": "67be5c1c897589dacfdc4430ad9727f81fd02cebeaf13255dd0ac09c6a50a161",
+      "deb_size_bytes": 12640,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-session/gnome-session-common_42.0-1ubuntu2_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "gnome-session 42.0-1ubuntu2. The session manager. /usr/bin/gnome-session is the entry point invoked by repro-start-gnome.sh; it execs gnome-shell after wiring up the systemd user instance. gnome-session-common is an all-arch deb shipping mime defaults."
+}

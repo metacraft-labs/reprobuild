@@ -1,0 +1,84 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libgraphene",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libcairo2",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpango",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libharfbuzz0b",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwayland",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libepoxy0",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libgtk-4.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgtk4",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4.6.9+ds-0ubuntu0.22.04.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgtk-4-1",
+      "deb_sha256": "69bbd3dbb1c437563d625ab15b43d0dd969f151fd66c772e845a8103bbe68640",
+      "deb_size_bytes": 2865660,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gtk4/libgtk-4-1_4.6.9+ds-0ubuntu0.22.04.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgtk-4.so.1.600.9",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgtk-4.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libgtk-4-common",
+      "deb_sha256": "572d2534074328f08b68ab94e5299eb247192552fd5b5f5a13a3d9334dd72da8",
+      "deb_size_bytes": 662152,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gtk4/libgtk-4-common_4.6.9+ds-0ubuntu0.22.04.2_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgtk-4 4.6.9+ds-0ubuntu0.22.04.2 is the jammy security-pocket build. GTK 4 \u2014 the GUI toolkit xdg-desktop-portal-gtk + libadwaita-using apps need. Largest single .deb in DE-G1 (~3 MB compressed). DE-H1 already supplies libcairo2 / libpango / libharfbuzz0b which GTK4 hard-deps."
+}

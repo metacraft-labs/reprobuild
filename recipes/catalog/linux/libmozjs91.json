@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libmozjs-91.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libmozjs91",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "91.10.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libmozjs-91-0",
+      "deb_sha256": "ffc96561eaa7e2d04d64bad8dc8d7a472c9f1f393b091b01c1164c6b47ef3353",
+      "deb_size_bytes": 4070940,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mozjs91/libmozjs-91-0_91.10.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libmozjs-91.so.91.10.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libmozjs-91.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libmozjs-91-0 91.10.0-0ubuntu1. SpiderMonkey 91 \u2014 Mozilla's JS engine. Single largest dep in DE-G1 (4 MB compressed, 12 MB extracted). Hard-required by libgjs; gnome-shell would fail to load without it. Note: SONAME is libmozjs-91.so.0 (not .91), and the on-disk filename is libmozjs-91.so.91.10.0 \u2014 Mozilla's split-version convention. The DE-G1 build script's soname-link logic handles this."
+}

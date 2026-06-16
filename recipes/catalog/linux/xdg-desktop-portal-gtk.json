@@ -1,0 +1,46 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "xdg-desktop-portal",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgtk4",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "xdg-desktop-portal-gtk",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "xdg-desktop-portal-gtk",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1.14.0-1build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "xdg-desktop-portal-gtk",
+      "deb_sha256": "d3d60526948e4a32a2a6a1c840fd6168fc03e1383a0ce50ff3740527d4bfb8c2",
+      "deb_size_bytes": 87402,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xdg-desktop-portal-gtk/xdg-desktop-portal-gtk_1.14.0-1build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/libexec/xdg-desktop-portal-gtk"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "xdg-desktop-portal-gtk 1.14.0-1build1. GTK-based backend for the xdg-desktop-portal framework. Routes appchooser + secret + settings portals through GTK."
+}

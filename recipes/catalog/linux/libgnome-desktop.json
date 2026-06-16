@@ -1,0 +1,54 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libgtk4",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libgnome-desktop-3.so.19",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgnome-desktop",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.9-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgnome-desktop-3-19",
+      "deb_sha256": "46c846663486a41f3ac6805116933031574b6b5c0619fc035b611e26da533057",
+      "deb_size_bytes": 119858,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-desktop/libgnome-desktop-3-19_42.9-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgnome-desktop-3.so.19.3.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgnome-desktop-3.so.19"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "gnome-desktop3-data",
+      "deb_sha256": "1dd2569d0946fce4e6c724880622d7dca82586754d8c8990e56f199511ed1cb3",
+      "deb_size_bytes": 23276,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-desktop/gnome-desktop3-data_42.9-0ubuntu1_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgnome-desktop 42.9-0ubuntu1. Helper lib for GNOME desktop components (parsing .desktop files, wallpaper lookup, monitor config). Hard-deped by gnome-shell + mutter + gnome-settings-daemon."
+}

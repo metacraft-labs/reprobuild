@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libsystemd.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libsystemd",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "249.11-0ubuntu3.21"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libsystemd0",
+      "deb_sha256": "86cc91af9eaca8ab6c18cebe74f86b6ad08a07dd9faa52867f52f47e44b2c488",
+      "deb_size_bytes": 316362,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.21_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libsystemd.so.0.32.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libsystemd.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libsystemd 249.11-0ubuntu3.21 is the jammy security-pocket build. systemd client library (sd_journal_send, sd_notify, sd_bus_*). Hard-deped by gnome-shell + mutter + gnome-session + gnome-settings-daemon + gdm3. **Cascade-class hidden dep:** the R9 from-source systemd ships a libsystemd.so.0 but with different SONAME bytes; planting jammy's own copy avoids ABI roulette."
+}

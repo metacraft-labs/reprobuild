@@ -1,0 +1,42 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libx11-extras",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libxkbfile.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxkbfile",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1:1.1.0-1build3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxkbfile1",
+      "deb_sha256": "89ceb4a9420dd9f1f89c0488abc0002f55ddefaaa2209ccad8c3b3e3c9e21743",
+      "deb_size_bytes": 71826,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxkbfile/libxkbfile1_1.1.0-1build3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxkbfile.so.1.0.2",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxkbfile.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libxkbfile 1:1.1.0-1build3. Legacy X11 XKB keymap file loader. libmutter + gnome-shell link it for the X11 fallback keyboard layout path even on Wayland sessions."
+}

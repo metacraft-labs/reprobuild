@@ -1,0 +1,52 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libmozjs91",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libcairo2",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libgjs.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgjs",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "1.72.4-0ubuntu0.22.04.4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgjs0g",
+      "deb_sha256": "dbcab727ea3d7b3d3195f18eb24b653591b7844e6369caeb369a2376bb566abf",
+      "deb_size_bytes": 401946,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gjs/libgjs0g_1.72.4-0ubuntu0.22.04.4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgjs.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgjs.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgjs 1.72.4-0ubuntu0.22.04.4 is the jammy security-pocket build. gjs is the JS engine binding gnome-shell + the gsd-* daemons consume. Embeds SpiderMonkey 91 via libmozjs-91.so.0."
+}

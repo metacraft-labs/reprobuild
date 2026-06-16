@@ -1,0 +1,66 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libglib2.0",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libdconf.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "dconf",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.40.0-3ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libdconf1",
+      "deb_sha256": "8cc719e288131b7232a22d58f4c32e96f59a9ff23378a7c6f4f401eb06f99b63",
+      "deb_size_bytes": 40498,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/d/dconf/libdconf1_0.40.0-3ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libdconf.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libdconf.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "dconf-service",
+      "deb_sha256": "cc9d865340084258519eb69d1e53119aa389b0b0d19f0e3f433c2adc4575de7b",
+      "deb_size_bytes": 28092,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/d/dconf/dconf-service_0.40.0-3ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/libexec/dconf-service"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "dconf-gsettings-backend",
+      "deb_sha256": "90632fbb3a6865d36a8ec17e4152f419efd7e94768c68a5e7fa5b60cdce47a94",
+      "deb_size_bytes": 22742,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/d/dconf/dconf-gsettings-backend_0.40.0-3ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/gio/modules/libdconfsettings.so"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "dconf 0.40.0-3ubuntu0.1. Three .debs bundled: libdconf1 (client lib), dconf-service (daemon), dconf-gsettings-backend (GIO module). **Cascade-class hidden dep:** without dconf-gsettings-backend, g_settings_new() returns the memory backend and gnome-settings-daemon panics on first write. The GIO module under usr/lib/.../gio/modules/ has no SONAME (GLib loads it by absolute path); the DE-G1 build script does NOT create a soname-link for it."
+}

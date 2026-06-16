@@ -1,0 +1,130 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgnome-desktop",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libcanberra",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpolkit",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwacom",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "dconf",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "gsettings-desktop-schemas",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "gsd-xsettings",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "gnome-settings-daemon",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.1-1ubuntu2.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "gnome-settings-daemon",
+      "deb_sha256": "8b87b2ccec10f42c0e0b888a94621cc5881cbc2f087707b78f9da6fb8aaf47c9",
+      "deb_size_bytes": 328708,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-settings-daemon/gnome-settings-daemon_42.1-1ubuntu2.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-a11y-settings"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-color"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-datetime"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-housekeeping"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-keyboard"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-media-keys"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-power"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-rfkill"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-screensaver-proxy"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-sharing"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-smartcard"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-sound"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-wacom"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/gsd-xsettings"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "gnome-settings-daemon-common",
+      "deb_sha256": "bf34942d0cb5012d3725d89a54e153bc75abcada5ced230fac7485ed0b1f8eb9",
+      "deb_size_bytes": 17588,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gnome-settings-daemon/gnome-settings-daemon-common_42.1-1ubuntu2.2_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "gnome-settings-daemon 42.1-1ubuntu2.2. 14 gsd-* libexec daemons the gnome-session pulls in via XDG-autostart. Skipping the usb-protection / wwan / print-notifications / printer / backlight-helper / wacom-oled-helper sub-helpers in expected_files (present in the .deb but PoC doesn't smoke them)."
+}

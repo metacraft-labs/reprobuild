@@ -1,0 +1,190 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libwayland",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libdrm",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "mesa",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgnome-desktop",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgraphene",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpixman",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libcairo2",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpango",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libharfbuzz0b",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgudev",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwacom",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libinput",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbregistry",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon-x11",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbfile",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libjson-glib",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libstartup-notification",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpipewire",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb-extras",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb1",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libglvnd",
+      "snapshot": "ubuntu/jammy/20220422T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libmutter-10.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "mutter",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "42.9-0ubuntu9"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "mutter",
+      "deb_sha256": "a2dc1671d2e32ed4186331d84e63bfb620d61ddaeb6fbf6932812b157320fbd3",
+      "deb_size_bytes": 107640,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/m/mutter/mutter_42.9-0ubuntu9_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/mutter"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/libexec/mutter-restart-helper"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libmutter-10-0",
+      "deb_sha256": "62bd3b33d19f2ae3648325212853f5608ddba24b8263b542d62e29f50ae93ab1",
+      "deb_size_bytes": 1379608,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mutter/libmutter-10-0_42.9-0ubuntu9_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libmutter-10.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libmutter-10.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/mutter-10/libmutter-clutter-10.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/mutter-10/libmutter-clutter-10.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/mutter-10/libmutter-cogl-10.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/mutter-10/libmutter-cogl-10.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/mutter-10/libmutter-cogl-pango-10.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/mutter-10/libmutter-cogl-pango-10.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "mutter-common",
+      "deb_sha256": "378be9316b634f79cfd6ffd3b2398f84ee7638ebd8166c4cc3c992634ef0ceb6",
+      "deb_size_bytes": 13410,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/m/mutter/mutter-common_42.9-0ubuntu9_all.deb",
+      "expected_files": []
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "mutter 42.9-0ubuntu9 is the jammy universe release build. Wayland compositor + window manager embedded by gnome-shell. Three .debs: mutter (the CLI; jammy universe), libmutter-10-0 (the shared lib; main), mutter-common (data files; main). The libmutter .deb also ships the clutter/cogl rendering sub-libs under mutter-10/ \u2014 those need a dedicated ld.so.conf.d entry that the DE-G1 build script adds explicitly (the lib search path /opt/reproos-linux/store/<hash>/usr/lib/x86_64-linux-gnu/mutter-10/)."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libICE.so.6",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libice",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "2:1.0.10-1build2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libice6",
+      "deb_sha256": "eea6d52d12ad610d70b0f70c825ed3c560dafb09f4c272e3c6b0b493d984d13f",
+      "deb_size_bytes": 42606,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libi/libice/libice6_1.0.10-1build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libICE.so.6.3.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libICE.so.6"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libice6 2:1.0.10-1build2. X11 Inter-Client Exchange library. libSM hard-deps it; cairo's X11 backend links it. Wayland-only session still needs it because cairo's X11 backend is compiled in unconditionally on jammy."
+}

@@ -689,6 +689,19 @@ if [ "${MVP_INCLUDE_HYPRLAND:-0}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# DE-G1 implication pre-stage. MVP_INCLUDE_GNOME=1 implies the full DE0
+# foundation (matches DE-H1's MVP_INCLUDE_HYPRLAND pre-stage above). See
+# the DE-H1 block above for the rationale (implies must fire before
+# per-stage gates).
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_GNOME:-0}" = "1" ]; then
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+fi
+
+# ---------------------------------------------------------------------------
 # Stage 4e (opt-in): DE0-S systemd-session foundation overlay-plant.
 #
 # Set MVP_INCLUDE_DE0_SESSION=1 to plant the Wayland-prerequisite layer
@@ -814,6 +827,48 @@ if [ "${MVP_INCLUDE_HYPRLAND:-0}" = "1" ]; then
     --allow-online \
     2>&1 | sed 's/^/[d1]   /'
   log "stage 4h DONE"
+fi
+
+# ---------------------------------------------------------------------------
+# Stage 4i (opt-in): DE-G1 GNOME 42 stack overlay-plant.
+#
+# Plants 33 catalog entries on top of DE0-G (gdm + gnome-shell + mutter +
+# gnome-session + gnome-settings-daemon + libgjs + libmozjs-91 + libgtk4 +
+# dconf + gsettings-desktop-schemas + adwaita-icon-theme + 22 support libs)
+# plus the GNOME config layer (/etc/gdm3/custom.conf, /etc/wayland-sessions/
+# gnome.desktop, /usr/local/bin/repro-start-gnome.sh, /etc/profile.d/
+# gnome-gsettings.sh, /etc/systemd/system/multi-user.target.wants/
+# gdm.service). Per the campaign spec
+# `reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org` (DE-G1).
+#
+# Implies graphics (DE0-G) + dbus (DE0-D) + session (DE0-S). Set
+# MVP_INCLUDE_GNOME=1 to plant. Default off: the bare D1 MVP ISO does
+# not need GNOME.
+#
+# DE-G1 is independent of DE-H1 — both can be enabled simultaneously
+# (the binary symlink farms are name-disjoint and the gsettings /
+# adwaita data trees only land if DE-G1 is on). When BOTH are enabled,
+# DE-H1 runs first (stage 4h) then DE-G1 (this stage). Each is
+# idempotent and only the compositor-config layer differs.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_GNOME:-0}" = "1" ]; then
+  # GNOME implies the full DE0 foundation.
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+
+  log "stage 4i: DE-G1 GNOME 42 stack overlay-plant"
+  DE_G1_SH="$SCRIPT_DIR/build-mvp-gnome-rootfs.sh"
+  if [ ! -f "$DE_G1_SH" ]; then
+    die "MVP_INCLUDE_GNOME=1 but $DE_G1_SH missing"
+  fi
+  MVP_OVERLAY_DIR="$OVERLAY" bash "$DE_G1_SH" \
+    --overlay-dir "$OVERLAY" \
+    --skip-de0-g \
+    --allow-online \
+    2>&1 | sed 's/^/[d1]   /'
+  log "stage 4i DONE"
 fi
 
 log ""
