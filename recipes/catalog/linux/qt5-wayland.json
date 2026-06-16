@@ -1,0 +1,77 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwayland",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "qt5-wayland",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.15.3-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "qtwayland5",
+      "deb_sha256": "dfd9aeac02a651948568d04267d8f90427ad1e37e706768b2362db1b45df2bdb",
+      "deb_size_bytes": 227800,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtwayland-opensource-src/qtwayland5_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qtwayland5/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5waylandclient5",
+      "deb_sha256": "a1fc3af458e440b2d2500f3506643ebe5720fe98d1a23862c16e186d31868f66",
+      "deb_size_bytes": 407472,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtwayland-opensource-src/libqt5waylandclient5_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5WaylandClient.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5WaylandClient.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5waylandcompositor5",
+      "deb_sha256": "3e34e120b341e0e1b0a92ebb1daeabe8fae2424046186b599a273639b43dfac6",
+      "deb_size_bytes": 400920,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtwayland-opensource-src/libqt5waylandcompositor5_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5WaylandCompositor.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5WaylandCompositor.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Qt 5 Wayland integration. libQt5WaylandClient.so.5 is the wl_compositor-side Qt platform plugin client; libQt5WaylandCompositor.so.5 is the compositor-side API used by kwin_wayland."
+}

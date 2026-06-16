@@ -1,0 +1,52 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kdelibs4support",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5kdelibs4support5",
+      "deb_sha256": "c28dc217f2409118d3591ea51e91ec09becf8af62b31585c6a45d562f1510c9f",
+      "deb_size_bytes": 795946,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdelibs4support/libkf5kdelibs4support5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KDELibs4Support.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KDELibs4Support.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KDELibs 4 -> KF5 transition shim. Hard-deped by plasma-desktop for legacy KGlobal::config() / KConfigGroup global access."
+}

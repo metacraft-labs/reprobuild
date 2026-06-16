@@ -1,0 +1,72 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "plasma-workspace",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kio",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "plasma-desktop",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:5.24.7-0ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "plasma-desktop",
+      "deb_sha256": "050609df8ffa875e1ecf5bc3f433436d1b567552f9b8baa74e0e9fdacb217d1b",
+      "deb_size_bytes": 1236324,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-desktop/plasma-desktop_5.24.7-0ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/ibus-ui-emojier-plasma"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/kaccess"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "plasma-desktop-data",
+      "deb_sha256": "5fdb4f5cfdd8b45ad425afe8f387cd1e9463854569aa722d896336392b4a39cf",
+      "deb_size_bytes": 6080398,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-desktop/plasma-desktop-data_5.24.7-0ubuntu0.1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/accounts/providers/kde/opendesktop.provider"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Plasma desktop session glue + data. The -data deb ships /usr/share/plasma/desktoptheme/, /usr/share/wallpapers/, the l10n files."
+}

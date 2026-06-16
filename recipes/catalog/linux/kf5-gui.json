@@ -1,0 +1,197 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kf5-gui",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5guiaddons5",
+      "deb_sha256": "97bc8af17dd0ba9ec6873e6418b63209d3a8d542100aa89d77699cf7cfa6be9c",
+      "deb_size_bytes": 70816,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kguiaddons/libkf5guiaddons5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5GuiAddons.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5GuiAddons.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5guiaddons-bin",
+      "deb_sha256": "4b141a92f1ee4ba7c711ee9d9af5e1f9800e12a6a53231e968abde5e1aec393b",
+      "deb_size_bytes": 8726,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kguiaddons/libkf5guiaddons-bin_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kde-geo-uri-handler"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5guiaddons-data",
+      "deb_sha256": "6350fd29de244841ee9d476beb058ffca390d81b4416f442633cf9772fba10d2",
+      "deb_size_bytes": 4438,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kguiaddons/libkf5guiaddons-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/applications/google-maps-geo-handler.desktop"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5widgetsaddons5",
+      "deb_sha256": "84b00f1fcbd0d99969105eed4f19487e62d4407a1b27c278212790816bb571f1",
+      "deb_size_bytes": 420862,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwidgetsaddons/libkf5widgetsaddons5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5WidgetsAddons.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5WidgetsAddons.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5widgetsaddons-data",
+      "deb_sha256": "82d2a718a5bddcfb947a4f52eb0549e3853cd3118ba2894b892e5e32b1ec2341",
+      "deb_size_bytes": 1199130,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwidgetsaddons/libkf5widgetsaddons-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5widgetsaddons-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5itemviews5",
+      "deb_sha256": "50bcbc589b062a2e7dde532fdeed6be0bedd8af6c4adb20b7b891b72c50b7806",
+      "deb_size_bytes": 82302,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kitemviews/libkf5itemviews5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5ItemViews.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5ItemViews.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5jobwidgets5",
+      "deb_sha256": "a77af1d0aed8f5cf189d0dfbef1380ed682abeb294e64d60b3b56fa16868a86e",
+      "deb_size_bytes": 65098,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kjobwidgets/libkf5jobwidgets5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5JobWidgets.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5JobWidgets.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5iconthemes5",
+      "deb_sha256": "e5b3c3c76fd2b0d604c34a77d964296e9d61ee81e60cdf605bc9b6cfe78f4c32",
+      "deb_size_bytes": 101674,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kiconthemes/libkf5iconthemes5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5IconThemes.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5IconThemes.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5iconthemes-data",
+      "deb_sha256": "60cf568c46d1aad91a06960cab4de3c44c665ed808b7f85eeb9832d17c6d9f6c",
+      "deb_size_bytes": 27744,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kiconthemes/libkf5iconthemes-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5iconthemes-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5completion5",
+      "deb_sha256": "740cd3b92ec245b78432ea257e90279a3423e15024554b0b39e169feeb162073",
+      "deb_size_bytes": 90718,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcompletion/libkf5completion5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Completion.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Completion.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5completion-data",
+      "deb_sha256": "2e8df83d4ba9e3ec3115b0f0f51b95928c121ba660a5ff14fd6b65c885d006bd",
+      "deb_size_bytes": 15086,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcompletion/libkf5completion-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5completion-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5i18n5",
+      "deb_sha256": "e249f4d6e37ff62676bff2421437bc8bf4e9a2b63ef9f450aab1ecb5a761f2d1",
+      "deb_size_bytes": 118628,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/ki18n/libkf5i18n5_5.92.0-0ubuntu2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5I18n.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5I18n.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5i18n-data",
+      "deb_sha256": "507ccf8dd70ba86cf31378f2986ee6cc1270469bffb42ccb303ddf76178aae19",
+      "deb_size_bytes": 1207534,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/ki18n/libkf5i18n-data_5.92.0-0ubuntu2_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5i18n-data/changelog.Debian.gz"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 GUI helper frameworks aggregated (KGuiAddons + KWidgetsAddons + KItemViews + KJobWidgets + KIconThemes + KCompletion + KI18n). 13 .debs in one catalog. libkf5i18n-data is the second-largest .deb in DE-K1 (1.21 MB compressed; l10n catalogs for 60+ locales)."
+}

@@ -1,0 +1,189 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kio",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kded",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "plasma-framework",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kactivities",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-wayland",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qml-modules",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libksysguard",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "plasma-workspace",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:5.24.7-0ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "plasma-workspace",
+      "deb_sha256": "c05a948b5b436c1786a25486b9f82c0f2c10a4b64b0be1188b6f5935debcdd1a",
+      "deb_size_bytes": 11860052,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/plasma-workspace_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kcminit"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/krunner"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/ksmserver"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/plasmashell"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "plasma-workspace-wayland",
+      "deb_sha256": "93a3643f70b208f4778e8239050b2390418c408b5dc72c40b2faf4c172f93ffb",
+      "deb_size_bytes": 71680,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/plasma-workspace-wayland_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/startplasma-wayland"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libplasma-geolocation-interface5",
+      "deb_sha256": "789c1c55206bc854bba93c0c61b414d8bec5f1883bf062ccc68062d8a4f40192",
+      "deb_size_bytes": 22682,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/libplasma-geolocation-interface5_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libplasma-geolocation-interface.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libplasma-geolocation-interface.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libtaskmanager6",
+      "deb_sha256": "4290e6669879a5b1e325992866207ea6c55660ce78fe5fcedf4654de23582d28",
+      "deb_size_bytes": 183110,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/libtaskmanager6_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libtaskmanager.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libtaskmanager.so.6"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libnotificationmanager1",
+      "deb_sha256": "5f055456cf5e40fc65bb38d6dd074ac5058141381a0b25e3efbc4463f55fcb86",
+      "deb_size_bytes": 177392,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/libnotificationmanager1_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libnotificationmanager.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libnotificationmanager.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkworkspace5-5",
+      "deb_sha256": "43d68dad5264bd80ca86e440cb0b2961680c8d78fa13164a8551e041cd91f6d6",
+      "deb_size_bytes": 92376,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/libkworkspace5-5_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkworkspace5.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkworkspace5.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "sddm-theme-breeze",
+      "deb_sha256": "925944d866384db65d4b246b37016fb9fd5f2223e1e8fcc4722894c0146a000e",
+      "deb_size_bytes": 612088,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-workspace/sddm-theme-breeze_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/sddm-theme-breeze/copyright"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Plasma workspace - the largest .deb in DE-K1 (11.8 MB). Ships /usr/bin/plasmashell + /usr/bin/krunner + /usr/bin/kcminit + /usr/bin/ksmserver + /usr/bin/startplasma-wayland + 23 helpers under usr/libexec/. The -wayland deb ships the Wayland session entry. The four lib*.debs (plasma-geolocation-interface, taskmanager, notificationmanager, kworkspace5) ship runtime-only helper libs hard-deped by plasmashell."
+}

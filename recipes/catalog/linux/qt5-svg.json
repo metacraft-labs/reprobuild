@@ -1,0 +1,42 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "qt5-svg",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.15.3-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libqt5svg5",
+      "deb_sha256": "7c27f9f6002ed5cb13f86bbc053e50e484d779b0217de7ceec2780becc33be33",
+      "deb_size_bytes": 149436,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtsvg-opensource-src/libqt5svg5_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Svg.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Svg.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Qt 5 SVG renderer. Loaded by KIconThemes + by Plasma's QML SVG decorations."
+}

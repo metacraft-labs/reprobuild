@@ -1,0 +1,94 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kwin-libs",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:5.24.7-0ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkwineffects13",
+      "deb_sha256": "ccccd328fc0923f799bd2aaf09b760bdb4c5f30f3b602f918089ad36d2874fa9",
+      "deb_size_bytes": 97138,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwin/libkwineffects13_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkwineffects.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkwineffects.so.13"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkwinglutils13",
+      "deb_sha256": "fb42dc46c93183e1b114c3f72fec04717254df463be79df0b43f4e33901a5aee",
+      "deb_size_bytes": 63874,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwin/libkwinglutils13_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkwinglutils.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkwinglutils.so.13"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkwinxrenderutils13",
+      "deb_sha256": "89d8866f43cbc890290a66cb606d08dc70b971da723956bd8455c1f7e29fc452",
+      "deb_size_bytes": 16950,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwin/libkwinxrenderutils13_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkwinxrenderutils.so.5.24.7",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkwinxrenderutils.so.13"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkdecorations2-5v5",
+      "deb_sha256": "0d3b2bd527df471153e5bdb4c49092d37585e1472e3fcdc9556875fc5150621b",
+      "deb_size_bytes": 60224,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdecoration/libkdecorations2-5v5_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkdecorations2.so.5.24.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkdecorations2.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkdecorations2private9",
+      "deb_sha256": "ca362547484610b5c94bd5b77a4140deea317098feb1f60fd51e90bf5d8a9bd6",
+      "deb_size_bytes": 8116,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdecoration/libkdecorations2private9_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkdecorations2private.so.5.24.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkdecorations2private.so.9"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KWin effect / decoration helper libs. libkwineffects.so.13 is the effects API; libkwinglutils.so.13 wraps the GL helper; libkwinxrenderutils.so.13 is the legacy X-Render helper. libkdecorations2 is the window-decoration API (both public + private companion). Jammy's KWin 5.24 ABI uses sover 13 (not 15) for the effects/glutils libs and sover 9 (not 8) for the decorations private lib."
+}

@@ -1,0 +1,120 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "qt5-declarative",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.15.3+dfsg-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libqt5qml5",
+      "deb_sha256": "e449b5fbdb959beb27cecb4a2b8a41028bad6d4a5d647cabd57bf623a339e103",
+      "deb_size_bytes": 1471940,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/libqt5qml5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Qml.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Qml.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5quick5",
+      "deb_sha256": "8e1eb083057fda313f436e7be6a45b39f9b325c8ee668c6e7ca976d1f289a9e6",
+      "deb_size_bytes": 1747742,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/libqt5quick5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Quick.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Quick.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5quickwidgets5",
+      "deb_sha256": "16a88f49e470050b854429fc8ab0e122dadb2f4962c634c436a31c3ddd5b4f0b",
+      "deb_size_bytes": 39926,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/libqt5quickwidgets5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5QuickWidgets.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5QuickWidgets.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5quicktemplates2-5",
+      "deb_sha256": "4cfc767c606cf78f3a144c65ca3ce084584d07ee9e91da0b54e78323900d7dea",
+      "deb_size_bytes": 449322,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtquickcontrols2-opensource-src/libqt5quicktemplates2-5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5QuickTemplates2.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5QuickTemplates2.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5quickparticles5",
+      "deb_sha256": "185e7b9cdf334487fe679606164173085f096d601d44a0fb04f11aace930d24e",
+      "deb_size_bytes": 218046,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/libqt5quickparticles5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5QuickParticles.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5QuickParticles.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5quickshapes5",
+      "deb_sha256": "7cf937355151ed49f16caa922e9310882e56a386714f3e8286875040c25b9016",
+      "deb_size_bytes": 103636,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/libqt5quickshapes5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5QuickShapes.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5QuickShapes.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5quicktest5",
+      "deb_sha256": "a6437492130d09a9700503fb2b1aeb7b2be44e06cd25a358c74d6c5994163cea",
+      "deb_size_bytes": 58152,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/libqt5quicktest5_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5QuickTest.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5QuickTest.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Qt 5 Declarative (QML + Quick) - the runtime of every Plasma UI. plasmashell + krunner + plasma-discover are all QML apps."
+}

@@ -1,0 +1,92 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "plasma-framework",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "plasma-framework",
+      "deb_sha256": "16c6672b1e83868126a2ff5c4e6b8a1467ebaf9e790aa5a488e6901467f89a75",
+      "deb_size_bytes": 2766836,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-framework/plasma-framework_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/plasmapkg2"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5plasma5",
+      "deb_sha256": "a04df187260752ecf0929c8d239810086c5144161f5640124a6308a78d9d844a",
+      "deb_size_bytes": 260320,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-framework/libkf5plasma5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Plasma.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Plasma.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5plasmaquick5",
+      "deb_sha256": "721540f6c1c3d0b6cbb339689280598ccf96d59c9a8af9d4adef0991ce9117c3",
+      "deb_size_bytes": 113406,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-framework/libkf5plasmaquick5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5PlasmaQuick.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5PlasmaQuick.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 Plasma framework + its QtQuick bridge. libkf5plasma5.so.5 is the C++ Plasma API; libkf5plasmaquick5.so.5 exposes it to QML. plasma-framework ships shared assets /usr/share/plasma/."
+}

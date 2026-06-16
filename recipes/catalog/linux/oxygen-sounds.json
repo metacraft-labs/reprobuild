@@ -1,0 +1,80 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "oxygen-sounds",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:5.24.6-0ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "oxygen-sounds",
+      "deb_sha256": "a36e81282a5e4c34e2c03a2f13125eede1679f4d428254367330e446f245745c",
+      "deb_size_bytes": 1894492,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/o/oxygen/oxygen-sounds_5.24.6-0ubuntu0.1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/oxygen-sounds/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkuserfeedbackcore1",
+      "deb_sha256": "f69dc27ac8ad831d8ef248cc230eb137f435bbaea9e50c7c42524416fa418375",
+      "deb_size_bytes": 129506,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kuserfeedback/libkuserfeedbackcore1_1.2.0-2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKUserFeedbackCore.so.1.2.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKUserFeedbackCore.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libpackagekitqt5-1",
+      "deb_sha256": "7c7fc5c4ea1d7c7b74d76f4e4a52bac67e0a6b9a639b2b74d433f3cbac724d9c",
+      "deb_size_bytes": 80220,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/packagekit-qt/libpackagekitqt5-1_1.0.2-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpackagekitqt5.so.1.0.2",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpackagekitqt5.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libpolkit-qt5-1-1",
+      "deb_sha256": "1987c9cf23c46e43914c8b2be1bd7a87bf98f7fc6a3db0680e795d3e35ff816f",
+      "deb_size_bytes": 62310,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/polkit-qt-1/libpolkit-qt5-1-1_0.114.0-2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libpolkit-qt5-gui-1.so.1.114.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libpolkit-qt5-gui-1.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Plasma audio assets (Oxygen sound theme) + 3 small client libraries plasma-desktop hard-deps but are too small to warrant their own catalogs."
+}

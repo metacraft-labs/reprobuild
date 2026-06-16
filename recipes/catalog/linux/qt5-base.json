@@ -1,0 +1,239 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libwayland",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libdrm",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "mesa",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpipewire",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb1",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb-extras",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbfile",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon-x11",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libice",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsm",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsoup2.4",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpolkit",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libnss",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwacom",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgudev",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "qt5-base",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.15.3+dfsg-2ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libqt5core5a",
+      "deb_sha256": "0bcbdb0e6753d5a5340de8b6396294c20690618f7379206a3b61bd138064a102",
+      "deb_size_bytes": 2005522,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5core5a_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Core.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Core.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5gui5",
+      "deb_sha256": "8198c2a7b3872edcd1f3b8829038e0dd1be73ba4a56753f7d38bb7ddab7ae248",
+      "deb_size_bytes": 3721752,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5gui5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5XcbQpa.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5XcbQpa.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5widgets5",
+      "deb_sha256": "ea808d2b290a0f26b540938673796ea293250175536b4bc6d6b4ec38b90a4c54",
+      "deb_size_bytes": 2561196,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5widgets5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Widgets.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Widgets.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5network5",
+      "deb_sha256": "7bb865e3d20fe33d4a57f3cefbf21c5ca56554b5253c69e3181f8ca6b4d83b09",
+      "deb_size_bytes": 730608,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5network5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Network.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Network.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5dbus5",
+      "deb_sha256": "60e26e47c6d71a3895928ff1d904f54096c5ec2e17ea6e2738a6e76036164097",
+      "deb_size_bytes": 222086,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5dbus5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5DBus.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5DBus.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5xml5",
+      "deb_sha256": "b4c2172591f315bc07b9018cabd92ef365844f4e179731b24ac29cbc92ff5424",
+      "deb_size_bytes": 124318,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5xml5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Xml.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Xml.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5sql5",
+      "deb_sha256": "dfb3cc734a15b121d73ab365cfa304593e79071a272d6d76dbf347c93440651b",
+      "deb_size_bytes": 122736,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5sql5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Sql.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Sql.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5concurrent5",
+      "deb_sha256": "cc3535d4925022187903d6ce31a7ac542316f2ea90a8afba31c68e4c1762a46e",
+      "deb_size_bytes": 36254,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5concurrent5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5Concurrent.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5Concurrent.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5x11extras5",
+      "deb_sha256": "ff649bca1fbcf018bf6555dbc501709ff8dfb86d17c4add0d0e10648f39ceca9",
+      "deb_size_bytes": 10910,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtx11extras-opensource-src/libqt5x11extras5_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5X11Extras.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5X11Extras.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libqt5opengl5",
+      "deb_sha256": "bfac0fe20f89d67fde15c20f63fd524e63e2d371e82f44160522115a528f7046",
+      "deb_size_bytes": 153142,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtbase-opensource-src/libqt5opengl5_5.15.3+dfsg-2ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libQt5OpenGL.so.5.15.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libQt5OpenGL.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Qt 5.15.3 base libraries from qtbase-opensource-src + qtx11extras. 10 .debs aggregated. libqt5gui5 (3.72 MB) is the largest; ships the QPA platform plugin loader + xcb/wayland/minimal/offscreen backends."
+}

@@ -1,0 +1,103 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libksysguard",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:5.24.6-0ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libksgrd9",
+      "deb_sha256": "e90aa647ac299d31fa5394bd488635ea5bbe3a1f84c5349c664b505dc3669361",
+      "deb_size_bytes": 36598,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libk/libksysguard/libksgrd9_5.24.6-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libksgrd.so.5.24.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libksgrd.so.9"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libksignalplotter9",
+      "deb_sha256": "e128e4f8200042f5594b3510bd4f132bcb157d02f1f11a2c02c11ae0fca1488d",
+      "deb_size_bytes": 34848,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libk/libksysguard/libksignalplotter9_5.24.6-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libksignalplotter.so.5.24.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libksignalplotter.so.9"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libprocesscore9",
+      "deb_sha256": "10e8df69a4870aa07210d1c77e49d788c42ace8a0fa80ffc1a74e715d9e45314",
+      "deb_size_bytes": 102458,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libk/libksysguard/libprocesscore9_5.24.6-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libprocesscore.so.5.24.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libprocesscore.so.9"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libprocessui9",
+      "deb_sha256": "3dcbd860b951467be9da0dd1cdd56e2faaa71fcacf6543511ca8c413e9297e47",
+      "deb_size_bytes": 114240,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libk/libksysguard/libprocessui9_5.24.6-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libprocessui.so.5.24.6",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libprocessui.so.9"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5sysguard-bin",
+      "deb_sha256": "f1b8439bcb610e0d9a2fef53c4fec4af59065abe8491ce685d1acf533df35194",
+      "deb_size_bytes": 56504,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/libk/libksysguard/libkf5sysguard-bin_5.24.6-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5sysguard-bin/copyright"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KSysGuard libs (system monitor data sources, signal-plot widget, process tree). plasma-workspace's plasma-systemmonitor applet links them."
+}

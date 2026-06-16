@@ -1,0 +1,61 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kio",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpipewire",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "xdg-desktop-portal-kde",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.24.7-0ubuntu0.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "xdg-desktop-portal-kde",
+      "deb_sha256": "81be80cbd84e700ec1c72c9b2f61d109cf9478c5eb97ae450258bbea45966acc",
+      "deb_size_bytes": 199118,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/x/xdg-desktop-portal-kde/xdg-desktop-portal-kde_5.24.7-0ubuntu0.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/applications/org.freedesktop.impl.portal.desktop.kde.desktop"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KDE backend for xdg-desktop-portal. Forwards file-chooser/screenshot/screencast requests to KWin + plasmashell."
+}

@@ -1,0 +1,314 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kf5-frameworks",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5windowsystem5",
+      "deb_sha256": "476bd1087fecda632a9733e35d3b390ec437ea64adf146779135b73a04d76bbb",
+      "deb_size_bytes": 150000,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwindowsystem/libkf5windowsystem5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5WindowSystem.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5WindowSystem.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5windowsystem-data",
+      "deb_sha256": "c289d3eea447ee35d95b740d54cfb0327c1db264931c00f5baccd119d3037acd",
+      "deb_size_bytes": 10582,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kwindowsystem/libkf5windowsystem-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5windowsystem-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5globalaccel5",
+      "deb_sha256": "c1e880cfda10730f3c152e6ee37186850ecbf968318d331138bd981312a66493",
+      "deb_size_bytes": 45088,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kglobalaccel/libkf5globalaccel5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5GlobalAccel.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5GlobalAccel.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5globalaccel-bin",
+      "deb_sha256": "1e4a7fa5e57560655f939abe9ce299ca901490c688da3ab8e04b508986a7f282",
+      "deb_size_bytes": 14428,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kglobalaccel/libkf5globalaccel-bin_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kglobalaccel5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5globalaccel-data",
+      "deb_sha256": "2f8f07bf9a8fc7e4a1d688b5eedc4259cdf1dd6df412305eb860073579dc4593",
+      "deb_size_bytes": 23856,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kglobalaccel/libkf5globalaccel-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/dbus-1/services/org.kde.kglobalaccel.service"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5globalaccelprivate5",
+      "deb_sha256": "e5a19157e68c7b153677108752747a4291a0c92c3b9811cf4fe927c92e8ce88d",
+      "deb_size_bytes": 51166,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kglobalaccel/libkf5globalaccelprivate5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5GlobalAccelPrivate.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5GlobalAccelPrivate.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5xmlgui5",
+      "deb_sha256": "323a1903f61fa476d83c3c1fa91b90cff15ad82fec5ce10aaefd1e9d4516c858",
+      "deb_size_bytes": 277858,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kxmlgui/libkf5xmlgui5_5.92.0-0ubuntu2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5XmlGui.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5XmlGui.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5xmlgui-data",
+      "deb_sha256": "16e188dc91f37576e813d6b68be09d2e1b4b791ca6ade01b3c4834a4788036fa",
+      "deb_size_bytes": 412310,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kxmlgui/libkf5xmlgui-data_5.92.0-0ubuntu2_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5xmlgui-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5xmlgui-bin",
+      "deb_sha256": "37c263ebf076904a33dcbc15a779be3b187ad93927c295a60ebc71858fbe8583",
+      "deb_size_bytes": 17720,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kxmlgui/libkf5xmlgui-bin_5.92.0-0ubuntu2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5xmlgui-bin/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5notifications5",
+      "deb_sha256": "b09a25bf224c7ca7c66f4b107e86d2df11b57f3c1d650b0bcb0f533d99055b6f",
+      "deb_size_bytes": 112608,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knotifications/libkf5notifications5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Notifications.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Notifications.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5notifications-data",
+      "deb_sha256": "0b084423dab0b272032a324115b9ea1efb0680ad5cfe23f0837560b275ecbcb5",
+      "deb_size_bytes": 16348,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knotifications/libkf5notifications-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5notifications-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5notifyconfig5",
+      "deb_sha256": "362906d953023c9c4f3c1a7761200bf855653ef7e913bdb272c3cc4d3cb8f9cd",
+      "deb_size_bytes": 31406,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knotifyconfig/libkf5notifyconfig5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5NotifyConfig.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5NotifyConfig.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5notifyconfig-data",
+      "deb_sha256": "b1f1eca01b4976d38d279315549057be7cecce64b7b29527b643f7a62881f706",
+      "deb_size_bytes": 51848,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knotifyconfig/libkf5notifyconfig-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5notifyconfig-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5service5",
+      "deb_sha256": "870dd1ff8f54b57fa78fca520811545fbd57b4c293bbf51f65fc8fd296c8ea6d",
+      "deb_size_bytes": 196378,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kservice/libkf5service5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Service.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Service.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5service-bin",
+      "deb_sha256": "f36fd6b812c426a5e9517c3c015c2bc633f35cf9b2d8589113e1f3fc961026e4",
+      "deb_size_bytes": 47282,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kservice/libkf5service-bin_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kbuildsycoca5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5service-data",
+      "deb_sha256": "9f07d9bdab08464e9b33a1dfffb15ebaadf3e870deea45df0986c081bf9e19dc",
+      "deb_size_bytes": 70170,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kservice/libkf5service-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5service-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5kcmutils5",
+      "deb_sha256": "9c127bae5c89c585f4f9d2ba160f822b1c7289ac3eea698ed648c01ee5085dc1",
+      "deb_size_bytes": 117982,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcmutils/libkf5kcmutils5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KCMUtils.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KCMUtils.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5package5",
+      "deb_sha256": "48ee10925753e0b9a92e96a91259fbb3c90cd7af99b1f894f5906e6c46985c9a",
+      "deb_size_bytes": 52552,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kpackage/libkf5package5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Package.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Package.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5package-data",
+      "deb_sha256": "a5d0d95648ad13e96b211a24e3cfd31adc97577533916992b51643e24ba8b2ef",
+      "deb_size_bytes": 83852,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kpackage/libkf5package-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5package-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5sonnetcore5",
+      "deb_sha256": "c9485a09ba7fe46810b4084d9558329ac93a4e1967bcd058c947396a61f2785a",
+      "deb_size_bytes": 134646,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/sonnet/libkf5sonnetcore5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5SonnetCore.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5SonnetCore.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5sonnetui5",
+      "deb_sha256": "a14e2659850c85118e013896f20353302c00db3c6fb5a042dfe4648632ce83f4",
+      "deb_size_bytes": 53914,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/sonnet/libkf5sonnetui5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5SonnetUi.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5SonnetUi.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5sonnet5-data",
+      "deb_sha256": "a10271dfe703ba9315e7104ecf36d84ee2c2c130b8c564b48253b849d3dbf1f3",
+      "deb_size_bytes": 97208,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/sonnet/libkf5sonnet5-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5sonnet5-data/changelog.Debian.gz"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 desktop-tier frameworks aggregated (KWindowSystem + KGlobalAccel + KXmlGui + KNotifications + KNotifyConfig + KService + KCMUtils + KPackage + Sonnet). 22 .debs in one catalog."
+}

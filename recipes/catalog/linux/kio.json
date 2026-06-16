@@ -1,0 +1,151 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kio",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "kio",
+      "deb_sha256": "e6a185497f881f4d6bb15172c0b9347daf428c5de417cf93c88ac9e48342aff0",
+      "deb_size_bytes": 3379752,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kio/kio_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kcookiejar5"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/ktelnetservice5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5kiocore5",
+      "deb_sha256": "9fbf05210d7e8ae324716b939e0699ab3df24b9ba888b6f98b281fd1396516f7",
+      "deb_size_bytes": 526268,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kio/libkf5kiocore5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KIOCore.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KIOCore.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5kiogui5",
+      "deb_sha256": "df381d93e36d0fcf6496caee32050e02b41d42a86a5b7ac36769038a8217b42b",
+      "deb_size_bytes": 94868,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kio/libkf5kiogui5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KIOGui.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KIOGui.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5kiowidgets5",
+      "deb_sha256": "9ebb9bb33d86a4f628d6b26441616d1fc5d96903782e48fa6bbd3a24b881d177",
+      "deb_size_bytes": 451928,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kio/libkf5kiowidgets5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KIOWidgets.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KIOWidgets.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5kiofilewidgets5",
+      "deb_sha256": "442425b4a615f6ead0cd56fb249031005628ba371c5df872679d6c56a2edb861",
+      "deb_size_bytes": 329848,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kio/libkf5kiofilewidgets5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KIOFileWidgets.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KIOFileWidgets.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5kiontlm5",
+      "deb_sha256": "a1e54a95283bb4041c50196f19e60119746956477214f489963f672555c68e34",
+      "deb_size_bytes": 18940,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kio/libkf5kiontlm5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5KIONTLM.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5KIONTLM.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5bookmarks5",
+      "deb_sha256": "b1a064780abaf15354a4d5c15a61b8bf3d29b4630f658431b60ace855ce4e04c",
+      "deb_size_bytes": 97706,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kbookmarks/libkf5bookmarks5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Bookmarks.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Bookmarks.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5parts5",
+      "deb_sha256": "caf2c06ec511a8527d7c6050b7fa4d3b2afff44a7024a0624de5782293baca8c",
+      "deb_size_bytes": 125542,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kparts/libkf5parts5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Parts.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Parts.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KIO virtual-filesystem framework + 5 client libs + KBookmarks + KParts. plasmashell hard-deps libKF5KIOCore for its 'open file' dialog."
+}

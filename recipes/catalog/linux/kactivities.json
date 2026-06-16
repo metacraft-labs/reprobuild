@@ -1,0 +1,59 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kactivities",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.24.4-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "kactivitymanagerd",
+      "deb_sha256": "f2ef6e299eb40f5a878456dba7e140e3dfb501f7881b7bde36c2931724e379c0",
+      "deb_size_bytes": 204672,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kactivitymanagerd/kactivitymanagerd_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/dbus-1/services/org.kde.ActivityManager.service"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5activities5",
+      "deb_sha256": "31dea08e07fe46a6fa54a97abf950cb64da1abe77fcc6c457ea4268c1f2337e9",
+      "deb_size_bytes": 71728,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kactivities-kf5/libkf5activities5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Activities.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Activities.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KDE Activities daemon + KF5 activities client lib. Plasma 5 requires kactivitymanagerd running on the session bus for desktop activity switching."
+}

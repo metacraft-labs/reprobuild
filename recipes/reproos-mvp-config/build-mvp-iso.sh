@@ -702,6 +702,17 @@ if [ "${MVP_INCLUDE_GNOME:-0}" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# DE-K1 implication pre-stage. MVP_INCLUDE_PLASMA=1 implies the full DE0
+# foundation (matches DE-H1's / DE-G1's pre-stage above).
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_PLASMA:-0}" = "1" ]; then
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+fi
+
+# ---------------------------------------------------------------------------
 # Stage 4e (opt-in): DE0-S systemd-session foundation overlay-plant.
 #
 # Set MVP_INCLUDE_DE0_SESSION=1 to plant the Wayland-prerequisite layer
@@ -869,6 +880,44 @@ if [ "${MVP_INCLUDE_GNOME:-0}" = "1" ]; then
     --allow-online \
     2>&1 | sed 's/^/[d1]   /'
   log "stage 4i DONE"
+fi
+
+# ---------------------------------------------------------------------------
+# Stage 4j (opt-in): DE-K1 KDE Plasma 5.24 overlay-plant.
+#
+# Reference: docs/wayland-de-kde.md +
+# reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org (DE-K1).
+#
+# Implies graphics (DE0-G) + dbus (DE0-D) + session (DE0-S). Set
+# MVP_INCLUDE_PLASMA=1 to plant. Default off: the bare D1 MVP ISO does
+# not need Plasma.
+#
+# DE-K1 is independent of DE-H1 and DE-G1 - all three can be enabled
+# simultaneously without conflict (they share DE0-G + DE-H1/G1's
+# foundation libs via dependency_closure[]; the kf5/qt5/plasma trees are
+# parallel to mutter/gnome-shell, just plant additional store dirs).
+# When all three are enabled, DE-H1 runs first (stage 4h), DE-G1 next
+# (stage 4i), DE-K1 last (this stage); each is idempotent and only the
+# compositor-config layer differs.
+# ---------------------------------------------------------------------------
+
+if [ "${MVP_INCLUDE_PLASMA:-0}" = "1" ]; then
+  # Plasma implies the full DE0 foundation.
+  : "${MVP_INCLUDE_DE0_SESSION:=1}"
+  : "${MVP_INCLUDE_DE0_DBUS:=1}"
+  : "${MVP_INCLUDE_DE0_GRAPHICS:=1}"
+
+  log "stage 4j: DE-K1 KDE Plasma 5.24 stack overlay-plant"
+  DE_K1_SH="$SCRIPT_DIR/build-mvp-plasma-rootfs.sh"
+  if [ ! -f "$DE_K1_SH" ]; then
+    die "MVP_INCLUDE_PLASMA=1 but $DE_K1_SH missing"
+  fi
+  MVP_OVERLAY_DIR="$OVERLAY" bash "$DE_K1_SH" \
+    --overlay-dir "$OVERLAY" \
+    --skip-de0-g \
+    --allow-online \
+    2>&1 | sed 's/^/[d1]   /'
+  log "stage 4j DONE"
 fi
 
 log ""

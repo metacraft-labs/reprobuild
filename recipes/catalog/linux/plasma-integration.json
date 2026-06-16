@@ -1,0 +1,63 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "plasma-integration",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.24.4-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "plasma-integration",
+      "deb_sha256": "fa26503327b36d5bb69aedf4f9770b661d35e3b233554adb82cd150cfce0288c",
+      "deb_size_bytes": 159648,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/plasma-integration/plasma-integration_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/plasma-integration/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "polkit-kde-agent-1",
+      "deb_sha256": "fa3271bb3bddb56099dbd6c376896e2099e356c1fb2543a492ec9372e1eb83bd",
+      "deb_size_bytes": 63200,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/polkit-kde-agent-1/polkit-kde-agent-1_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/applications/org.kde.polkit-kde-authentication-agent-1.desktop"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Qt 5 platform-theme plugin for Plasma + the Polkit auth agent (kde-authentication-agent-1 binary)."
+}

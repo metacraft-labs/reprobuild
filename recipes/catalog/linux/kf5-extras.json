@@ -1,0 +1,85 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kf5-extras",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5solid5",
+      "deb_sha256": "5fcf2ac13a964192131aa0cdffbd3df127fd6152def98dc20443ac50a365ff25",
+      "deb_size_bytes": 209262,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/solid/libkf5solid5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Solid.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Solid.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5solid5-data",
+      "deb_sha256": "92466369c0701a4eb711299e134c0a57258edd9a054899a0c860dcc9d9585fa2",
+      "deb_size_bytes": 100630,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/solid/libkf5solid5-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5solid5-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5baloo5",
+      "deb_sha256": "846964b7db8b046a793940e634ab92b320a77bd1fc4e1c9829baa832c796db3c",
+      "deb_size_bytes": 65100,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/b/baloo-kf5/libkf5baloo5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Baloo.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Baloo.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkaccounts2",
+      "deb_sha256": "902a4a90bdac3eb1806b3ff35ca34b03115a557ff4cabdeaddfcd17e1041a9ea",
+      "deb_size_bytes": 50180,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kaccounts-integration/libkaccounts2_21.12.3-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libkaccounts.so.21.12.3",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libkaccounts.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 Solid (hardware abstraction) + KBaloo (file indexer client lib) + KAccounts (account integration framework client lib). No daemons planted."
+}

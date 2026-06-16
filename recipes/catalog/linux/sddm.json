@@ -1,0 +1,131 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libsystemd",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpipewire",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb1",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb-extras",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbfile",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libxkbcommon-x11",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libice",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsm",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libsoup2.4",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libpolkit",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libnss",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libwacom",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "libgudev",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "sddm",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.19.0-2ubuntu2.3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "sddm",
+      "deb_sha256": "8d953e78aea649d588aa31a533a8691c215d19b5dbe7625bab018394112d597a",
+      "deb_size_bytes": 648252,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/sddm/sddm_0.19.0-2ubuntu2.3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/sddm"
+        },
+        {
+          "kind": "binary",
+          "path": "usr/bin/sddm-greeter"
+        },
+        {
+          "kind": "data",
+          "path": "lib/systemd/system/sddm.service"
+        },
+        {
+          "kind": "config",
+          "path": "etc/pam.d/sddm"
+        },
+        {
+          "kind": "config",
+          "path": "etc/pam.d/sddm-autologin"
+        },
+        {
+          "kind": "config",
+          "path": "etc/pam.d/sddm-greeter"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "SDDM 0.19.0 jammy. Wayland-mode display manager. Ships sddm sbin + sddm-greeter binary + 3 PAM stacks (/etc/pam.d/sddm{,-autologin,-greeter}) + lib/systemd/system/sddm.service + dbus system.d conf. Single-deb catalog, parallel to DE-G1's gdm.json but with the daemon binary in /usr/bin not /usr/sbin."
+}

@@ -1,0 +1,54 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "phonon",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:4.11.1-4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "phonon4qt5",
+      "deb_sha256": "67db4eea420dccbc9afdb9ffe4cf594ac3a2e640db350ac6f88dc03e21862cbd",
+      "deb_size_bytes": 6308,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/phonon/phonon4qt5_4.11.1-4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/phonon4qt5/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libphonon4qt5-4",
+      "deb_sha256": "37c2c9854f4a813b2a761a809f6b7b936fa0d2b442fd4d01fa469dcb26cdb8d2",
+      "deb_size_bytes": 152800,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/p/phonon/libphonon4qt5-4_4.11.1-4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libphonon4qt5.so.4.11.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libphonon4qt5.so.4"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Phonon 4 (Qt 5 binding). Plasma's notification daemon + media controls. The phonon backend (gstreamer/vlc) is NOT planted; phonon falls back to its null backend at runtime - notifications work silently."
+}

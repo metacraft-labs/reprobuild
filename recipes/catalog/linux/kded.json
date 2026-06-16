@@ -1,0 +1,75 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kio",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kded",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "kded5",
+      "deb_sha256": "e990c0a7fd77805a91eb4feaec51f4bb406e4f186fc62c58d35a68fa9d28d2e1",
+      "deb_size_bytes": 55136,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kded/kded5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kded5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "kpackagetool5",
+      "deb_sha256": "6654041188f0ae295ceb859c62930a0923b8acb05ad4199297fc81fea32856ea",
+      "deb_size_bytes": 53076,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kpackage/kpackagetool5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kpackagetool5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "kde-cli-tools",
+      "deb_sha256": "7b11c8872351c4c0068e986936bb52adc6c0b7bcbdfb684052c2fcb9ebf49c17",
+      "deb_size_bytes": 167428,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kde-cli-tools/kde-cli-tools_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/kcmshell5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KDED5 (desktop-bus daemon used by kactivitymanagerd + plasmashell + KIO scheduler) + kpackagetool5 (CLI for KPackage) + kde-cli-tools (kcmshell5 + kdesu5 + kioclient5 + kstart5)."
+}

@@ -1,0 +1,70 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kf5-declarative",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5declarative5",
+      "deb_sha256": "e403aad0c7760c7a29dc0117d924f21a2afabd1d156b4f3a7809bb63ad92d259",
+      "deb_size_bytes": 28852,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/libkf5declarative5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Declarative.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Declarative.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5quickaddons5",
+      "deb_sha256": "aa07915be6904868162b0ca42d29bcad410d0be6f8621e225fc8dadb171e8ec9",
+      "deb_size_bytes": 39786,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/libkf5quickaddons5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5QuickAddons.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5QuickAddons.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 QML bridge (KDeclarative + KQuickAddons). Required by plasmashell + krunner for their QML UI."
+}

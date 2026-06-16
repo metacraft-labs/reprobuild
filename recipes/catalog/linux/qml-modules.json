@@ -1,0 +1,241 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-declarative",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "qml-modules",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.15.3+dfsg-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "qml-module-qtquick2",
+      "deb_sha256": "5190f24615b8914870e99ea4873d0442daef5cc2cc2bef11bf205c737a8711b8",
+      "deb_size_bytes": 33708,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/qml-module-qtquick2_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick2/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qtquick-window2",
+      "deb_sha256": "cf34c9680ffb95225f7c755bc9f802c6f1a4462e63474d73a03475e46ba03d8f",
+      "deb_size_bytes": 26300,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/qml-module-qtquick-window2_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick-window2/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qtquick-layouts",
+      "deb_sha256": "344a7a1789607f76d3825a88cf2be7fd87e0f01db3062e4ff2939ac537c14931",
+      "deb_size_bytes": 56048,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/qml-module-qtquick-layouts_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick-layouts/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qtquick-controls",
+      "deb_sha256": "3a8ff161d72d4e771b1fe53d78ebb1df93ad591b568d8b944568a17faf3c8f5d",
+      "deb_size_bytes": 576748,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtquickcontrols-opensource-src/qml-module-qtquick-controls_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick-controls/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qtquick-controls2",
+      "deb_sha256": "c95fda933714929f5fa84a3274d1dcaed437ffb0fd0ff22cd19d970cf48f7d52",
+      "deb_size_bytes": 935440,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtquickcontrols2-opensource-src/qml-module-qtquick-controls2_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick-controls2/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qtquick-templates2",
+      "deb_sha256": "25171a8c5de0435bdbf52f68dfbbfd8eafebf3f11bcbea35e36e9fa181501512",
+      "deb_size_bytes": 77032,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtquickcontrols2-opensource-src/qml-module-qtquick-templates2_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick-templates2/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qtquick-dialogs",
+      "deb_sha256": "78fe626b3386dea0d643761b58787d438b06dda05f679ad2f330f3f3fbaee6d7",
+      "deb_size_bytes": 132406,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtquickcontrols-opensource-src/qml-module-qtquick-dialogs_5.15.3-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qtquick-dialogs/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qt-labs-folderlistmodel",
+      "deb_sha256": "b7b1da069d5139ed9da7e3e2bed9d0d56ce632f658a7ed0113a97da0f1cdb800",
+      "deb_size_bytes": 36110,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/qml-module-qt-labs-folderlistmodel_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qt-labs-folderlistmodel/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-qt-labs-settings",
+      "deb_sha256": "5dd3868a6a2dbf54bd0b7fc921e063b16d639645edebd7af0cfdb5ed893e1b71",
+      "deb_size_bytes": 26526,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/q/qtdeclarative-opensource-src/qml-module-qt-labs-settings_5.15.3+dfsg-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-qt-labs-settings/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-kirigami2",
+      "deb_sha256": "e21ea7d57ba7df8f522ec4ab36c9b5a487b9ce0b8fdf3dc1bde44075a22ed80d",
+      "deb_size_bytes": 329282,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kirigami2/qml-module-org-kde-kirigami2_5.92.0-0ubuntu2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-kirigami2/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-kquickcontrols",
+      "deb_sha256": "c09dc376e2ae194c04f8adba99d2aceba0d1b831351c4200b324ed7ffb807227",
+      "deb_size_bytes": 26150,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/qml-module-org-kde-kquickcontrols_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-kquickcontrols/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-kquickcontrolsaddons",
+      "deb_sha256": "b958adf1cd39b1a1e524ebc5629d6831378e21c4305f06c01f846194e6314939",
+      "deb_size_bytes": 74358,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/qml-module-org-kde-kquickcontrolsaddons_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-kquickcontrolsaddons/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-kwindowsystem",
+      "deb_sha256": "580e1874f8631aa44cda8f73cac21ac3253550c15ab2ea1f0f560b55faab3a85",
+      "deb_size_bytes": 13096,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/qml-module-org-kde-kwindowsystem_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-kwindowsystem/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-kcoreaddons",
+      "deb_sha256": "cae91de7509c427b535b753224ee477832d01b933fbf1ce42431cb96dd4cbaf7",
+      "deb_size_bytes": 17052,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/qml-module-org-kde-kcoreaddons_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-kcoreaddons/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-solid",
+      "deb_sha256": "e9ca81a2da9ecb70ea6f14463197c7ac2afbc738c8dbc11c6bcdd11fa51ae20f",
+      "deb_size_bytes": 15562,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/s/solid/qml-module-org-kde-solid_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-solid/copyright"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "qml-module-org-kde-draganddrop",
+      "deb_sha256": "ee35fb7f18bcb2c5e38820dbca0d6ac60e0e5ffe73f714a7e646ecaf200e7a95",
+      "deb_size_bytes": 28900,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdeclarative/qml-module-org-kde-draganddrop_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/qml-module-org-kde-draganddrop/copyright"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "All QML modules loaded by plasmashell / krunner / kwin's QML scripts. 16 .debs aggregated. Each .deb ships a qml/<module>/qmldir + lib*.so plugin. Aggregator pattern parallels DE-G1's gsettings/adwaita data debs."
+}

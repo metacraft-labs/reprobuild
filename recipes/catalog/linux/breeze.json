@@ -1,0 +1,63 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-gui",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "breeze",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "4:5.24.7-0ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "breeze",
+      "deb_sha256": "49ea8bdb68ae2fff7518db148fffa0847d0532951086629e31bdd24f44fe6bb8",
+      "deb_size_bytes": 6875370,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/b/breeze/breeze_5.24.7-0ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/breeze-settings5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "breeze-cursor-theme",
+      "deb_sha256": "cc6d4416b66f4c29051218b2647ab9e6bd5578b3f6fbe2fe9432ca52682d8f0e",
+      "deb_size_bytes": 310934,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/b/breeze/breeze-cursor-theme_5.24.7-0ubuntu0.2_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/breeze-cursor-theme/changelog.Debian.gz"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "Breeze widget style + window decoration theme + cursor theme. Largest single .deb in DE-K1 by extracted size (6.87 MB compressed; icons + decoration assets)."
+}

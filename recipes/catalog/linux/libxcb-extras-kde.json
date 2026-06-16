@@ -1,0 +1,159 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "libxcb1",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxcb-extras-kde",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "0.4.0-1build3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxcb-keysyms1",
+      "deb_sha256": "1d62f96a793cc1aa0df860de3f7d83edea2fa461d97e2b3d4d7f7e7a10e55f42",
+      "deb_size_bytes": 8746,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-keysyms/libxcb-keysyms1_0.4.0-1build3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-keysyms.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-keysyms.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-record0",
+      "deb_sha256": "9f818385f6dd1fd586bdf88d79e1aece5b8459172fa92a89a02ea67520708c4f",
+      "deb_size_bytes": 7384,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-record0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-record.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-record.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-cursor0",
+      "deb_sha256": "c9b5d1ad4af57397b1bd77e0a92750e34419def134c0282a0836ae9efc07cf64",
+      "deb_size_bytes": 10538,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/x/xcb-util-cursor/libxcb-cursor0_0.1.1-4ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-image0",
+      "deb_sha256": "b52babc3b4f2aa5241cac3a7888ce3b37d25a7f18867cae180e8cd11ec945cb9",
+      "deb_size_bytes": 11502,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-image/libxcb-image0_0.4.0-2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-image.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-image.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-icccm4",
+      "deb_sha256": "4dfe14a0ce681b823b740dabb3de84b3ce0958c9a404af61823b11f64047b0ef",
+      "deb_size_bytes": 11460,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-wm/libxcb-icccm4_0.4.1-1.1build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-icccm.so.4.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-icccm.so.4"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-util1",
+      "deb_sha256": "237d51a378b93c1669ff193084ebeb6422fe1e2ea96c2e9a0099eac40992a345",
+      "deb_size_bytes": 11448,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util/libxcb-util1_0.4.0-1build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-util.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-util.so.1"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-randr0",
+      "deb_sha256": "39dc0f73fa3bd43f3f7755cb7d12bfd1cd59dd8966f747d66fba47dfc8652f62",
+      "deb_size_bytes": 18300,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-randr0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-randr.so.0.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-randr.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-render0",
+      "deb_sha256": "26d331ed6e1219485dbd6a35b7c9cf552e1470f41bf2158b44a1331405f05250",
+      "deb_size_bytes": 16356,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-render0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-render.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-render.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-render-util0",
+      "deb_sha256": "f87659a2369430ed2acb1cdae54a06fa9d60727a6545594e213173ddb4377727",
+      "deb_size_bytes": 10272,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-renderutil/libxcb-render-util0_0.3.9-1build3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-render-util.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-render-util.so.0"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libxcb-shape0",
+      "deb_sha256": "71666977d7aa11877d7af663231cabf4bde60b033947b83358522c6f43873b3d",
+      "deb_size_bytes": 6158,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/libxcb-shape0_1.14-3ubuntu3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxcb-shape.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxcb-shape.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "XCB extras specifically required by kwin_x11 fallback path + Qt5 XCB QPA plugin. Distinct from DE-H1's libxcb-extras.json (different subset)."
+}

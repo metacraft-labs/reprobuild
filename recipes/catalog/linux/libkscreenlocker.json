@@ -1,0 +1,52 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libkscreenlocker",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.24.4-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkscreenlocker5",
+      "deb_sha256": "8ffb65ddb38964661720aa9e4b6f734022a1d38686be59d3944fe0068164f7be",
+      "deb_size_bytes": 107354,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kscreenlocker/libkscreenlocker5_5.24.4-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKScreenLocker.so.5.24.4",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKScreenLocker.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KScreenLocker shared library. Loaded by plasma-workspace's screen-lock dispatch. The lock-screen UI binary kscreenlocker_greet is shipped under usr/libexec/."
+}

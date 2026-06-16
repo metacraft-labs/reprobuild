@@ -1,0 +1,218 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "qt5-base",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kf5-core",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5coreaddons5",
+      "deb_sha256": "084139767fc1e3c68f13841461729ac880b3cbbc070ff6a1483502f0cbdc3d67",
+      "deb_size_bytes": 254028,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcoreaddons/libkf5coreaddons5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5CoreAddons.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5CoreAddons.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5coreaddons-data",
+      "deb_sha256": "34bfa8a5a584095cdaadc4d1253ffde739736e180fc83548e95d7deac34018fd",
+      "deb_size_bytes": 163526,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcoreaddons/libkf5coreaddons-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5coreaddons-data/README.md"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5configcore5",
+      "deb_sha256": "5c5a9cb340769463ff70e9c1ab655d8ed9ae8217078dcb74cb8aca625e356a54",
+      "deb_size_bytes": 144266,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kconfig/libkf5configcore5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5ConfigCore.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5ConfigCore.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5configgui5",
+      "deb_sha256": "188ac165ddfd2217a5e9621207af374ce57bd40ed7dc729090b7f39990a178fa",
+      "deb_size_bytes": 51850,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kconfig/libkf5configgui5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5ConfigGui.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5ConfigGui.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5configwidgets5",
+      "deb_sha256": "16dffbaeaf292d37fbf82c82e5431eaa4370ea8962e95b553fce0b37ba50f34c",
+      "deb_size_bytes": 156738,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kconfigwidgets/libkf5configwidgets5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5ConfigWidgets.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5ConfigWidgets.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5configwidgets-data",
+      "deb_sha256": "ad431cd0164d097c0e8fad919527b6eb55cf088eeeeb04a6b395117eaf34db6b",
+      "deb_size_bytes": 237272,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kconfigwidgets/libkf5configwidgets-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "binary",
+          "path": "usr/bin/preparetips5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5config-data",
+      "deb_sha256": "ba1331e53d6b1e3999b8d14f1ab0d5e2935ca4e96313eb3356e048e6b2ddbc10",
+      "deb_size_bytes": 91732,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kconfig/libkf5config-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5config-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5dbusaddons5",
+      "deb_sha256": "6a88641ccd041d13af58d8d0690c845856efcefb9210bfa8569828abd17bafda",
+      "deb_size_bytes": 38866,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdbusaddons/libkf5dbusaddons5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5DBusAddons.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5DBusAddons.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5dbusaddons-data",
+      "deb_sha256": "ad6a8304d52ae02bfa23ad50481fb09d02b2109139c51f667ecbfce92074d28a",
+      "deb_size_bytes": 16256,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kdbusaddons/libkf5dbusaddons-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5dbusaddons-data/changelog.Debian.gz"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5authcore5",
+      "deb_sha256": "c2c40f264a5becb7be7e5f5f4b89e1146b0844f8719d2dcdbd99b42d75dc4e03",
+      "deb_size_bytes": 56038,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kauth/libkf5authcore5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5AuthCore.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5AuthCore.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5auth-data",
+      "deb_sha256": "87aa46c940d73ef34af1f51709f73149a6c74ec318cc2cdd7ae60837f9e3580c",
+      "deb_size_bytes": 23614,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kauth/libkf5auth-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/dbus-1/system.d/org.kde.kf5auth.conf"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5crash5",
+      "deb_sha256": "f4776d97c5055e823992bb3e69088d4e6eae57130d310c35d21a41f2d37a6548",
+      "deb_size_bytes": 18402,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcrash/libkf5crash5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Crash.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Crash.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5archive5",
+      "deb_sha256": "a5ebf5a11775ecf696c5d887b32ceb0e7ffcbfa2df1810f3ddab6b21cecbe0c0",
+      "deb_size_bytes": 94458,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/karchive/libkf5archive5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Archive.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Archive.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5codecs5",
+      "deb_sha256": "e93e1bb3208c569fea0ec1535a79cf9a246e88cb09ff9534aaa87d69b4af2d83",
+      "deb_size_bytes": 99284,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcodecs/libkf5codecs5_5.92.0-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5Codecs.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5Codecs.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5codecs-data",
+      "deb_sha256": "d91ea4852e8f4ad1a4efbf177ddc81c962ffc723d686342629c6968dd73189e1",
+      "deb_size_bytes": 47758,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/kcodecs/libkf5codecs-data_5.92.0-0ubuntu1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5codecs-data/README.md"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 core frameworks aggregated (KAuth + KCodecs + KConfig + KCoreAddons + KCrash + KDBusAddons + KArchive). 15 .debs in one catalog to stay under the 30-catalog cap."
+}

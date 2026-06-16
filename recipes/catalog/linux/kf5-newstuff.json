@@ -1,0 +1,77 @@
+{
+  "dependency_closure": [
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-core",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kf5-frameworks",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    },
+    {
+      "distro": "linux-graphics",
+      "name": "kio",
+      "snapshot": "ubuntu/jammy/20260615T000000Z"
+    }
+  ],
+  "format_version": 1,
+  "linux_version_banner": "",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "kf5-newstuff",
+    "snapshot": "ubuntu/jammy/20260615T000000Z",
+    "version": "5.92.0-0ubuntu1.1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libkf5newstuff5",
+      "deb_sha256": "32ff128223804c75c30e08eb6e2b8f40d6bc7816ea5bab110a5764368f9301cf",
+      "deb_size_bytes": 127646,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knewstuff/libkf5newstuff5_5.92.0-0ubuntu1.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5NewStuff.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5NewStuff.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5newstuffcore5",
+      "deb_sha256": "8f3eba21d64a265ddb27cf28126c1564d685ebea969b9b820fea4a11398396fb",
+      "deb_size_bytes": 264970,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knewstuff/libkf5newstuffcore5_5.92.0-0ubuntu1.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libKF5NewStuffCore.so.5.92.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libKF5NewStuffCore.so.5"
+        }
+      ]
+    },
+    {
+      "deb_pkg": "libkf5newstuff-data",
+      "deb_sha256": "6927f599ba6e2d650286408a06764d63c5e6d68920532ff60be940c8500a0ccf",
+      "deb_size_bytes": 408330,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/universe/k/knewstuff/libkf5newstuff-data_5.92.0-0ubuntu1.1_all.deb",
+      "expected_files": [
+        {
+          "kind": "data",
+          "path": "usr/share/doc/libkf5newstuff-data/changelog.Debian.gz"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "universe"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "KF5 KNewStuff (the 'Get Hot New Stuff' plugin system). Hard-deped by plasma-workspace's wallpaper picker."
+}
