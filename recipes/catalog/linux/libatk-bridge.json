@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libatk-bridge-2.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libatk-bridge",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.38.0-3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libatk-bridge2.0-0",
+      "deb_sha256": "98924a5b376da9c075663ea61721fb0d91a55be3473c4643286491247f229b48",
+      "deb_size_bytes": 66556,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/a/at-spi2-atk/libatk-bridge2.0-0_2.38.0-3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libatk-bridge-2.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libatk-bridge2.0-0 version 2.38.0-3 from jammy."
+}

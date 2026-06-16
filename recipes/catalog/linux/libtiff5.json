@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libtiff.so.5",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libtiff5",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "4.3.0-6ubuntu0.13"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libtiff5",
+      "deb_sha256": "298a778a6a579a556f6bb4e32512cd76e0483b57b4a379ee85397f62fe21f225",
+      "deb_size_bytes": 185292,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/t/tiff/libtiff5_4.3.0-6ubuntu0.13_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libtiff.so.5.7.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libtiff.so.5"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libtiff5 version 4.3.0-6ubuntu0.13 from jammy."
+}

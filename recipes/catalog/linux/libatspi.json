@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libatspi.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libatspi",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.44.0-3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libatspi2.0-0",
+      "deb_sha256": "93b243e9d8fb3de9ba78251cf3dec2c6b66836ea7329ae4026981ce8dda62de4",
+      "deb_size_bytes": 80886,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/a/at-spi2-core/libatspi2.0-0_2.44.0-3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libatspi.so.0.0.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libatspi.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libatspi2.0-0 version 2.44.0-3 from jammy."
+}

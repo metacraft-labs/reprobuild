@@ -1,0 +1,35 @@
+{
+  "dependency_closure": [
+    {"distro": "linux-graphics", "name": "libglib2.0", "snapshot": "ubuntu/jammy/20240901T000000Z"}
+  ],
+  "format_version": 1,
+  "linux_version_banner": "libgirepository-1.0.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgirepository",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.72.0-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgirepository-1.0-1",
+      "deb_sha256": "2564342ced21cd09786ab7af1bb66c384fc183c05e1dce1b1bbcf0313f1998c6",
+      "deb_size_bytes": 55644,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gobject-introspection/libgirepository-1.0-1_1.72.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgirepository-1.0.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgirepository-1.0.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {"kind": "ubuntu-jammy-archive", "pocket": "main"}
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "libgirepository-1.0-1 1.72.0-1 from jammy. DE-G1 GObject introspection runtime; required by gnome-shell + gjs which dynamically link GObject types via GIRepository. Hidden DE-G1 dep surfaced during runtime ldd audit."
+}

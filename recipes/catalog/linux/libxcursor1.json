@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libXcursor.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxcursor1",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1:1.2.0-2build4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxcursor1",
+      "deb_sha256": "4ea5fa73bc989f5b8cbeecfdb650e142920859837279d0a64891cb80aff9dfc8",
+      "deb_size_bytes": 20920,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcursor/libxcursor1_1.2.0-2build4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXcursor.so.1.0.2",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXcursor.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libxcursor1 version 1:1.2.0-2build4 from jammy."
+}

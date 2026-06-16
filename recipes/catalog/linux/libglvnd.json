@@ -26,6 +26,19 @@
       ]
     },
     {
+      "deb_pkg": "libgl1",
+      "deb_sha256": "4fb2bbff94bb1a59bbdb40041e7a8ab58db2a003a151f4055357af03f0b78666",
+      "deb_size_bytes": 110500,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libg/libglvnd/libgl1_1.4.0-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libGL.so.1.7.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libGL.so.1"
+        }
+      ]
+    },
+    {
       "deb_pkg": "libgles2",
       "deb_sha256": "d69a414b91f420531e813b08a8b48e594312b29a3b666aa584f221ec19b07346",
       "deb_size_bytes": 18016,

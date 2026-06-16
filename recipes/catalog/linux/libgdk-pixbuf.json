@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libgdk_pixbuf-2.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgdk-pixbuf",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.42.8+dfsg-1ubuntu0.5"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgdk-pixbuf-2.0-0",
+      "deb_sha256": "dc19853a6d8981b6a4ab140f454d7ad4f4688f3de959663f30e18c6327b8a64f",
+      "deb_size_bytes": 148234,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.8+dfsg-1ubuntu0.5_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0.4200.8",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libgdk-pixbuf-2.0-0 version 2.42.8+dfsg-1ubuntu0.5 from jammy."
+}

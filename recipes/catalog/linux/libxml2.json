@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libxml2.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxml2",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.9.13+dfsg-1ubuntu0.11"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxml2",
+      "deb_sha256": "74eb1df2112ec3cd5a961b737d68c9a96c6de2f115a124ede81af5292b5d23e7",
+      "deb_size_bytes": 764598,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.13+dfsg-1ubuntu0.11_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libxml2.so.2.9.13",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libxml2.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libxml2 version 2.9.13+dfsg-1ubuntu0.11 from jammy."
+}

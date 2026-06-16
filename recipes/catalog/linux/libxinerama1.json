@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libXinerama.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxinerama1",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2:1.1.4-3"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxinerama1",
+      "deb_sha256": "be0caa6259a6c8d5ff75d2bd410a4cf6126b1d4dcb6a04b9c33f388d639f7b07",
+      "deb_size_bytes": 7382,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxinerama/libxinerama1_1.1.4-3_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXinerama.so.1.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXinerama.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libxinerama1 version 2:1.1.4-3 from jammy."
+}

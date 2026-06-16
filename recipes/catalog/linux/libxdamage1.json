@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libXdamage.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxdamage1",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1:1.1.5-2build2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxdamage1",
+      "deb_sha256": "a705af86334b9c219e5f50e21e5bc51bfbf8b8189ca88d4fcafff734de81a503",
+      "deb_size_bytes": 7154,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxdamage/libxdamage1_1.1.5-2build2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXdamage.so.1.1.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXdamage.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libxdamage1 version 1:1.1.5-2build2 from jammy."
+}

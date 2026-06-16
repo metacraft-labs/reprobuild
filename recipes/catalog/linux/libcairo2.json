@@ -31,6 +31,19 @@
           "soname_link": "usr/lib/x86_64-linux-gnu/libcairo.so.2"
         }
       ]
+    },
+    {
+      "deb_pkg": "libcairo-gobject2",
+      "deb_sha256": "1c56e1d49921272ac243ff9c39771da7e37891b1ca0bc30696639e624aaf0443",
+      "deb_size_bytes": 19460,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/c/cairo/libcairo-gobject2_1.16.0-5ubuntu2.1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2.11600.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libcairo-gobject.so.2"
+        }
+      ]
     }
   ],
   "provisioning_methods": [

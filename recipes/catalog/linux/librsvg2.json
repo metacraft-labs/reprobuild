@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "librsvg-2.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "librsvg2",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.52.5+dfsg-3ubuntu0.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "librsvg2-2",
+      "deb_sha256": "7bde6c1a908c59456ed21c4d8b518775835dac24125e3c29805a8f1869ad68b2",
+      "deb_size_bytes": 2973762,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libr/librsvg/librsvg2-2_2.52.5+dfsg-3ubuntu0.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/librsvg-2.so.2.48.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/librsvg-2.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. librsvg2-2 version 2.52.5+dfsg-3ubuntu0.2 from jammy."
+}

@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libXrender.so.1",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libxrender1",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1:0.9.10-1build4"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libxrender1",
+      "deb_sha256": "a68f6db4320b5963dd499b83b6cc8c7b5cd39b05e84862d5945da9244e4c96d6",
+      "deb_size_bytes": 19678,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libxrender/libxrender1_0.9.10-1build4_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libXrender.so.1.3.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libXrender.so.1"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libxrender1 version 1:0.9.10-1build4 from jammy."
+}

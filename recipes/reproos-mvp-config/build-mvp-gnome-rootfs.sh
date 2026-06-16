@@ -203,42 +203,84 @@ DE_G1_CATALOG_NAMES=(
   gnome-settings-daemon
   gnome-shell
   gsettings-desktop-schemas
+  libatk-bridge
+  libatk1.0
+  libatspi
+  libbrotli1
+  libbsd0
+  libcairo2
   libcanberra
+  libcolord2
+  libdatrie1
+  libelf1
+  libepoxy0
   libevdev2
+  libffi8
+  libfreetype6
+  libfribidi0
   libgcr3
+  libgdk-pixbuf
+  libgirepository
   libgjs
   libglib2.0
   libglvnd
   libgnome-desktop
   libgraphene
+  libgraphite2-3
+  libgtk-3
   libgtk4
   libgudev
+  libharfbuzz0b
   libice
   libinput
+  libjpeg-turbo8
+  libjson-c5
   libjson-glib
+  libmd0
   libmozjs91
   libmtdev1
   libnm0
   libnss
+  libpango
+  libpcre3
   libpipewire
+  libpixman
+  libpng16-16
   libpolkit
+  librsvg2
   libsecret
   libsm
   libsoup2.4
   libstartup-notification
   libsystemd
   libtdb1
+  libthai0
+  libtiff5
   libvorbisfile3
   libwacom
+  libwayland-cursor
+  libx11-extras
   libxcb-extras
   libxcb-extras-kde
   libxcb-xkb1
+  libxcb1
+  libxcomposite1
+  libxcursor1
+  libxdamage1
+  libxfixes3
+  libxi6
+  libxinerama1
   libxkbcommon-x11
   libxkbfile
   libxkbregistry
+  libxml2
+  libxrandr2
+  libxrender1
+  libxshmfence1
   mutter
   xdg-desktop-portal-gnome
   xdg-desktop-portal-gtk
+  zlib1g
 )
 
 CATALOGS=()

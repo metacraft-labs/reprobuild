@@ -1,0 +1,41 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libcolord.so.2",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libcolord2",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.4.6-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libcolord2",
+      "deb_sha256": "a483a6b4a7b9a76f268b67eadc84bea0efd8307133bebdbdae3effa2e409b1e9",
+      "deb_size_bytes": 155164,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/c/colord/libcolord2_1.4.6-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libcolord.so.2.0.5",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libcolord.so.2"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libcolordprivate.so.2.0.5",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libcolordprivate.so.2"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libcolord2 version 1.4.6-1 from jammy."
+}

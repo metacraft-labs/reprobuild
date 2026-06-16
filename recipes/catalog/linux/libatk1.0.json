@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libatk-1.0.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libatk1.0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.36.0-3build1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libatk1.0-0",
+      "deb_sha256": "598b522b64a20c9a3ea44fa816b539976c39d41bf2bccd104fed49954638f0f9",
+      "deb_size_bytes": 51938,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/a/atk1.0/libatk1.0-0_2.36.0-3build1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libatk-1.0.so.0.23609.1",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libatk1.0-0 version 2.36.0-3build1 from jammy."
+}

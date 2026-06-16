@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libepoxy.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libepoxy0",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "1.5.10-1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libepoxy0",
+      "deb_sha256": "b074cde6aa853be14ec11148794bfeb2f55db41a9abdc0c99f18db97bb99e47b",
+      "deb_size_bytes": 237222,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libe/libepoxy/libepoxy0_1.5.10-1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libepoxy.so.0.0.0",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libepoxy.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libepoxy0 version 1.5.10-1 from jammy."
+}

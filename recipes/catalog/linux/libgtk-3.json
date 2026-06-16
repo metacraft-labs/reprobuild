@@ -1,0 +1,41 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libgdk-3.so.0",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libgtk-3",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "3.24.33-1ubuntu2.2"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libgtk-3-0",
+      "deb_sha256": "b22a6e211b0e79aeaf467773a6689abf96c3a524446528c8b54c80b5e165fe4a",
+      "deb_size_bytes": 3052782,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/g/gtk+3.0/libgtk-3-0_3.24.33-1ubuntu2.2_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgdk-3.so.0.2404.29",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgdk-3.so.0"
+        },
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libgtk-3.so.0.2404.29",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libgtk-3.so.0"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libgtk-3-0 version 3.24.33-1ubuntu2.2 from jammy."
+}

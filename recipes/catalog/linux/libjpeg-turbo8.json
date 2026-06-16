@@ -1,0 +1,36 @@
+{
+  "dependency_closure": [],
+  "format_version": 1,
+  "linux_version_banner": "libjpeg.so.8",
+  "package": {
+    "distro": "linux-graphics",
+    "name": "libjpeg-turbo8",
+    "snapshot": "ubuntu/jammy/20260616T000000Z",
+    "version": "2.1.2-0ubuntu1"
+  },
+  "package_source": "ubuntu-jammy",
+  "payload_files": [
+    {
+      "deb_pkg": "libjpeg-turbo8",
+      "deb_sha256": "bb9538fa94f06bf6b7907105439f0a0a30e3ec27030832820a6c2cc2dc6578a8",
+      "deb_size_bytes": 134436,
+      "deb_url": "http://archive.ubuntu.com/ubuntu/pool/main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.2-0ubuntu1_amd64.deb",
+      "expected_files": [
+        {
+          "kind": "shared_library",
+          "path": "usr/lib/x86_64-linux-gnu/libjpeg.so.8.2.2",
+          "soname_link": "usr/lib/x86_64-linux-gnu/libjpeg.so.8"
+        }
+      ]
+    }
+  ],
+  "provisioning_methods": [
+    {
+      "kind": "ubuntu-jammy-archive",
+      "pocket": "main"
+    }
+  ],
+  "runtime": "linux",
+  "signed_envelope": null,
+  "version_pin_rationale": "DE-G1 GTK3 transitive closure for gnome-shell + mutter. libjpeg-turbo8 version 2.1.2-0ubuntu1 from jammy."
+}
