@@ -148,6 +148,12 @@
               pkgs.sqlite
               pkgs.xxHash
               pkgs.clingo
+              # repro-harvest-apt is compiled with --define:ssl (it walks
+              # snapshot.debian.org's HTTPS InRelease signature chain), so
+              # Nim's std/net openssl backend link step needs -lssl -lcrypto.
+              # macOS resolves these from the system SDK, but the Linux nix
+              # sandbox has no system openssl — pull it into the closure here.
+              pkgs.openssl
             ];
 
             BLAKE3_PREFIX = blake3Prefix;
@@ -236,6 +242,7 @@
               pkgs.clang
               pkgs.curl
               pkgs.libblake3
+              pkgs.openssl
               pkgs.p7zip
               pkgs.sqlite
               pkgs.xxHash

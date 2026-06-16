@@ -1594,7 +1594,12 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
       let destination = action.builtinPath(action.outputs[0])
       createDir(extendedPath(destination.splitPath.head))
       prepareBuiltinFileOutput(destination)
-      copyFile(extendedPath(source), extendedPath(destination))
+      # Preserve the source file's mode bits — plain ``copyFile`` creates the
+      # destination with the process umask default (typically 0644), which
+      # silently drops the executable bit. CodeTracer's recipe copies the
+      # cargo-built ``replay-server`` / ``session-manager`` binaries through
+      # this action; without the exec bit they fail to launch (exit 126).
+      copyFileWithPermissions(extendedPath(source), extendedPath(destination))
     of bakEnsureDir:
       if action.outputs.len != 1:
         raiseEngine("ensureDir action requires exactly one output: " & action.id)
@@ -1642,7 +1647,10 @@ proc executeBuiltinAction(action: BuildAction): ActionResult =
             raiseEngine("preserveTree source file disappeared before execution: " &
               source)
           prepareBuiltinFileOutput(destination)
-          copyFile(extendedPath(source), extendedPath(destination))
+          # Preserve source mode bits (notably the exec bit) — see the
+          # bakCopyFile note above; preserveTree mirrors arbitrary trees that
+          # may contain executables.
+          copyFileWithPermissions(extendedPath(source), extendedPath(destination))
         of ptekSymlink:
           if not symlinkExists(extendedPath(source)):
             raiseEngine("preserveTree source symlink disappeared before execution: " &
