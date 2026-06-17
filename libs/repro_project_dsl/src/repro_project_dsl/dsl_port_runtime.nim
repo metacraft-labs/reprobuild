@@ -83,14 +83,18 @@ type
   DslScalarKind* = enum
     ## Discriminant for the scalar value the M2 surface stores against
     ## each key. Matches the four primitive shapes the v8 fixtures use
-    ## (``int``, ``string``, ``bool``, ``float``). Future kinds (e.g.
-    ## ``seq[string]``) widen this enum WITHOUT a schema bump because
-    ## ``readConfigurable[T]`` raises ``EDslPortTypeMismatch`` when a
-    ## caller asks for the wrong type — never silently coerces.
+    ## (``int``, ``string``, ``bool``, ``float``) plus M9.D's two
+    ## additions (``dskEnum`` for typed-enum configurables, and
+    ## ``dskSeqEnum`` for ``seq[Enum]`` configurables). Future kinds
+    ## (e.g. ``seq[string]``) widen this enum WITHOUT a schema bump
+    ## because ``readConfigurable[T]`` raises ``EDslPortTypeMismatch``
+    ## when a caller asks for the wrong type — never silently coerces.
     dskBool
     dskInt
     dskString
     dskFloat
+    dskEnum
+    dskSeqEnum
 
   DslScalarValue* = object
     ## Discriminated record holding one configurable's payload. Stored
@@ -100,6 +104,23 @@ type
     of dskInt: intVal*: int
     of dskString: strVal*: string
     of dskFloat: floatVal*: float
+    of dskEnum:
+      ## M9.D — typed-enum configurable.
+      ## ``enumOrd`` stores the enum value's ``.ord`` (so dense enums
+      ## round-trip via ``T(ord)`` at read time); ``enumTypeName`` is
+      ## ``$T`` captured at registration so cross-type reads can detect
+      ## the mismatch; ``enumValueName`` is ``$value`` (the literal name)
+      ## for diagnostic / inspection paths.
+      enumOrd*: int
+      enumTypeName*: string
+      enumValueName*: string
+    of dskSeqEnum:
+      ## M9.D — ``seq[Enum]`` configurable. Same shape per element as
+      ## ``dskEnum`` with the per-instance type name pinned at the
+      ## seq level (every element shares the same type, by definition).
+      seqEnumTypeName*: string
+      seqEnumOrds*: seq[int]
+      seqEnumValueNames*: seq[string]
 
   DslVersionInfo* = object
     ## One entry inside a ``versions:`` block. Matches the four named
@@ -165,6 +186,30 @@ proc dslScalarString*(v: string): DslScalarValue =
 proc dslScalarFloat*(v: float): DslScalarValue =
   DslScalarValue(kind: dskFloat, floatVal: v)
 
+proc dslScalarEnum*(ordVal: int; typeName, valueName: string): DslScalarValue =
+  ## M9.D constructor for the typed-enum arm. ``ordVal`` is the enum
+  ## value's ``.ord``; ``typeName`` is ``$T`` (captured at the generic
+  ## call site so callers cannot smuggle a wrong type name); ``valueName``
+  ## is ``$value`` (the literal name as Nim's ``$`` formats it).
+  DslScalarValue(kind: dskEnum, enumOrd: ordVal,
+                 enumTypeName: typeName, enumValueName: valueName)
+
+proc dslScalarSeqEnum*(typeName: string;
+                       ordsAndNames: seq[(int, string)]):
+                       DslScalarValue =
+  ## M9.D constructor for ``seq[Enum]``. ``ordsAndNames`` is an
+  ## already-paired seq of (``.ord``, ``$value``) entries so the caller
+  ## doesn't have to feed two parallel seqs by hand. Storage is two
+  ## parallel seqs internally — keeps the discriminant record bytes
+  ## minimal vs. boxing each element as a full ``DslScalarValue``.
+  var ords = newSeqOfCap[int](ordsAndNames.len)
+  var names = newSeqOfCap[string](ordsAndNames.len)
+  for (o, n) in ordsAndNames:
+    ords.add(o)
+    names.add(n)
+  DslScalarValue(kind: dskSeqEnum, seqEnumTypeName: typeName,
+                 seqEnumOrds: ords, seqEnumValueNames: names)
+
 # ---------------------------------------------------------------------------
 # Public API — config: surface
 # ---------------------------------------------------------------------------
@@ -198,6 +243,13 @@ proc recordConfigDefault*[T](packageName, name: string; default: T) =
   ## ``name: T = default`` entry. We bridge through the type-erased
   ## ``recordConfigDefaultRaw`` so the macro never has to know the
   ## ``DslScalarValue`` constructor name.
+  ##
+  ## M9.D widens the supported ``T`` set to include typed enums
+  ## (``when T is enum``) and ``seq[Enum]`` (``when T is seq and
+  ## elementType(T) is enum``). The seq arm dispatches inside this
+  ## generic instead of as a separate overload because the macro emits
+  ## an explicit generic parameter ``recordConfigDefault[seq[X]](...)``
+  ## which routes to THIS proc, not to a sibling ``[E: enum]`` overload.
   let key = packageName & "." & name
   when T is bool:
     recordConfigDefaultRaw(key, dslScalarBool(default))
@@ -207,9 +259,25 @@ proc recordConfigDefault*[T](packageName, name: string; default: T) =
     recordConfigDefaultRaw(key, dslScalarString(default))
   elif T is SomeFloat:
     recordConfigDefaultRaw(key, dslScalarFloat(float(default)))
+  elif T is enum:
+    recordConfigDefaultRaw(key, dslScalarEnum(default.ord, $T, $default))
+  elif T is seq:
+    # Crack the element type via ``typeof(default[0])`` — works inside
+    # a generic body without needing ``std/typetraits.elementType``.
+    # The element MUST be an enum; ``seq[string]`` etc. fall through
+    # to the static-error arm.
+    type Elem = typeof(default[0])
+    when Elem is enum:
+      var pairs = newSeqOfCap[(int, string)](default.len)
+      for e in default:
+        pairs.add((e.ord, $e))
+      recordConfigDefaultRaw(key, dslScalarSeqEnum($Elem, pairs))
+    else:
+      {.error: "recordConfigDefault: unsupported configurable type " &
+         $T & "; M9.D seq support is restricted to seq[Enum]".}
   else:
     {.error: "recordConfigDefault: unsupported configurable type " &
-       $T & "; M2 supports bool / int / string / float".}
+       $T & "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
 
 proc registeredConfigKeys*(): seq[string] =
   ## Return every ``<package>.<name>`` key in insertion order. A copy
@@ -262,9 +330,82 @@ proc readConfigurable*[T](key: string): T =
         "readConfigurable[" & $T & "]('" & key &
         "'): stored kind is " & $stored.kind & ", not dskFloat")
     return T(stored.floatVal)
+  elif T is enum:
+    if stored.kind != dskEnum:
+      raise newException(EDslPortTypeMismatch,
+        "readConfigurable[" & $T & "]('" & key &
+        "'): stored kind is " & $stored.kind & ", not dskEnum")
+    if stored.enumTypeName != $T:
+      raise newException(EDslPortTypeMismatch,
+        "readConfigurable[" & $T & "]('" & key &
+        "'): stored enum type " & stored.enumTypeName &
+        " does not match requested " & $T)
+    return T(stored.enumOrd)
   else:
     {.error: "readConfigurable: unsupported type " & $T &
-       "; M2 supports bool / int / string / float".}
+       "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+
+proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
+  ## M9.D ``seq[Enum]`` reader with graceful fallback. Returns the
+  ## registered seq when the key exists AND the stored kind matches
+  ## AND the stored enum type name matches ``$E``; otherwise returns
+  ## ``fallback``.
+  ##
+  ## Graceful degradation here matches the task's "wrong-type fallback"
+  ## contract — the key-only overload would raise, which is the wrong
+  ## shape for fixture / multi-recipe code paths that probe several
+  ## possible types.
+  try:
+    let stored = dslPortLookup(key)
+    if stored.kind != dskSeqEnum:
+      return fallback
+    if stored.seqEnumTypeName != $E:
+      return fallback
+    result = newSeqOfCap[E](stored.seqEnumOrds.len)
+    for o in stored.seqEnumOrds:
+      result.add(E(o))
+  except EDslPortMissingKey:
+    return fallback
+
+proc readConfigurable*[T](key: string; fallback: T): T =
+  ## M9.D fallback-flavoured reader for scalar configurables. Returns
+  ## the registered value when the key exists AND the stored kind
+  ## matches AND (for enums) the stored type name matches ``$T``;
+  ## otherwise returns ``fallback``. Never raises — callers use this
+  ## overload when the spec calls for graceful degradation rather than
+  ## a hard type-mismatch error.
+  try:
+    let stored = dslPortLookup(key)
+    when T is bool:
+      if stored.kind != dskBool: return fallback
+      return stored.boolVal
+    elif T is SomeInteger:
+      if stored.kind != dskInt: return fallback
+      return T(stored.intVal)
+    elif T is string:
+      if stored.kind != dskString: return fallback
+      return stored.strVal
+    elif T is SomeFloat:
+      if stored.kind != dskFloat: return fallback
+      return T(stored.floatVal)
+    elif T is enum:
+      if stored.kind != dskEnum: return fallback
+      if stored.enumTypeName != $T: return fallback
+      return T(stored.enumOrd)
+    else:
+      {.error: "readConfigurable: unsupported type " & $T &
+         "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+  except EDslPortMissingKey:
+    return fallback
+
+proc inspectConfigurable*(key: string): DslScalarValue =
+  ## M9.D test-side accessor: return the raw stored ``DslScalarValue``
+  ## at ``key`` (override-preferred, defaults fallback), or raise
+  ## ``EDslPortMissingKey`` when the key is unknown. Tests use this to
+  ## verify the captured ``enumTypeName`` / ``enumValueName`` /
+  ## ``seqEnumTypeName`` round-trip the macro-emitted ``$T`` / ``$value``
+  ## strings byte-for-byte.
+  dslPortLookup(key)
 
 proc setConfigurableRaw*(key: string; value: DslScalarValue) =
   ## Type-erased override path. Used by ``setConfigurable[T]`` and by
@@ -292,9 +433,21 @@ proc setConfigurable*[T](key: string; value: T) =
     setConfigurableRaw(key, dslScalarString(value))
   elif T is SomeFloat:
     setConfigurableRaw(key, dslScalarFloat(float(value)))
+  elif T is enum:
+    setConfigurableRaw(key, dslScalarEnum(value.ord, $T, $value))
+  elif T is seq:
+    type Elem = typeof(value[0])
+    when Elem is enum:
+      var pairs = newSeqOfCap[(int, string)](value.len)
+      for e in value:
+        pairs.add((e.ord, $e))
+      setConfigurableRaw(key, dslScalarSeqEnum($Elem, pairs))
+    else:
+      {.error: "setConfigurable: unsupported type " & $T &
+         "; M9.D seq support is restricted to seq[Enum]".}
   else:
     {.error: "setConfigurable: unsupported type " & $T &
-       "; M2 supports bool / int / string / float".}
+       "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
 
 proc resetConfigurable*(key: string) =
   ## Clear the override at ``key`` (if any) so the next read returns

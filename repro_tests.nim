@@ -1566,6 +1566,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim",
+    binary: "build/test-bin/t_dsl_config_enum",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
     binary: "build/test-bin/t_dsl_config_override",
     defines: @[],
@@ -1576,6 +1584,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
     binary: "build/test-bin/t_dsl_config_scalar",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim",
+    binary: "build/test-bin/t_dsl_config_seq_enum",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

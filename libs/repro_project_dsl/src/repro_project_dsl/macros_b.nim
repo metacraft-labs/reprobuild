@@ -521,22 +521,65 @@ proc collectM2ConfigEntries(configBody: NimNode):
                 typeNode: entry.typeNode,
                 defaultNode: entry.defaultNode))
 
+proc m2TypeReprIsPrimitiveScalar(typeRepr: string): bool =
+  ## True iff ``typeRepr`` names one of M2's four primitive scalar
+  ## shapes (and their sized variants). The check is a deliberate
+  ## string-match: at macro-expansion time we only have the verbatim
+  ## source repr — semchecking would require a ``typed`` macro and pull
+  ## in the full symbol environment.
+  typeRepr in ["bool", "int", "int8", "int16", "int32", "int64",
+               "uint", "uint8", "uint16", "uint32", "uint64",
+               "string", "float", "float32", "float64"]
+
+proc m2IsBareIdentRepr(typeRepr: string): bool =
+  ## True iff ``typeRepr`` is a single Nim identifier with no
+  ## generic-brackets / dots / spaces — the syntactic shape of a
+  ## user-defined enum reference. Authors writing complex types
+  ## (``Table[string, int]``, qualified ``foo.Bar``, …) stay silently
+  ## passed through.
+  if typeRepr.len == 0:
+    return false
+  for ch in typeRepr:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '_'}:
+      return false
+  # First char must be a letter or underscore (Nim ident rule).
+  typeRepr[0] in {'A'..'Z', 'a'..'z', '_'}
+
+proc m2SeqElementRepr(typeRepr: string): string =
+  ## If ``typeRepr`` matches the shape ``seq[<inner>]``, return the
+  ## inner repr (with surrounding whitespace stripped); otherwise the
+  ## empty string. ``seq[int]`` → ``"int"``, ``seq[string]`` →
+  ## ``"string"``, ``seq[DesktopKind]`` → ``"DesktopKind"``.
+  if not typeRepr.startsWith("seq[") or not typeRepr.endsWith("]"):
+    return ""
+  let inner = typeRepr[4 ..< typeRepr.len - 1].strip()
+  return inner
+
 proc m2TypeReprIsSupportedScalar(typeRepr: string): bool =
   ## True iff the ``T`` from a ``name: T = default`` entry names one of
-  ## the four primitive shapes M2's runtime understands. The check is
-  ## a deliberate string-match: at macro-expansion time we only have
-  ## the verbatim source repr — semchecking the type would require a
-  ## ``typed`` macro and pull in the full symbol environment. The
-  ## predicate covers the common spellings (``bool``, ``int``, ``int8``,
-  ## …, ``int64``, ``uint``, ``string``, ``float``, ``float32``,
-  ## ``float64``). Authors writing complex types (``seq[string]``,
-  ## ``MyEnum``, ``Table[string, int]``, …) get a silent passthrough so
-  ## the legacy NDE recipes keep compiling; future M3+ widens the
-  ## supported set as the runtime grows new ``DslScalarKind`` arms.
+  ## the shapes M2 (post-M9.D) handles:
+  ##   * a primitive scalar (``bool`` / ``int`` / ``string`` / ``float``
+  ##     + sized variants), or
+  ##   * a bare identifier (presumed to be an enum type — the runtime's
+  ##     ``when T is enum`` branch validates at instantiation), or
+  ##   * ``seq[Ident]`` where ``Ident`` is a bare identifier (presumed
+  ##     to be a ``seq[Enum]``; ``seq[string]`` and similar primitive
+  ##     element types stay rejected here so the runtime's static-error
+  ##     branch never fires).
+  ##
+  ## Authors writing complex types (``Table[string, int]``,
+  ## ``seq[seq[X]]``, qualified types, …) get a silent passthrough so
+  ## the legacy NDE recipes keep compiling.
   let trimmed = typeRepr.strip()
-  trimmed in ["bool", "int", "int8", "int16", "int32", "int64",
-              "uint", "uint8", "uint16", "uint32", "uint64",
-              "string", "float", "float32", "float64"]
+  if m2TypeReprIsPrimitiveScalar(trimmed):
+    return true
+  if m2IsBareIdentRepr(trimmed):
+    return true
+  let inner = m2SeqElementRepr(trimmed)
+  if inner.len > 0 and m2IsBareIdentRepr(inner) and
+      not m2TypeReprIsPrimitiveScalar(inner):
+    return true
+  return false
 
 proc emitM2ConfigDefaults(packageName: string;
                           sectionStmts: NimNode): NimNode =
