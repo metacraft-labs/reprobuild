@@ -1,9 +1,10 @@
 ## t_test_edge_migration_covers_all_test_files — Test-Edges-And-Parallel-Runner
 ## M1 verification.
 ##
-## Asserts that the count of declared ``buildNimUnittest.build(`` calls
-## in ``repro.tests.nim`` equals the count of test files on disk under
-## the three discovery roots used by ``scripts/generate_test_edges.nim``:
+## Asserts that the count of declared ``TestSpec(`` entries in the
+## generated ``repro_tests.nim`` table equals the count of test files on
+## disk under the three discovery roots used by
+## ``scripts/generate_test_edges.nim``:
 ##
 ##   * ``tests/**/t_*.nim``
 ##   * ``libs/**/tests/{t_,test_}*.nim``
@@ -21,7 +22,7 @@ proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
   while dir.len > 0:
     if fileExists(dir / RepoRootMarker) and
-        fileExists(dir / "repro.tests.nim"):
+        fileExists(dir / "repro_tests.nim"):
       return dir
     let parent = dir.parentDir
     if parent == dir:
@@ -53,6 +54,13 @@ proc countTestFilesOnDisk(repoRoot: string): int =
       return
     for path in walkDirRec(abs, relative = true):
       let normalized = path.replace('\\', '/')
+      # Mirror the generator's exclusion (scripts/generate_test_edges.nim
+      # skips ``tests/fixtures/``): those are fixture PROJECTS — sample
+      # test collections consumed BY tests — not reprobuild's own unittest
+      # binaries, so they carry no build edge. Without this the on-disk
+      # count over-reports by the fixtures' ``t_*.nim`` files.
+      if (dir & "/" & normalized).startsWith("tests/fixtures/"):
+        continue
       if requireTestsParent:
         let parts = normalized.split('/')
         if parts.len < 3: continue
@@ -66,16 +74,19 @@ proc countTestFilesOnDisk(repoRoot: string): int =
   result += walk("tools", pmTestOnly, true)
 
 proc countGeneratedBuildCalls(repoRoot: string): int =
-  let content = readFile(repoRoot / "repro.tests.nim")
+  # Project-DSL-Composition M6: the generated table moved from
+  # ``repro.tests.nim`` (one ``let _<name> = buildNimUnittest.build(``
+  # line per edge) to ``repro_tests.nim`` (a ``seq[TestSpec]`` data
+  # table; ``repro.nim`` now calls ``buildNimUnittest.build`` once per
+  # entry inside its package ``build:`` block). Count the ``TestSpec(``
+  # entries — still exactly one per declared test build edge. Filtering
+  # by the ``TestSpec(`` prefix excludes the ``TestSpec* = object`` type
+  # definition and the header comments that mention it in prose.
+  let content = readFile(repoRoot / "repro_tests.nim")
   result = 0
   for line in content.splitLines():
     let stripped = line.strip(leading = true, trailing = false)
-    # The generator emits exactly one ``let _<name> =
-    # buildNimUnittest.build(`` line per edge. Filtering by the
-    # ``let _`` prefix excludes the documentation comments in the
-    # generated file header that mention ``buildNimUnittest.build``
-    # in prose.
-    if stripped.startsWith("let _") and "buildNimUnittest.build(" in line:
+    if stripped.startsWith("TestSpec("):
       inc result
 
 suite "t_test_edge_migration_covers_all_test_files":
