@@ -1990,6 +1990,52 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Seventh from-source production recipe to exercise the M9.H/I/K
+  # trio — BALANCED library + executable split (1 lib + 1 exe) where
+  # Wayland was imbalanced (3 libs + 1 exe). Pins libxkbcommon 1.13.2's
+  # vendored sha256 + meson flag sequence + ``libxkbcommon`` library +
+  # ``xkbcli`` executable artifacts. Upstream-source side of the
+  # ``libxkbcommon >=1.5`` dependency that ``wlrootsSource`` declares.
+  TestSpec(
+    source: "recipes/packages/source/libxkbcommon/test_libxkbcommon_source.nim",
+    binary: "build/test-bin/t_libxkbcommon_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eighth from-source production recipe to exercise the M9.H/I/K
+  # trio — second single-library shape (wlroots was the first), with
+  # a minimal ``uses:`` set (meson + ninja + gcc only). Pins pixman
+  # 0.46.4's vendored sha256 + meson flag sequence + ``libpixman1``
+  # library artifact. Upstream-source side of the ``pixman >=0.42``
+  # dependency that ``wlrootsSource`` declares.
+  TestSpec(
+    source: "recipes/packages/source/pixman/test_pixman_source.nim",
+    binary: "build/test-bin/t_pixman_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Ninth from-source production recipe to exercise the M9.H/I/K trio
+  # — library + executable pair whose on-disk filenames COLLIDE
+  # (``libinput.so`` vs the ``libinput`` CLI binary) but whose DSL
+  # identifiers stay distinct (``libinput`` for the library,
+  # ``libinputBin`` for the executable). Pins libinput 1.28.1's
+  # vendored sha256 (sourced from Debian's source pool because the
+  # canonical freedesktop.org URL sits behind an Anubis bot-protection
+  # challenge) + meson flag sequence + ``libinput`` library +
+  # ``libinputBin`` executable artifacts. Upstream-source side of the
+  # ``libinput >=1.14`` dependency that ``wlrootsSource`` declares.
+  TestSpec(
+    source: "recipes/packages/source/libinput/test_libinput_source.nim",
+    binary: "build/test-bin/t_libinput_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
