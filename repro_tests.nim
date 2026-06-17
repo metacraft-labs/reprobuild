@@ -2133,6 +2133,64 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Sixteenth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the GNOME stack batch (mutter / gdm /
+  # gnome-shell). Second meson-driven multi-artifact recipe to ship
+  # BOTH a library AND an executable from the same ``package`` macro
+  # (Wayland was the first). Pins mutter 47.10's vendored sha256 +
+  # meson flag sequence + cross-channel isolation + ``libMutter``
+  # library artifact + ``mutterBin`` executable artifact within a
+  # single package's artifact set. Upstream-source side of the
+  # ``mutter >=47`` dependency ``gnomeShellSource`` declares and the
+  # NDE-G1 GNOME desktop entry pins.
+  TestSpec(
+    source: "recipes/packages/source/mutter/test_mutter_source.nim",
+    binary: "build/test-bin/t_mutter_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventeenth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND autotools-driven recipe (expat was the first) and
+  # FIRST autotools recipe to ship TWO executable artifacts from one
+  # ``package`` macro. The ``configureFlags:`` block exercises every
+  # autotools-flag idiom in one sequence (``--disable-*``,
+  # ``--without-*``, ``--with-*=value``, ``--disable-*=false``
+  # polarity flip, ``--enable-*``). Pins gdm 47.0's vendored sha256 +
+  # ``./configure`` flag sequence + cross-channel isolation
+  # (configure flags MUST NOT leak into the meson or cmake channels)
+  # + ``gdm`` daemon executable artifact + ``gdmGreeterSession``
+  # greeter executable artifact. NDE-G1's display-manager entry
+  # point.
+  TestSpec(
+    source: "recipes/packages/source/gdm/test_gdm_source.nim",
+    binary: "build/test-bin/t_gdm_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eighteenth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD (closing) recipe in the GNOME stack batch and FIRST
+  # recipe to combine BOTH a multi-word-kebab package name
+  # (``gnome-shell`` -> ``gnomeShellSource``) AND a mixed-kind
+  # artifact set (library + executable). Third meson recipe to ship
+  # a library + an executable from the same ``package`` macro
+  # (Wayland + mutter were the first two). Pins gnome-shell 47.10's
+  # vendored sha256 + meson flag sequence + cross-channel isolation +
+  # ``gnomeShell`` executable artifact + ``libGnomeShell`` library
+  # artifact within a single package's artifact set. The GNOME user-
+  # session UI: top bar, activities overview, lock screen,
+  # notification daemon, extension host.
+  TestSpec(
+    source: "recipes/packages/source/gnome-shell/test_gnome_shell_source.nim",
+    binary: "build/test-bin/t_gnome_shell_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
