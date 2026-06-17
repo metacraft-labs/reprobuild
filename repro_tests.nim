@@ -1892,6 +1892,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # First from-source production recipe to exercise the M9.H/I/K trio
+  # (fetch: + mesonOptions: + convention-layer fetch-action emission).
+  # Smoke-tests the dbusBrokerSource recipe's registry round-trips
+  # (URL + sha256, meson flag sequence, executable artifacts).
+  TestSpec(
+    source: "recipes/packages/source/dbus-broker/test_dbus_broker_source.nim",
+    binary: "build/test-bin/t_dbus_broker_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
