@@ -27,6 +27,18 @@
 
 import std/[algorithm, json, macros, os, strutils, tables]
 
+# DSL-port M9.A: ``nimcrypto/sha2`` powers the content-addressed sha256
+# hashing path for ``consumeConfigFile`` / ``consumeManagedBlock``. We
+# import-alias it under ``ncSha2`` so the M9.A wrappers below can
+# instantiate ``ncSha2.sha256`` without colliding with any top-level
+# ``sha256`` identifier callers may want to re-introduce. The shim
+# modules at ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`` use
+# the same library + identical digest interface, so the cache-key
+# composition stays byte-comparable across the M9.A DSL surface and the
+# pre-existing shim emitters (Generated-Configuration-Files.md
+# §"Cache-key composition").
+import nimcrypto/sha2 as ncSha2
+
 proc extendedPath(path: string): string =
   when defined(windows):
     if path.len == 0 or path.startsWith("\\\\"):

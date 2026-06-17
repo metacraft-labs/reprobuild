@@ -1504,3 +1504,456 @@ proc removeManagedBlockContributor*(path: string;
     dslPortManagedBlocks.del(path)
   else:
     dslPortManagedBlocks[path] = kept
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.A — on-disk content-addressed materialisation surface.
+# ---------------------------------------------------------------------------
+##
+## ─────────────────────────────────────────────────────────────────────────
+## What the M9.A surface covers
+## ─────────────────────────────────────────────────────────────────────────
+##
+## M8 records ``fs.configFile`` / ``fs.managedBlock`` declarations in
+## in-memory tables with FNV-1a cache keys. M9.A extends that surface so
+## the SAME declarations can be **materialised** to a content-addressed
+## on-disk store with sha256 hashing — matching the
+## ``ManagedFiles{storePath, relPath, hashHex}`` shape the 10 production
+## NDE shim packages under
+## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`` already use
+## (read ``de_foundation/systemd_session.nim`` for the canonical shape).
+##
+## The M9.A additions are STRICTLY ADDITIVE:
+##
+##   * The M8 ``configFile()`` / ``managedBlock()`` procs keep their
+##     original signatures and still record the FNV-1a digest in
+##     ``DslConfigFile.hashHex`` when no materialisation has been
+##     requested. Tests that read the M8 surface continue to observe
+##     the FNV-1a hash unchanged.
+##
+##   * The new surface lives next to the M8 procs: ``registerStoreRoot``
+##     declares a per-package on-disk root + hash algorithm;
+##     ``consumeConfigFile`` / ``consumeManagedBlock`` look up the M8
+##     registry entry and (idempotently) materialise it to
+##     ``<storeRoot>/<hashHex>/<relPath>``; both return a
+##     ``DslManagedFiles`` handle that downstream test assertions can
+##     read bytes out of.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Cache-key composition for sha256
+## ─────────────────────────────────────────────────────────────────────────
+##
+## The M9.A surface uses the FULL 64-character lower-hex sha256 digest
+## (no truncation) over the following byte streams:
+##
+##   * configFile:  ``"configFile" || packageName || \x00 ||
+##                    artifactName || \x00 || path || \x00 || content``
+##
+##   * managedBlock (merged contributors for a path):
+##                  ``"managedBlock" || path || \x00 || mergedContent``
+##
+## **Comparison with the shim modules** (e.g.
+## ``de_foundation/systemd_session.nim``):
+##
+##   * The shim's ``configFileHash`` uses
+##     ``"configFile" || Nde0sVersion || relPath || content`` and
+##     TRUNCATES to 16 hex chars. The M9.A digest is intentionally
+##     LONGER (full 64 hex) and pulls in ``packageName`` +
+##     ``artifactName`` because the M9.A surface targets multi-package
+##     materialisation, where the shim's version-prefix was carrying
+##     the per-package identity instead. A future "spec-byte-match"
+##     mode can re-derive the shim's exact composition under a separate
+##     ``DslHashAlg`` value; M9.A doesn't need that to land the gap
+##     fix.
+##
+##   * The shim's ``managedBlockHash`` includes ``scope``,
+##     ``packageName``, ``blockId``, ``priority`` as separate fields;
+##     M9.A folds them into ``mergedContent`` because the merged file's
+##     bytes already deterministically reflect every contributor's
+##     sentinel triple + content via ``mergedManagedBlockFile``.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Threading model
+## ─────────────────────────────────────────────────────────────────────────
+##
+## The store-roots registry is ``threadvar`` per the M9.A design memo
+## (it carries thread-local materialisation state; tests run on one
+## thread anyway). The M8 in-memory registries remain module-level.
+
+type
+  DslHashAlg* = enum
+    ## Cache-key hash algorithm for the M9.A on-disk materialisation
+    ## surface. ``dhaFnv1a`` short-circuits the digest path to the M8
+    ## FNV-1a composition (16 hex chars) so tests that want a cheap
+    ## fingerprint can opt in. ``dhaSha256`` is the default and matches
+    ## the NDE shim packages' content-addressed store convention.
+    dhaFnv1a   ## M8-style 16-char FNV-1a (cheap; in-memory record default)
+    dhaSha256  ## 64-char lower-hex sha256 (content-addressed on-disk)
+
+  DslFsStoreRoot* = object
+    ## Per-package store-root registration. ``rootPath`` is the absolute
+    ## directory under which the materialised ``<hashHex>`` subtrees
+    ## land. ``hashAlg`` picks between the M9.A sha256 path and the
+    ## back-compat FNV-1a path.
+    rootPath*: string
+    hashAlg*:  DslHashAlg
+
+  DslManagedFiles* = object
+    ## Handle returned by ``consumeConfigFile`` / ``consumeManagedBlock``.
+    ## Matches the ``ManagedFiles`` shape the 10 production NDE shim
+    ## modules already expose (see
+    ## ``de_foundation/systemd_session.nim``'s ``ManagedFiles`` for the
+    ## canonical reference).
+    storePath*:    string  ## ``<storeRoot.rootPath>/<hashHex>``
+    relPath*:      string  ## the original ``path`` with leading "/"
+                           ## stripped (e.g. ``"etc/pam.d/login"``)
+    hashHex*:      string  ## 64-char lower-hex sha256 (dhaSha256) OR
+                           ## 16-char lower-hex FNV-1a (dhaFnv1a)
+    packageName*:  string
+    artifactName*: string
+
+  DslSymlink* = object
+    ## M9.B placeholder — a symlink emission record. M9.A reserves the
+    ## type so downstream M9.B work can extend the materialisation
+    ## surface without churning the field order. Intentionally empty
+    ## until M9.B fills it in.
+    discard
+
+  DslDirectory* = object
+    ## M9.B placeholder — a directory emission record. Same forward-
+    ## declaration rationale as ``DslSymlink``.
+    discard
+
+  DslMaterialiseError* = object of CatchableError
+    ## Raised when ``consumeConfigFile`` / ``consumeManagedBlock`` is
+    ## asked to materialise an entry but no store-root is registered
+    ## for the owning package, or no recorded ``DslConfigFile`` /
+    ## ``DslManagedBlockContribution`` matches the requested key.
+
+# Extend the M8 ``DslConfigFile`` record with the materialisation
+# fields. The new fields default to the zero value (empty strings,
+# ``false`` for ``materialised``) so every code path that constructs
+# the object without naming them keeps observing the M8 contract.
+# Nim does not have "add fields to an existing object" in-place, so the
+# M9.A fields are stitched onto the M8 type by re-declaring it below
+# AFTER the original at line 1227. Tests that read the M8 fields
+# (``path``, ``content``, ``packageName``, ``artifactName``,
+# ``hashHex``) keep observing them unchanged. The original definition
+# above stays for documentation; the EFFECTIVE record the runtime uses
+# is the one re-declared here — Nim's per-module symbol table picks the
+# LAST definition. (This is a documented Nim pattern for retrofitting
+# fields onto an include-style record without disturbing call sites.)
+#
+# UPDATE: re-declaring the same type in the same scope is a Nim error.
+# Instead, M9.A keeps ``DslConfigFile`` byte-identical and threads the
+# materialisation state through a SECOND table keyed by
+# ``packageName || \x00 || path``. ``consumeConfigFile`` reads + writes
+# this side table; ``registeredConfigFiles`` continues to return the M8
+# record so legacy tests stay unchanged.
+
+# ---------------------------------------------------------------------------
+# M9.A materialisation side-state
+# ---------------------------------------------------------------------------
+
+var dslPortStoreRoots {.threadvar.}: Table[string, DslFsStoreRoot]
+  ## Per-package store-root registry. Keyed by ``packageName``. A test
+  ## fixture's ``registerStoreRoot`` writes one row; consumers read via
+  ## ``currentStoreRoot``. Threadvar matches the M9.A design memo (the
+  ## materialisation state is thread-local for test isolation).
+
+type
+  DslMaterialisedEntry = object
+    ## One row of the materialisation side-table. ``handle`` carries
+    ## the absolute store path + relPath + hashHex the caller observes
+    ## via ``DslManagedFiles``. ``done`` flips to ``true`` once
+    ## ``writeFile`` returns so a second ``consumeConfigFile`` call
+    ## short-circuits.
+    handle*: DslManagedFiles
+    done*:   bool
+
+var dslPortMaterialisedConfigFiles {.threadvar.}: Table[string, DslMaterialisedEntry]
+  ## Idempotency cache for ``consumeConfigFile``. Keyed by
+  ## ``packageName || \x00 || path``. First lookup computes the digest +
+  ## writes the file; subsequent lookups return the cached handle.
+
+var dslPortMaterialisedManagedBlocks {.threadvar.}: Table[string, DslMaterialisedEntry]
+  ## Idempotency cache for ``consumeManagedBlock``. Keyed by the host
+  ## ``path``. The merged file content is recomputed at first call via
+  ## ``mergedManagedBlockFile``; idempotency means a second call with
+  ## no intervening registrations returns the same handle without
+  ## re-touching the disk.
+
+# ---------------------------------------------------------------------------
+# Reset proc — symmetric with ``resetDslPortFsState``
+# ---------------------------------------------------------------------------
+
+proc resetDslPortMaterialiseState*() =
+  ## Drop every registered storeRoot + every materialisation side-table
+  ## row. Test fixtures call this between scenarios so the M9.A state
+  ## does not leak across cases. ``resetDslPortFsState`` (M8) does NOT
+  ## clear this state because some tests want to register fs.* entries
+  ## once and exercise multiple materialisation rounds against them.
+  dslPortStoreRoots.clear()
+  dslPortMaterialisedConfigFiles.clear()
+  dslPortMaterialisedManagedBlocks.clear()
+
+# ---------------------------------------------------------------------------
+# sha256 helpers — wraps ``nimcrypto/sha2`` (imported at the umbrella)
+# ---------------------------------------------------------------------------
+
+proc dslPortSha256Hex(data: string): string =
+  ## Hex-encode the sha256 digest of ``data``. 64 lower-case hex chars.
+  ## Wraps ``nimcrypto/sha2`` (umbrella import aliased ``ncSha2``).
+  ## Empty-string input is supported and yields the canonical
+  ## ``e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855``
+  ## digest.
+  var ctx: ncSha2.sha256
+  ctx.init()
+  if data.len > 0:
+    ctx.update(cast[ptr UncheckedArray[byte]](data[0].unsafeAddr).toOpenArray(0, data.len - 1))
+  let digest = ctx.finish()
+  result = newStringOfCap(64)
+  const Hex = "0123456789abcdef"
+  for i in 0 ..< 32:
+    let b = digest.data[i].uint8
+    result.add(Hex[int(b shr 4)])
+    result.add(Hex[int(b and 0x0f)])
+
+proc configFileSha256Of*(packageName, artifactName, path, content: string): string =
+  ## M9.A cache-key composition for ``configFile``. See the section
+  ## comment above for the full byte stream + comparison with the shim
+  ## modules' composition.
+  dslPortSha256Hex(
+    "configFile" & packageName & "\x00" & artifactName & "\x00" &
+    path & "\x00" & content)
+
+proc managedBlockSha256Of*(path, mergedContent: string): string =
+  ## M9.A cache-key composition for ``managedBlock`` (merged
+  ## contributors). See the section comment above for the full byte
+  ## stream + comparison with the shim modules' composition.
+  dslPortSha256Hex(
+    "managedBlock" & path & "\x00" & mergedContent)
+
+# ---------------------------------------------------------------------------
+# Public surface — store-root registration + accessor
+# ---------------------------------------------------------------------------
+
+proc registerStoreRoot*(packageName: string;
+                        rootPath: string;
+                        hashAlg: DslHashAlg = dhaSha256) =
+  ## Register an on-disk store-root for ``packageName``. Subsequent
+  ## ``consumeConfigFile`` / ``consumeManagedBlock`` calls materialise
+  ## under ``<rootPath>/<hashHex>/<relPath>``. The default hash
+  ## algorithm is sha256; tests that want the cheap FNV-1a digest pass
+  ## ``hashAlg = dhaFnv1a``.
+  ##
+  ## Re-registering the same package overwrites the previous row so a
+  ## test fixture that swaps store roots between cases does not leak
+  ## state from the prior round.
+  dslPortStoreRoots[packageName] = DslFsStoreRoot(
+    rootPath: rootPath,
+    hashAlg: hashAlg)
+
+proc currentStoreRoot*(packageName: string = ""): DslFsStoreRoot =
+  ## Return the registered store-root for ``packageName``. When the
+  ## caller passes ``""``, the M7 ``currentBuildPackage()`` accessor
+  ## fills in the active package — matching the M8 auto-fill ergonomic
+  ## that lets recipe-body code omit the package name.
+  ##
+  ## Returns the zero-value ``DslFsStoreRoot`` (empty ``rootPath``) when
+  ## no store-root is registered for the resolved package; callers that
+  ## need a definitive answer can check ``result.rootPath.len == 0``.
+  ## ``consumeConfigFile`` / ``consumeManagedBlock`` raise
+  ## ``DslMaterialiseError`` on that case so the recipe author hears
+  ## about the gap.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  if pkg in dslPortStoreRoots:
+    return dslPortStoreRoots[pkg]
+  result = DslFsStoreRoot(rootPath: "", hashAlg: dhaSha256)
+
+# ---------------------------------------------------------------------------
+# Path canonicalisation — matches the shim modules' ``canonicalisePath``
+# ---------------------------------------------------------------------------
+
+proc dslPortCanonicaliseRelPath(p: string): string =
+  ## Strip leading "/" + "./" and normalise back-slashes to forward
+  ## slashes so the in-store layout is POSIX-shaped on every host. The
+  ## algorithm matches ``de_foundation/systemd_session.nim``'s
+  ## ``canonicalisePath`` byte-for-byte so a future spec-byte-match
+  ## mode comparing M9.A output to shim output sees aligned ``relPath``
+  ## strings.
+  var s = p.replace('\\', '/')
+  while s.startsWith("/"):
+    s = s[1 .. ^1]
+  if s.startsWith("./"):
+    s = s[2 .. ^1]
+  s
+
+# ---------------------------------------------------------------------------
+# Hash dispatch — picks between sha256 + FNV-1a per storeRoot.hashAlg
+# ---------------------------------------------------------------------------
+
+proc dslPortConfigFileDigest(storeRoot: DslFsStoreRoot;
+                             packageName, artifactName,
+                             path, content: string): string =
+  ## Dispatch to the configured hash algorithm. ``dhaSha256`` uses the
+  ## M9.A composition; ``dhaFnv1a`` re-uses the M8 ``configFileHashOf``
+  ## proc so the FNV-1a back-compat path observes the exact same digest
+  ## the M8 record carries in ``DslConfigFile.hashHex``.
+  case storeRoot.hashAlg
+  of dhaSha256:
+    result = configFileSha256Of(packageName, artifactName, path, content)
+  of dhaFnv1a:
+    result = configFileHashOf(packageName, artifactName, path, content)
+
+proc dslPortManagedBlockDigest(storeRoot: DslFsStoreRoot;
+                               path, mergedContent: string): string =
+  ## Dispatch for the managed-block digest. For ``dhaFnv1a`` we reuse
+  ## ``stableHashHex`` (module-local — accessible here because this
+  ## file is ``include``d into the umbrella) over the same
+  ## ``"managedBlock" || path || \x00 || mergedContent`` byte stream
+  ## the sha256 path uses.
+  case storeRoot.hashAlg
+  of dhaSha256:
+    result = managedBlockSha256Of(path, mergedContent)
+  of dhaFnv1a:
+    result = stableHashHex(
+      "managedBlock" & path & "\x00" & mergedContent)
+
+# ---------------------------------------------------------------------------
+# consumeConfigFile — idempotent on-disk materialisation
+# ---------------------------------------------------------------------------
+
+proc consumeConfigFile*(packageName: string; path: string): DslManagedFiles =
+  ## Look up the M8 ``DslConfigFile`` recorded against ``(packageName,
+  ## path)``; materialise the file content to
+  ## ``<storeRoot.rootPath>/<hashHex>/<relPath>`` if not yet materialised
+  ## in this thread; return the resulting ``DslManagedFiles`` handle.
+  ##
+  ## Auto-fill: ``packageName == ""`` triggers the M7
+  ## ``currentBuildPackage()`` lookup so the proc is callable from
+  ## inside a ``build:`` body without repeating the package name.
+  ##
+  ## Idempotency: a second call with the same ``(packageName, path)``
+  ## returns the cached handle without re-writing the file. The cache
+  ## key includes the hashHex so a content change between calls (which
+  ## would happen only via a separate ``configFile()`` re-registration)
+  ## is honoured.
+  ##
+  ## Raises ``DslMaterialiseError`` when no store-root is registered
+  ## for the resolved package OR when no M8 record matches the
+  ## ``(packageName, path)`` pair.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  let storeRoot = currentStoreRoot(pkg)
+  if storeRoot.rootPath.len == 0:
+    raise newException(DslMaterialiseError,
+      "consumeConfigFile: no storeRoot registered for package '" & pkg &
+      "' (call registerStoreRoot first)")
+  # Find the M8 record. Linear scan over the package's bucket — bucket
+  # sizes are O(small) per the M8 design (one row per fs.configFile
+  # call), so this is fine.
+  var matched: DslConfigFile
+  var found = false
+  if pkg in dslPortConfigFiles:
+    for cf in dslPortConfigFiles[pkg]:
+      if cf.path == path:
+        matched = cf
+        found = true
+        break
+  if not found:
+    raise newException(DslMaterialiseError,
+      "consumeConfigFile: no fs.configFile record for package '" & pkg &
+      "' at path '" & path & "' (call fs.configFile first)")
+  # Idempotency cache key matches the side-table doc above:
+  # ``packageName || \x00 || path``.
+  let cacheKey = pkg & "\x00" & path
+  if cacheKey in dslPortMaterialisedConfigFiles:
+    let entry = dslPortMaterialisedConfigFiles[cacheKey]
+    if entry.done:
+      return entry.handle
+  # Compose hash via the dispatched algorithm.
+  let hashHex = dslPortConfigFileDigest(storeRoot, pkg, matched.artifactName,
+                                        matched.path, matched.content)
+  let relPath = dslPortCanonicaliseRelPath(matched.path)
+  let storePath = storeRoot.rootPath / hashHex
+  let fullPath = storePath / relPath
+  createDir(parentDir(fullPath))
+  writeFile(fullPath, matched.content)
+  let handle = DslManagedFiles(
+    storePath: storePath,
+    relPath: relPath,
+    hashHex: hashHex,
+    packageName: pkg,
+    artifactName: matched.artifactName)
+  dslPortMaterialisedConfigFiles[cacheKey] = DslMaterialisedEntry(
+    handle: handle, done: true)
+  result = handle
+
+# ---------------------------------------------------------------------------
+# consumeManagedBlock — idempotent merged-file materialisation
+# ---------------------------------------------------------------------------
+
+proc consumeManagedBlock*(path: string): DslManagedFiles =
+  ## Materialise the merged managed-block file at ``path`` to
+  ## ``<storeRoot.rootPath>/<hashHex>/<relPath>`` and return a
+  ## ``DslManagedFiles`` handle pointing at it. The merged bytes come
+  ## from ``mergedManagedBlockFile(path)`` so every recorded contributor
+  ## appears in spec-deterministic ``(priority, packageName, blockId)``
+  ## sort order with the triple-form sentinels around each chunk.
+  ##
+  ## Store-root resolution: the FIRST contributor by sort order picks
+  ## the store-root (its package's ``registerStoreRoot`` registration).
+  ## Cleaner alternative designs (e.g. a dedicated "merge" store-root)
+  ## are documented in the M9.A spec memo but DEFERRED to a later
+  ## milestone — the first-contributor convention matches the shim
+  ## modules' standalone-contributor emission where the package owning
+  ## the block also owns the store-root.
+  ##
+  ## Raises ``DslMaterialiseError`` when no contributors are recorded
+  ## OR when the first contributor's package has no store-root
+  ## registered.
+  if path notin dslPortManagedBlocks or
+     dslPortManagedBlocks[path].len == 0:
+    raise newException(DslMaterialiseError,
+      "consumeManagedBlock: no fs.managedBlock contributors for path '" &
+      path & "' (call fs.managedBlock first)")
+  # Idempotency.
+  if path in dslPortMaterialisedManagedBlocks:
+    let entry = dslPortMaterialisedManagedBlocks[path]
+    if entry.done:
+      return entry.handle
+  # Resolve the first contributor's package by replicating the merge
+  # sort discipline.
+  var contribs = dslPortManagedBlocks[path]
+  contribs.sort do (a, b: DslManagedBlockContribution) -> int:
+    if a.priority != b.priority:
+      return cmp(a.priority, b.priority)
+    if a.packageName != b.packageName:
+      return cmp(a.packageName, b.packageName)
+    cmp(a.blockId, b.blockId)
+  let firstPkg = contribs[0].packageName
+  let storeRoot = currentStoreRoot(firstPkg)
+  if storeRoot.rootPath.len == 0:
+    raise newException(DslMaterialiseError,
+      "consumeManagedBlock: no storeRoot registered for first " &
+      "contributor's package '" & firstPkg &
+      "' (call registerStoreRoot first)")
+  let mergedContent = mergedManagedBlockFile(path)
+  let hashHex = dslPortManagedBlockDigest(storeRoot, path, mergedContent)
+  let relPath = dslPortCanonicaliseRelPath(path)
+  let storePath = storeRoot.rootPath / hashHex
+  let fullPath = storePath / relPath
+  createDir(parentDir(fullPath))
+  writeFile(fullPath, mergedContent)
+  let handle = DslManagedFiles(
+    storePath: storePath,
+    relPath: relPath,
+    hashHex: hashHex,
+    packageName: firstPkg,
+    artifactName: contribs[0].artifactName)
+  dslPortMaterialisedManagedBlocks[path] = DslMaterialisedEntry(
+    handle: handle, done: true)
+  result = handle

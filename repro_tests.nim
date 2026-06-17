@@ -1629,6 +1629,34 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.A — content-addressed on-disk materialisation for the
+  # M8 ``fs.configFile`` / ``fs.managedBlock`` surfaces. The three
+  # entries below pin sha256 hashing (configFile path), merged-content
+  # materialisation (managedBlock path), and the dhaFnv1a fallback.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_configfile.nim",
+    binary: "build/test-bin/t_dsl_fs_materialise_configfile",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_managedblock.nim",
+    binary: "build/test-bin/t_dsl_fs_materialise_managedblock",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_fnv_fallback.nim",
+    binary: "build/test-bin/t_dsl_fs_materialise_fnv_fallback",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
     binary: "build/test-bin/t_dsl_helper_proc_reads_build_context",
