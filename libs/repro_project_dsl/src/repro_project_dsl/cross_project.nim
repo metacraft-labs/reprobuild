@@ -448,3 +448,117 @@ proc partitionPackageBody*(body: NimNode):
     if stmt.kind == nnkIncludeStmt:
       continue
     result.preservedStmts.add(stmt.copyNimTree())
+
+# ---------------------------------------------------------------------------
+# DSL-port M3 — section-ownership discriminator.
+#
+# M2 review flagged a generalisation risk: when multiple milestone
+# emitters share the section-head namespace (M2 owns ``config`` +
+# ``versions``; M3 owns ``executable`` + ``library`` + ``files``; legacy
+# ``parsePackageDef`` ALSO owns ``executable`` + ``library`` for the
+# typed-tool wrapper emission), a per-entry tag on the partition output
+# lets each emitter claim ownership precisely.
+#
+# The tag is INFORMATIONAL. M3 does NOT cause ``parsePackageDef`` to
+# skip ``executable`` / ``library`` entries — production's typed-tool
+# wrapper, cli interface emission, ``buildXxx*`` proc, and per-package
+# const all live downstream of ``pkg.executables`` / ``pkg.libraries``,
+# and breaking that chain would require porting all of M4-M8 in one
+# milestone (out of scope). Instead M3 runs as an ADDITIONAL observer
+# pass that records each artifact into a separate runtime sidecar
+# (``dslPortArtifactRegistry``, see ``dsl_port_runtime.nim``). The tag
+# is the seam M4+ uses to migrate downstream emission off the legacy
+# records onto the new registry — when an arm is fully ported, that
+# arm's section-head is rewritten as ``so*Artifact`` ONLY and the
+# corresponding legacy parsePackageDef arm is deleted in lockstep.
+#
+# Why this is safe today:
+#   * ``parsePackageDef`` populates ``pkg.executables`` (per
+#     ``parseExecutable``) and ``pkg.libraries`` (per ``parseLibrary``)
+#     — same as before M3.
+#   * ``emitM3Artifacts`` (in ``macros_b.nim``) calls
+#     ``registerArtifact`` for every recognised entry — a sidecar
+#     append, no Nim code emitted from the artifact body itself.
+#   * The runtime registries are disjoint: ``pkg.executables`` /
+#     ``pkg.libraries`` live on the legacy ``PackageDef`` record;
+#     ``dslPortArtifactRegistry`` lives on the new runtime sidecar.
+#     Tests inspect one or the other; production wrapper emission
+#     reads only the legacy record.
+#
+# ``files:`` is a corner case — the LEGACY ``parsePackageDef`` does NOT
+# recognise ``files:`` at all (no arm exists for it). M3's emitter is
+# therefore the sole consumer of ``files:`` entries; nothing is
+# double-emitted.
+# ---------------------------------------------------------------------------
+
+type
+  SectionOwnership* = enum
+    ## Per-section claim on a partitioned section-list entry. The M2
+    ## reviewer suggested this discriminator so M3+ emitters can mark
+    ## ownership precisely. See the comment above for the ownership
+    ## semantics today and the migration path M4+ follows.
+    soLegacyParsePackageDef
+      ## Default ownership: ``parsePackageDef`` consumes this entry
+      ## (every section type prior to M2 / M3).
+    soM2Config
+      ## ``config:`` blocks — M2's ``emitM2ConfigDefaults`` reads scalar
+      ## defaults from this entry into ``dslPortDefaults``. Legacy
+      ## ``parsePackageDef`` ALSO reads variant declarations from the
+      ## same body; the two emitters operate on disjoint per-entry
+      ## subsets (see ``collectM2ConfigEntries``).
+    soM2Versions
+      ## ``versions:`` blocks — M2's ``emitM2Versions`` reads the
+      ## per-version metadata into ``dslPortVersionRegistry``. Legacy
+      ## ``parsePackageDef`` does NOT recognise ``versions:`` so this
+      ## ownership is exclusive.
+    soM3ExecutableArtifact
+      ## ``executable <name>:`` blocks — M3's ``emitM3Artifacts``
+      ## records the artifact into ``dslPortArtifactRegistry``. Legacy
+      ## ``parsePackageDef``'s ``executable`` arm ALSO populates
+      ## ``pkg.executables`` (the typed-tool wrapper sidecar); no Nim
+      ## code is double-emitted because the two sidecars are disjoint.
+    soM3LibraryArtifact
+      ## ``library <name>:`` blocks — same dual-sidecar semantics as
+      ## ``soM3ExecutableArtifact``.
+    soM3FilesArtifact
+      ## ``files <name>:`` blocks — exclusive ownership. The legacy
+      ## ``parsePackageDef`` does NOT recognise ``files:`` (no arm
+      ## exists for it), so M3's emitter is the sole consumer.
+
+  ClassifiedSection* = object
+    ## One classified section. ``stmt`` is a copy of the AST node from
+    ## the partitioned section list; ``ownership`` is the discriminator
+    ## the emitter dispatches on.
+    stmt*: NimNode
+    ownership*: SectionOwnership
+
+proc classifySectionStmt(stmt: NimNode): SectionOwnership =
+  ## Map a section-head name to its primary ownership tag. The
+  ## ``executable`` / ``library`` / ``files`` arms map to the new M3
+  ## tags; the ``config:`` / ``versions:`` arms map to the M2 tags;
+  ## everything else stays on the legacy path.
+  let head = calleeName(stmt).normalize
+  case head
+  of "executable": soM3ExecutableArtifact
+  of "library": soM3LibraryArtifact
+  of "files": soM3FilesArtifact
+  of "config": soM2Config
+  of "versions": soM2Versions
+  else: soLegacyParsePackageDef
+
+proc classifyPackageSections*(sectionStmts: NimNode):
+    seq[ClassifiedSection] =
+  ## Wrap ``partitionPackageBody``'s section-list output in a
+  ## per-entry ownership tag. Emitters that want to claim entries
+  ## (e.g. ``emitM3Artifacts``) walk this seq and dispatch on
+  ## ``entry.ownership``; emitters that want the raw section list
+  ## (e.g. the legacy ``parsePackageDef``) continue to walk the raw
+  ## ``NimNode`` directly. The two pathways co-exist by design — see
+  ## the comment above ``SectionOwnership`` for the migration plan.
+  result = @[]
+  if sectionStmts.kind != nnkStmtList:
+    return
+  for stmt in sectionStmts:
+    result.add(ClassifiedSection(
+      stmt: stmt,
+      ownership: classifySectionStmt(stmt)))

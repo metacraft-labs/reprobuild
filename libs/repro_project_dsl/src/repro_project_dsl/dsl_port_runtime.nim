@@ -340,3 +340,119 @@ proc registeredVersions*(packageName: string): seq[DslVersionInfo] =
   if packageName in dslPortVersionRegistry:
     return dslPortVersionRegistry[packageName]
   return @[]
+
+# ---------------------------------------------------------------------------
+# DSL-port M3 — artifact registry for ``executable``, ``library``, ``files``.
+# ---------------------------------------------------------------------------
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Why a sidecar registry rather than re-using ``pkg.executables`` /
+## ``pkg.libraries``?
+## ─────────────────────────────────────────────────────────────────────────
+##
+## The legacy ``parsePackageDef`` walker in ``macros_a.nim`` already
+## extracts ``executable <name>: ...`` and ``library <name>: ...``
+## entries into ``pkg.executables`` (``ExecutableDef``) and
+## ``pkg.libraries`` (``LibraryDef``). Those records are consumed by
+## ``wrapperCode`` / ``toolActionWrapperCode`` to emit the typed-tool
+## wrapper procs, the ``defineCliInterface`` calls, the ``buildXxx*``
+## proc, and the per-package ``const <pkg>* = <Title>Package()``. The
+## production NDE recipes plus ``examples/hello-world-c/repro.nim`` AND
+## ``examples/hello-world-multi-output/repro.nim`` rely on that emission
+## end-to-end.
+##
+## M3 ports v8's ``executable`` / ``library`` / ``files`` templates as
+## an OBSERVER pass that ALSO records each artifact into a separate
+## ``dslPortArtifactRegistry`` keyed by package name. Future milestones
+## (M4 — cli: lowering, M5 — build: lowering, M6 — files: lowering)
+## migrate downstream emission off the legacy records onto this
+## registry; until then both records co-exist, populated from the same
+## source-order walk over the partitioned section list. No statement is
+## double-emitted because:
+##
+##   * ``parsePackageDef`` populates ``pkg.executables`` /
+##     ``pkg.libraries`` (legacy data-extraction sidecar).
+##   * M3's ``emitM3Artifacts`` populates ``dslPortArtifactRegistry``
+##     (new runtime sidecar — same model as M2's ``dslPortDefaults`` /
+##     ``dslPortVersionRegistry``).
+##
+## Both sidecars are independent; no piece of code is emitted twice
+## from a single section.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Why store the artifact body as a ``string`` (its ``.repr``) instead
+## of a ``NimNode``?
+## ─────────────────────────────────────────────────────────────────────────
+##
+## NimNode values exist only at compile time — the runtime registry
+## cannot hold one. To still satisfy the spec's "M3 records body
+## verbatim; M4+ will lower it" requirement we store the body's
+## ``.repr`` as a string. M4 reads the body BACK at compile time
+## (the lowering itself runs at macro-expansion time, not at runtime)
+## by walking the same partitioned section list; the runtime string
+## is the diagnostic surface tests use to verify what was recorded.
+
+type
+  DslArtifactKind* = enum
+    ## Discriminator for the three artifact-template families v8 ships:
+    ## ``executable``, ``library``, ``files``. Matches the three
+    ## ``soM3*Artifact`` entries on ``SectionOwnership`` (see
+    ## ``cross_project.nim``) one-to-one.
+    dakExecutable
+    dakLibrary
+    dakFiles
+
+  DslArtifact* = object
+    ## One ``executable``/``library``/``files`` registration. Populated
+    ## by ``emitM3Artifacts`` at module-init time; read by host code via
+    ## ``registeredArtifacts``. M3 records the artifact name, kind, and
+    ## body repr; M4+ will widen the schema as the cli:/build:/files:
+    ## sub-blocks land.
+    packageName*: string
+    artifactName*: string
+      ## The string-form name verbatim, or the ident-form name's
+      ## ``strVal`` (NO kebab translation — see the legacy-vs-M3
+      ## ownership decision in ``macros_b.nim:emitM3Artifacts``).
+    kind*: DslArtifactKind
+    bodyRepr*: string
+      ## The artifact-internal body's ``NimNode.repr`` at the time
+      ## ``emitM3Artifacts`` ran. M4+ will re-parse this at lowering time
+      ## or read the AST off the partitioned section list directly.
+
+var dslPortArtifactRegistry: Table[string, seq[DslArtifact]]
+  ## Per-package artifact registry. Keyed by package name.
+  ## ``registerArtifact`` appends to the per-package seq;
+  ## ``registeredArtifacts`` returns a copy so callers cannot mutate
+  ## the registry from outside the public API.
+
+proc resetDslPortArtifactState*() =
+  ## Drop every artifact registration. Test fixtures call this between
+  ## scenarios to keep the registry clean. The config and versions
+  ## registries have their own reset procs — keeping the three concerns
+  ## separable lets tests target one without disturbing the others.
+  dslPortArtifactRegistry.clear()
+
+proc registerArtifact*(packageName: string; artifact: DslArtifact) =
+  ## Append one artifact entry against ``packageName``. The ``package``
+  ## macro emits one call per recognised ``executable:``/``library:``/
+  ## ``files:`` block via ``emitM3Artifacts``.
+  ##
+  ## Idempotency: registering a duplicate ``(packageName, artifactName,
+  ## kind)`` tuple appends the new record — we deliberately do NOT
+  ## collapse, because conditional ``when`` branches can legitimately
+  ## re-declare the same artifact name under different platform gates
+  ## and the consumer (M4+) decides which arm to honour. Surfacing
+  ## both gives downstream consumers the complete picture; collapsing
+  ## would discard provenance.
+  if packageName notin dslPortArtifactRegistry:
+    dslPortArtifactRegistry[packageName] = @[]
+  dslPortArtifactRegistry[packageName].add(artifact)
+
+proc registeredArtifacts*(packageName: string): seq[DslArtifact] =
+  ## Return every artifact registered against ``packageName`` in
+  ## declaration order. Returns the empty seq when the package never
+  ## declared an ``executable:`` / ``library:`` / ``files:`` block;
+  ## callers must NOT treat the empty return as an error.
+  if packageName in dslPortArtifactRegistry:
+    return dslPortArtifactRegistry[packageName]
+  return @[]

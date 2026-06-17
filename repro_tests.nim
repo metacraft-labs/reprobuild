@@ -1570,6 +1570,47 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # ── DSL-port M3: v8-style ``executable`` / ``library`` / ``files``
+  # artifact templates. The four tests pin the contract that the new
+  # ``emitM3Artifacts`` lowerer in ``macros_b.nim`` produces
+  # ``registerArtifact(...)`` calls that survive macro expansion and
+  # round-trip through the M3 ``registeredArtifacts`` API in
+  # ``dsl_port_runtime.nim``. Ident-form ``executable myTool:`` ALSO
+  # injects ``let myTool {.inject, used.}: DslArtifact = ...`` so the
+  # binding is referenceable from downstream code; the
+  # ``ident-form injects let`` tests in each file pin that injection.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim",
+    binary: "build/test-bin/t_dsl_executable_string_form",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_ident_form.nim",
+    binary: "build/test-bin/t_dsl_executable_ident_form",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_library.nim",
+    binary: "build/test-bin/t_dsl_library",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
+    binary: "build/test-bin/t_dsl_files",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",

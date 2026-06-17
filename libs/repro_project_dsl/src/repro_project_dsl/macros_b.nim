@@ -656,6 +656,208 @@ proc emitM2Versions(packageName: string;
         "  sourceUrl: " & urlLit & ",\n" &
         "  sourceRepository: " & repoLit & "))\n"))
 
+# ---------------------------------------------------------------------------
+# DSL-port M3 — ``executable`` / ``library`` / ``files`` artifact lowerer.
+#
+# M3 ports v8's three artifact templates as an OBSERVER pass that
+# records each artifact into the new ``dslPortArtifactRegistry`` sidecar
+# (see ``dsl_port_runtime.nim``). The legacy ``parsePackageDef``'s
+# ``executable`` and ``library`` arms continue to populate
+# ``pkg.executables`` / ``pkg.libraries`` — production's typed-tool
+# wrapper, cli interface emission, ``buildXxx*`` proc, and per-package
+# const all live downstream of those legacy records. The two pathways
+# co-exist by design; the migration plan is documented in
+# ``cross_project.nim`` above ``SectionOwnership``.
+#
+# ─────────────────────────────────────────────────────────────────────
+# Path (A) vs Path (B) — decision: A2 (hybrid)
+# ─────────────────────────────────────────────────────────────────────
+#
+# M2 took Path (B) (eager extract at end of macro expansion). M3's
+# spec says Path (A) is "likely forced" because artifact bodies
+# contain ``build:`` blocks that reference lexically-preceding ``let``
+# bindings. The full in-place rewrite (Path A1) would replace each
+# ``executable``/``library``/``files`` call/command with a
+# ``block: registerArtifact(...)`` expression in source order — but
+# this collides with the legacy ``parsePackageDef`` chain whose
+# emission STILL needs the original section heads to populate
+# ``pkg.executables`` / ``pkg.libraries`` and downstream wrapper
+# code.
+#
+# A2 (hybrid) chosen: keep partition output structure; M3's emitter
+# walks the partitioned section list (same as M2's emitters) AND
+# emits one ``registerArtifact(...)`` call per recognised entry into
+# the macro expansion. The calls are appended AFTER the preserved Nim
+# statements so any author-supplied helper proc or ``let`` binding
+# the body references is already in scope. Body verbatim recording is
+# the only payload M3 actually needs (lowering of cli:/build: is M4+
+# work) so the simpler hybrid covers M3's acceptance with no risk to
+# the legacy chain.
+#
+# When M4 lands and starts emitting actual ``cli:`` / ``build:``
+# lowerings INSIDE the registered artifact body, M3's emitter will
+# pivot to A1 (in-place body rewrite); the runtime API stays
+# unchanged.
+# ---------------------------------------------------------------------------
+
+proc m3ArtifactNameNode(headNode: NimNode): tuple[matched: bool;
+                                                  artifactName: string;
+                                                  isIdentForm: bool;
+                                                  identNode: NimNode] =
+  ## Recognise the name node in ``executable <name>:``. Accepts:
+  ##
+  ##   * string-form  — ``executable "myTool": ...`` → ``StrLit``;
+  ##   * ident-form   — ``executable myTool: ...`` → ``Ident`` / ``Sym`` /
+  ##                                                ``AccQuoted``.
+  ##
+  ## The artifact name is the string verbatim (string-form) or the
+  ## ident's text (ident-form, no kebab translation — keeps the
+  ## registry's keying scheme symmetric with the source-level spelling).
+  case headNode.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    result.matched = true
+    result.artifactName = headNode.strVal
+    result.isIdentForm = false
+    result.identNode = nil
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    result.matched = true
+    result.artifactName = identText(headNode)
+    result.isIdentForm = true
+    result.identNode = headNode
+  else:
+    discard
+
+proc m3ArtifactEntryAst(stmt: NimNode):
+    tuple[matched: bool; artifactName: string; bodyRepr: string;
+          isIdentForm: bool; identNode: NimNode] =
+  ## Recognise an artifact-template invocation:
+  ##
+  ##   ``executable <name>: <body>``
+  ##   ``library    <name>: <body>``
+  ##   ``files      <name>: <body>``
+  ##
+  ## All three parse as ``Call(head, name, StmtList(body))`` or the
+  ## ``Command`` variant. The section-head (``executable`` /
+  ## ``library`` / ``files``) is already discriminated by
+  ## ``classifyPackageSections``; here we only extract the name and
+  ## the body repr.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len < 3:
+    return
+  let nameInfo = m3ArtifactNameNode(stmt[1])
+  if not nameInfo.matched:
+    return
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return
+  result.matched = true
+  result.artifactName = nameInfo.artifactName
+  result.bodyRepr = body.repr
+  result.isIdentForm = nameInfo.isIdentForm
+  result.identNode = nameInfo.identNode
+
+proc m3KindLit(ownership: SectionOwnership): NimNode =
+  ## Map the section-ownership tag to the matching ``DslArtifactKind``
+  ## enum value (as a NimNode reference). The three M3 ownerships are
+  ## the only ones this is called for.
+  case ownership
+  of soM3ExecutableArtifact: ident("dakExecutable")
+  of soM3LibraryArtifact:    ident("dakLibrary")
+  of soM3FilesArtifact:      ident("dakFiles")
+  else:
+    # Defensive — caller filters by ownership before calling here.
+    ident("dakExecutable")
+
+proc emitM3Artifacts(packageName: string;
+                     classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list; for every entry whose ownership
+  ## tag claims an M3 artifact, emit one ``registerArtifact(...)`` call
+  ## with the artifact's name, kind, and body repr.
+  ##
+  ## Ident-form injection: ``executable myTool: ...`` additionally
+  ## emits ``let myTool {.inject, used.}: DslArtifact = DslArtifact(...)``
+  ## so the binding is referenceable from downstream code in the same
+  ## scope — mirroring v8's ``Executable[name]`` value-handle return.
+  ## The injected handle is the metadata record, NOT the v8
+  ## ``Executable[name]`` typed value (which M4+ wires up alongside the
+  ## ``cli:`` lowering).
+  ##
+  ## String-form recovery: ``executable "myTool": ...`` does NOT
+  ## inject a binding (there is no Nim identifier to inject); the
+  ## registry append is the sole emission.
+  ##
+  ## Collision guard: ``wrapperCode`` ALWAYS emits
+  ## ``const <packageValueIdent>* = <Title>Package()`` at module top
+  ## level (see ``macros_a.nim:wrapperCode``). When the artifact ident
+  ## matches that const's name — common in stdlib packages where
+  ## ``package gcc:`` contains ``executable gcc:`` — the M3 injection
+  ## would shadow / redefine the legacy const and fail compilation.
+  ## We skip the injection in that case (the runtime registry still
+  ## records the artifact; only the per-binding let is suppressed).
+  ## M4+ may pivot the legacy const to a typed-tool value, eliminating
+  ## the conflict; until then the skip preserves backward compatibility
+  ## with every NDE recipe + ``examples/hello-world-c/repro.nim`` +
+  ## ``examples/hello-world-multi-output/repro.nim``.
+  let pkgValueIdent = packageValueIdent(packageName)
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership notin {soM3ExecutableArtifact,
+                              soM3LibraryArtifact,
+                              soM3FilesArtifact}:
+      continue
+    let parsed = m3ArtifactEntryAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    let pkgLit = newLit(packageName)
+    let nameLit = newLit(parsed.artifactName)
+    let bodyLit = newLit(parsed.bodyRepr)
+    let kindLit = m3KindLit(entry.ownership)
+    # Append one record per recognised entry. The ``DslArtifact``
+    # object literal is constructed at runtime so the registry append
+    # cost stays proportional to the number of artifacts (not the
+    # body size — the body repr is captured at macro-expansion time
+    # into the ``bodyLit`` string literal).
+    let registerCall = quote do:
+      registerArtifact(`pkgLit`, DslArtifact(
+        packageName: `pkgLit`,
+        artifactName: `nameLit`,
+        kind: `kindLit`,
+        bodyRepr: `bodyLit`))
+    let artifactValueIdent =
+      if parsed.isIdentForm: packageValueIdent(parsed.artifactName)
+      else: ""
+    let wouldCollideWithLegacyConst =
+      parsed.isIdentForm and artifactValueIdent == pkgValueIdent
+    if parsed.isIdentForm and parsed.identNode != nil and
+       parsed.identNode.kind in {nnkIdent, nnkAccQuoted} and
+       not wouldCollideWithLegacyConst:
+      # Ident-form injection. Inject a ``let`` binding so the author
+      # can refer to ``myTool`` lexically after the declaration. The
+      # ``{.inject, used.}`` pragma pair is the same shape v8's
+      # ``transformPackageBody`` uses for library / files ident-form
+      # (see ``tools/prototypes/v8/intended/reprobuild.nim`` line
+      # ~907). We give the binding the ``DslArtifact`` type so M4+
+      # can widen it (e.g. to ``Executable[name]``) without renaming
+      # the symbol.
+      #
+      # We only attempt injection when the ident shape is something
+      # we can plausibly redeclare at module top level. ``nnkSym``
+      # entries (already-resolved symbols) are rejected — that
+      # shouldn't normally happen inside an ``untyped`` macro body
+      # but defensive-skip avoids a ``redefinition`` error if the
+      # caller hand-quotes a Sym.
+      let identNode = parsed.identNode.copyNimTree()
+      result.add(quote do:
+        `registerCall`
+        let `identNode` {.inject, used.}: DslArtifact = DslArtifact(
+          packageName: `pkgLit`,
+          artifactName: `nameLit`,
+          kind: `kindLit`,
+          bodyRepr: `bodyLit`))
+    else:
+      result.add(registerCall)
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -718,6 +920,17 @@ macro package*(name: untyped; body: untyped): untyped =
   # package's recipe before or after the host module's own setup.
   let m2ConfigEmission = emitM2ConfigDefaults(packageName, sectionStmts)
   let m2VersionsEmission = emitM2Versions(packageName, sectionStmts)
+  # ── DSL-port M3: classify sections + emit artifact registrations.
+  # The classifier attaches a ``SectionOwnership`` tag to every
+  # partitioned section entry; ``emitM3Artifacts`` filters by the three
+  # ``soM3*Artifact`` tags and emits one ``registerArtifact(...)`` call
+  # per recognised entry. The legacy ``parsePackageDef`` chain below
+  # continues to populate ``pkg.executables`` / ``pkg.libraries`` so
+  # production's typed-tool wrapper, cli interface, ``buildXxx*`` proc,
+  # and per-package const all keep working unchanged. See the comment
+  # above ``emitM3Artifacts`` for the legacy-vs-M3 ownership decision.
+  let classifiedSections = classifyPackageSections(sectionStmts)
+  let m3ArtifactEmission = emitM3Artifacts(packageName, classifiedSections)
   # ── Spec-Implementation M1: variant declarations + finalization ────
   # ``parsePackageDef`` collected every ``variant: T = default`` (and
   # ``@variant``-tagged) declaration from the ``config:`` block into
@@ -799,6 +1012,12 @@ macro package*(name: untyped; body: untyped): untyped =
   # the entry's default expression references is already in scope.
   result.add(m2ConfigEmission)
   result.add(m2VersionsEmission)
+  # ── DSL-port M3: artifact registrations. Appended LAST so the
+  # body repr captured at macro-expansion time is available to any
+  # downstream consumer (M4+ will read this list at compile time via
+  # the partitioned section walk; the runtime registry is the
+  # diagnostic surface tests use today).
+  result.add(m3ArtifactEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.
