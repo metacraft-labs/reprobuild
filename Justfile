@@ -164,6 +164,30 @@ unit_nde_h1_sway:
         libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim \
         2>&1 | tee test-logs/unit_nde_h1_sway.log
 
+# NDE-G1 native GNOME compositor package unit tests.
+# Exercises spec'd materializeGnome — /etc/gdm3/custom.conf INI with
+# configurable [daemon] keys (autoLogin + autoLoginUser +
+# waylandSession + disableInitialSetup propagate to rendered content
+# + content-addressed store path) + /etc/ld.so.conf.d/00-reproos-linux.conf
+# libpaths managedBlock contribution (NDE-spec-block triple-form
+# sentinel scope=system, packageName=gnome, blockId=libpaths,
+# priority=500 compositor sort key) + /usr/lib/systemd/system/gdm.service
+# Type=notify display-manager unit (cascade-G fix; R9 systemd 257.9
+# dropped /lib/systemd/system/ from UnitPath) + /etc/wayland-sessions/
+# gnome.desktop XDG session entry. Naming decision: packageName="gnome"
+# (NOT sway / plasma / hyprland — sentinel regression guards
+# encoded in the sentinel test).
+unit_nde_g1_gnome:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_nde_g1_gnome \
+        --out:build/test-bin/t_nde_g1_gnome \
+        libs/repro_dsl_stdlib/tests/t_nde_g1_gnome.nim \
+        2>&1 | tee test-logs/unit_nde_g1_gnome.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
