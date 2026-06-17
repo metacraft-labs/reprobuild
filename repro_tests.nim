@@ -1518,6 +1518,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_input_wiring.nim",
+    binary: "build/test-bin/t_dsl_build_input_wiring",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_records_output_for_library.nim",
     binary: "build/test-bin/t_dsl_build_records_output_for_library",
     defines: @[],
@@ -1713,6 +1721,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_library.nim",
     binary: "build/test-bin/t_dsl_library",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim",
+    binary: "build/test-bin/t_dsl_output_ref",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

@@ -746,6 +746,11 @@ var dslPortActiveBuildContext {.threadvar.}: seq[DslBuildContextFrame]
   ## different threads don't cross-attribute outputs. Empty when no
   ## ``build:`` block is currently open.
 
+proc resetDslPortBuildInputState*()
+  ## Forward declaration so the M4 ``resetDslPortBuildState`` can call
+  ## the M9.F state-reset helper; the full body lives further down
+  ## next to the M9.F typed-output / build-input registries it manages.
+
 proc resetDslPortBuildState*() =
   ## Drop every recorded build action + every recorded output + clear
   ## the active-context stack. Test fixtures call this between
@@ -755,6 +760,13 @@ proc resetDslPortBuildState*() =
   dslPortBuildActions.setLen(0)
   dslPortOutputs.clear()
   dslPortActiveBuildContext.setLen(0)
+  # M9.F: the typed-output handles + cross-artifact build-input wiring
+  # tables are declared further down (after the M5/M6/M7 stacks) so this
+  # reset hook delegates via ``resetDslPortBuildInputState`` to keep the
+  # var decls colocated with their owning M9.F surface. Each test fixture
+  # also runs in its own process so the threadvar tables start empty
+  # before the first ``output(...)`` registration in any case.
+  resetDslPortBuildInputState()
 
 proc registerBuildAction*(packageName, artifactName, bodyRepr: string) =
   ## Append one build-action entry. The ``package`` macro emits one call
@@ -880,7 +892,113 @@ proc currentBuildArtifact*(): string =
   let frame = currentBuildContext()
   result = frame.artifactName
 
-proc output*(path: string) =
+# ---------------------------------------------------------------------------
+# DSL-port M9.F — cross-artifact output references.
+#
+# v8's NDE0-K kernel rewrite needs to be able to declare ONE artifact's
+# output and then PASS it as an input to a SECOND artifact's build action,
+# e.g.::
+#
+#   package kernel:
+#     files configFile:
+#       build:
+#         output("/build/config-used")
+#     executable bzImage:
+#       build:
+#         kernelCompile.build(
+##           source = linuxSource.tree,
+##           config = configFile.output,
+#           output = "build/bzImage")
+#
+# The cleanest user-facing surface (``<ident>.output`` dot syntax) requires
+# the M3 ident-form to inject a typed ``DslArtifactRef`` rather than the
+# current ``DslArtifact`` value, and would ripple through every prior M3+
+# test. The M9.F simplification picks two SHIM procs that stand in for the
+# v8 dot-syntax without touching M3's macro layer:
+#
+#   * ``outputOf(packageName, artifactName)`` — a function-form shorthand
+#     returning a ``DslOutputRef`` for the producer artifact.
+#   * ``toolBuild(toolName, inputs, output)`` — a flat helper that records
+#     a tool-build wiring (one input per ``(slot, DslOutputRef)`` pair) and
+#     the resulting output. NDE0-K's rewrite will spell
+#     ``kernelCompile.build(config = configFile.output, …)`` as
+#     ``toolBuild("kernelCompile", @[("config", outputOf("kernel", "configFile"))], "build/bzImage")``.
+#
+# The full v8 dot-syntax (``configFile.output``) is DEFERRED. The M9.F
+# helpers cover the runtime registration surface; a later milestone can
+# add the dot-syntax sugar without changing the registry shape.
+#
+# Backward compat: the existing M4 ``output(path)`` callers MUST keep
+# working as bare statements. The new signature returns ``DslOutputRef``
+# and is tagged ``{.discardable.}`` so legacy ``output("foo")`` callers
+# compile without warnings AND the new typed return value is available
+# when the caller asks for it (``let h = output("foo")``).
+# ---------------------------------------------------------------------------
+
+type
+  DslOutputRef* = object
+    ## A typed handle pointing at one output path declared via
+    ## ``output(...)`` inside a producer artifact's ``build:`` block.
+    ## ``packageName`` / ``artifactName`` identify the producer;
+    ## ``path`` is the path string the producer registered.
+    ##
+    ## Two construction paths:
+    ##
+    ##   * ``output(path)`` returns a handle whose three fields all
+    ##     reflect the live build-context frame and the registered
+    ##     path.
+    ##   * ``outputOf(packageName, artifactName)`` returns a handle
+    ##     whose ``path`` echoes the FIRST registered output for the
+    ##     named producer (or ``""`` when nothing is registered yet
+    ##     — e.g. when the consumer's ``build:`` runs before the
+    ##     producer's because module-init ordering puts them out of
+    ##     declaration order).
+    packageName*: string
+    artifactName*: string
+    path*: string
+
+  DslBuildInput* = object
+    ## One ``toolBuild`` consumer-side wiring entry. Records that the
+    ## consumer artifact ``(consumerPackageName, consumerArtifactName)``
+    ## passed the producer's output ``(producerPackageName,
+    ## producerArtifactName, producerPath)`` into a named input slot
+    ## ``inputName`` (e.g. ``"config"``, ``"source"``).
+    consumerPackageName*: string
+    consumerArtifactName*: string
+    inputName*: string
+    producerPackageName*: string
+    producerArtifactName*: string
+    producerPath*: string
+
+var dslPortArtifactOutputs {.threadvar.}: Table[string, seq[DslOutputRef]]
+  ## Per-``(packageName, artifactName)`` typed-output registry. Keyed by
+  ## ``packageName & "\x00" & artifactName`` (NUL separator picked so the
+  ## key is unambiguous even if a future artifact name contains ``.``).
+  ## Populated by ``output(path)`` IN ADDITION to the legacy ``dslPort
+  ## Outputs`` string registry so the M4 ``registeredOutputs`` accessor
+  ## stays byte-identical to its pre-M9.F shape.
+
+var dslPortBuildInputs {.threadvar.}: Table[string, seq[DslBuildInput]]
+  ## Per-``(consumerPackageName, consumerArtifactName)`` build-input
+  ## registry. Keyed using the same ``\x00`` separator as
+  ## ``dslPortArtifactOutputs``. Populated by ``registerBuildInput`` /
+  ## ``toolBuild`` when a consumer artifact's ``build:`` records a
+  ## producer-to-input wiring.
+
+proc m9fKey(packageName, artifactName: string): string {.inline.} =
+  ## Compose the NUL-separated table key used by the M9.F registries.
+  result = packageName & "\x00" & artifactName
+
+proc resetDslPortBuildInputState*() =
+  ## Drop every M9.F typed-output handle + build-input wiring. Test
+  ## fixtures running on different threads also implicitly start clean
+  ## because both tables are ``{.threadvar.}``; the explicit reset is
+  ## here for symmetry with ``resetDslPortBuildState`` for the rare
+  ## fixture that exercises multiple package fragments on one thread.
+  dslPortArtifactOutputs.clear()
+  dslPortBuildInputs.clear()
+
+proc output*(path: string): DslOutputRef {.discardable.} =
   ## Record ``path`` against the active build context's
   ## ``(packageName, artifactName)`` bucket. When no context is
   ## active (the stack is empty), the call is a SILENT no-op so the
@@ -890,13 +1008,34 @@ proc output*(path: string) =
   ## macro always wraps the body in ``beginBuildContext / try /
   ## finally endBuildContext`` so the no-op branch is unreachable
   ## from a correctly-shaped recipe.
+  ##
+  ## M9.F EXTENSION: in addition to the M4 string registry, the call
+  ## now ALSO appends a ``DslOutputRef`` handle to the M9.F typed-output
+  ## registry AND returns that handle so the caller can pass it to
+  ## ``registerBuildInput`` / ``toolBuild`` as a typed reference. The
+  ## ``{.discardable.}`` annotation preserves M4 backward compatibility
+  ## for bare ``output("path")`` statement-form callers.
+  ##
+  ## Empty-context behaviour: the no-op branch returns a default-
+  ## constructed ``DslOutputRef`` (all three fields empty). This matches
+  ## the M4 silent-no-op contract — callers reaching this branch are
+  ## outside an M4 frame and the legacy provider mode never reads the
+  ## handle.
   if dslPortActiveBuildContext.len == 0:
-    return
+    return DslOutputRef(packageName: "", artifactName: "", path: path)
   let frame = dslPortActiveBuildContext[^1]
-  let key = frame.packageName & "." & frame.artifactName
-  if not dslPortOutputs.hasKey(key):
-    dslPortOutputs[key] = @[]
-  dslPortOutputs[key].add(path)
+  let legacyKey = frame.packageName & "." & frame.artifactName
+  if not dslPortOutputs.hasKey(legacyKey):
+    dslPortOutputs[legacyKey] = @[]
+  dslPortOutputs[legacyKey].add(path)
+  let typedKey = m9fKey(frame.packageName, frame.artifactName)
+  if not dslPortArtifactOutputs.hasKey(typedKey):
+    dslPortArtifactOutputs[typedKey] = @[]
+  result = DslOutputRef(
+    packageName: frame.packageName,
+    artifactName: frame.artifactName,
+    path: path)
+  dslPortArtifactOutputs[typedKey].add(result)
 
 proc registeredOutputs*(packageName, artifactName: string): seq[string] =
   ## Return every output path recorded against the ``(packageName,
@@ -907,6 +1046,103 @@ proc registeredOutputs*(packageName, artifactName: string): seq[string] =
   if dslPortOutputs.hasKey(key):
     return dslPortOutputs[key]
   return @[]
+
+proc registeredOutputRefs*(packageName, artifactName: string): seq[DslOutputRef] =
+  ## M9.F: return the typed ``DslOutputRef`` handles recorded against
+  ## the ``(packageName, artifactName)`` key in registration order.
+  ## Returns the empty seq when the key was never written. Diagnostic
+  ## sibling of ``registeredOutputs`` for callers that want the
+  ## producer-identity metadata along with the path.
+  let key = m9fKey(packageName, artifactName)
+  if dslPortArtifactOutputs.hasKey(key):
+    return dslPortArtifactOutputs[key]
+  return @[]
+
+proc outputOf*(packageName, artifactName: string): DslOutputRef =
+  ## M9.F: function-form shorthand that returns a ``DslOutputRef`` for
+  ## the named producer artifact. Stands in for v8's
+  ## ``<artifactIdent>.output`` dot syntax until M3's ident injection
+  ## gets widened (deferred — see the section header above).
+  ##
+  ## Lookup: returns the FIRST handle the producer registered, OR a
+  ## placeholder handle with ``path == ""`` when nothing has been
+  ## registered yet. The producer-then-consumer ordering is the
+  ## expected case (NDE0-K writes ``files configFile: build: output
+  ## "config"`` BEFORE ``executable bzImage: build: toolBuild(...)``,
+  ## and module-init evaluates package bodies in source order), so the
+  ## empty-path branch is reachable only when the recipe wires inputs
+  ## from a producer that has not (yet) emitted a registered output.
+  let key = m9fKey(packageName, artifactName)
+  if dslPortArtifactOutputs.hasKey(key) and dslPortArtifactOutputs[key].len > 0:
+    return dslPortArtifactOutputs[key][0]
+  return DslOutputRef(
+    packageName: packageName,
+    artifactName: artifactName,
+    path: "")
+
+proc registerBuildInput*(consumerPackageName, consumerArtifactName,
+                         inputName: string;
+                         producer: DslOutputRef) =
+  ## M9.F: record one consumer-side build-input wiring. The
+  ## ``(consumerPackageName, consumerArtifactName)`` pair identifies
+  ## the artifact whose ``build:`` block consumes ``producer`` via the
+  ## named slot ``inputName``. Idempotency follows the M4 registry
+  ## convention — duplicate registrations append rather than collapse
+  ## so conditional ``when`` branches that re-declare the same wiring
+  ## under different platform gates surface to the consumer with full
+  ## provenance.
+  let key = m9fKey(consumerPackageName, consumerArtifactName)
+  if not dslPortBuildInputs.hasKey(key):
+    dslPortBuildInputs[key] = @[]
+  dslPortBuildInputs[key].add(DslBuildInput(
+    consumerPackageName: consumerPackageName,
+    consumerArtifactName: consumerArtifactName,
+    inputName: inputName,
+    producerPackageName: producer.packageName,
+    producerArtifactName: producer.artifactName,
+    producerPath: producer.path))
+
+proc registeredBuildInputs*(consumerPackageName,
+                            consumerArtifactName: string): seq[DslBuildInput] =
+  ## M9.F: return every build-input wiring recorded against the
+  ## ``(consumerPackageName, consumerArtifactName)`` key in
+  ## registration order. Returns the empty seq when no wiring was
+  ## registered.
+  let key = m9fKey(consumerPackageName, consumerArtifactName)
+  if dslPortBuildInputs.hasKey(key):
+    return dslPortBuildInputs[key]
+  return @[]
+
+proc toolBuild*(toolName: string;
+                inputs: seq[(string, DslOutputRef)];
+                outputPath: string): DslOutputRef {.discardable.} =
+  ## M9.F: flat helper that lowers v8's
+  ## ``<tool>.build(input1 = expr1, input2 = expr2, output = "path")``
+  ## tool-build invocation into the M9.F registries WITHOUT requiring
+  ## the macro layer to parse ``<ident>.build(...)``:
+  ##
+  ##   1. For each ``(slot, producerRef)`` pair in ``inputs``, append a
+  ##      ``DslBuildInput`` row to the active consumer artifact's
+  ##      build-input bucket via ``registerBuildInput``.
+  ##   2. Append ``outputPath`` to the M4 string registry AND the M9.F
+  ##      typed-output registry by funnelling through ``output()`` — so
+  ##      the wiring fixture observes the same registration paths as
+  ##      the legacy ``output("…")`` statement.
+  ##
+  ## ``toolName`` is captured so a future milestone can lower it into a
+  ## structural ``DslToolInvocation`` record. The parameter name
+  ## ``outputPath`` (rather than ``output``) avoids shadowing the
+  ## module-level ``output`` proc inside this body.
+  ##
+  ## Returns a ``DslOutputRef`` so callers can chain
+  ## ``toolBuild(...)`` results into a later ``toolBuild`` invocation
+  ## without re-querying the registry; ``{.discardable.}`` lets the
+  ## return value be ignored at the call site.
+  discard toolName  # captured intentionally; reserved for a follow-up milestone
+  let frame = currentBuildContext()
+  for (slot, producer) in inputs:
+    registerBuildInput(frame.packageName, frame.artifactName, slot, producer)
+  result = output(outputPath)
 
 # ---------------------------------------------------------------------------
 # DSL-port M5 — ``service:`` block lowering: per-package service registry
