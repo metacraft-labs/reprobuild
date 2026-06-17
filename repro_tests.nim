@@ -1878,6 +1878,20 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.K — fetch-action emission gate. Verifies that the
+  # M9.H ``registeredFetchSpec`` registry feeds the shared fetch_action
+  # helper (consumed by the four c-cpp-* Tier 2b conventions) into a
+  # well-formed BuildActionDef carrying the URL + hash + dest path. The
+  # M9.K bridge from the parser-only M9.H/M9.I registries to actual
+  # build-engine actions.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_action_emission.nim",
+    binary: "build/test-bin/t_dsl_fetch_action_emission",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",

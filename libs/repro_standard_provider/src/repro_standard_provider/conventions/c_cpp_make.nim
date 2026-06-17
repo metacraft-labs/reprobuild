@@ -82,6 +82,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/fetch_action
 
 const
   ScratchDirName* = ".repro/build"
@@ -232,6 +233,34 @@ proc extractMembers(source: string): seq[CCppMember] =
     result.add(CCppMember(name: name, kind: ccmkExecutable))
   for name in extractLibraries(source):
     result.add(CCppMember(name: name, kind: ccmkLibraryStatic))
+
+proc extractFirstPackageName(source: string): string =
+  ## DSL-port M9.K: heuristic scan for the first ``package <ident>:``
+  ## declaration. Same shape as the sibling conventions' helpers — the
+  ## lookup key for the M9.H ``registeredFetchSpec`` and M9.I
+  ## ``registeredBuildFlags`` registries.
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if not stripped.startsWith("package"):
+      continue
+    if stripped.len > len("package") and
+        stripped[len("package")] notin {' ', '\t'}:
+      continue
+    let rest = stripped[len("package") .. ^1].strip()
+    if rest.len == 0:
+      continue
+    var name = ""
+    for ch in rest:
+      if ch in {' ', '\t', ':', ','}:
+        break
+      name.add(ch)
+    if name.len > 0:
+      return name
+  ""
 
 proc rootMakefile(projectRoot: string): string =
   ## Return the absolute path of the root-level Makefile (preferring
@@ -430,7 +459,9 @@ proc objFileFor(objDir, source: string): string =
 proc emitCompileAction(projectRoot, ccExe: string;
                        member: CCppMember;
                        source, objFile, depFile: string;
-                       sourceDir: string): BuildActionDef =
+                       sourceDir: string;
+                       extraDeps: seq[string] = @[];
+                       extraInputs: seq[string] = @[]): BuildActionDef =
   ## One ``gcc -c`` action for a single C source.
   let includeFlags = block:
     var flags: seq[string] = @[]
@@ -465,10 +496,15 @@ proc emitCompileAction(projectRoot, ccExe: string;
   let kindTag = case member.kind
     of ccmkExecutable: "executable"
     of ccmkLibraryStatic: "library-static"
+  var inputs = @[source]
+  for ei in extraInputs:
+    if ei notin inputs:
+      inputs.add(ei)
   buildAction(
     id = actionId,
     call = inlineExecCall(argv, projectRoot),
-    inputs = @[source],
+    deps = extraDeps,
+    inputs = inputs,
     outputs = @[objFile],
     pool = "compile",
     depfile = depFile,
@@ -478,13 +514,28 @@ proc emitCompileAction(projectRoot, ccExe: string;
 proc emitLinkAction(projectRoot, ccExe: string;
                     member: CCppMember;
                     objFiles: seq[string];
-                    compileActionIds: seq[string]): BuildActionDef =
+                    compileActionIds: seq[string];
+                    makeFlags: seq[string]): BuildActionDef =
   ## ``gcc -o <bin> <objs>`` link action for an ``executable`` member.
+  ##
+  ## DSL-port M9.K: the c-cpp-make convention does NOT invoke ``make``
+  ## itself (it emits its own per-source DAG), so the M9.I ``makeFlags``
+  ## channel has no native injection point. The pragmatic mapping is to
+  ## append the registered flags to the link action's argv — the
+  ## closest analog to "make produces the final binary" within this
+  ## convention's emit shape. Recipes whose makeFlags are CFLAGS-style
+  ## tokens (``CFLAGS=-O3``) land on the gcc link command line where
+  ## they are effective; recipes whose makeFlags are make-variable
+  ## overrides (``ARCH=x86_64``) would belong on a real ``make ...``
+  ## action — that integration is a follow-up when the c-cpp-make
+  ## convention gains a Mode-A → make fallback.
   let binaryOutput = binaryPathFor(projectRoot, member.name)
   createDir(extendedPath(parentDir(binaryOutput)))
   var argv = @[ccExe, "-o", binaryOutput]
   for obj in objFiles:
     argv.add(obj)
+  for flag in makeFlags:
+    argv.add(flag)
   buildAction(
     id = "ccpp-make-link-" & sanitizeNamePart(member.name),
     call = inlineExecCall(argv, projectRoot),
@@ -498,13 +549,20 @@ proc emitLinkAction(projectRoot, ccExe: string;
 proc emitArchiveAction(projectRoot, arExe: string;
                        member: CCppMember;
                        objFiles: seq[string];
-                       compileActionIds: seq[string]): BuildActionDef =
+                       compileActionIds: seq[string];
+                       makeFlags: seq[string]): BuildActionDef =
   ## ``ar rcs lib<name>.a <objs>`` archive action for a static library.
+  ##
+  ## DSL-port M9.K: see ``emitLinkAction`` for the makeFlags channel
+  ## semantics — same pragmatic mapping (appended verbatim to the
+  ## archive argv).
   let archiveOutput = staticLibraryPathFor(projectRoot, member.name)
   createDir(extendedPath(parentDir(archiveOutput)))
   var argv = @[arExe, "rcs", archiveOutput]
   for obj in objFiles:
     argv.add(obj)
+  for flag in makeFlags:
+    argv.add(flag)
   buildAction(
     id = "ccpp-make-archive-" & sanitizeNamePart(member.name),
     call = inlineExecCall(argv, projectRoot),
@@ -516,7 +574,10 @@ proc emitArchiveAction(projectRoot, arExe: string;
     commandStatsId = "ccpp-make.library-static.archive")
 
 proc emitForMember(projectRoot, ccExe, arExe: string;
-                   target: CCppEmitTarget):
+                   target: CCppEmitTarget;
+                   makeFlags: seq[string];
+                   compileExtraDeps: seq[string] = @[];
+                   compileExtraInputs: seq[string] = @[]):
                      tuple[compiles: seq[BuildActionDef];
                            terminal: BuildActionDef] =
   ## Emit per-source compiles + the terminal link/archive action for a
@@ -533,17 +594,18 @@ proc emitForMember(projectRoot, ccExe, arExe: string;
     let depFile = objFile & ".d"
     objFiles.add(objFile)
     let action = emitCompileAction(projectRoot, ccExe, target.member,
-      source, objFile, depFile, target.sourceDir)
+      source, objFile, depFile, target.sourceDir,
+      compileExtraDeps, compileExtraInputs)
     compileActions.add(action)
     compileIds.add(action.id)
   case target.member.kind
   of ccmkExecutable:
     let link = emitLinkAction(projectRoot, ccExe, target.member, objFiles,
-      compileIds)
+      compileIds, makeFlags)
     (compileActions, link)
   of ccmkLibraryStatic:
     let archive = emitArchiveAction(projectRoot, arExe, target.member,
-      objFiles, compileIds)
+      objFiles, compileIds, makeFlags)
     (compileActions, archive)
 
 proc syntheticPackage(projectRoot: string;
@@ -599,11 +661,31 @@ proc cCppMakeEmitFragment(projectRoot: string;
             member.name & "' under " & projectRoot)
       targets.add(target)
     let pkg = syntheticPackage(projectRoot, members)
+    # DSL-port M9.K: look up the DSL package name and read the M9.H
+    # fetch spec + M9.I make flag seq against that key.
+    let dslPackageName = extractFirstPackageName(source)
+    let fetchSpec =
+      if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
+      else: DslFetchSpec()
+    let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
+    let makeFlags =
+      if dslPackageName.len > 0:
+        registeredBuildFlags(dslPackageName, "", "make")
+      else: @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
+      var compileExtraDeps: seq[string] = @[]
+      var compileExtraInputs: seq[string] = @[]
+      if hasFetch:
+        discard buildPool("fetch", 2'u32)
+        let fetchAct = emitFetchAction(projectRoot, dslPackageName, fetchSpec)
+        allActions.add(fetchAct)
+        compileExtraDeps.add(fetchAct.id)
+        compileExtraInputs.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
       for target in targets:
-        let emitted = emitForMember(projectRoot, ccExe, arExe, target)
+        let emitted = emitForMember(projectRoot, ccExe, arExe, target,
+          makeFlags, compileExtraDeps, compileExtraInputs)
         for a in emitted.compiles:
           allActions.add(a)
         allActions.add(emitted.terminal)

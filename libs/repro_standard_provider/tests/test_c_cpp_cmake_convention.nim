@@ -264,3 +264,59 @@ suite "c-cpp-cmake convention M38":
       check sawBuildFlag
       check sawTargetFlag
       check sawHello
+
+  test "M9.K: cmakeFlags appear in cmake configure argv":
+    # DSL-port M9.K: when the M9.I registry holds cmakeFlags for the
+    # DSL package, ``emitFragment`` must inject them into the cmake
+    # configure action's argv. The test pre-populates the registry
+    # directly (no DSL recipe evaluation) and verifies the flags
+    # round-trip into the action's argv text.
+    if not cmakeToolchainReady():
+      skip()
+    else:
+      let scratch = getTempDir() / "test_c_cpp_cmake_convention_m9k_flags"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch)
+      createDir(scratch / "src")
+      writeFile(scratch / "src" / "main.c",
+        "#include <stdio.h>\nint main(void){return 0;}\n")
+      writeFile(scratch / "CMakeLists.txt",
+        "cmake_minimum_required(VERSION 3.20)\n" &
+        "project(m9khello LANGUAGES C)\n" &
+        "add_executable(m9khello src/main.c)\n")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package m9kCmakePkg:\n" &
+        "  uses:\n" &
+        "    \"gcc >=11\"\n" &
+        "    \"cmake >=3.20\"\n" &
+        "\n" &
+        "  executable m9khello:\n" &
+        "    discard\n")
+      defer:
+        removeDir(scratch)
+      resetDslPortBuildFlagState()
+      registerBuildFlag("m9kCmakePkg", "", "cmake", "-DENABLE_FOO=ON")
+      registerBuildFlag("m9kCmakePkg", "", "cmake", "-DFOO_VERSION=1.2.3")
+      defer:
+        resetDslPortBuildFlagState()
+      let conv = cmake_convention.cCppCMakeConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var sawEnableFoo = false
+      var sawFooVersion = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id != "ccpp-cmake-configure":
+          continue
+        let argvJoined = inlineArgvOf(action).join(" ")
+        if argvJoined.contains("-DENABLE_FOO=ON"):
+          sawEnableFoo = true
+        if argvJoined.contains("-DFOO_VERSION=1.2.3"):
+          sawFooVersion = true
+      check sawEnableFoo
+      check sawFooVersion

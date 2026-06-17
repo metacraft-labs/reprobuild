@@ -91,6 +91,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/fetch_action
 
 const
   ScratchDirName* = ".repro/build"
@@ -228,6 +229,39 @@ proc extractMembers(source: string): seq[CCppMesonMember] =
   for name in extractLibraries(source):
     result.add(CCppMesonMember(name: name, kind: ccmsLibraryStatic))
 
+proc extractFirstPackageName(source: string): string =
+  ## DSL-port M9.K: heuristic scan for the first ``package <ident>:``
+  ## declaration. The result is the lookup key the convention uses
+  ## against the M9.H ``registeredFetchSpec`` and M9.I
+  ## ``registeredBuildFlags`` registries (both keyed by the DSL package
+  ## name as written in the recipe source).
+  ##
+  ## Returns the empty string when no ``package`` block can be found
+  ## (e.g. legacy recipes that pre-date the M9 surface) — callers then
+  ## skip the registry lookups so behaviour stays unchanged.
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if not stripped.startsWith("package"):
+      continue
+    if stripped.len > len("package") and
+        stripped[len("package")] notin {' ', '\t'}:
+      continue
+    let rest = stripped[len("package") .. ^1].strip()
+    if rest.len == 0:
+      continue
+    var name = ""
+    for ch in rest:
+      if ch in {' ', '\t', ':', ','}:
+        break
+      name.add(ch)
+    if name.len > 0:
+      return name
+  ""
+
 proc hasMesonBuild(projectRoot: string): bool =
   fileExists(extendedPath(projectRoot / "meson.build"))
 
@@ -364,7 +398,10 @@ proc collectMesonInputs(projectRoot: string): seq[string] =
   result = seen
   result.sort(system.cmp[string])
 
-proc emitConfigureAction(projectRoot, mesonExe, ccExe: string):
+proc emitConfigureAction(projectRoot, mesonExe, ccExe: string;
+                         mesonOptions: seq[string];
+                         extraDeps: seq[string] = @[];
+                         extraInputs: seq[string] = @[]):
     tuple[action: BuildActionDef; stamp: string] =
   ## Emit the ``meson setup <scratch> <root> --buildtype=release`` action.
   ## On success the action runs a follow-up touch via a sh-c wrapper if
@@ -396,11 +433,20 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string):
     let escapedCc = ccExe.replace("\\", "/").replace("\"", "\\\"")
     let escapedRoot = projectRoot.replace("\\", "/").replace("\"", "\\\"")
     let escapedScratch = scratch.replace("\\", "/").replace("\"", "\\\"")
+    # DSL-port M9.K: append M9.I-registered mesonOptions to the
+    # ``meson setup`` invocation. Each flag is double-quote-escaped
+    # for the shell context. Order is preserved verbatim — the M9.I
+    # registry stores flags in source-declaration order.
+    var trailingOpts = ""
+    for opt in mesonOptions:
+      trailingOpts.add(" \"")
+      trailingOpts.add(opt.replace("\"", "\\\""))
+      trailingOpts.add("\"")
     let script = "set -e; export CC=\"" & escapedCc & "\"; \"" &
       escapedMeson & "\" setup \"" &
       escapedScratch & "\" \"" & escapedRoot &
-      "\" --buildtype=release --backend=ninja; touch \"" &
-      escapedStamp & "\""
+      "\" --buildtype=release --backend=ninja" & trailingOpts &
+      "; touch \"" & escapedStamp & "\""
     argv = @[shExe, "-c", script]
   else:
     # No sh on PATH (rare on dev hosts): invoke meson directly. The
@@ -412,13 +458,20 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string):
     # with the wrong toolchain.
     argv = @[mesonExe, "setup", scratch, projectRoot,
       "--buildtype=release", "--backend=ninja"]
-  let inputs = collectMesonInputs(projectRoot)
+    # DSL-port M9.K: append M9.I-registered mesonOptions verbatim.
+    for opt in mesonOptions:
+      argv.add(opt)
+  var inputs = collectMesonInputs(projectRoot)
+  for ei in extraInputs:
+    if ei notin inputs:
+      inputs.add(ei)
   var outputs = @[buildNinja]
   if shExe.len > 0:
     outputs.add(stamp)
   let action = buildAction(
     id = "ccpp-meson-configure",
     call = inlineExecCall(argv, projectRoot),
+    deps = extraDeps,
     inputs = inputs,
     outputs = outputs,
     pool = "compile",
@@ -434,17 +487,29 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string):
 
 proc emitBuildAction(projectRoot, mesonExe: string;
                      member: CCppMesonMember;
-                     configureActionId, configureStamp: string):
+                     configureActionId, configureStamp: string;
+                     ninjaFlags: seq[string]):
                        BuildActionDef =
   ## Emit ``meson compile -C <scratch> <member>`` for a single member.
   ## The output path is the convention's predicted location of the
   ## produced artefact.
+  ##
+  ## DSL-port M9.K: ninja flags from the M9.I registry are passed
+  ## through to ninja via meson's ``--ninja-args=<joined>`` pass-through
+  ## (a single argument whose value is the space-joined ninja flag
+  ## list). Per-flag escaping is the caller's responsibility — the M9.I
+  ## emitter passes each literal flag verbatim, and these are normally
+  ## simple tokens like ``-j4``.
   let scratch = scratchPathFor(projectRoot)
   let outputPath = case member.kind
     of ccmsExecutable: executableOutputPath(projectRoot, member.name)
     of ccmsLibraryStatic: staticLibraryOutputPath(projectRoot, member.name)
   createDir(extendedPath(parentDir(outputPath)))
-  let argv = @[mesonExe, "compile", "-C", scratch, member.name]
+  var argv = @[mesonExe, "compile", "-C", scratch, member.name]
+  if ninjaFlags.len > 0:
+    # Meson's ``--ninja-args`` accepts a single argument whose contents
+    # are forwarded to ninja. Space-join preserves declaration order.
+    argv.add("--ninja-args=" & ninjaFlags.join(" "))
   let kindTag = case member.kind
     of ccmsExecutable: "executable"
     of ccmsLibraryStatic: "library-static"
@@ -503,13 +568,39 @@ proc cCppMesonEmitFragment(projectRoot: string;
         "c-cpp-meson convention: no 'ninja' on PATH " &
           "(Meson's default backend; multi-config backends deferred)")
     let pkg = syntheticPackage(projectRoot, members)
+    # DSL-port M9.K: look up the DSL package name (first ``package
+    # <ident>:`` block in the recipe source) and read the M9.H fetch
+    # spec + M9.I meson/ninja flag seqs against that key.
+    let dslPackageName = extractFirstPackageName(source)
+    let fetchSpec =
+      if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
+      else: DslFetchSpec()
+    let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
+    let mesonOptions =
+      if dslPackageName.len > 0:
+        registeredBuildFlags(dslPackageName, "", "meson")
+      else: @[]
+    let ninjaFlags =
+      if dslPackageName.len > 0:
+        registeredBuildFlags(dslPackageName, "", "ninja")
+      else: @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
-      let configurePair = emitConfigureAction(projectRoot, mesonExe, ccExe)
-      var allActions: seq[BuildActionDef] = @[configurePair.action]
+      var allActions: seq[BuildActionDef] = @[]
+      var configureDeps: seq[string] = @[]
+      var configureInputsExtra: seq[string] = @[]
+      if hasFetch:
+        discard buildPool("fetch", 2'u32)
+        let fetchAct = emitFetchAction(projectRoot, dslPackageName, fetchSpec)
+        allActions.add(fetchAct)
+        configureDeps.add(fetchAct.id)
+        configureInputsExtra.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
+      let configurePair = emitConfigureAction(projectRoot, mesonExe, ccExe,
+        mesonOptions, configureDeps, configureInputsExtra)
+      allActions.add(configurePair.action)
       for member in members:
         let buildAct = emitBuildAction(projectRoot, mesonExe, member,
-          configurePair.action.id, configurePair.stamp)
+          configurePair.action.id, configurePair.stamp, ninjaFlags)
         allActions.add(buildAct)
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,

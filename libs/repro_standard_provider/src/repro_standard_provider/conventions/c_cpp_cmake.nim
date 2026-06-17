@@ -74,6 +74,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/fetch_action
 
 const
   ScratchDirName* = ".repro/build"
@@ -210,6 +211,34 @@ proc extractMembers(source: string): seq[CCppCMakeMember] =
     result.add(CCppCMakeMember(name: name, kind: cccmkExecutable))
   for name in extractLibraries(source):
     result.add(CCppCMakeMember(name: name, kind: cccmkLibraryStatic))
+
+proc extractFirstPackageName(source: string): string =
+  ## DSL-port M9.K: heuristic scan for the first ``package <ident>:``
+  ## declaration. Same shape as the meson convention's helper — the
+  ## lookup key for the M9.H ``registeredFetchSpec`` and M9.I
+  ## ``registeredBuildFlags`` registries.
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if not stripped.startsWith("package"):
+      continue
+    if stripped.len > len("package") and
+        stripped[len("package")] notin {' ', '\t'}:
+      continue
+    let rest = stripped[len("package") .. ^1].strip()
+    if rest.len == 0:
+      continue
+    var name = ""
+    for ch in rest:
+      if ch in {' ', '\t', ':', ','}:
+        break
+      name.add(ch)
+    if name.len > 0:
+      return name
+  ""
 
 proc hasCMakeListsTxt(projectRoot: string): bool =
   fileExists(extendedPath(projectRoot / "CMakeLists.txt"))
@@ -368,7 +397,10 @@ proc collectCMakeInputs(projectRoot: string): seq[string] =
   result = seen
   result.sort(system.cmp[string])
 
-proc emitConfigureAction(projectRoot, cmakeExe, generator: string):
+proc emitConfigureAction(projectRoot, cmakeExe, generator: string;
+                         cmakeFlags: seq[string];
+                         extraDeps: seq[string] = @[];
+                         extraInputs: seq[string] = @[]):
     tuple[action: BuildActionDef; stamp: string] =
   ## Emit the ``cmake -S <root> -B <scratch> -G <generator>`` action.
   ## On success the action runs a follow-up touch via a sh-c wrapper if
@@ -399,9 +431,18 @@ proc emitConfigureAction(projectRoot, cmakeExe, generator: string):
     let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
     let escapedRoot = projectRoot.replace("\\", "/").replace("\"", "\\\"")
     let escapedScratch = scratch.replace("\\", "/").replace("\"", "\\\"")
+    # DSL-port M9.K: append M9.I-registered cmakeFlags to the
+    # ``cmake -S ... -B ... -G ...`` invocation. Each flag is
+    # double-quote-escaped for the shell context.
+    var trailingFlags = ""
+    for flag in cmakeFlags:
+      trailingFlags.add(" \"")
+      trailingFlags.add(flag.replace("\"", "\\\""))
+      trailingFlags.add("\"")
     let script = "set -e; \"" & escapedCmake & "\" -S \"" & escapedRoot &
       "\" -B \"" & escapedScratch & "\" -G \"" & generator &
-      "\" -DCMAKE_BUILD_TYPE=Release; touch \"" & escapedStamp & "\""
+      "\" -DCMAKE_BUILD_TYPE=Release" & trailingFlags &
+      "; touch \"" & escapedStamp & "\""
     argv = @[shExe, "-c", script]
   else:
     # No sh on PATH (rare on dev hosts): invoke cmake directly. The
@@ -409,13 +450,20 @@ proc emitConfigureAction(projectRoot, cmakeExe, generator: string):
     # primary output so the engine still records success.
     argv = @[cmakeExe, "-S", projectRoot, "-B", scratch, "-G", generator,
       "-DCMAKE_BUILD_TYPE=Release"]
-  let inputs = collectCMakeInputs(projectRoot)
+    # DSL-port M9.K: append M9.I-registered cmakeFlags verbatim.
+    for flag in cmakeFlags:
+      argv.add(flag)
+  var inputs = collectCMakeInputs(projectRoot)
+  for ei in extraInputs:
+    if ei notin inputs:
+      inputs.add(ei)
   var outputs = @[cache]
   if shExe.len > 0:
     outputs.add(stamp)
   let action = buildAction(
     id = "ccpp-cmake-configure",
     call = inlineExecCall(argv, projectRoot),
+    deps = extraDeps,
     inputs = inputs,
     outputs = outputs,
     pool = "compile",
@@ -501,10 +549,32 @@ proc cCppCMakeEmitFragment(projectRoot: string;
           "(needs ninja, or platform-specific make: mingw32-make on " &
           "Windows / make on POSIX)")
     let pkg = syntheticPackage(projectRoot, members)
+    # DSL-port M9.K: look up the DSL package name (first ``package
+    # <ident>:`` block in the recipe source) and read the M9.H fetch
+    # spec + M9.I cmake flag seq against that key.
+    let dslPackageName = extractFirstPackageName(source)
+    let fetchSpec =
+      if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
+      else: DslFetchSpec()
+    let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
+    let cmakeFlags =
+      if dslPackageName.len > 0:
+        registeredBuildFlags(dslPackageName, "", "cmake")
+      else: @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
-      let configurePair = emitConfigureAction(projectRoot, cmakeExe, gen.name)
-      var allActions: seq[BuildActionDef] = @[configurePair.action]
+      var allActions: seq[BuildActionDef] = @[]
+      var configureDeps: seq[string] = @[]
+      var configureInputsExtra: seq[string] = @[]
+      if hasFetch:
+        discard buildPool("fetch", 2'u32)
+        let fetchAct = emitFetchAction(projectRoot, dslPackageName, fetchSpec)
+        allActions.add(fetchAct)
+        configureDeps.add(fetchAct.id)
+        configureInputsExtra.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
+      let configurePair = emitConfigureAction(projectRoot, cmakeExe, gen.name,
+        cmakeFlags, configureDeps, configureInputsExtra)
+      allActions.add(configurePair.action)
       for member in members:
         let buildAct = emitBuildAction(projectRoot, cmakeExe, member,
           configurePair.action.id, configurePair.stamp)

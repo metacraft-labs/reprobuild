@@ -80,6 +80,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/fetch_action
 
 const
   ScratchDirName* = ".repro/build"
@@ -224,6 +225,34 @@ proc extractMembers(source: string): seq[CCppAutotoolsMember] =
     result.add(CCppAutotoolsMember(name: name, kind: catmkExecutable))
   for name in extractLibraries(source):
     result.add(CCppAutotoolsMember(name: name, kind: catmkLibraryStatic))
+
+proc extractFirstPackageName(source: string): string =
+  ## DSL-port M9.K: heuristic scan for the first ``package <ident>:``
+  ## declaration. Same shape as the sibling conventions' helpers — the
+  ## lookup key for the M9.H ``registeredFetchSpec`` and M9.I
+  ## ``registeredBuildFlags`` registries.
+  for rawLine in source.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if not stripped.startsWith("package"):
+      continue
+    if stripped.len > len("package") and
+        stripped[len("package")] notin {' ', '\t'}:
+      continue
+    let rest = stripped[len("package") .. ^1].strip()
+    if rest.len == 0:
+      continue
+    var name = ""
+    for ch in rest:
+      if ch in {' ', '\t', ':', ','}:
+        break
+      name.add(ch)
+    if name.len > 0:
+      return name
+  ""
 
 proc hasConfigureSource(projectRoot: string): bool =
   ## True when ``configure.ac`` or legacy ``configure.in`` exists.
@@ -562,33 +591,51 @@ proc collectAutotoolsSources(projectRoot: string): seq[string] =
       seen.add(path)
   result = seen
 
-proc renderConfigureScript(needAutoreconf: bool): string =
+proc renderConfigureScript(needAutoreconf: bool;
+                           configureFlags: seq[string]): string =
   ## sh-c command running ``autoreconf -fi`` (optionally) then
   ## ``./configure --prefix=/ --disable-dependency-tracking
-  ## --disable-maintainer-mode`` then touching the stamp.
+  ## --disable-maintainer-mode <M9.K configureFlags>`` then touching the
+  ## stamp.
+  ##
+  ## DSL-port M9.K: ``configureFlags`` (from the M9.I
+  ## ``configureFlags:`` block, channel ``"configure"``) are appended
+  ## verbatim to the ``./configure`` invocation in declaration order.
   var parts: seq[string] = @[]
   parts.add("set -e")
   if needAutoreconf:
     parts.add("autoreconf -fi")
-  parts.add("./configure --prefix=/ --disable-dependency-tracking " &
-    "--disable-maintainer-mode")
+  var configureCmd = "./configure --prefix=/ --disable-dependency-tracking " &
+    "--disable-maintainer-mode"
+  for flag in configureFlags:
+    configureCmd.add(" \"")
+    configureCmd.add(flag.replace("\"", "\\\""))
+    configureCmd.add("\"")
+  parts.add(configureCmd)
   parts.add("touch \"$REPRO_CONFIGURE_STAMP\"")
   parts.join("; ")
 
 proc emitConfigureAction(projectRoot, shExe: string;
-                         needAutoreconf: bool):
+                         needAutoreconf: bool;
+                         configureFlags: seq[string];
+                         extraDeps: seq[string] = @[];
+                         extraInputs: seq[string] = @[]):
                            tuple[action: BuildActionDef; stamp: string] =
   let stamp = configureStampPath(projectRoot)
   createDir(extendedPath(parentDir(stamp)))
-  let script = renderConfigureScript(needAutoreconf)
+  let script = renderConfigureScript(needAutoreconf, configureFlags)
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let fullScript = "REPRO_CONFIGURE_STAMP=\"" & escapedStamp & "\"; " & script
   let argv = @[shExe, "-c", fullScript]
-  let inputs = collectAutotoolsSources(projectRoot)
+  var inputs = collectAutotoolsSources(projectRoot)
+  for ei in extraInputs:
+    if ei notin inputs:
+      inputs.add(ei)
   let outputs = @[projectRoot / "Makefile", stamp]
   let action = buildAction(
     id = "ccpp-autotools-configure",
     call = inlineExecCall(argv, projectRoot),
+    deps = extraDeps,
     inputs = inputs,
     outputs = outputs,
     pool = "compile",
@@ -794,11 +841,32 @@ proc cCppAutotoolsEmitFragment(projectRoot: string;
             makefileAmPath & ")")
       targets.add(target)
     let pkg = syntheticPackage(projectRoot, members)
+    # DSL-port M9.K: look up the DSL package name and read the M9.H
+    # fetch spec + M9.I configure flag seq against that key.
+    let dslPackageName = extractFirstPackageName(source)
+    let fetchSpec =
+      if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
+      else: DslFetchSpec()
+    let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
+    let configureFlags =
+      if dslPackageName.len > 0:
+        registeredBuildFlags(dslPackageName, "", "configure")
+      else: @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
+      var allActions: seq[BuildActionDef] = @[]
+      var configureDeps: seq[string] = @[]
+      var configureInputsExtra: seq[string] = @[]
+      if hasFetch:
+        discard buildPool("fetch", 2'u32)
+        let fetchAct = emitFetchAction(projectRoot, dslPackageName, fetchSpec)
+        allActions.add(fetchAct)
+        configureDeps.add(fetchAct.id)
+        configureInputsExtra.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
       let configurePair = emitConfigureAction(projectRoot, shExe,
-        needAutoreconf)
-      var allActions: seq[BuildActionDef] = @[configurePair.action]
+        needAutoreconf, configureFlags, configureDeps,
+        configureInputsExtra)
+      allActions.add(configurePair.action)
       for target in targets:
         let emitted = emitForMember(projectRoot, ccExe, arExe, target,
           configurePair.stamp, configurePair.action.id)
