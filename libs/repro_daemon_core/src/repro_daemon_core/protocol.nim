@@ -374,9 +374,14 @@ proc writeFrame*(conn: IpcConn; kind: UserDaemonMessageKind;
   frame.add(body)
   conn.sendByteString(frame.textOf())
 
-proc readFrame*(conn: IpcConn): tuple[kind: UserDaemonMessageKind;
+proc readFrame*(conn: IpcConn; timeoutMs = 0): tuple[kind: UserDaemonMessageKind;
                                       body: seq[byte]] =
-  let header = conn.recvBytesExact(10)
+  ## ``timeoutMs > 0`` bounds BOTH the header and body reads (see
+  ## ``recvBytesExact``); it is used for the daemon status handshake so an
+  ## unresponsive daemon triggers fallback instead of an indefinite hang.
+  ## The default (0) preserves the original unbounded blocking read used by
+  ## the long-lived build/watch command streams.
+  let header = conn.recvBytesExact(10, timeoutMs)
   for i in 0 ..< 4:
     if header[i] != byte(ord(FrameMagic[i])):
       raise newException(ValueError, "bad user-daemon frame magic")
@@ -384,7 +389,7 @@ proc readFrame*(conn: IpcConn): tuple[kind: UserDaemonMessageKind;
   let kindRaw = int(header.readU16Le(pos))
   let bodyLen = int(header.readU32Le(pos))
   result.kind = UserDaemonMessageKind(kindRaw)
-  result.body = conn.recvBytesExact(bodyLen)
+  result.body = conn.recvBytesExact(bodyLen, timeoutMs)
 
 proc helloBody*(client: BinaryIdentity; featureFlags, commandMode,
                 projectRoot: string; protocolMajor = UserDaemonProtocolMajor;

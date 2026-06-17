@@ -4,6 +4,19 @@ import repro_core
 
 import ./protocol
 
+const
+  UserDaemonHandshakeTimeoutMs* = 10_000
+    ## Upper bound on how long a status handshake (the ``udkHello`` ack and a
+    ## ``udkStatus`` response) may take before the client gives up and treats
+    ## the daemon as unavailable. A responsive daemon sends its hello-ack the
+    ## moment it accepts the connection, so this only ever fires for a wedged
+    ## or protocol-incompatible daemon that binds the endpoint but never
+    ## returns a complete frame. Without the bound the client blocks in
+    ## ``recv`` forever — the deadlock the daemon control-plane suite hit on
+    ## macOS when a build connected to the fake protocol-mismatch daemon.
+    ## ``startUserDaemon`` turns the resulting not-running status into its
+    ## existing "did not complete a compatible status handshake" fallback.
+
 type
   UserDaemonClientError* = object of CatchableError
 
@@ -53,7 +66,18 @@ proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
   let client = binaryIdentity(clientName, getAppFilename(), versionString())
   result.writeFrame(udkHello, helloBody(client, UserDaemonFeatureFlags,
     commandMode, projectRoot, protocolMajor, protocolMinor))
-  let ack = result.readFrame()
+  # Bound the hello-ack: a daemon that accepts the connection but never
+  # returns a frame (wedged / protocol-incompatible) must not hang the client
+  # forever. On timeout ``readFrame`` raises ``IpcEndpointError``; convert it
+  # to the daemon-client error type (as the connect path above does) so every
+  # caller's existing ``UserDaemonClientError`` handling routes it to a
+  # fallback to direct mode instead of a hang.
+  var ack: tuple[kind: UserDaemonMessageKind; body: seq[byte]]
+  try:
+    ack = result.readFrame(UserDaemonHandshakeTimeoutMs)
+  except IpcEndpointError as exc:
+    result.closeIpcConn()
+    raise newException(UserDaemonClientError, exc.msg)
   if ack.kind == udkError:
     raise newException(UserDaemonClientError, parseErrorBody(ack.body))
   if ack.kind != udkHelloAck:
@@ -80,7 +104,10 @@ proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
     return
   defer: conn.closeIpcConn()
   conn.writeFrame(udkStatus)
-  let frame = conn.readFrame()
+  # Same bound as the hello-ack: a daemon that completes the hello handshake
+  # but then stalls before answering the status query must not wedge the
+  # client. The caller treats the raised error as "daemon not running".
+  let frame = conn.readFrame(UserDaemonHandshakeTimeoutMs)
   if frame.kind == udkStatusResponse:
     return parseStatusBody(frame.body)
   if frame.kind == udkError:

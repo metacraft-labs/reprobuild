@@ -18,7 +18,7 @@
 ## existing daemons actually call are wrapped. Higher-level code stays
 ## the same; the platform difference is contained here.
 
-import std/[os, strutils]
+import std/[os, strutils, times]
 
 when defined(posix):
   import std/[net, posix]
@@ -196,11 +196,41 @@ when defined(posix):
       return
     conn.socket.send(data)
 
-  proc recvBytesExact*(conn: IpcConn; byteCount: int): seq[byte] =
+  proc recvBytesExact*(conn: IpcConn; byteCount: int; timeoutMs = 0): seq[byte] =
+    ## Read exactly ``byteCount`` bytes. When ``timeoutMs > 0`` the read is
+    ## bounded by an absolute deadline: each blocking ``recv`` is gated behind
+    ## a ``poll(POLLIN)`` for the remaining budget, and an
+    ## ``IpcEndpointError`` is raised if the peer goes quiet. This is used
+    ## ONLY for the daemon status handshake (``connectUserDaemon`` /
+    ## ``queryUserDaemonStatus``): a daemon that accepts the connection but
+    ## never returns a complete frame — e.g. a protocol-incompatible or wedged
+    ## daemon — would otherwise block the client forever in ``recv`` (observed
+    ## first on macOS in the daemon control-plane suite). Long-running
+    ## build-data reads pass ``timeoutMs == 0`` and keep the original
+    ## unbounded blocking behaviour.
     if byteCount <= 0:
       return @[]
     result = newSeqOfCap[byte](byteCount)
+    let deadline =
+      if timeoutMs > 0: epochTime() + timeoutMs.float / 1000.0
+      else: 0.0
     while result.len < byteCount:
+      if deadline > 0.0:
+        let remainingMs = int((deadline - epochTime()) * 1000.0)
+        if remainingMs <= 0:
+          raise newException(IpcEndpointError,
+            "timed out after " & $timeoutMs & "ms reading " & $byteCount &
+            " bytes from IPC peer (received " & $result.len & ")")
+        let fd = conn.socket.getFd()
+        var fds = TPollfd(fd: cast[cint](fd), events: POLLIN, revents: 0)
+        let rc = poll(addr(fds), Tnfds(1), cint(remainingMs))
+        if rc == 0:
+          raise newException(IpcEndpointError,
+            "timed out after " & $timeoutMs &
+            "ms waiting for IPC peer to send frame data")
+        if rc < 0:
+          raise newException(IpcEndpointError,
+            "poll() failed while reading from IPC peer")
       let chunk = conn.socket.recv(byteCount - result.len)
       if chunk.len == 0:
         raise newException(IpcEndpointError,
@@ -396,12 +426,37 @@ when defined(windows):
     if ok == 0 or int(written) != data.len:
       raiseWin("WriteFile failed on named pipe")
 
-  proc recvBytesExact*(conn: IpcConn; byteCount: int): seq[byte] =
+  proc recvBytesExact*(conn: IpcConn; byteCount: int; timeoutMs = 0): seq[byte] =
+    ## Named-pipe counterpart of the POSIX reader. ``timeoutMs > 0`` bounds the
+    ## daemon status handshake: before each (blocking) ``ReadFile`` we spin on
+    ## ``PeekNamedPipe`` until at least one byte is available or the deadline
+    ## elapses, so a wedged/incompatible daemon raises instead of hanging the
+    ## client forever — matching the POSIX branch. ``timeoutMs == 0`` keeps the
+    ## original unbounded behaviour for long-running build-data reads.
     if byteCount <= 0:
       return @[]
     result = newSeq[byte](byteCount)
     var totalRead = 0
+    let deadline =
+      if timeoutMs > 0: epochTime() + timeoutMs.float / 1000.0
+      else: 0.0
     while totalRead < byteCount:
+      if deadline > 0.0:
+        while true:
+          var br, totAvail, left: DWORD
+          let pk = peekNamedPipeRaw(conn.handle, nil, 0.DWORD,
+            addr br, addr totAvail, addr left)
+          if pk == 0:
+            # Broken pipe / peer gone: let ReadFile below surface the
+            # canonical error instead of spinning.
+            break
+          if totAvail > 0:
+            break
+          if epochTime() >= deadline:
+            raise newException(IpcEndpointError,
+              "timed out after " & $timeoutMs &
+              "ms waiting for IPC peer to send frame data")
+          sleep(5)
       var nread: DWORD = 0
       let ok = readFile(conn.handle, addr result[totalRead],
         DWORD(byteCount - totalRead), addr nread, nil)

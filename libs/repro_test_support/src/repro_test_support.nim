@@ -33,6 +33,8 @@ import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 when defined(windows):
   import std/winlean
+else:
+  import std/posix
 
 const
   isNixSupported* = defined(linux) or defined(macosx)
@@ -173,17 +175,62 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
       result.output.setLen(prev + bytesRead)
       copyMem(addr result.output[prev], addr buf[0], bytesRead)
   else:
-    let outp = process.outputStream
+    # POSIX mirror of the Windows ``PeekNamedPipe`` strategy documented in
+    # (b)/(c) above, and for the SAME reason. A daemon grandchild — spawned
+    # by ``repro build`` / ``repro watch`` in default daemon mode via
+    # ``startUserDaemon`` — inherits the immediate child's stdout WRITE end
+    # (``fork`` duplicates every open fd; the daemon's own ``poDaemon``-style
+    # detach redirects its logging to a file but the inherited pipe fd stays
+    # open). A blocking ``readLine``/``readAll`` then waits for an EOF that
+    # never arrives, because the build child has long exited while the daemon
+    # keeps the pipe's write end alive — hanging the test forever. This was
+    # latent until the daemon control-plane suite first ran on macOS.
+    #
+    # Read NON-BLOCKING instead: drain whatever the child wrote, and once the
+    # IMMEDIATE child has exited and the pipe yields no more buffered bytes,
+    # stop — leaving the daemon to its independent lifecycle exactly as the
+    # Windows branch does. The test's own ``stopDaemon`` defer reaps it.
+    const PollSleepMs = 25
+    let fd = cint(process.outputHandle)
+    let prevFlags = fcntl(fd, F_GETFL)
+    if prevFlags != -1:
+      discard fcntl(fd, F_SETFL, prevFlags or O_NONBLOCK)
+    # Drain every byte currently readable without blocking, appending to
+    # ``sink``; returns true on a genuine EOF (all write ends closed), false
+    # once the pipe would block. ``sink`` is an explicit ``var`` parameter so
+    # the nested proc's own (bool) ``result`` does not shadow ``CmdResult``.
+    proc drainAvailable(fd: cint; sink: var string): bool =
+      var buf {.noinit.}: array[4096, char]
+      while true:
+        let n = read(fd, addr buf[0], buf.len)
+        if n > 0:
+          let prev = sink.len
+          sink.setLen(prev + n)
+          copyMem(addr sink[prev], addr buf[0], n)
+        elif n == 0:
+          return true
+        else:
+          if errno == EINTR:
+            continue
+          # EAGAIN/EWOULDBLOCK (no data right now) or an unexpected error:
+          # either way there is nothing more to read this pass.
+          return false
     result.code = -1
-    var line = newStringOfCap(120)
     while true:
-      if outp.readLine(line):
-        result.output.add(line)
-        result.output.add("\n")
-      else:
+      if drainAvailable(fd, result.output):
+        # Genuine EOF: every write end (including any grandchild's) closed.
         result.code = process.peekExitCode()
-        if result.code != -1:
-          break
+        if result.code == -1:
+          result.code = process.waitForExit()
+        break
+      # Pipe would block. If the immediate child is gone, do one final drain
+      # to collect bytes that raced in just before it exited, then walk away
+      # without waiting for the grandchild-held write end to close.
+      result.code = process.peekExitCode()
+      if result.code != -1:
+        discard drainAvailable(fd, result.output)
+        break
+      sleep(PollSleepMs)
 
 proc requireSuccess*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   ## Run ``cmd`` and assert exit-code 0. Returns the merged output so
