@@ -1774,6 +1774,27 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.E — ``variant <configField>:`` arms + ``validate:``
+  # predicate closures. The two entries pin the NDEM1 reproos-desktop
+  # shape: per-DE arms gate ``uses:`` clauses on the desktopKind
+  # configurable, and a ``validate:`` closure enforces
+  # ``activeAtBoot in desktopKind`` at solver time.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
+    binary: "build/test-bin/t_dsl_variant_uses",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim",
+    binary: "build/test-bin/t_dsl_validate",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",

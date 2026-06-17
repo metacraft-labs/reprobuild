@@ -2731,3 +2731,238 @@ proc consumeDirectory*(packageName: string; path: string): DslManagedFiles =
   dslPortMaterialisedDirectories[cacheKey] = DslMaterialisedEntry(
     handle: handle, done: true)
   result = handle
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.E — variant: arm registry + validate: predicate registry.
+# ---------------------------------------------------------------------------
+##
+## ## What the M9.E surface covers
+##
+## NDEM1 (reproos-desktop) declares two related package-body shapes that
+## prior milestones did not cover:
+##
+##   1. ``variant <configField>:`` — gate per-variant ``uses:`` clauses
+##      on a configurable's value. The arms are scoped by the user's
+##      enum: e.g. ``\`case\` dkSway: uses "sway >=0.1.0"``. Only the
+##      ``uses:`` clause is recognised inside an arm initially (M9.E
+##      explicit deferral — future milestones can widen to
+##      ``build:`` / ``service:`` / ``files:`` arm bodies).
+##
+##   2. ``validate:`` — solver-time boolean predicate the runtime
+##      evaluates at consumption time. Body is a ``proc(): bool = ...``
+##      closure literal (M9.E explicit deferral — a future ergonomic
+##      shortcut can land where bare expressions auto-wrap with the
+##      package's config-field bindings injected in scope).
+##
+## The arms-by-arm-value contract: ``activeVariantArms(pkg,
+## configField)`` walks the registered arms for the package, looks up
+## the configurable's current value via ``inspectConfigurable``, and
+## returns every arm whose ``armValue`` matches a stored value name.
+## ``dskSeqEnum`` (M9.D) returns the union of matching arms; ``dskEnum``
+## returns at most one arm; any other stored kind returns the empty
+## seq.
+##
+## ## Why a separate evaluator closure rather than introspecting the
+## body's AST?
+##
+## The macro running at expansion time cannot enumerate every
+## configurable the user's expression references without parsing the
+## body — which would re-invent the type-checker. Instead M9.E asks the
+## user to author the validate body as a closure literal that the macro
+## splices verbatim into ``registerValidateExpr``. The closure captures
+## bindings the user wires explicitly (typically
+## ``readConfigurable[T]`` calls); the runtime executes it without
+## further introspection. The trade-off is the same the M5 ``service:``
+## emitter took for body-setter parsing — pragmatic, scope-limited,
+## with a documented next-milestone path.
+##
+## ## Threading model
+##
+## The two registries are ``threadvar`` so concurrent test fixtures do
+## not cross-attribute arms / closures. ``resetDslPortVariantState`` and
+## ``resetDslPortValidateState`` reset the per-thread slot. Matches the
+## ``dslPortSymlinks`` / ``dslPortDirectories`` threading shape.
+
+type
+  DslVariantArm* = object
+    ## One ``\`case\` <enumValue>:`` arm inside a ``variant
+    ## <configField>:`` block. Populated by the M9.E emitter at
+    ## module-init time; read by host code via ``registeredVariants`` /
+    ## ``activeVariantArms``.
+    packageName*: string
+    variantConfigField*: string
+      ## The config-field ident named in the outer ``variant <ident>:``
+      ## head. Diagnostic surface — ``activeVariantArms`` also keys off
+      ## ``packageName & "." & variantConfigField`` to read the
+      ## configurable cell.
+    armValue*: string
+      ## The enum literal as a string (``$enumValue``) — e.g.
+      ## ``"dkSway"``. The macro captures this from the source-level
+      ## ident verbatim (no kebab translation) so the match against the
+      ## configurable's stored ``enumValueName`` / ``seqEnumValueNames``
+      ## strings is byte-aligned with M9.D's capture path.
+    armOrd*: int
+      ## The arm's ``ord(enumValue)`` captured at macro-expansion time.
+      ## Allows round-trip / sort by ord regardless of insertion order.
+    usesClauses*: seq[string]
+      ## Each entry is one ``uses "string"`` clause's payload (the
+      ## string-literal verbatim). M9.E supports only ``uses:`` arms
+      ## initially — explicit deferral for per-arm ``build:`` /
+      ## ``service:`` / ``files:`` widening.
+
+  DslValidateExpr* = object
+    ## One ``validate:`` predicate. Populated by the M9.E emitter at
+    ## module-init time; read by host code via ``registeredValidates``
+    ## or evaluated via ``evaluateValidates``.
+    packageName*: string
+    exprRepr*: string
+      ## Source-text form for diagnostics; e.g.
+      ## ``"activeAtBoot in desktopKind"``. Captured via
+      ## ``$body.repr`` at macro-expansion time.
+    evaluator*: proc(): bool {.closure.}
+      ## The compiled closure the macro spliced from the user's
+      ## ``proc(): bool = ...`` body. ``evaluateValidates`` calls this;
+      ## ``false`` triggers ``EConfigViolation``.
+
+  EConfigViolation* = object of CatchableError
+    ## Raised by ``evaluateValidates`` when any registered closure
+    ## returns ``false``. The message embeds the violating expression's
+    ## ``exprRepr`` so the diagnostic surface points back to the
+    ## source-level declaration.
+
+var dslPortVariants {.threadvar.}: Table[string, seq[DslVariantArm]]
+  ## Per-package variant-arm registry. Keyed by ``packageName``.
+  ## ``registerVariantArm`` appends to the per-package seq;
+  ## ``registeredVariants`` returns a copy so callers cannot mutate the
+  ## registry from outside the public API.
+
+var dslPortValidates {.threadvar.}: Table[string, seq[DslValidateExpr]]
+  ## Per-package validate-predicate registry. Keyed by ``packageName``.
+  ## ``registerValidateExpr`` appends; ``registeredValidates`` returns a
+  ## copy.
+
+# ---------------------------------------------------------------------------
+# Reset procs — symmetric with the prior M9.* reset shape
+# ---------------------------------------------------------------------------
+
+proc resetDslPortVariantState*() =
+  ## Drop every variant-arm registration. Test fixtures call this
+  ## between scenarios so registry entries do not leak across cases.
+  ## Separate from ``resetDslPortValidateState`` so tests can target one
+  ## without disturbing the other (matches the
+  ## ``resetDslPortConfigState`` / ``resetRegisteredVersions`` split).
+  dslPortVariants.clear()
+
+proc resetDslPortValidateState*() =
+  ## Drop every validate-predicate registration.
+  dslPortValidates.clear()
+
+# ---------------------------------------------------------------------------
+# variant: registration + read API
+# ---------------------------------------------------------------------------
+
+proc registerVariantArm*(packageName, configField, armValue: string;
+                         armOrd: int; usesClauses: seq[string]) =
+  ## Append one variant-arm registration. The M9.E emitter emits one call
+  ## per recognised ``\`case\` <enumValue>:`` arm inside a
+  ## ``variant <configField>:`` block.
+  ##
+  ## Idempotency: re-registering the same (packageName, configField,
+  ## armValue) appends a duplicate row — matches the
+  ## ``registerVersion`` / ``registerArtifact`` precedent. Conditional
+  ## ``when`` branches can legitimately re-declare an arm under
+  ## different platform gates and the consumer decides which arm to
+  ## honour.
+  if packageName notin dslPortVariants:
+    dslPortVariants[packageName] = @[]
+  dslPortVariants[packageName].add(DslVariantArm(
+    packageName: packageName,
+    variantConfigField: configField,
+    armValue: armValue,
+    armOrd: armOrd,
+    usesClauses: usesClauses))
+
+proc registeredVariants*(packageName: string): seq[DslVariantArm] =
+  ## Return every variant-arm registered against ``packageName`` in
+  ## insertion order. Returns the empty seq when the package never
+  ## declared a ``variant:`` block; callers must NOT treat the empty
+  ## return as an error.
+  if packageName in dslPortVariants:
+    return dslPortVariants[packageName]
+  return @[]
+
+proc activeVariantArms*(packageName, configField: string): seq[DslVariantArm] =
+  ## Return the variant arms that fire for the CURRENT configurable
+  ## value at evaluation time. The configurable is looked up via
+  ## ``inspectConfigurable``; the stored ``DslScalarValue``'s kind
+  ## decides the matching strategy:
+  ##
+  ##   * ``dskSeqEnum`` (M9.D ``seq[Enum]``) — return every arm whose
+  ##     ``armValue`` matches ANY element in ``seqEnumValueNames``;
+  ##   * ``dskEnum`` (M9.D scalar enum) — return the single arm whose
+  ##     ``armValue == enumValueName`` (or empty if no match);
+  ##   * any other stored kind (or missing key) — return the empty seq.
+  ##
+  ## Per-arm order matches the source-level declaration order.
+  result = @[]
+  if packageName notin dslPortVariants:
+    return
+  let key = packageName & "." & configField
+  if not isConfigKeyRegistered(key):
+    return
+  let stored = inspectConfigurable(key)
+  let arms = dslPortVariants[packageName]
+  case stored.kind
+  of dskSeqEnum:
+    for arm in arms:
+      if arm.variantConfigField != configField:
+        continue
+      if arm.armValue in stored.seqEnumValueNames:
+        result.add(arm)
+  of dskEnum:
+    for arm in arms:
+      if arm.variantConfigField != configField:
+        continue
+      if arm.armValue == stored.enumValueName:
+        result.add(arm)
+  else:
+    discard
+
+# ---------------------------------------------------------------------------
+# validate: registration + evaluation API
+# ---------------------------------------------------------------------------
+
+proc registerValidateExpr*(packageName, exprRepr: string;
+                           evaluator: proc(): bool {.closure.}) =
+  ## Append one validate-predicate registration. The M9.E emitter emits
+  ## one call per recognised ``validate:`` block. Idempotency matches
+  ## ``registerVariantArm``: duplicates append rather than collapse.
+  if packageName notin dslPortValidates:
+    dslPortValidates[packageName] = @[]
+  dslPortValidates[packageName].add(DslValidateExpr(
+    packageName: packageName,
+    exprRepr: exprRepr,
+    evaluator: evaluator))
+
+proc registeredValidates*(packageName: string): seq[DslValidateExpr] =
+  ## Return every validate predicate registered against ``packageName``
+  ## in insertion order. Empty seq when no ``validate:`` block was
+  ## declared.
+  if packageName in dslPortValidates:
+    return dslPortValidates[packageName]
+  return @[]
+
+proc evaluateValidates*(packageName: string) =
+  ## Evaluate every registered validate predicate for ``packageName``.
+  ## Raises ``EConfigViolation`` (with the offending ``exprRepr``
+  ## embedded in the message) on the first predicate that returns
+  ## ``false``. No-op when no predicates are registered.
+  if packageName notin dslPortValidates:
+    return
+  for entry in dslPortValidates[packageName]:
+    if entry.evaluator.isNil:
+      continue
+    if not entry.evaluator():
+      raise newException(EConfigViolation,
+        "validate: predicate '" & entry.exprRepr & "' failed for package '" &
+        packageName & "'")

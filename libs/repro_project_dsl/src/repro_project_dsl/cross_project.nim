@@ -352,7 +352,13 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # Nix-style package outputs (``$out`` / ``$out-man``
                  # / ``$out-doc`` / ``$out-dev``). One ``output <name>:``
                  # entry per declared output inside the body.
-                 "outputs"]
+                 "outputs",
+                 # DSL-port M9.E: the ``variant <configField>:`` block
+                 # drives per-variant ``uses:`` clauses for NDEM1-style
+                 # closure selection; the ``validate:`` block declares a
+                 # solver-time predicate over the current configurable
+                 # values.
+                 "variant", "validate"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.
@@ -557,6 +563,20 @@ type
       ## remaining setters verbatim into ``DslServiceDef.bodyRepr``
       ## so the diagnostic surface stays open for the next
       ## milestone.
+    soM9EVariant
+      ## ``variant <configField>:`` blocks (M9.E) — drive per-variant
+      ## ``uses:`` clauses for NDEM1-style closure selection. The legacy
+      ## ``parsePackageDef`` does NOT recognise the top-level ``variant``
+      ## section, so M9.E's ownership is exclusive (symmetric with M5's
+      ## ``service:`` treatment). M9.E's emitter walks the body for
+      ## ``\`case\` <enumValue>:`` arms and emits one
+      ## ``registerVariantArm(...)`` call per arm.
+    soM9EValidate
+      ## ``validate:`` blocks (M9.E) — solver-time predicates evaluated
+      ## over the current configurable values. Body is expected to be a
+      ## single ``proc(): bool = ...`` literal; the emitter splices that
+      ## closure verbatim into a ``registerValidateExpr(...)`` call.
+      ## Exclusive ownership symmetric with ``soM9EVariant``.
 
   ClassifiedSection* = object
     ## One classified section. ``stmt`` is a copy of the AST node from
@@ -581,6 +601,8 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   of "versions": soM2Versions
   of "build": soM4Build
   of "service": soM5Service
+  of "variant": soM9EVariant
+  of "validate": soM9EValidate
   else: soLegacyParsePackageDef
 
 proc classifyPackageSections*(sectionStmts: NimNode):

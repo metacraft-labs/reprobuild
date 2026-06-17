@@ -1733,6 +1733,240 @@ proc emitM6CliLowering*(packageName: string;
         result.add(m6EmitParamRegistration(
           packageName, artifactName, "", p))
 
+# ---------------------------------------------------------------------------
+# DSL-port M9.E — ``variant <configField>:`` + ``validate:`` lowerers.
+#
+# ## variant <configField>: arm parsing
+#
+# Source-level shape (the v8 spec memo's example, adapted to Nim's parser):
+#
+#   variant desktopKind:
+#     `case` dkSway:
+#       uses "sway >=0.1.0"
+#     `case` dkGnome:
+#       uses "gnome >=0.1.0"
+#
+# Note the backticked ``\`case\``. Nim's parser reserves ``case`` for
+# case-statements which require ``of`` branches; using the bare keyword
+# inside a package body fails with ``invalid indentation``. The
+# backticked form parses as ``Command(AccQuoted(Ident "case"),
+# Ident "dkSway", StmtList(...))`` which the emitter recognises.
+# Authors get the same look-and-feel as the v8 prototype; the backticks
+# are the cost of staying inside Nim's grammar.
+#
+# Each ``\`case\``-arm body MAY contain one or more ``uses "string"``
+# statements. M9.E supports ONLY ``uses:`` arms — other body shapes
+# (``build:`` / ``service:`` / ``files:`` per-arm bodies) are explicit
+# deferrals; they appear inside the arm body but the emitter silently
+# skips them. The full body's ``$body.repr`` is captured into
+# ``DslVariantArm.usesClauses`` ONLY for the recognised ``uses:``
+# entries — diagnostics for the deferred shapes can be added when the
+# next milestone lands.
+#
+# At emission time, the macro emits:
+#
+#     registerVariantArm("<pkg>", "<configField>", "<armValue>",
+#                        ord(<armValueIdent>), @[<usesClauses>])
+#
+# The ``ord(<armValueIdent>)`` call is evaluated at MODULE-INIT TIME
+# (not at macro-expansion) because Nim's enum literals are typed values
+# the Nim VM only resolves once their type context is in scope. The
+# enum identifier MUST be visible at module scope at the point the
+# ``package`` macro emits its registration block; this matches the
+# pattern M9.D uses for ``recordConfigDefault[E](pkg, name, dkSway)``
+# (the recipe declares the enum at module top level above the
+# ``package`` block).
+#
+# ## validate: body parsing
+#
+# The expected body shape is a single ``proc(): bool = ...`` lambda
+# literal:
+#
+#   validate:
+#     proc(): bool =
+#       readConfigurable[DesktopKind]("pkg", "activeAtBoot", dkSway) in
+#         readConfigurable[seq[DesktopKind]]("pkg", "desktopKind", @[])
+#
+# The macro splices the lambda verbatim as the third argument of a
+# ``registerValidateExpr("<pkg>", "<exprRepr>", <lambda>)`` call. The
+# expression-repr is captured via ``$lambdaBody.repr`` so the
+# diagnostic message surfaces something close to the source-level
+# predicate.
+#
+# Future ergonomic shortcut (explicit deferral): we could detect a bare
+# expression (``nnkInfix(in, ...)`` etc.) and wrap it inside a
+# ``proc(): bool = <expr>`` automatically, with config-field bindings
+# auto-injected by enumerating the M2 ``config:`` block above the
+# ``validate:`` head. That requires the macro to scan the partitioned
+# section list for field idents + types, then emit per-field
+# ``let <field> = readConfigurable[T](...)`` bindings inside the
+# generated closure. Pragmatic deferral for M9.E — the closure form
+# above is what every fixture today uses.
+# ---------------------------------------------------------------------------
+
+proc m9eVariantHeadAst(stmt: NimNode):
+    tuple[matched: bool; configField: string; body: NimNode] =
+  ## Recognise ``variant <configField>: <body>``. Parses as
+  ## ``Call(Ident "variant", <configField>, StmtList(body))`` or the
+  ## ``Command`` variant. The ``variant`` head is already discriminated
+  ## by ``classifyPackageSections``; here we only extract the field
+  ## name and the body.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len < 3:
+    return
+  let nameNode = stmt[1]
+  if nameNode.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return
+  result.matched = true
+  result.configField = identText(nameNode)
+  result.body = body
+
+proc m9eVariantArmAst(stmt: NimNode):
+    tuple[matched: bool; armIdent: NimNode; body: NimNode] =
+  ## Recognise a ``\`case\` <enumValue>: <body>`` arm. Parses as
+  ## ``Command(AccQuoted(Ident "case"), <armIdent>, StmtList(body))``.
+  ## Also accepts the bare-ident form ``of <enumValue>:`` for symmetry
+  ## with case-statement spelling — but Nim's parser only honours ``of``
+  ## inside a ``case``-statement context, so in practice every arm
+  ## comes through as the backticked head.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len < 3:
+    return
+  let head = stmt[0]
+  let headName =
+    if head.kind == nnkAccQuoted: identText(head)
+    elif head.kind in {nnkIdent, nnkSym}: identText(head)
+    else: ""
+  if headName.normalize notin ["case", "of"]:
+    return
+  let armNode = stmt[1]
+  if armNode.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    return
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return
+  result.matched = true
+  result.armIdent = armNode
+  result.body = body
+
+proc m9eCollectUsesClauses(armBody: NimNode): seq[NimNode] =
+  ## Scan an arm body for ``uses "string"`` statements; return one
+  ## string-literal NimNode per recognised clause (already copied so
+  ## the splice is safe). Non-``uses:`` body statements are silently
+  ## ignored — M9.E's per-arm support is restricted to ``uses:`` as an
+  ## explicit deferral.
+  result = @[]
+  if armBody.kind != nnkStmtList:
+    return
+  for stmt in armBody:
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len != 2:
+      continue
+    let head = stmt[0]
+    if head.kind notin {nnkIdent, nnkSym}:
+      continue
+    if identText(head).normalize != "uses":
+      continue
+    let arg = stmt[1]
+    if arg.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      continue
+    result.add(arg.copyNimTree())
+
+proc emitM9EVariantArms*(packageName: string;
+                         classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for ``soM9EVariant`` entries and
+  ## emit one ``registerVariantArm(...)`` call per recognised
+  ## ``\`case\` <enumValue>:`` arm inside each ``variant
+  ## <configField>:`` body.
+  ##
+  ## Per-arm emission shape:
+  ##
+  ##   registerVariantArm(<pkg>, <configField>, "<armValue>",
+  ##                      ord(<armIdent>), @["use-1", "use-2", ...])
+  ##
+  ## The ``ord(<armIdent>)`` reads the enum value's ordinal at
+  ## module-init time; the enum type MUST be visible at module scope
+  ## above the ``package`` macro invocation (the recipe declares the
+  ## enum at module top level — same shape M9.D recipes already use).
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership != soM9EVariant:
+      continue
+    let parsed = m9eVariantHeadAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    let pkgLit = newLit(packageName)
+    let fieldLit = newLit(parsed.configField)
+    for armStmt in parsed.body:
+      let armParsed = m9eVariantArmAst(armStmt)
+      if not armParsed.matched:
+        continue
+      let armValueStr = identText(armParsed.armIdent)
+      if armValueStr.len == 0:
+        continue
+      let armValueLit = newLit(armValueStr)
+      let armIdentNode = armParsed.armIdent.copyNimTree()
+      # Build the @["..", ".."] bracket of uses-clauses.
+      let usesBracket = nnkPrefix.newTree(
+        ident("@"), nnkBracket.newTree())
+      for clauseLit in m9eCollectUsesClauses(armParsed.body):
+        usesBracket[1].add(clauseLit)
+      result.add(quote do:
+        registerVariantArm(`pkgLit`, `fieldLit`, `armValueLit`,
+                           ord(`armIdentNode`), `usesBracket`))
+
+proc m9eValidateClosureFromBody(body: NimNode): NimNode =
+  ## Inspect a ``validate:`` body. The expected shape is a single
+  ## ``proc(): bool = ...`` lambda literal; we splice it verbatim as
+  ## the closure argument of ``registerValidateExpr``. The body may
+  ## also be a ``StmtList`` wrapping the lambda; we unwrap once.
+  ##
+  ## Returns ``nil`` when the body does not match — the emitter then
+  ## silently skips emission (no Nim code generated). The body's repr
+  ## is still captured for the diagnostic surface via a sibling helper.
+  var node = body
+  if node.kind == nnkStmtList and node.len == 1:
+    node = node[0]
+  if node.kind in {nnkLambda, nnkProcDef, nnkDo}:
+    return node.copyNimTree()
+  return nil
+
+proc emitM9EValidates*(packageName: string;
+                      classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for ``soM9EValidate`` entries and
+  ## emit one ``registerValidateExpr(<pkg>, <exprRepr>, <closure>)``
+  ## call per recognised block.
+  ##
+  ## The closure body is the user's ``proc(): bool = ...`` literal,
+  ## spliced verbatim. The ``exprRepr`` argument is the body's
+  ## ``$body.repr`` (captured at macro-expansion time) so the runtime
+  ## diagnostic message points back to source-level intent.
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership != soM9EValidate:
+      continue
+    let stmt = entry.stmt
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len < 2:
+      continue
+    let body = stmt[^1]
+    if body.kind != nnkStmtList:
+      continue
+    let closureNode = m9eValidateClosureFromBody(body)
+    if closureNode == nil:
+      continue
+    let pkgLit = newLit(packageName)
+    let exprReprLit = newLit(body.repr)
+    result.add(quote do:
+      registerValidateExpr(`pkgLit`, `exprReprLit`, `closureNode`))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -1945,6 +2179,21 @@ macro package*(name: untyped; body: untyped): untyped =
   # ``emitM6CliLowering`` for the complete double-emit analysis.
   let m6CliEmission = emitM6CliLowering(packageName, classifiedSections)
   result.add(m6CliEmission)
+  # ── DSL-port M9.E: ``variant <configField>:`` arm registrations +
+  # ``validate:`` predicate registrations. The two emitters operate on
+  # the same classified seq M3-M6 consumed and append per-block runtime
+  # calls. ``parsePackageDef`` does NOT recognise either section
+  # (``variant`` is distinct from the ``variant:`` declaration inside
+  # ``config:`` which the legacy walker handles), so the M9.E ownership
+  # is exclusive — symmetric with M5's ``service:`` treatment. The
+  # blocks sit AFTER M6's emission so the M9.E surface sees every
+  # registry row prior milestones created — useful for downstream
+  # diagnostics that want to cross-reference a variant against the
+  # config field's recorded default.
+  let m9eVariantEmission = emitM9EVariantArms(packageName, classifiedSections)
+  let m9eValidateEmission = emitM9EValidates(packageName, classifiedSections)
+  result.add(m9eVariantEmission)
+  result.add(m9eValidateEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.
