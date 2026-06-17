@@ -656,6 +656,77 @@ proc currentBuildContext*(): DslBuildContextFrame =
     return dslPortActiveBuildContext[^1]
   return DslBuildContextFrame(packageName: "", artifactName: "")
 
+# ---------------------------------------------------------------------------
+# DSL-port M7 — user-facing helper API: read the active build context from
+# arbitrary Nim procs called as side effects from inside a ``build:`` body.
+# ---------------------------------------------------------------------------
+##
+## ─────────────────────────────────────────────────────────────────────────
+## What the M7 surface covers
+## ─────────────────────────────────────────────────────────────────────────
+##
+## v8's ``build:`` block runs the user-written body verbatim inside the
+## active-context try/finally pair. Helper procs the recipe author defines
+## at module scope and CALLS from inside the build body are reached while
+## the M4 stack frame is still on top of ``dslPortActiveBuildContext``.
+## M7 exposes a minimal, ergonomic accessor surface so those helpers can
+## read which package / artifact frame is currently active without having
+## to deal in the raw ``DslBuildContextFrame`` record:
+##
+##   * ``currentBuildPackage(): string`` — the top frame's package name,
+##     or ``""`` when no ``build:`` block is open.
+##
+##   * ``currentBuildArtifact(): string`` — the top frame's artifact name
+##     (``""`` for the package-level ``build:`` form), or ``""`` when no
+##     ``build:`` block is open.
+##
+##   * ``currentServicePackage(): string`` / ``currentServiceName():
+##     string`` — symmetric surface for the M5 ``service:`` stack. The
+##     M5 emitter does NOT splice the user's verbatim service body (only
+##     parsed setter calls — see ``emitM5Services`` in ``macros_b.nim``),
+##     so a helper proc called from inside a recipe's ``service:`` body
+##     today won't observe these from a recipe-level reference; the
+##     accessors are still exposed for symmetry and for the M5+ emitter
+##     evolution where verbatim body-splicing may land. ``cli:`` blocks
+##     have no runtime stack (every parameter registers eagerly at macro-
+##     expansion time), so there is no analogous CLI accessor.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Why convenience procs instead of having callers reach
+## ``currentBuildContext()`` directly?
+## ─────────────────────────────────────────────────────────────────────────
+##
+## ``currentBuildContext()`` returns a ``DslBuildContextFrame`` whose two
+## string fields the caller would have to dot-access (``.packageName`` /
+## ``.artifactName``). Recipes that just want "what package am I in?" then
+## have to ALSO import the type. The convenience accessors:
+##
+##   1. Hide the record type (callers never have to name it).
+##   2. Give the API a stable ergonomic surface that downstream lowerings
+##      can later cache or memoise without touching every recipe.
+##   3. Match v8's pattern (``currentPackage()`` / ``currentArtifact()``
+##      shims) so when a v8 recipe lifts to the production DSL the helper
+##      names line up one-for-one.
+
+proc currentBuildPackage*(): string =
+  ## Return the active ``build:`` block's package name, or the empty
+  ## string when no build context is on the stack. Safe to call from any
+  ## Nim proc reached as a side effect from inside the body of a
+  ## recipe's ``build:`` block.
+  let frame = currentBuildContext()
+  result = frame.packageName
+
+proc currentBuildArtifact*(): string =
+  ## Return the active ``build:`` block's artifact name (``""`` for the
+  ## package-level form), or the empty string when no build context is
+  ## on the stack. The empty-stack and the package-level cases are
+  ## indistinguishable through this accessor by design — callers that
+  ## need to disambiguate use ``currentBuildPackage()`` in tandem (a
+  ## non-empty package name with an empty artifact name signals the
+  ## package-level form).
+  let frame = currentBuildContext()
+  result = frame.artifactName
+
 proc output*(path: string) =
   ## Record ``path`` against the active build context's
   ## ``(packageName, artifactName)`` bucket. When no context is
@@ -903,6 +974,40 @@ proc finishServiceContext*() =
     dslPortActiveServiceContext.len - 1)
   registerService(frame.packageName, frame.serviceName,
                   frame.executableRef, frame.args, frame.bodyRepr)
+
+# ---------------------------------------------------------------------------
+# DSL-port M7 — user-facing service-context accessors. Symmetric with the
+# build-context ``currentBuildPackage`` / ``currentBuildArtifact`` surface.
+#
+# ``DslServiceContextFrame`` itself is held module-private (host code is
+# not meant to inspect raw frames — body-setters route through their own
+# public wrappers). The two accessors below expose the package name and
+# service name as plain strings, mirroring the M7 build-context surface.
+# Empty string when the stack is empty, mirroring the M4
+# ``currentBuildContext`` empty-stack convention.
+# ---------------------------------------------------------------------------
+
+proc currentServicePackage*(): string =
+  ## Return the active ``service:`` block's package name, or the empty
+  ## string when no service context is on the stack. The M5 emitter does
+  ## not splice the user's verbatim service body today (see
+  ## ``emitM5Services``), so a helper proc called from a recipe-level
+  ## ``service:`` body won't observe this from current emission shape;
+  ## the accessor is exposed for symmetry with the M7 build-context
+  ## surface and so the M5+ emitter can later splice the body without
+  ## requiring a new public API.
+  if dslPortActiveServiceContext.len > 0:
+    return dslPortActiveServiceContext[^1].packageName
+  return ""
+
+proc currentServiceName*(): string =
+  ## Return the active ``service:`` block's service name (the source-
+  ## level ident text, or the string-literal verbatim for ``service
+  ## "name":``), or the empty string when no service context is on the
+  ## stack. Same empty-stack convention as ``currentServicePackage``.
+  if dslPortActiveServiceContext.len > 0:
+    return dslPortActiveServiceContext[^1].serviceName
+  return ""
 
 # ---------------------------------------------------------------------------
 # DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` parameter
