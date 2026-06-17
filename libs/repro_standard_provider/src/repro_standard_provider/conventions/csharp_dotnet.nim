@@ -563,7 +563,7 @@ proc emitBuildAction(projectRoot, dotnetExe: string;
     # package / build actions. Enumerate inputs explicitly via
     # ``collectCsharpInputs`` so per-source invalidation still works
     # without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "csharp-dotnet.build")
 
 proc syntheticPackage(projectRoot: string;

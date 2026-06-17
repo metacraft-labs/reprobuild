@@ -472,7 +472,7 @@ proc emitInstallAction(projectRoot, bundleExe: string): BuildActionDef =
       # ``bundle install`` spawns Ruby worker subprocesses whose FS
       # reads aren't reliably observed via the Windows DLL-interpose
       # path. Same constraint M40/M41/M42/M43/M46/M55 face.
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "ruby-bundler.install")
   else:
     let bundleCmd = "'" & bundleExe & "' install --deployment " &
@@ -488,7 +488,7 @@ proc emitInstallAction(projectRoot, bundleExe: string): BuildActionDef =
       inputs = inputs,
       outputs = @[sentinelPath],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "ruby-bundler.install")
 
 proc emitWrapperAction(projectRoot, bundleExe, exeName: string;

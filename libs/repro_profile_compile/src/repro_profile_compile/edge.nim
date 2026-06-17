@@ -124,7 +124,7 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
     commandStatsId = "repro profile compile edge",
     cacheable = true,
     weakFingerprint = weak,
-    dependencyPolicy = declaredOnlyPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy())
 
 # ---------------------------------------------------------------------------
 # BuildEngineConfig defaults appropriate for a single profile compile.

@@ -372,7 +372,7 @@ proc providerCompileEdge*(inputSources: openArray[string];
     actionSpec: ActionSpec(
       actionId: stableIdFromDigest(fingerprint),
       process: process,
-      dependencyPolicy: declaredOnlyPolicy(),
+      dependencyPolicy: automaticMonitorGatheringPolicy(),
       metadata: providerCompileMetadata(declaredInputs, declaredOutputs,
         compilerCommand, interfaceFingerprint, providerFingerprint,
         fingerprint)),

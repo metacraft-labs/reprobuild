@@ -25,7 +25,7 @@ proc dependencyPolicyForAction(action: TryCompileActionDef):
   if action.depfile.len > 0:
     makeDepfilePolicy(action.depfile)
   else:
-    declaredOnlyDependencyPolicy()
+    automaticMonitorPolicy()
 
 proc registerAction(action: TryCompileActionDef): BuildActionDef
     {.discardable.} =

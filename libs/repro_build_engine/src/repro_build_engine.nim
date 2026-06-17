@@ -416,7 +416,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              actionCachePolicy = ffpTimestamp;
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
-             dependencyPolicy = declaredOnlyPolicy();
+             dependencyPolicy = automaticMonitorGatheringPolicy();
              env: openArray[string] = []): BuildAction =
   BuildAction(
     kind: bakProcess,
@@ -461,7 +461,7 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     cacheable: cacheable,
     weakFingerprint: weakFingerprint,
     actionCachePolicy: actionCachePolicy,
-    dependencyPolicy: declaredOnlyPolicy(),
+    dependencyPolicy: automaticMonitorGatheringPolicy(),
     builtinText: text,
     builtinEntries: @entries)
 
@@ -736,23 +736,10 @@ proc readDynamicGraphFragment(path: string): DynamicGraphFragment =
 proc expectedPath(action: BuildAction; file: ExpectedDependencyFile): string =
   materialPath(action.cwd, file.path)
 
-proc legacyDepfileReports(action: BuildAction):
-    seq[RecognizedDependencyReportSpec] =
-  if action.depfile.len > 0:
-    result.add RecognizedDependencyReportSpec(
-      formatName: DependencyFormatName(MakeDepfileFormatName),
-      outputs: @[ExpectedDependencyFile(
-        logicalName: "depfile",
-        path: action.depfile,
-        required: true)],
-      completeness: decComplete)
-
 proc reportSpecsForPolicy(action: BuildAction):
     seq[RecognizedDependencyReportSpec] =
   if action.dependencyPolicy.kind in RecognizedPolicyKinds:
     return action.dependencyPolicy.recognizedReports
-  if action.dependencyPolicy.kind == dgDeclaredOnly:
-    return action.legacyDepfileReports()
   @[]
 
 proc converterSpecsForPolicy(action: BuildAction):
@@ -762,9 +749,13 @@ proc converterSpecsForPolicy(action: BuildAction):
   @[]
 
 proc monitorEvidenceRequired(action: BuildAction): bool =
-  action.dependencyPolicy.kind in MonitorPolicyKinds or
-    (action.dependencyPolicy.kind == dgDeclaredOnly and
-      action.monitorDepfile.len > 0)
+  ## Monitor evidence is required for monitored policies once an RMDF
+  ## (monitor depfile) has actually been wired up for the action. The
+  ## monitor-bypass paths (e.g. the Windows ``REPRO_MONITOR_BYPASS`` escape
+  ## hatch) leave the policy as ``dgAutomaticMonitor`` but install no RMDF;
+  ## those fall back to declared inputs + outputs without demanding evidence.
+  action.dependencyPolicy.kind in MonitorPolicyKinds and
+    action.monitorDepfile.len > 0
 
 proc needsExecutionForPolicy(action: BuildAction): bool =
   action.dependencyPolicy.kind in MonitorPolicyKinds or
@@ -1164,13 +1155,13 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   else:
     when defined(windows):
       if getEnv("REPRO_MONITOR_BYPASS") == "1":
-        # Windows: downgrade the action to declared-only when the bypass is
-        # active. Without this, the engine's evidence validator later
-        # complains that monitor evidence is required but no depfile is set,
-        # and the action is marked asFailed even though it ran successfully.
-        # Declared inputs + outputs are enough for caching correctness; we
-        # just lose the auto-discovered read/write set.
-        result.action.dependencyPolicy = declaredOnlyPolicy()
+        # Windows: when the bypass is active we install NO monitor depfile, so
+        # ``monitorEvidenceRequired`` is false and the evidence validator does
+        # not complain that monitor evidence is missing. The action keeps its
+        # ``dgAutomaticMonitor`` policy but falls back to declared inputs +
+        # outputs for caching correctness; we just lose the auto-discovered
+        # read/write set. (The removed ``declaredOnlyPolicy`` used to express
+        # this downgrade explicitly.)
         return
     let monitorCli = monitorCliPath(config)
     if monitorCli.len == 0:

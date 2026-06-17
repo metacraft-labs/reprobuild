@@ -485,7 +485,7 @@ proc emitInstallAction(projectRoot, composerExe: string): BuildActionDef =
       # ``composer install`` spawns PHP subprocesses whose FS reads
       # aren't reliably observed via the Windows DLL-interpose path.
       # Same constraint M40/M41/M42/M43/M46/M55/M56 face.
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "php-composer.install")
   else:
     let composerCmd = "'" & composerExe & "' install --no-dev " &
@@ -501,7 +501,7 @@ proc emitInstallAction(projectRoot, composerExe: string): BuildActionDef =
       inputs = inputs,
       outputs = @[sentinelPath],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "php-composer.install")
 
 proc emitWrapperAction(projectRoot, phpExe, exeName: string;

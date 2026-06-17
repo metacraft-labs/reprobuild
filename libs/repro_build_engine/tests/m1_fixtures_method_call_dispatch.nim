@@ -61,7 +61,7 @@ proc run*(self: NimUnittestBinary; filter = "";
     else: defaultToolActionId(call)
   result = recordToolInvocation(selectedActionId, call,
     deps = combineActionDeps(deps, after),
-    dependencyPolicy = declaredOnlyDependencyPolicy())
+    dependencyPolicy = automaticMonitorPolicy())
   # Named-Targets M1 wiring: surface the implicit name (the binary
   # basename) on the export table so the new edge is selectable by
   # name like every other typed-tool edge.

@@ -811,7 +811,7 @@ proc emitCompileAction(projectRoot, projectEntry, goExe: string;
     inputs = inputs,
     outputs = @[archive],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go.compile")
   GoCompileAction(
     action: action,
@@ -903,7 +903,7 @@ proc emitLinkAction(projectRoot, projectEntry, goExe: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go.link")
 
 proc syntheticPackage(projectRoot, projectEntry: string): PackageDef =

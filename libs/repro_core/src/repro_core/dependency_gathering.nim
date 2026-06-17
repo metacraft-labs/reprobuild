@@ -2,7 +2,6 @@ import repro_core/process_specs
 
 type
   DependencyGatheringKind* = enum
-    dgDeclaredOnly
     dgAutomaticMonitor
     dgRecognizedFormat
     dgPostBuildConverter
@@ -52,10 +51,16 @@ proc `$`*(name: DependencyFormatName): string =
 proc `==`*(a, b: DependencyFormatName): bool =
   string(a) == string(b)
 
-proc declaredOnlyPolicy*(
+proc automaticMonitorGatheringPolicy*(
     ignoredInputPrefixes: openArray[string] = []): DependencyGatheringPolicy =
+  ## The default dependency-gathering policy: the executor monitors the
+  ## action and records every file it actually reads, so the action's
+  ## fingerprint covers all real inputs (not just the statically declared
+  ## ones). This is the spec's baseline for opaque tools; ``dgDeclaredOnly``
+  ## (which tracked only declared inputs and silently let depended-on files
+  ## change without a rebuild) has been removed.
   DependencyGatheringPolicy(
-    kind: dgDeclaredOnly,
+    kind: dgAutomaticMonitor,
     completeness: decComplete,
     ignoredInputPrefixes: @ignoredInputPrefixes)
 

@@ -428,7 +428,7 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string):
     # ``c-cpp-cmake`` and ``c-cpp-autotools`` face for their configure
     # actions. Enumerate inputs explicitly via ``collectMesonInputs``
     # so per-file invalidation still works without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-meson.configure")
   (action, stamp)
 
@@ -455,7 +455,7 @@ proc emitBuildAction(projectRoot, mesonExe: string;
     inputs = @[configureStamp],
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-meson." & kindTag & ".build")
 
 proc syntheticPackage(projectRoot: string;

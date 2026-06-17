@@ -136,7 +136,7 @@ proc thinConsumerEdge(consumerPath, interfacePath: string;
       actionId: stableIdFromDigest(fingerprint),
       process: directProcess(corepaths.normalizedPath(command[0]), processArgs,
         corepaths.normalizedPath(workDir)),
-      dependencyPolicy: declaredOnlyPolicy(),
+      dependencyPolicy: automaticMonitorGatheringPolicy(),
       metadata: cborMap([
         entry("kind", cborText("thinConsumerCheck")),
         entry("schema", cborUInt(1)),

@@ -301,7 +301,6 @@ type
 
   BuildActionDependencyPolicyKind* = enum
     bdpDefault
-    bdpDeclaredOnly
     bdpAutomaticMonitor
     bdpMakeDepfile
 

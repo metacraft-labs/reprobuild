@@ -680,7 +680,7 @@ proc emitCompileAction(projectRoot, fpcExe: string;
     inputs = @[source],
     outputs = @[objFile],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "pascal-direct.compile")
 
 proc emitArchiveAction(projectRoot, arExe: string;
@@ -700,7 +700,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "pascal-direct.archive")
 
 proc emitExecutableLinkAction(projectRoot, fpcExe: string;
@@ -773,7 +773,7 @@ proc emitExecutableLinkAction(projectRoot, fpcExe: string;
     inputs = inputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "pascal-direct.executable.link")
 
 # ---------------------------------------------------------------------------
@@ -1019,7 +1019,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "pascal-direct.xlang.ccpp.archive")
 
 proc emitCCppCrossMember(projectRoot: string;
@@ -1137,7 +1137,7 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "pascal-direct.xlang.ccpp.exec.link")
 
 proc emitCCppCrossExecutable(projectRoot: string;

@@ -726,7 +726,7 @@ proc emitByteCompileAction(projectRoot, pythonExe: string;
       inputs = @[stagedInitPath],
       outputs = @[stampPath],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "python-direct." & kindTag & ".byte-compile")
     return action
   else:
@@ -743,7 +743,7 @@ proc emitByteCompileAction(projectRoot, pythonExe: string;
       inputs = @[stagedInitPath],
       outputs = @[stampPath],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "python-direct." & kindTag & ".byte-compile")
     return action
 

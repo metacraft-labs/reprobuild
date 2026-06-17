@@ -85,5 +85,5 @@ proc run*(tool: PythonUnittest;
     deps = combineActionDeps(deps, after),
     extraInputs = allExtraInputs,
     cacheable = cacheable,
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)

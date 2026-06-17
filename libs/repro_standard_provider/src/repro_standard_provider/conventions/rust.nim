@@ -1211,7 +1211,7 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     inputs = compileInputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "rust.rustc-test-compile")
 
   let stampPath =
@@ -1224,7 +1224,7 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     inputs = @[binaryOutput],
     outputs = @[],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "rust.rustc-test-run")
 
   # Stamp the run so the engine has a declared output to track. The

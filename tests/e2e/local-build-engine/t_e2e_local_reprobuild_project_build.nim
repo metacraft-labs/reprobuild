@@ -1347,11 +1347,9 @@ suite "e2e_local_reprobuild_project_build":
 
       let report = parseFile(valueAfter(output, "buildReport:"))
       check reportAction(report, "summary"){"runQuotaBackend"}.getStr() == "builtin"
-      let expectedStylusPolicy =
-        when defined(macosx) or defined(linux) or defined(windows):
-          "dgAutomaticMonitor"
-        else:
-          "dgDeclaredOnly"
+      # ``dgAutomaticMonitor`` is the default everywhere now; ``dgDeclaredOnly``
+      # was removed, so there is no per-platform fallback policy.
+      let expectedStylusPolicy = "dgAutomaticMonitor"
       check report{"actions"}.getElems().anyIt(
         it{"id"}.getStr().startsWith("stylus-") and
         it{"dependencyPolicyKind"}.getStr() == expectedStylusPolicy)

@@ -604,7 +604,7 @@ proc emitBuildAction(projectRoot, cabalExe, platformTuple,
     # package / build actions. Enumerate inputs explicitly via
     # ``collectHaskellInputs`` so per-source invalidation still works
     # without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "haskell-cabal.build")
 
 proc syntheticPackage(projectRoot: string;

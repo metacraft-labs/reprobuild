@@ -592,7 +592,7 @@ proc emitConfigureAction(projectRoot, shExe: string;
     inputs = inputs,
     outputs = outputs,
     pool = "compile",
-    # M28 note: declaredOnlyDependencyPolicy() rather than
+    # M28 note: automaticMonitorPolicy() rather than
     # automaticMonitorPolicy() because the configure compound
     # (autoreconf + ./configure) spawns a fan-out of perl/m4/sh
     # subprocesses that FS-snoop's DLL-interpose handles unreliably
@@ -602,7 +602,7 @@ proc emitConfigureAction(projectRoot, shExe: string;
     # Makefile.am + every .m4 / aclocal.m4 / config.h.in under the
     # project root via ``collectAutotoolsSources`` so per-file
     # invalidation still works without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-autotools.configure")
   (action, stamp)
 
@@ -672,7 +672,7 @@ proc emitLinkAction(projectRoot, ccExe: string;
     inputs = objFiles,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-autotools.executable.link")
 
 proc emitArchiveAction(projectRoot, arExe: string;
@@ -692,7 +692,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-autotools.library-static.archive")
 
 proc emitForMember(projectRoot, ccExe, arExe: string;

@@ -195,13 +195,8 @@ proc parseCommandDependencyPolicy(node: NimNode;
   case text
   of "default":
     result = defaultDependencyPolicy()
-  of "declaredonly":
-    result = declaredOnlyDependencyPolicy()
   of "automaticmonitor", "monitor":
-    when defined(macosx) or defined(linux) or defined(windows):
-      result = automaticMonitorPolicy()
-    else:
-      result = declaredOnlyDependencyPolicy()
+    result = automaticMonitorPolicy()
   of "makedepfile":
     result = makeDepfilePolicy()
   else:
@@ -1306,8 +1301,6 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
   case policy.kind
   of bdpDefault:
     "defaultDependencyPolicy(" & ignoredCode() & ")"
-  of bdpDeclaredOnly:
-    "declaredOnlyDependencyPolicy(" & ignoredCode() & ")"
   of bdpAutomaticMonitor:
     "automaticMonitorPolicy(" & ignoredCode() & ")"
   of bdpMakeDepfile:
@@ -2173,12 +2166,12 @@ proc dependencyPolicyLiteral(node: NimNode;
   of "default":
     defaultDependencyPolicy()
   of "declaredonly":
-    declaredOnlyDependencyPolicy()
+    automaticMonitorPolicy()
   of "automaticmonitor", "monitor":
     when defined(macosx) or defined(linux) or defined(windows):
       automaticMonitorPolicy()
     else:
-      declaredOnlyDependencyPolicy()
+      automaticMonitorPolicy()
   of "makedepfile":
     makeDepfilePolicy()
   else:

@@ -423,9 +423,10 @@ suite "integration_scheduler_dependency_gathering_policies":
       let cacheRoot = tempRoot / ".repro-cache"
       createDir(workRoot)
 
-      requirePolicyCase("declared-only", "plain", declaredOnlyPolicy(),
-        declaredHidden = true, cacheRoot, workRoot, fixtureBin, app)
-
+      # ``dgDeclaredOnly`` was removed (it silently tracked only declared
+      # inputs); the default is now ``dgAutomaticMonitor``, which is exercised
+      # with a live monitor in the ``automatic-monitor`` case below. This block
+      # covers the policies that gather evidence WITHOUT the OS monitor.
       requirePolicyCase("recognized-report", "depfile",
         reportPolicy(dgRecognizedFormat, "deps.d"),
         declaredHidden = false, cacheRoot, workRoot, fixtureBin, app)

@@ -735,7 +735,7 @@ proc emitLinkAction(projectRoot, dExe: string;
     inputs = inputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "d-direct." & kindTag & ".link")
 
 # ---------------------------------------------------------------------------
@@ -980,7 +980,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "d-direct.xlang.ccpp.archive")
 
 proc emitCCppCrossMember(projectRoot: string;
@@ -1099,7 +1099,7 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "d-direct.xlang.ccpp.exec.link")
 
 proc emitCCppCrossExecutable(projectRoot: string;

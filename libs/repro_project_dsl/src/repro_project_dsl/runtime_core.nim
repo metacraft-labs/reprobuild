@@ -630,13 +630,6 @@ proc defaultDependencyPolicy*(
     kind: bdpDefault,
     ignoredInputPrefixes: @ignoredInputPrefixes)
 
-proc declaredOnlyDependencyPolicy*(
-    ignoredInputPrefixes: openArray[string] = []):
-    BuildActionDependencyPolicy {.dynOrStatic.} =
-  BuildActionDependencyPolicy(
-    kind: bdpDeclaredOnly,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
-
 proc automaticMonitorPolicy*(
     ignoredInputPrefixes: openArray[string] = []):
     BuildActionDependencyPolicy {.dynOrStatic.} =
@@ -1276,7 +1269,7 @@ proc prepareObject*(tool: ReproHcr; input, output: string;
     if actionId.len > 0: actionId else: defaultBuiltinActionId("hcr-prepareObject", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
 proc machoSegmentLinkFlags*(tool: ReproHcr; segmentName = "__HCR"): string {.dynOrStatic.} =
@@ -1306,7 +1299,7 @@ proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
     if actionId.len > 0: actionId else: defaultBuiltinActionId("copyFile", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
 proc ensureDir*(tool: ReproFs; path: string; actionId = "";
@@ -1322,7 +1315,7 @@ proc ensureDir*(tool: ReproFs; path: string; actionId = "";
     if actionId.len > 0: actionId else: defaultBuiltinActionId("ensureDir", path)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy())
+    dependencyPolicy = automaticMonitorPolicy())
 
 proc writeText*(tool: ReproFs; output, text: string; actionId = "";
                 deps: openArray[string] = [];
@@ -1339,7 +1332,7 @@ proc writeText*(tool: ReproFs; output, text: string; actionId = "";
     if actionId.len > 0: actionId else: defaultBuiltinActionId("writeText", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
 proc stamp*(tool: ReproFs; output, title: string;
@@ -1359,7 +1352,7 @@ proc stamp*(tool: ReproFs; output, title: string;
     if actionId.len > 0: actionId else: defaultBuiltinActionId("stamp", output)
   recordCommandAction(selectedActionId, call, deps = combineActionDeps(deps, after),
     extraInputs = inputs, cacheable = cacheable, commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
 proc normalizedRelPath(path: string): string =
@@ -1450,7 +1443,7 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     extraInputs = inputs,
     extraOutputs = outputs,
     commandStatsId = commandStatsId,
-    dependencyPolicy = declaredOnlyDependencyPolicy())
+    dependencyPolicy = automaticMonitorPolicy())
 
 proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
   result = path.replace('\\', '/').strip()

@@ -492,7 +492,7 @@ proc emitLinkAction(projectRoot, ccExe: string;
     inputs = objFiles,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-make.executable.link")
 
 proc emitArchiveAction(projectRoot, arExe: string;
@@ -512,7 +512,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-make.library-static.archive")
 
 proc emitForMember(projectRoot, ccExe, arExe: string;

@@ -1161,7 +1161,7 @@ proc emitLinkAction(projectRoot, ccExe: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-direct.executable.link")
 
 proc emitArchiveAction(projectRoot, arExe: string;
@@ -1181,7 +1181,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-direct.library-static.archive")
 
 proc readScannedDepsSource(projectRoot: string): string =

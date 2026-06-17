@@ -855,7 +855,7 @@ proc emitByteCompileActions(projectRoot, pythonExe: string;
       inputs = @[source],
       outputs = @[pycPath],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "python.byte-compile." & kindTag)
     result.actions.add(action)
     result.pycFiles.add(pycPath)
@@ -908,7 +908,7 @@ proc emitMemberWheelAction(projectRoot, pythonExe: string;
     inputs = inputs,
     outputs = @[wheelPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = statsId)
   (action, wheelPath)
 
@@ -953,7 +953,7 @@ proc emitMemberSdistAction(projectRoot, pythonExe: string;
     inputs = inputs,
     outputs = @[sdistPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = statsId)
   (action, sdistPath)
 
@@ -1001,7 +1001,7 @@ proc emitMemberInstallerAction(projectRoot, pythonExe: string;
     inputs = @[wheelPath, scriptPath],
     outputs = launcherPaths,
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = statsId)
   (action, launcherPaths)
 

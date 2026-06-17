@@ -2808,7 +2808,7 @@ proc actionSpecFor*(identity: ToolActionIdentity): ActionSpec =
     process: directProcess(corepaths.normalizedPath(
         identity.resolvedExecutablePath),
       args, corepaths.normalizedPath(getCurrentDir())),
-    dependencyPolicy: declaredOnlyPolicy(),
+    dependencyPolicy: automaticMonitorGatheringPolicy(),
     metadata: metadataFor(identity))
 
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;

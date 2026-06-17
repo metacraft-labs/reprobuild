@@ -696,7 +696,7 @@ proc emitLinkAction(projectRoot, zigExe: string;
     inputs = inputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "zig-direct." & kindTag & ".link")
 
 # ---------------------------------------------------------------------------
@@ -941,7 +941,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "zig-direct.xlang.ccpp.archive")
 
 proc emitCCppCrossMember(projectRoot: string;
@@ -1076,7 +1076,7 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "zig-direct.xlang.ccpp.exec.link")
 
 proc emitCCppCrossExecutable(projectRoot: string;

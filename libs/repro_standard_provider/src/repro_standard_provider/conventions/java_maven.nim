@@ -390,7 +390,7 @@ proc emitPackageAction(projectRoot, mvnExe: string;
     # constraint M38/M39's configure actions face. Enumerate inputs
     # explicitly via ``collectJavaInputs`` so per-source invalidation
     # still works without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "java-maven.package")
 
 proc syntheticPackage(projectRoot: string;

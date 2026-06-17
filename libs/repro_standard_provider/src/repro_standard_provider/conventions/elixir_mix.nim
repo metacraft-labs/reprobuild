@@ -512,7 +512,7 @@ proc emitEscriptBuildAction(projectRoot, mixExe, exeName: string;
     # processes whose FS reads aren't reliably observed via the
     # Windows DLL-interpose path. Same constraint
     # M40/M41/M42/M43/M46/M55/M56/M57/M60/M61 face.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "elixir-mix.escript-build")
 
 proc emitWrapperAction(projectRoot, exeName, escriptBuildActionId: string):

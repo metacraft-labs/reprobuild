@@ -424,7 +424,7 @@ proc emitConfigureAction(projectRoot, cmakeExe, generator: string):
     # (same constraint c-cpp-autotools's configure action faces). We
     # enumerate inputs explicitly via ``collectCMakeInputs`` so per-
     # file invalidation still works without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-cmake.configure")
   (action, stamp)
 
@@ -451,7 +451,7 @@ proc emitBuildAction(projectRoot, cmakeExe: string;
     inputs = @[configureStamp],
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-cmake." & kindTag & ".build")
 
 proc syntheticPackage(projectRoot: string;

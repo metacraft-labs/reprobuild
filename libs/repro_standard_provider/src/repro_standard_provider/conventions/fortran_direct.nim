@@ -611,7 +611,7 @@ proc emitCompileAction(projectRoot, gfortranExe: string;
     inputs = @[source],
     outputs = @[objFile],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "fortran-direct.compile")
 
 proc emitArchiveAction(projectRoot, arExe: string;
@@ -632,7 +632,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "fortran-direct.archive")
 
 proc fortranRuntimeLinkLibs(): seq[string] =
@@ -688,7 +688,7 @@ proc emitLinkAction(projectRoot, gfortranExe: string;
     inputs = inputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "fortran-direct.link")
 
 # ---------------------------------------------------------------------------
@@ -916,7 +916,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "fortran-direct.xlang.ccpp.archive")
 
 proc emitCCppCrossMember(projectRoot: string;
@@ -1029,7 +1029,7 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "fortran-direct.xlang.ccpp.exec.link")
 
 proc emitCCppCrossExecutable(projectRoot: string;

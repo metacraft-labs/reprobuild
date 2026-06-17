@@ -969,7 +969,7 @@ proc emitCompileAction(projectRoot, goExe: string;
     inputs = inputs,
     outputs = @[archive],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go-direct." & kindTag & ".compile")
 
 proc emitLinkAction(projectRoot, goExe: string;
@@ -1019,7 +1019,7 @@ proc emitLinkAction(projectRoot, goExe: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go-direct.executable.link")
 
 # ----------------------------------------------------------------------
@@ -1140,7 +1140,7 @@ proc emitCgoBuildAction(projectRoot, goExe: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go-direct.executable.cgo.build")
 
 proc emitCArchiveBuildAction(projectRoot, goExe: string;
@@ -1177,7 +1177,7 @@ proc emitCArchiveBuildAction(projectRoot, goExe: string;
     inputs = inputs,
     outputs = @[archivePath, headerPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go-direct.library.c-archive")
 
 # ----------------------------------------------------------------------
@@ -1472,7 +1472,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go-direct.xlang.ccpp.archive")
 
 proc emitCCppCrossMember(projectRoot: string;
@@ -1614,7 +1614,7 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "go-direct.xlang.ccpp.exec.link")
 
 proc emitCCppCrossExecutable(projectRoot: string;

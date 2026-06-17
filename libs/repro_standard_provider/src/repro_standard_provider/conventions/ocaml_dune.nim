@@ -506,7 +506,7 @@ proc emitBuildAction(projectRoot, duneExe, entryRel: string;
     # for their configure / package / build actions. Enumerate inputs
     # explicitly via ``collectOcamlInputs`` so per-source invalidation
     # still works without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ocaml-dune.build")
 
 proc syntheticPackage(projectRoot: string;

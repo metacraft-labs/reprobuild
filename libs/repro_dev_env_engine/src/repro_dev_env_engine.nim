@@ -108,7 +108,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = true,
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    dependencyPolicy = declaredOnlyPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy())
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
@@ -348,7 +348,7 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     commandStatsId = "repro dev-env shell render edge",
     cacheable = true,
     weakFingerprint = weak,
-    dependencyPolicy = declaredOnlyPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy())
 
 proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.modulePath.len == 0:

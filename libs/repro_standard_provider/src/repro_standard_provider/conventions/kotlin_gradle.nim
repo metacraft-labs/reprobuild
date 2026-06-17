@@ -508,7 +508,7 @@ proc emitBuildAction(projectRoot, gradleExe: string;
     # constraint M38/M39/M40 face for their configure / package actions.
     # Enumerate inputs explicitly via ``collectGradleInputs`` so per-
     # source invalidation still works without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "kotlin-gradle.build")
 
 proc syntheticPackage(projectRoot: string;

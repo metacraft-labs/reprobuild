@@ -1173,7 +1173,7 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
     inputs = phase3Inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "nim.c.gcc-link")
 
   (phase1Action, phase2, phase3Action)
@@ -1318,7 +1318,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
       inputs = objFiles,
       outputs = @[staticOutput],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "nim.c.ar-archive")
     phase3.add(staticAction)
 
@@ -1363,7 +1363,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
       inputs = objFiles,
       outputs = @[sharedOutput],
       pool = "compile",
-      dependencyPolicy = declaredOnlyDependencyPolicy(),
+      dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "nim.c.gcc-link-shared")
     phase3.add(sharedAction)
 
@@ -1825,7 +1825,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
     inputs = objFiles,
     outputs = @[archiveOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "nim.xlang.ccpp.archive")
 
 proc emitCCppCrossMember(projectRoot: string;
@@ -2008,7 +2008,7 @@ proc emitCCppCrossExecLinkAction(projectRoot, linkDriver: string;
     inputs = inputs,
     outputs = @[binaryOutput],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "nim.xlang.ccpp.exec.link")
 
 proc emitCCppCrossExecutable(projectRoot: string;
@@ -2299,7 +2299,7 @@ proc emitRustCrossLibrary(projectRoot: string;
     inputs = inputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "nim.xlang.rust.lib.link")
 
 proc emitRustCrossExecutable(projectRoot: string;
@@ -2399,7 +2399,7 @@ proc emitRustCrossExecutable(projectRoot: string;
     inputs = inputs,
     outputs = @[outputPath],
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "nim.xlang.rust.exec.link")
 
 proc readScannedDepsSource(projectRoot: string): string =

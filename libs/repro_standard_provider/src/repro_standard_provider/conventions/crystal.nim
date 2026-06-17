@@ -514,7 +514,7 @@ proc emitShardsInstallAction(projectRoot, shardsExe: string;
     # ``shards install`` spawns git / curl subprocesses whose FS reads
     # aren't reliably observed via Windows DLL-interpose. Same pattern
     # as M40 / M41 / M42 / M43 / M46 / M55 / M56 / M57 conventions.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "crystal.shards.install")
 
 proc emitBuildAction(projectRoot, crystalExe: string;
@@ -558,7 +558,7 @@ proc emitBuildAction(projectRoot, crystalExe: string;
     # internally; the FS reads aren't reliably observed via Windows
     # DLL-interpose. ``declaredOnly`` policy + explicit ``inputs``
     # walk is the same pattern other Tier 2b conventions use.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = statsId)
 
 proc syntheticPackage(projectRoot: string;

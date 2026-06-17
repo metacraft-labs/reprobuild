@@ -405,7 +405,7 @@ proc emitBuildAction(projectRoot, swiftExe: string;
     # package / build actions. Enumerate inputs explicitly via
     # ``collectSwiftInputs`` so per-source invalidation still works
     # without monitoring.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "swift-swiftpm.build")
 
 proc syntheticPackage(projectRoot: string;

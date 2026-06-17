@@ -962,7 +962,7 @@ proc emitTscCompileAction(projectRoot, npxExe: string;
     inputs = inputs,
     outputs = expectedOutputs,
     pool = "compile",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "jsts.tsc-compile")
   action
 

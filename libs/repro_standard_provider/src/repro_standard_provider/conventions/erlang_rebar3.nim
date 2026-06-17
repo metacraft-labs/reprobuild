@@ -491,7 +491,7 @@ proc emitEscriptizeAction(projectRoot, rebar3Exe, exeName: string;
     # ``rebar3 escriptize`` spawns ``erl`` worker processes whose FS
     # reads aren't reliably observed via the Windows DLL-interpose
     # path. Same constraint M40/M41/M42/M43/M46/M55/M56/M57/M60 face.
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "erlang-rebar3.escriptize")
 
 proc emitWrapperAction(projectRoot, exeName, escriptizeActionId: string):

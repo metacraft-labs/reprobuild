@@ -955,7 +955,7 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
     weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
-    dependencyPolicy = declaredOnlyPolicy(),
+    dependencyPolicy = automaticMonitorGatheringPolicy(),
     env = env)
 
 proc prependProcessPath(path: string) =
@@ -1252,7 +1252,12 @@ proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string]
 
 proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
   if depfile.len == 0:
-    return repro_core.declaredOnlyPolicy()
+    # No recognized depfile to drive gathering -> the executor monitors the
+    # action and records every file it reads. This is the default policy for
+    # actions that do not opt into a depfile/converter; the removed
+    # ``dgDeclaredOnly`` used to track only declared inputs here, which let
+    # depended-on files change without invalidating the action.
+    return repro_core.automaticMonitorGatheringPolicy()
   DependencyGatheringPolicy(
     kind: dgRecognizedFormat,
     completeness: decComplete,
@@ -1272,8 +1277,6 @@ proc lowerDependencyPolicy(actionId, depfile: string;
   case policy.kind
   of bdpDefault:
     result = depfilePolicy(depfile)
-  of bdpDeclaredOnly:
-    result = repro_core.declaredOnlyPolicy()
   of bdpAutomaticMonitor:
     if depfile.len > 0:
       raise newException(ValueError,
@@ -2892,7 +2895,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = true,
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    dependencyPolicy = declaredOnlyPolicy())
+    dependencyPolicy = automaticMonitorGatheringPolicy())
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
@@ -4948,6 +4951,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         cacheRoot: outDir / "build-engine-cache",
         actionCacheRoot: currentActionCacheRoot(),
         runQuotaCliPath: publicCliPath,
+        # The provider compile is monitored like every other action: wrapping
+        # the inner ``repro __repro-compile-provider`` (which runs ``nim c``)
+        # with fs-snoop captures every file the compile reads — repro.nim and
+        # ALL transitively imported modules (repro_project_dsl,
+        # ct_test_nim_unittest, repro_tests.nim, the stdlib). Without this the
+        # provider's fingerprint covered only its statically declared inputs,
+        # so editing e.g. the DSL or the test-edge adapter left a stale
+        # provider (and, transitively, stale build/execute edges). This is the
+        # same monitor wiring the main build's engine config uses.
+        monitorCliPath: selfSpawnFsSnoopPath(),
+        monitorCliArgs: internalFsSnoopArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
@@ -10161,6 +10175,12 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
+      # Monitor the provider compile so its fingerprint covers every file the
+      # compile reads (repro.nim + all transitive imports), not just the
+      # statically declared inputs. See the matching wiring on the primary
+      # provider-compile config above.
+      monitorCliPath: selfSpawnFsSnoopPath(),
+      monitorCliArgs: internalFsSnoopArgs,
       maxParallelism: 1'u32,
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
