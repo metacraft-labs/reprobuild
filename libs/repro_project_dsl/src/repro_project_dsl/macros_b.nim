@@ -1967,6 +1967,211 @@ proc emitM9EValidates*(packageName: string;
     result.add(quote do:
       registerValidateExpr(`pkgLit`, `exprReprLit`, `closureNode`))
 
+# ---------------------------------------------------------------------------
+# DSL-port M9.G — ``bootloader:`` block lowerer.
+#
+# Source-level shape (the v8 spec memo's NDEM1 example):
+#
+#   package reproosDesktop:
+#     bootloader:
+#       generationEntry: true
+#       timeout: 5
+#       menuEntry:
+#         title "ReproOS - generation {{ generation.id }}"
+#         kernel "/boot/vmlinuz-{{ generation.id }}"
+#         initrd "/boot/initrd.img-{{ generation.id }}"
+#         cmdline "root=LABEL=ReproOS ro quiet"
+#
+# Per-package single block; nested setters dispatched on head name. The
+# ``generationEntry`` / ``timeout`` / ``defaultEntry`` setters are
+# lowered to ``registerBootloaderConfig(...)`` calls (one per setter —
+# the runtime merges into the row keyed by ``packageName`` so argument
+# order does not matter). Each ``menuEntry:`` body is lowered to a
+# ``registerBootloaderMenuEntry(...)`` call with the four canonical
+# fields (title/kernel/initrd/cmdline) extracted from the body's setter
+# statements.
+#
+# Setters with unrecognised heads or non-string-literal payloads inside
+# a ``menuEntry:`` body are silently skipped — they appear in the
+# diagnostic surface via the runtime's ``extras`` slot when a future
+# milestone widens the field set. Skipped payloads default to ``""``.
+# ---------------------------------------------------------------------------
+
+proc m9gUnwrapSetterPayload(arg: NimNode): NimNode =
+  ## Unwrap a setter payload node. The DSL recognises two source-level
+  ## spellings for setters:
+  ##
+  ##   * ``key value`` — parses as ``Command(Ident "key", <payloadNode>)``
+  ##     where ``stmt[1]`` is the payload directly.
+  ##   * ``key: value`` — parses as ``Call(Ident "key", StmtList(
+  ##     <payloadNode>))`` where ``stmt[1]`` is a ``StmtList`` wrapping
+  ##     the payload.
+  ##
+  ## Returns the underlying payload node in either case; returns the
+  ## input verbatim for any other shape so caller-level matchers can
+  ## reject it.
+  if arg.kind == nnkStmtList and arg.len == 1:
+    return arg[0]
+  return arg
+
+proc m9gExtractStrLit(arg: NimNode): string =
+  ## Extract a string-literal payload from a setter argument. Returns
+  ## ``""`` when the argument is not a string literal. Handles both
+  ## the ``key "value"`` (Command) and ``key: "value"`` (Call+StmtList)
+  ## spellings via ``m9gUnwrapSetterPayload``.
+  let n = m9gUnwrapSetterPayload(arg)
+  if n.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return n.strVal
+  return ""
+
+proc m9gExtractBoolLit(arg: NimNode): tuple[matched: bool; value: bool] =
+  ## Extract a bool-literal payload from a setter argument. Recognises
+  ## ``true`` / ``false`` idents (Nim parses bare ``true`` / ``false``
+  ## as ``nnkIdent``) AND ``nnkSym`` references that resolve to the bool
+  ## values. Returns ``(matched=false, ...)`` for anything else. Handles
+  ## both the ``key true`` (Command) and ``key: true`` (Call+StmtList)
+  ## spellings via ``m9gUnwrapSetterPayload``.
+  let n = m9gUnwrapSetterPayload(arg)
+  if n.kind in {nnkIdent, nnkSym}:
+    let s = identText(n).normalize
+    if s == "true":
+      return (true, true)
+    if s == "false":
+      return (true, false)
+
+proc m9gExtractIntLit(arg: NimNode): tuple[matched: bool; value: int] =
+  ## Extract an int-literal payload from a setter argument. Returns
+  ## ``(matched=false, ...)`` when the argument is not an integer
+  ## literal. Handles both the ``key 5`` (Command) and ``key: 5`` (Call+
+  ## StmtList) spellings via ``m9gUnwrapSetterPayload``.
+  let n = m9gUnwrapSetterPayload(arg)
+  if n.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+                nnkInt32Lit, nnkInt64Lit}:
+    return (true, int(n.intVal))
+
+proc m9gSetterHeadName(stmt: NimNode): string =
+  ## Return the lowercased head ident name of a setter statement, or
+  ## ``""`` when the statement is not a simple setter shape.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return ""
+  if stmt.len < 2:
+    return ""
+  let head = stmt[0]
+  if head.kind notin {nnkIdent, nnkSym}:
+    return ""
+  result = identText(head).normalize
+
+proc m9gParseMenuEntry(body: NimNode):
+    tuple[title, kernel, initrd, cmdline: string] =
+  ## Walk a ``menuEntry:`` body and extract the four canonical string
+  ## fields. Missing fields default to ``""`` — the recipe author is
+  ## responsible for declaring every field the apply phase needs.
+  if body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    let head = m9gSetterHeadName(stmt)
+    if head.len == 0:
+      continue
+    if stmt.len != 2:
+      continue
+    let payload = m9gExtractStrLit(stmt[1])
+    case head
+    of "title": result.title = payload
+    of "kernel": result.kernel = payload
+    of "initrd": result.initrd = payload
+    of "cmdline": result.cmdline = payload
+    else: discard
+
+proc emitM9GBootloader*(packageName: string;
+                       classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for ``soM9GBootloader`` entries
+  ## and emit one ``registerBootloaderConfig`` call per recognised
+  ## top-level setter PLUS one ``registerBootloaderMenuEntry`` call per
+  ## recognised ``menuEntry:`` block.
+  ##
+  ## Per-package emission shape:
+  ##
+  ##   registerBootloaderConfig("<pkg>", true, -1, "")
+  ##   registerBootloaderConfig("<pkg>", false, 5, "")
+  ##   registerBootloaderMenuEntry("<pkg>",
+  ##                               "<title>", "<kernel>",
+  ##                               "<initrd>", "<cmdline>")
+  ##
+  ## ``parsePackageDef`` does NOT recognise ``bootloader:`` (no arm in
+  ## ``macros_a.nim``), so M9.G's ownership is exclusive.
+  result = newStmtList()
+  let pkgLit = newLit(packageName)
+  # Always emit one initialising call so the package row exists even if
+  # the body declares only ``menuEntry:`` blocks. (The runtime is
+  # idempotent on re-init so this is safe.)
+  var bootloaderBlockSeen = false
+  for entry in classified:
+    if entry.ownership != soM9GBootloader:
+      continue
+    bootloaderBlockSeen = true
+    let stmt = entry.stmt
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len < 2:
+      continue
+    let body = stmt[^1]
+    if body.kind != nnkStmtList:
+      continue
+    for setterStmt in body:
+      let head = m9gSetterHeadName(setterStmt)
+      if head.len == 0:
+        continue
+      case head
+      of "generationentry":
+        if setterStmt.len != 2:
+          continue
+        let parsed = m9gExtractBoolLit(setterStmt[1])
+        if not parsed.matched:
+          continue
+        let boolLit = newLit(parsed.value)
+        result.add(quote do:
+          registerBootloaderConfig(`pkgLit`, `boolLit`, -1, ""))
+      of "timeout":
+        if setterStmt.len != 2:
+          continue
+        let parsed = m9gExtractIntLit(setterStmt[1])
+        if not parsed.matched:
+          continue
+        let intLit = newLit(parsed.value)
+        result.add(quote do:
+          registerBootloaderConfig(`pkgLit`, false, `intLit`, ""))
+      of "defaultentry":
+        if setterStmt.len != 2:
+          continue
+        let payload = m9gExtractStrLit(setterStmt[1])
+        if payload.len == 0:
+          continue
+        let strLit = newLit(payload)
+        result.add(quote do:
+          registerBootloaderConfig(`pkgLit`, false, -1, `strLit`))
+      of "menuentry":
+        if setterStmt.len < 2:
+          continue
+        let menuBody = setterStmt[^1]
+        if menuBody.kind != nnkStmtList:
+          continue
+        let fields = m9gParseMenuEntry(menuBody)
+        let titleLit = newLit(fields.title)
+        let kernelLit = newLit(fields.kernel)
+        let initrdLit = newLit(fields.initrd)
+        let cmdlineLit = newLit(fields.cmdline)
+        result.add(quote do:
+          registerBootloaderMenuEntry(`pkgLit`,
+            `titleLit`, `kernelLit`, `initrdLit`, `cmdlineLit`))
+      else:
+        discard
+  # If we saw at least one bootloader block but emitted no setter calls
+  # (e.g. only unrecognised heads), still emit one init call so the
+  # package row is non-empty / observable to ``registeredBootloaderConfig``.
+  if bootloaderBlockSeen and result.len == 0:
+    result.add(quote do:
+      registerBootloaderConfig(`pkgLit`, false, -1, ""))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -2194,6 +2399,16 @@ macro package*(name: untyped; body: untyped): untyped =
   let m9eValidateEmission = emitM9EValidates(packageName, classifiedSections)
   result.add(m9eVariantEmission)
   result.add(m9eValidateEmission)
+  # ── DSL-port M9.G: ``bootloader:`` block lowering. Per-package single
+  # block; the emitter walks the setter list and emits one
+  # ``registerBootloaderConfig`` call per recognised top-level setter
+  # plus one ``registerBootloaderMenuEntry`` call per ``menuEntry:``
+  # body. ``parsePackageDef`` does NOT recognise the section so M9.G's
+  # ownership is exclusive — symmetric with M5's ``service:`` and
+  # M9.E's ``variant:`` / ``validate:``. Block sits AFTER M9.E so the
+  # M9.G surface sees every registry row prior milestones created.
+  let m9gBootloaderEmission = emitM9GBootloader(packageName, classifiedSections)
+  result.add(m9gBootloaderEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

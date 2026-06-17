@@ -1811,6 +1811,19 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.G — ``bootloader:`` block registry. NDEM1 reproos-
+  # desktop needs per-package GRUB metadata so the generation-switch
+  # apply phase can render the menu. The block recognises three top-
+  # level setters (``generationEntry`` / ``timeout`` / ``defaultEntry``)
+  # plus zero or more ``menuEntry:`` bodies.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim",
+    binary: "build/test-bin/t_dsl_bootloader",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",

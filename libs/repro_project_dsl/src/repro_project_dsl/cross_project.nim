@@ -358,7 +358,11 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # closure selection; the ``validate:`` block declares a
                  # solver-time predicate over the current configurable
                  # values.
-                 "variant", "validate"]
+                 "variant", "validate",
+                 # DSL-port M9.G: the ``bootloader:`` block declares
+                 # per-package GRUB metadata for NDEM1 generation-switch
+                 # rendering.
+                 "bootloader"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.
@@ -577,6 +581,17 @@ type
       ## single ``proc(): bool = ...`` literal; the emitter splices that
       ## closure verbatim into a ``registerValidateExpr(...)`` call.
       ## Exclusive ownership symmetric with ``soM9EVariant``.
+    soM9GBootloader
+      ## ``bootloader:`` blocks (M9.G) — per-package GRUB metadata for
+      ## NDEM1 generation-switch rendering. Body recognises three top-
+      ## level setters (``generationEntry`` / ``timeout`` /
+      ## ``defaultEntry``) and zero or more ``menuEntry:`` bodies. The
+      ## emitter lowers each setter to a ``registerBootloaderConfig``
+      ## call and each ``menuEntry:`` to a ``registerBootloader
+      ## MenuEntry`` call. The legacy ``parsePackageDef`` walker does
+      ## NOT recognise ``bootloader:`` (no arm in ``macros_a.nim``), so
+      ## M9.G's ownership is exclusive — symmetric with M5's ``service:``
+      ## treatment.
 
   ClassifiedSection* = object
     ## One classified section. ``stmt`` is a copy of the AST node from
@@ -603,6 +618,7 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   of "service": soM5Service
   of "variant": soM9EVariant
   of "validate": soM9EValidate
+  of "bootloader": soM9GBootloader
   else: soLegacyParsePackageDef
 
 proc classifyPackageSections*(sectionStmts: NimNode):

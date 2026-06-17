@@ -3202,3 +3202,172 @@ proc evaluateValidates*(packageName: string) =
       raise newException(EConfigViolation,
         "validate: predicate '" & entry.exprRepr & "' failed for package '" &
         packageName & "'")
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.G — ``bootloader:`` block registry.
+# ---------------------------------------------------------------------------
+##
+## ## What the M9.G surface covers
+##
+## NDEM1 (reproos-desktop) needs a way to declare per-package bootloader
+## metadata so the generation-switch apply phase can render the GRUB
+## menu. The simplest user-facing shape mirrors v8's spec memo example:
+##
+##   package reproosDesktop:
+##     bootloader:
+##       generationEntry: true
+##       timeout: 5
+##       menuEntry:
+##         title "ReproOS - generation {{ generation.id }}"
+##         kernel "/boot/vmlinuz-{{ generation.id }}"
+##         initrd "/boot/initrd.img-{{ generation.id }}"
+##         cmdline "root=LABEL=ReproOS ro quiet"
+##
+## ONE ``bootloader:`` block per package. Multiple ``menuEntry:`` blocks
+## inside the body are allowed and appended in source order. The
+## ``generationEntry``/``timeout``/``defaultEntry`` setters are
+## merged into a single ``DslBootloaderConfig`` row; the macro emits one
+## ``registerBootloaderConfig`` per declared setter so the runtime
+## coalesces them into the final config.
+##
+## The actual generation-switch rendering happens at the NDEM1 apply
+## phase that consumes ``registeredBootloaderConfig`` — M9.G is a pure
+## registry milestone, no semantic interpretation here.
+##
+## ## Threading model
+##
+## ``dslPortBootloaders`` is ``threadvar`` so concurrent test fixtures do
+## not cross-attribute bootloader rows. ``resetDslPortBootloaderState``
+## resets the per-thread slot. Matches the M9.E ``dslPortVariants`` /
+## ``dslPortValidates`` shape.
+
+type
+  DslBootloaderMenuEntry* = object
+    ## One ``menuEntry:`` block inside a ``bootloader:`` body. The four
+    ## canonical fields (title, kernel, initrd, cmdline) are the
+    ## minimum surface the NDEM1 generation-switch needs; extra
+    ## key/value setters captured by future milestones land in
+    ## ``extras`` so the diagnostic surface stays open without
+    ## widening the typed-field set.
+    packageName*: string
+    title*: string
+    kernel*: string
+    initrd*: string
+    cmdline*: string
+    extras*: seq[tuple[key: string, value: string]]
+      ## Forward-compat slot for additional ``key "value"`` setters a
+      ## future milestone may add to ``menuEntry:`` bodies (e.g.
+      ## ``device "/dev/sda1"`` or ``moduleParams "..."``). M9.G's
+      ## emitter populates only the four canonical fields; ``extras``
+      ## starts empty.
+
+  DslBootloaderConfig* = object
+    ## Per-package bootloader registry row. One row per package; the
+    ## M9.G emitter coalesces multiple top-level setters
+    ## (``generationEntry`` / ``timeout`` / ``defaultEntry``) into a
+    ## single row by re-running ``registerBootloaderConfig`` for each
+    ## setter (the runtime merges into the existing row keyed by
+    ## ``packageName``). Multiple ``menuEntry:`` blocks append distinct
+    ## ``DslBootloaderMenuEntry`` rows into ``menuEntries`` in source
+    ## order.
+    packageName*: string
+    generationEntry*: bool
+      ## Whether this package contributes a generation-aware GRUB
+      ## entry. NDEM1 reproos-desktop sets this to ``true``; recipes
+      ## without per-generation entries leave it at the default
+      ## ``false``.
+    timeout*: int
+      ## GRUB menu timeout in seconds. Default ``-1`` indicates the
+      ## setter was never emitted; the apply phase substitutes a
+      ## host-level default in that case.
+    defaultEntry*: string
+      ## Optional GRUB ``set default=`` value. Default ``""`` means
+      ## unset.
+    menuEntries*: seq[DslBootloaderMenuEntry]
+      ## Source-order list of per-entry blocks declared inside the
+      ## ``bootloader:`` body.
+
+var dslPortBootloaders {.threadvar.}: Table[string, DslBootloaderConfig]
+  ## Per-package bootloader registry. Keyed by ``packageName``.
+  ## ``registerBootloaderConfig`` initialises or merges into the row;
+  ## ``registerBootloaderMenuEntry`` appends a menu-entry row.
+
+proc resetDslPortBootloaderState*() =
+  ## Drop every bootloader-config registration. Test fixtures call this
+  ## between scenarios so registry entries do not leak across cases.
+  ## Symmetric with ``resetDslPortVariantState`` /
+  ## ``resetDslPortValidateState``.
+  dslPortBootloaders.clear()
+
+proc registerBootloaderConfig*(packageName: string;
+                               generationEntry: bool;
+                               timeout: int = -1;
+                               defaultEntry: string = "") =
+  ## Initialise OR merge the bootloader row for ``packageName``. The
+  ## M9.G emitter calls this once per declared top-level setter; the
+  ## runtime coalesces them by:
+  ##
+  ##   * creating an empty row on first call (with ``generationEntry =
+  ##     false``, ``timeout = -1``, ``defaultEntry = ""``,
+  ##     ``menuEntries = @[]``);
+  ##   * applying ``generationEntry`` IF the caller asked for ``true``
+  ##     (a ``false`` argument does not clobber a prior ``true``);
+  ##   * applying ``timeout`` IF the caller passed a non-default value
+  ##     (anything other than ``-1``);
+  ##   * applying ``defaultEntry`` IF the caller passed a non-empty
+  ##     string.
+  ##
+  ## This means the macro can emit one call per setter without worrying
+  ## about argument order or unset-vs-default ambiguity. The first call
+  ## also populates ``packageName`` on the row.
+  if packageName notin dslPortBootloaders:
+    dslPortBootloaders[packageName] = DslBootloaderConfig(
+      packageName: packageName,
+      generationEntry: false,
+      timeout: -1,
+      defaultEntry: "",
+      menuEntries: @[])
+  if generationEntry:
+    dslPortBootloaders[packageName].generationEntry = true
+  if timeout != -1:
+    dslPortBootloaders[packageName].timeout = timeout
+  if defaultEntry.len > 0:
+    dslPortBootloaders[packageName].defaultEntry = defaultEntry
+
+proc registerBootloaderMenuEntry*(packageName: string;
+                                  title, kernel, initrd, cmdline: string) =
+  ## Append a ``menuEntry`` row to the bootloader config for
+  ## ``packageName``. Auto-creates an empty parent row if no
+  ## ``registerBootloaderConfig`` call landed yet (the
+  ## ``bootloader:`` body's setter order is the user's choice — a
+  ## ``menuEntry:`` may appear before ``generationEntry:`` /
+  ## ``timeout:`` in source).
+  if packageName notin dslPortBootloaders:
+    dslPortBootloaders[packageName] = DslBootloaderConfig(
+      packageName: packageName,
+      generationEntry: false,
+      timeout: -1,
+      defaultEntry: "",
+      menuEntries: @[])
+  dslPortBootloaders[packageName].menuEntries.add(DslBootloaderMenuEntry(
+    packageName: packageName,
+    title: title,
+    kernel: kernel,
+    initrd: initrd,
+    cmdline: cmdline,
+    extras: @[]))
+
+proc registeredBootloaderConfig*(packageName: string): DslBootloaderConfig =
+  ## Return the registered bootloader config for ``packageName``.
+  ## Returns a default-initialised row with empty fields when the
+  ## package never declared a ``bootloader:`` block; the row's
+  ## ``packageName`` is left empty so callers can distinguish
+  ## "registered with all defaults" from "never registered".
+  if packageName in dslPortBootloaders:
+    return dslPortBootloaders[packageName]
+  return DslBootloaderConfig(
+    packageName: "",
+    generationEntry: false,
+    timeout: -1,
+    defaultEntry: "",
+    menuEntries: @[])
