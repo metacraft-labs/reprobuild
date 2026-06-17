@@ -2182,6 +2182,156 @@ proc emitM9GBootloader*(packageName: string;
     result.add(quote do:
       registerBootloaderConfig(`pkgLit`, false, -1, ""))
 
+# ---------------------------------------------------------------------------
+# DSL-port M9.H — ``fetch:`` block emitter.
+#
+# Walks each ``soM9HFetch`` classified section, parses the six recognised
+# setters out of the body, and emits a single ``registerFetchSpec(...)``
+# call per declared block. Setter parsing uses the same helpers the M9.G
+# emitter uses (``m9gExtractStrLit`` / ``m9gExtractBoolLit`` /
+# ``m9gExtractIntLit`` / ``m9gSetterHeadName``); the helpers' M9.G prefix
+# is incidental — they parse any setter spelling the DSL accepts.
+#
+# Rejection rules (parse-time ``error()``):
+#   * Neither ``url`` nor ``gitUrl`` declared → "fetch: block must
+#     specify one of url: or gitUrl:".
+#   * Both ``url`` AND ``gitUrl`` declared (conflicting kind) → "fetch:
+#     block declares both url: and gitUrl: — pick one".
+#   * Neither ``sha256`` nor ``blake3`` declared → "fetch: block must
+#     specify either sha256: or blake3:".
+#
+# Default values:
+#   * ``extractStrip`` defaults to 1 when not declared.
+#   * ``extractedRoot`` defaults to "" when not declared.
+#   * ``gitRevision`` defaults to "" when not declared (only meaningful
+#     for ``gitUrl`` mode).
+#
+# Precedence:
+#   * If both ``sha256`` and ``blake3`` appear in the same body, the
+#     ``blake3`` value wins (matches the M9.H spec).
+# ---------------------------------------------------------------------------
+
+proc m9hSetterValueNode(arg: NimNode): NimNode =
+  ## Return the value-side node of a ``key value`` / ``key: value``
+  ## setter. The DSL accepts two source-level spellings:
+  ##
+  ##   * ``key value`` — parses as ``Command(Ident "key",
+  ##     <valueNode>)`` where ``stmt[1]`` is the value node directly.
+  ##   * ``key: value`` — parses as ``Call(Ident "key", StmtList(
+  ##     <valueNode>))`` where ``stmt[1]`` is a ``StmtList`` wrapping
+  ##     the value node.
+  ##
+  ## Returns the underlying value node in either case. M9.H splices
+  ## these nodes verbatim into the emitted ``registerFetchSpec(...)``
+  ## call so the recipe author may use arbitrary compile-time string
+  ## expressions (e.g. ``"abc" & repeat("0", 61)``) as setter values —
+  ## ``m9gExtractStrLit`` only matches naked string literals, which is
+  ## too restrictive for the M9.H surface.
+  if arg.kind == nnkStmtList and arg.len == 1:
+    return arg[0]
+  return arg
+
+proc emitM9HFetch*(packageName: string;
+                  classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for ``soM9HFetch`` entries and
+  ## emit one ``registerFetchSpec(...)`` call per recognised ``fetch:``
+  ## block. Returns an empty ``StmtList`` when no entry is found.
+  ##
+  ## Per-block emission shape:
+  ##
+  ##   registerFetchSpec("<pkg>",
+  ##                     <url-or-gitUrl-expr>,
+  ##                     <gitRevision-expr>,
+  ##                     <dshaSha256 | dshaBlake3>,
+  ##                     <hashHex-expr>,
+  ##                     <dfkTarball | dfkGitArchive>,
+  ##                     <extractStrip-expr>,
+  ##                     <extractedRoot-expr>)
+  ##
+  ## The string-valued setters splice the source-level value node
+  ## verbatim into the call — this lets the recipe use any compile-
+  ## time string expression (a naked literal, a ``$`` interpolation, a
+  ## ``&``-concat, ...) without restricting the macro to one shape.
+  ## Parse-time presence checks (``url`` / ``gitUrl`` exclusive,
+  ## ``sha256`` / ``blake3`` at least one) still run against the
+  ## node's structural presence.
+  result = newStmtList()
+  let pkgLit = newLit(packageName)
+  for entry in classified:
+    if entry.ownership != soM9HFetch:
+      continue
+    let stmt = entry.stmt
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len < 2:
+      continue
+    let body = stmt[^1]
+    if body.kind != nnkStmtList:
+      continue
+    # Per-block accumulators. Each "*Node" holds the AST node spliced
+    # into the emitted call; ``nil`` means "setter not declared".
+    var urlNode: NimNode = nil
+    var gitUrlNode: NimNode = nil
+    var gitRevisionNode: NimNode = nil
+    var sha256Node: NimNode = nil
+    var blake3Node: NimNode = nil
+    var extractStripNode: NimNode = nil
+    var extractedRootNode: NimNode = nil
+    for setterStmt in body:
+      let head = m9gSetterHeadName(setterStmt)
+      if head.len == 0:
+        continue
+      if setterStmt.len != 2:
+        continue
+      let valueNode = m9hSetterValueNode(setterStmt[1])
+      case head
+      of "url": urlNode = valueNode
+      of "giturl": gitUrlNode = valueNode
+      of "gitrevision": gitRevisionNode = valueNode
+      of "sha256": sha256Node = valueNode
+      of "blake3": blake3Node = valueNode
+      of "extractstrip": extractStripNode = valueNode
+      of "extractedroot": extractedRootNode = valueNode
+      else: discard
+    # Validate.
+    if urlNode == nil and gitUrlNode == nil:
+      error("fetch: block must specify one of url: or gitUrl: " &
+            "(package " & packageName & ")", stmt)
+    if urlNode != nil and gitUrlNode != nil:
+      error("fetch: block declares both url: and gitUrl: — pick one " &
+            "(package " & packageName & ")", stmt)
+    if sha256Node == nil and blake3Node == nil:
+      error("fetch: block must specify either sha256: or blake3: " &
+            "(package " & packageName & ")", stmt)
+    # Resolve kind + final URL.
+    let kindIdent =
+      if gitUrlNode != nil: ident("dfkGitArchive")
+      else: ident("dfkTarball")
+    let finalUrlNode =
+      if gitUrlNode != nil: gitUrlNode
+      else: urlNode
+    # Resolve hash (blake3 wins if both declared).
+    let hashAlgIdent =
+      if blake3Node != nil: ident("dshaBlake3")
+      else: ident("dshaSha256")
+    let hashHexNode =
+      if blake3Node != nil: blake3Node
+      else: sha256Node
+    # Defaults for the optional setters.
+    let gitRevisionFinal =
+      if gitRevisionNode != nil: gitRevisionNode
+      else: newLit("")
+    let extractStripFinal =
+      if extractStripNode != nil: extractStripNode
+      else: newLit(1)
+    let extractedRootFinal =
+      if extractedRootNode != nil: extractedRootNode
+      else: newLit("")
+    result.add(quote do:
+      registerFetchSpec(`pkgLit`, `finalUrlNode`, `gitRevisionFinal`,
+        `hashAlgIdent`, `hashHexNode`,
+        `kindIdent`, `extractStripFinal`, `extractedRootFinal`))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -2419,6 +2569,18 @@ macro package*(name: untyped; body: untyped): untyped =
   # M9.G surface sees every registry row prior milestones created.
   let m9gBootloaderEmission = emitM9GBootloader(packageName, classifiedSections)
   result.add(m9gBootloaderEmission)
+  # ── DSL-port M9.H: ``fetch:`` block lowering. Per-package single block
+  # (last writer wins if multiple ``fetch:`` blocks appear). The emitter
+  # parses the six recognised setters (``url`` / ``gitUrl`` /
+  # ``gitRevision`` / ``sha256`` / ``blake3`` / ``extractStrip`` /
+  # ``extractedRoot``) and emits a single ``registerFetchSpec(...)`` call
+  # per block. ``parsePackageDef`` does NOT recognise ``fetch:`` so
+  # M9.H's ownership is exclusive — symmetric with M9.G's ``bootloader:``
+  # treatment. NOTE: M9.H is REGISTRATION + parser ONLY; the build-
+  # engine fetch action that consumes the registry (download + hash
+  # verify + extract) is a separate milestone (M9.K).
+  let m9hFetchEmission = emitM9HFetch(packageName, classifiedSections)
+  result.add(m9hFetchEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

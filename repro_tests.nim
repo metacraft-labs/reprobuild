@@ -1824,6 +1824,32 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.H — ``fetch:`` block registry (tarball mode). NDE R4-R9
+  # from-source recipes pin upstream tarball URL + hash + extract
+  # metadata directly inside the recipe so they can drop their sibling
+  # ``.ps1``/``.sh`` pre-fetch scripts. M9.H is REGISTRATION + parser
+  # ONLY; the build-engine fetch action is wired in M9.K.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_tarball.nim",
+    binary: "build/test-bin/t_dsl_fetch_tarball",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.H — ``fetch:`` block registry (git-archive mode). Some
+  # NDE recipes (dbus-broker tags not in any tarball release) need a
+  # shallow git clone instead of a tarball URL; the M9.H ``gitUrl`` +
+  # ``gitRevision`` setters cover that case while sharing the same hash-
+  # verification surface.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_git.nim",
+    binary: "build/test-bin/t_dsl_fetch_git",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",

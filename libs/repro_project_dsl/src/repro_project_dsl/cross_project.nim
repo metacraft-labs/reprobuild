@@ -362,7 +362,12 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # DSL-port M9.G: the ``bootloader:`` block declares
                  # per-package GRUB metadata for NDEM1 generation-switch
                  # rendering.
-                 "bootloader"]
+                 "bootloader",
+                 # DSL-port M9.H: the ``fetch:`` block declares pinned
+                 # upstream source metadata (URL + hash + extract) so
+                 # from-source recipes can drop their sibling
+                 # ``.ps1``/``.sh`` pre-fetch scripts.
+                 "fetch"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.
@@ -592,6 +597,19 @@ type
       ## NOT recognise ``bootloader:`` (no arm in ``macros_a.nim``), so
       ## M9.G's ownership is exclusive — symmetric with M5's ``service:``
       ## treatment.
+    soM9HFetch
+      ## ``fetch:`` blocks (M9.H) — pinned upstream source metadata
+      ## (URL + hash + extract) so from-source recipes can drop their
+      ## sibling pre-fetch scripts. Body recognises six setters
+      ## (``url`` / ``gitUrl`` / ``gitRevision`` / ``sha256`` /
+      ## ``blake3`` / ``extractStrip`` / ``extractedRoot``). The
+      ## emitter lowers the body to a single ``registerFetchSpec(...)``
+      ## call. The legacy ``parsePackageDef`` walker does NOT recognise
+      ## ``fetch:`` (no arm in ``macros_a.nim``), so M9.H's ownership is
+      ## exclusive — symmetric with M9.G's ``bootloader:`` treatment.
+      ## NOTE: this is REGISTRATION + parser ONLY. The build-engine
+      ## fetch action that consumes the registry is a separate
+      ## milestone (M9.K).
 
   ClassifiedSection* = object
     ## One classified section. ``stmt`` is a copy of the AST node from
@@ -619,6 +637,7 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   of "variant": soM9EVariant
   of "validate": soM9EValidate
   of "bootloader": soM9GBootloader
+  of "fetch": soM9HFetch
   else: soLegacyParsePackageDef
 
 proc classifyPackageSections*(sectionStmts: NimNode):

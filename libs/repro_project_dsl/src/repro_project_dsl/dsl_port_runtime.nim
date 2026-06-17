@@ -3403,3 +3403,145 @@ proc registeredBootloaderConfig*(packageName: string): DslBootloaderConfig =
     timeout: -1,
     defaultEntry: "",
     menuEntries: @[])
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.H — ``fetch:`` block registry.
+# ---------------------------------------------------------------------------
+##
+## ## What the M9.H surface covers
+##
+## NDE R4-R9 (dbus-broker, libdrm, wayland, wlroots, sway, kernel)
+## currently pre-fetches upstream source tarballs via out-of-band
+## ``.ps1`` / ``.sh`` sibling scripts BEFORE invoking ``repro build``.
+## M9.H pins the URL + hash + extract metadata directly inside the recipe
+## via a new ``fetch:`` block whose body recognises six setters:
+##
+##   * ``url: "string"`` — tarball URL (kind == ``dfkTarball``).
+##   * ``gitUrl: "string"`` — git clone URL (kind == ``dfkGitArchive``).
+##   * ``gitRevision: "string"`` — git ref/tag (only meaningful for
+##     ``dfkGitArchive``).
+##   * ``sha256: "<64 hex>"`` — expected sha256 of the fetched tarball
+##     (sets ``hashAlg == dshaSha256``).
+##   * ``blake3: "<64 hex>"`` — expected blake3 of the fetched tarball
+##     (sets ``hashAlg == dshaBlake3``; takes precedence if both
+##     ``sha256`` and ``blake3`` appear in the same body).
+##   * ``extractStrip: <int>`` — tar ``--strip-components`` value at
+##     extract time (default 1).
+##   * ``extractedRoot: "string"`` — relative-to-projectRoot location of
+##     the extracted source tree (default "").
+##
+## **M9.H is REGISTRATION + parser ONLY.** No actual network fetch or
+## extract action runs as part of this milestone. The build-engine
+## action that consumes the registry (downloads the URL, verifies the
+## hash, untars to ``extractedRoot``) is wired in a separate milestone
+## (M9.K). This file ONLY captures the spec into ``dslPortFetchSpecs``
+## so downstream code can introspect it.
+##
+## ## Threading model
+##
+## ``dslPortFetchSpecs`` is ``threadvar`` so concurrent test fixtures do
+## not cross-attribute fetch rows. ``resetDslPortFetchState`` resets the
+## per-thread slot. Matches the M9.E ``dslPortVariants`` /
+## ``dslPortValidates`` and M9.G ``dslPortBootloaders`` shape.
+
+type
+  DslFetchKind* = enum
+    ## Discriminant for the fetch source kind. M9.H ships two kinds;
+    ## future milestones widen the enum (``dfkGitFull`` for a full clone,
+    ## ``dfkLocal`` for an in-tree path) WITHOUT breaking the registry
+    ## API because every consumer dispatches on this discriminant.
+    dfkTarball
+      ## Download a tarball from ``url`` + verify hash + extract.
+    dfkGitArchive
+      ## Shallow-clone ``url`` at ``gitRevision`` + verify the resulting
+      ## tarball's hash + extract. The shallow clone keeps the on-disk
+      ## payload comparable in size to a release tarball while still
+      ## pinning a tag / commit not present in any upstream release
+      ## archive.
+
+  DslSourceHashAlg* = enum
+    ## Hash algorithm used to verify the fetched source. Both sha256 and
+    ## blake3 produce 64-hex digests so the same ``hashHex`` field stores
+    ## either; consumers MUST inspect ``hashAlg`` before validating.
+    dshaSha256
+    dshaBlake3
+
+  DslFetchSpec* = object
+    ## One ``fetch:`` block's pinned-source metadata. The packageName is
+    ## captured on the row so a copy retains its attribution after a
+    ## table-key lookup; this mirrors ``DslBootloaderConfig`` /
+    ## ``DslArtifact``.
+    packageName*: string
+    kind*: DslFetchKind
+    url*: string
+      ## Tarball URL (``dfkTarball``) or git URL (``dfkGitArchive``).
+    gitRevision*: string
+      ## Tag / commit / branch the shallow-clone resolves. Empty for
+      ## ``dfkTarball``.
+    hashAlg*: DslSourceHashAlg
+    hashHex*: string
+      ## 64-hex digest of the fetched tarball.
+    extractStrip*: int
+      ## ``tar --strip-components`` value at extract time. Defaults to 1
+      ## (matches the common GitHub-archive layout where the tarball's
+      ## top-level directory is ``<repo>-<sha>``).
+    extractedRoot*: string
+      ## Relative-to-projectRoot path where the extracted source tree
+      ## lives. Empty default means "let the engine choose" (typically
+      ## ``<package>-<version>`` inside the build's working tree).
+
+var dslPortFetchSpecs {.threadvar.}: Table[string, DslFetchSpec]
+  ## Per-package fetch spec registry. Keyed by ``packageName``.
+  ## ``registerFetchSpec`` writes the row (last writer wins per package
+  ## — a package declaring two ``fetch:`` blocks gets the second one).
+  ## ``registeredFetchSpec`` returns the row or a default-initialised
+  ## empty spec when none was registered.
+
+proc resetDslPortFetchState*() =
+  ## Drop every fetch-spec registration. Test fixtures call this between
+  ## scenarios so registry entries do not leak across cases. Symmetric
+  ## with ``resetDslPortBootloaderState`` / ``resetDslPortVariantState``.
+  dslPortFetchSpecs.clear()
+
+proc registerFetchSpec*(packageName, url, gitRevision: string;
+                       hashAlg: DslSourceHashAlg;
+                       hashHex: string;
+                       kind: DslFetchKind;
+                       extractStrip: int;
+                       extractedRoot: string) =
+  ## Pin the fetch metadata for ``packageName`` into the registry. The
+  ## M9.H macro emitter assembles every field at compile time and emits a
+  ## single call per declared ``fetch:`` block. The runtime overwrites
+  ## any prior row for the same package; a package declaring two
+  ## ``fetch:`` blocks gets the latter one's metadata.
+  ##
+  ## NOTE: M9.H performs NO network I/O. The registered spec is the
+  ## INPUT to a future M9.K fetch action; this proc never opens a
+  ## socket, never touches the filesystem, never computes a hash.
+  dslPortFetchSpecs[packageName] = DslFetchSpec(
+    packageName: packageName,
+    kind: kind,
+    url: url,
+    gitRevision: gitRevision,
+    hashAlg: hashAlg,
+    hashHex: hashHex,
+    extractStrip: extractStrip,
+    extractedRoot: extractedRoot)
+
+proc registeredFetchSpec*(packageName: string): DslFetchSpec =
+  ## Return the registered fetch spec for ``packageName``. Returns a
+  ## default-initialised row with empty fields and ``kind = dfkTarball``
+  ## when the package never declared a ``fetch:`` block; the row's
+  ## ``packageName`` is left empty so callers can distinguish
+  ## "registered with all defaults" from "never registered".
+  if packageName in dslPortFetchSpecs:
+    return dslPortFetchSpecs[packageName]
+  return DslFetchSpec(
+    packageName: "",
+    kind: dfkTarball,
+    url: "",
+    gitRevision: "",
+    hashAlg: dshaSha256,
+    hashHex: "",
+    extractStrip: 1,
+    extractedRoot: "")
