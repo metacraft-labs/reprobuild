@@ -750,10 +750,13 @@ proc converterSpecsForPolicy(action: BuildAction):
 
 proc monitorEvidenceRequired(action: BuildAction): bool =
   ## Monitor evidence is required for monitored policies once an RMDF
-  ## (monitor depfile) has actually been wired up for the action. The
-  ## monitor-bypass paths (e.g. the Windows ``REPRO_MONITOR_BYPASS`` escape
-  ## hatch) leave the policy as ``dgAutomaticMonitor`` but install no RMDF;
-  ## those fall back to declared inputs + outputs without demanding evidence.
+  ## (monitor depfile) has actually been wired up for the action. The only
+  ## way a monitored action ends up without an RMDF now is an engine config
+  ## that has no fs-snoop wired (``monitorCliPath`` empty): the setup step
+  ## emits a "requires repro-fs-snoop" diagnostic and falls back to the
+  ## statically declared inputs/outputs rather than claiming complete
+  ## evidence. (The Windows ``REPRO_MONITOR_BYPASS`` escape hatch that used
+  ## to produce this state was removed.)
   action.dependencyPolicy.kind in MonitorPolicyKinds and
     action.monitorDepfile.len > 0
 
@@ -1138,31 +1141,17 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim and
   # libs/repro_monitor_depfile/src/repro_monitor_depfile/windows_injector.nim).
   # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
-  # injection mechanism differs.
-  #
-  # Windows escape hatch: REPRO_MONITOR_BYPASS=1 disables the injection for
-  # the current build run. The Windows IAT-patching shim is stable for short
-  # commands but currently deadlocks the Nim compiler on very large native
-  # codetracer builds (ct.exe — thousands of generated .c files; nim spends
-  # most of its time invoking gcc under the shim and the synchronization
-  # cost compounds). With bypass on, the engine runs the action directly,
-  # uses only declared/inputs evidence, and the build still completes
-  # correctly for caching purposes — the cost is that monitor-derived
-  # evidence is empty.
+  # injection mechanism differs. (The Windows ``REPRO_MONITOR_BYPASS=1`` escape
+  # hatch — which ran actions unmonitored and fell back to declared-inputs-only
+  # evidence — was retired in M11 once the IAT-patching shim's Nim-compiler
+  # deadlock was fixed; see reprobuild-specs/Notes/m11-fs-snoop-audit.md
+  # ("RESOLVED — bypass dropped"). It is removed here rather than left as a
+  # silent declared-only fallback, which is the exact correctness hole the
+  # removed ``dgDeclaredOnly`` policy represented.)
   when not (defined(macosx) or defined(linux) or defined(windows)):
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
-    when defined(windows):
-      if getEnv("REPRO_MONITOR_BYPASS") == "1":
-        # Windows: when the bypass is active we install NO monitor depfile, so
-        # ``monitorEvidenceRequired`` is false and the evidence validator does
-        # not complain that monitor evidence is missing. The action keeps its
-        # ``dgAutomaticMonitor`` policy but falls back to declared inputs +
-        # outputs for caching correctness; we just lose the auto-discovered
-        # read/write set. (The removed ``declaredOnlyPolicy`` used to express
-        # this downgrade explicitly.)
-        return
     let monitorCli = monitorCliPath(config)
     if monitorCli.len == 0:
       result.diagnostic =
