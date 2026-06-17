@@ -1949,6 +1949,23 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Fifth from-source production recipe to exercise the M9.H/I/K trio
+  # — FOUR executable artifacts off a meson build whose dependency
+  # surface is the widest in the from-source cohort (10 entries in
+  # ``uses:`` covering meson/ninja/gcc + wlroots + wayland-scanner +
+  # libxkbcommon + pcre2 + json-c + pango + cairo + gdk-pixbuf). Pins
+  # Sway 1.11's vendored sha256 + meson flag sequence + four
+  # ``sway`` / ``swaybar`` / ``swaynag`` / ``swaymsg`` executable
+  # artifacts. Caps the wayland-stack from-source chain
+  # (wayland-scanner → libwayland → wlroots → SWAY).
+  TestSpec(
+    source: "recipes/packages/source/sway/test_sway_source.nim",
+    binary: "build/test-bin/t_sway_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
