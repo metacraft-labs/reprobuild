@@ -1540,6 +1540,36 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # ── DSL-port M2: v8-style ``config:`` scalar surface + ``versions:``
+  # block lowering. The three tests pin the contract that the new
+  # ``emitM2ConfigDefaults`` + ``emitM2Versions`` lowerers in
+  # ``macros_b.nim`` produce ``recordConfigDefault[T]`` /
+  # ``registerVersion`` calls that survive macro expansion and round-trip
+  # through the M2 read/write API in ``dsl_port_runtime.nim``.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
+    binary: "build/test-bin/t_dsl_config_scalar",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
+    binary: "build/test-bin/t_dsl_versions_single",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
+    binary: "build/test-bin/t_dsl_config_override",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",

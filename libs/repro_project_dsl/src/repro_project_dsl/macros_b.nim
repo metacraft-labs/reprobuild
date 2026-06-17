@@ -380,6 +380,282 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
       gateValLit & ")\n"))
   result.add(parseStmt("finalizeVariants()\n"))
 
+# ---------------------------------------------------------------------------
+# DSL-port M2 — ``config:`` + ``versions:`` block lowerers.
+#
+# Both lowerers operate on the ``sectionStmts`` partition returned by
+# ``partitionPackageBody`` (M1). They walk that statement list looking
+# for ``config:`` and ``versions:`` heads and emit one runtime call per
+# entry into the result statement list. The result is spliced into the
+# ``package`` macro's expansion AFTER the legacy
+# ``parsePackageDef`` + ``buildCode`` chain so the M2 emissions sit
+# alongside the variant-declaration emissions without colliding.
+#
+# ─────────────────────────────────────────────────────────────────────
+# M1 risk addresses (Path-(B) implementation)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Risk #1 — Lexical-order divergence. M2 takes Path (B): ``config:``
+#   entries and ``versions:`` entries are extracted eagerly at
+#   macro-expansion time and emit ``recordConfigDefault`` /
+#   ``registerVersion`` calls at the END of the macro's lowered output,
+#   AFTER the preserved Nim statements. The M2 surface is name-keyed
+#   (read by ``readConfigurable[T]("<pkg>.<name>")``), so the eager
+#   extraction never depends on a lexical predecessor's runtime value.
+#   The Path (A) in-place rewrite is documented as future M3+ work; it
+#   becomes load-bearing only when a section lowerer needs to *read* a
+#   lexically-preceding ``let`` binding, which neither ``config:`` nor
+#   ``versions:`` does in M2.
+#
+# Risk #2 — ``parsePackageDef`` double-consume. The legacy
+#   ``parsePackageDef.config:`` arm calls ``collectConfigSection`` which
+#   feeds ``parseVariantDeclaration``. That proc recognises ONLY two
+#   shapes — ``name: variant T = default`` (explicit ``variant``
+#   keyword) and ``name: T = default`` paired with a ``## @variant``
+#   doc directive — and SILENTLY skips everything else. M2's
+#   ``collectM2ConfigEntries`` walks the same body but recognises
+#   ONLY the plain typed-default shape (``name: T = default``) WHEN it
+#   does NOT match either variant spelling. The two paths are therefore
+#   mutually exclusive on a per-entry basis: a variant entry lowers to
+#   ``declareVariant[T]`` AND NEVER ``recordConfigDefault``; a plain
+#   scalar entry lowers to ``recordConfigDefault`` AND NEVER
+#   ``declareVariant[T]``. The set discrimination happens locally —
+#   each emitter inspects the entry's AST shape and the leading doc
+#   directive in the same way the partner emitter does — so we can
+#   ship them as independent passes without a shared "this entry is
+#   M2-owned" tag.
+#
+# Risk #3 — variant declarations coordinate with M2 emission. Same
+#   resolution as risk #2: ``emitVariantDeclarations`` and
+#   ``emitM2ConfigDefaults`` operate on disjoint subsets of the same
+#   ``config:`` body. The 11 NDE recipes (kernel, dbus-broker,
+#   graphics-stack, …) declare ``name: T = default`` entries without
+#   ``## @variant`` so the legacy variant emitter silently drops them;
+#   M2's emitter picks them up. The variant-declaring kernel entries
+#   (currently zero in production — every kernel knob is the plain
+#   typed-default shape) stay routed through the legacy path. No
+#   recipe needs a code change.
+# ---------------------------------------------------------------------------
+
+proc m2EntryHasVariantDocDirective(pendingDoc: string): bool =
+  ## Same predicate ``parseVariantDeclaration`` uses to detect the
+  ## ``## @variant`` directive. We duplicate (rather than expose) the
+  ## helper so the M2 lowerer can stay self-contained — coupling it
+  ## back into ``macros_a.nim`` would entangle two separate code paths
+  ## that the milestone explicitly keeps disjoint.
+  for line in pendingDoc.splitLines():
+    var trimmed = line.strip()
+    while trimmed.len > 0 and trimmed[0] == '#':
+      trimmed = trimmed[1 .. ^1]
+    trimmed = trimmed.strip()
+    if trimmed == "@variant":
+      return true
+  false
+
+proc m2EntryIsExplicitVariant(inner: NimNode): bool =
+  ## True when the inner statement of ``name: <inner>`` is
+  ## ``variant T = default`` — i.e. the explicit-keyword variant
+  ## spelling ``parseVariantDeclaration`` accepts as Shape 1.
+  inner.kind == nnkCommand and inner.len == 2 and
+    inner[0].kind in {nnkIdent, nnkSym} and
+    identText(inner[0]).normalize == "variant" and
+    inner[1].kind == nnkExprEqExpr and inner[1].len == 2
+
+proc m2ConfigEntryAst(stmt: NimNode):
+    tuple[matched: bool; name: string; typeNode: NimNode; defaultNode: NimNode] =
+  ## Recognise the plain typed-default shape
+  ## ``name: T = default`` → ``Call(Ident, StmtList(Asgn(Type,
+  ## Default)))`` (the same parser shape ``parseVariantDeclaration``'s
+  ## Shape 2 inspects). Returns ``matched=false`` for anything else so
+  ## the caller can decide what to do with non-matching entries.
+  if stmt.kind != nnkCall or stmt.len != 2:
+    return
+  if stmt[0].kind notin {nnkIdent, nnkSym}:
+    return
+  if stmt[1].kind != nnkStmtList or stmt[1].len != 1:
+    return
+  let inner = stmt[1][0]
+  if inner.kind != nnkAsgn or inner.len != 2:
+    return
+  result.matched = true
+  result.name = identText(stmt[0])
+  result.typeNode = inner[0]
+  result.defaultNode = inner[1]
+
+proc collectM2ConfigEntries(configBody: NimNode):
+    seq[tuple[name: string; typeNode: NimNode; defaultNode: NimNode]] =
+  ## Walk a ``config:`` block's body and return every plain
+  ## typed-default entry — i.e. ``name: T = default`` WITHOUT the
+  ## ``variant`` keyword AND WITHOUT a preceding ``## @variant`` doc
+  ## directive. The remaining entries (explicit variant spelling or
+  ## ``@variant`` doc directive) are handled by the legacy variant
+  ## path (``parseVariantDeclaration`` in ``macros_a.nim``); the two
+  ## passes are mutually exclusive on a per-entry basis so an entry
+  ## is never double-emitted (M1 risk #2).
+  if configBody.kind != nnkStmtList:
+    return
+  var pendingDoc = ""
+  for stmt in configBody:
+    if stmt.kind == nnkCommentStmt:
+      if pendingDoc.len > 0: pendingDoc.add "\n"
+      pendingDoc.add stmt.strVal
+      continue
+    let entry = m2ConfigEntryAst(stmt)
+    if not entry.matched:
+      pendingDoc = ""
+      continue
+    # Variant by inner-form ``variant T = default`` (Shape 1)?
+    let inner =
+      if stmt.kind == nnkCall and stmt.len == 2 and
+         stmt[1].kind == nnkStmtList and stmt[1].len == 1:
+        stmt[1][0]
+      else:
+        nil
+    let isExplicitVariant =
+      not inner.isNil and m2EntryIsExplicitVariant(inner)
+    let isTaggedVariant = m2EntryHasVariantDocDirective(pendingDoc)
+    pendingDoc = ""
+    if isExplicitVariant or isTaggedVariant:
+      continue
+    result.add((name: entry.name,
+                typeNode: entry.typeNode,
+                defaultNode: entry.defaultNode))
+
+proc m2TypeReprIsSupportedScalar(typeRepr: string): bool =
+  ## True iff the ``T`` from a ``name: T = default`` entry names one of
+  ## the four primitive shapes M2's runtime understands. The check is
+  ## a deliberate string-match: at macro-expansion time we only have
+  ## the verbatim source repr — semchecking the type would require a
+  ## ``typed`` macro and pull in the full symbol environment. The
+  ## predicate covers the common spellings (``bool``, ``int``, ``int8``,
+  ## …, ``int64``, ``uint``, ``string``, ``float``, ``float32``,
+  ## ``float64``). Authors writing complex types (``seq[string]``,
+  ## ``MyEnum``, ``Table[string, int]``, …) get a silent passthrough so
+  ## the legacy NDE recipes keep compiling; future M3+ widens the
+  ## supported set as the runtime grows new ``DslScalarKind`` arms.
+  let trimmed = typeRepr.strip()
+  trimmed in ["bool", "int", "int8", "int16", "int32", "int64",
+              "uint", "uint8", "uint16", "uint32", "uint64",
+              "string", "float", "float32", "float64"]
+
+proc emitM2ConfigDefaults(packageName: string;
+                          sectionStmts: NimNode): NimNode =
+  ## Scan ``sectionStmts`` for every ``config:`` head and emit one
+  ## ``recordConfigDefault[T](<packageName>, <name>, <default>)`` call
+  ## per recognised entry. The result is appended at the end of the
+  ## ``package`` macro's expansion so every registration runs at
+  ## module-init time before any host code reads the cell.
+  ##
+  ## Type filter: M2 only emits for the four primitive types its
+  ## ``DslScalarKind`` enum covers (bool / int / string / float and
+  ## their sized variants). Entries with non-scalar types
+  ## (``seq[string]``, custom enums, …) are silently passed through;
+  ## the legacy NDE recipes carry several such entries which would
+  ## otherwise trigger a ``recordConfigDefault: unsupported`` static
+  ## error at macro-expansion time. M3+ widens the runtime to cover
+  ## these shapes when the Cell-backed pathway lands.
+  result = newStmtList()
+  if sectionStmts.kind != nnkStmtList:
+    return
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "config":
+      continue
+    if stmt.len < 2:
+      continue
+    let configBody = stmt[stmt.len - 1]
+    for entry in collectM2ConfigEntries(configBody):
+      let typeRepr = entry.typeNode.repr
+      if not m2TypeReprIsSupportedScalar(typeRepr):
+        continue
+      let nameLit = escForCode(entry.name)
+      let pkgLit = escForCode(packageName)
+      let defaultRepr = entry.defaultNode.repr
+      # ``recordConfigDefault[T]`` is the generic facade in
+      # ``dsl_port_runtime.nim``. We emit the explicit generic
+      # parameter so Nim picks the bool/int/string/float branch
+      # without having to infer from the literal — a literal like ``5``
+      # would otherwise lose its desired ``int8`` / ``int32`` flavour.
+      result.add(parseStmt(
+        "recordConfigDefault[" & typeRepr & "](" &
+        pkgLit & ", " & nameLit & ", " & defaultRepr & ")\n"))
+
+proc m2VersionsEntryAst(stmt: NimNode):
+    tuple[matched: bool; version: string; body: NimNode] =
+  ## Recognise ``"<version-string>": <body>`` inside a ``versions:``
+  ## block. Parses as ``Call`` or ``Command`` whose head is a string
+  ## literal and tail is an ``nnkStmtList``.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len < 2:
+    return
+  if stmt[0].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return
+  if stmt[^1].kind != nnkStmtList:
+    return
+  result.matched = true
+  result.version = stmt[0].strVal
+  result.body = stmt[^1]
+
+proc emitM2Versions(packageName: string;
+                    sectionStmts: NimNode): NimNode =
+  ## Scan ``sectionStmts`` for ``versions:`` heads and emit one
+  ## ``registerVersion(<packageName>, DslVersionInfo(...))`` call per
+  ## inner ``"<version>":`` block. The four named keys
+  ## ``sourceRevision``, ``sourceChecksum``, ``sourceUrl``,
+  ## ``sourceRepository`` are recognised; everything else is currently
+  ## ignored (M3+ widens via the ``extras`` table). Unknown assignment
+  ## keys are NOT a hard error — they sit alongside the recognised
+  ## keys so authors can co-locate forward-compat fields without a
+  ## macro-expansion failure.
+  result = newStmtList()
+  if sectionStmts.kind != nnkStmtList:
+    return
+  for stmt in sectionStmts:
+    if calleeName(stmt).normalize != "versions":
+      continue
+    if stmt.len < 2:
+      continue
+    let versionsBody = stmt[stmt.len - 1]
+    if versionsBody.kind != nnkStmtList:
+      continue
+    for versionStmt in versionsBody:
+      let parsed = m2VersionsEntryAst(versionStmt)
+      if not parsed.matched:
+        continue
+      var sourceRevision = ""
+      var sourceChecksum = ""
+      var sourceUrl = ""
+      var sourceRepository = ""
+      for assignment in parsed.body:
+        if assignment.kind notin {nnkAsgn, nnkFastAsgn}:
+          continue
+        if assignment[0].kind notin {nnkIdent, nnkSym}:
+          continue
+        if assignment[1].kind notin {nnkStrLit, nnkRStrLit,
+                                      nnkTripleStrLit}:
+          continue
+        let key = identText(assignment[0])
+        let value = assignment[1].strVal
+        case key
+        of "sourceRevision": sourceRevision = value
+        of "sourceChecksum": sourceChecksum = value
+        of "sourceUrl": sourceUrl = value
+        of "sourceRepository": sourceRepository = value
+        else: discard
+      let pkgLit = escForCode(packageName)
+      let versionLit = escForCode(parsed.version)
+      let revLit = escForCode(sourceRevision)
+      let sumLit = escForCode(sourceChecksum)
+      let urlLit = escForCode(sourceUrl)
+      let repoLit = escForCode(sourceRepository)
+      result.add(parseStmt(
+        "registerVersion(" & pkgLit & ", DslVersionInfo(\n" &
+        "  version: " & versionLit & ",\n" &
+        "  sourceRevision: " & revLit & ",\n" &
+        "  sourceChecksum: " & sumLit & ",\n" &
+        "  sourceUrl: " & urlLit & ",\n" &
+        "  sourceRepository: " & repoLit & "))\n"))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -426,9 +702,22 @@ macro package*(name: untyped; body: untyped): untyped =
   ##    the ``config:`` block lowers to a
   ##    ``let <name> = declareVariant[T](...)`` plus a trailing
   ##    ``finalizeVariants()`` call.
-  let (sectionStmts {.used.}, preservedStmts) = partitionPackageBody(body)
+  let (sectionStmts, preservedStmts) = partitionPackageBody(body)
   let pkg = parsePackageDef(name, body)
   let packageName = pkg.packageName
+  # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
+  # entries. The two emitters operate on the M1 ``sectionStmts``
+  # partition and are mutually exclusive with the legacy
+  # ``emitVariantDeclarations`` pass on the per-entry level (see
+  # ``collectM2ConfigEntries`` for the disjointness argument that
+  # addresses M1 risk #2). The result is appended at the END of the
+  # macro's expansion so registrations happen at module-init time AFTER
+  # the legacy ``registerPackageDef`` call and AFTER any preserved Nim
+  # statements have run — that ordering keeps the M2 surface available
+  # to downstream code regardless of whether the caller imports the
+  # package's recipe before or after the host module's own setup.
+  let m2ConfigEmission = emitM2ConfigDefaults(packageName, sectionStmts)
+  let m2VersionsEmission = emitM2Versions(packageName, sectionStmts)
   # ── Spec-Implementation M1: variant declarations + finalization ────
   # ``parsePackageDef`` collected every ``variant: T = default`` (and
   # ``@variant``-tagged) declaration from the ``config:`` block into
@@ -503,6 +792,13 @@ macro package*(name: untyped; body: untyped): untyped =
   # ``buildCode`` chain consumes ``sectionStmts``; this leg consumes
   # everything else.
   result.add(preservedStmts)
+  # ── DSL-port M2: ``config:`` defaults + ``versions:`` registrations.
+  # Both emitters operate on ``sectionStmts`` and append zero or more
+  # runtime calls per recognised entry. They sit AFTER the preserved
+  # statements so any author-supplied helper proc or ``let`` binding
+  # the entry's default expression references is already in scope.
+  result.add(m2ConfigEmission)
+  result.add(m2VersionsEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

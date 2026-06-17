@@ -71,6 +71,14 @@ include "repro_project_dsl/prelude_typed_objects"
 import "repro_project_dsl/dyn_or_static"
 export dyn_or_static
 include "repro_project_dsl/runtime_core"
+# DSL-port M2 — sidecar runtime for the v8-style ``config:`` scalar
+# surface and the new ``versions:`` registry. Lives in its own module so
+# the M2 reader/writer API is consumable directly by host code and by
+# tests without dragging the macro side along. The ``package`` macro
+# emits ``recordConfigDefault[T](...)`` and ``registerVersion(...)``
+# calls into the lowered body, both of which resolve through this
+# module's public procs.
+include "repro_project_dsl/dsl_port_runtime"
 include "repro_project_dsl/macros_a"
 include "repro_project_dsl/runtime_provider"
 # Project-DSL-Composition M5: cross-project edge references —
