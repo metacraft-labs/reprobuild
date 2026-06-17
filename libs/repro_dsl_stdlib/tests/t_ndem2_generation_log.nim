@@ -36,7 +36,39 @@
 import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/packages/system/reproos_desktop
+import repro_dsl_stdlib/packages/system/reproos_desktop as shim
+  # Alias so the type alias below can disambiguate the shim's
+  # ``EConfigViolation`` (raised by ``addGeneration`` / ``rollback`` /
+  # ``deserializeGenerationLog``) from the DSL runtime's same-named
+  # exception that ``repro_project_dsl`` re-exports.
 import repro_dsl_stdlib/packages/system/generation_log
+
+# Importing the recipe's ``repro.nim`` evaluates its ``package
+# generationLog:`` block at module init, exercising the NDE-J pure-DSL
+# surface (M2 ``versions:`` + M3 ``executable:`` + M6 ``cli:``) against
+# the real production recipe shape. Without this import the registry
+# stays empty and the "NDE-J DSL surface" assertions below would be
+# vacuous. The recipe re-exports ``generation_log`` so this double-import
+# resolves to the same module instance (precedent: NDE-A
+# ``t_nde0a_apt_jammy.nim`` does the same double-import dance).
+#
+# ``repro_project_dsl`` re-exports an ``EConfigViolation`` symbol that
+# clashes with the shim's same-named type the v1 suite ``expect`` on;
+# the type alias below pins ``EConfigViolation`` (used by every v1
+# ``expect`` block above) to the shim spelling so the expect macro's
+# strVal extractor sees an unambiguous ident node. Mirrors the NDE-I
+# precedent in ``t_ndem1_reproos_desktop.nim``.
+import repro_project_dsl
+import "../../../recipes/packages/system/generation-log/repro" as
+  generationLogRecipe
+
+type
+  EConfigViolation = shim.EConfigViolation
+    ## Pin the v1 ``expect EConfigViolation:`` blocks to the shim's
+    ## exception (the one ``addGeneration`` / ``rollback`` /
+    ## ``deserializeGenerationLog`` actually raise). Without this alias
+    ## the symbol would be ambiguous after the NDE-J import of
+    ## ``repro_project_dsl`` which also exports an ``EConfigViolation``.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -458,3 +490,107 @@ suite "NDEM2 generation-log persistence + rollback":
     let bogus = """{"version":"99.99.99","entries":[]}"""
     expect EConfigViolation:
       discard deserializeGenerationLog(bogus)
+
+# ---------------------------------------------------------------------------
+# NDE-J DSL-surface coverage. Pins that the rewritten
+# ``recipes/packages/system/generation-log/repro.nim`` actually exercises
+# the new DSL surface (M2 ``versions:`` + M3 ``executable:`` + M6
+# ``cli:``) rather than silently keeping the legacy ``config:``-only
+# shape. Confirms:
+#
+#   * the recipe's ``versions:`` block round-trips through
+#     ``registeredVersions`` with the same string the shim's
+#     ``NdemGenerationLogVersion`` constant bakes into every serialised
+#     log envelope — the cache-key contract is auditable from both ends;
+#
+#   * the recipe's ``executable reproosRebuild:`` artifact is recorded
+#     in the M3 artifact registry under the source-level package name;
+#
+#   * the recipe's ``cli:`` block lowers every spec'd
+#     ``reproos-rebuild`` subcommand argument (subcommand verb +
+#     generationId + olderThan duration + verbose flag) into the M6 CLI
+#     param registry with the right ``DslCliParamKind`` discriminator
+#     for each.
+#
+# The v1 invariant suite above stays intact (15 tests, 81 ``check``
+# assertions all preserved); these are extra assertions on top.
+# ---------------------------------------------------------------------------
+
+suite "NDEM2 generation-log DSL surface (NDE-J)":
+
+  test "recipe registers exactly one version via the DSL versions: block":
+    # NDE-J adds a ``versions:`` block; before the rewrite there was no
+    # ``registerVersion`` emission for ``generationLog`` and the accessor
+    # returned the empty seq. After the rewrite a single entry shows up.
+    let vs = registeredVersions("generationLog")
+    check vs.len == 1
+
+  test "recorded version string is byte-identical to NdemGenerationLogVersion":
+    # Tying the recipe-declared version to the shim constant is the
+    # whole point of M2's surface — it makes the cache-key contract
+    # auditable from the DSL side without parsing the JSON envelope the
+    # serialiser embeds the same string into.
+    let vs = registeredVersions("generationLog")
+    check vs[0].version == NdemGenerationLogVersion
+
+  test "recorded version carries the NDEM2 sourceRevision pin":
+    # The recipe pins a deterministic ``sourceRevision`` so the spec's
+    # cache-key inputs (adapter version + revision) are both reachable
+    # from the registry alone.
+    let vs = registeredVersions("generationLog")
+    check vs[0].sourceRevision == "ndem2/generation-log/0.1.0"
+
+  test "recipe registers the reproosRebuild executable artifact":
+    # NDE-J adds an ``executable reproosRebuild:`` artifact reflecting
+    # the spec'd ``reproos-rebuild`` CLI surface. Before the rewrite the
+    # recipe had no ``executable:`` / ``library:`` / ``files:`` block
+    # and the M3 artifact registry was empty for ``generationLog``.
+    let arts = registeredArtifacts("generationLog")
+    check arts.len == 1
+    check arts[0].artifactName == "reproosRebuild"
+    check arts[0].kind == dakExecutable
+    check arts[0].packageName == "generationLog"
+
+  test "reproosRebuild cli: registers four params in declaration order":
+    # M6 lowerer records one row per ``pos`` / ``flag`` / ``boolFlag``
+    # statement against ``<pkg>.<artifact>.<subcmd="">`` (subcmd nesting
+    # is M6-deferred; root params only). The recipe declares:
+    #   pos subcommand is string
+    #   flag generationId is string
+    #   flag olderThan is string
+    #   boolFlag verbose
+    let params = registeredCliParams(
+      "generationLog", "reproosRebuild", "")
+    check params.len == 4
+
+    # pos subcommand — the verb (list / switch / rollback / gc).
+    check params[0].name == "subcommand"
+    check params[0].typeName == "string"
+    check params[0].kind == cpkPos
+
+    # flag generationId — argument to ``switch <generationId>``;
+    # consumed by ``lookupGeneration``.
+    check params[1].name == "generationId"
+    check params[1].typeName == "string"
+    check params[1].kind == cpkFlag
+
+    # flag olderThan — argument to ``gc --older-than=<duration>``.
+    check params[2].name == "olderThan"
+    check params[2].typeName == "string"
+    check params[2].kind == cpkFlag
+
+    # boolFlag verbose — universal verbosity flag. The M6 emitter
+    # defaults the typeName to ``"bool"`` for ``boolFlag`` entries.
+    check params[3].name == "verbose"
+    check params[3].typeName == "bool"
+    check params[3].kind == cpkBoolFlag
+
+  test "registeredVersions / registeredArtifacts / registeredCliParams symmetric for unknown package":
+    # Symmetric with every M2 / M3 / M6 accessor: querying a package
+    # that never declared the corresponding block returns the empty seq
+    # rather than raising. This makes the DSL-surface assertions above
+    # robust against test ordering.
+    check registeredVersions("noSuchPackageEverDeclared").len == 0
+    check registeredArtifacts("noSuchPackageEverDeclared").len == 0
+    check registeredCliParams(
+      "noSuchPackageEverDeclared", "anyTool", "").len == 0
