@@ -30,45 +30,56 @@
 ##     syntax, ``sway-session.service``, ``/etc/wayland-sessions/
 ##     sway.desktop`` with ``Name=Sway`` + ``Exec=sway``.
 ##
-## ## Why this layout
+## ## NDE-F: DSL-port migration to typed fs.* + service: surface
 ##
-## The spec worked example uses two DSL block forms not yet recognised
-## by ``parsePackageDef`` at
-## ``libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim``:
+## NDE-F (sixth NDE rewrite, after NDE-A/B/C/D/E) migrates this recipe
+## from the previous "shim does everything, recipe is a config: shell"
+## pattern to the spec'd typed surface:
 ##
-##   files config:
+##   files <artifactName>:
 ##     build:
-##       fs.configFile(
-##         path = "/etc/sway/config",
-##         content = iniContent:
-##           # sway-config-shaped template — see impl module for the
-##           # render logic
-##       )
+##       fs.configFile(path = "/etc/sway/config", content = ...)
+##       fs.managedBlock(path = "/etc/ld.so.conf.d/...", scope = bsSystem,
+##                       priority = 500, packageName = "sway", ...)
 ##
 ##   service sessionManager:
-##     description = "Sway wlroots-tiling Wayland compositor session"
-##     type        = oneshot
-##     execStart   = "/usr/bin/sway"
-##     wantedBy    = "graphical-session.target"
+##     description "..."
+##     `type` "oneshot"
+##     execStart  "..."
+##     wantedBy   "graphical-session.target"
 ##
-## ``parsePackageDef`` currently recognises only ``executable`` /
-## ``library`` / ``uses`` / ``config`` / ``outputs`` section heads —
-## ``files <name>:`` block form + ``service <name>:`` block form are
-## pure DSL spec at this point. NDE0-A + NDE0-S + NDE0-D + NDE0-G +
-## NDE0-K all documented the same limitation. The runtime semantics of
-## these blocks live in the planted ``/etc/sway/config`` +
-## ``sway-session.service`` + ``/etc/wayland-sessions/sway.desktop``
-## files emitted by the impl module's ``materializeSway`` proc.
+## NDE-F is the **first compositor-side overlay** in the multi-contributor
+## managedBlock cohort: it appends a ``libpaths`` contribution at
+## **priority=500** to the ``/etc/ld.so.conf.d/00-reproos-linux.conf``
+## block that NDE-D's graphics-stack anchors at priority=100. The merger
+## sorts ``(priority, packageName, blockId)`` ascending so graphics-stack
+## (priority=100) appears BEFORE sway (priority=500). NDE-D pinned this
+## ordering from the anchor side via its multi-contributor merge test;
+## NDE-F pins it from the overlay side via a parallel test below — a
+## synthetic priority=100 contribution is registered alongside the
+## recipe's priority=500 contribution and ``mergedManagedBlockFile``
+## confirms graphics-stack sorts first.
+##
+## The three load-bearing identifiers for the libpaths contribution —
+## the ``blockId``, the compositor ``priority``, and the kebab-cased
+## packageName segment — are sourced from the shim's exported constants
+## (``NdeH1LibpathsBlockId`` / ``NdeH1LibpathsPriority`` /
+## ``NdeH1PackageName``) so a future rename or priority bump propagates
+## across the cohort in one place.
 ##
 ## ## Configurables
 ##
 ## Per the spec NDE-H1 section. Each maps to a field on ``SwayConfig``
 ## in the impl module. Toggling any of them invalidates only the
-## outputs that consume it (the impl module's per-output hash
-## derivation propagates the change atomically; the unaffected outputs
-## stay cached). See the impl module's ``SwayOutputs`` docstring for
-## the full invalidation matrix.
+## outputs that consume it (the DSL's per-artifact
+## ``configFileSha256Of`` / ``managedBlockSha256Of`` hash propagates the
+## change atomically through ``consumeConfigFile`` /
+## ``consumeManagedBlock``; the unaffected artifacts stay cached).
 ##
+##   * ``aptSnapshot`` — apt-jammy snapshot pin for the (deferred) sway
+##     + wlroots .deb consumption. Default
+##     ``"ubuntu/jammy/20260615T000000Z"``. Part of every cache key so a
+##     snapshot bump invalidates the ld.so.conf.d block atomically.
 ##   * ``superKey`` — modifier key bound to ``$mod`` in
 ##     ``/etc/sway/config``. Default ``"Super_L"`` per spec.
 ##   * ``terminalApp`` — terminal launched by ``$mod+Return``. Default
@@ -77,9 +88,15 @@
 ##   * ``launcherApp`` — application launcher launched by ``$mod+d``.
 ##     Default ``"wofi"`` per spec.
 ##   * ``extraModelines`` — optional ``output`` configurations. Default
-##     ``@[]`` (sway auto-configures every connected output).
-##   * ``aptSnapshot`` — apt-jammy snapshot pin for the (deferred) sway
-##     + wlroots .deb consumption. Part of every cache key.
+##     ``@[]`` (sway auto-configures every connected output). NB: M2/M9.D
+##     ``recordConfigDefault`` does not yet cover ``seq[string]`` — the
+##     entry is declared in the ``config:`` block for documentary
+##     purposes and forward compatibility but the recipe's helper reads
+##     the impl module's ``defaultConfig().extraModelines`` default
+##     rather than a configurable cell. When M3+ widens the runtime to
+##     cover ``seq[string]``, the helper migrates to ``readConfigurable``
+##     like the scalar configurables above. Same pattern as NDE-D's
+##     ``fontPackages`` configurable.
 ##
 ## ## Honest deferrals
 ##
@@ -104,53 +121,185 @@
 ##   the output handles; the consumer that turns them into the live
 ##   /etc/ tree is NDEM1.
 ##
-## * **``files config:`` + ``service sessionManager:`` DSL blocks**:
-##   pure DSL spec at this point. Semantics encoded directly in the
-##   Nim helpers exported from the impl module.
+## * **service sessionManager: execStart literal**: The M5 ``service:``
+##   parser captures ``execStart "literal"`` at macro-expansion time,
+##   so the literal MUST be a compile-time string. The
+##   ``"/usr/bin/sway"`` literal recorded here matches the rendered
+##   ``sway-session.service`` unit-file's ExecStart= directive emitted
+##   by ``renderSessionService()``. Both surfaces are kept in sync by
+##   convention: any future update to the renderSessionService() body
+##   should also propagate to the service-block literal below.
+##
+## * **extraModelines configurable propagation**: as documented above,
+##   v1 declares the ``seq[string]`` config entry but the runtime can
+##   only store scalar types today; toggling extraModelines via
+##   ``setConfigurable`` is not supported yet. The library's render proc
+##   still consumes the ``SwayConfig`` struct (constructed from defaults
+##   for ``extraModelines``), so the rendered content is correct on
+##   first emission. The cache key still propagates honestly because
+##   the rendered bytes flow through ``configFileSha256Of(content)``.
 
 import repro_project_dsl
+import repro_project_dsl/fs as fs
 
-# The stdlib impl module that owns the emission helpers + the rendered
-# /etc/sway/config / unit-file / desktop-entry text. Imported here so
-# it is in scope for downstream packages that ``uses: "sway >=0.1.0"``
-# and inline a ``build:`` block invoking the procs directly.
+# The stdlib impl module that owns the render* template procs +
+# SwayConfig type + the per-output emission constants (NdeH1*).
+# Imported under an alias so the recipe-side call sites stay readable
+# (``swayImpl.renderSwayConfig()``). The shim's ``materializeSway``
+# orchestrator + the legacy on-disk emitter procs are still available
+# to legacy callers but the recipe no longer invokes them — all on-disk
+# materialisation now flows through the DSL's M8 / M9.A path.
 import repro_dsl_stdlib/packages/desktop_environments/sway as swayImpl
 export swayImpl
+
+# ---------------------------------------------------------------------------
+# Configurable accessor
+# ---------------------------------------------------------------------------
+
+const SwayPackageId* = "swayCompositor"
+  ## The Nim identifier the ``package`` macro registers. Shared between
+  ## the recipe's fs.* call sites + the test fixtures so a future rename
+  ## propagates in one place. NB: this differs from
+  ## ``swayImpl.NdeH1PackageName`` (= "sway"); the kebab-cased form is
+  ## the cohort-wide sentinel segment for the libpaths block, while
+  ## ``SwayPackageId`` is the DSL-side package identifier the M3
+  ## registry indexes by.
+
+proc currentSwayCfg*(): swayImpl.SwayConfig =
+  ## Read every configurable cell into a ``SwayConfig`` record the
+  ## shim's render* procs can consume. Uses the M9.D fallback-flavour
+  ## of ``readConfigurable`` so this proc is callable even when the
+  ## package has not yet registered its defaults (e.g. from a unit test
+  ## that imported the recipe but is exercising the helper in isolation).
+  ##
+  ## ``extraModelines`` is sourced from ``defaultConfig()`` rather than
+  ## ``readConfigurable``: the M2/M9.D surface does not yet cover
+  ## ``seq[string]`` and the ``config:`` block's entry is silently
+  ## passed through at macro-expansion time (same pattern as NDE-D's
+  ## ``fontPackages``). The cache-key propagates honestly because the
+  ## rendered bytes still flow through ``configFileSha256Of``.
+  let defaults = swayImpl.defaultConfig()
+  result = swayImpl.SwayConfig(
+    aptSnapshot: readConfigurable[string](
+      "swayCompositor.aptSnapshot", defaults.aptSnapshot),
+    superKey: readConfigurable[string](
+      "swayCompositor.superKey", defaults.superKey),
+    terminalApp: readConfigurable[string](
+      "swayCompositor.terminalApp", defaults.terminalApp),
+    launcherApp: readConfigurable[string](
+      "swayCompositor.launcherApp", defaults.launcherApp),
+    extraModelines: defaults.extraModelines,
+    storeRoot: defaults.storeRoot)
+
+# ---------------------------------------------------------------------------
+# Per-artifact registration helpers
+# ---------------------------------------------------------------------------
+#
+# Each helper records one fs.* declaration against the recipe's
+# packageName + artifactName. The ``files:`` arms below call these so the
+# M4 ``beginBuildContext`` push covers the artifact name. Tests that
+# want to re-register after toggling a configurable call
+# ``registerSwayFiles()`` (below) directly with explicit packageName +
+# artifactName so the call works outside a build: context.
+# ---------------------------------------------------------------------------
+
+proc registerSwayConfig*() =
+  ## ``/etc/sway/config`` — the spec's load-bearing acceptance #1 file.
+  ## Content is the rendered bindsym + exec-once + output configuration
+  ## text from ``swayImpl.renderSwayConfig(cfg)``. Configurables
+  ## ``superKey`` / ``terminalApp`` / ``launcherApp`` / ``extraModelines``
+  ## all propagate to the cache key via the rendered bytes.
+  let cfg = currentSwayCfg()
+  fs.configFile(
+    path = "/etc/sway/config",
+    content = swayImpl.renderSwayConfig(cfg),
+    packageName = SwayPackageId,
+    artifactName = "config")
+
+proc registerLdConfContribution*() =
+  ## The libpaths managedBlock — NDE-F's overlay contribution at
+  ## priority=500 against the same ``/etc/ld.so.conf.d/00-reproos-linux
+  ## .conf`` block NDE-D's graphics-stack anchors at priority=100. The
+  ## blockId / priority / packageName triple is sourced from the shim's
+  ## exported constants so the cohort-wide rename or priority bump
+  ## propagates in one place. The merger sorts ``(priority, packageName,
+  ## blockId)`` ascending so graphics-stack (priority=100) sorts before
+  ## sway (priority=500).
+  let cfg = currentSwayCfg()
+  fs.managedBlock(
+    path = "/etc/ld.so.conf.d/00-reproos-linux.conf",
+    blockId = swayImpl.NdeH1LibpathsBlockId,
+    scope = bsSystem,
+    content = swayImpl.renderLdConfBlockContent(cfg),
+    priority = swayImpl.NdeH1LibpathsPriority,   # =500 (compositor sort key)
+    packageName = swayImpl.NdeH1PackageName,
+    artifactName = "ldConfContribution")
+
+proc registerSessionService*() =
+  ## ``sway-session.service`` Type=oneshot unit at the cascade-G fix
+  ## path /usr/lib/systemd/system/ (NOT the legacy /lib/systemd/system/
+  ## which R9 systemd 257.9 dropped from the default UnitPath).
+  fs.configFile(
+    path = "/usr/lib/systemd/system/sway-session.service",
+    content = swayImpl.renderSessionService(),
+    packageName = SwayPackageId,
+    artifactName = "sessionService")
+
+proc registerSessionDesktopEntry*() =
+  ## ``/etc/wayland-sessions/sway.desktop`` — XDG Desktop Entry the
+  ## display-manager greeters (gdm, sddm) read to populate the session-
+  ## picker dropdown.
+  fs.configFile(
+    path = "/etc/wayland-sessions/sway.desktop",
+    content = swayImpl.renderSessionDesktopEntry(),
+    packageName = SwayPackageId,
+    artifactName = "sessionDesktopEntry")
+
+proc registerSwayFiles*() =
+  ## Register every fs.* output the recipe owns. Idempotent at the
+  ## per-call level only — call ``resetDslPortFsState`` +
+  ## ``resetDslPortFsExtState`` before re-invoking, otherwise each fs.*
+  ## call appends a fresh row to the registry.
+  ##
+  ## Used by the unit-test fixture to re-register after a configurable
+  ## toggle. The recipe's ``files <name>: build:`` arms below each
+  ## invoke a single per-artifact helper so the M4 ``beginBuildContext``
+  ## push carries the spec'd artifact name; the per-artifact helpers'
+  ## explicit packageName argument keeps the registration well-formed
+  ## when called outside a build: context (as the test fixture does).
+  registerSwayConfig()
+  registerLdConfContribution()
+  registerSessionService()
+  registerSessionDesktopEntry()
+
+# ---------------------------------------------------------------------------
+# Package declaration
+# ---------------------------------------------------------------------------
 
 package swayCompositor:
   ## NDE-H1 native sway compositor package.
   ##
   ## Downstream Tier-1 packages (NDEM1 system-generation switching)
-  ## ``uses:`` this and consume the exported ``materializeSway``
-  ## proc to obtain the emission outputs (the /etc/sway/config text;
-  ## the /etc/ld.so.conf.d/00-reproos-linux.conf libpaths managed
-  ## block contribution with priority=500; the sway-session.service
-  ## unit at the cascade-G path /usr/lib/systemd/system/; the
-  ## /etc/wayland-sessions/sway.desktop XDG session entry).
+  ## ``uses:`` this and consume the recipe's fs.* artifacts through the
+  ## DSL's ``consumeConfigFile`` / ``consumeManagedBlock`` materialiser:
   ##
-  ## Conceptual DSL declarations (surface not yet implemented;
-  ## semantics encoded directly in the impl module's helpers):
-  ##
-  ##   files config:
-  ##     build:
-  ##       fs.configFile(
-  ##         path = "/etc/sway/config",
-  ##         content = iniContent:
-  ##           # ... sway-config-shaped template ...
-  ##       )
-  ##
-  ##   service sessionManager:
-  ##     description = "Sway wlroots-tiling Wayland compositor session"
-  ##     type        = oneshot
-  ##     execStart   = "/usr/bin/sway"
-  ##     wantedBy    = "graphical-session.target"
+  ##   * /etc/sway/config — the spec'd configurable-driven bindsym +
+  ##     exec-once + output configurations.
+  ##   * /etc/ld.so.conf.d/00-reproos-linux.conf — managedBlock
+  ##     contribution (scope=system, packageName=sway, blockId=libpaths,
+  ##     priority=500). Unions with NDE-D's graphics-stack contribution
+  ##     at NDEM1 multi-contributor merge step.
+  ##   * /usr/lib/systemd/system/sway-session.service — Type=oneshot
+  ##     user-session unit (cascade-G fix path).
+  ##   * /etc/wayland-sessions/sway.desktop — XDG session entry.
 
   defaultToolProvisioning "path"
 
   config:
-    ## apt-jammy snapshot pin. Default ``ubuntu/jammy/20260615T000000Z``
-    ## (matches NDE0-G's foundation pin). Part of every cache key so a
-    ## snapshot bump invalidates the ld.so.conf.d block atomically.
+    ## The apt-jammy snapshot pin for the (deferred) sway + wlroots .deb
+    ## input. Format: ``ubuntu/jammy/YYYYMMDDTHHMMSSZ``. Part of every
+    ## cache key so a snapshot bump invalidates the libpaths block
+    ## atomically.
     aptSnapshot: string = "ubuntu/jammy/20260615T000000Z"
 
     ## Modifier key bound to ``$mod`` in /etc/sway/config. Default
@@ -169,6 +318,9 @@ package swayCompositor:
     ## argument portion of an ``output`` line. Insertion-order
     ## preserved (sway honours first-match-wins for output configs).
     ## Default ``@[]`` — sway auto-configures every connected output.
+    ## NB: M2/M9.D ``recordConfigDefault`` does not yet cover
+    ## ``seq[string]`` — the entry is documentary; the helper reads
+    ## the impl module's default. See module-preamble honest deferrals.
     extraModelines: seq[string] = @[]
 
   uses:
@@ -191,8 +343,63 @@ package swayCompositor:
     "dbus-broker >=0.1.0"
 
     ## NDE0-G native graphics-stack — supplies the wlroots
-    ## prerequisites (Mesa DRM userland + libwayland + libxkbcommon
-    ## + fontconfig + fonts-dejavu-core). The libpaths block
-    ## contribution NDE-H1 emits here unions with NDE0-G's at the
-    ## NDEM1 multi-contributor merge step.
+    ## prerequisites (Mesa DRM userland + libwayland + libxkbcommon +
+    ## fontconfig + fonts-dejavu-core). The libpaths block
+    ## contribution NDE-H1 emits here (priority=500) unions with
+    ## NDE0-G's (priority=100) at the NDEM1 multi-contributor merge
+    ## step.
     "graphics-stack >=0.1.0"
+
+  # -------------------------------------------------------------------------
+  # files: artifacts — one per emitted file. Each ``build:`` body calls
+  # the matching per-artifact helper proc declared at module top level;
+  # the helper handles the configurable read + the fs.* registration so
+  # the recipe stays declarative.
+  # -------------------------------------------------------------------------
+
+  files config:
+    ## /etc/sway/config — the load-bearing user-facing keybind surface.
+    ## Configurables (superKey, terminalApp, launcherApp,
+    ## extraModelines) all propagate through ``renderSwayConfig(cfg)``
+    ## to the cache key.
+    build:
+      registerSwayConfig()
+
+  files ldConfContribution:
+    ## /etc/ld.so.conf.d/00-reproos-linux.conf — NDE-F's overlay
+    ## contribution at priority=500 (cohort packageName="sway",
+    ## blockId="libpaths"). Unions with NDE-D graphics-stack's
+    ## priority=100 anchor at the merge step.
+    build:
+      registerLdConfContribution()
+
+  files sessionService:
+    ## /usr/lib/systemd/system/sway-session.service — Type=oneshot
+    ## user-session unit at the cascade-G fix path (NOT
+    ## /lib/systemd/system/ — R9 dropped that from UnitPath).
+    build:
+      registerSessionService()
+
+  files sessionDesktopEntry:
+    ## /etc/wayland-sessions/sway.desktop — XDG session entry the
+    ## display-manager greeters read to populate the session-picker.
+    build:
+      registerSessionDesktopEntry()
+
+  # -------------------------------------------------------------------------
+  # service: block — M9.C extended systemd-unit metadata recorded into
+  # the DslServiceDef registry. Activation-layer consumers (NDEM1)
+  # read this to plant the unit-file's [Install] section, set up
+  # WantedBy= aliases, etc. The literal ``execStart`` here records the
+  # ``/usr/bin/sway`` binary path that matches the rendered
+  # ``sway-session.service`` unit-file's ExecStart= directive emitted
+  # by ``renderSessionService()``.
+  # -------------------------------------------------------------------------
+
+  service sessionManager:
+    ## Sway user-session manager (the compositor itself).
+    description "Sway wlroots-tiling Wayland compositor session"
+    `type` "oneshot"
+    execStart "/usr/bin/sway"
+    wantedBy "graphical-session.target"
+    after "graphical-session-pre.target"
