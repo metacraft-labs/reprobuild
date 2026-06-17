@@ -1966,6 +1966,30 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Sixth from-source production recipe to exercise the M9.H/I/K trio
+  # — FIRST consumer of the M9.I ``makeFlags:`` channel (the five
+  # prior recipes all build under meson + ninja and consume
+  # ``mesonOptions:``). The Linux kernel uses ``make`` / kbuild, so
+  # this recipe's M9.I round-trip exercises the ``"make"`` channel of
+  # ``registeredBuildFlags``, complementing the five prior recipes'
+  # ``"meson"`` coverage. Pins linux-6.6.142's vendored sha256
+  # (b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70)
+  # + the kbuild flag sequence (ARCH=x86_64 LOCALVERSION=
+  # KBUILD_BUILD_USER=reprobuild KBUILD_BUILD_HOST=reprobuild
+  # KBUILD_BUILD_TIMESTAMP=@1577836800 -j1) + 1 executable artifact
+  # (bzImage) + 3 files artifacts (vmlinux / systemMap /
+  # kernelRelease). First recipe to combine ``dakExecutable`` with
+  # ``dakFiles`` in a single from-source package. Complements the
+  # NDE-E ``reproosKernel`` config-emitting front end with the
+  # upstream-source back end.
+  TestSpec(
+    source: "recipes/packages/source/kernel/test_kernel_source.nim",
+    binary: "build/test-bin/t_kernel_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
