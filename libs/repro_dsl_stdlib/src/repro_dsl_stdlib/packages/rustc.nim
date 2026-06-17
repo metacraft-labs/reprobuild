@@ -42,12 +42,22 @@ package rustc:
       executablePath = ".cargo/bin/rustc.exe",
       requiresExecutionProfileChecksum = false)
     # Direct-download: same rust standalone-distribution tarball as
-    # `cargo.nim`; rustc.exe ships under `rustc/bin/`.
+    # `cargo.nim`. The tarball ships rustc under `rustc/bin/` and the
+    # rust-std component under `rust-std-<triple>/`; the realize loop
+    # detects the rust-installer layout (via the
+    # `rust-installer-version` + `components` sentinel files) and
+    # merges every component into a single flat prefix — the same
+    # operation upstream's `install.sh` performs — so rustc lands at
+    # `<prefix>/bin/rustc.exe` with libstd at
+    # `<prefix>/lib/rustlib/<triple>/lib/` (the exact layout rustc
+    # expects via `<exe>/../lib/rustlib/...`). See
+    # ``mergeRustInstallerComponents`` in
+    # ``repro_tool_profiles.nim``.
     tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
       sha256 = "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
       archiveType = "tar.xz",
       stripComponents = 1,
-      executablePath = "rustc/bin/rustc.exe",
+      executablePath = "bin/rustc.exe",
       packageId = "rust@1.92.0",
       cpu = "x86_64",
       os = "windows",

@@ -24,12 +24,15 @@ package rustup:
     # serves cargo / rustc / rustfmt / rustup). The tarball does NOT
     # ship rustup.exe, so this entry points at cargo.exe — operators
     # who actually need rustup should install it separately via the
-    # scoopApp path.
+    # scoopApp path. The realize loop's rust-installer auto-merge
+    # collapses every component into a flat prefix (see
+    # ``mergeRustInstallerComponents``), so cargo.exe lands at
+    # `<prefix>/bin/cargo.exe`.
     tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
       sha256 = "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
       archiveType = "tar.xz",
       stripComponents = 1,
-      executablePath = "cargo/bin/cargo.exe",
+      executablePath = "bin/cargo.exe",
       packageId = "rust@1.92.0",
       cpu = "x86_64",
       os = "windows",

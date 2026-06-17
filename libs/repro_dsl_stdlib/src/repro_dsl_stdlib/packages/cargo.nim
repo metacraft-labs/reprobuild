@@ -3,6 +3,31 @@ import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
+# ---------------------------------------------------------------------------
+# Typed output: a cargo test binary that speaks the rust libtest CLI.
+#
+# `cargo test --no-run --message-format=json-render-diagnostics` builds the
+# integration-test + lib-test binaries under
+# `target/<profile>/deps/<crate>-<hash>` (a hashed filename libtest picks)
+# and emits one JSON line per produced binary so the recipe can wire the
+# resulting paths through the engine. The recipe surfaces each produced
+# binary as a `CargoTestBinary` and then calls `.run(filter = ...)` to
+# schedule a per-test execute edge.
+#
+# Mirrors the `NimUnittestBinary` shape documented in
+# Test-Edges-And-Parallel-Runner.milestones.org §M0/M1 — same `.run()`
+# convention, same `TestBinary`-style interface so a future
+# `ct-test-runner` adapter can drive cargo test binaries through the
+# same parallel scheduler that handles Nim ones today.
+# ---------------------------------------------------------------------------
+
+type CargoTestBinary* = object
+  ## Typed handle returned by `cargo.test.build(...)`. Carries the
+  ## on-disk path of one cargo-test binary so `.run()` / `.runTest()`
+  ## can wire it into the input set of an execute edge and the engine
+  ## action-cache keys on the binary content.
+  path*: string
+
 package cargo:
   provisioning:
     nixPackage "nixpkgs#cargo", executablePath = "bin/cargo",
@@ -25,14 +50,25 @@ package cargo:
       requiresExecutionProfileChecksum = false)
     # Direct-download: the upstream Rust standalone-distribution tarball
     # ships cargo / rustc / rustfmt / rust-std under a single
-    # `rust-X.Y.Z-x86_64-pc-windows-msvc/` top-level dir. cargo.exe
-    # lives at `cargo/bin/cargo.exe` inside that tree. With
-    # stripComponents=1 the prefix root holds `cargo/bin/cargo.exe`.
+    # `rust-X.Y.Z-x86_64-pc-windows-msvc/` top-level dir, with each
+    # component nested under its own subdir (`cargo/`, `rustc/`,
+    # `rust-std-<triple>/`, `rustfmt-preview/`, ...) — the official
+    # `install.sh` MERGES these components into one flat prefix at
+    # install time, which is the only layout where rustc can find
+    # libstd at `<bin>/../lib/rustlib/<triple>/lib/`. With
+    # `stripComponents=1` we strip the outer
+    # `rust-1.92.0-<triple>/` dir; the realize loop then auto-detects
+    # the rust-installer layout (via the `rust-installer-version` +
+    # `components` sentinel files) and replays the upstream merge so
+    # `cargo.exe` lands at `<prefix>/bin/cargo.exe` and libstd at
+    # `<prefix>/lib/rustlib/<triple>/lib/`. See
+    # ``mergeRustInstallerComponents`` in
+    # ``repro_tool_profiles.nim`` for the merge implementation.
     tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
       sha256 = "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
       archiveType = "tar.xz",
       stripComponents = 1,
-      executablePath = "cargo/bin/cargo.exe",
+      executablePath = "bin/cargo.exe",
       packageId = "rust@1.92.0",
       cpu = "x86_64",
       os = "windows",
@@ -40,13 +76,24 @@ package cargo:
 
   executable cargo:
     cli:
-      dependencyPolicy automaticMonitor,
-        ignoredInputPrefixes = @[
-          "$CARGO_HOME/.global-cache",
-          "$CARGO_HOME/.package-cache",
-          "$HOME/.cargo/.global-cache",
-          "$HOME/.cargo/.package-cache"
-        ]
+      # Cargo manages its own incremental cache + fingerprint database
+      # under ``target/``, with semantics far more precise than the
+      # engine's fs-snoop can infer. Wrapping cargo with the automatic
+      # monitor adds no precision (cargo's cache decides invalidation;
+      # snoop's read/write set just duplicates what target/ already
+      # records) but does introduce the IAT-patching shim into every
+      # rustc / linker / build-script subprocess cargo spawns — a
+      # production hazard on Windows where rustc + LLVM do enough
+      # process-level fiddling that the inline-hook propagation
+      # interacts badly with rustc's exception handling. Declaring
+      # ``declaredOnly`` here means cargo edges key on their declared
+      # inputs/outputs (Cargo.toml, Cargo.lock, src/, etc.) and let
+      # cargo's own cache handle the fine-grained recompile decisions.
+      # Recipe authors who really want monitor evidence on a cargo
+      # call can opt back in by passing
+      # ``dependencyPolicy = automaticMonitorPolicy()`` to the
+      # per-call wrapper.
+      dependencyPolicy declaredOnly
 
       subcmd "build":
         boolFlag locked is bool, alias = "--locked"
@@ -56,6 +103,73 @@ package cargo:
           role = input
         flag targetDir is string,
           alias = "--target-dir"
+
+      subcmd "test":
+        ## `cargo test` orchestrates build + run in one verb. The
+        ## reprobuild-native shape ALWAYS passes `--no-run` from this
+        ## subcommand so the action emits the test binaries as outputs;
+        ## individual tests are then driven via the typed handle's
+        ## `.run()` method below. Direct `cargo test` invocations that
+        ## run inside this subcommand without `--no-run` are still
+        ## supported (the legacy `just test` carries them) but they do
+        ## not produce reusable typed outputs.
+        boolFlag locked is bool, alias = "--locked"
+        boolFlag release is bool, alias = "--release"
+        boolFlag noRun is bool, alias = "--no-run"
+        flag manifestPath is string,
+          alias = "--manifest-path",
+          role = input
+        flag targetDir is string,
+          alias = "--target-dir"
+        flag testBinaryPath is string,
+          alias = "--test",
+          role = output
+        outputs testBinary is CargoTestBinary, testBinaryPath
+
+# ---------------------------------------------------------------------------
+# Manual wrapper on the `CargoTestBinary` typed output — emits one
+# execute edge per call. Recipes typically call `.run()` once per
+# individual rust test discovered by enumerating the binary's
+# `--list --format=terse` output at recipe-evaluation time (or once with
+# `filter = ""` to run the whole binary as a single edge during the
+# initial migration).
+# ---------------------------------------------------------------------------
+
+proc run*(self: CargoTestBinary; filter = "";
+         actionId = ""; deps: openArray[string] = [];
+         after: openArray[BuildActionDef] = [];
+         extraEnv: openArray[(string, string)] = []): BuildActionDef
+    {.discardable.} =
+  ## Schedules one cargo-test execute edge for this binary. When
+  ## `filter` is non-empty, the binary is invoked with
+  ## `--exact <filter>` (libtest's per-test selection). When empty,
+  ## the binary runs every test it contains in one process — the
+  ## "whole binary as one edge" fallback used before per-test
+  ## enumeration is wired.
+  ##
+  ## The handle's `path` is recorded as a typed input so the engine
+  ## action-cache keys on the binary's content; a rebuild of the
+  ## binary correctly invalidates every per-test execute edge that
+  ## reads it.
+  ##
+  ## ``extraEnv`` (MR10): per-edge env-var injection threaded onto the
+  ## spawned test process. Useful for tests whose runtime needs
+  ## additional env vars (e.g. cairo-corelib's ``CAIRO_CORELIB_DIR``)
+  ## without resorting to a shell-wrapper indirection.
+  var cliArgs: seq[PublicCliArg] = @[]
+  cliArgs.add(inputArg("binary", self.path))
+  if filter.len > 0:
+    cliArgs.add(cliArg("filter", filter))
+  let call = publicCliCall("cargo",
+    "cargo-test-binary", "run",
+    "cargo.test_binary.run", cliArgs)
+  let selectedActionId =
+    if actionId.len > 0: actionId
+    else: defaultToolActionId(call)
+  result = recordToolInvocation(selectedActionId, call,
+    deps = combineActionDeps(deps, after),
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    extraEnv = extraEnv)
 
 # M65 cakBuiltin catalog -- consumed on Windows and non-Nix Linux.
 # Same per-channel Rust toolchain archive as `rustc.nim` and

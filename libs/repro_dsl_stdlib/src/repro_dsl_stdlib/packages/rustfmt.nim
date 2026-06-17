@@ -30,12 +30,18 @@ package rustfmt:
       executablePath = ".cargo/bin/rustfmt.exe",
       requiresExecutionProfileChecksum = false)
     # Direct-download: same rust standalone-distribution tarball as
-    # `cargo.nim`; rustfmt.exe ships under `rustfmt-preview/bin/`.
+    # `cargo.nim`. The realize loop merges every rust-installer
+    # component (cargo, rustc, rust-std, rustfmt-preview, ...) into a
+    # flat prefix matching what upstream's `install.sh` produces, so
+    # `rustfmt.exe` lands at `<prefix>/bin/rustfmt.exe` and the
+    # cargo-fmt subcommand front at `<prefix>/bin/cargo-fmt.exe`. See
+    # ``mergeRustInstallerComponents`` in
+    # ``repro_tool_profiles.nim``.
     tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
       sha256 = "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
       archiveType = "tar.xz",
       stripComponents = 1,
-      executablePath = "rustfmt-preview/bin/rustfmt.exe",
+      executablePath = "bin/rustfmt.exe",
       packageId = "rust@1.92.0",
       cpu = "x86_64",
       os = "windows",
