@@ -524,6 +524,24 @@ type
       ## ``files <name>:`` blocks — exclusive ownership. The legacy
       ## ``parsePackageDef`` does NOT recognise ``files:`` (no arm
       ## exists for it), so M3's emitter is the sole consumer.
+    soM4Build
+      ## Package-level ``build:`` blocks — M4's
+      ## ``emitM4BuildActions`` records each entry into
+      ## ``dslPortBuildActions`` AND wraps the body in a
+      ## ``beginBuildContext / try / finally endBuildContext`` pair so
+      ## ``output(path)`` calls inside attribute to the package
+      ## (empty ``artifactName``). The legacy
+      ## ``collectBuildStatements`` walker ALSO emits the body inside
+      ## ``buildXxxPackage*()`` for provider-mode dispatch; the two
+      ## sidecars are disjoint (M4 surfaces actions/outputs via
+      ## ``dslPortBuildActions`` / ``dslPortOutputs``; legacy surfaces
+      ## via the synthesized proc). Nested ``build:`` blocks inside
+      ## ``executable`` / ``library`` / ``files`` artifacts stay tagged
+      ## as their parent artifact's ownership at the OUTER section
+      ## level; M4's artifact-build emitter re-walks the artifact body
+      ## to find them and DOES NOT introduce a separate tag for the
+      ## nested case (there is no need — the outer artifact tag
+      ## already routes the entry to M4's nested walker).
 
   ClassifiedSection* = object
     ## One classified section. ``stmt`` is a copy of the AST node from
@@ -536,7 +554,8 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   ## Map a section-head name to its primary ownership tag. The
   ## ``executable`` / ``library`` / ``files`` arms map to the new M3
   ## tags; the ``config:`` / ``versions:`` arms map to the M2 tags;
-  ## everything else stays on the legacy path.
+  ## the package-level ``build:`` arm maps to the new M4 tag; everything
+  ## else stays on the legacy path.
   let head = calleeName(stmt).normalize
   case head
   of "executable": soM3ExecutableArtifact
@@ -544,6 +563,7 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   of "files": soM3FilesArtifact
   of "config": soM2Config
   of "versions": soM2Versions
+  of "build": soM4Build
   else: soLegacyParsePackageDef
 
 proc classifyPackageSections*(sectionStmts: NimNode):

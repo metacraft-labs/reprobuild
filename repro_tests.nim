@@ -1611,6 +1611,42 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # ── DSL-port M4: v8-style ``build:`` block lowering (package-level
+  # + artifact-scoped). The three tests pin the contract that the new
+  # ``emitM4BuildActions`` + ``emitM4ArtifactBuildLowering`` lowerers
+  # in ``macros_b.nim`` produce ``registerBuildAction`` /
+  # ``beginBuildContext / output / endBuildContext`` calls that survive
+  # macro expansion and round-trip through the M4
+  # ``registeredBuildActions`` / ``registeredOutputs`` API in
+  # ``dsl_port_runtime.nim``. The package-level form records with
+  # empty ``artifactName``; the artifact-scoped form records the
+  # parent ``executable`` / ``library`` ident name so ``output(path)``
+  # calls inside the body attribute to the correct ``(pkg, artifact)``
+  # bucket.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
+    binary: "build/test-bin/t_dsl_build_package_empty",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_with_executable.nim",
+    binary: "build/test-bin/t_dsl_build_with_executable",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_records_output_for_library.nim",
+    binary: "build/test-bin/t_dsl_build_records_output_for_library",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",

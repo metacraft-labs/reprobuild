@@ -858,6 +858,228 @@ proc emitM3Artifacts(packageName: string;
     else:
       result.add(registerCall)
 
+# ---------------------------------------------------------------------------
+# DSL-port M4 — ``build:`` block lowerers (package-level + artifact-scoped).
+#
+# v8's ``build:`` macro (see ``tools/prototypes/v8/staged/package_catalog/
+# project_package_dsl.nim`` line 418) is a context wrapper: push a
+# ``BuildBlockState`` onto a thread-local stack, run the body verbatim,
+# pop on exit. M4 ports that shape into production.
+#
+# Two surfaces, both routed off the same partitioned-section input:
+#
+#   1. Package-level — ``build:`` at the top of a ``package <name>:``
+#      body. ``classifySectionStmt`` tags these as ``soM4Build``.
+#      ``emitM4BuildActions`` walks the classified seq, picks every
+#      ``soM4Build`` entry, and emits one
+#      ``beginBuildContext / registerBuildAction / try body finally
+#      endBuildContext`` block per entry into the macro expansion.
+#
+#   2. Artifact-scoped — ``build:`` nested inside ``executable`` /
+#      ``library`` / ``files``. The outer artifact is tagged
+#      ``soM3*Artifact`` (M3's ownership); ``emitM4ArtifactBuild
+#      Lowering`` re-walks that artifact's body looking for ``build:``
+#      heads and emits the same wrap-and-register block, but with the
+#      artifact name in the second position so ``output()`` calls
+#      inside attribute to ``(pkg, artifact)`` rather than ``(pkg,
+#      "")``.
+#
+# Body re-walk discipline: BOTH emitters consume the actual NimNode of
+# the ``build:`` body — either directly from the partitioned section
+# list (package-level) or from the artifact-body re-walk
+# (artifact-scoped). M3 records the artifact's body REPR as a string
+# in ``DslArtifact.bodyRepr`` for diagnostic purposes; M4 NEVER calls
+# ``parseStmt`` on that string. The recorded ``bodyRepr`` field on
+# ``DslBuildAction`` is captured the SAME way (string literal) but is
+# also a diagnostic surface only — the lowerer emits the body as a
+# verbatim ``NimNode`` splice, not from the repr round-trip.
+#
+# ─────────────────────────────────────────────────────────────────────
+# M3 reviewer risks addressed
+# ─────────────────────────────────────────────────────────────────────
+#
+# Risk #1 — ``bodyRepr`` is a string. M4 re-walks the partitioned
+#   section list (and for artifact-scoped builds, re-walks the
+#   artifact body in place) to get the actual NimNode. ``parseStmt``
+#   on the recorded repr is NEVER invoked.
+#
+# Risk #2 — Section-ownership migration. M4 ADDS the ``soM4Build``
+#   tag and starts using it for the package-level form. ``parsePackageDef``
+#   does NOT have a dedicated arm for top-level ``build:`` (its only
+#   build-related code path is the ``collectBuildStatements`` walker
+#   used by ``buildCode``, which lifts the body into the synthesized
+#   ``buildXxxPackage*()`` proc). Therefore M4's package-level emission
+#   does NOT displace any ``parsePackageDef`` arm — the new M4 init
+#   block runs ALONGSIDE the legacy ``buildXxxPackage*()`` proc
+#   emission, and both surfaces coexist. See the "double-emit risk"
+#   analysis in the report for the complete argument.
+#
+#   For artifact-scoped builds, the legacy ``parseExecutable`` /
+#   ``parseLibrary`` arms do NOT consume the nested ``build:`` body
+#   at all (they only walk for ``name:``, ``cli:``, ``kind:``, etc.).
+#   The only legacy consumer of nested ``build:`` is
+#   ``collectBuildStatements``, which lifts the body into the same
+#   ``buildXxxPackage*()`` proc. Again the two pathways coexist; M4's
+#   emission is additive.
+#
+# Risk #3 — Collision guard / typed-tool handle coordination. M4
+#   uses neither the typed-tool handle nor the per-package const —
+#   the M4 ``output(path)`` recorder is the only user-facing proc and
+#   it operates on the active-context stack frame, not on a named
+#   handle. There is no shape M4 emits that could collide with the
+#   legacy ``const <pkg>* = <Title>Package()`` or the
+#   ``Executable[name]`` typed-tool handles.
+#
+# Risk #4 — v8's executable requires a ``cli:`` block. M3 already
+#   chose NOT to enforce this constraint (artifacts record into the
+#   sidecar regardless), and M4 inherits that decision: a ``build:``
+#   block inside an ``executable`` artifact records its outputs even
+#   when no ``cli:`` is declared. The ``cli:`` lowering arrives in M6
+#   and may add the enforcement at that point.
+# ---------------------------------------------------------------------------
+
+proc m4BuildEntryBody(stmt: NimNode): NimNode =
+  ## Extract the ``StmtList`` body from a ``build:`` section call.
+  ##
+  ## ``build:`` parses as ``Call(Ident "build", StmtList(...))`` or
+  ## ``Command(Ident "build", StmtList(...))``. Returns the inner
+  ## ``StmtList`` (a copy so subsequent splicing does not share AST
+  ## with the user's source tree); returns ``nil`` for any unexpected
+  ## shape so callers can defensively skip.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return nil
+  if stmt.len < 2:
+    return nil
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return nil
+  return body.copyNimTree()
+
+proc emitM4BuildActions*(packageName: string;
+                        classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for package-level ``build:``
+  ## entries (``soM4Build`` ownership) and emit one wrap-and-register
+  ## block per entry. The result is appended to the macro's expansion
+  ## AFTER M3's artifact emission, so the ``output(path)`` proc and
+  ## the ``beginBuildContext`` runtime helper are in scope.
+  ##
+  ## Each entry's verbatim Nim body is spliced VERBATIM into the
+  ## try-clause — no ``parseStmt(bodyRepr)``, no re-shaping. The
+  ## ``bodyRepr`` literal captured here is a DIAGNOSTIC surface only,
+  ## consumed by ``registeredBuildActions`` callers that want to verify
+  ## what was recorded.
+  ##
+  ## Provider-mode disjointness: the user's verbatim body is gated on
+  ## ``when not defined(reproProviderMode)`` so the legacy
+  ## ``buildXxxPackage*()`` proc — which ALSO consumes the body via
+  ## ``collectBuildStatements`` and is invoked from
+  ## ``runPackageProvider`` under ``--define:reproProviderMode +
+  ## isMainModule`` — does NOT see the body run twice in provider
+  ## mode. The ``registerBuildAction`` row + the ``beginBuildContext``
+  ## push/pop pair remain unconditional so the registry surface is
+  ## observable from BOTH modes (provider-mode tooling that wants to
+  ## inspect the recorded action shape can still call
+  ## ``registeredBuildActions``). See the ownership comment above
+  ## ``emitM4BuildActions`` for the complete double-emit analysis.
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership != soM4Build:
+      continue
+    let body = m4BuildEntryBody(entry.stmt)
+    if body.isNil:
+      continue
+    let pkgLit = newLit(packageName)
+    let artifactLit = newLit("")
+    let bodyReprLit = newLit(body.repr)
+    # The verbatim body is spliced into the try-clause. Each statement
+    # the author wrote runs at module-init time inside the active
+    # build context so ``output(path)`` resolves correctly.
+    #
+    # The body splice itself is gated on ``not defined(reproProviderMode)``
+    # to keep the provider-mode legacy chain (``runPackageProvider``
+    # → ``buildXxxPackage*()``) the sole executor in that mode. Tests
+    # do not define ``reproProviderMode`` so the body still runs at
+    # module-init and the M4 acceptance fixtures observe the expected
+    # outputs / actions.
+    result.add(quote do:
+      block:
+        registerBuildAction(`pkgLit`, `artifactLit`, `bodyReprLit`)
+        beginBuildContext(`pkgLit`, `artifactLit`)
+        try:
+          when not defined(reproProviderMode):
+            `body`
+        finally:
+          endBuildContext())
+
+proc emitM4ArtifactBuildLowering*(packageName: string;
+                                  classified: seq[ClassifiedSection]): NimNode =
+  ## For every M3 artifact entry in the classified seq, re-walk its
+  ## body looking for nested ``build:`` heads and emit one
+  ## wrap-and-register block per entry.
+  ##
+  ## The re-walk uses ``classifyPackageSections`` on the artifact's body
+  ## — the SAME partition seam M3 uses on the package body. The
+  ## ``build:`` head inside an artifact body classifies as ``soM4Build``
+  ## via ``classifySectionStmt``; we pick those entries and emit a
+  ## ``beginBuildContext(packageName, artifactName) / register / try
+  ## body finally end`` block, exactly mirroring the package-level
+  ## emission but with a non-empty ``artifactName``.
+  ##
+  ## Why classify the artifact body at all? It's the simplest way to
+  ## ALSO survive a recipe author writing ``build:`` MULTIPLE times
+  ## inside the same artifact (rare but legal — conditional ``when``
+  ## branches that each open a build block). The classifier emits one
+  ## entry per syntactic occurrence; the emitter dispatches once per
+  ## entry. We deliberately do NOT widen the M4 surface to handle
+  ## ``output("name", path)`` (two-arg) or other v8 helpers — that
+  ## arrives in M5+ as the build-body lowering deepens. For M4 the
+  ## acceptance is the single-arg ``output(path)`` recorder.
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership notin {soM3ExecutableArtifact,
+                              soM3LibraryArtifact,
+                              soM3FilesArtifact}:
+      continue
+    let parsed = m3ArtifactEntryAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    let artifactName = parsed.artifactName
+    if entry.stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if entry.stmt.len < 3:
+      continue
+    let artifactBody = entry.stmt[^1]
+    if artifactBody.kind != nnkStmtList:
+      continue
+    # Re-walk the artifact body via the same classifier. ``build:``
+    # heads inside the artifact body classify as ``soM4Build`` and we
+    # extract their inner ``StmtList`` to splice verbatim.
+    let artifactClassified = classifyPackageSections(artifactBody)
+    for innerEntry in artifactClassified:
+      if innerEntry.ownership != soM4Build:
+        continue
+      let body = m4BuildEntryBody(innerEntry.stmt)
+      if body.isNil:
+        continue
+      let pkgLit = newLit(packageName)
+      let artifactLit = newLit(artifactName)
+      let bodyReprLit = newLit(body.repr)
+      # Same provider-mode disjointness as ``emitM4BuildActions``:
+      # the user's body splice is gated on
+      # ``not defined(reproProviderMode)`` so the legacy
+      # ``buildXxxPackage*()`` (which also pulls artifact-scoped
+      # ``build:`` bodies via ``collectBuildStatements``) stays the
+      # sole executor in provider mode.
+      result.add(quote do:
+        block:
+          registerBuildAction(`pkgLit`, `artifactLit`, `bodyReprLit`)
+          beginBuildContext(`pkgLit`, `artifactLit`)
+          try:
+            when not defined(reproProviderMode):
+              `body`
+          finally:
+            endBuildContext())
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -1018,6 +1240,34 @@ macro package*(name: untyped; body: untyped): untyped =
   # the partitioned section walk; the runtime registry is the
   # diagnostic surface tests use today).
   result.add(m3ArtifactEmission)
+  # ── DSL-port M4: ``build:`` block lowering (package-level +
+  # artifact-scoped). Both emitters walk the SAME classified seq
+  # M3's emitter consumed (no second classification pass) and emit
+  # wrap-and-register blocks that splice the user's build body
+  # verbatim. The blocks sit AFTER M3's artifact emission so the
+  # M4 surface ALWAYS sees the registry rows M3 created — useful
+  # for diagnostic paths that want to cross-reference an action's
+  # artifactName against ``registeredArtifacts``.
+  #
+  # IMPORTANT: the legacy ``buildCode`` emission (above) ALSO
+  # consumes the build body via ``collectBuildStatements`` and
+  # synthesises ``buildXxxPackage*()``. That proc is only invoked
+  # under ``reproProviderMode + isMainModule``, so test runs see
+  # M4's init-time emission run exactly once. To keep provider mode
+  # from also seeing the body twice (M4 init body splice + legacy
+  # proc body splice), the M4 emitters gate the user's verbatim body
+  # splice on ``when not defined(reproProviderMode)``. The
+  # ``registerBuildAction`` + ``beginBuildContext`` / ``endBuildContext``
+  # pair stays unconditional so the registry surface is observable
+  # from both modes; only the body execution is mode-disjoint. See the
+  # provider-mode disjointness commentary on ``emitM4BuildActions`` /
+  # ``emitM4ArtifactBuildLowering`` for the complete rationale.
+  let m4BuildActionEmission = emitM4BuildActions(packageName,
+                                                  classifiedSections)
+  let m4ArtifactBuildEmission = emitM4ArtifactBuildLowering(packageName,
+                                                            classifiedSections)
+  result.add(m4BuildActionEmission)
+  result.add(m4ArtifactBuildEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

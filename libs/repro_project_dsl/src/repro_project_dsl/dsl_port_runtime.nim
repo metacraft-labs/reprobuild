@@ -456,3 +456,230 @@ proc registeredArtifacts*(packageName: string): seq[DslArtifact] =
   if packageName in dslPortArtifactRegistry:
     return dslPortArtifactRegistry[packageName]
   return @[]
+
+# ---------------------------------------------------------------------------
+# DSL-port M4 — ``build:`` block lowering: actions, outputs, active-context
+# stack.
+# ---------------------------------------------------------------------------
+##
+## ─────────────────────────────────────────────────────────────────────────
+## What the M4 surface covers
+## ─────────────────────────────────────────────────────────────────────────
+##
+## v8's ``build:`` block macro (``project_package_dsl.nim`` line 418) is a
+## pure context wrapper — push a ``BuildBlockState`` onto a thread-local
+## stack, run the user's body verbatim, pop on exit. Inside the body, the
+## ``output(path)`` / ``output(name, path)`` procs (lines 433-442) read
+## the active stack frame to attribute their effect to the right
+## artifact (or the package itself for the M1 symmetric package-level
+## form).
+##
+## The M4 production port mirrors that shape one-to-one:
+##
+##   * ``registerBuildAction(packageName, artifactName, bodyRepr)`` —
+##     observer-style append-only registry. The ``package`` macro emits
+##     one call per recognised ``build:`` block (package-level OR
+##     artifact-scoped). Empty ``artifactName`` is the package-level
+##     discriminator; any non-empty string names the parent
+##     ``executable`` / ``library`` / ``files`` artifact.
+##
+##   * ``beginBuildContext(packageName, artifactName)`` /
+##     ``endBuildContext()`` — Approach (A) thread-local push/pop. The
+##     ``package`` macro wraps every ``build:`` body in a try/finally
+##     that pairs these calls, so ``output`` reaches the right frame
+##     even when the path passes through a helper proc.
+##
+##   * ``output(path)`` — Records ``path`` against the active artifact
+##     frame. When NO active context exists (e.g. the legacy
+##     ``buildXxxPackage*()`` proc invokes a helper that called
+##     ``output`` after the M4 try/finally already popped — possible in
+##     provider-mode replay), the call is a SILENT no-op so the legacy
+##     pathway stays compatible. This is INTENTIONALLY asymmetric with
+##     the v8 staged variant (which calls ``currentBuildState()`` and
+##     raises): tests for M4 always push a context first via the
+##     emitted try/finally, so the no-op branch is unreachable from a
+##     correctly-shaped recipe. The branch only exists for compatibility
+##     with the legacy provider-mode call chain.
+##
+##   * ``registeredOutputs(packageName, artifactName): seq[string]`` —
+##     diagnostic accessor. Returns the empty seq when no outputs were
+##     recorded against the key, matching M2's / M3's "empty rather than
+##     raise" convention.
+##
+##   * ``registeredBuildActions(packageName): seq[DslBuildAction]`` —
+##     per-package read of every recorded action. Same semantics as
+##     ``registeredArtifacts`` and ``registeredVersions``.
+##
+##   * ``resetDslPortBuildState()`` — drops every action, every output,
+##     and clears the active-context stack. Test fixtures call this
+##     between scenarios.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Why a thread-local stack rather than module-level scalars?
+## ─────────────────────────────────────────────────────────────────────────
+##
+## Approach (A) mirrors v8's production layer (``beginBuildBlock`` /
+## ``endBuildBlock`` in ``runtime_core.nim`` lines 113-154) and supports
+## nesting — a helper proc invoked from inside one ``build:`` block can
+## itself open another (rare today, but the door is left open for
+## composition-style helpers). Approach (B) module-level scalars would
+## silently corrupt the inner attribution. The active-context state is
+## ``threadvar`` so a multi-threaded test runner does not cross-attribute
+## outputs between fixtures.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Coordination with the legacy ``beginBuildBlock`` (Project-DSL-Composition
+## M5)
+## ─────────────────────────────────────────────────────────────────────────
+##
+## ``runtime_core.nim``'s ``beginBuildBlock`` records a
+## ``PackageBuildState`` for typed-tool wrappers / cross-cutting interface
+## slots. M4's ``beginBuildContext`` is a SEPARATE stack used solely by
+## the new ``build:`` / ``output()`` surface. The two stacks coexist
+## because:
+##
+##   * ``beginBuildBlock`` is pushed by the legacy ``buildXxxPackage*()``
+##     proc (provider-mode only) and consumed by typed-tool wrappers.
+##   * ``beginBuildContext`` is pushed by the M4 init-time try/finally
+##     and consumed by ``output()``.
+##
+## M4 does NOT extend the legacy ``PackageBuildState`` to carry an
+## ``artifactName`` — doing so would change the legacy ABI and ripple
+## through every typed-tool wrapper. Keeping the two stacks disjoint
+## means the M4 surface can evolve without touching the legacy chain.
+
+type
+  DslBuildAction* = object
+    ## One ``build:`` block registration. Populated by ``emitM4*``
+    ## emitters at module-init time; read by host code via
+    ## ``registeredBuildActions``. Distinguishes:
+    ##
+    ##   * package-level form (``artifactName == ""``) — the ``build:``
+    ##     block sat directly under a ``package <name>:`` head.
+    ##   * artifact-scoped form (``artifactName == "<ident>"`` or
+    ##     ``"<str-lit>"``) — the ``build:`` block sat inside an
+    ##     ``executable`` / ``library`` / ``files`` artifact body.
+    packageName*: string
+    artifactName*: string
+      ## Empty for package-level; the artifact's source-level name for
+      ## artifact-scoped.
+    bodyRepr*: string
+      ## The ``build:`` body's ``NimNode.repr`` at the time
+      ## ``emitM4*`` ran. Diagnostic surface — M4+ lowerings re-walk the
+      ## partitioned section list (NEVER ``parseStmt(bodyRepr)``).
+
+  DslBuildContextFrame* = object
+    ## One frame on the active-context stack. Pushed by
+    ## ``beginBuildContext``, popped by ``endBuildContext``.
+    packageName*: string
+    artifactName*: string
+
+var dslPortBuildActions: seq[DslBuildAction]
+  ## Append-only registry. ``registerBuildAction`` adds one row per
+  ## recognised ``build:`` block. ``registeredBuildActions`` returns a
+  ## per-package filtered copy.
+
+var dslPortOutputs: Table[string, seq[string]]
+  ## Per-``(packageName, artifactName)`` output registry, keyed by
+  ## ``packageName & "." & artifactName``. ``output(path)`` appends one
+  ## row per call into the active frame's bucket;
+  ## ``registeredOutputs(packageName, artifactName)`` returns the
+  ## per-bucket copy. ``Table[string, seq[string]]`` rather than the
+  ## sequence-of-records used for actions because outputs are queried
+  ## by exact ``(pkg, artifact)`` lookup and a Table gives O(1).
+
+var dslPortActiveBuildContext {.threadvar.}: seq[DslBuildContextFrame]
+  ## Active-context stack. ``threadvar`` so test fixtures running on
+  ## different threads don't cross-attribute outputs. Empty when no
+  ## ``build:`` block is currently open.
+
+proc resetDslPortBuildState*() =
+  ## Drop every recorded build action + every recorded output + clear
+  ## the active-context stack. Test fixtures call this between
+  ## scenarios so registry entries do not leak across cases. Keeping the
+  ## three concerns (config, versions, artifacts, build) separable lets
+  ## tests target one surface without disturbing the others.
+  dslPortBuildActions.setLen(0)
+  dslPortOutputs.clear()
+  dslPortActiveBuildContext.setLen(0)
+
+proc registerBuildAction*(packageName, artifactName, bodyRepr: string) =
+  ## Append one build-action entry. The ``package`` macro emits one call
+  ## per recognised ``build:`` block via ``emitM4BuildActions`` or
+  ## ``emitM4ArtifactBuildLowering``.
+  ##
+  ## Idempotency: re-running the registration on a second module-init
+  ## of the same package (e.g. when the recipe module is imported twice)
+  ## appends a duplicate row — we deliberately do NOT collapse, because
+  ## conditional ``when`` branches can legitimately re-declare a build
+  ## action under different platform gates and the consumer decides
+  ## which arm to honour. Tests that need a clean baseline call
+  ## ``resetDslPortBuildState`` first.
+  dslPortBuildActions.add(DslBuildAction(
+    packageName: packageName,
+    artifactName: artifactName,
+    bodyRepr: bodyRepr))
+
+proc registeredBuildActions*(packageName: string): seq[DslBuildAction] =
+  ## Return every build action registered against ``packageName`` in
+  ## declaration order. Returns the empty seq when the package never
+  ## declared a ``build:`` block; callers must NOT treat the empty
+  ## return as an error.
+  result = @[]
+  for action in dslPortBuildActions:
+    if action.packageName == packageName:
+      result.add(action)
+
+proc beginBuildContext*(packageName, artifactName: string) =
+  ## Push a frame onto the active-context stack. The ``package`` macro
+  ## wraps every recognised ``build:`` body in a try/finally that pairs
+  ## this with ``endBuildContext``. Multiple pushes nest cleanly —
+  ## ``output(path)`` always attributes to the TOP frame.
+  dslPortActiveBuildContext.add(DslBuildContextFrame(
+    packageName: packageName,
+    artifactName: artifactName))
+
+proc endBuildContext*() =
+  ## Pop the top frame. Safe to call on an empty stack (no-op) — the
+  ## try/finally pairing guarantees balance in well-formed code, but
+  ## defensive no-op semantics let unit tests reset between scenarios
+  ## without crashing when state was already clean.
+  if dslPortActiveBuildContext.len > 0:
+    dslPortActiveBuildContext.setLen(dslPortActiveBuildContext.len - 1)
+
+proc currentBuildContext*(): DslBuildContextFrame =
+  ## Return the top frame, or a zero-value frame (both fields empty)
+  ## when no ``build:`` block is open. Helper for inspection paths that
+  ## want to attribute a side-effect to the active artifact without
+  ## raising when called outside a build context.
+  if dslPortActiveBuildContext.len > 0:
+    return dslPortActiveBuildContext[^1]
+  return DslBuildContextFrame(packageName: "", artifactName: "")
+
+proc output*(path: string) =
+  ## Record ``path`` against the active build context's
+  ## ``(packageName, artifactName)`` bucket. When no context is
+  ## active (the stack is empty), the call is a SILENT no-op so the
+  ## legacy ``buildXxxPackage*()`` provider-mode call chain — which
+  ## may invoke build code without first opening an M4 context —
+  ## stays compatible. The init-time emission from the ``package``
+  ## macro always wraps the body in ``beginBuildContext / try /
+  ## finally endBuildContext`` so the no-op branch is unreachable
+  ## from a correctly-shaped recipe.
+  if dslPortActiveBuildContext.len == 0:
+    return
+  let frame = dslPortActiveBuildContext[^1]
+  let key = frame.packageName & "." & frame.artifactName
+  if not dslPortOutputs.hasKey(key):
+    dslPortOutputs[key] = @[]
+  dslPortOutputs[key].add(path)
+
+proc registeredOutputs*(packageName, artifactName: string): seq[string] =
+  ## Return every output path recorded against the ``(packageName,
+  ## artifactName)`` key in registration order. Returns the empty seq
+  ## when the key was never written; symmetric with the M2 / M3
+  ## accessor convention.
+  let key = packageName & "." & artifactName
+  if dslPortOutputs.hasKey(key):
+    return dslPortOutputs[key]
+  return @[]
