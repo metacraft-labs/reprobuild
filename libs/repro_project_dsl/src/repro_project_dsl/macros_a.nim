@@ -376,9 +376,15 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
       result.dependencyPolicy = parseCommandDependencyPolicy(stmt,
         result.dependencyPolicy)
     of "pos":
-      if isRoot:
-        error("top-level CLI parameters before subcommands must be flags",
-          stmt)
+      # DSL-port M6: v8's ``cli:`` body accepts ``pos`` at the root scope
+      # (``executable myTool: cli: pos input is string``) for tools with
+      # no subcommands. The legacy reprobuild parser rejected this shape
+      # because pre-v8 ``cli:`` blocks were strictly subcommand-only; the
+      # v8 port relaxes that to match the upstream surface. The
+      # downstream typed-tool wrapper emission already handles
+      # ``cpkPositional`` params on the root command via the same code
+      # path it uses for subcommand-scoped positionals, so the relaxation
+      # is purely the lifting of the early check here.
       let param = parseParam(stmt)
       result.params.add(param)
     of "flag", "boolflag":

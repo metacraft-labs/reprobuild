@@ -903,3 +903,145 @@ proc finishServiceContext*() =
     dslPortActiveServiceContext.len - 1)
   registerService(frame.packageName, frame.serviceName,
                   frame.executableRef, frame.args, frame.bodyRepr)
+
+# ---------------------------------------------------------------------------
+# DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` parameter
+# registry.
+# ---------------------------------------------------------------------------
+##
+## ─────────────────────────────────────────────────────────────────────────
+## What the M6 surface covers
+## ─────────────────────────────────────────────────────────────────────────
+##
+## v8's ``cli`` template (``project_package_dsl.nim`` line 830) is a
+## context wrapper that pushes a CLI-scope graph node and runs the body.
+## Inside, the ``pos`` / ``flag`` / ``boolFlag`` macros (lines 682-820)
+## emit one ``recordCliPos`` / ``recordCliFlag`` / ``recordCliBoolFlag``
+## runtime call per declared parameter, keyed off the current section
+## (root or named ``subcmd``). M6 ports the MINIMAL contract:
+##
+##   * ``pos <name> is <Type>``              → ``DslCliParam(kind: cpkPos)``.
+##   * ``flag <name> is <Type>``             → ``DslCliParam(kind: cpkFlag)``.
+##   * ``boolFlag <name>`` (no type)         → ``DslCliParam(kind: cpkBoolFlag,
+##                                              typeName: "bool")``.
+##
+## The registry is keyed by ``<packageName>.<artifactName>.<subcmd>``
+## with ``subcmd`` == "" for the root scope. M6 records ROOT-scope params
+## from the simple form ``cli: pos input is string; flag x is string``.
+## ``subcmd "<name>":`` nesting is deferred to a follow-on milestone
+## (see "Honest deferrals" in the M6 report); the registry schema's
+## ``subcmd`` field is wired through so the deferral doesn't require a
+## schema bump.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Why ``DslCliParamKind`` and not ``CliParamKind``?
+## ─────────────────────────────────────────────────────────────────────────
+##
+## ``types.nim`` already exports a legacy ``CliParamKind* = enum
+## cpkPositional, cpkFlag`` used by the typed-tool wrapper / ``parseParam``
+## chain. Reusing the type name would collide; the enum LITERAL ``cpkFlag``
+## is also shared. Nim's overload resolution disambiguates same-named
+## enum literals via the expected-type rule at the comparison site, so
+## ``params[0].kind == cpkPos`` and ``params[0].kind == cpkFlag`` both
+## resolve to the M6 enum when ``params[0].kind`` is typed as
+## ``DslCliParamKind``. The M6 enum gets its own type name to keep
+## type-level lookups unambiguous (``DslCliParamKind`` vs
+## ``CliParamKind``).
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Threading model
+## ─────────────────────────────────────────────────────────────────────────
+##
+## Module-level (not ``threadvar``), same as the M3/M5 artifact /
+## service registries. M6 registrations happen at module-init time on
+## the main thread; consumers read from any thread.
+
+type
+  DslCliParamKind* = enum
+    ## Discriminator for the three CLI-parameter shapes v8's ``cli``
+    ## body accepts. Bears the same literal-name conventions as the
+    ## v8-port spec (``cpkPos`` / ``cpkFlag`` / ``cpkBoolFlag``).
+    ## Distinct from the legacy ``CliParamKind`` in ``types.nim``
+    ## (``cpkPositional`` / ``cpkFlag``) — see the section comment
+    ## above for the disambiguation rationale.
+    cpkPos
+    cpkFlag
+    cpkBoolFlag
+
+  DslCliParam* = object
+    ## One ``pos`` / ``flag`` / ``boolFlag`` registration inside a
+    ## ``cli:`` block. Populated by ``emitM6CliLowering`` at module-init
+    ## time; read by host code via ``registeredCliParams``.
+    packageName*: string
+    artifactName*: string
+      ## The parent ``executable`` / ``library`` / ``files`` artifact
+      ## name verbatim (no kebab translation — symmetric with M3 / M5).
+    subcmd*: string
+      ## The enclosing ``subcmd "<name>":`` label, or "" for the root
+      ## scope. The schema reserves this field for the M6+ subcmd
+      ## extension; M6 always emits "" because the subcmd lowering is
+      ## deferred (see "Honest deferrals" in the M6 report).
+    name*: string
+      ## The source-level identifier of the parameter (e.g. ``input``,
+      ## ``region``, ``verbose``). NOT the kebab/cli-name translation
+      ## v8's ``cliNameFromIdent`` produces — M6's registry keys the
+      ## param off the Nim ident for symmetric round-tripping with
+      ## downstream consumers (M7+).
+    typeName*: string
+      ## "string" / "int" / "bool" / "seq[string]" verbatim from the
+      ## ``is <Type>`` infix. For ``boolFlag`` the source omits the
+      ## type; the emitter defaults to "bool".
+    kind*: DslCliParamKind
+
+var dslPortCliParams: Table[string, seq[DslCliParam]]
+  ## Per-``<packageName>.<artifactName>.<subcmd>`` CLI-parameter
+  ## registry. Each bucket holds the params in source-declaration
+  ## order. ``registerCliParam`` appends; ``registeredCliParams``
+  ## returns a copy so callers cannot mutate the registry from
+  ## outside the public API.
+
+proc dslCliKeyOf*(packageName, artifactName, subcmd: string): string =
+  ## Internal: compose the registry key. Exposed as a public helper so
+  ## test fixtures can inspect/reset specific buckets without rebuilding
+  ## the key by hand.
+  result = packageName & "." & artifactName & "." & subcmd
+
+proc resetDslPortCliState*() =
+  ## Drop every recorded CLI-parameter spec. Test fixtures call this
+  ## between scenarios so registry entries do not leak across cases.
+  ## Symmetric with the M2 / M3 / M4 / M5 reset procs.
+  dslPortCliParams.clear()
+
+proc registerCliParam*(packageName, artifactName, subcmd, name,
+                       typeName: string; kind: DslCliParamKind) =
+  ## Append one CLI-parameter entry against ``<packageName>.<artifactName>
+  ## .<subcmd>``. The ``package`` macro emits one call per recognised
+  ## ``pos`` / ``flag`` / ``boolFlag`` statement via ``emitM6CliLowering``.
+  ##
+  ## Idempotency: re-running the registration on a second module-init of
+  ## the same package appends a duplicate row — we deliberately do NOT
+  ## collapse, because conditional ``when`` branches can legitimately
+  ## re-declare a param under different platform gates and the consumer
+  ## decides which arm to honour. Tests that need a clean baseline call
+  ## ``resetDslPortCliState`` first.
+  let key = dslCliKeyOf(packageName, artifactName, subcmd)
+  if key notin dslPortCliParams:
+    dslPortCliParams[key] = @[]
+  dslPortCliParams[key].add(DslCliParam(
+    packageName: packageName,
+    artifactName: artifactName,
+    subcmd: subcmd,
+    name: name,
+    typeName: typeName,
+    kind: kind))
+
+proc registeredCliParams*(packageName, artifactName, subcmd: string):
+    seq[DslCliParam] =
+  ## Return every CLI parameter registered against the
+  ## ``<packageName>.<artifactName>.<subcmd>`` key in declaration order.
+  ## Returns the empty seq when the key was never written; symmetric
+  ## with the M2 / M3 / M4 / M5 accessor convention.
+  let key = dslCliKeyOf(packageName, artifactName, subcmd)
+  if key in dslPortCliParams:
+    return dslPortCliParams[key]
+  return @[]

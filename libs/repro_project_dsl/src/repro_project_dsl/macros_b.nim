@@ -1304,6 +1304,232 @@ proc emitM5Services*(packageName: string;
         finally:
           finishServiceContext())
 
+# ---------------------------------------------------------------------------
+# DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` lowerer.
+#
+# v8's ``cli`` template (see ``tools/prototypes/v8/staged/package_
+# catalog/project_package_dsl.nim`` line 830) pushes a CLI-scope handle
+# onto a graph stack and runs the user body. Inside, the
+# ``pos`` / ``flag`` / ``boolFlag`` macros (lines 682-820) emit a
+# ``recordCliPos`` / ``recordCliFlag`` / ``recordCliBoolFlag`` call per
+# statement keyed off the current section (root or ``subcmd``). M6 ports
+# the MINIMAL contract: each statement registers one ``DslCliParam`` row
+# against ``<pkg>.<artifact>.<subcmd="">`` via ``registerCliParam``.
+#
+# ─────────────────────────────────────────────────────────────────────
+# Scope decisions (deferred to a follow-on milestone)
+# ─────────────────────────────────────────────────────────────────────
+#
+# * Subcommand nesting. v8 walks ``subcmd "<name>":`` heads inside
+#   ``cli:`` and routes recorded params to the matching section. M6
+#   honours ROOT params only; the schema reserves the ``subcmd`` field
+#   so the deferral does not require a registry schema bump. See the
+#   "Honest deferrals" report in M6's commit log.
+#
+# * Per-parameter options (``alias = "..."``, ``required = true``,
+#   ``position = 2``, ``name = "...override"``). The legacy
+#   ``parseParam`` chain handles these for typed-tool wrapper emission;
+#   M6's registry captures only the minimal ``(name, typeName, kind)``
+#   triple plus the bucket key.
+#
+# * ``policy`` declarations inside ``cli:``. v8's ``policy``
+#   (project_package_dsl.nim line 822) is currently consumed by the
+#   legacy ``parseCommandDependencyPolicy`` arm; M6 skips it.
+#
+# ─────────────────────────────────────────────────────────────────────
+# M5 reviewer risks addressed
+# ─────────────────────────────────────────────────────────────────────
+#
+# Risk #1 — Section-ownership: ``cli:`` is an artifact-INTERNAL sub-block
+#   (sits inside ``executable``/``library``/``files`` bodies), NOT a
+#   top-level package section. ``classifySectionStmt`` therefore does
+#   NOT introduce a new top-level ownership tag; instead M6 piggybacks
+#   on the M3 ``soM3*Artifact`` tags and RE-WALKS the artifact body
+#   (same pattern M4 uses in ``emitM4ArtifactBuildLowering``). The
+#   legacy ``parseExecutable``'s ``cli:`` arm continues to walk the same
+#   body and populate ``pkg.executables[].commands`` for the typed-tool
+#   wrapper emission — the two sidecars are disjoint and no Nim code is
+#   double-emitted.
+#
+# Risk #2 — Provider-mode gating: M6 only registers metadata into the
+#   sidecar registry; it does not splice any user body. Provider-mode
+#   gating is therefore N/A (no double-execution risk).
+#
+# Risk #3 — Empty-stack convention: there is no M6 active-context
+#   stack. The emitter knows ``(packageName, artifactName)`` at
+#   macro-expansion time via the re-walk; the ``subcmd`` slot is
+#   always "" for M6 (root-scope only). Future milestones that add
+#   subcmd nesting will introduce a per-subcmd push/pop pair, mirroring
+#   M4 / M5 — at which point the empty-stack convention follows M4 /
+#   M5's "silent no-op" precedent.
+#
+# Risk #4 — Multi-bucket registry: ``dslPortCliParams`` is a
+#   ``Table[string, seq[DslCliParam]]`` keyed by
+#   ``<pkg>.<artifact>.<subcmd>``. The key uniquely identifies a
+#   bucket and preserves per-bucket insertion order. Symmetric with
+#   M4's ``dslPortOutputs`` keying convention.
+# ---------------------------------------------------------------------------
+
+proc m6CliBlockBody(stmt: NimNode): NimNode =
+  ## Extract the ``StmtList`` body from a ``cli:`` section call.
+  ##
+  ## ``cli:`` parses as ``Call(Ident "cli", StmtList(...))`` or
+  ## ``Command(Ident "cli", StmtList(...))``. Returns the inner
+  ## ``StmtList`` (no copy — M6 only reads it for spec extraction);
+  ## returns ``nil`` for any unexpected shape so callers can
+  ## defensively skip.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return nil
+  if stmt.len < 2:
+    return nil
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return nil
+  return body
+
+proc m6CliParamKindLit(kind: DslCliParamKind): NimNode =
+  ## Render a ``DslCliParamKind`` literal as a NimNode reference. Used
+  ## by the emitter to construct the kind argument of the
+  ## ``registerCliParam(...)`` runtime call.
+  case kind
+  of cpkPos:      ident("cpkPos")
+  of cpkFlag:     ident("cpkFlag")
+  of cpkBoolFlag: ident("cpkBoolFlag")
+
+proc m6ParseCliParam(stmt: NimNode):
+    tuple[matched: bool; name: string; typeName: string;
+          kind: DslCliParamKind] =
+  ## Parse one ``pos <name> is <Type>`` / ``flag <name> is <Type>`` /
+  ## ``boolFlag <name>`` statement out of a ``cli:`` body. Returns
+  ## ``matched = false`` for any other shape (silently skipped — the
+  ## body may also contain ``subcmd "<name>":`` heads, ``outputs``
+  ## statements, ``dependencyPolicy``, etc., which M6 does not
+  ## consume).
+  ##
+  ## Type extraction: M6 recognises ``<name> is <Type>`` (the v8
+  ## ``typedIsArg`` form, ``project_package_dsl.nim`` line 674). The
+  ## type NimNode is rendered via ``.repr`` to a string —
+  ## "string" / "int" / "bool" / "seq[string]" — matching v8's
+  ## ``cliTypeNameFromNode`` output for the common shapes. For
+  ## ``boolFlag`` the source omits the type; we default the recorded
+  ## ``typeName`` to "bool".
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len < 2:
+    return
+  let head = stmt[0]
+  if head.kind notin {nnkIdent, nnkSym}:
+    return
+  let headName = identText(head).normalize
+  case headName
+  of "pos":
+    result.kind = cpkPos
+  of "flag":
+    result.kind = cpkFlag
+  of "boolflag":
+    result.kind = cpkBoolFlag
+  else:
+    return
+  let nameArg = stmt[1]
+  # Common case: ``<name> is <Type>`` infix.
+  if nameArg.kind == nnkInfix and nameArg.len == 3 and
+      nameArg[0].eqIdent("is"):
+    if nameArg[1].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      return
+    result.name = identText(nameArg[1])
+    result.typeName = nameArg[2].repr
+    result.matched = true
+    return
+  # Bare-name case: ``boolFlag verbose`` (no type, defaults to "bool").
+  # Also accept ``pos input`` / ``flag x`` defensively even though
+  # those are non-canonical (legacy ``parseParam`` errors on them).
+  if nameArg.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    result.name = identText(nameArg)
+    result.typeName =
+      if result.kind == cpkBoolFlag: "bool"
+      else: "string"
+        # Fallback for the bare ``flag`` / ``pos`` shape — M6 does not
+        # emit these in any of its acceptance fixtures, but the
+        # default keeps the registry well-formed if a recipe author
+        # writes the shape regardless. The legacy ``parseParam`` chain
+        # surfaces the missing-type error elsewhere.
+    result.matched = true
+
+proc m6EmitParamRegistration(packageName, artifactName, subcmd: string;
+                             param: tuple[matched: bool; name: string;
+                                          typeName: string;
+                                          kind: DslCliParamKind]): NimNode =
+  ## Build one ``registerCliParam(...)`` call site for the given
+  ## parsed parameter. Caller has already validated ``param.matched``.
+  let pkgLit = newLit(packageName)
+  let artifactLit = newLit(artifactName)
+  let subcmdLit = newLit(subcmd)
+  let nameLit = newLit(param.name)
+  let typeLit = newLit(param.typeName)
+  let kindLit = m6CliParamKindLit(param.kind)
+  quote do:
+    registerCliParam(`pkgLit`, `artifactLit`, `subcmdLit`,
+                     `nameLit`, `typeLit`, `kindLit`)
+
+proc emitM6CliLowering*(packageName: string;
+                       classified: seq[ClassifiedSection]): NimNode =
+  ## For every M3 artifact entry in the classified seq, re-walk the
+  ## artifact body looking for a nested ``cli:`` head and emit one
+  ## ``registerCliParam(...)`` per recognised ``pos`` / ``flag`` /
+  ## ``boolFlag`` statement.
+  ##
+  ## Mirrors the body-rewalk pattern M4's
+  ## ``emitM4ArtifactBuildLowering`` uses: read the artifact body
+  ## from the partitioned section list (NOT from the recorded
+  ## ``bodyRepr`` string — never ``parseStmt`` a repr round-trip),
+  ## scan its top-level statements for the ``cli:`` head, and
+  ## dispatch inside its inner ``StmtList``.
+  ##
+  ## Subcommand handling: deferred. Any ``subcmd "<name>":`` head
+  ## inside the ``cli:`` body is silently skipped — the params it
+  ## declares do NOT show up in M6's registry. Follow-on milestone
+  ## opens the per-subcmd walker; the schema's ``subcmd`` field is
+  ## already wired.
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership notin {soM3ExecutableArtifact,
+                              soM3LibraryArtifact,
+                              soM3FilesArtifact}:
+      continue
+    let parsed = m3ArtifactEntryAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    let artifactName = parsed.artifactName
+    if entry.stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if entry.stmt.len < 3:
+      continue
+    let artifactBody = entry.stmt[^1]
+    if artifactBody.kind != nnkStmtList:
+      continue
+    # Walk the artifact body for ``cli:`` heads. We do NOT re-classify
+    # via ``classifyPackageSections`` here — ``cli:`` is not a
+    # top-level section type, so it has no entry in
+    # ``classifySectionStmt`` and would land on the legacy ownership.
+    # Direct head-name match is sufficient.
+    for inner in artifactBody:
+      if calleeName(inner).normalize != "cli":
+        continue
+      let cliBody = m6CliBlockBody(inner)
+      if cliBody.isNil:
+        continue
+      # Dispatch on each top-level statement of the ``cli:`` body.
+      # Statements we don't recognise (``subcmd``, ``outputs``,
+      # ``dependencyPolicy``, ``policy``) are silently skipped — the
+      # legacy ``parseExecutable`` arm continues to consume them via
+      # ``parseCliScope`` for the typed-tool wrapper emission.
+      for cliStmt in cliBody:
+        let p = m6ParseCliParam(cliStmt)
+        if not p.matched:
+          continue
+        result.add(m6EmitParamRegistration(
+          packageName, artifactName, "", p))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -1504,6 +1730,18 @@ macro package*(name: untyped; body: untyped): untyped =
   # ``emitM5Services`` for the provider-mode gating decision.
   let m5ServiceEmission = emitM5Services(packageName, classifiedSections)
   result.add(m5ServiceEmission)
+  # ── DSL-port M6: ``cli:`` block ``pos`` / ``flag`` / ``boolFlag``
+  # parameter registration. Walks the M3 artifact entries in the
+  # classified seq, re-walks each artifact body looking for a nested
+  # ``cli:`` head, and emits one ``registerCliParam(...)`` call per
+  # recognised ``pos`` / ``flag`` / ``boolFlag`` statement. The legacy
+  # ``parseExecutable`` arm continues to walk the same ``cli:`` body
+  # and populate ``pkg.executables[].commands`` for the typed-tool
+  # wrapper emission — the two sidecars are disjoint and observe the
+  # body in parallel. See the ownership commentary above
+  # ``emitM6CliLowering`` for the complete double-emit analysis.
+  let m6CliEmission = emitM6CliLowering(packageName, classifiedSections)
+  result.add(m6CliEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

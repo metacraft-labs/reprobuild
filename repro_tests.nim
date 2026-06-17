@@ -1682,6 +1682,40 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` lowering.
+  # The three tests pin the contract that ``emitM6CliLowering`` in
+  # ``macros_b.nim`` re-walks each M3 artifact body, dispatches the
+  # nested ``cli:`` head's statements through ``m6ParseCliParam``, and
+  # emits one ``registerCliParam(pkg, artifact, subcmd="", name,
+  # typeName, kind)`` call per recognised parameter. The recorded
+  # specs round-trip through the M6 ``registeredCliParams`` API in
+  # ``dsl_port_runtime.nim``. The legacy ``parseExecutable`` ``cli:``
+  # arm continues to populate ``pkg.executables[].commands`` for the
+  # typed-tool wrapper emission — the two sidecars co-exist.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_pos.nim",
+    binary: "build/test-bin/t_dsl_cli_params_pos",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_flag.nim",
+    binary: "build/test-bin/t_dsl_cli_params_flag",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_bool.nim",
+    binary: "build/test-bin/t_dsl_cli_params_bool",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",
