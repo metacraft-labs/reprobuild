@@ -140,6 +140,30 @@ unit_nde0k_kernel:
         libs/repro_dsl_stdlib/tests/t_nde0k_kernel.nim \
         2>&1 | tee test-logs/unit_nde0k_kernel.log
 
+# NDE-H1 native sway compositor package unit tests.
+# Exercises spec'd materializeSway — /etc/sway/config with
+# configurable bindsym lines (superKey + terminalApp + launcherApp +
+# extraModelines propagate to rendered content + content-addressed
+# store path) + /etc/ld.so.conf.d/00-reproos-linux.conf libpaths
+# managedBlock contribution (NDE-spec-block triple-form sentinel
+# scope=system, packageName=sway, blockId=libpaths, priority=500
+# compositor sort key) + /usr/lib/systemd/system/sway-session.service
+# Type=oneshot user-session unit (cascade-G fix; R9 systemd 257.9
+# dropped /lib/systemd/system/ from UnitPath) + /etc/wayland-sessions/
+# sway.desktop XDG session entry. Naming decision: packageName="sway"
+# (Tier-1 native is true to identity; Hyprland-the-package is the
+# future NDE-Hp1 milestone).
+unit_nde_h1_sway:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_nde_h1_sway \
+        --out:build/test-bin/t_nde_h1_sway \
+        libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim \
+        2>&1 | tee test-logs/unit_nde_h1_sway.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
