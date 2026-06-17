@@ -1917,6 +1917,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Third from-source production recipe to exercise the M9.H/I/K trio
+  # — FIRST recipe to mix ``library`` + ``executable`` artifacts in
+  # a single from-source production package. Pins Wayland 1.25.0's
+  # vendored sha256 + meson flag sequence + three shared-library
+  # artifacts (libwayland-{client,server,cursor}) PLUS one executable
+  # (wayland-scanner). Guards the M3 artifact registry against a
+  # regression that flattens the ``dakLibrary`` / ``dakExecutable``
+  # discriminator within a single package's artifact set.
+  TestSpec(
+    source: "recipes/packages/source/wayland/test_wayland_source.nim",
+    binary: "build/test-bin/t_wayland_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
