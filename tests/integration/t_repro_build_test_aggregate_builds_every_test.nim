@@ -61,15 +61,21 @@ proc countDeclaredTestSpecs(repoRoot: string): int =
 
 proc collectsTestActions(repoRoot: string): bool =
   ## Verify that ``repro.nim``'s ``build:`` body closes the test
-  ## iteration with exactly one ``collect("test", reprobuildTestActions)``
-  ## (Spec-Implementation M0 shape) or, on older trees, the equivalent
-  ## ``aggregate("test", reprobuildTestActions)``.
+  ## iteration with exactly one ``collect("test", …)``. The accumulator
+  ## name evolved across migrations: the M0 shape collected a single
+  ## ``reprobuildTestActions``; the later two-edge split (build edge +
+  ## execute edge) renamed the run-collection accumulator to
+  ## ``reprobuildTestExecuteActions`` (with a sibling
+  ## ``reprobuildTestBuildActions`` feeding ``test-builds``). Accept any
+  ## of those forms — and the legacy ``aggregate(...)`` spelling — so the
+  ## test pins the "exactly one closing collection" invariant without
+  ## hard-coding a single accumulator identifier.
   let content = readFile(repoRoot / "repro.nim")
-  let collectShape =
-    "collect(\"test\", reprobuildTestActions)" in content
-  let aggregateShape =
-    "aggregate(\"test\", reprobuildTestActions)" in content
-  collectShape or aggregateShape
+  for accumulator in ["reprobuildTestExecuteActions", "reprobuildTestActions"]:
+    if ("collect(\"test\", " & accumulator & ")") in content or
+        ("aggregate(\"test\", " & accumulator & ")") in content:
+      return true
+  false
 
 proc findReport(workRoot, repoRoot: string): string =
   for path in walkDirRec(workRoot):
