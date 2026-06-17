@@ -92,6 +92,40 @@
           # ``<dir>/ct_interpose/hook_registry.nim``), which is
           # ``ct_interpose/src`` inside the native-recorder checkout.
           ctInterposeSrc = "${codetracer-native-recorder}/ct_interpose/src";
+          # Build the RunQuota daemon (and CLI) from the ``runquota-src``
+          # input, the same source the reprobuild client compiles against
+          # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
+          # auto-started ``runquotad`` tracks the pinned/overridable source
+          # rather than a separately-installed binary, so
+          # ``--override-input runquota-src path:../runquota`` yields a daemon
+          # built from the local sibling — no ``RUNQUOTAD_BIN`` and no push
+          # needed to iterate. Mirrors runquota's own flake package.
+          runquotaTools = pkgs.stdenv.mkDerivation {
+            pname = "runquota";
+            version = "0.1.0";
+            src = runquota-src;
+            strictDeps = true;
+            dontConfigure = true;
+            nativeBuildInputs = [
+              pkgs.bash
+              pkgs.coreutils
+              pkgs.just
+              pkgs.nim2
+            ];
+            buildPhase = ''
+              runHook preBuild
+              mkdir -p test-logs
+              ${pkgs.bash}/bin/bash scripts/build_apps.sh 2>&1 | tee test-logs/build.log
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin"
+              install -m755 build/bin/runquota "$out/bin/runquota"
+              install -m755 build/bin/runquotad "$out/bin/runquotad"
+              runHook postInstall
+            '';
+          };
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks.just-lint = {
@@ -235,6 +269,7 @@
             SQLITE_PREFIX = pkgs.sqlite.out;
             XXHASH_PREFIX = pkgs.xxHash;
             packages = [
+              runquotaTools
               pkgs.just
               pkgs.nim2
               pkgs.cmake
