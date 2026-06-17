@@ -425,6 +425,13 @@ proc solve*(variants: openArray[VariantDecl];
   ## The driver lifecycle mirrors ``solveVariants``'s nine-step
   ## sequence; the only difference is the show directive surfaces two
   ## predicate families and the parse step routes by predicate name.
+  ##
+  ## Cross-platform: the same clingo FFI runs on Linux, macOS, and
+  ## Windows. Windows used to bypass this path with a
+  ## ``solveWithoutClingo`` stub because no provisioning entry
+  ## existed; ``windows/ensure-clingo.ps1`` now installs the real
+  ## clingo.dll (5.8.0) from conda-forge so the standard solver runs
+  ## on every supported host.
   let program = encodeUnified(variants, packages)
   result = UnifiedSolution(variants: initTable[string, string](),
                            packages: initTable[string, string](),

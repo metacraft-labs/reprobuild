@@ -194,321 +194,193 @@ type
 # are the cleanup pair; they must run on the happy path AND on the
 # error path so the high-level wrapper uses ``try / finally``.
 #
-# Platform scope: Reprobuild's M2 solver is currently exercised on
-# Linux and macOS only. Windows packaging of clingo is non-trivial
-# (no nixpkgs path; no upstream Windows DLL on potassco/clingo's
-# GitHub releases; conda-forge ships a Python-bound .pyd rather than
-# a plain ``clingo.dll``), so we guard the dynlib-backed FFI behind
-# ``when not defined(windows)`` and provide Windows stubs that raise
-# ``ClingoNotAvailableError`` on call. This lets the rest of
-# ``repro_cli_support`` -- including ``repro exec`` / ``repro shell``
-# / ``repro home apply`` paths that DON'T touch the solver -- compile
-# and run on Windows. Driving the M2 solver (variant /
-# version-constraint resolution) from Windows requires either a
-# native clingo build or a remote-solve protocol; both are outside
-# the M2a scope.
+# Platform scope: the FFI is unified across Linux, macOS, and Windows.
+# Each platform provides a ``libclingo.{so,dylib}`` / ``clingo.dll`` on
+# the dynlib search path (nixpkgs on Linux/macOS,
+# ``windows/ensure-clingo.ps1`` from a conda-forge tarball on
+# Windows). The previous Windows-stub branch — kept while clingo had
+# no Windows provisioning entry — has been retired: ``repro_solver``
+# now runs the real solver on every supported host.
+#
+# ``ClingoNotAvailableError`` is preserved as an exception type for
+# the rare scenario where a host's clingo install is broken at
+# runtime (LoadLibrary failure surfaces as a Nim ``LibraryError``
+# from the dynlib loader, but downstream catch sites may still want a
+# distinct typed signal for "FFI not callable").
 
 type
   ClingoNotAvailableError* = object of CatchableError
 
-when defined(windows):
-  template clingoNotAvailable() =
-    raise newException(ClingoNotAvailableError,
-      "clingo solver not wired up on Windows yet (repro_solver M2). " &
-      "See clingo_bindings.nim header for the rationale.")
+{.push cdecl, importc, dynlib: clingoLib.}
 
-when not defined(windows):
-  {.push cdecl, importc, dynlib: clingoLib.}
+proc clingo_control_new*(arguments: ptr cstring;
+                         argumentsSize: csize_t;
+                         logger: pointer;
+                         loggerData: pointer;
+                         messageLimit: cuint;
+                         control: ptr ClingoControlPtr): bool
+  ## Allocate a new control object. Upstream doc: Control module,
+  ## "Creating and Destroying Control Objects". ``arguments`` may be
+  ## NULL when ``argumentsSize`` is 0; the smoke test passes the empty
+  ## argv. ``logger`` is NULL when we don't want callback diagnostics.
 
-  proc clingo_control_new*(arguments: ptr cstring;
-                           argumentsSize: csize_t;
-                           logger: pointer;
-                           loggerData: pointer;
-                           messageLimit: cuint;
-                           control: ptr ClingoControlPtr): bool
-    ## Allocate a new control object. Upstream doc: Control module,
-    ## "Creating and Destroying Control Objects". ``arguments`` may be
-    ## NULL when ``argumentsSize`` is 0; the smoke test passes the empty
-    ## argv. ``logger`` is NULL when we don't want callback diagnostics.
+proc clingo_control_free*(control: ClingoControlPtr)
+  ## Destroy a control object. Upstream doc: Control module.
 
-  proc clingo_control_free*(control: ClingoControlPtr)
-    ## Destroy a control object. Upstream doc: Control module.
+proc clingo_control_add*(control: ClingoControlPtr;
+                         name: cstring;
+                         parameters: ptr cstring;
+                         parametersSize: csize_t;
+                         program: cstring): bool
+  ## Append a non-ground program (an ASP program text) to a named
+  ## part of the control. Upstream doc: Control module,
+  ## "Loading Programs". ``"base"`` is the canonical default part.
 
-  proc clingo_control_add*(control: ClingoControlPtr;
-                           name: cstring;
-                           parameters: ptr cstring;
-                           parametersSize: csize_t;
-                           program: cstring): bool
-    ## Append a non-ground program (an ASP program text) to a named
-    ## part of the control. Upstream doc: Control module,
-    ## "Loading Programs". ``"base"`` is the canonical default part.
+proc clingo_control_ground*(control: ClingoControlPtr;
+                            parts: ptr ClingoPart;
+                            partsSize: csize_t;
+                            groundCallback: pointer;
+                            groundCallbackData: pointer): bool
+  ## Ground the requested parts. Upstream doc: Control module,
+  ## "Grounding". The callback is for external functions
+  ## (``@name(...)``); we pass NULL because the smoke test's program
+  ## has none.
 
-  proc clingo_control_ground*(control: ClingoControlPtr;
-                              parts: ptr ClingoPart;
-                              partsSize: csize_t;
-                              groundCallback: pointer;
-                              groundCallbackData: pointer): bool
-    ## Ground the requested parts. Upstream doc: Control module,
-    ## "Grounding". The callback is for external functions
-    ## (``@name(...)``); we pass NULL because the smoke test's program
-    ## has none.
+proc clingo_control_solve*(control: ClingoControlPtr;
+                           mode: ClingoSolveMode;
+                           assumptions: pointer;
+                           assumptionsSize: csize_t;
+                           notify: pointer;
+                           data: pointer;
+                           handle: ptr ClingoSolveHandlePtr): bool
+  ## Start a solve and obtain a handle. Upstream doc: Solving module,
+  ## "Solve Functions". ``assumptions`` is NULL when we have none;
+  ## ``notify`` is the event callback (NULL for the smoke test).
 
-  proc clingo_control_solve*(control: ClingoControlPtr;
-                             mode: ClingoSolveMode;
-                             assumptions: pointer;
-                             assumptionsSize: csize_t;
-                             notify: pointer;
-                             data: pointer;
-                             handle: ptr ClingoSolveHandlePtr): bool
-    ## Start a solve and obtain a handle. Upstream doc: Solving module,
-    ## "Solve Functions". ``assumptions`` is NULL when we have none;
-    ## ``notify`` is the event callback (NULL for the smoke test).
+proc clingo_solve_handle_get*(handle: ClingoSolveHandlePtr;
+                              result: ptr ClingoSolveResult): bool
+  ## Block on the next result. Upstream doc: Solving module,
+  ## "Solve Handle".
 
-  proc clingo_solve_handle_get*(handle: ClingoSolveHandlePtr;
-                                result: ptr ClingoSolveResult): bool
-    ## Block on the next result. Upstream doc: Solving module,
-    ## "Solve Handle".
+proc clingo_solve_handle_model*(handle: ClingoSolveHandlePtr;
+                                model: ptr ptr ClingoModel): bool
+  ## Get the current model when the solve is at a model event.
+  ## Upstream doc: Solving module, "Solve Handle". The pointed-to
+  ## model is valid only until the next handle call.
 
-  proc clingo_solve_handle_model*(handle: ClingoSolveHandlePtr;
-                                  model: ptr ptr ClingoModel): bool
-    ## Get the current model when the solve is at a model event.
-    ## Upstream doc: Solving module, "Solve Handle". The pointed-to
-    ## model is valid only until the next handle call.
+proc clingo_solve_handle_resume*(handle: ClingoSolveHandlePtr): bool
+  ## Resume the search after a model event. Upstream doc: Solving
+  ## module, "Solve Handle". In yield mode, the search blocks at every
+  ## model; ``resume`` advances it to the next model (or to the end of
+  ## the search). The smoke test calls this after extracting symbols
+  ## from the first model so the final ``clingo_solve_handle_get``
+  ## sees a fully-finished solve.
 
-  proc clingo_solve_handle_resume*(handle: ClingoSolveHandlePtr): bool
-    ## Resume the search after a model event. Upstream doc: Solving
-    ## module, "Solve Handle". In yield mode, the search blocks at every
-    ## model; ``resume`` advances it to the next model (or to the end of
-    ## the search). The smoke test calls this after extracting symbols
-    ## from the first model so the final ``clingo_solve_handle_get``
-    ## sees a fully-finished solve.
+proc clingo_solve_handle_close*(handle: ClingoSolveHandlePtr): bool
+  ## Stop solving and release the handle. Upstream doc: Solving
+  ## module, "Solve Handle". Must run on both the happy and error
+  ## paths.
 
-  proc clingo_solve_handle_close*(handle: ClingoSolveHandlePtr): bool
-    ## Stop solving and release the handle. Upstream doc: Solving
-    ## module, "Solve Handle". Must run on both the happy and error
-    ## paths.
+proc clingo_model_symbols_size*(model: ptr ClingoModel;
+                                show: ClingoShowType;
+                                size: ptr csize_t): bool
+  ## Two-step pattern's first call: ask how many symbols the model
+  ## holds for the requested show mask. Upstream doc: Model module,
+  ## "Symbols".
 
-  proc clingo_model_symbols_size*(model: ptr ClingoModel;
-                                  show: ClingoShowType;
-                                  size: ptr csize_t): bool
-    ## Two-step pattern's first call: ask how many symbols the model
-    ## holds for the requested show mask. Upstream doc: Model module,
-    ## "Symbols".
+proc clingo_model_symbols*(model: ptr ClingoModel;
+                           show: ClingoShowType;
+                           symbols: ptr ClingoSymbol;
+                           size: csize_t): bool
+  ## Two-step pattern's second call: fill a pre-allocated buffer with
+  ## ``size`` symbols. Upstream doc: Model module, "Symbols".
 
-  proc clingo_model_symbols*(model: ptr ClingoModel;
-                             show: ClingoShowType;
-                             symbols: ptr ClingoSymbol;
-                             size: csize_t): bool
-    ## Two-step pattern's second call: fill a pre-allocated buffer with
-    ## ``size`` symbols. Upstream doc: Model module, "Symbols".
+proc clingo_symbol_to_string_size*(symbol: ClingoSymbol;
+                                   size: ptr csize_t): bool
+  ## Two-step rendering: ask how many bytes ``symbol``'s string form
+  ## takes (including the trailing NUL). Upstream doc: Symbol module,
+  ## "Symbols Inspection".
 
-  proc clingo_symbol_to_string_size*(symbol: ClingoSymbol;
-                                     size: ptr csize_t): bool
-    ## Two-step rendering: ask how many bytes ``symbol``'s string form
-    ## takes (including the trailing NUL). Upstream doc: Symbol module,
-    ## "Symbols Inspection".
+proc clingo_symbol_to_string*(symbol: ClingoSymbol;
+                              str: ptr char;
+                              size: csize_t): bool
+  ## Two-step rendering: write the string form of ``symbol`` into the
+  ## caller's buffer. Upstream doc: Symbol module, "Symbols
+  ## Inspection".
 
-  proc clingo_symbol_to_string*(symbol: ClingoSymbol;
-                                str: ptr char;
-                                size: csize_t): bool
-    ## Two-step rendering: write the string form of ``symbol`` into the
-    ## caller's buffer. Upstream doc: Symbol module, "Symbols
-    ## Inspection".
+proc clingo_error_message*(): cstring
+  ## Per-thread last-error message. Returns NULL when no error has
+  ## been recorded since the previous successful call. Upstream doc:
+  ## "Error Handling".
 
-  proc clingo_error_message*(): cstring
-    ## Per-thread last-error message. Returns NULL when no error has
-    ## been recorded since the previous successful call. Upstream doc:
-    ## "Error Handling".
+# --------------------------------------------------------------------
+# M2e — assumption interface + symbolic atom lookup
+# --------------------------------------------------------------------
 
-  # --------------------------------------------------------------------
-  # M2e — assumption interface + symbolic atom lookup
-  # --------------------------------------------------------------------
+proc clingo_solve_handle_core*(handle: ClingoSolveHandlePtr;
+                               core: ptr ptr ClingoLiteral;
+                               size: ptr csize_t): bool
+  ## Extract the unsat core from a handle whose solve completed
+  ## unsatisfiably under assumptions. Upstream doc: Solving module,
+  ## "Solve Handle". The returned ``core`` array is borrowed from
+  ## the handle and stays valid until the handle is closed. Each
+  ## entry is a ``clingo_literal_t`` matching one of the assumption
+  ## literals the caller passed to ``clingo_control_solve``; the sign
+  ## tells whether the positive or the negative form participates in
+  ## the conflict.
 
-  proc clingo_solve_handle_core*(handle: ClingoSolveHandlePtr;
-                                 core: ptr ptr ClingoLiteral;
-                                 size: ptr csize_t): bool
-    ## Extract the unsat core from a handle whose solve completed
-    ## unsatisfiably under assumptions. Upstream doc: Solving module,
-    ## "Solve Handle". The returned ``core`` array is borrowed from
-    ## the handle and stays valid until the handle is closed. Each
-    ## entry is a ``clingo_literal_t`` matching one of the assumption
-    ## literals the caller passed to ``clingo_control_solve``; the sign
-    ## tells whether the positive or the negative form participates in
-    ## the conflict.
+proc clingo_control_symbolic_atoms*(control: ClingoControlPtr;
+                                    atoms: ptr ClingoSymbolicAtomsPtr): bool
+  ## Borrow the symbolic-atoms collection from a grounded control.
+  ## Upstream doc: Control module, "Inspection". The collection is
+  ## only meaningful AFTER grounding; calling this before
+  ## ``clingo_control_ground`` returns an empty collection.
 
-  proc clingo_control_symbolic_atoms*(control: ClingoControlPtr;
-                                      atoms: ptr ClingoSymbolicAtomsPtr): bool
-    ## Borrow the symbolic-atoms collection from a grounded control.
-    ## Upstream doc: Control module, "Inspection". The collection is
-    ## only meaningful AFTER grounding; calling this before
-    ## ``clingo_control_ground`` returns an empty collection.
+proc clingo_symbolic_atoms_find*(atoms: ClingoSymbolicAtomsPtr;
+                                 symbol: ClingoSymbol;
+                                 iterator_out: ptr ClingoSymbolicAtomIterator): bool
+  ## Locate an atom in the symbolic-atoms collection by its grounded
+  ## symbol. Upstream doc: SymbolicAtoms module. When the atom is
+  ## present the iterator points at it; when absent the iterator
+  ## equals the end iterator (test with ``clingo_symbolic_atoms_is_valid``).
 
-  proc clingo_symbolic_atoms_find*(atoms: ClingoSymbolicAtomsPtr;
-                                   symbol: ClingoSymbol;
-                                   iterator_out: ptr ClingoSymbolicAtomIterator): bool
-    ## Locate an atom in the symbolic-atoms collection by its grounded
-    ## symbol. Upstream doc: SymbolicAtoms module. When the atom is
-    ## present the iterator points at it; when absent the iterator
-    ## equals the end iterator (test with ``clingo_symbolic_atoms_is_valid``).
+proc clingo_symbolic_atoms_is_valid*(atoms: ClingoSymbolicAtomsPtr;
+                                     iterator_in: ClingoSymbolicAtomIterator;
+                                     valid: ptr bool): bool
+  ## Check whether an iterator points at a real atom (true) or at the
+  ## end-of-collection sentinel (false). Upstream doc: SymbolicAtoms
+  ## module.
 
-  proc clingo_symbolic_atoms_is_valid*(atoms: ClingoSymbolicAtomsPtr;
-                                       iterator_in: ClingoSymbolicAtomIterator;
-                                       valid: ptr bool): bool
-    ## Check whether an iterator points at a real atom (true) or at the
-    ## end-of-collection sentinel (false). Upstream doc: SymbolicAtoms
-    ## module.
+proc clingo_symbolic_atoms_literal*(atoms: ClingoSymbolicAtomsPtr;
+                                    iterator_in: ClingoSymbolicAtomIterator;
+                                    literal: ptr ClingoLiteral): bool
+  ## Read the program literal of the atom an iterator points at.
+  ## Upstream doc: SymbolicAtoms module. Use this literal as an
+  ## assumption to ``clingo_control_solve``.
 
-  proc clingo_symbolic_atoms_literal*(atoms: ClingoSymbolicAtomsPtr;
-                                      iterator_in: ClingoSymbolicAtomIterator;
-                                      literal: ptr ClingoLiteral): bool
-    ## Read the program literal of the atom an iterator points at.
-    ## Upstream doc: SymbolicAtoms module. Use this literal as an
-    ## assumption to ``clingo_control_solve``.
+proc clingo_symbol_create_string*(str: cstring;
+                                  symbol: ptr ClingoSymbol): bool
+  ## Construct a string symbol from a cstring. Upstream doc: Symbol
+  ## module, "Symbols Construction". The returned tagged ``uint64``
+  ## carries the string by reference into clingo's symbol table; the
+  ## caller's buffer can be freed immediately afterwards.
 
-  proc clingo_symbol_create_string*(str: cstring;
+proc clingo_symbol_create_number*(number: cint; symbol: ptr ClingoSymbol)
+  ## Construct a number symbol from a C int. Upstream doc: Symbol
+  ## module, "Symbols Construction". Cannot fail (the operation is
+  ## pure tagging); returns ``void`` in the C header.
+
+proc clingo_symbol_create_function*(name: cstring;
+                                    arguments: ptr ClingoSymbol;
+                                    argumentsSize: csize_t;
+                                    positive: bool;
                                     symbol: ptr ClingoSymbol): bool
-    ## Construct a string symbol from a cstring. Upstream doc: Symbol
-    ## module, "Symbols Construction". The returned tagged ``uint64``
-    ## carries the string by reference into clingo's symbol table; the
-    ## caller's buffer can be freed immediately afterwards.
+  ## Construct a function symbol from a name + argument array.
+  ## Upstream doc: Symbol module, "Symbols Construction". ``positive``
+  ## is true for the standard ``name(args)`` form; false produces the
+  ## negation form ``-name(args)``.
 
-  proc clingo_symbol_create_number*(number: cint; symbol: ptr ClingoSymbol)
-    ## Construct a number symbol from a C int. Upstream doc: Symbol
-    ## module, "Symbols Construction". Cannot fail (the operation is
-    ## pure tagging); returns ``void`` in the C header.
-
-  proc clingo_symbol_create_function*(name: cstring;
-                                      arguments: ptr ClingoSymbol;
-                                      argumentsSize: csize_t;
-                                      positive: bool;
-                                      symbol: ptr ClingoSymbol): bool
-    ## Construct a function symbol from a name + argument array.
-    ## Upstream doc: Symbol module, "Symbols Construction". ``positive``
-    ## is true for the standard ``name(args)`` form; false produces the
-    ## negation form ``-name(args)``.
-
-  {.pop.}
-
-when defined(windows):
-  # Stub implementations matching the FFI signatures above. None of
-  # these touch a dynlib; they raise immediately when invoked. The
-  # M2 solver's higher-level code is structured around the C return
-  # convention (``bool`` plus ``clingo_error_message``), so a caller
-  # that catches ``ClingoNotAvailableError`` and reports it as an
-  # adapter-not-available diagnostic is the natural integration shape.
-
-  proc clingo_control_new*(arguments: ptr cstring;
-                           argumentsSize: csize_t;
-                           logger: pointer;
-                           loggerData: pointer;
-                           messageLimit: cuint;
-                           control: ptr ClingoControlPtr): bool =
-    clingoNotAvailable()
-
-  proc clingo_control_free*(control: ClingoControlPtr) =
-    clingoNotAvailable()
-
-  proc clingo_control_add*(control: ClingoControlPtr;
-                           name: cstring;
-                           parameters: ptr cstring;
-                           parametersSize: csize_t;
-                           program: cstring): bool =
-    clingoNotAvailable()
-
-  proc clingo_control_ground*(control: ClingoControlPtr;
-                              parts: ptr ClingoPart;
-                              partsSize: csize_t;
-                              groundCallback: pointer;
-                              groundCallbackData: pointer): bool =
-    clingoNotAvailable()
-
-  proc clingo_control_solve*(control: ClingoControlPtr;
-                             mode: ClingoSolveMode;
-                             assumptions: pointer;
-                             assumptionsSize: csize_t;
-                             notify: pointer;
-                             data: pointer;
-                             handle: ptr ClingoSolveHandlePtr): bool =
-    clingoNotAvailable()
-
-  # NOTE: the Linux/macOS FFI declaration above names the second
-  # parameter ``result`` -- harmless on an FFI sig (no Nim body) but
-  # in a stub with a body it would shadow the implicit ``result``
-  # return variable. Rename to ``resultOut`` in the stub.
-  proc clingo_solve_handle_get*(handle: ClingoSolveHandlePtr;
-                                resultOut: ptr ClingoSolveResult): bool =
-    clingoNotAvailable()
-
-  proc clingo_solve_handle_model*(handle: ClingoSolveHandlePtr;
-                                  model: ptr ptr ClingoModel): bool =
-    clingoNotAvailable()
-
-  proc clingo_solve_handle_resume*(handle: ClingoSolveHandlePtr): bool =
-    clingoNotAvailable()
-
-  proc clingo_solve_handle_close*(handle: ClingoSolveHandlePtr): bool =
-    clingoNotAvailable()
-
-  proc clingo_model_symbols_size*(model: ptr ClingoModel;
-                                  show: ClingoShowType;
-                                  size: ptr csize_t): bool =
-    clingoNotAvailable()
-
-  proc clingo_model_symbols*(model: ptr ClingoModel;
-                             show: ClingoShowType;
-                             symbols: ptr ClingoSymbol;
-                             size: csize_t): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbol_to_string_size*(symbol: ClingoSymbol;
-                                     size: ptr csize_t): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbol_to_string*(symbol: ClingoSymbol;
-                                str: ptr char;
-                                size: csize_t): bool =
-    clingoNotAvailable()
-
-  proc clingo_error_message*(): cstring =
-    cstring("clingo not available on Windows")
-
-  proc clingo_solve_handle_core*(handle: ClingoSolveHandlePtr;
-                                 core: ptr ptr ClingoLiteral;
-                                 size: ptr csize_t): bool =
-    clingoNotAvailable()
-
-  proc clingo_control_symbolic_atoms*(control: ClingoControlPtr;
-                                      atoms: ptr ClingoSymbolicAtomsPtr): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbolic_atoms_find*(atoms: ClingoSymbolicAtomsPtr;
-                                   symbol: ClingoSymbol;
-                                   iterator_out: ptr ClingoSymbolicAtomIterator): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbolic_atoms_is_valid*(atoms: ClingoSymbolicAtomsPtr;
-                                       iterator_in: ClingoSymbolicAtomIterator;
-                                       valid: ptr bool): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbolic_atoms_literal*(atoms: ClingoSymbolicAtomsPtr;
-                                      iterator_in: ClingoSymbolicAtomIterator;
-                                      literal: ptr ClingoLiteral): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbol_create_string*(str: cstring;
-                                    symbol: ptr ClingoSymbol): bool =
-    clingoNotAvailable()
-
-  proc clingo_symbol_create_number*(number: cint; symbol: ptr ClingoSymbol) =
-    clingoNotAvailable()
-
-  proc clingo_symbol_create_function*(name: cstring;
-                                      arguments: ptr ClingoSymbol;
-                                      argumentsSize: csize_t;
-                                      positive: bool;
-                                      symbol: ptr ClingoSymbol): bool =
-    clingoNotAvailable()
+{.pop.}
 
 # --------------------------------------------------------------------
 # Nim-side convenience for two-step string rendering
