@@ -3032,11 +3032,22 @@ type
       ## ``packageName & "." & variantConfigField`` to read the
       ## configurable cell.
     armValue*: string
-      ## The enum literal as a string (``$enumValue``) — e.g.
+      ## The enum literal as a SOURCE-LEVEL IDENT string — e.g.
       ## ``"dkSway"``. The macro captures this from the source-level
-      ## ident verbatim (no kebab translation) so the match against the
-      ## configurable's stored ``enumValueName`` / ``seqEnumValueNames``
-      ## strings is byte-aligned with M9.D's capture path.
+      ## ident text verbatim (no kebab translation). For bare-value
+      ## enums (no explicit ``= "..."`` value), this is the same as
+      ## ``$value`` and matches M9.D's stored ``enumValueName`` /
+      ## ``seqEnumValueNames`` directly. For explicit-string-value enums
+      ## (e.g. ``dkSway = "sway"``), the source ident text and ``$value``
+      ## diverge; see ``armValueRepr`` for the matching slot.
+    armValueRepr*: string
+      ## The enum literal's STRINGIFICATION (``$enumValue``) captured
+      ## at module-init time — e.g. ``"sway"`` for an enum declared
+      ## ``dkSway = "sway"`` (or ``"dkSway"`` for a bare ``dkSway`` enum
+      ## without explicit value). Required for ``activeVariantArms`` to
+      ## match against M9.D's stored ``enumValueName`` /
+      ## ``seqEnumValueNames`` (which also use the ``$value`` form)
+      ## under explicit-string-value enums. NDE-I close-out widening.
     armOrd*: int
       ## The arm's ``ord(enumValue)`` captured at macro-expansion time.
       ## Allows round-trip / sort by ord regardless of insertion order.
@@ -3098,10 +3109,17 @@ proc resetDslPortValidateState*() =
 # ---------------------------------------------------------------------------
 
 proc registerVariantArm*(packageName, configField, armValue: string;
-                         armOrd: int; usesClauses: seq[string]) =
+                         armOrd: int; usesClauses: seq[string];
+                         armValueRepr: string = "") =
   ## Append one variant-arm registration. The M9.E emitter emits one call
   ## per recognised ``\`case\` <enumValue>:`` arm inside a
   ## ``variant <configField>:`` block.
+  ##
+  ## ``armValueRepr`` (the ``$value`` form, e.g. ``"sway"`` for
+  ## ``dkSway = "sway"``) defaults to the empty string for source
+  ## compatibility with pre-NDE-I callers; the M9.E emitter always
+  ## fills it. ``activeVariantArms`` falls back to ``armValue`` when
+  ## ``armValueRepr`` is empty.
   ##
   ## Idempotency: re-registering the same (packageName, configField,
   ## armValue) appends a duplicate row — matches the
@@ -3115,6 +3133,8 @@ proc registerVariantArm*(packageName, configField, armValue: string;
     packageName: packageName,
     variantConfigField: configField,
     armValue: armValue,
+    armValueRepr:
+      if armValueRepr.len == 0: armValue else: armValueRepr,
     armOrd: armOrd,
     usesClauses: usesClauses))
 
@@ -3134,12 +3154,22 @@ proc activeVariantArms*(packageName, configField: string): seq[DslVariantArm] =
   ## decides the matching strategy:
   ##
   ##   * ``dskSeqEnum`` (M9.D ``seq[Enum]``) — return every arm whose
-  ##     ``armValue`` matches ANY element in ``seqEnumValueNames``;
+  ##     ``armValue`` OR ``armValueRepr`` matches ANY element in
+  ##     ``seqEnumValueNames``;
   ##   * ``dskEnum`` (M9.D scalar enum) — return the single arm whose
-  ##     ``armValue == enumValueName`` (or empty if no match);
+  ##     ``armValue`` OR ``armValueRepr`` equals ``enumValueName``
+  ##     (or empty if no match);
   ##   * any other stored kind (or missing key) — return the empty seq.
   ##
   ## Per-arm order matches the source-level declaration order.
+  ##
+  ## NDE-I close-out: the M9.E emitter captures ``armValue`` from the
+  ## SOURCE-LEVEL ident text (e.g. ``"dkSway"``), while M9.D records
+  ## the ``$value`` stringification in the configurable cell (which
+  ## diverges from the ident for enums with explicit string values
+  ## like ``dkSway = "sway"``). The dual-match against ``armValueRepr``
+  ## bridges both spellings without breaking the existing
+  ## bare-enum contract (where the two strings coincide).
   result = @[]
   if packageName notin dslPortVariants:
     return
@@ -3153,13 +3183,15 @@ proc activeVariantArms*(packageName, configField: string): seq[DslVariantArm] =
     for arm in arms:
       if arm.variantConfigField != configField:
         continue
-      if arm.armValue in stored.seqEnumValueNames:
+      if arm.armValue in stored.seqEnumValueNames or
+         arm.armValueRepr in stored.seqEnumValueNames:
         result.add(arm)
   of dskEnum:
     for arm in arms:
       if arm.variantConfigField != configField:
         continue
-      if arm.armValue == stored.enumValueName:
+      if arm.armValue == stored.enumValueName or
+         arm.armValueRepr == stored.enumValueName:
         result.add(arm)
   else:
     discard

@@ -1912,6 +1912,15 @@ proc emitM9EVariantArms*(packageName: string;
         continue
       let armValueLit = newLit(armValueStr)
       let armIdentNode = armParsed.armIdent.copyNimTree()
+      # The ``armValueRepr`` expression evaluates ``$<armIdent>`` at
+      # module-init time so it reflects an enum's explicit string value
+      # when present (e.g. ``$dkSway == "sway"`` for ``dkSway = "sway"``;
+      # ``$dkSway == "dkSway"`` for a bare ``dkSway``). NDE-I close-out:
+      # bridges the M9.E source-ident capture with M9.D's ``$value``
+      # stored spelling so ``activeVariantArms`` matches under both
+      # explicit- and bare-value enum shapes.
+      let armReprExpr = nnkPrefix.newTree(ident("$"),
+                                          armIdentNode.copyNimTree())
       # Build the @["..", ".."] bracket of uses-clauses.
       let usesBracket = nnkPrefix.newTree(
         ident("@"), nnkBracket.newTree())
@@ -1919,7 +1928,8 @@ proc emitM9EVariantArms*(packageName: string;
         usesBracket[1].add(clauseLit)
       result.add(quote do:
         registerVariantArm(`pkgLit`, `fieldLit`, `armValueLit`,
-                           ord(`armIdentNode`), `usesBracket`))
+                           ord(`armIdentNode`), `usesBracket`,
+                           armValueRepr = `armReprExpr`))
 
 proc m9eValidateClosureFromBody(body: NimNode): NimNode =
   ## Inspect a ``validate:`` body. The expected shape is a single

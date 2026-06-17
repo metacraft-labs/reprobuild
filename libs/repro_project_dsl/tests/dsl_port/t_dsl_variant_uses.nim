@@ -61,6 +61,14 @@ suite "DSL-port M9.E — variant: uses arms":
     check arms[2].armValue == "dkPlasma"
     check arms[2].armOrd == ord(dkPlasma)
     check arms[2].usesClauses == @["plasma >=0.1.0"]
+    # NDE-I close-out: ``armValueRepr`` captures ``$value`` so the
+    # ``activeVariantArms`` matcher can dual-key on ident vs. $value
+    # under explicit-string-value enums. For this fixture's bare-value
+    # ``DesktopKind`` (no ``= "..."``), ``$dkSway == "dkSway"`` —
+    # ``armValueRepr`` coincides with ``armValue``.
+    check arms[0].armValueRepr == "dkSway"
+    check arms[1].armValueRepr == "dkGnome"
+    check arms[2].armValueRepr == "dkPlasma"
     # All three arms key off the same outer ``variant desktopKind:``
     # head; the captured config-field name round-trips.
     check arms[0].variantConfigField == "desktopKind"
