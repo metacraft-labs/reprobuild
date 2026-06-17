@@ -20,7 +20,7 @@ when not defined(windows):
 # the codetracer recorder when co-resident) can register against the
 # same chain at their own priorities without colliding with the shim.
 
-import std/[locks, os, strutils, tables]
+import std/[exitprocs, locks, os, strutils, tables]
 from repro_core/paths import extendedPath
 
 import repro_monitor_depfile/types
@@ -80,6 +80,9 @@ const ctInlineHookAvailable = true
 template ctInlineHookInstall(target, hook: pointer;
                              outTrampoline: ptr pointer): cint =
   inlineHookInstall(target, hook, outTrampoline)
+
+template ctInlineHookUninstall(target: pointer): cint =
+  inlineHookUninstall(target)
 
 template ctInlineHookBeginTransaction(): cint =
   inlineHookBeginTransaction()
@@ -211,6 +214,7 @@ const
   INFINITE = 0xFFFFFFFF'u32
   GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = 0x00000004'u32
   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = 0x00000002'u32
+  GET_MODULE_HANDLE_EX_FLAG_PIN = 0x00000001'u32
 
 type SIZE_T = uint
 
@@ -2850,6 +2854,15 @@ const kernel32FileIatDlls = @[
 # different ExportName, so the IAT-fallback list can stay minimal here.
 const ntdllNtIatDlls = @["ntdll.dll"]
 
+# Addresses of the kernel32 / ntdll entry points we successfully
+# inline-patched. The C-runtime atexit handler walks this and calls
+# ``ctInlineHookUninstall`` on every entry so the original 5 bytes
+# at each kernel32 function are restored before the shim DLL's code
+# pages disappear. Without this, any kernel32 call from a later
+# atexit handler (libtest's, the CRT's) chases a JMP into unmapped
+# memory and the process dies with ``STATUS_ACCESS_VIOLATION``.
+var installedHookTargets {.global.}: seq[pointer] = @[]
+
 # Module-global hook table. Built once with the trampoline + origStorage
 # pointers — these are addresses of module-level statics so they're known
 # at module-init time; a `let` binding is sufficient.
@@ -3086,7 +3099,10 @@ proc queueInlineInstall(spec: HookSpec; hModule: HANDLE): cint =
     let target = GetProcAddress(hModule, cast[LPCSTR](spec.name.cstring))
     if target == nil:
       return -1
-    ctInlineHookInstall(target, spec.trampoline, spec.origStorage)
+    let rc = ctInlineHookInstall(target, spec.trampoline, spec.origStorage)
+    if rc == 0:
+      installedHookTargets.add(target)
+    return rc
 
 proc installIatFor(spec: HookSpec) =
   ## Fallback IAT install for an entry point that the inline path rejected.
@@ -3301,6 +3317,51 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
       targets.add((spec.name, addr0))
     runInstallAudit(targets, dbg)
   dbg("[repro_monitor_shim] initialization complete\n")
+  # Pin the shim DLL in the process so its module image is never
+  # unmapped — every kernel32 / ntdll entry point we patched holds a
+  # 5-byte ``JMP rel32`` whose target is a proc inside this DLL, so
+  # the JMP targets MUST remain valid for the entire process
+  # lifetime. Without pinning, FreeLibrary calls (LdrUnloadDll, the
+  # loader's automatic detach pass at process exit, etc.) can unmap
+  # the shim image while the patched kernel32 functions are still
+  # reachable through C-runtime exit handlers (libtest's atexit
+  # chain calls CloseHandle / GetFileAttributesW / etc.), and the
+  # next call hits ``STATUS_ACCESS_VIOLATION (0xc0000005)`` jumping
+  # into unmapped memory. ``GetModuleHandleExW`` with
+  # ``GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS`` resolves the module
+  # base from an address inside this DLL (the ``repro_monitor_shim_init``
+  # proc's own code page); adding ``GET_MODULE_HANDLE_EX_FLAG_PIN``
+  # bumps the loader refcount to ``MAXDWORD`` so subsequent
+  # FreeLibrary calls become no-ops. Costs one resident DLL until
+  # process exit — well worth avoiding the access violations.
+  block:
+    # Go through ByteAddress like ``ensureSelfDllPath`` does so gcc's
+    # ``-Wincompatible-pointer-types`` warn-as-error path doesn't trip
+    # on the function-pointer-to-LPCWSTR cast.
+    let pinProbe = cast[ByteAddress](repro_monitor_shim_init)
+    var dummy: HANDLE = nil
+    discard GetModuleHandleExW(
+      GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS or
+      GET_MODULE_HANDLE_EX_FLAG_PIN,
+      cast[LPCWSTR](pinProbe),
+      addr dummy)
+  # Belt-and-suspenders: also register an atexit handler that uninstalls
+  # every inline patch we installed. The PIN above keeps the shim DLL
+  # mapped for the lifetime of the process so JMPs into its code remain
+  # valid even if FreeLibrary is called repeatedly, but Pythonish embedded
+  # interpreters / .NET hosts / cargo subprocesses we don't fully control
+  # can still tear down their CRT state in surprising orders. Restoring
+  # the original 5 bytes at each kernel32 entry point makes the post-exit
+  # state byte-equivalent to a never-hooked process, so any further
+  # kernel32 call from a deeper atexit chain is a normal direct call.
+  block:
+    {.gcsafe.}:
+      addExitProc(proc() {.noconv.} =
+        when ctInlineHookAvailable:
+          for tgt in installedHookTargets:
+            if tgt != nil:
+              discard ctInlineHookUninstall(tgt)
+        installedHookTargets.setLen(0))
   result = 0
 
 proc repro_monitor_shim_flush*(): cint {.exportc, dynlib, cdecl.} = 0

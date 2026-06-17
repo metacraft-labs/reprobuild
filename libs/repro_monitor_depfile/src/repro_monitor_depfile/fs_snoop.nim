@@ -537,7 +537,21 @@ proc runFsSnoopCli*(programName: string; args: seq[string]): int =
       result = runMonitoredCommand(parsed.request)
     finally:
       if tempRoot.len > 0:
-        removeDir(extendedPath(tempRoot))
+        # Best-effort cleanup. On Windows the monitor shim's lingering
+        # handles (file-handle reuse, deferred delete on close) can
+        # leave directory entries that the regular ``removeDir`` cannot
+        # immediately unlink — Windows reports "the directory is not
+        # empty" even when the rdep / metadata files have already been
+        # opened+closed cleanly. Surfacing that as an action failure
+        # masks the underlying build's actual exit status (the cargo
+        # build that just succeeded), so suppress the diagnostic and
+        # let the OS reap the temp tree on the next scratch sweep. The
+        # temp directory's contents are evidence-only and never
+        # cross-process consumed.
+        try:
+          removeDir(extendedPath(tempRoot))
+        except OSError:
+          discard
   except CatchableError as err:
     stderr.writeLine(programName & ": error: " & err.msg)
     result = 1
