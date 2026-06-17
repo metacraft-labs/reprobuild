@@ -75,6 +75,22 @@ package aptJammy:
 
   defaultToolProvisioning "path"
 
+  versions:
+    ## Adapter implementation revision. Part of the spec §3 fingerprint
+    ## (sha256("apt.extract" || adapterVersion || sha256(deb))) so a
+    ## bugfix in the stdlib module invalidates every downstream cached
+    ## store path atomically. Keep the version string in sync with
+    ## ``AptJammyAdapterVersion`` in the stdlib module
+    ## (``libs/repro_dsl_stdlib/.../apt_jammy.nim``). The snapshot pin
+    ## that anchors the four-link chain (spec §6) lives below in
+    ## ``config.snapshot``; the ``sourceUrl`` here records the upstream
+    ## snapshot mirror so a future live-fetch implementation has a pin
+    ## resolvable from the version registry alone.
+    "0.1.0":
+      sourceRevision = "ubuntu/jammy/20260615T000000Z"
+      sourceUrl = "https://snapshot.ubuntu.com/ubuntu/20260615T000000Z"
+      sourceRepository = "https://snapshot.ubuntu.com/ubuntu"
+
   config:
     ## The snapshot pin. Format: ``ubuntu/jammy/YYYYMMDDTHHMMSSZ``.
     ## Per the spec §6 normalisation, this is opaque to v1 (informational

@@ -30,6 +30,18 @@ import std/[algorithm, os, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_dsl_stdlib/packages/apt_jammy
 
+# Importing the recipe's ``repro.nim`` evaluates its ``package aptJammy:``
+# block at module init, exercising the M2 ``versions:`` lowerer + the
+# M1 ``defaultToolProvisioning`` / config: surface against the real
+# production recipe shape. Without this import the registry stays empty
+# and the "DSL surface" assertion below would be vacuous.
+#
+# We pull in the project DSL host for its ``registeredVersions`` accessor;
+# the recipe itself imports + re-exports ``apt_jammy`` already so this
+# double-import resolves to the same module instance.
+import repro_project_dsl
+import "../../../recipes/packages/adapters/apt-jammy/repro" as aptJammyRecipe
+
 # ---------------------------------------------------------------------------
 # Fixture-path helpers
 # ---------------------------------------------------------------------------
@@ -313,3 +325,36 @@ suite "NDE0-A apt-jammy adapter":
     check hA == hB
     check hA != hC
     check hA.len == 16
+
+# ---------------------------------------------------------------------------
+# NDE-A DSL-surface coverage. Pins that the rewritten
+# ``recipes/packages/adapters/apt-jammy/repro.nim`` actually exercises
+# the new DSL surface (M2 ``versions:``) rather than silently keeping the
+# legacy ``config:``-only shape. Confirms the recipe's version
+# declaration is wired through ``registerVersion`` and that the recorded
+# fields round-trip via ``registeredVersions``. The version string must
+# track ``AptJammyAdapterVersion`` (the spec §3 fingerprint input) so a
+# stdlib bugfix and a recipe-side bump stay in lockstep.
+# ---------------------------------------------------------------------------
+
+suite "NDE0-A apt-jammy DSL surface":
+
+  test "recipe registers exactly one version via the DSL versions: block":
+    let vs = registeredVersions("aptJammy")
+    check vs.len == 1
+
+  test "recorded version string matches AptJammyAdapterVersion constant":
+    # Tying the recipe-declared version to the stdlib constant is the
+    # whole point of M2's surface — it makes the cache-key contract
+    # auditable from the DSL side.
+    let vs = registeredVersions("aptJammy")
+    check vs[0].version == AptJammyAdapterVersion
+
+  test "recorded version carries the snapshot pin as sourceRevision":
+    # The recipe pins the snapshot string into ``sourceRevision`` so the
+    # spec §3 fingerprint ingredients (adapter version + snapshot) are
+    # both reachable from the registry without parsing the config: block.
+    let vs = registeredVersions("aptJammy")
+    check vs[0].sourceRevision == "ubuntu/jammy/20260615T000000Z"
+    check vs[0].sourceUrl.startsWith("https://snapshot.ubuntu.com/")
+    check vs[0].sourceRepository == "https://snapshot.ubuntu.com/ubuntu"
