@@ -1904,6 +1904,19 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Second from-source production recipe to exercise the M9.H/I/K trio
+  # — exercises the M3 ``library`` artifact family (``dakLibrary``)
+  # where the dbus-broker smoke test exercises ``executable``
+  # (``dakExecutable``). Pins libdrm 2.4.133's vendored sha256 +
+  # meson flag sequence + three shared-library artifacts.
+  TestSpec(
+    source: "recipes/packages/source/libdrm/test_libdrm_source.nim",
+    binary: "build/test-bin/t_libdrm_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
