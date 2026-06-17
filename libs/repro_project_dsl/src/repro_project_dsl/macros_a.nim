@@ -468,7 +468,18 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
   for stmt in body:
     case calleeName(stmt).normalize
     of "name":
-      result.binaryName = stringLiteral(stmt[1])
+      # ``name: "value"`` parses as ``Call(Ident "name", StmtList(StrLit
+      # "value"))`` because the colon introduces a block. Unwrap the
+      # synthetic StmtList so the literal extraction sees the raw
+      # StrLit (otherwise ``stringLiteral`` falls back to ``node.repr``
+      # and yields ``"\n\"value\""``, a bug that silently corrupted
+      # every package's binary basename until this fix). Authors may
+      # also write ``name "value"`` (Command form) — that variant lands
+      # the StrLit directly at ``stmt[1]`` and skips the unwrap.
+      var nameNode = stmt[1]
+      if nameNode.kind == nnkStmtList and nameNode.len == 1:
+        nameNode = nameNode[0]
+      result.binaryName = stringLiteral(nameNode)
     of "cli":
       let cliBody = stmt[1]
       var commands: seq[CliCommandDef] = @[]
@@ -1821,6 +1832,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("after: openArray[BuildActionDef] = []")
     formals.add("extraInputs: openArray[string] = []")
     formals.add("extraOutputs: openArray[string] = []")
+    formals.add("extraEnv: openArray[(string, string)] = []")
     formals.add("depfile = \"\"")
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
@@ -1851,6 +1863,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
+      "extraEnv = extraEnv, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(cmd.dependencyPolicy) & ")\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
@@ -2041,6 +2054,11 @@ proc usesImportCode(pkg: PackageDef): string =
       "pyproject-hooks",
       "pytest",
       "python3",
+      # M7 (Windows reprobuild migration): python-build-standalone
+      # tarball provisioning (libs/python3xx.lib + include/ — the
+      # PyO3 build script's link target). Distinct from ``python3``
+      # which on Windows resolves to the official embeddable zip.
+      "python-dev",
       "rg",
       "ruby",
       "rust-analyzer",
@@ -2387,6 +2405,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("after: openArray[BuildActionDef] = []")
     formals.add("extraInputs: openArray[string] = []")
     formals.add("extraOutputs: openArray[string] = []")
+    formals.add("extraEnv: openArray[(string, string)] = []")
     formals.add("depfile = \"\"")
     formals.add("cacheable = true")
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
@@ -2414,6 +2433,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       "deps = combineActionDeps(deps, after), extraInputs = extraInputs, " &
       "extraOutputs = extraOutputs, depfile = depfile, cacheable = cacheable, " &
       "commandStatsId = commandStatsId, actionCachePolicy = actionCachePolicy, " &
+      "extraEnv = extraEnv, " &
       "dependencyPolicy = " &
       dependencyPolicyCode(command.dependencyPolicy) & ")\n")
     # Typed-Outputs M1: bind typed fields against the call-site flag

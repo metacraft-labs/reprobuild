@@ -379,6 +379,16 @@ type
       ## graphs survive serialization. v12 and earlier payloads
       ## decode with an empty ``outputTag``, which the closure walker
       ## treats identically to ``"out"``.
+    env*: seq[(string, string)]
+      ## MR10 (Reprobuild typed-tool env injection): per-edge env-var
+      ## additions threaded down from the typed-tool wrapper-proc's
+      ## ``extraEnv`` parameter. Each ``(NAME, VALUE)`` entry is
+      ## appended to the action's spawned-process env table by the
+      ## CLI's action-realisation path (``repro_cli_support``). The
+      ## engine inherits the parent process env unconditionally;
+      ## ``env`` extends rather than replaces. Empty for legacy
+      ## recipes (and the v13-and-earlier payload codec round-trips
+      ## the field as empty so older artifacts decode cleanly).
     sourceFile*: string
     sourceLine*: int
 

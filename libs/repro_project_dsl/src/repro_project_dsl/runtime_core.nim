@@ -170,7 +170,14 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 13'u16
+  BuildActionPayloadVersion = 14'u16
+    ## v14: MR10 — appends a length-prefixed list of
+    ## ``(name: string, value: string)`` env-var entries carrying the
+    ## per-edge env injections from the typed-tool wrapper's
+    ## ``extraEnv`` parameter. Empty for legacy recipes; v13 and
+    ## earlier payloads decode with no env entries, preserving
+    ## byte-for-byte round-trip semantics for older artifacts.
+    ##
     ## v13: Recipe-Val M8 — appends an ``outputTag: string`` field
     ## carrying the Nix-style package-output discriminator. Empty
     ## string means "contributes to the default ``out`` output,"
@@ -718,13 +725,18 @@ proc buildAction*(id: string; call: PublicCliCall;
                   commandStatsId = "";
                   dependencyPolicy = defaultDependencyPolicy();
                   actionCachePolicy = defaultActionCachePolicy();
-                  outputTag = ""):
+                  outputTag = "";
+                  env: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
   ## walker treats identically to ``"out"`` — preserves legacy
   ## single-output behavior for every recipe that doesn't opt in to
   ## multi-output partitioning.
+  ##
+  ## ``env`` (MR10): per-edge env-var injection. Each ``(NAME, VALUE)``
+  ## entry is added to the action's spawned-process environment by the
+  ## CLI's action-realisation path. Empty for legacy recipes.
   result = BuildActionDef(
     id: id,
     call: call,
@@ -739,7 +751,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     commandStatsId: if commandStatsId.len > 0: commandStatsId else: id,
     dependencyPolicy: dependencyPolicy,
     actionCachePolicy: actionCachePolicy,
-    outputTag: outputTag)
+    outputTag: outputTag,
+    env: @env)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -1170,7 +1183,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
                           cacheable = true;
                           commandStatsId = "";
                           dependencyPolicy = defaultDependencyPolicy();
-                          actionCachePolicy = defaultActionCachePolicy()):
+                          actionCachePolicy = defaultActionCachePolicy();
+                          extraEnv: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
   var inputs = declaredInputPaths(call)
   var outputs = declaredOutputPaths(call)
@@ -1190,7 +1204,8 @@ proc recordCommandAction*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
-    actionCachePolicy = actionCachePolicy)
+    actionCachePolicy = actionCachePolicy,
+    env = extraEnv)
 
 proc setRegisteredActionTargetNames*(actionId: string;
                                      names: openArray[string]) {.dynOrStatic.} =
@@ -1235,8 +1250,15 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
                            cacheable = true;
                            commandStatsId = "";
                            dependencyPolicy = defaultDependencyPolicy();
-                           actionCachePolicy = defaultActionCachePolicy()):
+                           actionCachePolicy = defaultActionCachePolicy();
+                           extraEnv: openArray[(string, string)] = []):
     BuildActionDef {.dynOrStatic.} =
+  ## MR10: ``extraEnv`` carries per-edge env-var additions. Each entry
+  ## is appended to the spawned process's env table by the CLI's
+  ## action-realisation path (``repro_cli_support`` lowering of the
+  ## ``BuildActionDef`` payload to ``BuildAction.env``). The engine
+  ## inherits the parent process env unconditionally; ``extraEnv``
+  ## extends rather than replaces.
   recordCommandAction(
     id,
     call,
@@ -1249,7 +1271,8 @@ proc recordToolInvocation*(id: string; call: PublicCliCall;
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = dependencyPolicy,
-    actionCachePolicy = actionCachePolicy)
+    actionCachePolicy = actionCachePolicy,
+    extraEnv = extraEnv)
 
 proc prepareObject*(tool: ReproHcr; input, output: string;
                     functionName = ""; segmentName = "__HCR"; actionId = "";
@@ -1672,6 +1695,11 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
     payload.writeString(typedOutput.path)
   # v13: Recipe-Val M8 — Nix-style package-output discriminator.
   payload.writeString(action.outputTag)
+  # v14: MR10 — per-edge env-var injections.
+  payload.writeU32Le(uint32(action.env.len))
+  for entry in action.env:
+    payload.writeString(entry[0])
+    payload.writeString(entry[1])
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1687,7 +1715,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, 12'u16, BuildActionPayloadVersion}:
+      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1730,6 +1758,16 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # Older payloads (v1..v12) decode with an empty ``outputTag``, which
   # the closure walker normalises to the default ``"out"`` output —
   # preserving legacy single-output behavior byte-for-byte.
+  if version >= 14'u16:
+    let envCount = int(readU32Le(bytes, pos))
+    result.env = newSeq[(string, string)](envCount)
+    for i in 0 ..< envCount:
+      let name = readString(bytes, pos)
+      let value = readString(bytes, pos)
+      result.env[i] = (name, value)
+  # v1..v13 payloads decode with an empty ``env`` list; the CLI's
+  # action-realisation path treats an empty list as "no per-edge env
+  # injections," preserving pre-MR10 behavior for older artifacts.
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
