@@ -1933,6 +1933,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Fourth from-source production recipe to exercise the M9.H/I/K trio
+  # — a SINGLE library artifact off a meson build whose dependency
+  # surface is wider than libdrm's (libdrm + Wayland + libxkbcommon +
+  # pixman + libinput in one ``uses:`` block). Pins wlroots 0.19.3's
+  # vendored sha256 + meson flag sequence + the single ``libwlroots``
+  # library artifact. Guards the M9.K convention layer against
+  # regressions that flatten the per-package fetch / mesonOptions
+  # registries when a wider transitive-dependency surface is in play.
+  TestSpec(
+    source: "recipes/packages/source/wlroots/test_wlroots_source.nim",
+    binary: "build/test-bin/t_wlroots_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
