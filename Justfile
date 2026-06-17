@@ -95,6 +95,27 @@ unit_nde0d_dbus_broker:
         libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim \
         2>&1 | tee test-logs/unit_nde0d_dbus_broker.log
 
+# NDE0-G native graphics-stack package unit tests.
+# Exercises spec'd materializeGraphicsStack — /etc/ld.so.conf.d/
+# 00-reproos-linux.conf libpaths managedBlock contribution (NDE-spec-block
+# triple-form sentinel, priority=100 foundation sort key) + the
+# /usr/lib/systemd/system/repro-ldconfig.service Type=oneshot linker-
+# cascade unit (cascade-G fix; R9 systemd 257.9 dropped /lib/systemd/
+# system/ from UnitPath) + belt-and-braces /etc/systemd/system/ record
+# + multi-user.target.wants activation symlink record. Configurable-
+# driven cache-key invalidation (aptSnapshot, enableHardwareGl,
+# fontPackages) per NDE0-G acceptance.
+unit_nde0g_graphics_stack:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_nde0g_graphics_stack \
+        --out:build/test-bin/t_nde0g_graphics_stack \
+        libs/repro_dsl_stdlib/tests/t_nde0g_graphics_stack.nim \
+        2>&1 | tee test-logs/unit_nde0g_graphics_stack.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
