@@ -111,3 +111,47 @@ nim c \
   --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
   --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
   libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
+
+# MR4 -- Windows self-containment: stage clingo.dll next to repro.exe
+# so the Nim ``{.dynlib: "clingo.dll".}`` FFI in
+# ``libs/repro_solver/src/repro_solver/clingo_bindings.nim`` resolves
+# from the executable's own directory at LoadLibrary time. Without this
+# step, ``repro.exe`` running in a fresh pwsh (env.ps1 not sourced)
+# crashes at module init with ``could not load: clingo.dll`` because
+# Win32's LoadLibrary searches the .exe's dir, then the system dirs,
+# then PATH -- and only env.ps1 puts the conda-forge clingo bin dir on
+# PATH.
+#
+# Source resolution policy (no hardcoded ``D:\metacraft-dev-deps`` --
+# the env.ps1 install root is not the canonical store): locate the
+# clingo.exe sibling on PATH at build time (``command -v clingo.exe``
+# works under MSYS / Git Bash, and env.ps1 always co-locates
+# clingo.exe with clingo.dll per the conda-forge layout). The
+# ``windows/ensure-clingo.ps1`` provisioner downloads the same conda
+# package on every install, so the DLL bytes are stable across hosts.
+#
+# When clingo.exe is not on PATH (e.g. a non-env.ps1 dev shell on a
+# host that has never run the bootstrap), we surface a warning rather
+# than failing the build -- ``repro.exe`` still builds; it just won't
+# self-load until the user provisions clingo. M3-style stdlib package
+# resolution (a ``packages/clingo.nim`` entry consumed by the engine's
+# tool-provisioning store) is the durable follow-up; this MR4 step is
+# the smallest fix that unblocks all 17 recorder tests in the
+# clean-shell sweep.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    clingo_exe="$(command -v clingo.exe 2>/dev/null || true)"
+    if [ -n "${clingo_exe}" ]; then
+      clingo_src_dir="$(dirname "${clingo_exe}")"
+      clingo_src_dll="${clingo_src_dir}/clingo.dll"
+      if [ -f "${clingo_src_dll}" ]; then
+        cp -f "${clingo_src_dll}" build/bin/clingo.dll
+        echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
+      else
+        echo "warning: clingo.exe on PATH but sibling clingo.dll missing at ${clingo_src_dll}; repro.exe will fail to load in a clean shell" >&2
+      fi
+    else
+      echo "warning: clingo.exe not on PATH; cannot stage clingo.dll next to repro.exe -- run env.ps1 or windows/ensure-clingo.ps1 first" >&2
+    fi
+    ;;
+esac
