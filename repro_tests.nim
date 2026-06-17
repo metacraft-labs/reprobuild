@@ -510,14 +510,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_dsl_stdlib/tests/t_nde0s_systemd_session.nim",
-    binary: "build/test-bin/t_nde0s_systemd_session",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim",
     binary: "build/test-bin/t_nde0d_dbus_broker",
     defines: @[],
@@ -542,8 +534,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim",
-    binary: "build/test-bin/t_nde_h1_sway",
+    source: "libs/repro_dsl_stdlib/tests/t_nde0s_systemd_session.nim",
+    binary: "build/test-bin/t_nde0s_systemd_session",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -552,6 +544,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde_g1_gnome.nim",
     binary: "build/test-bin/t_nde_g1_gnome",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nde_h1_sway.nim",
+    binary: "build/test-bin/t_nde_h1_sway",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1510,122 +1510,16 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
-    binary: "build/test-bin/t_dsl_cross_project_binding_guard",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # ── DSL-port M1: v8 ``transformPackageBody`` scaffold acceptance.
-  # The two tests pin the contract that the new partition seam in
-  # ``macros_b.nim``'s ``package`` macro preserves both the empty-body
-  # shape and arbitrary Nim statements (``let`` / ``for`` / ``proc``)
-  # mixed at top level. See
-  # ``libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim``
-  # and ``…/t_dsl_composition_for_loop.nim`` for the assertions.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim",
-    binary: "build/test-bin/t_dsl_package_empty",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim",
-    binary: "build/test-bin/t_dsl_composition_for_loop",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # ── DSL-port M2: v8-style ``config:`` scalar surface + ``versions:``
-  # block lowering. The three tests pin the contract that the new
-  # ``emitM2ConfigDefaults`` + ``emitM2Versions`` lowerers in
-  # ``macros_b.nim`` produce ``recordConfigDefault[T]`` /
-  # ``registerVersion`` calls that survive macro expansion and round-trip
-  # through the M2 read/write API in ``dsl_port_runtime.nim``.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
-    binary: "build/test-bin/t_dsl_config_scalar",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
-    binary: "build/test-bin/t_dsl_versions_single",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
-    binary: "build/test-bin/t_dsl_config_override",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # ── DSL-port M3: v8-style ``executable`` / ``library`` / ``files``
-  # artifact templates. The four tests pin the contract that the new
-  # ``emitM3Artifacts`` lowerer in ``macros_b.nim`` produces
-  # ``registerArtifact(...)`` calls that survive macro expansion and
-  # round-trip through the M3 ``registeredArtifacts`` API in
-  # ``dsl_port_runtime.nim``. Ident-form ``executable myTool:`` ALSO
-  # injects ``let myTool {.inject, used.}: DslArtifact = ...`` so the
-  # binding is referenceable from downstream code; the
-  # ``ident-form injects let`` tests in each file pin that injection.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim",
-    binary: "build/test-bin/t_dsl_executable_string_form",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_ident_form.nim",
-    binary: "build/test-bin/t_dsl_executable_ident_form",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_library.nim",
-    binary: "build/test-bin/t_dsl_library",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
-    binary: "build/test-bin/t_dsl_files",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # ── DSL-port M4: v8-style ``build:`` block lowering (package-level
-  # + artifact-scoped). The three tests pin the contract that the new
-  # ``emitM4BuildActions`` + ``emitM4ArtifactBuildLowering`` lowerers
-  # in ``macros_b.nim`` produce ``registerBuildAction`` /
-  # ``beginBuildContext / output / endBuildContext`` calls that survive
-  # macro expansion and round-trip through the M4
-  # ``registeredBuildActions`` / ``registeredOutputs`` API in
-  # ``dsl_port_runtime.nim``. The package-level form records with
-  # empty ``artifactName``; the artifact-scoped form records the
-  # parent ``executable`` / ``library`` ident name so ``output(path)``
-  # calls inside the body attribute to the correct ``(pkg, artifact)``
-  # bucket.
-  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
     binary: "build/test-bin/t_dsl_build_package_empty",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_records_output_for_library.nim",
+    binary: "build/test-bin/t_dsl_build_records_output_for_library",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1640,24 +1534,141 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_records_output_for_library.nim",
-    binary: "build/test-bin/t_dsl_build_records_output_for_library",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_bool.nim",
+    binary: "build/test-bin/t_dsl_cli_params_bool",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M5 — ``service:`` block lowering. The three tests pin the
-  # contract that the new ``emitM5Services`` lowerer in ``macros_b.nim``
-  # emits ``beginServiceContext`` / ``setActiveServiceExecutable`` /
-  # ``addActiveServiceArg`` / ``finishServiceContext`` calls that
-  # survive macro expansion and round-trip through the M5
-  # ``registeredServices`` API in ``dsl_port_runtime.nim``. The
-  # ``service <ident>:`` form records the ident text as the service
-  # name; the body's ``executable <ident>`` setter records the
-  # cross-reference to the parent ``executable`` artifact; the
-  # ``args "...", "..."`` setter records positional args in
-  # declaration order.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_flag.nim",
+    binary: "build/test-bin/t_dsl_cli_params_flag",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_pos.nim",
+    binary: "build/test-bin/t_dsl_cli_params_pos",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim",
+    binary: "build/test-bin/t_dsl_composition_for_loop",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
+    binary: "build/test-bin/t_dsl_config_override",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
+    binary: "build/test-bin/t_dsl_config_scalar",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_ident_form.nim",
+    binary: "build/test-bin/t_dsl_executable_ident_form",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim",
+    binary: "build/test-bin/t_dsl_executable_string_form",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
+    binary: "build/test-bin/t_dsl_files",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_configfile.nim",
+    binary: "build/test-bin/t_dsl_fs_configfile",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_multi.nim",
+    binary: "build/test-bin/t_dsl_fs_managedblock_multi",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_single.nim",
+    binary: "build/test-bin/t_dsl_fs_managedblock_single",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
+    binary: "build/test-bin/t_dsl_helper_proc_reads_build_context",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_within_artifact.nim",
+    binary: "build/test-bin/t_dsl_helper_proc_within_artifact",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_library.nim",
+    binary: "build/test-bin/t_dsl_library",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim",
+    binary: "build/test-bin/t_dsl_package_empty",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_args.nim",
+    binary: "build/test-bin/t_dsl_service_args",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_basic.nim",
     binary: "build/test-bin/t_dsl_service_basic",
@@ -1675,58 +1686,16 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_args.nim",
-    binary: "build/test-bin/t_dsl_service_args",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M6 — ``cli:`` block ``pos`` / ``flag`` / ``boolFlag`` lowering.
-  # The three tests pin the contract that ``emitM6CliLowering`` in
-  # ``macros_b.nim`` re-walks each M3 artifact body, dispatches the
-  # nested ``cli:`` head's statements through ``m6ParseCliParam``, and
-  # emits one ``registerCliParam(pkg, artifact, subcmd="", name,
-  # typeName, kind)`` call per recognised parameter. The recorded
-  # specs round-trip through the M6 ``registeredCliParams`` API in
-  # ``dsl_port_runtime.nim``. The legacy ``parseExecutable`` ``cli:``
-  # arm continues to populate ``pkg.executables[].commands`` for the
-  # typed-tool wrapper emission — the two sidecars co-exist.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_pos.nim",
-    binary: "build/test-bin/t_dsl_cli_params_pos",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
+    binary: "build/test-bin/t_dsl_versions_single",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_flag.nim",
-    binary: "build/test-bin/t_dsl_cli_params_flag",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_bool.nim",
-    binary: "build/test-bin/t_dsl_cli_params_bool",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
-    binary: "build/test-bin/t_dsl_helper_proc_reads_build_context",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_within_artifact.nim",
-    binary: "build/test-bin/t_dsl_helper_proc_within_artifact",
+    source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
+    binary: "build/test-bin/t_dsl_cross_project_binding_guard",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

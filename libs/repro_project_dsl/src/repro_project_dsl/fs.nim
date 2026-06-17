@@ -1,0 +1,39 @@
+## DSL-port M8 — ``fs`` namespace shim.
+##
+## Nim has no namespace keyword. The idiomatic ``fs.configFile(...)`` /
+## ``fs.managedBlock(...)`` callsite syntax is achieved by importing this
+## module under the ``fs`` alias:
+##
+## .. code-block:: nim
+##   import repro_project_dsl
+##   import repro_project_dsl/fs as fs
+##
+##   package myPkg:
+##     build:
+##       fs.configFile(
+##         path = "~/.config/myapp.conf",
+##         content = "key = value\n"
+##       )
+##       fs.managedBlock(
+##         path = "/etc/ld.so.conf.d/00-reproos-linux.conf",
+##         blockId = "libpaths",
+##         scope = bsSystem,
+##         content = "/opt/test/lib\n"
+##       )
+##
+## The procs themselves live in
+## ``repro_project_dsl/dsl_port_runtime.nim`` (so the umbrella include
+## chain carries the runtime state); this module simply re-exports the
+## umbrella so the ``fs.<name>`` qualified-call form resolves. Callers
+## that import ``repro_project_dsl`` directly can also call the procs
+## unqualified (``configFile(...)`` / ``managedBlock(...)``) — both
+## spellings hit the same procs.
+##
+## The reason ``import`` rather than ``include`` is used: the umbrella
+## module already defines every fs.* symbol via its include chain;
+## re-including would multiply-define them. Importing keeps the
+## fs.<name> qualification working at the callsite without redefining
+## anything.
+
+import ../repro_project_dsl
+export repro_project_dsl

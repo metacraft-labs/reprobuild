@@ -1150,3 +1150,357 @@ proc registeredCliParams*(packageName, artifactName, subcmd: string):
   if key in dslPortCliParams:
     return dslPortCliParams[key]
   return @[]
+
+# ---------------------------------------------------------------------------
+# DSL-port M8 — ``fs.configFile`` and ``fs.managedBlock`` named-proc surface.
+# ---------------------------------------------------------------------------
+##
+## ─────────────────────────────────────────────────────────────────────────
+## What the M8 surface covers
+## ─────────────────────────────────────────────────────────────────────────
+##
+## Per ``reprobuild-specs/Generated-Configuration-Files.md``:
+##
+##   * ``fs.configFile(path, content, packageName, artifactName)`` —
+##     records a fully-owned config-file declaration. The file itself is
+##     produced by the apply phase, not by this proc — symmetric with M4's
+##     ``output(path)`` "declaration records, apply phase acts" split.
+##
+##   * ``fs.managedBlock(path, blockId, scope, content, priority,
+##     packageName, artifactName)`` — records a single contribution to a
+##     multi-contributor managed file. Multiple contributors at the same
+##     ``path`` are sorted at materialisation time by
+##     ``(priority, packageName, blockId)`` ascending (spec
+##     §"Block ordering rule") and emitted with the spec'd triple-form
+##     sentinels ``# >>> repro:<scope>:<packageName>:<blockId> >>>``.
+##
+##   * ``mergedManagedBlockFile(path)`` — return the merged content for a
+##     given ``path`` (used by tests + the production apply phase). The
+##     merger sorts independently of insertion order so the output is a
+##     deterministic function of the contribution set.
+##
+##   * ``removeManagedBlockContributor(path, scope, packageName,
+##     blockId)`` — remove a single contributor from a path's bucket.
+##     Spec §"Deletion semantics" guarantees the remaining contributors
+##     stay byte-identical; ``mergedManagedBlockFile`` after removal must
+##     produce a file with the removed sentinel triple absent and the
+##     other contributors' bytes preserved exactly.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Why a separate fs.nim module wrapper instead of putting the procs
+## inside a ``namespace`` Nim doesn't have?
+## ─────────────────────────────────────────────────────────────────────────
+##
+## Nim has no namespace keyword. The idiomatic "fs.configFile(...)" syntax
+## is achieved by giving the procs short names (``configFile``,
+## ``managedBlock``) inside a module called ``fs``, then importing it as
+## ``import repro_project_dsl/fs as fs``. The procs themselves live here
+## in ``dsl_port_runtime.nim`` (so the umbrella include chain carries the
+## runtime state) and are re-exported by the thin ``fs.nim`` shim that
+## sits next to the umbrella module.
+##
+## Tests that import ``repro_project_dsl`` only (without the ``as fs``
+## alias) can still call the procs directly by name (``configFile(...)``,
+## ``managedBlock(...)``) — the umbrella exports them too. The ``fs.``
+## prefix is purely a callsite-readability sugar; both spellings hit the
+## same procs.
+##
+## ─────────────────────────────────────────────────────────────────────────
+## Threading model
+## ─────────────────────────────────────────────────────────────────────────
+##
+## Module-level (not ``threadvar``), same as M3/M5/M6 registries. M8
+## registrations happen at module-init time on the main thread; consumers
+## (tests, the apply phase) read from any thread.
+
+type
+  ManagedBlockScope* = enum
+    ## Per spec §"Sentinel uniqueness": the ``<scope>`` segment of the
+    ## triple-form sentinel. ``bsSystem`` for /etc/* host files, ``bsHome``
+    ## for ~/ anchored files. The single-block ``# >>> repro:home:<id>
+    ## >>>`` shape from the older single-contributor form is OUT OF SCOPE
+    ## here — M8 always emits the triple form so a single-contributor file
+    ## remains forward-compatible with later co-contributors.
+    bsSystem = "system"
+    bsHome   = "home"
+
+  DslConfigFile* = object
+    ## One ``fs.configFile(...)`` registration. Populated at module-init
+    ## time; read by host code via ``registeredConfigFiles``.
+    packageName*: string
+      ## The owning package; auto-filled from ``currentBuildPackage()``
+      ## when the caller passes ``""``. May still be ``""`` when the call
+      ## happens outside a build context AND the caller did not supply a
+      ## name — diagnostic surface only, not a hard error.
+    artifactName*: string
+      ## The owning artifact within ``packageName``, or ``""`` for a
+      ## package-level configFile. Auto-fills from
+      ## ``currentBuildArtifact()`` when the caller passes ``""`` AND a
+      ## build context is open. Otherwise stays ``""``.
+    path*: string
+      ## Output path verbatim from the call. Path-resolution (``~/``
+      ## expansion, ``${XDG_CONFIG_HOME}`` lookup, ...) is deferred to
+      ## the apply phase — M8 records the raw value the recipe author
+      ## wrote so ``repro home why <file>`` can quote it back.
+    content*: string
+      ## Rendered file content verbatim. Empty content is legal (an
+      ## empty file is a valid declaration).
+    hashHex*: string
+      ## Cache key — ``stableHashHex(packageName || artifactName ||
+      ## path || content)``. 16 hex characters. Symmetric with the
+      ## ``configFileHash`` shape NDE0-S's out-of-DSL helper computed.
+      ## Configurable-driven cache-key composition (spec §"Configurables
+      ## As Inputs") is deferred to a later milestone; the BLAKE3-256 /
+      ## resolved-configurable propagation is also deferred. The simple
+      ## FNV-1a digest here is sufficient for the M8 acceptance contract
+      ## (any content change invalidates the cache key).
+
+  DslManagedBlockContribution* = object
+    ## One ``fs.managedBlock(...)`` contribution. The merged file at any
+    ## given ``path`` is the sorted concatenation of every entry whose
+    ## ``path`` matches.
+    path*: string
+    blockId*: string
+    scope*: ManagedBlockScope
+    packageName*: string
+      ## Auto-filled from ``currentBuildPackage()`` when the caller passes
+      ## ``""``. Part of the sort key AND the sentinel triple, so the
+      ## empty-string case is informational — the spec §"Sentinel
+      ## uniqueness" guarantee only holds when packageName is populated.
+    artifactName*: string
+      ## Auto-fills like ``DslConfigFile.artifactName``. Not part of the
+      ## sentinel triple or sort key — recorded for diagnostic provenance
+      ## only.
+    content*: string
+    priority*: int
+
+# ---------------------------------------------------------------------------
+# Module-level registries
+# ---------------------------------------------------------------------------
+
+var dslPortConfigFiles: Table[string, seq[DslConfigFile]]
+  ## Per-package config-file registry. Keyed by ``packageName``.
+  ## ``registerConfigFile`` appends; ``registeredConfigFiles`` returns a
+  ## copy so callers cannot mutate the registry from outside the public
+  ## API. ``Table[string, seq[...]]`` mirrors the M2 version and M5
+  ## service shapes — one bucket per package, declaration order within.
+
+var dslPortManagedBlocks: Table[string, seq[DslManagedBlockContribution]]
+  ## Per-path managed-block registry. Keyed by ``path`` because the merged
+  ## file is composed per-path across contributors from many packages.
+  ## Insertion order is NOT the merge order — ``mergedManagedBlockFile``
+  ## re-sorts at read time so the output is invariant to which package's
+  ## module is initialised first.
+
+# ---------------------------------------------------------------------------
+# Reset proc — used by every M8 test fixture
+# ---------------------------------------------------------------------------
+
+proc resetDslPortFsState*() =
+  ## Drop every recorded ``fs.configFile`` + every recorded
+  ## ``fs.managedBlock`` contribution. Test fixtures call this between
+  ## scenarios so registry entries do not leak across cases. Symmetric
+  ## with the M2 / M3 / M4 / M5 / M6 reset procs.
+  dslPortConfigFiles.clear()
+  dslPortManagedBlocks.clear()
+
+# ---------------------------------------------------------------------------
+# fs.configFile
+# ---------------------------------------------------------------------------
+
+proc registerConfigFile*(file: DslConfigFile) =
+  ## Type-erased append. The ``configFile`` proc below is the public
+  ## callsite recipes use; this helper is exposed so any future emitter
+  ## (e.g. a macro that splices configFile calls out of a structured
+  ## block) can target it directly without re-implementing the
+  ## auto-fill + cache-key composition.
+  let key = file.packageName
+  if key notin dslPortConfigFiles:
+    dslPortConfigFiles[key] = @[]
+  dslPortConfigFiles[key].add(file)
+
+proc registeredConfigFiles*(packageName: string): seq[DslConfigFile] =
+  ## Return every config-file registered against ``packageName`` in
+  ## declaration order. Returns the empty seq when the package never
+  ## called ``fs.configFile``; callers must NOT treat the empty return as
+  ## an error.
+  if packageName in dslPortConfigFiles:
+    return dslPortConfigFiles[packageName]
+  return @[]
+
+proc configFileHashOf*(packageName, artifactName, path, content: string): string =
+  ## Cache-key composition for ``fs.configFile``. The four-tuple feeds
+  ## ``stableHashHex`` (FNV-1a, 16 hex chars). The spec calls for
+  ## BLAKE3-256 over rendered bytes plus resolved configurable inputs;
+  ## M8 emits the simpler FNV-1a digest with no configurable-resolution
+  ## hook because the wider configurable plumbing isn't in the DSL-port
+  ## scope. Any content / packageName / artifactName / path change still
+  ## invalidates the digest, which is the cache-discriminating
+  ## requirement.
+  result = stableHashHex(
+    packageName & "\x00" & artifactName & "\x00" & path & "\x00" & content)
+
+proc configFile*(path: string; content: string;
+                 packageName: string = "";
+                 artifactName: string = "") =
+  ## Records a ``configFile`` declaration. Doesn't touch the filesystem;
+  ## production apply phase reads the registry to emit the actual file.
+  ##
+  ## Auto-fill behaviour: when ``packageName == ""``, consult the M7
+  ## ``currentBuildPackage()`` accessor so a call from inside a recipe's
+  ## ``build:`` body picks up the enclosing package's name without the
+  ## author having to repeat it. The same applies to ``artifactName`` /
+  ## ``currentBuildArtifact()``. When BOTH the parameter and the active
+  ## context are empty, the registry row carries an empty string in that
+  ## field — diagnostic only, not a hard error (so the proc is also
+  ## usable from a top-level driver script).
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  var artifact = artifactName
+  if artifact.len == 0:
+    artifact = currentBuildArtifact()
+  let hashHex = configFileHashOf(pkg, artifact, path, content)
+  registerConfigFile(DslConfigFile(
+    packageName: pkg,
+    artifactName: artifact,
+    path: path,
+    content: content,
+    hashHex: hashHex))
+
+# ---------------------------------------------------------------------------
+# fs.managedBlock — sentinel formatting
+# ---------------------------------------------------------------------------
+
+proc managedBlockOpenSentinel*(scope: ManagedBlockScope;
+                               packageName, blockId: string): string =
+  ## Spec §"Sentinel uniqueness" — open sentinel of the triple form.
+  ## Public so tests + the apply phase can format the same string the
+  ## merger emits.
+  "# >>> repro:" & $scope & ":" & packageName & ":" & blockId & " >>>"
+
+proc managedBlockCloseSentinel*(scope: ManagedBlockScope;
+                                packageName, blockId: string): string =
+  ## Spec §"Sentinel uniqueness" — close sentinel of the triple form.
+  "# <<< repro:" & $scope & ":" & packageName & ":" & blockId & " <<<"
+
+proc renderManagedBlockChunk(c: DslManagedBlockContribution): string =
+  ## Render one sentinel-delimited chunk: open + content (trailing \n
+  ## injected if missing) + close + a trailing \n. The blank-line
+  ## separation between chunks is the merger's responsibility.
+  result = managedBlockOpenSentinel(c.scope, c.packageName, c.blockId) & "\n"
+  result.add(c.content)
+  if not c.content.endsWith("\n"):
+    result.add('\n')
+  result.add(managedBlockCloseSentinel(c.scope, c.packageName, c.blockId) & "\n")
+
+# ---------------------------------------------------------------------------
+# fs.managedBlock — registration + read + delete
+# ---------------------------------------------------------------------------
+
+proc registerManagedBlock*(contribution: DslManagedBlockContribution) =
+  ## Type-erased append. The ``managedBlock`` proc below is the public
+  ## callsite recipes use; this helper is exposed so future emitters can
+  ## target it directly. Insertion order is preserved within the bucket;
+  ## merge order is independent of insertion order — see
+  ## ``mergedManagedBlockFile``.
+  let key = contribution.path
+  if key notin dslPortManagedBlocks:
+    dslPortManagedBlocks[key] = @[]
+  dslPortManagedBlocks[key].add(contribution)
+
+proc managedBlock*(path: string; blockId: string;
+                   scope: ManagedBlockScope;
+                   content: string;
+                   priority: int = 1000;
+                   packageName: string = "";
+                   artifactName: string = "") =
+  ## Records a single managedBlock contribution. Auto-fill semantics match
+  ## ``configFile``. Doesn't touch the filesystem.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  var artifact = artifactName
+  if artifact.len == 0:
+    artifact = currentBuildArtifact()
+  registerManagedBlock(DslManagedBlockContribution(
+    path: path,
+    blockId: blockId,
+    scope: scope,
+    packageName: pkg,
+    artifactName: artifact,
+    content: content,
+    priority: priority))
+
+proc registeredManagedBlocks*(path: string): seq[DslManagedBlockContribution] =
+  ## Return every contribution registered against ``path`` in INSERTION
+  ## order (not merge order). For the deterministic merge order, call
+  ## ``mergedManagedBlockFile``. Empty seq when no contribution touched
+  ## the path.
+  if path in dslPortManagedBlocks:
+    return dslPortManagedBlocks[path]
+  return @[]
+
+proc mergedManagedBlockFile*(path: string): string =
+  ## Return the materialised file content for ``path`` per spec
+  ## §"Block ordering rule": sort all contributions by
+  ## ``(priority, packageName, blockId)`` ascending, then concatenate the
+  ## rendered sentinel chunks with one blank line between consecutive
+  ## chunks (spec §"Unmanaged content preservation": "a single blank line
+  ## between consecutive contributor blocks, controlled by the
+  ## materialiser").
+  ##
+  ## Empty seq → empty string. Single contribution → one sentinel chunk
+  ## with no trailing blank line.
+  if path notin dslPortManagedBlocks:
+    return ""
+  var contribs = dslPortManagedBlocks[path]
+  if contribs.len == 0:
+    return ""
+  # Stable sort by (priority, packageName, blockId). Using
+  # ``algorithm.sort`` (already imported by the umbrella) so the ordering
+  # is deterministic regardless of insertion sequence.
+  contribs.sort do (a, b: DslManagedBlockContribution) -> int:
+    if a.priority != b.priority:
+      return cmp(a.priority, b.priority)
+    if a.packageName != b.packageName:
+      return cmp(a.packageName, b.packageName)
+    cmp(a.blockId, b.blockId)
+  result = ""
+  for i, c in contribs:
+    if i > 0:
+      # Spec §"Unmanaged content preservation": one blank line between
+      # consecutive contributor blocks.
+      result.add('\n')
+    result.add(renderManagedBlockChunk(c))
+
+proc removeManagedBlockContributor*(path: string;
+                                    scope: ManagedBlockScope;
+                                    packageName: string;
+                                    blockId: string) =
+  ## Spec §"Deletion semantics": drop ONE contributor identified by the
+  ## ``(scope, packageName, blockId)`` triple from ``path``'s bucket.
+  ## The remaining contributions stay byte-identical;
+  ## ``mergedManagedBlockFile`` after removal re-emits them in the same
+  ## sort order so surviving blocks are byte-identical to their state in
+  ## the prior generation.
+  ##
+  ## Removing a contributor that was never registered is a silent no-op.
+  ## Multiple contributions matching the triple (which the spec'd graph
+  ## layer would have rejected at construction time as a sentinel-
+  ## uniqueness violation) are all removed.
+  if path notin dslPortManagedBlocks:
+    return
+  var kept: seq[DslManagedBlockContribution] = @[]
+  for c in dslPortManagedBlocks[path]:
+    if c.scope == scope and c.packageName == packageName and
+       c.blockId == blockId:
+      continue
+    kept.add(c)
+  if kept.len == 0:
+    # Spec §"Deletion semantics" — when the set shrinks to zero, the path
+    # is no longer materialised. Drop the bucket so subsequent reads
+    # observe the empty state.
+    dslPortManagedBlocks.del(path)
+  else:
+    dslPortManagedBlocks[path] = kept
