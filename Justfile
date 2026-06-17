@@ -252,6 +252,32 @@ unit_ndem1_reproos_desktop:
         libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim \
         2>&1 | tee test-logs/unit_ndem1_reproos_desktop.log
 
+# NDEM2 native generation-log persistence + rollback unit tests.
+# Exercises the spec'd manifest-level acceptance for NixOS-style
+# generation switching (NDE-H2/G2/K2 boot-level tests remain blocked
+# on .deb extraction + activation runtime). Validates: empty-log
+# active() failure path, addGeneration entry + idempotency,
+# activeGeneration newest-wins, rollback returns prior generation,
+# single-entry rollback failure path, VARIANT switch produces
+# different closure (storePaths differ), CONFIGURABLE switch produces
+# identical closure but different activation (displayManagerSymlink
+# target differs), lookupGeneration historical query,
+# serializeGenerationLog determinism (byte-identity),
+# deserializeGenerationLog round-trip + version-mismatch rejection,
+# no-in-place-mutation byte-identity of historical manifest after
+# subsequent appends, sortedByTimestamp sibling read view. 14 unit
+# tests.
+unit_ndem2_generation_log:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_ndem2_generation_log \
+        --out:build/test-bin/t_ndem2_generation_log \
+        libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim \
+        2>&1 | tee test-logs/unit_ndem2_generation_log.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

@@ -574,6 +574,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
+    binary: "build/test-bin/t_ndem2_generation_log",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim",
     binary: "build/test-bin/t_smoke_catalog_audit_m29",
     defines: @[],
