@@ -2036,6 +2036,52 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Tenth from-source production recipe to exercise the M9.H/I/K trio
+  # — third single-library shape (wlroots + pixman were the first
+  # two), with a WIDE ``uses:`` set (pixman + freetype + fontconfig +
+  # zlib + libpng) and a ``.tar.xz`` (rather than ``.tar.gz``) source
+  # archive. Pins cairo 1.18.4's vendored sha256 + meson flag sequence
+  # + ``libcairo`` library artifact. Upstream-source side of the
+  # ``cairo >=1.16`` dependency that ``swaySource`` declares.
+  TestSpec(
+    source: "recipes/packages/source/cairo/test_cairo_source.nim",
+    binary: "build/test-bin/t_cairo_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eleventh from-source production recipe to exercise the M9.H/I/K
+  # trio — TWO-library single-package shape (``libpango-1.0.so`` +
+  # ``libpangocairo-1.0.so``). The first multi-library single-package
+  # shape in the from-source corpus where both artifacts share the
+  # same SONAME prefix but ship distinct ABIs. Pins pango 1.54.0's
+  # vendored sha256 + meson flag sequence + ``libpango`` and
+  # ``libpangocairo`` library artifacts. Upstream-source side of the
+  # ``pango >=1.50`` dependency that ``swaySource`` declares.
+  TestSpec(
+    source: "recipes/packages/source/pango/test_pango_source.nim",
+    binary: "build/test-bin/t_pango_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twelfth from-source production recipe to exercise the M9.H/I/K
+  # trio — fourth single-library shape (wlroots + pixman + cairo were
+  # the first three) with the kebab-to-camel package-identifier
+  # mapping (``gdk-pixbuf`` -> ``gdkPixbufSource``). Pins gdk-pixbuf
+  # 2.42.12's vendored sha256 + meson flag sequence + ``libgdkPixbuf``
+  # library artifact. Upstream-source side of the
+  # ``gdk-pixbuf >=2.40`` dependency that ``swaySource`` declares.
+  TestSpec(
+    source: "recipes/packages/source/gdk-pixbuf/test_gdk_pixbuf_source.nim",
+    binary: "build/test-bin/t_gdk_pixbuf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
