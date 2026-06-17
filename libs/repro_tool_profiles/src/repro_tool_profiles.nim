@@ -1460,8 +1460,160 @@ proc flattenStripComponents(destination: string; stripComponents: int) =
     " is not supported for non-tar archives; use stripComponents=1 or " &
     "rely on a tarball archiveType")
 
+proc removeEmptyDirTree(dir: string) =
+  ## Bottom-up: recurse into every child dir first, then if THIS dir
+  ## has no remaining entries, remove it. Used by the rust-installer
+  ## merge to clean up component dirs after their files have been
+  ## moved to the merged prefix root. Tolerates stray files the
+  ## upstream manifest didn't enumerate (the official installer logs
+  ## but tolerates the same — see ``rust-installer/install.sh``).
+  if not dirExists(extendedPath(dir)):
+    return
+  var childDirs: seq[string] = @[]
+  for kind, entry in walkDir(extendedPath(dir)):
+    if dirExists(extendedPath(entry)):
+      childDirs.add(entry)
+  for child in childDirs:
+    removeEmptyDirTree(child)
+  var hasEntries = false
+  for kind, entry in walkDir(extendedPath(dir)):
+    hasEntries = true
+    break
+  if not hasEntries:
+    try:
+      removeDir(extendedPath(dir))
+    except OSError:
+      discard
+
+proc mergeRustInstallerComponents(destination: string) =
+  ## Replays the upstream Rust standalone-distribution ``install.sh``
+  ## merge step.
+  ##
+  ## The ``rust-<ver>-<triple>.tar.xz`` archive (and its sibling
+  ## per-component archives) ships its payload as several sibling
+  ## component directories under one root: ``cargo/``, ``rustc/``,
+  ## ``rust-std-<triple>/``, ``clippy-preview/``,
+  ## ``rustfmt-preview/``, ``rust-docs/``, ... Each component has its
+  ## own ``bin/`` / ``lib/`` / ``share/`` subtree and a ``manifest.in``
+  ## listing the files it owns. The official ``install.sh`` (a.k.a.
+  ## ``rust-installer``) MERGES these components into a single flat
+  ## prefix at install time so that ``<prefix>/bin/rustc.exe`` finds
+  ## libstd at ``<prefix>/lib/rustlib/<triple>/lib/`` — exactly where
+  ## rustc looks via ``<exe>/../lib/rustlib/...``. Without the merge
+  ## ``cargo test --no-run`` fails with ``error[E0463]: can't find
+  ## crate for `std`'' because the unmerged ``rustc/lib/rustlib/`` tree
+  ## is empty (libstd lives under the sibling ``rust-std-<triple>/``).
+  ##
+  ## Detection is layout-driven (no schema flag needed): the merge
+  ## runs IFF the extracted root carries the canonical
+  ## ``rust-installer-version`` sentinel AND a ``components`` file
+  ## (the manifest of component dirs upstream's installer reads). For
+  ## any other archive shape the proc is a silent no-op.
+  ##
+  ## The merge itself walks each component's ``manifest.in``: ``dir:``
+  ## entries create the destination dir, ``file:`` entries move the
+  ## file from ``<root>/<component>/<rel>`` to ``<root>/<rel>``. Empty
+  ## component dirs are removed afterwards. The component-internal
+  ## ``manifest.in`` files are deleted as part of the merge (they
+  ## belong to the component, not the merged prefix).
+  let versionMarker = destination / "rust-installer-version"
+  let componentsFile = destination / "components"
+  if not fileExists(extendedPath(versionMarker)):
+    return
+  if not fileExists(extendedPath(componentsFile)):
+    return
+
+  let componentsRaw = readFile(extendedPath(componentsFile))
+  for componentRaw in componentsRaw.splitLines:
+    let component = componentRaw.strip()
+    if component.len == 0:
+      continue
+    # Defence-in-depth: refuse path-traversal in the components file.
+    let normalizedComponent = component.replace('\\', '/')
+    if normalizedComponent.contains("/") or normalizedComponent == ".." or
+        normalizedComponent == ".":
+      raise newException(OSError,
+        "tool-resolution failed: rust-installer components file lists " &
+        "invalid component name: " & component)
+    let componentDir = destination / component
+    if not dirExists(extendedPath(componentDir)):
+      continue
+    let manifestPath = componentDir / "manifest.in"
+    if not fileExists(extendedPath(manifestPath)):
+      continue
+    let manifestRaw = readFile(extendedPath(manifestPath))
+    for entryRaw in manifestRaw.splitLines:
+      let entry = entryRaw.strip()
+      if entry.len == 0:
+        continue
+      var kind, relRaw: string
+      let colonIdx = entry.find(':')
+      if colonIdx <= 0:
+        continue
+      kind = entry[0 ..< colonIdx]
+      relRaw = entry[colonIdx + 1 .. ^1]
+      let rel = relRaw.replace('\\', '/').strip()
+      if rel.len == 0:
+        continue
+      # Reject path-traversal: same rules as validateTarEntries.
+      if rel.startsWith("/") or rel == ".." or rel.startsWith("../") or
+          rel.contains("/../") or rel.endsWith("/.."):
+        raise newException(OSError,
+          "tool-resolution failed: rust-installer manifest entry " &
+          "escapes the prefix: " & entry & " (component " & component & ")")
+      case kind
+      of "dir":
+        createDir(extendedPath(destination / rel))
+      of "file":
+        let source = componentDir / rel
+        let target = destination / rel
+        if not fileExists(extendedPath(source)):
+          # Source missing — either already merged by an earlier
+          # invocation, or the manifest disagrees with the archive
+          # contents. Skip silently; the post-extract executable-
+          # presence check downstream catches the catastrophic case
+          # (the declared executablePath not landing in the prefix).
+          continue
+        if fileExists(extendedPath(target)):
+          # Earlier component already produced this file. Rust's
+          # components do not overlap on real entries — the only
+          # collisions are top-level metadata files (LICENSE-*,
+          # README.md, version, ...) which the installer dedupes by
+          # keeping the first writer. Skip the duplicate to match
+          # that behaviour.
+          removeFile(extendedPath(source))
+          continue
+        createDir(extendedPath(parentDir(target)))
+        moveFile(extendedPath(source), extendedPath(target))
+      else:
+        # ``link:`` / unknown kinds: Rust's installer treats these as
+        # post-install hooks the extracted prefix doesn't need (the
+        # rust-installer source's only other kind is ``dir`` and
+        # ``file`` on the platforms we ship). Ignore.
+        discard
+    # Delete the component's own manifest + any now-empty subtree.
+    try:
+      removeFile(extendedPath(manifestPath))
+    except OSError:
+      discard
+    # Remove empty leftover directories under the component dir.
+    # walkDir + bottom-up rmdir keeps this resilient to stray files
+    # the manifest didn't enumerate (rare; the upstream installer
+    # logs but tolerates the same).
+    removeEmptyDirTree(componentDir)
+
+  # The merged prefix no longer needs the installer metadata files.
+  # Keep them (they document provenance) but strip the now-redundant
+  # ``install.sh`` to discourage operators from invoking a second
+  # merge inside our already-merged layout.
+  let installSh = destination / "install.sh"
+  if fileExists(extendedPath(installSh)):
+    try: removeFile(extendedPath(installSh))
+    except OSError: discard
+
 proc extractTarballArchive(archivePath, destination, archiveType: string;
-                           stripComponents: int) =
+                           stripComponents: int;
+                           declaredExecutablePath = "") =
   validateTarEntries(archivePath, archiveType)
   createDir(extendedPath(destination))
   let lowerType = archiveType.toLowerAscii()
@@ -1484,6 +1636,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       raise newException(OSError,
         "tool-resolution failed: tar extraction failed for " & archivePath &
         "\n" & res.output)
+    mergeRustInstallerComponents(destination)
   of "zip":
     let extractor = resolveZipExtractor()
     let command =
@@ -1526,14 +1679,33 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         "\n" & res.output)
     flattenStripComponents(destination, stripComponents)
   of "raw":
-    # `raw` payloads are the executable themselves (e.g. rustup-init.exe).
+    # `raw` payloads are the executable themselves (e.g. iden3/circom's
+    # `circom-windows-amd64.exe` or argotorg/solidity's `solc-windows.exe`).
     # The `executablePath` declared by the package definition is the
-    # filename inside the prefix; copy the downloaded archive into
+    # relative path inside the prefix; copy the downloaded archive into
     # place under that name. `stripComponents` is meaningless here.
-    raise newException(ValueError,
-      "tool-resolution failed: archiveType=raw extraction requires the " &
-      "caller to supply executablePath as the destination filename; " &
-      "use the cakBuiltin adapter for installer payloads")
+    if declaredExecutablePath.len == 0:
+      raise newException(ValueError,
+        "tool-resolution failed: archiveType=raw extraction requires the " &
+        "caller to supply executablePath as the destination filename")
+    let normalized = declaredExecutablePath.replace('\\', '/')
+    if normalized.startsWith("/") or normalized == ".." or
+        normalized.startsWith("../") or normalized.contains("/../") or
+        normalized.endsWith("/.."):
+      raise newException(ValueError,
+        "tool-resolution failed: unsafe raw executablePath: " &
+        declaredExecutablePath)
+    let target = destination / declaredExecutablePath
+    createDir(extendedPath(parentDir(target)))
+    copyFile(extendedPath(archivePath), extendedPath(target))
+    when not defined(windows):
+      # Linux / macOS direct-download solc/circom binaries are shipped
+      # without an executable bit on the GitHub release asset; restore
+      # 0o755 so they can be exec'd from the prefix.
+      setFilePermissions(extendedPath(target),
+        {fpUserExec, fpUserRead, fpUserWrite,
+         fpGroupExec, fpGroupRead,
+         fpOthersExec, fpOthersRead})
   else:
     raise newException(ValueError,
       "tool-resolution failed: unsupported tarball archiveType " & archiveType)
@@ -1601,7 +1773,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     removeDir(extendedPath(tempPrefix))
   try:
     extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-      plan.stripComponents)
+      plan.stripComponents, plan.declaredExecutablePath)
     if executableInStorePath(tempPrefix, plan.declaredExecutablePath,
         rejectSymlinks = true).len == 0:
       raise newException(OSError,
@@ -1679,6 +1851,224 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     useDef.packageSelector, useDef.executableName)
 
   result.profileFingerprint = profileFingerprintFor(result)
+
+# ---------------------------------------------------------------------------
+# MR5 -- Bootstrap toolchain resolution for the interface-extract step.
+#
+# The engine's `repro-interface-extract` step compiles the project's
+# `repro.nim` recipe into a provider binary using `nim c` -> gcc. That
+# step runs BEFORE the project's `uses:` declarations are visible (the
+# manifest of "what tools the project uses" is INSIDE the recipe that
+# we are trying to compile), so the engine cannot read the project's
+# toolUses to learn which nim/gcc to use. It instead falls back to
+# `hostCCompilerPath()` (the C compiler discovered by `staticExec` at
+# the time repro.exe itself was built) and to the first `nim.exe` on
+# `$PATH`. In a clean shell with neither of those pointing at a usable
+# 64-bit gcc (e.g. when `gcc.exe` on PATH is FPC's 1999-era i386 gcc),
+# the compile fails with `nimbase.h: Invalid argument`.
+#
+# To stay self-contained without baking a dev-shell path into the
+# binary, we synthesize a hardcoded `InterfaceToolUse` record for nim
+# and one for gcc on Windows, drive them through the same
+# `resolveTarballTool` resolver that recipe-declared tools use, and
+# expose the resolved exe paths via `$REPRO_NIM_COMPILER` and `$CC` —
+# the two env vars `extractInterfaceFromModule` already honours. The
+# tarball metadata (URL, sha256, executablePath) MUST stay in sync
+# with the entries in `repro_dsl_stdlib/packages/{nim,gcc}.nim`.
+# A future change can deduplicate by harvesting at compile time, but
+# the hardcoded copy here keeps the engine's bootstrap free of any
+# dependency on the project's recipe.
+# ---------------------------------------------------------------------------
+
+const
+  BootstrapNimTarballUrl =
+    "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+  BootstrapNimTarballSha256 =
+    "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+  BootstrapNimTarballLinuxUrl =
+    "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz"
+  BootstrapNimTarballLinuxSha256 =
+    "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
+  BootstrapGccWindowsTarballUrl =
+    "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z"
+  BootstrapGccWindowsTarballSha256 =
+    "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
+
+proc bootstrapNimToolUse(): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint: "nim >=2.2 <3.0",
+    packageSelector: "nim@2.2.10",
+    executableName: "nim")
+  when defined(windows):
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "nim",
+        url: BootstrapNimTarballUrl,
+        sha256: BootstrapNimTarballSha256,
+        archiveType: "zip",
+        executablePath: "bin/nim.exe",
+        stripComponents: 1,
+        packageId: "nim@2.2.10",
+        lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
+        cpu: "x86_64",
+        os: "windows")]
+  else:
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "nim",
+        url: BootstrapNimTarballLinuxUrl,
+        sha256: BootstrapNimTarballLinuxSha256,
+        archiveType: "tar.xz",
+        executablePath: "bin/nim",
+        stripComponents: 1,
+        packageId: "nim@2.2.10",
+        lockIdentity: "tarball:nim@2.2.10:linux:sha256:" &
+          BootstrapNimTarballLinuxSha256,
+        cpu: "x86_64",
+        os: "linux")]
+
+proc bootstrapGccToolUse(): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint: "gcc",
+    packageSelector: "gcc-winlibs@16.1.0",
+    executableName: "gcc")
+  when defined(windows):
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "gcc",
+        url: BootstrapGccWindowsTarballUrl,
+        sha256: BootstrapGccWindowsTarballSha256,
+        archiveType: "7z",
+        executablePath: "bin/gcc.exe",
+        stripComponents: 1,
+        packageId: "gcc-winlibs@16.1.0",
+        lockIdentity: "tarball:gcc-winlibs@16.1.0:sha256:" &
+          BootstrapGccWindowsTarballSha256,
+        cpu: "x86_64",
+        os: "windows")]
+
+proc findEditBin(): string =
+  ## Locate `editbin.exe`, the MSVC PE-header editor. The build-shell
+  ## adds the MSVC toolchain bin to PATH so it normally resolves there;
+  ## fall back to `$VCToolsInstallDir/bin/Hostx64/x64/editbin.exe` when
+  ## not on PATH (e.g. CI hosts that source the toolchain via
+  ## `vcvarsall.bat` without prepending the bin dir).
+  when defined(windows):
+    let direct = findExe("editbin")
+    if direct.len > 0:
+      return direct
+    let vcTools = getEnv("VCToolsInstallDir")
+    if vcTools.len > 0:
+      let candidate = vcTools / "bin" / "Hostx64" / "x64" / "editbin.exe"
+      if fileExists(extendedPath(candidate)):
+        return candidate
+  return ""
+
+proc bumpWindowsNimStack(nimExePath: string) =
+  ## MR5 — Windows-only post-extract hook for the bootstrap-provisioned
+  ## `nim.exe`. The upstream Nim Windows distribution ships nim.exe
+  ## with the linker's default 2 MB stack reserve. The reprobuild
+  ## ``package`` macro is deeply recursive when expanded against the
+  ## full ``repro_dsl_stdlib`` umbrella that recorder ``repro.nim``
+  ## recipes import; on Windows the compiler crashes with
+  ## STATUS_STACK_OVERFLOW (-1073741571 / 0xC00000FD) during interface
+  ## extraction. `editbin /STACK:33554432` rewrites the PE header in
+  ## place to a 32 MB stack reserve, matching what
+  ## ``repo-workspaces/windows/ensure-nim.ps1`` does at env.ps1
+  ## install time. Idempotent (running it twice produces the same
+  ## bytes) and silent on failure: if editbin isn't available the
+  ## extract step still attempts the compile with the smaller stack
+  ## and surfaces the original error to the user.
+  when defined(windows):
+    if nimExePath.len == 0 or not fileExists(extendedPath(nimExePath)):
+      return
+    # Cheap version check: skip if the file already has a >= 16 MB stack
+    # reserve. `dumpbin /headers` would let us read it cleanly but is
+    # a heavier optional tool; we instead rely on idempotency of
+    # `editbin /STACK:` and the marker file written next to the binary.
+    let marker = nimExePath & ".reprobuild-stack-bump.marker"
+    if fileExists(extendedPath(marker)):
+      return
+    let editbin = findEditBin()
+    if editbin.len == 0:
+      return
+    try:
+      let res = execCmdEx(quoteShell(editbin) &
+        " /STACK:33554432 " & quoteShell(nimExePath))
+      if res.exitCode == 0:
+        try:
+          writeFile(extendedPath(marker), "ok\n")
+        except CatchableError:
+          discard
+    except CatchableError, OSError:
+      discard
+
+proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
+                                  storeRoot: string) =
+  ## MR5 — before the engine's interface-extract step shells out to
+  ## `nim c`, ensure `$REPRO_NIM_COMPILER` and `$CC` point at a
+  ## reprobuild-provisioned toolchain so the step does not pick up
+  ## whatever incidental `nim.exe` / `gcc.exe` happen to be on `$PATH`
+  ## (which on Windows often is FPC's 1999-era 32-bit gcc, breaking
+  ## the compile with `nimbase.h: Invalid argument`).
+  ##
+  ## Only fires for tool-provisioning modes where the project's
+  ## toolUses are resolved via the engine's tool-store (`tarball`
+  ## today; `nix`/`scoop` resolve their toolchain through other
+  ## adapters and the host PATH posture is already correct).
+  ##
+  ## MR9 — `$CC` honors pre-set values for backward compat with callers
+  ## that pre-pin the compiler (CI, integration tests). But the
+  ## interface-extract step ALSO publishes a dedicated, always-overridden
+  ## `$REPRO_BOOTSTRAP_CC` pointing at the bootstrap-resolved gcc's
+  ## absolute path on Windows. `hostCCompilerPath()` in
+  ## `repro_interface_artifacts` consults that var FIRST so the nim
+  ## invocation gets `--gcc.exe:<bootstrap>` regardless of whether a
+  ## (possibly bare / PATH-relative) `$CC` was inherited from env.ps1
+  ## or a parent shell. Without this, env.ps1's `$env:CC = "gcc"`
+  ## (bare basename, not absolute) defeats the `hostCCompilerPath`
+  ## `isAbsolute(ccEnv)` check, no `--gcc.exe` flag is emitted, and
+  ## nim falls back to the PATH lookup that picks up FPC's 1999-era
+  ## i386-target gcc 2.95 — failing the C compile of e.g. `blake3/capi.c`
+  ## with `stddef.h: Invalid argument`.
+  if mode != tpmTarball:
+    return
+  let effectiveStoreRoot =
+    if storeRoot.len > 0: storeRoot
+    else: getCurrentDir() / ".repro" / "tool-store"
+  if getEnv("REPRO_NIM_COMPILER").len == 0:
+    try:
+      let useDef = bootstrapNimToolUse()
+      if useDef.tarballProvisioning.len > 0:
+        let profile = resolveTarballTool(useDef, effectiveStoreRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          bumpWindowsNimStack(profile.resolvedExecutablePath)
+          putEnv("REPRO_NIM_COMPILER", profile.resolvedExecutablePath)
+    except CatchableError:
+      # Silent: if bootstrap resolution fails (offline, no curl, etc.)
+      # the existing PATH-based fallback in `nimCompilerPath()` still
+      # runs and may succeed when the host has a usable nim/gcc.
+      discard
+  when defined(windows):
+    # Always (re-)resolve the bootstrap gcc on Windows in tarball mode.
+    # Publish via `$REPRO_BOOTSTRAP_CC` so the interface-extract flag
+    # builder can pin `--gcc.exe:<absolute>` regardless of the inherited
+    # `$CC` shape (see proc docstring). Resolution is cheap once the
+    # tarball is materialized — `resolveTarballTool` short-circuits to
+    # the existing prefix when the receipt is present.
+    var bootstrapGcc = ""
+    try:
+      let useDef = bootstrapGccToolUse()
+      if useDef.tarballProvisioning.len > 0:
+        let profile = resolveTarballTool(useDef, effectiveStoreRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          bootstrapGcc = profile.resolvedExecutablePath
+    except CatchableError:
+      discard
+    if bootstrapGcc.len > 0:
+      putEnv("REPRO_BOOTSTRAP_CC", bootstrapGcc)
+      if getEnv("CC").len == 0:
+        putEnv("CC", bootstrapGcc)
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))
@@ -2815,13 +3205,30 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string): PathOnlyToolProfile =
   case mode
   of tpmPathOnly:
-    resolvePathOnlyTool(useDef, pathValue)
+    # M7 (Windows reprobuild migration): when path-mode resolution
+    # fails AND the use declares tarball provisioning metadata, fall
+    # through to the tarball realizer. This keeps the project-wide
+    # ``defaultToolProvisioning "path"`` posture for tools the host
+    # already supplies (cargo / nim / git / ...) while letting
+    # individual tools (e.g. ``python-dev``, ``uv``) opt into
+    # engine-managed tarball materialisation simply by declaring a
+    # ``tarball`` block in their stdlib package definition. The
+    # fallback is silent when no tarball metadata exists — the path
+    # resolver's original "not found in PATH" diagnostic propagates
+    # unchanged.
+    try:
+      result = resolvePathOnlyTool(useDef, pathValue)
+    except OSError:
+      if useDef.tarballProvisioning.len > 0:
+        result = resolveTarballTool(useDef, storeRoot)
+      else:
+        raise
   of tpmNix:
-    resolveNixTool(useDef, storeRoot)
+    result = resolveNixTool(useDef, storeRoot)
   of tpmTarball:
-    resolveTarballTool(useDef, storeRoot)
+    result = resolveTarballTool(useDef, storeRoot)
   of tpmScoop:
-    resolveScoopTool(useDef, storeRoot)
+    result = resolveScoopTool(useDef, storeRoot)
   else:
     raise newException(ValueError, "tool provisioning mode is not resolved")
 
