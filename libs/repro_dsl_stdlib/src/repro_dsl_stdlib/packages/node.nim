@@ -55,18 +55,61 @@ package node:
     scoopApp(bucket = "main", app = "nodejs",
       preferredVersion = ">=20", executablePath = "node.exe",
       requiresExecutionProfileChecksum = false)
-    # Direct-download: official Node.js 7z from nodejs.org. archive
-    # layout is `node-v24.16.0-win-x64/node.exe` so stripComponents=1
-    # flattens the leading directory.
-    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.7z",
-      sha256 = "9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211",
-      archiveType = "7z",
+    # Direct-download (MR2): official Node.js 20.x LTS tarballs from
+    # nodejs.org. The Windows asset is a .zip (vs. the 24.x .7z) because
+    # nodejs.org's 20.x line publishes the win-x64 zip alongside the 7z
+    # and the zip extractor path does not require a system-level ``7z``
+    # binary at realize time. Sha256s lifted from
+    # https://nodejs.org/dist/v20.18.0/SHASUMS256.txt — single source of
+    # truth for the v20.18.0 release. The archive layout is
+    # ``node-v20.18.0-win-x64/node.exe`` + ``npm.cmd`` + ``npx.cmd`` so
+    # stripComponents=1 flattens the leading dir; npm.nim and npx.nim
+    # declare the SAME tarball URL with their own executablePath so the
+    # engine's content-addressed store dedupes the extracted prefix.
+    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
+      sha256 = "f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297",
+      archiveType = "zip",
       stripComponents = 1,
       executablePath = "node.exe",
-      packageId = "node@24.16.0",
+      packageId = "node@20.18.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:node@24.16.0:sha256:9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211"
+      lockIdentity = "tarball:node@20.18.0:sha256:f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297"
+    # Linux x86_64: official Node.js tar.xz. Inner dir
+    # ``node-v20.18.0-linux-x64/`` flattens via stripComponents=1; the
+    # interpreter lives at ``bin/node`` post-flatten (no .exe suffix,
+    # no .cmd shims).
+    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz",
+      sha256 = "4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/node",
+      packageId = "node@20.18.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:node@20.18.0:sha256:4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a"
+    # macOS arm64: official Node.js tar.gz for Apple silicon. Inner dir
+    # ``node-v20.18.0-darwin-arm64/`` flattens to bin/node.
+    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz",
+      sha256 = "92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "bin/node",
+      packageId = "node@20.18.0",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:node@20.18.0:sha256:92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be"
+    # macOS x86_64: official Node.js tar.gz for Intel Macs. Same shape
+    # as the arm64 entry above.
+    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz",
+      sha256 = "c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "bin/node",
+      packageId = "node@20.18.0",
+      cpu = "x86_64",
+      os = "macos",
+      lockIdentity = "tarball:node@20.18.0:sha256:c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc"
 
   executable node:
     cli:

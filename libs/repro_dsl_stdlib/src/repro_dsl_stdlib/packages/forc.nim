@@ -7,10 +7,33 @@
 ## ``forc-binaries`` release tarballs so the recorder dev env stays
 ## self-contained on non-Nix hosts.
 ##
-## FuelLabs publishes Linux and macOS tarballs only -- there is no
-## Windows artefact upstream as of v0.70.3. Windows users currently
-## rely on WSL or the env.ps1 fallback; the recorder's Windows DIY
-## path documents this gap.
+## ----------------------------------------------------------------------
+## Windows: EXPLICITLY UNSUPPORTED (no PlatformBinary entry below).
+## ----------------------------------------------------------------------
+##
+## FuelLabs/sway publishes Linux and macOS ``forc-binaries`` tarballs
+## only; there is no Windows artefact upstream as of v0.70.3. See the
+## upstream release pages for verification:
+##   https://github.com/FuelLabs/sway/releases/tag/v0.70.3
+##
+## Building forc 0.70.3 from source on Windows fails at multiple
+## distinct points and is not reliably reproducible:
+##   * the ``Cargo.lock`` pins ``core2 0.4.0`` which was yanked from
+##     crates.io;
+##   * ``sway-core/src/debug_generation/dwarf.rs`` imports
+##     ``std::os::unix::ffi::OsStringExt`` unconditionally (Unix-only);
+##   * ``libssh2-sys`` (pulled transitively via the cargo-edit / git2
+##     dependency graph) cannot locate ``libssh2.h`` headers under the
+##     mingw-w64 toolchain shipped via reprobuild's gcc-winlibs slice.
+##
+## The deliberate omission of a ``poWindows`` ``PlatformBinary`` causes
+## the M65 adapter chain to surface a structured
+## ``brePlatformNotSupported`` step from cakBuiltin when a recorder
+## declares ``uses: "forc"`` on Windows. Recorders that need forc must
+## gate the dependency with ``when not defined(windows):`` in their
+## ``repro.nim`` (see ``codetracer-fuel-recorder/repro.nim``); on
+## Windows the sway-compile test edges skip cleanly and the rest of the
+## build proceeds.
 ##
 ## The release tarball bundles ``forc``, ``forc-fmt``, ``forc-lsp``,
 ## ``forc-deploy``, and ``forc-run`` together under a single

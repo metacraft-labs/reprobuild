@@ -50,6 +50,23 @@ package ruby:
     nixPackage "nixpkgs#ruby", executablePath = "bin/ruby",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # MR2 Windows: rubyinstaller2 portable 7z for Ruby 3.3.5-1. Inner
+    # dir ``rubyinstaller-3.3.5-1-x64/`` flattens via stripComponents=1
+    # so ``bin/ruby.exe``, ``bin/gem.cmd``, ``bin/irb.cmd``, plus the
+    # ``lib/``, ``include/`` and ``msys64/`` trees sit at the prefix
+    # root. sha256 was computed by downloading the asset and running
+    # ``sha256sum`` — the upstream release page does not publish a
+    # SHASUMS file (cf. nodejs.org). Linux/macOS hosts continue to use
+    # ``nixpkgs#ruby`` above; rubyinstaller2 only ships Windows builds.
+    tarball url = "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-3.3.5-1/rubyinstaller-3.3.5-1-x64.7z",
+      sha256 = "7b1715e464ce750c171d53b5191d549a599d07befb0f54fb56aa785e3f25ba8d",
+      archiveType = "7z",
+      stripComponents = 1,
+      executablePath = "bin/ruby.exe",
+      packageId = "ruby@3.3.5-1",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:ruby@3.3.5-1:sha256:7b1715e464ce750c171d53b5191d549a599d07befb0f54fb56aa785e3f25ba8d"
 
 # ---------------------------------------------------------------------------
 # M67 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

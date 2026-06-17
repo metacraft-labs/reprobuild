@@ -21,6 +21,39 @@ package solc:
     nixPackage "nixpkgs#solc", executablePath = "bin/solc",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Direct-download: argotorg/solidity publishes raw per-platform
+    # solc binaries (no archive wrapper). The reprobuild tarball
+    # resolver copies the verified download to ``executablePath``
+    # inside the realized prefix when ``archiveType = "raw"``.
+    # Mirrors the URL+sha256 in ``solcCatalog`` below which feeds the
+    # M65 cakBuiltin adapter on non-tarball-mode realizations.
+    tarball url = "https://github.com/argotorg/solidity/releases/download/v0.8.28/solc-windows.exe",
+      sha256 = "76a71001309810aafd0462d9b2f2612bf19b89550c866140edca26e533de06bc",
+      archiveType = "raw",
+      stripComponents = 0,
+      executablePath = "bin/solc.exe",
+      packageId = "solc@0.8.28",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:solc@0.8.28:sha256:76a71001309810aafd0462d9b2f2612bf19b89550c866140edca26e533de06bc"
+    tarball url = "https://github.com/argotorg/solidity/releases/download/v0.8.28/solc-static-linux",
+      sha256 = "9a0fb7e0db2c0641dbae1c5cc645dc686820c83af516226abb1c0a2f76636f25",
+      archiveType = "raw",
+      stripComponents = 0,
+      executablePath = "bin/solc",
+      packageId = "solc@0.8.28",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:solc@0.8.28:sha256:9a0fb7e0db2c0641dbae1c5cc645dc686820c83af516226abb1c0a2f76636f25"
+    tarball url = "https://github.com/argotorg/solidity/releases/download/v0.8.28/solc-macos",
+      sha256 = "81515b0e53deaa266d549545ccaac0a5a96e6d4e8201c77f673b2c710976d9ea",
+      archiveType = "raw",
+      stripComponents = 0,
+      executablePath = "bin/solc",
+      packageId = "solc@0.8.28",
+      cpu = "x86_64",
+      os = "macos",
+      lockIdentity = "tarball:solc@0.8.28:sha256:81515b0e53deaa266d549545ccaac0a5a96e6d4e8201c77f673b2c710976d9ea"
 
 let solcCatalog* = @[
   VersionedProvisioning(

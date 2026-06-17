@@ -21,6 +21,7 @@
 ## provision at test time.
 
 import std/tables
+import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
@@ -28,6 +29,42 @@ export packages_schema
 # archive wrapper). ``afRaw`` tells the realize loop to copy the
 # downloaded bytes into the prefix at the ``bin_relpath`` leaf
 # rather than running an extractor.
+
+package circom:
+  provisioning:
+    # Direct-download: iden3/circom publishes raw per-platform circom
+    # binaries (no archive wrapper). The reprobuild tarball resolver
+    # copies the verified download to ``executablePath`` inside the
+    # realized prefix when ``archiveType = "raw"``. Mirrors the
+    # URL+sha256 in ``circomCatalog`` below which feeds the M65
+    # cakBuiltin adapter on non-tarball-mode realizations.
+    tarball url = "https://github.com/iden3/circom/releases/download/v2.1.5/circom-windows-amd64.exe",
+      sha256 = "bea0d676ab6b3ac015cfd53260a35b4e447e7aa4c3385f741481309796c71106",
+      archiveType = "raw",
+      stripComponents = 0,
+      executablePath = "bin/circom.exe",
+      packageId = "circom@2.1.5",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:circom@2.1.5:sha256:bea0d676ab6b3ac015cfd53260a35b4e447e7aa4c3385f741481309796c71106"
+    tarball url = "https://github.com/iden3/circom/releases/download/v2.1.5/circom-linux-amd64",
+      sha256 = "8bbceaa993e757998808cfe9966daa80da04f41505f22c989c62f66e8ce2dcb2",
+      archiveType = "raw",
+      stripComponents = 0,
+      executablePath = "bin/circom",
+      packageId = "circom@2.1.5",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:circom@2.1.5:sha256:8bbceaa993e757998808cfe9966daa80da04f41505f22c989c62f66e8ce2dcb2"
+    tarball url = "https://github.com/iden3/circom/releases/download/v2.1.5/circom-macos-amd64",
+      sha256 = "9e5ab9e950c553d4ac3a6e1f84a310d04273cf55405663e9765a8daf4460714e",
+      archiveType = "raw",
+      stripComponents = 0,
+      executablePath = "bin/circom",
+      packageId = "circom@2.1.5",
+      cpu = "x86_64",
+      os = "macos",
+      lockIdentity = "tarball:circom@2.1.5:sha256:9e5ab9e950c553d4ac3a6e1f84a310d04273cf55405663e9765a8daf4460714e"
 
 let circomCatalog* = @[
   VersionedProvisioning(
