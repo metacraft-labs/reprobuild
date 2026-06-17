@@ -367,7 +367,13 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # upstream source metadata (URL + hash + extract) so
                  # from-source recipes can drop their sibling
                  # ``.ps1``/``.sh`` pre-fetch scripts.
-                 "fetch"]
+                 "fetch",
+                 # DSL-port M9.I: per-package convention-layer flag
+                 # injection. Each block body is a sequence of string
+                 # literals (one per line, no setters) that get appended
+                 # to the appropriate channel-specific registry.
+                 "mesonoptions", "cmakeflags",
+                 "configureflags", "makeflags", "ninjaflags"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.
@@ -610,6 +616,38 @@ type
       ## NOTE: this is REGISTRATION + parser ONLY. The build-engine
       ## fetch action that consumes the registry is a separate
       ## milestone (M9.K).
+    soM9IMesonOptions
+      ## ``mesonOptions:`` blocks (M9.I) — per-package flags passed to
+      ## ``meson setup`` by the c_cpp_meson convention. Body is a
+      ## sequence of string literals (one per line, no setters); the
+      ## emitter walks them in source order and emits one
+      ## ``registerBuildFlag(packageName, "", "meson", flag)`` call per
+      ## entry. Repeatable inside a package body (append semantics).
+      ## Exclusive ownership symmetric with M9.H's ``fetch:`` treatment.
+      ## NOTE: REGISTRATION + parser ONLY; convention-side consumption
+      ## is deferred to M9.L.
+    soM9ICmakeFlags
+      ## ``cmakeFlags:`` blocks (M9.I) — per-package flags passed to
+      ## ``cmake ..`` by the c_cpp_cmake convention. Same body shape +
+      ## emission shape as ``soM9IMesonOptions``; the emitter routes to
+      ## the ``cmake`` channel.
+    soM9IConfigureFlags
+      ## ``configureFlags:`` blocks (M9.I) — per-package flags passed to
+      ## ``./configure`` by the c_cpp_autotools convention. Same body
+      ## shape + emission shape as ``soM9IMesonOptions``; the emitter
+      ## routes to the ``configure`` channel.
+    soM9IMakeFlags
+      ## ``makeFlags:`` blocks (M9.I) — per-package raw ``make`` args by
+      ## the c_cpp_make convention (e.g. ``ARCH=x86_64`` / ``V=1``).
+      ## Same body shape + emission shape as ``soM9IMesonOptions``; the
+      ## emitter routes to the ``make`` channel. Order is load-bearing
+      ## (left-to-right env-var precedence in ``make``), so the registry
+      ## preserves source-declaration order verbatim.
+    soM9INinjaFlags
+      ## ``ninjaFlags:`` blocks (M9.I) — per-package raw ``ninja`` args
+      ## (e.g. ``-j4``). Same body shape + emission shape as
+      ## ``soM9IMesonOptions``; the emitter routes to the ``ninja``
+      ## channel.
 
   ClassifiedSection* = object
     ## One classified section. ``stmt`` is a copy of the AST node from
@@ -638,6 +676,11 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   of "validate": soM9EValidate
   of "bootloader": soM9GBootloader
   of "fetch": soM9HFetch
+  of "mesonoptions": soM9IMesonOptions
+  of "cmakeflags": soM9ICmakeFlags
+  of "configureflags": soM9IConfigureFlags
+  of "makeflags": soM9IMakeFlags
+  of "ninjaflags": soM9INinjaFlags
   else: soLegacyParsePackageDef
 
 proc classifyPackageSections*(sectionStmts: NimNode):

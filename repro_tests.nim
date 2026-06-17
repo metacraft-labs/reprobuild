@@ -1850,6 +1850,34 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.I — ``mesonOptions:`` block registry. Real packages like
+  # ``dbus-broker`` declare per-package flags passed to ``meson setup``
+  # via this block; the body is a sequence of string literals (one per
+  # line). REGISTRATION + parser ONLY; convention-side consumption is
+  # deferred to M9.L.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_meson_options.nim",
+    binary: "build/test-bin/t_dsl_meson_options",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.I — five-channel cross product. Pins the M9.I block
+  # taxonomy (``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:`` /
+  # ``makeFlags:`` / ``ninjaFlags:``) registered on a single package and
+  # the registry partitions flags into independent per-channel seqs (no
+  # cross-channel bleeding). The ``makeFlags:`` case carries two flags
+  # so an order-preserving sequence equality assertion catches any
+  # reordering bug.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_flags_all_channels.nim",
+    binary: "build/test-bin/t_dsl_build_flags_all_channels",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",

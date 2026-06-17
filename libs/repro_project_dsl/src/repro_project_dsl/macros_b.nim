@@ -2332,6 +2332,98 @@ proc emitM9HFetch*(packageName: string;
         `hashAlgIdent`, `hashHexNode`,
         `kindIdent`, `extractStripFinal`, `extractedRootFinal`))
 
+# ---------------------------------------------------------------------------
+# DSL-port M9.I — per-package convention-layer flag-injection emitter.
+#
+# Walks each ``soM9IMesonOptions`` / ``soM9ICmakeFlags`` /
+# ``soM9IConfigureFlags`` / ``soM9IMakeFlags`` / ``soM9INinjaFlags``
+# classified section, walks the block body's string-literal sequence in
+# source-declaration order, and emits one ``registerBuildFlag(packageName,
+# "", "<channel>", <flag>)`` call per recognised string literal. M9.I
+# always registers package-level rows (``artifactName == ""``); artifact-
+# level injection is a follow-up.
+#
+# Body shape: each block's body is expected to be ``nnkStmtList`` whose
+# children are string literals OR command/call shapes whose unwrapped
+# payload is a string literal. Anything else (comment, discard, unknown
+# node kind) is silently skipped so forward-compat with future block
+# extensions stays open.
+#
+# The string literals are spliced VERBATIM into the emitted call so the
+# recipe author may use any compile-time string expression (a naked
+# literal, a ``$`` interpolation, a ``&``-concat, ...) — the M9.H
+# precedent (see ``m9hSetterValueNode``).
+# ---------------------------------------------------------------------------
+
+proc m9iCollectFlagNodes(body: NimNode; outNodes: var seq[NimNode]) =
+  ## Walk a flag-block body and append each recognised flag-expression
+  ## node into ``outNodes`` in source-declaration order. Accepted
+  ## shapes:
+  ##
+  ##   * Bare string literal child (``"-Daudit=false"``).
+  ##   * Any other expression child whose VALUE is computed at compile
+  ##     time (``"abc" & repeat("0", 1)`` etc.). The emitter does not
+  ##     distinguish — it splices the node verbatim into the call so
+  ##     Nim semchecks the type at the call site.
+  ##
+  ## Skipped (silently): ``nnkCommentStmt``, empty ``nnkDiscardStmt``,
+  ## and ``nnkIncludeStmt`` — matches the package-body partition rules.
+  if body.kind != nnkStmtList:
+    return
+  for child in body:
+    if child.kind == nnkCommentStmt:
+      continue
+    if child.kind == nnkDiscardStmt and child.len > 0 and
+       child[0].kind == nnkEmpty:
+      continue
+    if child.kind == nnkIncludeStmt:
+      continue
+    outNodes.add(child)
+
+proc emitM9IBuildFlags*(packageName: string;
+                       classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for the five M9.I block ownerships
+  ## and emit one ``registerBuildFlag(...)`` call per recognised flag
+  ## expression. Returns an empty ``StmtList`` when no entry is found.
+  ##
+  ## Per-flag emission shape:
+  ##
+  ##   registerBuildFlag("<pkg>", "", "<channel>", <flagExpr>)
+  ##
+  ## ``<channel>`` is one of ``"meson"`` / ``"cmake"`` / ``"configure"``
+  ## / ``"make"`` / ``"ninja"`` (the M9.I channel taxonomy). The
+  ## ``artifactName`` argument is always the empty string at M9.I —
+  ## artifact-level flag injection is reserved for a follow-up
+  ## milestone.
+  result = newStmtList()
+  let pkgLit = newLit(packageName)
+  let artifactLit = newLit("")
+  for entry in classified:
+    var channel: string = ""
+    case entry.ownership
+    of soM9IMesonOptions: channel = "meson"
+    of soM9ICmakeFlags: channel = "cmake"
+    of soM9IConfigureFlags: channel = "configure"
+    of soM9IMakeFlags: channel = "make"
+    of soM9INinjaFlags: channel = "ninja"
+    else: continue
+    let channelLit = newLit(channel)
+    let stmt = entry.stmt
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len < 2:
+      continue
+    let body = stmt[^1]
+    if body.kind != nnkStmtList:
+      continue
+    var flagNodes: seq[NimNode] = @[]
+    m9iCollectFlagNodes(body, flagNodes)
+    for flagNode in flagNodes:
+      let flagNodeCopy = flagNode.copyNimTree()
+      result.add(quote do:
+        registerBuildFlag(`pkgLit`, `artifactLit`, `channelLit`,
+                          `flagNodeCopy`))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -2581,6 +2673,20 @@ macro package*(name: untyped; body: untyped): untyped =
   # verify + extract) is a separate milestone (M9.K).
   let m9hFetchEmission = emitM9HFetch(packageName, classifiedSections)
   result.add(m9hFetchEmission)
+  # ── DSL-port M9.I: per-package convention-layer flag-injection blocks
+  # (``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:`` /
+  # ``makeFlags:`` / ``ninjaFlags:``). Each block body is a sequence of
+  # string literals (one per line, no setters) that the emitter walks in
+  # source-declaration order, emitting one ``registerBuildFlag(...)``
+  # call per literal. Repeatable inside a package body — successive
+  # blocks APPEND to the registered seq (flag order is load-bearing for
+  # autotools / make). ``parsePackageDef`` does NOT recognise any of the
+  # five block heads so M9.I's ownership is exclusive — symmetric with
+  # M9.H's ``fetch:`` treatment. NOTE: M9.I is REGISTRATION + parser
+  # ONLY; the convention-side consumption (c_cpp_meson / c_cpp_cmake /
+  # c_cpp_autotools / c_cpp_make widening) is deferred to M9.L.
+  let m9iBuildFlagsEmission = emitM9IBuildFlags(packageName, classifiedSections)
+  result.add(m9iBuildFlagsEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

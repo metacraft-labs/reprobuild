@@ -3545,3 +3545,148 @@ proc registeredFetchSpec*(packageName: string): DslFetchSpec =
     hashHex: "",
     extractStrip: 1,
     extractedRoot: "")
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.I — per-package convention-layer flag-injection registry.
+# ---------------------------------------------------------------------------
+##
+## ## What the M9.I surface covers
+##
+## Real from-source recipes need to pass per-package flags into the
+## convention layer's underlying build tool. Examples:
+##
+##   * dbus-broker: ``-Daudit=false`` / ``-Dlauncher=true`` to
+##     ``meson setup``.
+##   * wlroots: ``-Dxwayland=disabled`` to ``meson setup``.
+##   * kernel: ``ARCH=x86_64`` / ``V=1`` to ``make``.
+##
+## M9.I adds four package-body blocks (all optional, all repeatable for
+## append semantics):
+##
+##   * ``mesonOptions:`` — flags passed to ``meson setup``.
+##   * ``cmakeFlags:`` — flags passed to ``cmake ..``.
+##   * ``configureFlags:`` — flags passed to ``./configure`` (autotools).
+##   * ``makeFlags:`` — raw ``make`` args.
+##   * ``ninjaFlags:`` — raw ``ninja`` args.
+##
+## Each block body is a sequence of string literals (one per line, no
+## setters). The block is repeatable inside a package body — successive
+## blocks APPEND to the registered sequence (M9.G/M9.H last-writer-wins
+## semantics would be wrong here because flag order matters for some
+## build systems).
+##
+## **M9.I is REGISTRATION + parser ONLY.** No actual injection into the
+## build action runs as part of this milestone. The convention layer
+## (c_cpp_meson, c_cpp_cmake, c_cpp_autotools, c_cpp_make) needs to be
+## widened to consume these registries; that's deferred to M9.L.
+##
+## ## Threading model
+##
+## ``dslPortBuildFlagSets`` is ``threadvar`` so concurrent test fixtures
+## do not cross-attribute flag rows. ``resetDslPortBuildFlagState``
+## resets the per-thread slot. Matches the M9.E / M9.G / M9.H shape.
+##
+## ## Artifact-level overrides
+##
+## The ``DslBuildFlagSet`` row carries an ``artifactName`` field so a
+## future milestone can attribute flags to a specific ``executable``/
+## ``library`` artifact within a package. M9.I only registers package-
+## level flags (``artifactName == ""``); artifact-level injection is a
+## follow-up.
+
+type
+  DslBuildFlagSet* = object
+    ## One package's accumulated convention-layer flag sequences. M9.I
+    ## records ONE row per ``(packageName, artifactName)`` pair; the
+    ## five channel-specific seqs append in source-declaration order so
+    ## flag-order-sensitive build systems (e.g. autotools' ``configure``
+    ## script's left-to-right env-var precedence) round-trip correctly.
+    ##
+    ## ``artifactName == ""`` indicates a package-level row — flags
+    ## apply to every artifact the package's build action produces.
+    ## Artifact-level rows (``artifactName != ""``) are reserved for a
+    ## follow-up milestone; M9.I always registers package-level rows.
+    packageName*: string
+    artifactName*: string
+      ## ``""`` = package-level (applies to all artifacts).
+    mesonOptions*: seq[string]
+      ## Passed to ``meson setup`` in declaration order.
+    cmakeFlags*: seq[string]
+      ## Passed to ``cmake ..`` in declaration order.
+    configureFlags*: seq[string]
+      ## Passed to ``./configure`` in declaration order.
+    makeFlags*: seq[string]
+      ## Passed to ``make`` in declaration order. Some flags act as
+      ## variable overrides (e.g. ``ARCH=x86_64``) so the registry
+      ## preserves the source order verbatim.
+    ninjaFlags*: seq[string]
+      ## Passed to ``ninja`` in declaration order.
+
+var dslPortBuildFlagSets {.threadvar.}: Table[string, DslBuildFlagSet]
+  ## Per-(package, artifact) flag-set registry. The key is the literal
+  ## ``packageName & '\x00' & artifactName`` (``\x00`` is a byte that
+  ## cannot appear in either component so the encoding is unambiguous).
+  ## ``registerBuildFlag`` appends; ``registeredBuildFlags`` reads back
+  ## the channel-specific seq.
+
+proc resetDslPortBuildFlagState*() =
+  ## Drop every build-flag registration. Test fixtures call this between
+  ## scenarios so registry entries do not leak across cases. Symmetric
+  ## with ``resetDslPortFetchState`` / ``resetDslPortBootloaderState``.
+  dslPortBuildFlagSets.clear()
+
+proc m9iFlagSetKey(packageName, artifactName: string): string {.inline.} =
+  ## Compose the ``(packageName, artifactName)`` registry key. The byte
+  ## ``\x00`` separator cannot appear in either component so the encoding
+  ## is unambiguous (Nim identifiers exclude NUL by tokenisation).
+  result = packageName & '\x00' & artifactName
+
+proc registerBuildFlag*(packageName, artifactName, channel, flag: string) =
+  ## Append ``flag`` to the appropriate channel-specific seq for the
+  ## ``(packageName, artifactName)`` row. The M9.I macro emitter calls
+  ## this once per string literal in each ``mesonOptions:`` /
+  ## ``cmakeFlags:`` / ``configureFlags:`` / ``makeFlags:`` /
+  ## ``ninjaFlags:`` block, in source-declaration order.
+  ##
+  ## ``channel`` ∈ {``"meson"``, ``"cmake"``, ``"configure"``,
+  ## ``"make"``, ``"ninja"``}; unknown channels are silently ignored
+  ## so forward-compatibility with future channels (e.g. ``"cargo"``)
+  ## stays open at the emitter layer.
+  ##
+  ## NOTE: M9.I performs NO injection into the build action. The
+  ## registered seqs are the INPUT to a future M9.L follow-up; this
+  ## proc only mutates the in-memory registry.
+  let key = m9iFlagSetKey(packageName, artifactName)
+  if key notin dslPortBuildFlagSets:
+    dslPortBuildFlagSets[key] = DslBuildFlagSet(
+      packageName: packageName,
+      artifactName: artifactName,
+      mesonOptions: @[],
+      cmakeFlags: @[],
+      configureFlags: @[],
+      makeFlags: @[],
+      ninjaFlags: @[])
+  case channel
+  of "meson": dslPortBuildFlagSets[key].mesonOptions.add(flag)
+  of "cmake": dslPortBuildFlagSets[key].cmakeFlags.add(flag)
+  of "configure": dslPortBuildFlagSets[key].configureFlags.add(flag)
+  of "make": dslPortBuildFlagSets[key].makeFlags.add(flag)
+  of "ninja": dslPortBuildFlagSets[key].ninjaFlags.add(flag)
+  else: discard
+
+proc registeredBuildFlags*(packageName, artifactName, channel: string):
+    seq[string] =
+  ## Return the registered flag seq for the ``(packageName, artifactName,
+  ## channel)`` triple in source-declaration order. Returns an empty seq
+  ## when nothing was registered or ``channel`` is unknown.
+  let key = m9iFlagSetKey(packageName, artifactName)
+  if key notin dslPortBuildFlagSets:
+    return @[]
+  let row = dslPortBuildFlagSets[key]
+  case channel
+  of "meson": return row.mesonOptions
+  of "cmake": return row.cmakeFlags
+  of "configure": return row.configureFlags
+  of "make": return row.makeFlags
+  of "ninja": return row.ninjaFlags
+  else: return @[]
