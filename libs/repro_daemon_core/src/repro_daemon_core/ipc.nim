@@ -198,16 +198,25 @@ when defined(posix):
 
   proc recvBytesExact*(conn: IpcConn; byteCount: int; timeoutMs = 0): seq[byte] =
     ## Read exactly ``byteCount`` bytes. When ``timeoutMs > 0`` the read is
-    ## bounded by an absolute deadline: each blocking ``recv`` is gated behind
-    ## a ``poll(POLLIN)`` for the remaining budget, and an
-    ## ``IpcEndpointError`` is raised if the peer goes quiet. This is used
-    ## ONLY for the daemon status handshake (``connectUserDaemon`` /
-    ## ``queryUserDaemonStatus``): a daemon that accepts the connection but
-    ## never returns a complete frame — e.g. a protocol-incompatible or wedged
-    ## daemon — would otherwise block the client forever in ``recv`` (observed
-    ## first on macOS in the daemon control-plane suite). Long-running
-    ## build-data reads pass ``timeoutMs == 0`` and keep the original
-    ## unbounded blocking behaviour.
+    ## bounded by an absolute deadline: a blocking ``recv`` that would have to
+    ## hit the kernel is first gated behind a ``poll(POLLIN)`` for the
+    ## remaining budget, and an ``IpcEndpointError`` is raised if the peer goes
+    ## quiet. This is used ONLY for the daemon status handshake
+    ## (``connectUserDaemon`` / ``queryUserDaemonStatus``): a daemon that
+    ## accepts the connection but never returns a complete frame — e.g. a
+    ## protocol-incompatible or wedged daemon — would otherwise block the
+    ## client forever in ``recv`` (observed first on macOS in the daemon
+    ## control-plane suite). Long-running build-data reads pass
+    ## ``timeoutMs == 0`` and keep the original unbounded blocking behaviour.
+    ##
+    ## CRITICAL: ``Socket`` is buffered (``newSocket`` defaults to
+    ## ``buffered = true``). A single kernel ``recv`` for the 10-byte frame
+    ## header pulls the frame BODY into the socket's userspace buffer too, so
+    ## the body read must NOT poll the raw fd — ``poll`` reports the kernel
+    ## socket as having no data even though the bytes are already buffered in
+    ## userspace, and the read would spuriously time out. Gate the poll on
+    ## ``hasDataBuffered`` so we only wait on the kernel fd when Nim's buffer
+    ## is actually empty; ``recv`` then drains the buffer first with no syscall.
     if byteCount <= 0:
       return @[]
     result = newSeqOfCap[byte](byteCount)
@@ -215,7 +224,7 @@ when defined(posix):
       if timeoutMs > 0: epochTime() + timeoutMs.float / 1000.0
       else: 0.0
     while result.len < byteCount:
-      if deadline > 0.0:
+      if deadline > 0.0 and not conn.socket.hasDataBuffered():
         let remainingMs = int((deadline - epochTime()) * 1000.0)
         if remainingMs <= 0:
           raise newException(IpcEndpointError,
