@@ -188,6 +188,36 @@ unit_nde_g1_gnome:
         libs/repro_dsl_stdlib/tests/t_nde_g1_gnome.nim \
         2>&1 | tee test-logs/unit_nde_g1_gnome.log
 
+# NDE-K1 native KDE Plasma compositor package unit tests.
+# Exercises spec'd materializePlasma — /etc/sddm.conf INI with
+# configurable [Autologin]/[General] keys (sddmAutoLogin +
+# sddmAutoLoginUser + waylandSession propagate to rendered content
+# + content-addressed store path; spec NDE-K1 acceptance literal:
+# sddmAutoLogin toggle re-keys only /etc/sddm.conf) +
+# /etc/ld.so.conf.d/00-reproos-linux.conf libpaths managedBlock
+# contribution (NDE-spec-block triple-form sentinel scope=system,
+# packageName=plasma (NOT sway/gnome/hyprland — sentinel regression
+# guards), blockId=libpaths, priority=500 compositor sort key, 5
+# bundle pins: kwin + plasma-workspace + plasma-desktop +
+# kf5-frameworks + qt5-base) + /usr/lib/systemd/system/sddm.service
+# Type=simple display-manager unit at cascade-G path (ExecStart=
+# /usr/bin/sddm, WantedBy=graphical.target, Requires=dbus.service)
+# + /etc/wayland-sessions/plasma.desktop XDG session entry (Name=
+# "Plasma (Wayland)", Exec=/usr/bin/startplasma-wayland,
+# Type=Application, DesktopNames=KDE) + /etc/pipewire/pipewire.conf
+# daemon config (pipewireEnabled propagates ENABLED/DISABLED
+# branches; both re-key the output).
+unit_nde_k1_plasma:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_nde_k1_plasma \
+        --out:build/test-bin/t_nde_k1_plasma \
+        libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim \
+        2>&1 | tee test-logs/unit_nde_k1_plasma.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
