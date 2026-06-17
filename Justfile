@@ -218,6 +218,40 @@ unit_nde_k1_plasma:
         libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim \
         2>&1 | tee test-logs/unit_nde_k1_plasma.log
 
+# NDEM1 native reproos-desktop system-level package unit tests.
+# MAJOR integration milestone: composes NDE-H1 sway + NDE-G1 gnome +
+# NDE-K1 plasma + the 4 foundation packages under a variant +
+# configurable scheme. Exercises the spec'd
+# materializeReproosDesktop: variant desktopKind (closure-affecting,
+# multi-valued seq[DesktopKind]) + configurable activeAtBoot
+# (activation-only, DesktopKind) + the validate: activeAtBoot in
+# desktopKind constraint (raises EConfigViolation); the multi-
+# contributor managedBlock merge on
+# /etc/ld.so.conf.d/00-reproos-linux.conf with NDE-spec-block sort
+# order (priority, packageName, blockId); the display-manager
+# activation symlink intent at
+# /etc/systemd/system/display-manager.service; the NixOS-style
+# generation manifest content-addressed across BOTH variant and
+# configurable. 14 unit tests covering: validate success +
+# rejection, materializer rejection via EConfigViolation, variant
+# closure differs, configurable swap leaves mergedLdConf identical
+# but display-manager target differs, sort order (graphics-stack
+# priority 100 first; compositors alphabetical), sentinel
+# discipline, removing contributor leaves others byte-identical,
+# idempotency, generationId variant + configurable separation,
+# per-DesktopKind display-manager target, manifest contents,
+# storePaths sorted.
+unit_ndem1_reproos_desktop:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --hints:off \
+        --warnings:off \
+        --nimcache:build/nimcache/unit_ndem1_reproos_desktop \
+        --out:build/test-bin/t_ndem1_reproos_desktop \
+        libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim \
+        2>&1 | tee test-logs/unit_ndem1_reproos_desktop.log
+
 e2e-debug-fs-snoop:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
