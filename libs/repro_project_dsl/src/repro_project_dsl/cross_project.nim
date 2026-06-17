@@ -390,3 +390,61 @@ proc preservedTopLevelNodes(body: NimNode): NimNode =
     if stmt.kind == nnkIncludeStmt:
       continue
     result.add(stmt.copyNimTree())
+
+# ---------------------------------------------------------------------------
+# DSL-port M1 — `partitionPackageBody`: the v8 `transformPackageBody`
+# entry point, factored as a single-pass partition.
+#
+# v8's `transformPackageBody` (`tools/prototypes/v8/intended/reprobuild.nim`
+# lines ~691-995) walks the package body in-place: each child is either
+# a recognised DSL section (rewritten via a per-section lowerer) or a
+# verbatim Nim statement (passed through unchanged). Production today
+# uses TWO passes — `parsePackageDef` (data extraction over known
+# sections) and `preservedTopLevelNodes` (the v8 "verbatim" branch).
+# This helper formalises the seam.
+#
+# Returns:
+#   sectionStmts:   a `StmtList` containing every recognised DSL section
+#                   in original source order. Fed to `parsePackageDef`
+#                   for legacy data extraction.
+#   preservedStmts: a `StmtList` containing every non-section statement
+#                   (let / var / for / proc / when / if / discard /
+#                   plain call / …) in original source order. Emitted
+#                   verbatim at module top level by the `package` macro.
+#
+# Skipped (neither bucket):
+#   * Empty `discard` placeholders (`discard` with no operand).
+#   * `nnkCommentStmt` doc-strings — metadata, not code.
+#   * `nnkIncludeStmt` — see `preservedTopLevelNodes` for the rationale;
+#     M6 will revisit.
+#
+# Why partition rather than rewrite in place? M1 keeps the legacy
+# section-handler chain intact (executable / library / uses / config /
+# outputs / etc.). M2-M8 will progressively replace those handlers with
+# v8-style template invocations; the partition seam lets them migrate
+# arm-by-arm without disturbing the unknown-Nim path.
+# ---------------------------------------------------------------------------
+proc partitionPackageBody*(body: NimNode):
+    tuple[sectionStmts: NimNode; preservedStmts: NimNode] =
+  result.sectionStmts = newStmtList()
+  result.preservedStmts = newStmtList()
+  if body.kind != nnkStmtList:
+    # Single-statement body (rare — Nim parses `package foo: discard`
+    # as a one-child stmt-list, but defensive). Treat as preserved.
+    if body.kind notin {nnkEmpty, nnkCommentStmt, nnkIncludeStmt} and
+       not (body.kind == nnkDiscardStmt and body.len > 0 and
+            body[0].kind == nnkEmpty):
+      result.preservedStmts.add(body.copyNimTree())
+    return
+  for stmt in body:
+    if isKnownPackageSection(stmt):
+      result.sectionStmts.add(stmt.copyNimTree())
+      continue
+    if stmt.kind == nnkDiscardStmt and stmt.len > 0 and
+       stmt[0].kind == nnkEmpty:
+      continue
+    if stmt.kind == nnkCommentStmt:
+      continue
+    if stmt.kind == nnkIncludeStmt:
+      continue
+    result.preservedStmts.add(stmt.copyNimTree())

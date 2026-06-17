@@ -1517,6 +1517,29 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # ── DSL-port M1: v8 ``transformPackageBody`` scaffold acceptance.
+  # The two tests pin the contract that the new partition seam in
+  # ``macros_b.nim``'s ``package`` macro preserves both the empty-body
+  # shape and arbitrary Nim statements (``let`` / ``for`` / ``proc``)
+  # mixed at top level. See
+  # ``libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim``
+  # and ``…/t_dsl_composition_for_loop.nim`` for the assertions.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim",
+    binary: "build/test-bin/t_dsl_package_empty",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim",
+    binary: "build/test-bin/t_dsl_composition_for_loop",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",

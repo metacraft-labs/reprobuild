@@ -383,38 +383,50 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
-  ## Project-DSL-Composition M5 — extends the legacy "parse body → emit
-  ## new code" pipeline with three additive emissions:
+  ## DSL-port M1 — the body is partitioned through
+  ## ``partitionPackageBody`` (the production seam for v8's
+  ## ``transformPackageBody`` proc, see
+  ## ``tools/prototypes/v8/intended/reprobuild.nim`` lines ~691-995).
+  ## Each top-level statement is classified as either:
   ##
-  ## 1. Active-build-context wrapping. The generated `build<Name>*()`
-  ##    proc now opens with `beginBuildBlock(packageName)` and pairs
-  ##    it with `endBuildBlock(<state>)` in a `try/finally`. Helper
-  ##    procs and unknown-but-preserved top-level Nim statements that
-  ##    invoke typed-tool wrappers find the active package via the
-  ##    thread-local stack instead of relying on lexical position.
+  ##   * a recognised DSL section (``executable``, ``library``,
+  ##     ``uses``, ``config``, ``outputs``, ``provisioning``,
+  ##     ``devEnv``, ``build``, ``versions``, ``service``, ``files``,
+  ##     ``depends_on``) — fed to ``parsePackageDef`` for legacy
+  ##     section-handler lowering;
+  ##   * a verbatim Nim statement (``let``, ``var``, ``for``, ``proc``,
+  ##     ``template``, ``when``, ``if``, ``echo``, ``discard <expr>``,
+  ##     plain proc call, …) — emitted verbatim at module top level so
+  ##     the author's intent survives macro expansion.
   ##
-  ## 2. Cross-project edge references. Top-level `let`/`var` bindings
-  ##    inside the outermost `build:` block(s) become public members
-  ##    of `<package>.build` via:
-  ##      - module-level storage vars (one per binding) plus paired
-  ##        init flags;
-  ##      - storage-write splices in the lowered `build:` body;
-  ##      - per-binding accessor templates dispatching on
-  ##        `PackageBuild["<name>"]`;
-  ##      - a bridging `template build*` that routes the legacy
-  ##        `const <name>* = <Title>Package()` const into the
-  ##        `PackageBuild["<name>"]` namespace.
-  ##    A compile-time `uses:` registry detects cycles before they
-  ##    cause downstream semcheck failures.
+  ## Subsequent milestones (DSL-port M2 — versions / M3 — config /
+  ## M4 — build / M5 — files / M6 — service / M7 — cli / M8 —
+  ## remaining sections) will progressively replace the legacy
+  ## section handlers with v8-style template invocations against the
+  ## partitioned section list. The unknown-Nim path stays stable.
   ##
-  ## 3. Unknown-node preservation. Top-level statements that don't
-  ##    match a recognised DSL section (raw `include`, `import`,
-  ##    `proc`, `when`, `echo`, …) are emitted verbatim alongside
-  ##    the generated code so they survive macro expansion. This is
-  ##    the "add-alongside" minimum-viable port of v8's
-  ##    `transformPackageBody` pattern; a full in-place rewrite is
-  ##    deferred (the legacy `parsePackageDef` + `buildCode` chain
-  ##    still does the section lowering).
+  ## Three additional emissions remain from Project-DSL-Composition M5:
+  ##
+  ## 1. Active-build-context wrapping. The generated ``build<Name>*()``
+  ##    proc opens with ``beginBuildBlock(packageName)`` and pairs it
+  ##    with ``endBuildBlock(<state>)`` in a ``try/finally``. Helper
+  ##    procs and preserved Nim statements that invoke typed-tool
+  ##    wrappers find the active package via the thread-local stack
+  ##    instead of relying on lexical position.
+  ##
+  ## 2. Cross-project edge references. Top-level ``let``/``var``
+  ##    bindings inside the outermost ``build:`` block(s) become
+  ##    public members of ``<package>.build`` via module-level
+  ##    storage vars, paired init flags, accessor templates, and a
+  ##    bridging ``template build*``. A compile-time ``uses:``
+  ##    registry detects cycles before they cause downstream
+  ##    semcheck failures.
+  ##
+  ## 3. Variant declarations. Each ``variant: T = default`` entry in
+  ##    the ``config:`` block lowers to a
+  ##    ``let <name> = declareVariant[T](...)`` plus a trailing
+  ##    ``finalizeVariants()`` call.
+  let (sectionStmts {.used.}, preservedStmts) = partitionPackageBody(body)
   let pkg = parsePackageDef(name, body)
   let packageName = pkg.packageName
   # ── Spec-Implementation M1: variant declarations + finalization ────
@@ -483,8 +495,14 @@ macro package*(name: untyped; body: untyped): untyped =
                                               crossProjectBindings))
   # ── existing builder emission (now feeding instrumented body) ────
   result.add(buildCode(pkg, bodyForBuild))
-  # ── M5: preserved unknown top-level nodes (include, raw Nim) ─────
-  result.add(preservedTopLevelNodes(bodyForBuild))
+  # ── DSL-port M1: preserved Nim statements (the v8 "verbatim" branch).
+  # Computed once at the top of the macro via ``partitionPackageBody``;
+  # emitted here at module top level so the author's intent runs at
+  # expansion / module-init time. Until M2-M8 migrate section handlers
+  # to v8-style template invocations the legacy ``parsePackageDef`` +
+  # ``buildCode`` chain consumes ``sectionStmts``; this leg consumes
+  # everything else.
+  result.add(preservedStmts)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.
