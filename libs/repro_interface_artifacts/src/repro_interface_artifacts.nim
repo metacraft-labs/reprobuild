@@ -967,6 +967,21 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
       for provisioning in pkg.scoopProvisioning:
         result.scoopProvisioning.add(toInterfaceScoopProvisioning(
           pkg.packageName, provisioning))
+      # When the package declares an ``executable`` whose exportName
+      # matches the use selector and renames the binary via ``name:``
+      # (e.g. ``package foundry: executable foundry: name: "forge"``),
+      # propagate that binary basename as the use's executableName so
+      # path-mode tool resolution probes for ``forge[.exe]`` instead of
+      # the non-existent ``foundry[.exe]`` derived from the selector.
+      # The default executableName (= selector) is preserved when no
+      # such executable is declared, keeping existing single-binary
+      # packages (cargo, gcc, nim, ...) unchanged.
+      for exe in pkg.executables:
+        if exe.exportName == useDef.executableName and
+            exe.binaryName.len > 0 and
+            exe.binaryName != useDef.executableName:
+          result.executableName = exe.binaryName
+          break
 
 proc toProjectInterface*(pkg: PackageDef;
                          packages: openArray[PackageDef] = []):
@@ -1564,6 +1579,21 @@ proc ensureExecutable(path: string) =
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc hostCCompilerPath(): string =
+  # MR9 — `$REPRO_BOOTSTRAP_CC` is the bootstrap-resolved gcc absolute
+  # path published by `ensureBootstrapToolchainEnv` (tool_profiles.nim)
+  # before the interface-extract step runs. It outranks `$CC` because
+  # env.ps1 / inherited shells legitimately set `$CC` to a bare
+  # basename like ``gcc`` for use by Makefiles / autotools, and the
+  # `isAbsolute(ccEnv)` check below would discard that value and fall
+  # through to `BuiltCCompilerPath` (which, on a clean Windows host,
+  # rarely matches a usable 64-bit toolchain). Consulting the
+  # bootstrap pin first guarantees nim's `--gcc.exe:` flag points at
+  # the reprobuild-provisioned winlibs gcc instead of whatever
+  # PATH-resolution would pick (e.g. FPC's 32-bit-target gcc 2.95).
+  let bootstrapCC = getEnv("REPRO_BOOTSTRAP_CC")
+  if bootstrapCC.len > 0 and isAbsolute(bootstrapCC) and
+      fileExists(extendedPath(bootstrapCC)):
+    return bootstrapCC
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
     return ccEnv
@@ -1598,6 +1628,22 @@ proc hostCCompilerFamily(cc: string): string =
   cachedHostCCompilerFamily
 
 proc hostCCompilerFlags(): seq[string] =
+  # Windows: bump the linked stack size for any binary the engine
+  # compiles on its own behalf (interface-extract runner, per-project
+  # provider). Default Windows stack is 1 MB; the recipe-evaluation
+  # path executes deeply-recursive macro-expansion code under a
+  # singleton thread (no async, no fan-out), and the resulting binary
+  # routinely overflows that limit with STATUS_STACK_OVERFLOW
+  # (-1073741571 / 0xC00000FD) on recipes that import the whole
+  # ``repro_dsl_stdlib`` umbrella. POSIX gets a much larger default
+  # stack from the kernel (8 MB on Linux, 8 MB on macOS) so this is a
+  # Windows-only adjustment. Emitted regardless of whether
+  # ``hostCCompilerPath`` resolved — the flag is honoured by every
+  # supported toolchain (winlibs gcc, MSYS2 mingw64, MSVC link.exe via
+  # ``--passL:/STACK:`` equivalent).
+  when defined(windows):
+    result.add("--passL:-Wl,--stack,16777216")
+
   let cc = hostCCompilerPath()
   if cc.len == 0:
     return
@@ -1610,22 +1656,101 @@ proc hostCCompilerFlags(): seq[string] =
   result.add("--clang.exe:" & cc)
   result.add("--clang.linkerexe:" & cc)
 
+proc walkLibSrcPathsInto(libsRoot: string; sink: var seq[string]) =
+  ## Walks ``<libsRoot>/<name>/src`` and appends every existing entry to
+  ## ``sink``. Follows symlinked dirs so cross-repo libraries vendored
+  ## via symlink (codetracer's ``ct_test_nim_unittest`` adapter etc.)
+  ## participate. Idempotent — the caller deduplicates the final list.
+  if not dirExists(extendedPath(libsRoot)):
+    return
+  # TODO(win-longpath): walk results escape; needs review
+  for path in walkDir(libsRoot):
+    if path.kind in {pcDir, pcLinkToDir}:
+      let src = path.path / "src"
+      if dirExists(extendedPath(src)):
+        sink.add(src)
+
+proc reprobuildLibsRootFromEnv(): string =
+  ## ``$REPROBUILD_LIBS_DIR`` is the explicit operator override for
+  ## "where reprobuild's libs/ live". Set by the engine when invoking
+  ## an out-of-tree provider compile; mirrors ``$REPROBUILD_REPO_ROOT``
+  ## except it points at the libs dir directly. Empty when not set.
+  let direct = getEnv("REPROBUILD_LIBS_DIR")
+  if direct.len > 0:
+    return direct
+  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
+  if repoRoot.len > 0:
+    return repoRoot / "libs"
+  ""
+
+proc reprobuildLibsRootFromBinaryLocation(): string =
+  ## When the running ``repro`` binary lives inside a reprobuild source
+  ## checkout (``<reprobuild-root>/build/bin/repro``) we can derive the
+  ## reprobuild libs root from the binary's path. This is the sibling-
+  ## repo detection equivalent of how dev-shell scripts probe for
+  ## ``../reprobuild/libs/`` next to the consumer repo, but anchored
+  ## from the binary instead of the consumer's workdir so it stays
+  ## correct regardless of where ``repro`` was invoked from.
+  let exePath = getAppFilename()
+  if exePath.len == 0:
+    return ""
+  # exePath: <reprobuild-root>/build/bin/repro.exe
+  let candidateRoot = exePath.parentDir.parentDir.parentDir
+  let candidate = candidateRoot / "libs"
+  let marker = candidate / "repro_project_dsl" / "src" / "repro_project_dsl.nim"
+  if fileExists(extendedPath(marker)):
+    return candidate
+  ""
+
+proc siblingReprobuildLibsRoot(workDir: string): string =
+  ## When a recorder repo is checked out as a sibling of reprobuild
+  ## (``D:/m/dev/codetracer-foo-recorder/`` next to
+  ## ``D:/m/dev/reprobuild/``) the develop-mode convention is for the
+  ## consumer to find reprobuild's libs at ``../reprobuild/libs/``.
+  ## This is the equivalent of the recorder dev-shell scripts' sibling
+  ## detection (``scripts/detect-siblings.sh`` etc.) lifted into the
+  ## reprobuild engine itself so consumers don't have to redo it.
+  let candidate = workDir.parentDir / "reprobuild" / "libs"
+  let marker = candidate / "repro_project_dsl" / "src" / "repro_project_dsl.nim"
+  if fileExists(extendedPath(marker)):
+    return candidate
+  ""
+
 proc reproLibPathFlags(workDir: string): seq[string] =
-  let libsRoot = workDir / "libs"
-  if dirExists(extendedPath(libsRoot)):
-    # TODO(win-longpath): walk results escape; needs review
-    for path in walkDir(libsRoot):
-      # Test-Edges-And-Parallel-Runner M1 carry-over: also follow
-      # ``pcLinkToDir`` so cross-repo libraries vendored into
-      # ``libs/`` via symlink (the codetracer-side
-      # ``ct_test_nim_unittest`` adapter, today; future framework
-      # adapters tomorrow) get their ``src/`` tree onto ``--path``.
-      # The downstream check ``dirExists(<src>)`` still filters out
-      # broken / non-Nim-shaped entries.
-      if path.kind in {pcDir, pcLinkToDir}:
-        let src = path.path / "src"
-        if dirExists(extendedPath(src)):
-          result.add("--path:" & src)
+  ## Build the ``--path:`` flags the engine passes to ``nim c`` when
+  ## compiling a project's provider library. Includes:
+  ##
+  ## 1. ``<workDir>/libs/*/src`` — the consumer repo's own libs.
+  ## 2. The reprobuild repo's ``libs/*/src``, located via:
+  ##    a. ``$REPROBUILD_LIBS_DIR`` / ``$REPROBUILD_REPO_ROOT`` overrides,
+  ##    b. the running ``repro`` binary's location (when it lives inside
+  ##       a reprobuild source checkout — the develop-mode default), or
+  ##    c. a sibling ``../reprobuild/`` checkout next to the consumer.
+  ##
+  ## Step (2) is the develop-mode sibling-repo detection per
+  ## codetracer-specs/Repo-Requirements.md §2.8: the engine ensures
+  ## that every recipe that imports ``repro_project_dsl`` / the
+  ## reprobuild stdlib packages compiles without the consumer recipe
+  ## having to embed the reprobuild repo path. It is also what makes
+  ## a one-shot ``repro build`` work in a recorder repo on Windows
+  ## without an env.ps1 pre-setup of NIM ``--path``.
+  var paths: seq[string] = @[]
+  walkLibSrcPathsInto(workDir / "libs", paths)
+
+  var reprobuildLibsRoot = reprobuildLibsRootFromEnv()
+  if reprobuildLibsRoot.len == 0:
+    reprobuildLibsRoot = reprobuildLibsRootFromBinaryLocation()
+  if reprobuildLibsRoot.len == 0:
+    reprobuildLibsRoot = siblingReprobuildLibsRoot(workDir)
+  if reprobuildLibsRoot.len > 0:
+    walkLibSrcPathsInto(reprobuildLibsRoot, paths)
+
+  # Deduplicate (a consumer repo that happens to symlink reprobuild
+  # libs into its own libs/ would otherwise list each path twice).
+  var seen = initHashSet[string]()
+  for p in paths:
+    if not seen.containsOrIncl(p):
+      result.add("--path:" & p)
   result.sort(system.cmp[string])
 
 proc normalizedStampPath(path: string): string =
