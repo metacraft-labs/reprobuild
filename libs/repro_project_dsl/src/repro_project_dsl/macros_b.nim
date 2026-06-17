@@ -1190,8 +1190,42 @@ proc m5ServiceEntryAst(stmt: NimNode):
   result.serviceName = nameInfo.serviceName
   result.body = body
 
-proc m5ParseServiceBody(body: NimNode):
-    tuple[executableRef: string; argStringLits: seq[NimNode]] =
+proc m5ServiceStringLitArg(stmt: NimNode): NimNode =
+  ## Recognise a ``setter "literal"`` shape inside a ``service:`` body
+  ## and return the string-literal NimNode (already a copy ready to be
+  ## spliced into a runtime call). Returns ``nil`` for any other shape
+  ## (non-Call/Command stmt, wrong arity, non-string-literal arg).
+  ##
+  ## Used by the M9.C setters which all share the
+  ## ``<head> "string-literal"`` AST shape:
+  ##   * ``description "..."``
+  ##   * ``type "..."``
+  ##   * ``execStart "..."``
+  ##   * ``wantedBy "..."``
+  ##   * ``wants "..."``
+  ##   * ``requires "..."``
+  ##   * ``before "..."``
+  ##   * ``after "..."``
+  ##   * ``restart "..."``
+  ##   * ``user "..."``
+  ##   * ``group "..."``
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return nil
+  if stmt.len != 2:
+    return nil
+  let arg = stmt[1]
+  if arg.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return nil
+  return arg.copyNimTree()
+
+proc m5ParseServiceBody(body: NimNode): tuple[
+    executableRef: string; argStringLits: seq[NimNode];
+    descriptionLit: NimNode; typeLit: NimNode; execStartLit: NimNode;
+    wantedByLits: seq[NimNode]; wantsLits: seq[NimNode];
+    requiresLits: seq[NimNode]; beforeLits: seq[NimNode];
+    afterLits: seq[NimNode];
+    envPairs: seq[tuple[keyLit: NimNode; valueLit: NimNode]];
+    restartLit: NimNode; userLit: NimNode; groupLit: NimNode] =
   ## Walk a ``service:`` body and extract:
   ##
   ##   * ``executable <ident>`` setter → records ``executableRef`` as
@@ -1208,12 +1242,28 @@ proc m5ParseServiceBody(body: NimNode):
   ##     time and can only freeze literals. M5+ widens this when the
   ##     variant-as-string lowering arrives.
   ##
+  ## M9.C extensions — systemd-unit metadata setters. All accept a
+  ## single string-literal argument (caught by ``m5ServiceStringLit
+  ## Arg``); ``env`` uses the call form ``env("KEY", "VALUE")``:
+  ##   * ``description "..."`` / ``type "..."`` / ``execStart "..."``
+  ##   * ``wantedBy "..."`` / ``wants "..."`` / ``requires "..."``
+  ##   * ``before "..."`` / ``after "..."``
+  ##   * ``env("KEY", "VALUE")``  — call form (see env-form rationale
+  ##     in dsl_port_runtime.nim above ``DslServiceDef.env``)
+  ##   * ``restart "..."`` / ``user "..."`` / ``group "..."``
+  ##
   ## Other body statements (``hotReload``, ``restartOnCrash``, ``on
   ## change ...``, ``runtimeFile``, …) are silently preserved as raw
   ## body shape; the M5 emitter still captures the full body's ``repr``
   ## into ``DslServiceDef.bodyRepr`` so the diagnostic surface is open
   ## for M6+ to parse them out later.
   result.argStringLits = @[]
+  result.wantedByLits = @[]
+  result.wantsLits = @[]
+  result.requiresLits = @[]
+  result.beforeLits = @[]
+  result.afterLits = @[]
+  result.envPairs = @[]
   if body.kind != nnkStmtList:
     return
   for stmt in body:
@@ -1222,7 +1272,11 @@ proc m5ParseServiceBody(body: NimNode):
     if stmt.len < 2:
       continue
     let head = stmt[0]
-    if head.kind notin {nnkIdent, nnkSym}:
+    # We accept ``nnkAccQuoted`` for the head because some M9.C setter
+    # names collide with Nim keywords (``type``) and recipes need to
+    # write them as ``\`type\` "simple"``. ``identText`` already
+    # collapses ``nnkAccQuoted`` to the bare ident string.
+    if head.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
       continue
     let headName = identText(head).normalize
     case headName
@@ -1239,6 +1293,61 @@ proc m5ParseServiceBody(body: NimNode):
         let arg = stmt[i]
         if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
           result.argStringLits.add(arg.copyNimTree())
+    of "description":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.descriptionLit = lit
+    of "type":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.typeLit = lit
+    of "execstart":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.execStartLit = lit
+    of "wantedby":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.wantedByLits.add(lit)
+    of "wants":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.wantsLits.add(lit)
+    of "requires":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.requiresLits.add(lit)
+    of "before":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.beforeLits.add(lit)
+    of "after":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.afterLits.add(lit)
+    of "env":
+      # ``env("KEY", "VALUE")`` — call form. Two string-literal args.
+      # The alternative ``env "KEY"="VALUE"`` form parses as
+      # Command(Ident "env", Asgn(StrLit, StrLit)) which is parser-
+      # noisy; the call form parses as a clean nnkCall and matches
+      # how M5 already lowers ``output("path")`` in M4 emission.
+      if stmt.kind == nnkCall and stmt.len == 3 and
+          stmt[1].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit} and
+          stmt[2].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        result.envPairs.add((keyLit: stmt[1].copyNimTree(),
+                             valueLit: stmt[2].copyNimTree()))
+    of "restart":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.restartLit = lit
+    of "user":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.userLit = lit
+    of "group":
+      let lit = m5ServiceStringLitArg(stmt)
+      if lit != nil:
+        result.groupLit = lit
     else:
       discard
 
@@ -1285,7 +1394,8 @@ proc emitM5Services*(packageName: string;
     let exeRefLit = newLit(parsedBody.executableRef)
     # Build the try-clause body: one setActiveServiceExecutable call
     # (only when the body provided a ref) plus one addActiveServiceArg
-    # per recognised string-literal arg.
+    # per recognised string-literal arg. M9.C extensions emit one
+    # body-setter call per recognised systemd-unit setter.
     let tryBody = newStmtList()
     if parsedBody.executableRef.len > 0:
       tryBody.add(quote do:
@@ -1293,6 +1403,56 @@ proc emitM5Services*(packageName: string;
     for argLit in parsedBody.argStringLits:
       tryBody.add(quote do:
         addActiveServiceArg(`argLit`))
+    # M9.C: scalar (last-wins) setters — only emit when the body
+    # provided a literal so unused defaults stay as the runtime's
+    # empty-string ground state.
+    if parsedBody.descriptionLit != nil:
+      let lit = parsedBody.descriptionLit
+      tryBody.add(quote do:
+        setActiveServiceDescription(`lit`))
+    if parsedBody.typeLit != nil:
+      let lit = parsedBody.typeLit
+      tryBody.add(quote do:
+        setActiveServiceType(`lit`))
+    if parsedBody.execStartLit != nil:
+      let lit = parsedBody.execStartLit
+      tryBody.add(quote do:
+        setActiveServiceExecStart(`lit`))
+    # M9.C: repeating (append-per-occurrence) setters.
+    for lit in parsedBody.wantedByLits:
+      tryBody.add(quote do:
+        addActiveServiceWantedBy(`lit`))
+    for lit in parsedBody.wantsLits:
+      tryBody.add(quote do:
+        addActiveServiceWants(`lit`))
+    for lit in parsedBody.requiresLits:
+      tryBody.add(quote do:
+        addActiveServiceRequires(`lit`))
+    for lit in parsedBody.beforeLits:
+      tryBody.add(quote do:
+        addActiveServiceBefore(`lit`))
+    for lit in parsedBody.afterLits:
+      tryBody.add(quote do:
+        addActiveServiceAfter(`lit`))
+    # M9.C: env("KEY", "VALUE") — call form, one record per pair.
+    for pair in parsedBody.envPairs:
+      let keyLit = pair.keyLit
+      let valueLit = pair.valueLit
+      tryBody.add(quote do:
+        addActiveServiceEnv(`keyLit`, `valueLit`))
+    # M9.C: scalar (last-wins) run-as / restart setters.
+    if parsedBody.restartLit != nil:
+      let lit = parsedBody.restartLit
+      tryBody.add(quote do:
+        setActiveServiceRestart(`lit`))
+    if parsedBody.userLit != nil:
+      let lit = parsedBody.userLit
+      tryBody.add(quote do:
+        setActiveServiceUser(`lit`))
+    if parsedBody.groupLit != nil:
+      let lit = parsedBody.groupLit
+      tryBody.add(quote do:
+        setActiveServiceGroup(`lit`))
     # The package-init block. The body-setter splice is unconditional
     # (no provider-mode gate) — see the "Risk #2" commentary above the
     # M5 emitter for the rationale.

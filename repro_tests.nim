@@ -1735,6 +1735,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim",
+    binary: "build/test-bin/t_dsl_service_description",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim",
+    binary: "build/test-bin/t_dsl_service_dependencies",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
     binary: "build/test-bin/t_dsl_versions_single",
     defines: @[],

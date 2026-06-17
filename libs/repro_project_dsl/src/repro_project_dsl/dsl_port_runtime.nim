@@ -834,6 +834,10 @@ proc registeredOutputs*(packageName, artifactName: string): seq[string] =
 ## ``dslPortVersionRegistry`` shape M2 already uses.
 
 type
+  DslServiceEnvEntry* = tuple[key: string, value: string]
+    ## One ``env "KEY", "VALUE"`` pair recorded inside a ``service:``
+    ## body. M9.C extension — see the M9.C section below.
+
   DslServiceDef* = object
     ## One ``service:`` block registration. Populated by ``emitM5Services``
     ## at module-init time; read by host code via ``registeredServices``.
@@ -849,6 +853,14 @@ type
       ## service body was preserved as raw Nim only). The cross-check
       ## test pins the populated case; the empty case is the defensive
       ## fallback.
+    executable*: string
+      ## M9.C alias of ``executableRef`` — exposed under the field name
+      ## used by the M9.C survey spec. The M5 emitter populates BOTH so
+      ## new tests can read ``svc.executable`` while M5's three pinned
+      ## fixtures (``t_dsl_service_basic`` / ``..._executable_ref`` /
+      ## ``..._args``) continue to read ``svc.executableRef``. Kept as a
+      ## second field rather than a rename so the M5 acceptance surface
+      ## does not move.
     args*: seq[string]
       ## Positional arguments from the body's ``args "x", "y", ...``
       ## setter, in declaration order. Empty when no ``args`` setter
@@ -858,6 +870,59 @@ type
       ## emitter ran. Diagnostic surface — M6+ may parse additional
       ## setters out of this string OR re-walk the partitioned section
       ## list. Same model M3/M4 use for their ``bodyRepr`` captures.
+    # ---------------------------------------------------------------
+    # M9.C — systemd-unit metadata extensions.
+    #
+    # The M9 NDE-package discovery survey flagged that systemd-unit
+    # rewrites need richer metadata than M5's minimal
+    # ``executable`` + ``args`` surface. The fields below match the
+    # systemd unit-file properties used by the NDE consumers
+    # (dbus.service / gdm.service / sddm.service / sway-session.service
+    # / repro-ldconfig.service). All fields default to empty (string
+    # "" / seq @[]) so M5 callers that never touched the new setters
+    # continue to read the same shape they always did.
+    # ---------------------------------------------------------------
+    description*: string
+      ## ``description "..."`` — free-form unit description. Empty when
+      ## the body lacked the setter.
+    serviceType*: string
+      ## ``type "..."`` — one of ``simple`` / ``forking`` / ``oneshot``
+      ## / ``notify`` / ``dbus`` / ``idle``. The string is recorded
+      ## verbatim; M5+ may add an enum surface once the consumer list
+      ## stabilises.
+    execStart*: string
+      ## ``execStart "..."`` — full command string. Alternative to the
+      ## ``executable`` + ``args`` lowering: lets a recipe pin
+      ## ``/path/to/binary --flag arg`` directly without going through
+      ## an artifact ref. Empty when the body uses the M5 pathway.
+    wantedBy*: seq[string]
+      ## ``wantedBy "<target>"`` — repeated; appended in declaration
+      ## order.
+    wants*: seq[string]
+      ## ``wants "<unit>"`` — repeated; appended in declaration order.
+    requires*: seq[string]
+      ## ``requires "<unit>"`` — repeated; appended in declaration
+      ## order.
+    before*: seq[string]
+      ## ``before "<unit>"`` — repeated; appended in declaration order.
+    after*: seq[string]
+      ## ``after "<unit>"`` — repeated; appended in declaration order.
+    env*: seq[DslServiceEnvEntry]
+      ## ``env("KEY", "VALUE")`` — repeated; appended in declaration
+      ## order. The call form (two string-literal arguments) is used
+      ## rather than ``env "KEY"="VALUE"`` because the former parses
+      ## cleanly as ``Call(Ident "env", StrLit, StrLit)`` whereas the
+      ## assignment form lands as ``Command(Ident "env",
+      ## Asgn(StrLit, StrLit))`` which is parser-noisy.
+    restart*: string
+      ## ``restart "<policy>"`` — e.g. ``on-failure`` / ``always``.
+      ## Empty when the body lacked the setter.
+    user*: string
+      ## ``user "..."`` — run-as user. Empty when the body lacked the
+      ## setter.
+    group*: string
+      ## ``group "..."`` — run-as group. Empty when the body lacked
+      ## the setter.
 
   DslServiceContextFrame = object
     ## One frame on the active-service stack. Pushed by
@@ -869,6 +934,19 @@ type
     executableRef: string
     args: seq[string]
     bodyRepr: string
+    # M9.C extensions — see DslServiceDef above for field semantics.
+    description: string
+    serviceType: string
+    execStart: string
+    wantedBy: seq[string]
+    wants: seq[string]
+    requires: seq[string]
+    before: seq[string]
+    after: seq[string]
+    env: seq[DslServiceEnvEntry]
+    restart: string
+    user: string
+    group: string
 
 var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## Per-package service registry. Keyed by package name.
@@ -892,7 +970,17 @@ proc resetDslPortServiceState*() =
   dslPortActiveServiceContext.setLen(0)
 
 proc registerService*(packageName, serviceName, executableRef: string;
-                     args: seq[string]; bodyRepr: string) =
+                     args: seq[string]; bodyRepr: string;
+                     description = ""; serviceType = "";
+                     execStart = "";
+                     wantedBy: seq[string] = @[];
+                     wants: seq[string] = @[];
+                     requires: seq[string] = @[];
+                     before: seq[string] = @[];
+                     after: seq[string] = @[];
+                     env: seq[DslServiceEnvEntry] = @[];
+                     restart = "";
+                     user = ""; group = "") =
   ## Append one service entry against ``packageName``. The ``package``
   ## macro emits one call per recognised ``service:`` block via
   ## ``emitM5Services``.
@@ -903,14 +991,33 @@ proc registerService*(packageName, serviceName, executableRef: string;
   ## legitimately re-declare a service under different platform gates
   ## and the consumer decides which arm to honour. Tests that need a
   ## clean baseline call ``resetDslPortServiceState`` first.
+  ##
+  ## M9.C: the ``description`` / ``serviceType`` / ``execStart`` /
+  ## ``wantedBy`` / ``wants`` / ``requires`` / ``before`` / ``after`` /
+  ## ``env`` / ``restart`` / ``user`` / ``group`` parameters all
+  ## default to empty so M5 callers that only pass the five original
+  ## positional parameters continue to compile unchanged.
   if packageName notin dslPortServiceRegistry:
     dslPortServiceRegistry[packageName] = @[]
   dslPortServiceRegistry[packageName].add(DslServiceDef(
     packageName: packageName,
     serviceName: serviceName,
     executableRef: executableRef,
+    executable: executableRef,
     args: args,
-    bodyRepr: bodyRepr))
+    bodyRepr: bodyRepr,
+    description: description,
+    serviceType: serviceType,
+    execStart: execStart,
+    wantedBy: wantedBy,
+    wants: wants,
+    requires: requires,
+    before: before,
+    after: after,
+    env: env,
+    restart: restart,
+    user: user,
+    group: group))
 
 proc registeredServices*(packageName: string): seq[DslServiceDef] =
   ## Return every service registered against ``packageName`` in
@@ -940,7 +1047,19 @@ proc beginServiceContext*(packageName, serviceName, bodyRepr: string) =
     serviceName: serviceName,
     executableRef: "",
     args: @[],
-    bodyRepr: bodyRepr))
+    bodyRepr: bodyRepr,
+    description: "",
+    serviceType: "",
+    execStart: "",
+    wantedBy: @[],
+    wants: @[],
+    requires: @[],
+    before: @[],
+    after: @[],
+    env: @[],
+    restart: "",
+    user: "",
+    group: ""))
 
 proc setActiveServiceExecutable*(executableRef: string) =
   ## Body-setter: select the referenced executable artifact. Mirrors
@@ -960,6 +1079,89 @@ proc addActiveServiceArg*(value: string) =
     return
   dslPortActiveServiceContext[^1].args.add(value)
 
+# ---------------------------------------------------------------------------
+# M9.C — systemd-unit metadata body-setters. One proc per recognised setter
+# in the M9.C surface. All are silent no-ops when the active-service stack
+# is empty (matches the M5 no-op convention documented above
+# ``setActiveServiceExecutable``). ``emitM5Services`` lowers the body
+# setters into one call per occurrence so the per-package frame collects
+# every value in declaration order.
+# ---------------------------------------------------------------------------
+
+proc setActiveServiceDescription*(value: string) =
+  ## Body-setter for ``description "..."``. Last-wins on repeats.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].description = value
+
+proc setActiveServiceType*(value: string) =
+  ## Body-setter for ``type "..."``. Last-wins on repeats.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].serviceType = value
+
+proc setActiveServiceExecStart*(value: string) =
+  ## Body-setter for ``execStart "..."``. Last-wins on repeats.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].execStart = value
+
+proc addActiveServiceWantedBy*(value: string) =
+  ## Body-setter for ``wantedBy "<target>"``. Appended per occurrence.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].wantedBy.add(value)
+
+proc addActiveServiceWants*(value: string) =
+  ## Body-setter for ``wants "<unit>"``. Appended per occurrence.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].wants.add(value)
+
+proc addActiveServiceRequires*(value: string) =
+  ## Body-setter for ``requires "<unit>"``. Appended per occurrence.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].requires.add(value)
+
+proc addActiveServiceBefore*(value: string) =
+  ## Body-setter for ``before "<unit>"``. Appended per occurrence.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].before.add(value)
+
+proc addActiveServiceAfter*(value: string) =
+  ## Body-setter for ``after "<unit>"``. Appended per occurrence.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].after.add(value)
+
+proc addActiveServiceEnv*(key, value: string) =
+  ## Body-setter for ``env("KEY", "VALUE")``. Appended per occurrence
+  ## in declaration order — see the env-form rationale above
+  ## ``DslServiceDef.env``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].env.add((key: key, value: value))
+
+proc setActiveServiceRestart*(value: string) =
+  ## Body-setter for ``restart "<policy>"``. Last-wins on repeats.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].restart = value
+
+proc setActiveServiceUser*(value: string) =
+  ## Body-setter for ``user "..."``. Last-wins on repeats.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].user = value
+
+proc setActiveServiceGroup*(value: string) =
+  ## Body-setter for ``group "..."``. Last-wins on repeats.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].group = value
+
 proc finishServiceContext*() =
   ## Pop the top frame and materialise a ``DslServiceDef`` record from
   ## it, appending to ``dslPortServiceRegistry``. Safe to call on an
@@ -973,7 +1175,19 @@ proc finishServiceContext*() =
   dslPortActiveServiceContext.setLen(
     dslPortActiveServiceContext.len - 1)
   registerService(frame.packageName, frame.serviceName,
-                  frame.executableRef, frame.args, frame.bodyRepr)
+                  frame.executableRef, frame.args, frame.bodyRepr,
+                  description = frame.description,
+                  serviceType = frame.serviceType,
+                  execStart = frame.execStart,
+                  wantedBy = frame.wantedBy,
+                  wants = frame.wants,
+                  requires = frame.requires,
+                  before = frame.before,
+                  after = frame.after,
+                  env = frame.env,
+                  restart = frame.restart,
+                  user = frame.user,
+                  group = frame.group)
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the
