@@ -53,6 +53,16 @@ import repro_dsl_stdlib/packages/desktop_environments/plasma
 import repro_dsl_stdlib/packages/de_foundation/systemd_session
   # for managedBlockHash + ManagedFiles + bsSystem (priority test)
 
+# The recipe — registers the package's M2 configurables + module-init
+# fires every ``files <name>: build:`` arm + the ``service
+# displayManager:`` arm so the M8/M9.A + M9.C tables are pre-populated
+# against the default configurables. The recipe also re-exports the
+# per-artifact ``register*`` helpers the NDE-H DSL-surface fixture
+# below uses to re-register after a configurable toggle.
+import repro_project_dsl
+import repro_project_dsl/fs as fs
+import "../../../recipes/packages/desktop-environments/plasma/repro" as recipe
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -68,6 +78,68 @@ proc readStoreFile(handle: ManagedFiles): string =
 proc configWithRoot(storeRoot: string): PlasmaConfig =
   result = defaultConfig()
   result.storeRoot = storeRoot
+
+# ---------------------------------------------------------------------------
+# DSL-port helpers — used by the NDE-H DSL-surface suite at the end.
+# ---------------------------------------------------------------------------
+
+proc readDslStoreFile(handle: DslManagedFiles): string =
+  ## Read the bytes of the emitted file at
+  ## ``handle.storePath/handle.relPath`` for the M9.A materialiser
+  ## handles (parallel to ``readStoreFile`` above for the shim's
+  ## ``ManagedFiles``).
+  let p = handle.storePath / handle.relPath
+  check fileExists(p)
+  result = readFile(p)
+
+proc resetRecipeState(storeRoot: string) =
+  ## Test-fixture reset: clear every M8/M9.A registry + materialiser
+  ## row, drop any pending configurable overrides for the plasmaDesktop
+  ## package, then re-register every fs.* output the recipe owns against
+  ## the (now-default) configurables.
+  ##
+  ## The libpaths managedBlock crosses two packageName namespaces: the
+  ## DSL package identifier (``plasmaDesktop``) the M3 ``files:`` arms
+  ## register against AND the cohort-wide kebab-cased segment
+  ## (``plasma``) the contribution carries for sentinel uniqueness. Both
+  ## store-root entries are bound below so the ``consumeManagedBlock``
+  ## lookup against the contribution's packageName finds an entry.
+  resetDslPortFsState()
+  resetDslPortFsExtState()
+  resetDslPortMaterialiseState()
+  resetConfigurable("plasmaDesktop.aptSnapshot")
+  resetConfigurable("plasmaDesktop.sddmAutoLogin")
+  resetConfigurable("plasmaDesktop.sddmAutoLoginUser")
+  resetConfigurable("plasmaDesktop.waylandSession")
+  resetConfigurable("plasmaDesktop.pipewireEnabled")
+  registerStoreRoot("plasmaDesktop", storeRoot, dhaSha256)
+  registerStoreRoot(NdeK1PackageName, storeRoot, dhaSha256)
+  recipe.registerPlasmaFiles()
+
+proc reregisterWithCurrentConfigurables(storeRoot: string) =
+  ## After ``setConfigurable(...)`` has flipped one or more cells, the
+  ## previously-recorded M8/M9 entries still carry the OLD content;
+  ## drop them, re-register against the new cells, and re-bind the
+  ## store-root (the M9.A reset call below also wipes it).
+  resetDslPortFsState()
+  resetDslPortFsExtState()
+  resetDslPortMaterialiseState()
+  registerStoreRoot("plasmaDesktop", storeRoot, dhaSha256)
+  registerStoreRoot(NdeK1PackageName, storeRoot, dhaSha256)
+  recipe.registerPlasmaFiles()
+
+proc consumeSddmConfigDsl(): DslManagedFiles =
+  consumeConfigFile("plasmaDesktop", "/etc/sddm.conf")
+proc consumeLdConfDsl(): DslManagedFiles =
+  consumeManagedBlock("/etc/ld.so.conf.d/00-reproos-linux.conf")
+proc consumeSddmServiceDsl(): DslManagedFiles =
+  consumeConfigFile("plasmaDesktop",
+                    "/usr/lib/systemd/system/sddm.service")
+proc consumeSessionDesktopEntryDsl(): DslManagedFiles =
+  consumeConfigFile("plasmaDesktop",
+                    "/etc/wayland-sessions/plasma.desktop")
+proc consumePipewireConfigDsl(): DslManagedFiles =
+  consumeConfigFile("plasmaDesktop", "/etc/pipewire/pipewire.conf")
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -469,3 +541,237 @@ suite "NDE-K1 KDE Plasma compositor package":
     check paths[2] == outs.sddmService.storePath
     check paths[3] == outs.sessionDesktopEntry.storePath
     check paths[4] == outs.pipewireConfig.storePath
+
+# ---------------------------------------------------------------------------
+# NDE-H DSL-surface coverage. Pins that the rewritten
+# ``recipes/packages/desktop-environments/plasma/repro.nim`` actually
+# exercises the new DSL surface (M3 ``files <name>:`` blocks + M8/M9.A
+# ``fs.configFile`` / ``fs.managedBlock`` + M9.C ``service:`` block)
+# rather than silently regressing to the legacy "shim does everything"
+# shape. These are extra assertions on top of the v1 surface — the v1
+# structural assertions above stay intact.
+# ---------------------------------------------------------------------------
+
+suite "NDE-K1 KDE Plasma compositor DSL surface":
+
+  test "recipe registers exactly 5 files: artifacts":
+    let arts = registeredArtifacts("plasmaDesktop")
+    check arts.len == 5
+
+  test "every recipe artifact is dakFiles":
+    let arts = registeredArtifacts("plasmaDesktop")
+    for a in arts:
+      check a.kind == dakFiles
+
+  test "recipe artifact names cover every emitted file":
+    let arts = registeredArtifacts("plasmaDesktop")
+    var names: seq[string] = @[]
+    for a in arts:
+      names.add(a.artifactName)
+    check "sddmConfig"           in names
+    check "ldConfContribution"   in names
+    check "sddmService"          in names
+    check "sessionDesktopEntry"  in names
+    check "pipewireConfig"       in names
+
+  test "M9.C service displayManager: records the systemd-unit metadata surface":
+    # Pins the M9.C extended service: block. The recipe declares
+    # description / `type` / execStart / wantedBy / after; the M5+M9.C
+    # parser captures every one verbatim into the DslServiceDef
+    # registry.
+    let svcs = registeredServices("plasmaDesktop")
+    check svcs.len == 1
+    let svc = svcs[0]
+    check svc.serviceName == "displayManager"
+    check svc.description == "Simple Desktop Display Manager"
+    check svc.serviceType == "simple"
+    check svc.execStart   == "/usr/bin/sddm"
+    check svc.wantedBy    == @["graphical.target"]
+    check svc.after       == @["systemd-user-sessions.service"]
+    # No ``executable <ident>`` setter → both the legacy
+    # ``executableRef`` and the new ``executable`` alias stay empty.
+    check svc.executable == ""
+    check svc.executableRef == ""
+    check svc.args.len == 0
+
+  test "sentinel triple-form via DSL surface: libpaths block uses packageName=plasma, blockId=libpaths":
+    # Same sentinel guard as the shim-side test above, but exercised
+    # through the DSL's M9.A ``consumeManagedBlock`` materialiser to
+    # confirm the recipe's ``fs.managedBlock(...)`` call carries the
+    # cohort-wide identifiers verbatim.
+    let root = createTempDir("ndek1_dsl_sentinel_", "")
+    defer: removeDir(root)
+    resetRecipeState(root)
+
+    let ldConf = consumeLdConfDsl()
+    let bytes = readDslStoreFile(ldConf)
+
+    let expectOpen = "# >>> repro:system:plasma:libpaths >>>"
+    let expectClose = "# <<< repro:system:plasma:libpaths <<<"
+
+    check expectOpen in bytes
+    check expectClose in bytes
+    check bytes.find(expectOpen) < bytes.find(expectClose)
+    # M9.A sha256 hashes are 64 lower-hex chars.
+    check ldConf.hashHex.len == 64
+    # Sanity: the store path is rooted under the override.
+    check ldConf.storePath.startsWith(root)
+
+  test "cascade-G fix via DSL surface: sddm.service planted at /usr/lib/systemd/system/":
+    # The cascade-G assertion through the DSL surface. The M9.A
+    # ``consumeConfigFile`` materialiser drops the leading / when
+    # canonicalising the host path to the store-relative ``relPath``.
+    let root = createTempDir("ndek1_dsl_unit_path_", "")
+    defer: removeDir(root)
+    resetRecipeState(root)
+
+    let svc = consumeSddmServiceDsl()
+    check svc.relPath ==
+      "usr/lib/systemd/system/sddm.service"
+    check fileExists(svc.storePath /
+                     "usr/lib/systemd/system/sddm.service")
+    check not fileExists(svc.storePath /
+                         "lib/systemd/system/sddm.service")
+    # M9.A sha256 hashes are 64 lower-hex chars.
+    check svc.hashHex.len == 64
+
+  test "DSL surface: /etc/sddm.conf has User= line + propagates via DSL configurables":
+    # End-to-end propagation: setConfigurable(...) → re-register →
+    # consumeConfigFile reads the materialised bytes. Mirrors the
+    # NDE-G gnome DSL-surface propagation test.
+    let root = createTempDir("ndek1_dsl_sddmconfig_", "")
+    defer: removeDir(root)
+
+    # Pass A — default (sddmAutoLoginUser = "repro").
+    resetRecipeState(root)
+    let cfgA = consumeSddmConfigDsl()
+    let bytesA = readDslStoreFile(cfgA)
+    check "User=repro" in bytesA
+    check "User=alice" notin bytesA
+
+    # Pass B — flip sddmAutoLoginUser to "alice" via setConfigurable.
+    setConfigurable[string](
+      "plasmaDesktop.sddmAutoLoginUser", "alice")
+    reregisterWithCurrentConfigurables(root)
+    let cfgB = consumeSddmConfigDsl()
+    let bytesB = readDslStoreFile(cfgB)
+    check "User=alice" in bytesB
+    check "User=repro" notin bytesB
+
+    # Store paths differ; the snapshot-independent unit + xdg outputs
+    # stay cached.
+    check cfgA.storePath != cfgB.storePath
+    # Reset sddmAutoLoginUser for hygiene.
+    resetConfigurable("plasmaDesktop.sddmAutoLoginUser")
+
+  test "DSL surface: /etc/pipewire/pipewire.conf propagates pipewireEnabled toggle":
+    # The extra fifth artifact's propagation test. pipewireEnabled
+    # toggle swaps between the ENABLED daemon config + the DISABLED
+    # marker file. The Plasma-specific path covering the cohort's
+    # 5-artifact shape vs sway/gnome's 4-artifact shape.
+    let root = createTempDir("ndek1_dsl_pipewire_", "")
+    defer: removeDir(root)
+
+    # Pass A — default (pipewireEnabled = true).
+    resetRecipeState(root)
+    let cfgA = consumePipewireConfigDsl()
+    let bytesA = readDslStoreFile(cfgA)
+    check "PipeWire daemon: ENABLED" in bytesA
+    check "context.properties" in bytesA
+    check "PipeWire daemon: DISABLED" notin bytesA
+
+    # Pass B — flip pipewireEnabled to false via setConfigurable.
+    setConfigurable[bool](
+      "plasmaDesktop.pipewireEnabled", false)
+    reregisterWithCurrentConfigurables(root)
+    let cfgB = consumePipewireConfigDsl()
+    let bytesB = readDslStoreFile(cfgB)
+    check "PipeWire daemon: DISABLED" in bytesB
+    check "pipewire.enabled = false" in bytesB
+    check "PipeWire daemon: ENABLED" notin bytesB
+
+    # Store paths differ.
+    check cfgA.storePath != cfgB.storePath
+    # Reset pipewireEnabled for hygiene.
+    resetConfigurable("plasmaDesktop.pipewireEnabled")
+
+  test "anchor constants: NDE-K1 libpaths identifiers match shim exports":
+    # The cohort-wide identifiers for the libpaths overlay are sourced
+    # from the shim's exported constants so a future rename / priority
+    # bump propagates from one place. The recipe MUST NOT hardcode
+    # "libpaths" / 500 / "plasma" — this test pins that contract.
+    check NdeK1LibpathsBlockId  == "libpaths"
+    check NdeK1LibpathsPriority == 500
+    check NdeK1PackageName      == "plasma"
+
+    # And the recipe's registered contribution carries exactly those
+    # values verbatim.
+    let root = createTempDir("ndek1_anchor_", "")
+    defer: removeDir(root)
+    resetRecipeState(root)
+
+    let contribs = registeredManagedBlocks(
+      "/etc/ld.so.conf.d/00-reproos-linux.conf")
+    check contribs.len == 1
+    let c = contribs[0]
+    check c.blockId     == NdeK1LibpathsBlockId
+    check c.priority    == NdeK1LibpathsPriority
+    check c.packageName == NdeK1PackageName
+    check c.scope       == bsSystem
+
+  test "multi-contributor merge: NDE-D graphics-stack (priority=100) sorts BEFORE plasma (priority=500)":
+    # The load-bearing NDE-H cohort-overlay test. NDE-D pinned the
+    # ordering invariant from the ANCHOR side. NDE-F + NDE-G pinned it
+    # from the sway + gnome OVERLAY sides. NDE-H now pins it from the
+    # PLASMA overlay side: the recipe's priority=500 contribution is
+    # already registered by ``resetRecipeState``; we add a synthetic
+    # priority=100 graphics-stack contribution alongside and assert the
+    # merger sorts (priority, packageName, blockId) ascending so
+    # graphics-stack (priority=100) appears BEFORE plasma (priority=500)
+    # per the spec §"Block ordering rule".
+    let root = createTempDir("ndek1_merge_", "")
+    defer: removeDir(root)
+    resetRecipeState(root)
+
+    # Add a synthetic graphics-stack contribution at priority=100
+    # (simulating NDE-D's anchor). blockId differs to keep both
+    # contributions visible per the (scope, packageName, blockId)
+    # uniqueness rule.
+    fs.managedBlock(
+      path = "/etc/ld.so.conf.d/00-reproos-linux.conf",
+      blockId = "libpaths-anchor",
+      scope = bsSystem,
+      content = "/opt/reproos-linux/store/gfxAnchorStub/usr/lib/x86_64-linux-gnu\n",
+      priority = 100,
+      packageName = "graphics-stack",
+      artifactName = "ldConfAnchor")
+
+    # The merged file's contents have BOTH contributions, with
+    # graphics-stack (priority=100) sorted before the priority=500
+    # plasma overlay per the spec's ``(priority, packageName, blockId)``
+    # rule.
+    let merged =
+      mergedManagedBlockFile("/etc/ld.so.conf.d/00-reproos-linux.conf")
+
+    let gfxOpen    = "# >>> repro:system:graphics-stack:libpaths-anchor >>>"
+    let plasmaOpen = "# >>> repro:system:plasma:libpaths >>>"
+
+    check gfxOpen in merged
+    check plasmaOpen in merged
+    # Graphics-stack's sentinel MUST appear before plasma's — the
+    # load-bearing NDE-H overlay-side invariant.
+    check merged.find(gfxOpen) < merged.find(plasmaOpen)
+    # Both sentinel pairs close.
+    check "# <<< repro:system:graphics-stack:libpaths-anchor <<<" in merged
+    check "# <<< repro:system:plasma:libpaths <<<" in merged
+    # The graphics-stack anchor stub is present.
+    check "gfxAnchorStub" in merged
+    # And plasma's lib-dir contribution is present.
+    check "/usr/lib/x86_64-linux-gnu" in merged
+
+    # The merger registered both contributors. ``registeredManagedBlocks``
+    # returns insertion order; sort discipline lives in
+    # ``mergedManagedBlockFile`` itself.
+    let contribs = registeredManagedBlocks(
+      "/etc/ld.so.conf.d/00-reproos-linux.conf")
+    check contribs.len == 2
