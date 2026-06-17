@@ -1080,6 +1080,230 @@ proc emitM4ArtifactBuildLowering*(packageName: string;
           finally:
             endBuildContext())
 
+# ---------------------------------------------------------------------------
+# DSL-port M5 — ``service:`` block lowerer.
+#
+# v8's ``service`` template (see ``tools/prototypes/v8/staged/package_
+# catalog/project_package_dsl.nim`` lines 906-1116) pushes a
+# ``ServiceBlockState`` onto a thread-local stack, runs the user body
+# (whose body-setters mutate the active frame), then materialises a
+# ``ServiceDef`` on the way out. M5 ports the MINIMAL contract:
+#
+#   * ``service <ident>:`` (named) or ``service "string":`` (string-form).
+#   * Body-setter ``executable <ident>`` → records ``executableRef``
+#     as the ident's text.
+#   * Body-setter ``args "a", "b", ...`` → records ``args`` as the
+#     literal string list (in declaration order).
+#   * Everything else inside the body is silently preserved into
+#     ``bodyRepr`` for diagnostic; M6+ may parse more setters (``on:``
+#     triggers, ``hotReload``, ``reloadOnChange``, ``runtimeFile``).
+#
+# ─────────────────────────────────────────────────────────────────────
+# M4 reviewer risks addressed
+# ─────────────────────────────────────────────────────────────────────
+#
+# Risk #1 — Section-ownership: M5 adds the ``soM5Service`` tag distinct
+#   from v8's ``service:`` body-setter procs. The legacy
+#   ``parsePackageDef`` does NOT recognise ``service:`` at all (no arm
+#   in ``macros_a.nim``), so M5's ownership is exclusive — symmetric
+#   with M3's ``files:`` treatment. No statement is double-emitted.
+#
+# Risk #2 — Provider-mode gating: services do NOT have a legacy
+#   provider-mode dispatcher (no ``buildXxxPackage*()`` arm consumes
+#   ``service:`` bodies). The body-setters we lower (``executable
+#   <ident>``, ``args "..."``) have no side effects beyond mutating the
+#   active-service frame — they don't shell out, write files, or invoke
+#   typed-tool wrappers. We therefore do NOT gate the body splice on
+#   ``when not defined(reproProviderMode)``. The unconditional emission
+#   keeps the registration observable from BOTH modes; future
+#   body-setters that DO have side effects (M5+ ``hotReload`` etc.)
+#   can introduce per-setter gating without changing M5's surface.
+#
+# Risk #3 — Context-stack reuse vs new stack: we introduce a NEW
+#   thread-local stack (``dslPortActiveServiceContext``) rather than
+#   extending the M4 ``DslBuildContextFrame``. Reasoning is documented
+#   above ``dslPortActiveServiceContext`` in ``dsl_port_runtime.nim`` —
+#   tl;dr: v8's ``service`` sits at the SAME lexical level as ``build:``
+#   in the package body, NOT inside one, so the two stacks should be
+#   disjoint. Extending the M4 frame would also ripple the ABI through
+#   every M4 emitter site.
+#
+# Risk #4 — Multi-output registry: ``dslPortServiceRegistry`` is a
+#   ``Table[packageName, seq[DslServiceDef]]`` keyed by package name —
+#   O(1) per-package lookup AND preserves per-package insertion order
+#   (since each bucket is a ``seq``). Symmetric with M2's
+#   ``dslPortVersionRegistry`` shape.
+#
+# Risk #5 — ``currentBuildContext()`` raise convention: M4 returns a
+#   zero-value frame on empty (not raise). M5 follows the same
+#   convention: the body-setter procs treat an empty active-service
+#   stack as a silent no-op rather than raising. This matches v8's
+#   ``service`` template behaviour at the source-shape level — body
+#   setters appear ONLY inside ``service:`` bodies, so the empty-stack
+#   path is unreachable from a correctly-shaped recipe. The no-op exists
+#   for defensive safety against macro-expansion bugs.
+# ---------------------------------------------------------------------------
+
+proc m5ServiceNameNode(headNode: NimNode):
+    tuple[matched: bool; serviceName: string] =
+  ## Recognise the name node in ``service <name>:``. Accepts:
+  ##
+  ##   * string-form  — ``service "myService": ...`` → ``StrLit``;
+  ##   * ident-form   — ``service myService: ...`` → ``Ident`` / ``Sym`` /
+  ##                                                ``AccQuoted``.
+  ##
+  ## The service name is the string verbatim (string-form) or the
+  ## ident's text (ident-form, no kebab translation — keeps the
+  ## registry's keying scheme symmetric with the source-level
+  ## spelling). Symmetric with M3's ``m3ArtifactNameNode``.
+  case headNode.kind
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    result.matched = true
+    result.serviceName = headNode.strVal
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    result.matched = true
+    result.serviceName = identText(headNode)
+  else:
+    discard
+
+proc m5ServiceEntryAst(stmt: NimNode):
+    tuple[matched: bool; serviceName: string; body: NimNode] =
+  ## Recognise a service-section invocation:
+  ##
+  ##   ``service <name>: <body>``
+  ##
+  ## Parses as ``Call(Ident "service", <name>, StmtList(body))`` or
+  ## the ``Command`` variant. The section-head (``service``) is already
+  ## discriminated by ``classifyPackageSections``; here we only extract
+  ## the name and the body.
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if stmt.len < 3:
+    return
+  let nameInfo = m5ServiceNameNode(stmt[1])
+  if not nameInfo.matched:
+    return
+  let body = stmt[^1]
+  if body.kind != nnkStmtList:
+    return
+  result.matched = true
+  result.serviceName = nameInfo.serviceName
+  result.body = body
+
+proc m5ParseServiceBody(body: NimNode):
+    tuple[executableRef: string; argStringLits: seq[NimNode]] =
+  ## Walk a ``service:`` body and extract:
+  ##
+  ##   * ``executable <ident>`` setter → records ``executableRef`` as
+  ##     the ident's ``strVal``. Only the LAST occurrence wins (matches
+  ##     v8's behavior — v8 raises on the second occurrence, but M5
+  ##     keeps the leniency until a real recipe needs the stricter
+  ##     check; future tightening goes through the M5+ body-setter
+  ##     widening).
+  ##   * ``args "a", "b", ...`` setter → appends every string-literal
+  ##     argument to ``argStringLits`` in declaration order. Non-literal
+  ##     argument nodes are silently skipped — the variant ID surface
+  ##     (``cachePort`` ident etc.) only lands in v8 because the staged
+  ##     layer evaluates the body at runtime; M5 runs at macro-expansion
+  ##     time and can only freeze literals. M5+ widens this when the
+  ##     variant-as-string lowering arrives.
+  ##
+  ## Other body statements (``hotReload``, ``restartOnCrash``, ``on
+  ## change ...``, ``runtimeFile``, …) are silently preserved as raw
+  ## body shape; the M5 emitter still captures the full body's ``repr``
+  ## into ``DslServiceDef.bodyRepr`` so the diagnostic surface is open
+  ## for M6+ to parse them out later.
+  result.argStringLits = @[]
+  if body.kind != nnkStmtList:
+    return
+  for stmt in body:
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len < 2:
+      continue
+    let head = stmt[0]
+    if head.kind notin {nnkIdent, nnkSym}:
+      continue
+    let headName = identText(head).normalize
+    case headName
+    of "executable":
+      # ``executable <ident>`` — record the ident's text. We accept
+      # nnkIdent / nnkSym / nnkAccQuoted; anything else is silently
+      # skipped (the diagnostic body capture still records it).
+      if stmt.len >= 2 and stmt[1].kind in
+          {nnkIdent, nnkSym, nnkAccQuoted}:
+        result.executableRef = identText(stmt[1])
+    of "args":
+      # ``args "a", "b", ...`` — append every string-literal argument.
+      for i in 1 ..< stmt.len:
+        let arg = stmt[i]
+        if arg.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+          result.argStringLits.add(arg.copyNimTree())
+    else:
+      discard
+
+proc emitM5Services*(packageName: string;
+                    classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for ``service:`` entries
+  ## (``soM5Service`` ownership) and emit one wrap-and-register block
+  ## per entry. The result is appended to the macro's expansion AFTER
+  ## M4's emissions so the M5 runtime helpers
+  ## (``beginServiceContext`` / ``setActiveServiceExecutable`` /
+  ## ``addActiveServiceArg`` / ``finishServiceContext``) are in scope.
+  ##
+  ## Per-entry emission shape:
+  ##
+  ##   block:
+  ##     beginServiceContext(<pkg>, <serviceName>, <bodyRepr>)
+  ##     try:
+  ##       setActiveServiceExecutable(<executableRef>)  # if present
+  ##       addActiveServiceArg(<arg-1>)                 # per arg
+  ##       addActiveServiceArg(<arg-2>)
+  ##       ...
+  ##     finally:
+  ##       finishServiceContext()
+  ##
+  ## The body-setter calls are NOT spliced from the user's body
+  ## verbatim — we parse the executable ref + args out at macro
+  ## expansion time and emit the equivalent runtime calls. This avoids
+  ## having to make the body-setter idents (``executable`` / ``args``)
+  ## bind to something callable in the lexical scope. The full body's
+  ## ``repr`` is captured into ``DslServiceDef.bodyRepr`` for
+  ## diagnostic surfacing; M6+ may pivot to a verbatim splice when the
+  ## body-setter taxonomy grows.
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership != soM5Service:
+      continue
+    let parsed = m5ServiceEntryAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    let parsedBody = m5ParseServiceBody(parsed.body)
+    let pkgLit = newLit(packageName)
+    let svcNameLit = newLit(parsed.serviceName)
+    let bodyReprLit = newLit(parsed.body.repr)
+    let exeRefLit = newLit(parsedBody.executableRef)
+    # Build the try-clause body: one setActiveServiceExecutable call
+    # (only when the body provided a ref) plus one addActiveServiceArg
+    # per recognised string-literal arg.
+    let tryBody = newStmtList()
+    if parsedBody.executableRef.len > 0:
+      tryBody.add(quote do:
+        setActiveServiceExecutable(`exeRefLit`))
+    for argLit in parsedBody.argStringLits:
+      tryBody.add(quote do:
+        addActiveServiceArg(`argLit`))
+    # The package-init block. The body-setter splice is unconditional
+    # (no provider-mode gate) — see the "Risk #2" commentary above the
+    # M5 emitter for the rationale.
+    result.add(quote do:
+      block:
+        beginServiceContext(`pkgLit`, `svcNameLit`, `bodyReprLit`)
+        try:
+          `tryBody`
+        finally:
+          finishServiceContext())
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -1268,6 +1492,18 @@ macro package*(name: untyped; body: untyped): untyped =
                                                             classifiedSections)
   result.add(m4BuildActionEmission)
   result.add(m4ArtifactBuildEmission)
+  # ── DSL-port M5: ``service:`` block lowering. Walks the SAME
+  # classified seq M3/M4 consumed and emits one wrap-and-register block
+  # per ``soM5Service`` entry. The block sits AFTER M4's emissions so
+  # the M5 surface sees the registry rows M3/M4 created — useful for
+  # diagnostic paths that want to cross-reference a service's
+  # ``executableRef`` against ``registeredArtifacts``. Legacy
+  # ``parsePackageDef`` does NOT recognise ``service:`` at all (no arm
+  # in ``macros_a.nim``), so M5's ownership is exclusive — symmetric
+  # with M3's ``files:`` treatment. See the "Risk #2" commentary above
+  # ``emitM5Services`` for the provider-mode gating decision.
+  let m5ServiceEmission = emitM5Services(packageName, classifiedSections)
+  result.add(m5ServiceEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

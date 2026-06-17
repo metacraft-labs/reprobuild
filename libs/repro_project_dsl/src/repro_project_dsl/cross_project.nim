@@ -542,6 +542,21 @@ type
       ## to find them and DOES NOT introduce a separate tag for the
       ## nested case (there is no need — the outer artifact tag
       ## already routes the entry to M4's nested walker).
+    soM5Service
+      ## ``service <name>:`` blocks — M5's ``emitM5Services`` records
+      ## each entry into ``dslPortServiceRegistry`` AND wraps the
+      ## body in a ``beginServiceContext / try / finally
+      ## finishServiceContext`` pair so the body-setters
+      ## (``executable <ident>`` / ``args "..."``) route to the active
+      ## frame. The legacy ``parsePackageDef`` walker does NOT
+      ## recognise ``service:`` at all (no arm exists for it in
+      ## ``macros_a.nim``), so M5's ownership is exclusive —
+      ## symmetric with M3's ``files:`` treatment. M6+ widens the
+      ## body-setter taxonomy (``on:`` triggers, ``hotReload``,
+      ## ``reloadOnChange``, ``runtimeFile``); M5 records the
+      ## remaining setters verbatim into ``DslServiceDef.bodyRepr``
+      ## so the diagnostic surface stays open for the next
+      ## milestone.
 
   ClassifiedSection* = object
     ## One classified section. ``stmt`` is a copy of the AST node from
@@ -554,8 +569,9 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   ## Map a section-head name to its primary ownership tag. The
   ## ``executable`` / ``library`` / ``files`` arms map to the new M3
   ## tags; the ``config:`` / ``versions:`` arms map to the M2 tags;
-  ## the package-level ``build:`` arm maps to the new M4 tag; everything
-  ## else stays on the legacy path.
+  ## the package-level ``build:`` arm maps to the new M4 tag; the
+  ## ``service:`` arm maps to the new M5 tag; everything else stays
+  ## on the legacy path.
   let head = calleeName(stmt).normalize
   case head
   of "executable": soM3ExecutableArtifact
@@ -564,6 +580,7 @@ proc classifySectionStmt(stmt: NimNode): SectionOwnership =
   of "config": soM2Config
   of "versions": soM2Versions
   of "build": soM4Build
+  of "service": soM5Service
   else: soLegacyParsePackageDef
 
 proc classifyPackageSections*(sectionStmts: NimNode):

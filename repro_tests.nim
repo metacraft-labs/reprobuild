@@ -1647,6 +1647,41 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M5 — ``service:`` block lowering. The three tests pin the
+  # contract that the new ``emitM5Services`` lowerer in ``macros_b.nim``
+  # emits ``beginServiceContext`` / ``setActiveServiceExecutable`` /
+  # ``addActiveServiceArg`` / ``finishServiceContext`` calls that
+  # survive macro expansion and round-trip through the M5
+  # ``registeredServices`` API in ``dsl_port_runtime.nim``. The
+  # ``service <ident>:`` form records the ident text as the service
+  # name; the body's ``executable <ident>`` setter records the
+  # cross-reference to the parent ``executable`` artifact; the
+  # ``args "...", "..."`` setter records positional args in
+  # declaration order.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_basic.nim",
+    binary: "build/test-bin/t_dsl_service_basic",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim",
+    binary: "build/test-bin/t_dsl_service_executable_ref",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_args.nim",
+    binary: "build/test-bin/t_dsl_service_args",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_executable_cli_only_no_build.nim",
     binary: "build/test-bin/t_dsl_executable_cli_only_no_build",
