@@ -2082,6 +2082,57 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Thirteenth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST CMake-driven recipe (every prior recipe used meson
+  # or make). Single-library shape with the kebab-to-camel package-
+  # identifier mapping (``json-c`` -> ``jsonCSource``). Pins json-c
+  # 0.18-20240915's vendored sha256 + cmake flag sequence + cross-
+  # channel isolation (cmake flags MUST NOT leak into the meson or
+  # configure channels) + ``libJsonC`` library artifact. Upstream-
+  # source side of the ``json-c >=0.17`` dependency the sway helpers
+  # / NetworkManager / BlueZ / PolicyKit declare.
+  TestSpec(
+    source: "recipes/packages/source/json-c/test_json_c_source.nim",
+    binary: "build/test-bin/t_json_c_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fourteenth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST autotools-driven recipe (every prior recipe used
+  # meson, make, or CMake). Single-library shape with the
+  # ``configureFlags:`` channel. Pins expat 2.7.0's vendored sha256 +
+  # ``./configure`` flag sequence + cross-channel isolation
+  # (configure flags MUST NOT leak into the meson or cmake channels)
+  # + ``libExpat`` library artifact. Upstream-source side of the
+  # ``expat >=2.6`` dependency that ``dbusBrokerSource`` + fontconfig
+  # + shared-mime-info + at-spi declare.
+  TestSpec(
+    source: "recipes/packages/source/expat/test_expat_source.nim",
+    binary: "build/test-bin/t_expat_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifteenth from-source production recipe to exercise the M9.H/I/K
+  # trio — FOUR-library single-package shape (the third multi-library
+  # shape after Wayland's two libs + pango's two libs, and the first
+  # to ship four artifacts under one ``package`` macro). Pins
+  # glib2 2.82.5's vendored sha256 + meson flag sequence + cross-
+  # channel isolation + ``libGlib2`` / ``libGObject`` / ``libGio`` /
+  # ``libGModule`` library artifacts. Upstream-source side of the
+  # ``glib >=2.62`` dependency every GObject-based recipe (gdk-pixbuf,
+  # pango, cairo's font-config glue) declares.
+  TestSpec(
+    source: "recipes/packages/source/glib2/test_glib2_source.nim",
+    binary: "build/test-bin/t_glib2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
