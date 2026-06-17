@@ -41,7 +41,33 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
             ignoredInputPrefixes: openArray[string] = [];
             depfile = ""; cacheable = true;
             actionCachePolicy = defaultActionCachePolicy();
-            commandStatsId = ""): BuildActionDef {.discardable.} =
+            commandStatsId = "";
+            dependencyPolicy = automaticMonitorPolicy()): BuildActionDef
+    {.discardable.} =
+  ## MR12: ``dependencyPolicy`` lets recipes opt OUT of the default
+  ## automatic-monitor IAT-patching shim that the engine injects into
+  ## every child process of a shell action. Pass
+  ## ``dependencyPolicy = declaredOnlyDependencyPolicy()`` for shell
+  ## wrappers around toolchains that have their own incremental cache
+  ## (e.g. ``bash -c '... cargo build ...'`` indirections — cargo's
+  ## fingerprint DB already decides invalidation, and rustc + LLVM on
+  ## Windows interact badly with the inline-hook propagation, producing
+  ## STATUS_ACCESS_VIOLATION crashes in rustc's proc-macro / codegen
+  ## paths). The cargo typed-tool edges declare ``declaredOnly`` for
+  ## the same reason (see ``cargo.nim``'s ``dependencyPolicy
+  ## declaredOnly`` comment); this parameter brings the same opt-out
+  ## to the bash-wrapped indirections that recipes still use while
+  ## features like workspace-PATH-injection are being designed.
+  ##
+  ## ``ignoredInputPrefixes`` is merged into the supplied policy so
+  ## callers can keep using the convenience parameter without having
+  ## to build the policy object themselves; an explicit
+  ## ``ignoredInputPrefixes`` on the policy is preserved and the two
+  ## sets are unioned.
+  var resolvedPolicy = dependencyPolicy
+  for prefix in ignoredInputPrefixes:
+    if prefix.len > 0 and prefix notin resolvedPolicy.ignoredInputPrefixes:
+      resolvedPolicy.ignoredInputPrefixes.add(prefix)
   let call = publicCliCall("sh", "sh", "", "sh.sh.call", @[
     cliArg("command", command, cpkFlag, 0, "-c"),
     cliArgSeq("args", args, cpkPositional, 0)
@@ -55,6 +81,5 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
-    dependencyPolicy = automaticMonitorPolicy(
-      ignoredInputPrefixes = ignoredInputPrefixes),
+    dependencyPolicy = resolvedPolicy,
     actionCachePolicy = actionCachePolicy)
