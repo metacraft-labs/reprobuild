@@ -994,6 +994,37 @@ proc reprobuildLibraryWorkDir(): string =
     return sourceRoot
   cwd
 
+proc resolveMonitorShimLibPath(): string =
+  ## Develop-mode improvement: locate ``librepro_monitor_shim.{dll,so,dylib}``
+  ## without requiring the operator to set ``REPRO_MONITOR_SHIM_LIB`` by
+  ## hand. Resolution order:
+  ##
+  ## 1. ``$REPRO_MONITOR_SHIM_LIB`` (operator override; legacy).
+  ## 2. ``<repro binary's repo>/build/lib/librepro_monitor_shim.<ext>``
+  ##    when the running ``repro`` lives inside a reprobuild source
+  ##    checkout (the develop-mode default — equivalent to how the
+  ##    sibling-repo path resolver in repro_interface_artifacts walks
+  ##    up from ``getAppFilename()``).
+  ## 3. Empty string when neither path matches; the caller (the engine's
+  ##    monitor launcher) treats that as "monitor not configured" and
+  ##    falls back to ``REPRO_MONITOR_BYPASS=1`` semantics.
+  let override = getEnv("REPRO_MONITOR_SHIM_LIB")
+  if override.len > 0:
+    return override
+  let exePath = getAppFilename()
+  if exePath.len == 0:
+    return ""
+  const dllExt =
+    when defined(windows): "dll"
+    elif defined(macosx):  "dylib"
+    else:                  "so"
+  # exePath: <reprobuild-root>/build/bin/repro.exe
+  let candidate = exePath.parentDir.parentDir / "lib" /
+    ("librepro_monitor_shim." & dllExt)
+  if fileExists(extendedPath(candidate)):
+    return candidate
+  ""
+
 proc moduleHasBuildBlock(modulePath: string): bool =
   for line in readFile(extendedPath(modulePath)).splitLines:
     if line.strip() == "build:":
@@ -1588,6 +1619,14 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       payload.call.subcommand,
       node.payload
     ].join("\n")
+    var mergedEnv: seq[string] = @[]
+    if actionPathPrefix.len > 0:
+      mergedEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+    # MR10: per-edge env-var injections from the typed-tool wrapper's
+    # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
+    # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
+    for entry in payload.env:
+      mergedEnv.add(entry[0] & "=" & entry[1])
     return repro_build_engine.action(
       payload.id,
       argv,
@@ -1605,11 +1644,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
       commandStatsId = commandStatsId,
-      env =
-        if actionPathPrefix.len > 0:
-          @["PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")]
-        else:
-          @[])
+      env = mergedEnv)
 
   let profile =
     if profiles.hasKey(exactKey):
@@ -1640,6 +1675,14 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     node.payload,
     digestHex(profile.profileFingerprint)
   ].join("\n")
+  var mergedEnv: seq[string] = @[]
+  if actionPathPrefix.len > 0:
+    mergedEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+  # MR10: per-edge env-var injections from the typed-tool wrapper's
+  # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
+  # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
+  for entry in payload.env:
+    mergedEnv.add(entry[0] & "=" & entry[1])
   repro_build_engine.action(
     payload.id,
     argvForCall(payload.call, profile),
@@ -1657,11 +1700,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
     commandStatsId = commandStatsId,
-    env =
-      if actionPathPrefix.len > 0:
-        @["PATH=" & actionPathPrefix & $PathSep & getEnv("PATH")]
-      else:
-        @[])
+    env = mergedEnv)
 
 proc levenshtein(a, b: string): int =
   ## Named-Targets M2 ``unknown_target`` diagnostic helper. A small
@@ -2282,7 +2321,46 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   else:
     lowerProviderSnapshot(snapshot, identity, projectRoot, [selectedActionId])
 
+const DefaultBuildCollectionName* = "default"
+  ## Per Build-Graph-Collections.md §"`default`" — the conventional
+  ## collection that `repro build` with no positional target resolves
+  ## to. Stdlib `executable` / `library` macros auto-enrol their
+  ## primary edge into it; explicit `collect("default", ...)` calls
+  ## contribute alongside auto-enrolments.
+  ##
+  ## The bare name is `default` (not `build`) so the CLI surface stays
+  ## ergonomic: `repro build` (no arg) and `repro build default` are
+  ## equivalent, while a literal `repro build build` would have read
+  ## like an authoring mistake.
+
+proc projectHasDefaultCollection*(snapshot: ProviderGraphSnapshot): bool =
+  ## Returns true when the project's aggregated target-export table
+  ## carries at least one row for the `default` conventional collection.
+  ## Drives the `repro build` (no-arg) default resolution: when this
+  ## holds, the engine schedules `repro build default` instead of
+  ## falling back to the legacy `DefaultBuildActionMetadataName`
+  ## action pin.
+  let exportTable = aggregateTargetExportTable(snapshot)
+  for entry in exportTable.entries:
+    if entry.kind == tekCollection and entry.name == DefaultBuildCollectionName:
+      return true
+  false
+
 proc defaultBuildActionId(snapshot: ProviderGraphSnapshot): string =
+  ## Returns the selector `repro build` (no positional target) should
+  ## materialize. Resolution order matches
+  ## CLI/build.md §"Current-Directory Default":
+  ##
+  ## 1. The `default` conventional collection if any package contributes
+  ##    to it (the modern shape per Build-Graph-Collections.md).
+  ## 2. The legacy `DefaultBuildActionMetadataName` action id pinned by
+  ##    a `defaultBuildAction("...")` call inside a `build:` block.
+  ##
+  ## Returns the empty string when neither path matches, signalling to
+  ## the caller that the historical unselected project-root behavior
+  ## should apply.
+  if projectHasDefaultCollection(snapshot):
+    return DefaultBuildCollectionName
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
@@ -4793,6 +4871,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let compileScratchDir = outDir / "provider-work"
   let interfaceStart = statStart(statsEnabled)
   progressRenderer.renderPhase("loading project interface")
+  # MR5 — ensure a reprobuild-provisioned nim+gcc is on $REPRO_NIM_COMPILER /
+  # $CC for the interface-extract step. See `ensureBootstrapToolchainEnv`
+  # for the rationale. Bootstrap toolchain is cached in the per-user
+  # tool-store (shared across projects), not the per-build outDir.
+  ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir, requireStub = false)
   finishStat(buildStats, statsEnabled, "repro interface extract",
@@ -5886,7 +5969,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     publicCliPath: publicCliPath,
     monitorCliPath: monitor.path,
     monitorCliArgs: monitor.args,
-    monitorShimLibPath: getEnv("REPRO_MONITOR_SHIM_LIB"),
+    monitorShimLibPath: resolveMonitorShimLibPath(),
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
@@ -6485,7 +6568,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     workDir: reprobuildLibraryWorkDir(),
     publicCliPath: publicCliPath,
     monitorCliPath: publicDevEnvFsSnoop(publicCliPath).path,
-    monitorShimLibPath: getEnv("REPRO_MONITOR_SHIM_LIB"),
+    monitorShimLibPath: resolveMonitorShimLibPath(),
     artifactPath: edge.artifactPath,
     activity: parsed.selection.activity,
     lockSliceId: parsed.selection.lockSliceId,
@@ -8379,6 +8462,45 @@ const
     # the launchd/systemd-spawned daemon does not inherit the user's shell, so
     # this must follow the user for monitored actions to run.
     "REPRO_MONITOR_SHIM_LIB",
+    # Windows MSVC linker pin used by cargo when targetting
+    # ``x86_64-pc-windows-msvc``. Recorder ``env.ps1`` scripts set this
+    # to bypass PATH-resolution of MSYS2's coreutils ``link.exe``
+    # collision; cargo subprocesses launched by the daemon need to see
+    # the same value or the link step fails with the
+    # ``/usr/bin/link: extra operand`` error documented in
+    # ``codetracer-cardano-recorder/env.ps1``.
+    "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
+    # Bindgen's libclang lookup. Recorder builds that pull in
+    # ``bindgen`` (rb-sys for the Ruby recorder, plus a handful of
+    # vendored crates in other recorders) panic during the cargo
+    # build step when ``libclang.dll`` is not on a path bindgen can
+    # resolve. ``env.ps1`` points this at MSYS2's mingw64/bin where
+    # the toolchain ships libclang.dll.
+    "LIBCLANG_PATH",
+    # Recorder-specific runtime data. The cairo-recorder's
+    # integration tests can't resolve ``use core::…`` imports
+    # without the Cairo corelib source tree. env.ps1 provisions it
+    # via ``ensure-cairo-corelib.ps1`` and points this env var at
+    # the extracted ``corelib/`` directory.
+    "CAIRO_CORELIB_DIR",
+    # PyO3 interpreter pin used by the codetracer-python-recorder
+    # cargo build. Without this, PyO3's build script picks the first
+    # ``python3`` on PATH (which is the repo-workspaces embeddable
+    # Python — no ``libs/python<ver>.lib``) and the link step fails
+    # with ``LNK1181: cannot open input file 'python312.lib'``.
+    # ``env.ps1`` points this at the python-build-standalone install
+    # provisioned by ensure-python-dev.ps1.
+    "PYO3_PYTHON",
+    "PYTHONHOME",
+    # rust libtest's parallelism knob. Recorder test suites that
+    # mutate process-global state (env vars, signal handlers, the
+    # PyO3 interpreter, etc.) under ``cargo test`` race against
+    # each other when libtest schedules them in parallel; setting
+    # this to 1 forces sequential execution and matches the
+    # serialization the per-test mutex guards already imply. The
+    # env var is interpreted by every cargo-test binary at run
+    # time so users can override per-invocation.
+    "RUST_TEST_THREADS",
     # Reprobuild's own build-time env vars consumed by config.nims and the
     # interface-extraction nim subprocesses. Without these, config.nims
     # defaults to vendored-hash mode and tries to compile from
@@ -8499,24 +8621,66 @@ proc daemonCarriedEnvironment*(): seq[string] =
       result.add(key & "=" & value)
 
 proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
-  if bypassRunQuota or getEnv("RUNQUOTA_SOCKET", "").len > 0 or
-      not autoRunQuotaEnabled():
+  if bypassRunQuota or not autoRunQuotaEnabled():
+    return nil
+  # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
+  # managing the daemon explicitly. On Windows we additionally probe
+  # reachability so a stale env var inherited from a previous build —
+  # which the daemon-hosted executor restores via ``putEnv`` even after
+  # the prior runquotad was terminated — does not cause us to skip
+  # spawning a fresh one for this build. On POSIX the per-PID socket
+  # path is unique so a stale value would point at a missing file; the
+  # subsequent runquota client connect would fail. Probing here makes
+  # both platforms self-healing.
+  if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
     return nil
   var runquotad = getEnv("RUNQUOTAD_BIN", "")
   if runquotad.len == 0:
     runquotad = findExe("runquotad")
   if runquotad.len == 0:
     return nil
-  let socket = getTempDir() / ("reprobuild-runquota-" &
-    $getCurrentProcessId() & ".sock")
-  if fileExists(socket):
-    removeFile(socket)
-  result = startProcess(runquotad, args = [
-    "--socket", socket,
-    "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-    "--memory-bytes", "17179869184"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socket)
+  # Pipe-name / socket-path derivation.
+  #
+  # Windows: omit ``--socket`` so runquotad binds to its built-in
+  # per-user default endpoint (``\\.\pipe\runquota-<USERNAME>`` —
+  # see ``runquota_ipc.defaultEndpoint``). The client side also
+  # falls through to ``defaultEndpoint`` when ``RUNQUOTA_SOCKET``
+  # is unset, so both halves of the IPC always meet on the same
+  # pipe regardless of which process spawned the daemon, which
+  # PID it has, or whether the env var was forwarded across the
+  # daemon protocol. This is the fix for the M1 regression where a
+  # ``getTempDir()/reprobuild-runquota-<PID>.sock`` derivation
+  # produced a different ``windowsPipeToken`` hash on every
+  # invocation, so a runquotad spawned by one ``repro build`` was
+  # invisible to the next one. We deliberately leave RUNQUOTA_SOCKET
+  # unset on Windows so child actions (which inherit the daemon's
+  # env) likewise hit the default endpoint.
+  #
+  # POSIX: keep the per-PID ``.sock`` path in ``$TMPDIR`` — Unix
+  # domain sockets need a concrete filesystem path, the PID guards
+  # against collisions between concurrent daemons, and the
+  # filesystem reclaims the inode when the daemon exits.
+  when defined(windows):
+    let args = @[
+      "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
+      "--memory-bytes", "17179869184"
+    ]
+    # Clear any stale value so the client side falls through to
+    # ``defaultEndpoint`` and meets the daemon on the per-user pipe.
+    putEnv("RUNQUOTA_SOCKET", "")
+    let socket = ""
+  else:
+    let socket = getTempDir() / ("reprobuild-runquota-" &
+      $getCurrentProcessId() & ".sock")
+    if fileExists(socket):
+      removeFile(socket)
+    let args = @[
+      "--socket", socket,
+      "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
+      "--memory-bytes", "17179869184"
+    ]
+    putEnv("RUNQUOTA_SOCKET", socket)
+  result = startProcess(runquotad, args = args, options = {poUsePath})
   for _ in 0 ..< 300:
     if isRunQuotaDaemonReachable():
       return
@@ -8529,9 +8693,13 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
     result.close()
   except CatchableError:
     discard
-  putEnv("RUNQUOTA_SOCKET", "")
+  when not defined(windows):
+    putEnv("RUNQUOTA_SOCKET", "")
+  let endpointHint =
+    when defined(windows): "default per-user named pipe"
+    else: socket
   raise newException(OSError,
-    "runquotad did not become reachable at " & socket)
+    "runquotad did not become reachable at " & endpointHint)
 
 proc runDepsRefreshCommand(args: openArray[string]): int =
   ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
@@ -10120,6 +10288,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   let stubPath = outDir / "project-interface.nim"
   let compileWorkDir = reprobuildLibraryWorkDir()
   let compileScratchDir = outDir / "provider-work"
+  # MR5 — see executeBuildTarget for the bootstrap toolchain rationale.
+  ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir, requireStub = false)
   result.interfacePath = interfacePath
@@ -13787,6 +13957,8 @@ proc runDevelopCommand(args: openArray[string]): int =
   let stubPath = outDir / "project-interface.nim"
   let compileWorkDir = reprobuildLibraryWorkDir()
   let compileScratchDir = outDir / "provider-work"
+  # MR5 — see executeBuildTarget for the bootstrap toolchain rationale.
+  ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
   let artifact = extractInterfaceFromModule(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir)
 
@@ -20209,6 +20381,8 @@ type
     fixturePath: string
     binDir: string
     reportPath: string
+    daemonFlag: string             # ``--daemon=on|off|auto`` carry-through
+                                   # for the verb-alias path.
     toolProvisioning: ToolProvisioningMode
       ## Workspace-mode discovery needs typed tool provisioning when the
       ## project's interface declares ``uses:`` blocks (the default for any
@@ -20651,6 +20825,16 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         existing.add(',')
       existing.add(spec)
       putEnv("REPRO_VARIANTS", existing)
+    elif arg == "--daemon" or arg.startsWith("--daemon="):
+      # Pass-through to ``runBuildCommand`` when ``repro test`` falls
+      # through to the verb-alias path (no shard flags supplied). The
+      # plain ``--daemon=off`` / ``--daemon=auto`` shape is widely
+      # used by the recorder CIs and by manual triage — without
+      # threading it here the alias path's diagnostic "unsupported
+      # repro test flag: --daemon=off" surprises users who learned
+      # the flag from ``repro build``.
+      let v = valueFromFlag(args, i, "--daemon")
+      result.daemonFlag = "--daemon=" & v
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported repro test flag: " & arg)
     else:
@@ -21514,10 +21698,25 @@ proc runReproTestCommand*(args: openArray[string];
 
   if opts.shardCount == 0 and opts.emitPlanPath.len == 0 and
       opts.planFromPath.len == 0:
-    emitShardDiagnostic(
-      "--shard <k>/<N> is required when not using --emit-partition-plan " &
-      "or --plan-from")
-    return 2
+    # Verb-alias path per Build-Graph-Collections.md §"Verb Aliases for
+    # Conventional Collections": ``repro test`` without any shard flags
+    # is byte-for-byte equivalent to ``repro build test``. Delegate to
+    # ``runBuildCommand`` so the user gets the conventional ``test``
+    # collection materialised end-to-end without having to remember
+    # the CI-sharding-specific surface. The shard CLI is the
+    # multi-machine CI path; the alias is the inner-loop "run my
+    # tests" path.
+    var buildArgs: seq[string] = @[]
+    if opts.toolProvisioning != tpmUnspecified:
+      buildArgs.add("--tool-provisioning=" & opts.toolProvisioning.modeName)
+    if opts.daemonFlag.len > 0:
+      buildArgs.add(opts.daemonFlag)
+    if opts.selectors.len == 0:
+      buildArgs.add("test")
+    else:
+      for sel in opts.selectors:
+        buildArgs.add(sel)
+    return runBuildCommand(buildArgs, publicCliPath)
 
   # Two code paths from here:
   #   (a) ``--fixture-from=<path>`` — the M2 fixture path, kept for

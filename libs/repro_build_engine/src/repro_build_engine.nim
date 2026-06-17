@@ -9,6 +9,7 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import repro_monitor_depfile
+import repro_platform
 import repro_runquota
 
 type
@@ -1141,13 +1142,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim and
   # libs/repro_monitor_depfile/src/repro_monitor_depfile/windows_injector.nim).
   # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
-  # injection mechanism differs. (The Windows ``REPRO_MONITOR_BYPASS=1`` escape
-  # hatch — which ran actions unmonitored and fell back to declared-inputs-only
-  # evidence — was retired in M11 once the IAT-patching shim's Nim-compiler
-  # deadlock was fixed; see reprobuild-specs/Notes/m11-fs-snoop-audit.md
-  # ("RESOLVED — bypass dropped"). It is removed here rather than left as a
-  # silent declared-only fallback, which is the exact correctness hole the
-  # removed ``dgDeclaredOnly`` policy represented.)
+  # injection mechanism differs.
   when not (defined(macosx) or defined(linux) or defined(windows)):
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
@@ -1237,64 +1232,121 @@ when defined(windows):
       return -1
     indices[signaled]
 
-proc launchChildEnv(action: BuildAction): seq[string] =
-  ## Nested-build resource model: an action's child process tree may itself
-  ## invoke ``repro build`` (the e2e/integration tests spawn an *inner*
-  ## ``repro``). The OUTER action is the unit RunQuota schedules — it holds a
-  ## lease whose measurement already covers its whole process group (peak
-  ## RSS + process count), so the inner build's resource use is accounted to
-  ## the outer lease. What must NOT happen is the inner ``repro`` acquiring
-  ## its OWN lease from the same daemon: it would request a second lease from
-  ## the pool while the parent already holds the outer action's lease, a
-  ## parent⇄child cycle the scheduler can only surface as ``build graph made
-  ## no progress``. (Clearing ``RUNQUOTA_SOCKET`` alone is insufficient —
-  ## ``runquota_ipc`` falls back to the default ``XDG_RUNTIME_DIR``/``TMPDIR``
-  ## socket path and reconnects to the very same daemon.)
-  ##
-  ## So we set ``REPROBUILD_NO_RUNQUOTA=1`` (the documented full-bypass
-  ## switch, equivalent to ``--no-runquota``) in every action child env: an
-  ## inner ``repro`` runs its own actions unmanaged, as ordinary child
-  ## processes of the outer leased action, and its CPU/memory rolls up into
-  ## the outer lease's group measurement — exactly the "outer managed, inner
-  ## unmanaged, outer measures the whole tree" model.
-  ##
-  ## The runquota launcher (``runquota_process.applyChildEnv`` on POSIX /
-  ## ``windowsChildEnv`` on Windows) and ``envTableFromArgvStyle`` both LAYER
-  ## this over the inherited environment, so ``PATH`` etc. survive. The value
-  ## is constant, so it does not perturb the action-cache fingerprint, and is
-  ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
-  ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
-  ## after).
-  result = @["REPROBUILD_NO_RUNQUOTA=1"]
-  for entry in action.env:
-    result.add(entry)
+proc bypassActionLogDir(cacheRoot: string): string =
+  ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
+  ## files live under ``<cacheRoot>/actions/`` so the same scratch dir
+  ## that already holds ``runquota-results/`` and ``monitor-depfiles/``
+  ## also owns the bypass-path stdio captures. ``repro clean`` (which
+  ## wipes ``cacheRoot``) reclaims them with the rest of the per-build
+  ## transient state.
+  cacheRoot / "actions"
 
-proc startBypassRunQuotaProcess(action: BuildAction): Process =
+proc bypassActionStdoutLogPath(cacheRoot, actionId: string): string =
+  bypassActionLogDir(cacheRoot) / (actionId & ".stdout.log")
+
+proc bypassActionStderrLogPath(cacheRoot, actionId: string): string =
+  bypassActionLogDir(cacheRoot) / (actionId & ".stderr.log")
+
+proc readBypassActionLog(path: string): string =
+  ## Read a bypass-mode per-action log file. Missing-file is the common
+  ## "tool produced no output" case and is squashed to an empty string;
+  ## any other error is also squashed (the bypass path is best-effort
+  ## diagnostic capture — a failed read mustn't escalate into an engine
+  ## failure that hides the real action failure).
+  if not fileExists(extendedPath(path)):
+    return ""
+  try:
+    readFile(extendedPath(path))
+  except CatchableError:
+    ""
+
+proc startBypassRunQuotaProcess(action: BuildAction;
+                                cacheRoot: string): Process =
   ## Path-mode escape hatch: spawn the action's argv directly via osproc,
   ## bypassing the RunQuota helper. Only used when
-  ## ``BuildEngineConfig.bypassRunQuota`` is true (currently set only on
-  ## Windows under ``--tool-provisioning=path``). All resource accounting,
-  ## named-pool leases, and quota enforcement are skipped — the engine still
-  ## honours its own ``poolRunning`` capacity tracking so action graphs that
-  ## declare pools stay sequenced, but no daemon-side enforcement happens.
+  ## ``BuildEngineConfig.bypassRunQuota`` is true (currently set on
+  ## Windows under ``--tool-provisioning=path`` AND whenever the
+  ## ``fallbackToRunQuotaBypass`` probe sees an unreachable runquotad).
+  ## All resource accounting, named-pool leases, and quota enforcement
+  ## are skipped — the engine still honours its own ``poolRunning``
+  ## capacity tracking so action graphs that declare pools stay
+  ## sequenced, but no daemon-side enforcement happens.
+  ##
+  ## **Stdio (M1 milestone, Windows-bypass-stdio-capture)**: each
+  ## action gets a pair of dedicated log files under
+  ## ``<cacheRoot>/actions/<id>.{stdout,stderr}.log`` and the child's
+  ## stdout / stderr are routed there via a tiny shell wrapper
+  ## (``cmd /D /C`` on Windows, ``sh -c`` on POSIX). The wrapper does
+  ## the redirection in the kernel — there is no Nim-side pipe drainer
+  ## involved — so the multi-process pipe-buffer deadlock that the
+  ## previous ``poStdErrToStdOut`` experiment hit (cargo spawning
+  ## rustc spawning link.exe collectively filling a shared kernel
+  ## pipe buffer faster than one Nim reader thread could drain) does
+  ## NOT recur here. ``finishBypassRunQuotaProcess`` reads the two
+  ## files back and stuffs their contents into the same
+  ## ``writeBypassResultJson`` payload the helper-path parser already
+  ## consumes, so the build-report's per-action ``stdout`` / ``stderr``
+  ## fields are now populated under bypass too. This is "option (3)"
+  ## from the bypass-stdio design discussion (file-tee per action,
+  ## not pipe inheritance).
+  ##
+  ## Under direct (non-daemon) invocations the user no longer sees the
+  ## action's output streaming in the terminal — they see it via the
+  ## build report instead. ``repro why <action-id>`` reads the same
+  ## result JSON for the same content; the log files themselves stay
+  ## on disk under ``cacheRoot`` for ad-hoc inspection.
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
-  let env = envTableFromArgvStyle(launchChildEnv(action))
+  # MR8: prepend the cached MSVC dev-env diff on Windows so daemon-spawned
+  # cargo / cc-rs / link.exe actions land on a coherent MSVC toolchain
+  # (cl.exe on PATH + INCLUDE/LIB/LIBPATH/VCToolsInstallDir/WindowsSdk*).
+  # No-op on non-Windows and when VS Build Tools is not installed; the
+  # action's own ``env`` entries override on key collision.
+  let mergedEnv = mergeActionEnvWithMsvc(action.env)
+  let env = envTableFromArgvStyle(mergedEnv)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
-  # Use inherited stdio instead of pipe-based capture. Path-mode bypass is a
-  # RunQuota escape hatch, and waiting for direct children before draining their
-  # pipe can deadlock on verbose compiler probes that fill the kernel buffer.
-  # The caller (`repro build`) still sees the output through its own stdio.
-  result = startProcess(action.argv[0],
-    args = action.argv[1 .. ^1],
-    env = env,
-    workingDir = cwd,
-    options = {poUsePath, poParentStreams})
+  let stdoutLog = bypassActionStdoutLogPath(cacheRoot, action.id)
+  let stderrLog = bypassActionStderrLogPath(cacheRoot, action.id)
+  createDir(extendedPath(bypassActionLogDir(cacheRoot)))
+  # Truncate any prior log so a re-run doesn't read stale content from
+  # a previous launch of the same action id.
+  try: writeFile(extendedPath(stdoutLog), "")
+  except CatchableError: discard
+  try: writeFile(extendedPath(stderrLog), "")
+  except CatchableError: discard
+  # Build the shell-wrapped command. ``quoteShell`` handles each argv
+  # element per the host platform's shell rules; both branches end up
+  # with one redirected-output pipeline that ``cmd`` / ``sh`` will
+  # tokenize back into argv before exec'ing the real tool.
+  var quotedArgv = ""
+  for i, a in action.argv:
+    if i > 0: quotedArgv.add(" ")
+    quotedArgv.add(quoteShell(a))
+  let wrapped =
+    quotedArgv & " > " & quoteShell(stdoutLog) &
+      " 2> " & quoteShell(stderrLog)
+  when defined(windows):
+    # ``/D`` disables AutoRun (HKCU\Software\Microsoft\Command Processor\
+    # AutoRun) so a user-injected init script can't mutate the action's
+    # environment; ``/C`` runs the command and terminates. Path lookup
+    # for the real tool is delegated to ``cmd`` rather than ``startProcess``
+    # because the wrapped command line itself contains the tool name.
+    result = startProcess("cmd.exe",
+      args = @["/D", "/C", wrapped],
+      env = env,
+      workingDir = cwd,
+      options = {poUsePath})
+  else:
+    result = startProcess("/bin/sh",
+      args = @["-c", wrapped],
+      env = env,
+      workingDir = cwd,
+      options = {})
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string; bypassRunQuota: bool): Process =
   if bypassRunQuota:
-    return startBypassRunQuotaProcess(action)
+    return startBypassRunQuotaProcess(action, config.cacheRoot)
   let rq = ReproResourceRequest(
     label: action.id,
     commandStatsId: action.commandStatsId,
@@ -1302,10 +1354,16 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
     memoryBytes: action.memoryBytes,
     namedPool: action.pool,
     namedPoolUnits: action.poolUnits)
+  # MR8: prepend the cached MSVC dev-env diff on Windows so the
+  # runquota helper hands the action a coherent MSVC toolchain
+  # (cl.exe / INCLUDE / LIB / LIBPATH / VCToolsInstallDir / WindowsSdk*).
+  # The action's own ``env`` entries are appended after, so any
+  # recipe-supplied overrides win on key collision. No-op on non-Windows
+  # and when VS Build Tools is not installed.
   let command = ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: launchChildEnv(action),
+    env: mergeActionEnvWithMsvc(action.env),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
@@ -1324,15 +1382,18 @@ proc runQuotaRequest(action: BuildAction): ReproResourceRequest =
 
 proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
     ReproCommandSpec =
+  # MR8: prepend the cached MSVC dev-env diff (Windows-only) so the
+  # inline-runquota batch path matches the helper-spawn path's env
+  # shape. The action's own ``env`` entries override on key collision.
   ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: launchChildEnv(action),
+    env: mergeActionEnvWithMsvc(action.env),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 
 proc writeBypassResultJson(resultPath: string; exitCode: int;
-                           combinedOutput: string) =
+                           stdoutPayload, stderrPayload: string) =
   ## Synthesize the same result-JSON schema the RunQuota helper writes, so the
   ## downstream parser in ``finishRunQuotaProcess`` can consume it unchanged.
   ## Keep field names and types byte-for-byte aligned with
@@ -1344,8 +1405,8 @@ proc writeBypassResultJson(resultPath: string; exitCode: int;
     "exited": true,
     "signaled": false,
     "signal": 0,
-    "stdout": combinedOutput,
-    "stderr": "",
+    "stdout": stdoutPayload,
+    "stderr": stderrPayload,
     "backend_name": "runquota-bypass",
     "runquota_socket": "",
     "lease_finished_sent": false,
@@ -1355,23 +1416,34 @@ proc writeBypassResultJson(resultPath: string; exitCode: int;
   writeFile(extendedPath(resultPath), $payload)
 
 proc finishBypassRunQuotaProcess(id: string; process: Process;
-                                 resultPath: string) =
-  ## Path-mode escape hatch: drain the directly-spawned process and synthesize
-  ## the result JSON the standard parser expects. Returns nothing — the caller
-  ## proceeds to the same ``parseFile(resultPath)`` codepath the RunQuota
-  ## helper would have written.
-  #
-  var combinedOutput = ""
+                                 resultPath: string; cacheRoot: string) =
+  ## Path-mode escape hatch: wait for the directly-spawned process and
+  ## synthesize the result JSON the standard parser expects.
+  ##
+  ## **M1 milestone (Windows-bypass-stdio-capture)**: read the per-action
+  ## ``<cacheRoot>/actions/<id>.{stdout,stderr}.log`` files
+  ## ``startBypassRunQuotaProcess`` redirected the child into and embed
+  ## their contents in the result JSON. The previous behaviour swallowed
+  ## stdio (``poParentStreams`` inherited the engine's stdio but was
+  ## invisible under daemon-mode invocations), which surfaced as "exit
+  ## code 101 with empty stderr" in build reports. The log-file route
+  ## avoids the multi-process pipe-buffer deadlock the in-process
+  ## drainer hit; see the rationale in ``startBypassRunQuotaProcess``.
   let exitCode = process.waitForExit()
-  writeBypassResultJson(resultPath, exitCode, combinedOutput)
+  let stdoutPayload = readBypassActionLog(
+    bypassActionStdoutLogPath(cacheRoot, id))
+  let stderrPayload = readBypassActionLog(
+    bypassActionStderrLogPath(cacheRoot, id))
+  writeBypassResultJson(resultPath, exitCode, stdoutPayload, stderrPayload)
 
 proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
-                           bypassRunQuota: bool): ActionResult =
+                           bypassRunQuota: bool;
+                           cacheRoot: string): ActionResult =
   let backendLabel =
     if bypassRunQuota: "runquota-bypass" else: "runquota-helper"
   result = ActionResult(id: id, launched: true, runQuotaBackend: backendLabel)
   if bypassRunQuota:
-    finishBypassRunQuotaProcess(id, process, resultPath)
+    finishBypassRunQuotaProcess(id, process, resultPath, cacheRoot)
   let helperExit =
     if bypassRunQuota: 0
     else: process.waitForExit()
@@ -2900,13 +2972,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.id,
             runningItem.process,
             runningItem.resultPath,
-            true)
+            true,
+            cacheRoot)
         of rpkHelperProcess:
           finishRunQuotaProcess(
             runningItem.id,
             runningItem.process,
             runningItem.resultPath,
-            false)
+            false,
+            cacheRoot)
       finishStat("repro runquota finish", finishStart)
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
