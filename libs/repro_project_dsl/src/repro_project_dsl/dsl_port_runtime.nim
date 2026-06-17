@@ -1612,16 +1612,60 @@ type
     artifactName*: string
 
   DslSymlink* = object
-    ## M9.B placeholder — a symlink emission record. M9.A reserves the
-    ## type so downstream M9.B work can extend the materialisation
-    ## surface without churning the field order. Intentionally empty
-    ## until M9.B fills it in.
-    discard
+    ## M9.B — one ``fs.symlink(...)`` registration. Records the symlink
+    ## intent only; the on-disk materialisation lives behind
+    ## ``consumeSymlink``. Mirrors the
+    ## ``de_foundation/systemd_session.nim``'s ``symlinkUnmask`` shape:
+    ## the apply-phase layer (NDEM milestone) reads the registry to
+    ## plant the actual symlink in the live ``/etc/`` tree. On hosts
+    ## where symlinks aren't first-class (Windows test machines without
+    ## developer-mode), the materialisation path falls back to a regular
+    ## file containing the target — see ``consumeSymlink``.
+    path*: string
+      ## Symlink path itself, verbatim from the call
+      ## (e.g. ``"/etc/systemd/system/systemd-logind.service"``).
+    target*: string
+      ## Symlink target, verbatim from the call
+      ## (e.g. ``"/lib/systemd/system/systemd-logind.service"``).
+    packageName*: string
+      ## Auto-filled from ``currentBuildPackage()`` when the caller
+      ## passes ``""``; mirrors ``DslConfigFile.packageName``.
+    artifactName*: string
+      ## Auto-filled from ``currentBuildArtifact()`` when the caller
+      ## passes ``""`` AND a build context is open. Otherwise stays
+      ## ``""``.
+    hashHex*: string
+      ## Cache key — ``stableHashHex("symlink" || packageName || \x00 ||
+      ## artifactName || \x00 || path || \x00 || target)``. 16 hex
+      ## characters (FNV-1a). ``consumeSymlink`` recomputes a 64-char
+      ## sha256 over the same byte stream when materialising under the
+      ## ``dhaSha256`` store-root path.
 
   DslDirectory* = object
-    ## M9.B placeholder — a directory emission record. Same forward-
-    ## declaration rationale as ``DslSymlink``.
-    discard
+    ## M9.B — one ``fs.directory(...)`` registration. An empty directory
+    ## placeholder declaration. Drives the NDE0-D ``/var/lib/dbus``
+    ## spool-directory case and any other "the directory must exist
+    ## even though no package owns the bytes inside it" surface.
+    path*: string
+      ## Directory path verbatim from the call (e.g.
+      ## ``"/var/lib/dbus"``).
+    mode*: int
+      ## POSIX mode bits the apply-phase layer will chmod the planted
+      ## directory to (e.g. ``0o755``). Documented but NOT enforced on
+      ## Windows (NTFS ACLs are a different model); the field is still
+      ## mixed into the cache key so a mode change invalidates it.
+    packageName*: string
+      ## Auto-filled from ``currentBuildPackage()`` when the caller
+      ## passes ``""``.
+    artifactName*: string
+      ## Auto-filled from ``currentBuildArtifact()`` when the caller
+      ## passes ``""``.
+    hashHex*: string
+      ## Cache key — ``stableHashHex("directory" || packageName ||
+      ## \x00 || artifactName || \x00 || path || \x00 || $mode)``. 16
+      ## hex characters (FNV-1a). ``consumeDirectory`` recomputes a
+      ## 64-char sha256 over the same byte stream when materialising
+      ## under the ``dhaSha256`` store-root path.
 
   DslMaterialiseError* = object of CatchableError
     ## Raised when ``consumeConfigFile`` / ``consumeManagedBlock`` is
@@ -1955,5 +1999,368 @@ proc consumeManagedBlock*(path: string): DslManagedFiles =
     packageName: firstPkg,
     artifactName: contribs[0].artifactName)
   dslPortMaterialisedManagedBlocks[path] = DslMaterialisedEntry(
+    handle: handle, done: true)
+  result = handle
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.B — fs.symlink + fs.directory registration & materialisation
+# ---------------------------------------------------------------------------
+##
+## What the M9.B surface covers
+## ----------------------------
+##
+## M8 + M9.A handle byte-content emissions (``fs.configFile`` /
+## ``fs.managedBlock``). The DE shim packages need two more typed
+## "intent records" the M8/M9.A pair does not cover:
+##
+##   * ``fs.symlink(path, target, ...)`` — a symlink declaration. The
+##     NDE0-S systemd-session shim's ``symlinkUnmask`` proc emits one of
+##     these for ``/etc/systemd/system/systemd-logind.service`` (un-mask
+##     pointer back to the real unit file). NDE0-G graphics-stack emits
+##     them for the ``multi-user.target.wants/*`` WantedBy symlinks.
+##     NDEM1 reproos-desktop emits one for the
+##     ``display-manager.service`` chooser.
+##
+##   * ``fs.directory(path, mode=0o755, ...)`` — an empty directory
+##     placeholder. NDE0-D dbus-broker uses this for ``/var/lib/dbus``
+##     (the spool directory must exist at boot but no package owns the
+##     bytes inside it).
+##
+## Both surfaces mirror M8/M9.A patterns to the letter:
+##
+##   * registration is into a typed in-memory ``Table[string,
+##     seq[...]]`` keyed by package name;
+##   * auto-fill pulls ``packageName`` / ``artifactName`` from
+##     ``currentBuildPackage()`` / ``currentBuildArtifact()`` when the
+##     caller passes ``""`` (M8 ergonomic);
+##   * materialisation lives behind ``consumeSymlink`` /
+##     ``consumeDirectory`` and parallels ``consumeConfigFile``
+##     (idempotent side-table, sha256 digest under the registered
+##     storeRoot, returns a ``DslManagedFiles`` handle).
+##
+## ## Windows symlink fallback
+##
+## Nim's ``os.createSymlink`` calls Win32 ``CreateSymbolicLinkW`` under
+## the hood, which on Windows requires either administrator privileges
+## or the Developer-Mode privilege. Neither is reliable in CI / test
+## fixtures, so ``consumeSymlink`` writes a regular file containing the
+## target string (with a ``# repro-symlink-intent`` header line) instead
+## of an OS-level symlink. The apply-phase layer that later plants the
+## actual ``/etc`` symlink reads that file. POSIX hosts (Linux / macOS)
+## get a real OS-level symlink unconditionally — they don't have the
+## same privilege wart and the in-store layout we expose is otherwise
+## byte-aligned with the shim modules' ``symlinkUnmask`` output.
+
+var dslPortSymlinks {.threadvar.}: Table[string, seq[DslSymlink]]
+  ## Per-package symlink registry. Keyed by ``packageName`` (matches the
+  ## M8 ``dslPortConfigFiles`` bucket shape). Declaration order within
+  ## each bucket is preserved.
+
+var dslPortDirectories {.threadvar.}: Table[string, seq[DslDirectory]]
+  ## Per-package directory-placeholder registry. Keyed by
+  ## ``packageName``. Mirrors ``dslPortSymlinks``.
+
+var dslPortMaterialisedSymlinks {.threadvar.}: Table[string, DslMaterialisedEntry]
+  ## Idempotency cache for ``consumeSymlink``. Keyed by
+  ## ``packageName || \x00 || path`` (same shape as
+  ## ``dslPortMaterialisedConfigFiles``).
+
+var dslPortMaterialisedDirectories {.threadvar.}: Table[string, DslMaterialisedEntry]
+  ## Idempotency cache for ``consumeDirectory``. Keyed by
+  ## ``packageName || \x00 || path``.
+
+# ---------------------------------------------------------------------------
+# Reset proc — symmetric with resetDslPortFsState
+# ---------------------------------------------------------------------------
+
+proc resetDslPortFsExtState*() =
+  ## Drop every recorded ``fs.symlink`` + ``fs.directory`` registration
+  ## AND every materialisation side-table row for the M9.B surface.
+  ## Symmetric with ``resetDslPortFsState`` (M8) and
+  ## ``resetDslPortMaterialiseState`` (M9.A) — test fixtures call this
+  ## between scenarios so the M9.B state does not leak across cases.
+  dslPortSymlinks.clear()
+  dslPortDirectories.clear()
+  dslPortMaterialisedSymlinks.clear()
+  dslPortMaterialisedDirectories.clear()
+
+# ---------------------------------------------------------------------------
+# fs.symlink — cache-key composition + registration
+# ---------------------------------------------------------------------------
+
+proc symlinkHashOf*(packageName, artifactName, path, target: string): string =
+  ## Cache-key composition for ``fs.symlink``. Mirrors
+  ## ``configFileHashOf``: FNV-1a stableHashHex over a discriminator
+  ## prefix + the four-tuple bytes. The ``"symlink"`` prefix prevents
+  ## cross-surface hash collisions if a future surface ever uses an
+  ## identical ``packageName || \x00 || ...`` byte stream.
+  result = stableHashHex(
+    "symlink" & packageName & "\x00" & artifactName & "\x00" &
+    path & "\x00" & target)
+
+proc registerSymlink*(entry: DslSymlink) =
+  ## Type-erased append. Exposed for future emitters that want to splice
+  ## symlink registrations out of a structured block without going
+  ## through the public ``symlink`` proc's auto-fill path.
+  let key = entry.packageName
+  if key notin dslPortSymlinks:
+    dslPortSymlinks[key] = @[]
+  dslPortSymlinks[key].add(entry)
+
+proc symlink*(path: string; target: string;
+              packageName: string = "";
+              artifactName: string = "") =
+  ## Records a ``fs.symlink`` declaration. Auto-fill matches
+  ## ``configFile`` (``currentBuildPackage()`` /
+  ## ``currentBuildArtifact()``). Doesn't touch the filesystem; the
+  ## on-disk materialisation lives behind ``consumeSymlink``.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  var artifact = artifactName
+  if artifact.len == 0:
+    artifact = currentBuildArtifact()
+  let hashHex = symlinkHashOf(pkg, artifact, path, target)
+  registerSymlink(DslSymlink(
+    path: path,
+    target: target,
+    packageName: pkg,
+    artifactName: artifact,
+    hashHex: hashHex))
+
+proc registeredSymlinks*(packageName: string): seq[DslSymlink] =
+  ## Return every symlink registered against ``packageName`` in
+  ## declaration order. Returns the empty seq when the package never
+  ## called ``fs.symlink``; callers must NOT treat the empty return as
+  ## an error.
+  if packageName in dslPortSymlinks:
+    return dslPortSymlinks[packageName]
+  return @[]
+
+# ---------------------------------------------------------------------------
+# fs.directory — cache-key composition + registration
+# ---------------------------------------------------------------------------
+
+proc directoryHashOf*(packageName, artifactName, path: string;
+                      mode: int): string =
+  ## Cache-key composition for ``fs.directory``. FNV-1a stableHashHex
+  ## over the discriminator prefix + the four-tuple bytes (mode mixed
+  ## in as ``$mode`` so the textual representation is the only
+  ## discriminator the digest sees).
+  result = stableHashHex(
+    "directory" & packageName & "\x00" & artifactName & "\x00" &
+    path & "\x00" & $mode)
+
+proc registerDirectory*(entry: DslDirectory) =
+  ## Type-erased append. Exposed for future emitters.
+  let key = entry.packageName
+  if key notin dslPortDirectories:
+    dslPortDirectories[key] = @[]
+  dslPortDirectories[key].add(entry)
+
+proc directory*(path: string; mode: int = 0o755;
+                packageName: string = "";
+                artifactName: string = "") =
+  ## Records a ``fs.directory`` placeholder. Auto-fill semantics match
+  ## ``configFile`` / ``symlink``. Doesn't touch the filesystem.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  var artifact = artifactName
+  if artifact.len == 0:
+    artifact = currentBuildArtifact()
+  let hashHex = directoryHashOf(pkg, artifact, path, mode)
+  registerDirectory(DslDirectory(
+    path: path,
+    mode: mode,
+    packageName: pkg,
+    artifactName: artifact,
+    hashHex: hashHex))
+
+proc registeredDirectories*(packageName: string): seq[DslDirectory] =
+  ## Return every directory registered against ``packageName`` in
+  ## declaration order. Empty seq when no directory was registered.
+  if packageName in dslPortDirectories:
+    return dslPortDirectories[packageName]
+  return @[]
+
+# ---------------------------------------------------------------------------
+# sha256 cache-key compositions for the M9.B materialisation surface
+# ---------------------------------------------------------------------------
+
+proc symlinkSha256Of*(packageName, artifactName, path, target: string): string =
+  ## M9.B cache-key composition for ``symlink`` materialisation. Same
+  ## byte stream as ``symlinkHashOf`` (so a future spec-byte-match mode
+  ## comparing FNV-1a + sha256 outputs sees aligned discriminator
+  ## bytes), only the digest algorithm differs.
+  dslPortSha256Hex(
+    "symlink" & packageName & "\x00" & artifactName & "\x00" &
+    path & "\x00" & target)
+
+proc directorySha256Of*(packageName, artifactName, path: string;
+                        mode: int): string =
+  ## M9.B cache-key composition for ``directory`` materialisation.
+  dslPortSha256Hex(
+    "directory" & packageName & "\x00" & artifactName & "\x00" &
+    path & "\x00" & $mode)
+
+proc dslPortSymlinkDigest(storeRoot: DslFsStoreRoot;
+                          packageName, artifactName,
+                          path, target: string): string =
+  ## Dispatch to the configured hash algorithm. Mirrors
+  ## ``dslPortConfigFileDigest``.
+  case storeRoot.hashAlg
+  of dhaSha256:
+    result = symlinkSha256Of(packageName, artifactName, path, target)
+  of dhaFnv1a:
+    result = symlinkHashOf(packageName, artifactName, path, target)
+
+proc dslPortDirectoryDigest(storeRoot: DslFsStoreRoot;
+                            packageName, artifactName,
+                            path: string; mode: int): string =
+  ## Dispatch for the directory digest.
+  case storeRoot.hashAlg
+  of dhaSha256:
+    result = directorySha256Of(packageName, artifactName, path, mode)
+  of dhaFnv1a:
+    result = directoryHashOf(packageName, artifactName, path, mode)
+
+# ---------------------------------------------------------------------------
+# consumeSymlink — idempotent on-disk materialisation
+# ---------------------------------------------------------------------------
+
+proc consumeSymlink*(packageName: string; path: string): DslManagedFiles =
+  ## Look up the M9.B ``DslSymlink`` recorded against ``(packageName,
+  ## path)``; materialise to ``<storeRoot.rootPath>/<hashHex>/<relPath>``
+  ## if not yet materialised in this thread; return the resulting
+  ## ``DslManagedFiles`` handle.
+  ##
+  ## Auto-fill: ``packageName == ""`` triggers
+  ## ``currentBuildPackage()`` resolution.
+  ##
+  ## Idempotency: a second call with the same ``(packageName, path)``
+  ## returns the cached handle without re-touching the disk.
+  ##
+  ## Windows symlink fallback: ``os.createSymlink`` requires admin or
+  ## developer-mode privilege on Windows. To keep the test fixture
+  ## portable, the Windows path writes a regular file at the symlink
+  ## location containing
+  ##
+  ## .. code-block:: text
+  ##   # repro-symlink-intent
+  ##   <target>
+  ##
+  ## POSIX hosts get a real OS-level symlink (``os.createSymlink``).
+  ##
+  ## Raises ``DslMaterialiseError`` when no storeRoot is registered OR
+  ## no M9.B record matches.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  let storeRoot = currentStoreRoot(pkg)
+  if storeRoot.rootPath.len == 0:
+    raise newException(DslMaterialiseError,
+      "consumeSymlink: no storeRoot registered for package '" & pkg &
+      "' (call registerStoreRoot first)")
+  var matched: DslSymlink
+  var found = false
+  if pkg in dslPortSymlinks:
+    for sl in dslPortSymlinks[pkg]:
+      if sl.path == path:
+        matched = sl
+        found = true
+        break
+  if not found:
+    raise newException(DslMaterialiseError,
+      "consumeSymlink: no fs.symlink record for package '" & pkg &
+      "' at path '" & path & "' (call fs.symlink first)")
+  let cacheKey = pkg & "\x00" & path
+  if cacheKey in dslPortMaterialisedSymlinks:
+    let entry = dslPortMaterialisedSymlinks[cacheKey]
+    if entry.done:
+      return entry.handle
+  let hashHex = dslPortSymlinkDigest(storeRoot, pkg, matched.artifactName,
+                                     matched.path, matched.target)
+  let relPath = dslPortCanonicaliseRelPath(matched.path)
+  let storePath = storeRoot.rootPath / hashHex
+  let fullPath = storePath / relPath
+  createDir(parentDir(fullPath))
+  when defined(windows):
+    # Windows symlink fallback: write a regular file with an intent
+    # header + the target string. The apply-phase layer parses this
+    # back when planting the real symlink (which a privileged installer
+    # WILL be able to do).
+    writeFile(fullPath, "# repro-symlink-intent\n" & matched.target & "\n")
+  else:
+    # POSIX: real OS-level symlink. ``os.createSymlink`` is dest, src
+    # order — the SOURCE argument is the target string, the DEST is the
+    # link to create.
+    if fileExists(fullPath) or symlinkExists(fullPath):
+      removeFile(fullPath)
+    createSymlink(matched.target, fullPath)
+  let handle = DslManagedFiles(
+    storePath: storePath,
+    relPath: relPath,
+    hashHex: hashHex,
+    packageName: pkg,
+    artifactName: matched.artifactName)
+  dslPortMaterialisedSymlinks[cacheKey] = DslMaterialisedEntry(
+    handle: handle, done: true)
+  result = handle
+
+# ---------------------------------------------------------------------------
+# consumeDirectory — idempotent on-disk materialisation
+# ---------------------------------------------------------------------------
+
+proc consumeDirectory*(packageName: string; path: string): DslManagedFiles =
+  ## Look up the M9.B ``DslDirectory`` recorded against ``(packageName,
+  ## path)``; materialise an empty directory at
+  ## ``<storeRoot.rootPath>/<hashHex>/<relPath>`` if not yet materialised
+  ## in this thread; return the resulting ``DslManagedFiles`` handle.
+  ##
+  ## Auto-fill / idempotency match ``consumeSymlink``.
+  ##
+  ## Note: the recorded ``mode`` field is currently NOT applied on the
+  ## materialised directory — POSIX mode bits are an apply-phase
+  ## concern. The digest mixes ``mode`` so a mode change WILL move the
+  ## materialised directory to a fresh ``<hashHex>`` subtree.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  let storeRoot = currentStoreRoot(pkg)
+  if storeRoot.rootPath.len == 0:
+    raise newException(DslMaterialiseError,
+      "consumeDirectory: no storeRoot registered for package '" & pkg &
+      "' (call registerStoreRoot first)")
+  var matched: DslDirectory
+  var found = false
+  if pkg in dslPortDirectories:
+    for d in dslPortDirectories[pkg]:
+      if d.path == path:
+        matched = d
+        found = true
+        break
+  if not found:
+    raise newException(DslMaterialiseError,
+      "consumeDirectory: no fs.directory record for package '" & pkg &
+      "' at path '" & path & "' (call fs.directory first)")
+  let cacheKey = pkg & "\x00" & path
+  if cacheKey in dslPortMaterialisedDirectories:
+    let entry = dslPortMaterialisedDirectories[cacheKey]
+    if entry.done:
+      return entry.handle
+  let hashHex = dslPortDirectoryDigest(storeRoot, pkg, matched.artifactName,
+                                       matched.path, matched.mode)
+  let relPath = dslPortCanonicaliseRelPath(matched.path)
+  let storePath = storeRoot.rootPath / hashHex
+  let fullPath = storePath / relPath
+  createDir(fullPath)
+  let handle = DslManagedFiles(
+    storePath: storePath,
+    relPath: relPath,
+    hashHex: hashHex,
+    packageName: pkg,
+    artifactName: matched.artifactName)
+  dslPortMaterialisedDirectories[cacheKey] = DslMaterialisedEntry(
     handle: handle, done: true)
   result = handle

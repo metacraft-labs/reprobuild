@@ -1657,6 +1657,27 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.B — typed ``fs.symlink`` / ``fs.directory`` registration
+  # + on-disk materialisation surfaces. Drives NDE0-S systemd-session
+  # unmask symlinks, NDE0-G graphics-stack WantedBy symlinks, NDEM1
+  # display-manager.service chooser, and NDE0-D dbus-broker
+  # ``/var/lib/dbus`` spool placeholder.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_symlink.nim",
+    binary: "build/test-bin/t_dsl_fs_symlink",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_directory.nim",
+    binary: "build/test-bin/t_dsl_fs_directory",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
     binary: "build/test-bin/t_dsl_helper_proc_reads_build_context",

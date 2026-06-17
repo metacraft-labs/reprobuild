@@ -1,8 +1,9 @@
-## DSL-port M8 — ``fs`` namespace shim.
+## DSL-port M8 / M9.A / M9.B — ``fs`` namespace shim.
 ##
 ## Nim has no namespace keyword. The idiomatic ``fs.configFile(...)`` /
-## ``fs.managedBlock(...)`` callsite syntax is achieved by importing this
-## module under the ``fs`` alias:
+## ``fs.managedBlock(...)`` / ``fs.symlink(...)`` / ``fs.directory(...)``
+## callsite syntax is achieved by importing this module under the ``fs``
+## alias:
 ##
 ## .. code-block:: nim
 ##   import repro_project_dsl
@@ -19,6 +20,14 @@
 ##         blockId = "libpaths",
 ##         scope = bsSystem,
 ##         content = "/opt/test/lib\n"
+##       )
+##       fs.symlink(
+##         path = "/etc/systemd/system/systemd-logind.service",
+##         target = "/lib/systemd/system/systemd-logind.service"
+##       )
+##       fs.directory(
+##         path = "/var/lib/dbus",
+##         mode = 0o755
 ##       )
 ##
 ## The procs themselves live in
