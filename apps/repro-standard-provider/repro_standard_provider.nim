@@ -38,6 +38,7 @@ import repro_standard_provider/conventions/c_cpp_make as c_cpp_make_convention
 import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_convention
 import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
+import repro_standard_provider/conventions/from_source_meson as from_source_meson_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -187,6 +188,23 @@ when defined(reproProviderMode):
   # need try_compile probes lifted into the reprobuild DAG; users opt
   # into Tier 2c via explicit provider declaration.
   addDefaultConvention(c_cpp_cmake_convention.cCppCMakeConvention())
+  # from_source_meson (M9.L.0) registered BEFORE c_cpp_meson so the
+  # from-source variant claims recipes that declare a ``fetch:`` block
+  # (no in-tree ``meson.build`` at projectRoot — the source has to be
+  # fetched + extracted first). The convention's ``recognize`` rejects
+  # when ``meson.build`` IS present at the root so the in-tree M39
+  # convention claims those projects; registration order is defensive
+  # in either direction. Covers the 74 ``recipes/packages/source/*``
+  # production recipes (dbus-broker, glib2, fontconfig, ...).
+  #
+  # TODO(reprobuild-as-ninja-generator): a follow-up milestone should
+  # add a sibling ``from_source_cmake.nim`` convention; the
+  # ``reprobuild-cmake/`` workspace fork is the upstream-CMake fork
+  # that lifts the generator backend into reprobuild's DAG. Same
+  # ninja-generator optimisation also applies to the from-source-meson
+  # path via parsing the generated ``build.ninja``.
+  addDefaultConvention(
+    from_source_meson_convention.fromSourceMesonConvention())
   # c_cpp_meson (M39) registered AFTER c_cpp_cmake and BEFORE
   # c_cpp_make so Meson claims any project with a root-level
   # ``meson.build`` before the Make convention gets a chance. CMake
