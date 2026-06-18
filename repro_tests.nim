@@ -2266,6 +2266,81 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Twenty-third from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the font + GUI infrastructure batch (freetype
+  # / harfbuzz / fontconfig / qt6-base). THIRD autotools-driven recipe
+  # after expat + gdm. Pins freetype 2.13.3's vendored sha256 +
+  # configure flag sequence (with the ``--without-X=auto`` tristate
+  # variants exercising the autotools-grammar) + cross-channel isolation
+  # + ``libFreetype`` library artifact. The font-glyph rasteriser
+  # foundation; pango / harfbuzz / fontconfig / cairo / Qt / GTK /
+  # browsers all link this transitively.
+  TestSpec(
+    source: "recipes/packages/source/freetype/test_freetype_source.nim",
+    binary: "build/test-bin/t_freetype_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-fourth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the font + GUI infrastructure batch and
+  # SIXTEENTH meson-driven recipe. Pins harfbuzz 10.1.0's vendored
+  # sha256 + meson flag sequence (six-element seq alongside cairo's
+  # six and pango's five — the largest meson flag sets in the corpus)
+  # + cross-channel isolation + ``libHarfbuzz`` library artifact. The
+  # OpenType text-shaping engine that complements freetype's glyph
+  # rasteriser; pango / cairo / GTK / Qt6 (QtGui) / Firefox / Chromium
+  # all link this transitively for complex-script rendering.
+  TestSpec(
+    source: "recipes/packages/source/harfbuzz/test_harfbuzz_source.nim",
+    binary: "build/test-bin/t_harfbuzz_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-fifth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the font + GUI infrastructure batch and
+  # FOURTH autotools-driven recipe (expat + gdm + freetype precedents).
+  # FIRST autotools recipe in the corpus to ship an ``--enable-X``
+  # POSITIVE-form configure flag — every prior autotools recipe shipped
+  # purely negative-form flags. Pins fontconfig 2.16.0's vendored sha256
+  # + configure flag sequence + cross-channel isolation +
+  # ``libFontconfig`` library artifact. The font-discovery + matching
+  # layer that sits above freetype's rasteriser; pango / cairo / GTK /
+  # Qt6 / Firefox / Chromium all link this transitively.
+  TestSpec(
+    source: "recipes/packages/source/fontconfig/test_fontconfig_source.nim",
+    binary: "build/test-bin/t_fontconfig_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-sixth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the font + GUI infrastructure batch and
+  # SIXTH CMake-driven recipe (json-c, kcoreaddons, kwin,
+  # plasma-workspace, sddm precedents). FIRST recipe in the corpus to
+  # ship SIX library artifacts from a single ``package`` macro — every
+  # prior multi-artifact recipe shipped two, three (sddm) or four
+  # (glib2). LARGEST vendored tarball in the corpus by far (48.2 MB
+  # compressed, well under the kernel-precedent 90 MB upstream-URL
+  # fallback cutoff). Pins qt6-base 6.8.1's vendored sha256 + CMake
+  # flag sequence + cross-channel isolation + six library artifacts
+  # (``libQt6Core`` + ``libQt6Gui`` + ``libQt6Widgets`` +
+  # ``libQt6Network`` + ``libQt6DBus`` + ``libQt6Sql``) within a single
+  # package's artifact set. The bottom of the Qt6 dependency graph;
+  # every KF6 module + every Plasma component links against it. SDDM
+  # greeter QML runtime also picks it up.
+  TestSpec(
+    source: "recipes/packages/source/qt6-base/test_qt6_base_source.nim",
+    binary: "build/test-bin/t_qt6_base_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
