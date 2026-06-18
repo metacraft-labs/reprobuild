@@ -1871,13 +1871,35 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   var paths: seq[string] = @[]
   walkLibSrcPathsInto(workDir / "libs", paths)
 
-  var reprobuildLibsRoot = reprobuildLibsRootFromEnv()
-  if reprobuildLibsRoot.len == 0:
-    reprobuildLibsRoot = reprobuildLibsRootFromBinaryLocation()
-  if reprobuildLibsRoot.len == 0:
-    reprobuildLibsRoot = siblingReprobuildLibsRoot(workDir)
-  if reprobuildLibsRoot.len > 0:
-    walkLibSrcPathsInto(reprobuildLibsRoot, paths)
+  # When the consumer's own ``libs/`` IS a reprobuild source tree — the
+  # in-tree case where the provider compiles reprobuild's own ``repo.nim``
+  # — those working-tree libs are the authoritative copy. Adding a SECOND
+  # reprobuild lib root located via ``$REPROBUILD_REPO_ROOT`` /
+  # ``$REPROBUILD_LIBS_DIR`` (or the binary location / a sibling checkout)
+  # would put a duplicate of every ``repro_*`` module on ``--path``. Nim's
+  # module resolution does NOT reliably prefer the first ``--path`` entry
+  # when the same logical module exists under two roots, so the external
+  # root can SHADOW the working tree — and in a dev shell that external
+  # root is a flake-pinned snapshot that can lag the working tree (e.g.
+  # pinned to a different branch), silently compiling the recipe against
+  # stale stdlib sources. So only consult the external reprobuild root
+  # when the consumer does not already provide the reprobuild libs itself.
+  let workDirIsReprobuildTree = fileExists(extendedPath(
+    workDir / "libs" / "repro_project_dsl" / "src" / "repro_project_dsl.nim"))
+
+  var reprobuildLibsRoot = ""
+  if workDirIsReprobuildTree:
+    # In-tree: anchor the MR14 sibling source-only flags at the working
+    # tree; the working-tree libs are already on ``paths`` above.
+    reprobuildLibsRoot = workDir / "libs"
+  else:
+    reprobuildLibsRoot = reprobuildLibsRootFromEnv()
+    if reprobuildLibsRoot.len == 0:
+      reprobuildLibsRoot = reprobuildLibsRootFromBinaryLocation()
+    if reprobuildLibsRoot.len == 0:
+      reprobuildLibsRoot = siblingReprobuildLibsRoot(workDir)
+    if reprobuildLibsRoot.len > 0:
+      walkLibSrcPathsInto(reprobuildLibsRoot, paths)
 
   # Deduplicate (a consumer repo that happens to symlink reprobuild
   # libs into its own libs/ would otherwise list each path twice).
