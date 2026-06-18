@@ -64,8 +64,20 @@ proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
   except IpcEndpointError as exc:
     raise newException(UserDaemonClientError, exc.msg)
   let client = binaryIdentity(clientName, getAppFilename(), versionString())
-  result.writeFrame(udkHello, helloBody(client, UserDaemonFeatureFlags,
-    commandMode, projectRoot, protocolMajor, protocolMinor))
+  # Bound the hello SEND symmetrically with the hello-ack RECV below: a daemon
+  # that accepts the connection but never ``recv``s (a wedged / stale daemon)
+  # would otherwise block the client in ``send`` forever once the socket
+  # buffers fill — the deadlock the m2 stale-endpoint test hit on macOS, where
+  # ``connectUserDaemon → writeFrame → send`` hung for 50+ minutes. On timeout
+  # ``writeFrame`` raises ``IpcEndpointError``; convert it to the daemon-client
+  # error type so callers fall back to direct mode instead of hanging.
+  try:
+    result.writeFrame(udkHello, helloBody(client, UserDaemonFeatureFlags,
+      commandMode, projectRoot, protocolMajor, protocolMinor),
+      timeoutMs = UserDaemonHandshakeTimeoutMs)
+  except IpcEndpointError as exc:
+    result.closeIpcConn()
+    raise newException(UserDaemonClientError, exc.msg)
   # Bound the hello-ack: a daemon that accepts the connection but never
   # returns a frame (wedged / protocol-incompatible) must not hang the client
   # forever. On timeout ``readFrame`` raises ``IpcEndpointError``; convert it
@@ -103,7 +115,10 @@ proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
     result.running = false
     return
   defer: conn.closeIpcConn()
-  conn.writeFrame(udkStatus)
+  # Bound the status SEND for the same reason as the hello send above: a daemon
+  # that completed the hello handshake but then wedged before reading the
+  # status request must not block the client in ``send``.
+  conn.writeFrame(udkStatus, timeoutMs = UserDaemonHandshakeTimeoutMs)
   # Same bound as the hello-ack: a daemon that completes the hello handshake
   # but then stalls before answering the status query must not wedge the
   # client. The caller treats the raised error as "daemon not running".

@@ -1499,6 +1499,22 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
       writeFile(launchdPlistPath(config), renderLaunchdUserAgentPlist(exe,
         config))
       let serviceTarget = "gui/" & $currentUid()
+      # Boot out any prior registration of this label BEFORE bootstrapping the
+      # fresh plist. A ``RunAtLoad=true`` / ``KeepAlive=false`` agent runs once
+      # and exits, but launchd keeps the (now-dead, status ``-9``) job loaded
+      # under its label. A subsequent ``bootstrap`` of the same label then fails
+      # ("service already bootstrapped"), so the code below fell through to
+      # ``kickstart -k`` — which on a dead job whose ProgramArguments still point
+      # at an OLD staged binary either relaunches the stale image or never
+      # produces a ready endpoint, forcing the 30 s ``waitForUserDaemonStatus``
+      # timeout and a posix-fork fallback on EVERY daemon spawn after the first.
+      # (Observed as accumulating ``launchctl list`` entries across the daemon
+      # control-plane + watch suites and the resulting "watch did not become
+      # ready" timeouts.) Removing the stale job first lets ``bootstrap`` of the
+      # freshly-written plist succeed cleanly. Errors are ignored: a missing
+      # job simply means there was nothing to remove.
+      discard execCmdEx(quoteCommand(["launchctl", "bootout",
+        serviceTarget & "/" & launchdLabel(config)]))
       let bootstrap = execCmdEx(quoteCommand(["launchctl", "bootstrap",
         serviceTarget, launchdPlistPath(config)]))
       if bootstrap.exitCode == 0:

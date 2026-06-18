@@ -365,14 +365,19 @@ proc readSession(buf: openArray[byte]; pos: var int): UserDaemonSession =
     result.lastResult = buf.readString(pos)
 
 proc writeFrame*(conn: IpcConn; kind: UserDaemonMessageKind;
-                 body: openArray[byte] = []) =
+                 body: openArray[byte] = []; timeoutMs = 0) =
+  ## ``timeoutMs > 0`` bounds the underlying send (see ``sendByteString``); it
+  ## is used for the daemon status handshake so a wedged daemon that accepts the
+  ## connection but never reads cannot block the client's send forever. The
+  ## default (0) preserves the original unbounded blocking write used by the
+  ## long-lived build/watch command streams.
   var frame: seq[byte] = @[]
   for ch in FrameMagic:
     frame.add(byte(ord(ch)))
   frame.writeU16Le(uint16(ord(kind)))
   frame.writeU32Le(uint32(body.len))
   frame.add(body)
-  conn.sendByteString(frame.textOf())
+  conn.sendByteString(frame.textOf(), timeoutMs)
 
 proc readFrame*(conn: IpcConn; timeoutMs = 0): tuple[kind: UserDaemonMessageKind;
                                       body: seq[byte]] =

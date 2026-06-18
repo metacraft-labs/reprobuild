@@ -99,7 +99,12 @@ proc binaryPath(): string = getAppFilename()
 
 proc repoRoot(): string = getCurrentDir()
 
-proc reprostoredBin(): string = repoRoot() / "build" / "bin" / addFileExt("reprostored", ExeExt)
+proc publicReproBin(): string = repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
+  ## Executable-Consolidation M3/M5: the standalone ``reprostored`` binary was
+  ## removed; the dev store daemon is the ``repro`` image run as
+  ## ``repro store serve --dev`` (the same self-spawn ``startDevDaemon`` uses).
+  ## The test spawns that process form directly so it controls the daemon
+  ## lifecycle (kill/restart) the way the M66/M67 scenarios require.
 
 proc makeEnv(endpoint, runtimeRoot: string): StringTableRef =
   result = newStringTable()
@@ -284,7 +289,7 @@ proc verifyPairResult(pair: tuple[a, b: JsonNode]; adapter, storeRoot: string) =
 suite "M67 daemon-mediated Nix and tarball realization":
   test "integration_daemon_nix_and_tarball_realize":
     when not defined(posix):
-      echo "[platform N/A] reprostored --dev IPC is POSIX-only in M66/M67."
+      echo "[platform N/A] dev store-daemon IPC is POSIX-only in M66/M67."
     else:
       let root = createTempDir("repro-m67-daemon-", "")
       defer:
@@ -295,8 +300,9 @@ suite "M67 daemon-mediated Nix and tarball realization":
       let storeRoot = root / "store"
       defer: stopIfRunning(endpoint)
 
-      let daemon = startProcess(reprostoredBin(),
-        args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
+      let daemon = startProcess(publicReproBin(),
+        args = @["store", "serve", "--dev", "--store-root", storeRoot,
+          "--endpoint", endpoint],
         env = makeEnv(endpoint, runtimeRoot),
         options = {poStdErrToStdOut})
       defer: daemon.close()
@@ -307,7 +313,7 @@ suite "M67 daemon-mediated Nix and tarball realization":
           var detail = err.msg
           if not daemon.running():
             let rc = daemon.waitForExit()
-            detail.add("; reprostored exited " & $rc & ": " &
+            detail.add("; repro store serve exited " & $rc & ": " &
               daemon.outputStream.readAll())
           raise newException(OSError, detail)
       check status.daemonProfile == StoreDaemonProfileDev

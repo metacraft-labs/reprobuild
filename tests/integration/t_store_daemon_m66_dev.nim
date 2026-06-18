@@ -80,8 +80,14 @@ proc repoRoot(): string =
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
 
-proc reprostoredBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("reprostored", ExeExt)
+proc storeServeArgs(extra: openArray[string]): seq[string] =
+  ## Executable-Consolidation M3/M5: the standalone ``reprostored`` binary was
+  ## removed; the dev store daemon process IS the ``repro`` image run as
+  ## ``repro store serve --dev`` (the same self-spawn ``startDevDaemon`` uses).
+  ## Tests that spawn the daemon PROCESS directly (to drive kill/restart and
+  ## lockfile scenarios) launch ``publicReproBin()`` with this argv instead of a
+  ## per-name binary on disk.
+  @["store", "serve"] & @extra
 
 proc makeEnv(endpoint, runtimeRoot: string): StringTableRef =
   result = newStringTable()
@@ -191,7 +197,7 @@ when isNixSupported:
       let storeRoot = root / "store"
       defer: stopIfRunning(endpoint)
 
-      check fileExists(reprostoredBin())
+      check fileExists(publicReproBin())
       let statusAbsent = requireSuccess(shellCommand([
         publicReproBin(), "store", "daemon", "status", "--dev",
         "--store-root", storeRoot
@@ -292,8 +298,9 @@ when isNixSupported:
       let env = makeEnv(endpoint, runtimeRoot)
       defer: stopIfRunning(endpoint)
 
-      let daemon = startProcess(reprostoredBin(),
-        args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
+      let daemon = startProcess(publicReproBin(),
+        args = storeServeArgs(@["--dev", "--store-root", storeRoot,
+          "--endpoint", endpoint]),
         env = env,
         options = {poStdErrToStdOut})
       defer: daemon.close()
@@ -301,8 +308,9 @@ when isNixSupported:
       check first.pid > 0
       check fileExists(devDaemonLockPath(storeRoot))
 
-      let second = startProcess(reprostoredBin(),
-        args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
+      let second = startProcess(publicReproBin(),
+        args = storeServeArgs(@["--dev", "--store-root", storeRoot,
+          "--endpoint", endpoint]),
         env = env,
         options = {poStdErrToStdOut})
       let secondRc = second.waitForExit()
@@ -335,8 +343,9 @@ when isNixSupported:
       let storeRoot = root / "store"
       let env = makeEnv(endpoint, runtimeRoot)
 
-      var daemon = startProcess(reprostoredBin(),
-        args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
+      var daemon = startProcess(publicReproBin(),
+        args = storeServeArgs(@["--dev", "--store-root", storeRoot,
+          "--endpoint", endpoint]),
         env = env,
         options = {poStdErrToStdOut})
       discard waitForStatus(endpoint, storeRoot)
@@ -365,8 +374,9 @@ when isNixSupported:
       check clientOut.contains("lost connection to dev store daemon during realize")
       check fileExists(devDaemonLockPath(storeRoot))
 
-      daemon = startProcess(reprostoredBin(),
-        args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
+      daemon = startProcess(publicReproBin(),
+        args = storeServeArgs(@["--dev", "--store-root", storeRoot,
+          "--endpoint", endpoint]),
         env = env,
         options = {poStdErrToStdOut})
       defer:
@@ -419,8 +429,9 @@ when isNixSupported:
       try: removeFile(storeRoot / "index.db-shm") except OSError: discard
       writeFile(storeRoot / "index.db", "not a sqlite database\n")
 
-      let daemon = startProcess(reprostoredBin(),
-        args = @["--dev", "--store-root", storeRoot, "--endpoint", endpoint],
+      let daemon = startProcess(publicReproBin(),
+        args = storeServeArgs(@["--dev", "--store-root", storeRoot,
+          "--endpoint", endpoint]),
         env = env,
         options = {poStdErrToStdOut})
       discard waitForStatus(endpoint, storeRoot)

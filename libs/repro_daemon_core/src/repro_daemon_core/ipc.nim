@@ -191,10 +191,84 @@ when defined(posix):
   proc isOpen*(conn: IpcConn): bool =
     conn.socket != nil
 
-  proc sendByteString*(conn: IpcConn; data: string) =
+  proc sendBoundedNonblocking(fd: cint; data: string; timeoutMs: int) =
+    ## Write all of ``data`` to ``fd`` under an absolute deadline, never
+    ## blocking in the kernel. The fd is switched to ``O_NONBLOCK`` for the
+    ## duration and each ``send`` is gated on a ``poll(POLLOUT)`` for the
+    ## remaining budget; ``EAGAIN``/``EWOULDBLOCK`` loops back to the poll, any
+    ## other ``errno`` (e.g. ``EPIPE`` from a peer that closed) surfaces as an
+    ## ``IpcEndpointError``. The previous "poll once, then blocking send"
+    ## shape was racy: ``poll(POLLOUT)`` reports a connected-but-not-yet-
+    ## ``accept``ed AF_UNIX socket as writable, so the subsequent blocking
+    ## ``send`` filled the socket buffer and then wedged in ``__sendto``
+    ## forever when the peer (a stale daemon, or the live-endpoint test helper
+    ## sitting between ``accept`` calls) never drained it — the 50+ minute m2
+    ## hang. A true non-blocking deadline loop cannot wedge.
+    ##
+    ## ``MSG_DONTWAIT`` is not surfaced by ``std/posix`` for this Nim version,
+    ## so we toggle ``O_NONBLOCK`` on the fd and restore the original flags
+    ## afterwards (mirrors the ``fcntl(... O_NONBLOCK)`` pattern already used
+    ## in ``repro_test_support``).
+    let deadline = epochTime() + timeoutMs.float / 1000.0
+    let prevFlags = fcntl(fd, F_GETFL, 0)
+    if prevFlags >= 0:
+      discard fcntl(fd, F_SETFL, prevFlags or O_NONBLOCK)
+    defer:
+      if prevFlags >= 0:
+        discard fcntl(fd, F_SETFL, prevFlags)
+    var sent = 0
+    while sent < data.len:
+      let remainingMs = int((deadline - epochTime()) * 1000.0)
+      if remainingMs <= 0:
+        raise newException(IpcEndpointError,
+          "timed out after " & $timeoutMs & "ms sending " & $data.len &
+          " bytes to IPC peer (sent " & $sent & ")")
+      let n = posix.send(SocketHandle(fd), addr data[sent],
+        data.len - sent, 0.cint)
+      if n > 0:
+        sent += n
+        continue
+      if n == 0:
+        raise newException(IpcEndpointError,
+          "IPC peer closed while sending frame data")
+      let err = osLastError().cint
+      if err == EAGAIN or err == EWOULDBLOCK:
+        var fds = TPollfd(fd: fd, events: POLLOUT, revents: 0)
+        let rc = poll(addr(fds), Tnfds(1), cint(remainingMs))
+        if rc == 0:
+          raise newException(IpcEndpointError,
+            "timed out after " & $timeoutMs &
+            "ms waiting for IPC peer to accept frame data")
+        if rc < 0:
+          raise newException(IpcEndpointError,
+            "poll() failed while sending to IPC peer")
+      elif err == EINTR:
+        continue
+      else:
+        raise newException(IpcEndpointError,
+          "send() failed writing to IPC peer (errno " & $err & ")")
+
+  proc sendByteString*(conn: IpcConn; data: string; timeoutMs = 0) =
+    ## Write all of ``data`` to the peer. When ``timeoutMs > 0`` the send is
+    ## bounded by an absolute deadline via a non-blocking, ``poll(POLLOUT)``-
+    ## gated loop (see ``sendBoundedNonblocking``) and raises an
+    ## ``IpcEndpointError`` if the peer never drains its receive window. This
+    ## mirrors the recv-side bound in ``recvBytesExact`` and exists for exactly
+    ## the symmetric failure mode: a daemon that ACCEPTS (or merely backlogs)
+    ## the connection but never ``recv``s — a wedged/stale daemon — would
+    ## otherwise leave the client blocked in ``send`` forever once the socket
+    ## buffers fill. It is used ONLY for the daemon status handshake sends
+    ## (``connectUserDaemon`` / ``queryUserDaemonStatus``). ``timeoutMs == 0``
+    ## keeps the original unbounded blocking behaviour for the long-running
+    ## build/watch command streams, whose framing never stalls mid-send in
+    ## practice and which must not be torn down by a transient back-pressure
+    ## pause.
     if data.len == 0:
       return
-    conn.socket.send(data)
+    if timeoutMs > 0:
+      sendBoundedNonblocking(cast[cint](conn.socket.getFd()), data, timeoutMs)
+    else:
+      conn.socket.send(data)
 
   proc recvBytesExact*(conn: IpcConn; byteCount: int; timeoutMs = 0): seq[byte] =
     ## Read exactly ``byteCount`` bytes. When ``timeoutMs > 0`` the read is
@@ -423,7 +497,12 @@ when defined(windows):
   proc isOpen*(conn: IpcConn): bool =
     conn.handle != 0 and conn.handle != INVALID_HANDLE_VALUE
 
-  proc sendByteString*(conn: IpcConn; data: string) =
+  proc sendByteString*(conn: IpcConn; data: string; timeoutMs = 0) =
+    ## ``timeoutMs`` is accepted for signature parity with the POSIX branch but
+    ## is not enforced here: the named pipe is created with
+    ## ``DefaultPipeTimeoutMs`` (5 s) as its ``nDefaultTimeOut`` and a blocking
+    ## ``WriteFile`` to a wedged server is bounded by the OS, so the unbounded
+    ## hang the POSIX poll guards against does not occur on Named Pipes.
     if data.len == 0:
       return
     var written: DWORD = 0
@@ -522,13 +601,13 @@ when defined(windows):
 # Cross-platform helpers callers reach for
 # ---------------------------------------------------------------------------
 
-proc sendBytes*(conn: IpcConn; data: openArray[byte]) =
+proc sendBytes*(conn: IpcConn; data: openArray[byte]; timeoutMs = 0) =
   if data.len == 0:
     return
   var buf = newString(data.len)
   for i, b in data:
     buf[i] = char(b)
-  sendByteString(conn, buf)
+  sendByteString(conn, buf, timeoutMs)
 
 proc recvByteString*(conn: IpcConn; byteCount: int): string =
   let buf = recvBytesExact(conn, byteCount)
