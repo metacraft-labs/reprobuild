@@ -459,87 +459,45 @@ proc bytesOfStr(s: string): seq[byte] =
     result[i] = byte(ch)
 
 proc cmdPublish(rawArgs: seq[string]): int =
+  ## M9.L.4-refactor Step A: thin wrapper that translates CLI flags +
+  ## env vars into a ``PublishInProcessRequest`` and forwards to the
+  ## library implementation. The pre-existing drift-guard +
+  ## packaging + sign + POST live in ``publishInProcess``
+  ## (libs/repro_binary_cache_client/src/repro_binary_cache_client/
+  ## in_process.nim). Keeping CLI behaviour byte-identical:
+  ##
+  ##   * exit 2 — identity hex mismatch + missing prefix dir + missing
+  ##     key/cert env vars (these are all caller-input errors, the
+  ##     pre-refactor CLI also exited 2 on them).
+  ##   * exit 1 — HTTP failure / network error.
+  ##   * exit 0 — server accepted the publish.
+  ##   * stdout — ``published <entryKeyHex>`` on success.
+  ##   * stderr — diagnostic text on failure (unchanged).
   let args = parsePublishArgs(rawArgs)
-  if not dirExists(args.prefixDir) and not fileExists(args.prefixDir):
-    stderr.writeLine("publish: prefix path does not exist: " & args.prefixDir)
-    return 2
-  # Build identity → recompute the entry key digest. The caller passed
-  # the hex it expects on the command line; we verify they match,
-  # protecting against a stale key being baked into the build script.
   let idy = identityFromArgs(args)
-  let derivedKey = deriveCacheEntryKey(idy)
-  let derivedHex = cacheEntryKeyHex(derivedKey)
-  if derivedHex != args.entryKeyHex:
-    stderr.writeLine("publish: identity-derived key does not match supplied " &
-      "entry-key hex.")
-    stderr.writeLine("  supplied:  " & args.entryKeyHex)
-    stderr.writeLine("  derived:   " & derivedHex)
-    return 2
-
-  # Package the prefix.
-  let payloadBytes =
-    if dirExists(args.prefixDir):
-      packPrefix(args.prefixDir)
-    else:
-      # Single-file prefix: wrap into a one-entry archive so the
-      # substitute path can extract uniformly.
-      var pref = absolutePath(args.prefixDir)
-      let parent = parentDir(pref)
-      let name = extractFilename(pref)
-      var sub: seq[byte] = @[]
-      for ch in ArchiveMagic:
-        sub.add(byte(ch))
-      writeU32LE(sub, ArchiveVersion)
-      writeU32LE(sub, 1'u32)
-      writeU32LE(sub, uint32(name.len))
-      for ch in name: sub.add(byte(ch))
-      writeU32LE(sub, fileModeOctal(pref))
-      let body = readFile(pref)
-      writeU64LE(sub, uint64(body.len))
-      for ch in body: sub.add(byte(ch))
-      sub
-  # Hash the payload bytes (= the digest the manifest must declare).
-  let rawDigest = blake3.digest(payloadBytes)
-  var payloadDigest: Blake3Hash
-  for i in 0 ..< 32:
-    payloadDigest[i] = rawDigest[i]
-  # Realized prefix digest: we re-use the payload hash as v1
-  # "realized-prefix-digest" placeholder. A future version can
-  # compute the canonical realized-tree hash separately.
-  var realizedDigest: Blake3Hash = payloadDigest
-  # Build dep-references (32-byte digests) from the dep-hex list.
-  var depRefs: seq[Blake3Hash] = @[]
-  for depHex in args.depHex:
-    depRefs.add(hexToDigest(depHex))
-  let payloadObj = PayloadObject(
-    kind: pkPrefixArchive, compression: ckNone,
-    declaredSize: uint64(payloadBytes.len),
-    uncompressedSize: uint64(payloadBytes.len),
-    digest: payloadDigest, name: "prefix.rbcarc")
-  var manifest = BinaryCacheManifest(
-    formatVersion: BinaryCacheFormatVersion,
-    entryKey: derivedKey,
-    payloads: @[payloadObj],
-    realizedPrefixDigest: realizedDigest,
-    depReferences: depRefs,
-    relocationPolicy: rpOptional,
-    createdAtUnix: getTime().toUnix())
-  let kp = loadProducerKeypair()
-  serverCodec.signManifest(kp, manifest)
-  let manifestBytes = serverCodec.encodeManifest(manifest)
-
-  randomize()
-  let boundary = "----RBC-cli-" & $rand(99_999_999)
-  let body = buildMultipartBody(boundary, manifestBytes, payloadBytes)
-  let url = defaultCacheUrl() & "/publish"
-  let client = newHttpClient(timeout = 60_000)
-  defer: client.close()
-  client.headers["Content-Type"] = "multipart/form-data; boundary=" & boundary
-  let resp = client.request(url, HttpPost, body)
-  if int(resp.code) >= 300:
-    stderr.writeLine("publish failed: " & $resp.code & " " & resp.body)
+  let kp =
+    try: loadProducerKeypair()
+    except ValueError as e:
+      stderr.writeLine(e.msg)
+      return 2
+  let req = PublishInProcessRequest(
+    entryKeyHex: args.entryKeyHex,
+    prefixDir: args.prefixDir,
+    identity: idy,
+    endpoint: defaultCacheUrl(),
+    keypair: kp)
+  let res = publishInProcess(req)
+  if not res.ok:
+    stderr.writeLine(res.error)
+    # Drift-guard + missing-prefix errors are caller-input failures
+    # (exit 2); everything else is a runtime / network failure (exit 1).
+    # The pre-refactor CLI used the same partitioning.
+    if res.statusCode == 0 and
+       (res.error.contains("identity-derived key does not match") or
+        res.error.contains("prefix path does not exist")):
+      return 2
     return 1
-  echo "published ", resp.body.strip()
+  echo "published ", res.responseBody.strip()
   return 0
 
 # ---------------------------------------------------------------------------

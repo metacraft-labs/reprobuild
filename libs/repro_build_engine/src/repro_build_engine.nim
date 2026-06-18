@@ -12,6 +12,17 @@ import repro_monitor_depfile
 import repro_platform
 import repro_runquota
 
+# M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
+# but is identity-agnostic — the convention populates the identity tuple
+# on the action and the engine passes it through to the publisher
+# closure. ``cache_key`` is intentionally lightweight (pulls
+# ``repro_binary_cache_server/types`` + ``key`` + ``blake3`` only),
+# so this import does NOT drag in the HTTP / closure-walk client
+# surface. The publisher closure (wired by ``repro_cli_support`` /
+# the standard provider in Step B) is the only seam that touches the
+# heavier client modules.
+import repro_binary_cache_client/cache_key
+
 type
   BuildEngineError* = object of CatchableError
 
@@ -110,6 +121,27 @@ type
       ## ``repro why``, the codetracer ``repro test`` integration)
       ## identify framework-specific outputs by interface tag from
       ## this list rather than re-parsing the DSL.
+    publishToBinaryCache*: bool
+      ## M9.L.4-refactor Step A. When ``true`` AND the action
+      ## completes successfully AND ``cacheEntryIdentity.isSome`` AND
+      ## ``BuildEngineConfig.binaryCachePublisher != nil``, the engine
+      ## invokes the publisher closure with the action's identity +
+      ## fingerprint + cwd + outputs + the recorded
+      ## ``ActionResultRecord`` outputs. Defaults to ``false`` so
+      ## existing per-action callers keep their current behaviour
+      ## (zero binary-cache traffic). Step B's convention refactor
+      ## sets ``true`` on the install + stage-copy actions; Step A
+      ## leaves all conventions untouched, so the field is inert in
+      ## the existing recipe corpus.
+    cacheEntryIdentity*: Option[CacheEntryIdentity]
+      ## M9.L.4-refactor Step A. The convention-supplied identity
+      ## tuple from which the publisher re-derives the canonical
+      ## entry-key hex (drift-guard) and which signs the manifest.
+      ## ``none`` (the default) means "no identity wired" — the
+      ## engine skips the publisher call even when
+      ## ``publishToBinaryCache`` is true. Step B populates this
+      ## from recipe metadata in the from-source conventions; Step A
+      ## leaves it ``none`` everywhere.
 
   BuildPool* = object
     name*: string
@@ -189,6 +221,14 @@ type
       ## `repro_peer_cache.action_bundle`. The engine treats the
       ## fetcher's `some(bytes)` result as an opaque payload and
       ## delegates installation to this closure.
+    binaryCachePublisher*: BinaryCachePublisher
+      ## M9.L.4-refactor Step A. Optional binary-cache publisher
+      ## closure. When non-nil, fired after every successful action
+      ## that carries ``publishToBinaryCache = true`` AND a populated
+      ## ``cacheEntryIdentity``. Soft-fail: a publish error logs into
+      ## stats but does NOT abort the build. ``nil`` keeps the engine
+      ## pure-local (legacy behaviour) — the publish hook becomes a
+      ## no-op for every action regardless of the per-action flag.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -299,6 +339,62 @@ type
     ## reason on verification failure without crashing the build. The
     ## CLI provides this closure via the wiring helper in
     ## `repro_cli_support`.
+
+  BinaryCachePublishRequest* = object
+    ## M9.L.4-refactor Step A. Passed to ``BinaryCachePublisher`` when
+    ## the engine fires the post-success publish hook. Decoupled by a
+    ## struct value so the publisher closure can ride a normal
+    ## ``{.closure, gcsafe.}`` lifetime without sharing references
+    ## into the engine's mutable build state.
+    ##
+    ## Fields (engine-populated):
+    ##   * ``actionId`` — ``BuildAction.id`` for diagnostics.
+    ##   * ``weakFingerprint`` — the engine-side action fingerprint
+    ##     (BLAKE3 over canonical action text). NOT the cache-entry
+    ##     key; the closure typically logs it for cross-correlation
+    ##     with the action cache.
+    ##   * ``identity`` — the convention-supplied
+    ##     ``CacheEntryIdentity`` from
+    ##     ``BuildAction.cacheEntryIdentity``. The publisher closure
+    ##     uses it both to re-derive the entry-key (drift-guard) and
+    ##     to sign the manifest.
+    ##   * ``cwd`` — ``BuildAction.cwd``; useful when the publisher
+    ##     needs to interpret a relative ``prefixDir``.
+    ##   * ``declaredOutputs`` — the action's declared output paths
+    ##     (verbatim from ``BuildAction.outputs``).
+    ##   * ``recordOutputs`` — the (path, blob) pairs the engine's
+    ##     local-store ``ActionResultRecord`` captured for the
+    ##     successful action. The publisher reads the prefix bytes
+    ##     directly from disk by convention, but the record-output
+    ##     list lets it skip stat'ing paths the action did not
+    ##     actually produce.
+    actionId*: string
+    weakFingerprint*: ContentDigest
+    identity*: CacheEntryIdentity
+    cwd*: string
+    declaredOutputs*: seq[string]
+    recordOutputs*: seq[string]
+
+  BinaryCachePublishResult* = object
+    ## Outcome returned by the publisher closure. The engine logs the
+    ## diagnostic into stats but does NOT abort the build on a failed
+    ## publish — mirrors ``publishPeerCacheBundle`` soft-fail
+    ## semantics.
+    ok*: bool
+    statusCode*: int
+    error*: string
+    bytesUploaded*: int
+
+  BinaryCachePublisher* = proc(req: BinaryCachePublishRequest):
+    BinaryCachePublishResult {.gcsafe, closure.}
+    ## M9.L.4-refactor Step A. The engine's seam to the binary-cache
+    ## publish pipeline. ``nil`` keeps the engine pure-local — the
+    ## publish hook becomes a no-op even when the action carries
+    ## ``publishToBinaryCache = true``. Step B's convention refactor
+    ## sets the field on actions; the actual closure is wired by the
+    ## standard-provider / CLI binding layer (reading the
+    ## ``REPRO_BINARY_CACHE_*`` env vars + calling
+    ## ``publishInProcess``).
 
   RunningProcessKind = enum
     rpkHelperProcess
@@ -2033,6 +2129,59 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
     finishStat("repro peer-cache publish", publishStart)
 
+  proc publishBinaryCacheBundle(action: BuildAction;
+                                record: ActionResultRecord) =
+    ## M9.L.4-refactor Step A binary-cache publisher hook. Soft-fail
+    ## like ``publishPeerCacheBundle``: a failed publish is logged
+    ## into stats but does NOT abort the build.
+    ##
+    ## Guards (any failure = no-op):
+    ##   * ``BuildEngineConfig.binaryCachePublisher == nil`` — no
+    ##     publisher wired (legacy CLI default).
+    ##   * ``action.publishToBinaryCache == false`` — the convention
+    ##     did not opt this action into binary-cache publishing.
+    ##     Existing recipes leave the flag at its default, so the hook
+    ##     stays inert across the 74-recipe corpus until Step B's
+    ##     convention refactor lands.
+    ##   * ``action.cacheEntryIdentity.isNone`` — no identity tuple
+    ##     to derive the entry-key from. Hard requirement; without
+    ##     the identity the publisher cannot run its drift-guard.
+    ##   * ``record.outputPayloadKind != opkCasBlobs`` — the cache
+    ##     record didn't capture output payloads (metadata-only
+    ##     mode), so the publisher has nothing to ship. Mirrors the
+    ##     same guard in ``publishPeerCacheBundle``.
+    if config.binaryCachePublisher == nil:
+      return
+    if not action.publishToBinaryCache:
+      return
+    if action.cacheEntryIdentity.isNone:
+      return
+    if record.outputPayloadKind != opkCasBlobs:
+      return
+    let publishStart = statStart()
+    var recordOutputs: seq[string] = @[]
+    for output in record.outputs:
+      recordOutputs.add(output.path)
+    let req = BinaryCachePublishRequest(
+      actionId: action.id,
+      weakFingerprint: action.weakFingerprint,
+      identity: action.cacheEntryIdentity.get(),
+      cwd: action.cwd,
+      declaredOutputs: action.outputs,
+      recordOutputs: recordOutputs)
+    let res =
+      try: config.binaryCachePublisher(req)
+      except CatchableError as e:
+        BinaryCachePublishResult(ok: false, statusCode: 0,
+          error: "binary-cache publisher raised: " & e.msg)
+    if not res.ok:
+      stats.addCounterMetric("repro binary-cache publish failures", 1)
+    else:
+      stats.addCounterMetric("repro binary-cache publish ok", 1)
+      stats.addCounterMetric("repro binary-cache publish bytes uploaded",
+        res.bytesUploaded)
+    finishStat("repro binary-cache publish", publishStart)
+
   proc tryFastNoopCacheHits(): Option[BuildRunResult] =
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
@@ -2783,8 +2932,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # blob payloads back out of the local CAS. The
               # publisher-less path (legacy CLI default) keeps the
               # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+              # M9.L.4-refactor Step A: ALSO force retention when the
+              # binary-cache publisher is configured AND this action
+              # opted into publishing — the publish hook guards on
+              # ``outputPayloadKind == opkCasBlobs`` and would
+              # silently skip otherwise.
               let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-                config.peerCacheActionPublisher != nil
+                config.peerCacheActionPublisher != nil or
+                (config.binaryCachePublisher != nil and
+                  plan.action.publishToBinaryCache)
               let record = cache.recordActionResult(cas, plan.action.weakFingerprint,
                 plan.action.actionCachePolicy, plan.action.cacheInputPaths(evidence.evidence),
                 plan.action.outputs, plan.action.cwd,
@@ -2794,6 +2950,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
+              publishBinaryCacheBundle(plan.action, record)
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -3125,8 +3282,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         invalidateCachedWrites(action, evidence.evidence)
         if action.cacheable:
           let recordStart = statStart()
+          # M9.L.4-refactor Step A: force output-blob retention when
+          # either the peer-cache publisher OR the binary-cache
+          # publisher (with this action opted in) needs to read the
+          # blob payloads back out of the local CAS.
           let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
-            config.peerCacheActionPublisher != nil
+            config.peerCacheActionPublisher != nil or
+            (config.binaryCachePublisher != nil and
+              action.publishToBinaryCache)
           let record = cache.recordActionResult(cas, action.weakFingerprint,
             action.actionCachePolicy, action.cacheInputPaths(evidence.evidence),
             action.outputs, action.cwd,
@@ -3136,6 +3299,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
           publishPeerCacheBundle(action.weakFingerprint, record)
+          publishBinaryCacheBundle(action, record)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:
