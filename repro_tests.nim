@@ -2835,6 +2835,88 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Fifty-first from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the crypto-and-FFI batch (libffi + nettle +
+  # libgcrypt + gnutls). Single-library autotools shape. Pins libffi
+  # 3.4.6's vendored sha256 + ``./configure`` flag sequence (incl. the
+  # ``--disable-multi-os-directory`` flag that guards the multilib
+  # install-layout split) + cross-channel isolation + ``libFfi``
+  # library artifact. libffi is the portable foreign-function-interface
+  # library at the bottom of every "call a C function from a high-level
+  # language" stack (GObject Introspection's libgirepository, Python's
+  # ctypes, Ruby's FFI gem, GJS's SpiderMonkey callback marshalling).
+  TestSpec(
+    source: "recipes/packages/source/libffi/test_libffi_source.nim",
+    binary: "build/test-bin/t_libffi_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifty-second from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the crypto-and-FFI batch. TWO-library
+  # autotools shape (libnettle + libhogweed) — pairs with the sibling
+  # ``libgcryptSource`` (fifty-third) + ``gnutlsSource`` (fifty-fourth)
+  # to build out the GNU TLS / crypto stack independently of openssl.
+  # Pins nettle 3.10's vendored sha256 + ``./configure`` flag sequence
+  # (incl. the mixed ``--disable-*`` / ``--enable-*`` polarity that pins
+  # the per-channel handling of mixed disable/enable polarities) +
+  # cross-channel isolation + ``libNettle`` + ``libHogweed`` library
+  # artifacts. nettle is the low-level cryptography library at the
+  # bottom of the GnuTLS stack; libnettle covers symmetric ciphers +
+  # hashes + AEAD; libhogweed covers public-key ciphers.
+  TestSpec(
+    source: "recipes/packages/source/nettle/test_nettle_source.nim",
+    binary: "build/test-bin/t_nettle_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifty-third from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the crypto-and-FFI batch and FIRST recipe in
+  # the corpus to vendor a .tar.bz2 archive (the prior fifty-two used
+  # .tar.gz or .tar.xz). Single-library autotools shape. Pins libgcrypt
+  # 1.11.0's vendored sha256 + ``./configure`` flag sequence (three
+  # consecutive ``--disable-*`` flags that pin the per-channel handling
+  # of common-prefix flag names) + cross-channel isolation + ``libGcrypt``
+  # library artifact + .tar.bz2 URL-suffix pin (the convention layer's
+  # extract action selects the bunzip2 decompressor based on the URL
+  # suffix; a regression that defaulted the decompressor back to gzip /
+  # xz would surface in the extract phase). libgcrypt is the GnuPG
+  # project's higher-level cryptography library consumed by gpg +
+  # gpg-agent + gpgsm + libsecret + the GNOME Keyring + dnsmasq's DNSSEC
+  # validation path.
+  TestSpec(
+    source: "recipes/packages/source/libgcrypt/test_libgcrypt_source.nim",
+    binary: "build/test-bin/t_libgcrypt_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifty-fourth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the crypto-and-FFI batch. Single-library
+  # autotools shape with the LARGEST production configure-flag set in
+  # the corpus (six flags) — pins the per-channel handling of a larger-
+  # cardinality flag sequence against a regression that truncated mid-
+  # sequence. Pins gnutls 3.8.8's vendored sha256 + ``./configure`` flag
+  # sequence (mixed ``--disable-*`` / ``--without-*`` polarity that pins
+  # the autotools two-flavour convention: ``--enable-X`` / ``--disable-X``
+  # toggle a boolean feature; ``--with-X`` / ``--without-X`` toggle a
+  # dependency probe) + cross-channel isolation + ``libGnutls`` library
+  # artifact. gnutls is the GNU TLS / DTLS library at the bottom of the
+  # GNOME networking stack's non-openssl backend selection (consumed by
+  # glib-networking's gnutls backend, GStreamer's souphttpsrc + tlsenc /
+  # tlsdec elements, and GNOME Online Accounts' OAuth2 flows via libsoup).
+  TestSpec(
+    source: "recipes/packages/source/gnutls/test_gnutls_source.nim",
+    binary: "build/test-bin/t_gnutls_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
