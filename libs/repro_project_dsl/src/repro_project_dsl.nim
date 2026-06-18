@@ -25,7 +25,7 @@
 ## callers across legacy/monolithic and shared-DLL provider modes; only
 ## the include files change role between modes.
 
-import std/[algorithm, json, macros, os, strutils, tables]
+import std/[algorithm, json, macros, options, os, strutils, tables]
 
 # DSL-port M9.A: ``nimcrypto/sha2`` powers the content-addressed sha256
 # hashing path for ``consumeConfigFile`` / ``consumeManagedBlock``. We
@@ -38,6 +38,18 @@ import std/[algorithm, json, macros, os, strutils, tables]
 # pre-existing shim emitters (Generated-Configuration-Files.md
 # §"Cache-key composition").
 import nimcrypto/sha2 as ncSha2
+
+# M9.L.4-refactor Step B: ``BuildActionDef`` carries an optional
+# ``CacheEntryIdentity`` populated by the from-source conventions so the
+# engine's binary-cache publisher hook can sign + upload the install
+# tree after a successful run. The DSL layer takes a hard dependency on
+# ``repro_binary_cache_client/cache_key`` (and transitively on
+# ``repro_binary_cache_server/types``) so the field's type is the same
+# canonical struct the engine and the binary-cache publisher consume —
+# no parallel mirror type drifting away from the spec.
+import repro_binary_cache_client/cache_key
+import repro_binary_cache_server/types as bcsTypes
+export cache_key, bcsTypes
 
 proc extendedPath(path: string): string =
   when defined(windows):

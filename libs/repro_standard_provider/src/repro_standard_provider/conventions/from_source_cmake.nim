@@ -73,19 +73,15 @@
 ##   * Per-artifact output lives at
 ##     ``<projectRoot>/.repro/output/<member>/<member>``.
 ##
-##   6. **Binary-cache publish** (``from-source-cmake-publish-<package>``)
-##      — best-effort upload of ``<stagingDir>`` to ``repro-cache`` via
-##      ``apps/repro-binary-cache-client publish``. Argv wraps the CLI
-##      invocation in ``sh -c ".. || true"`` so an unreachable cache /
-##      missing key+cert env vars / missing CLI degrades to a soft-fail
-##      without aborting the build. Depends on every stage-copy action
-##      so the publish runs AFTER the install tree is fully
-##      materialised. The 64-char hex cache-entry key is derived at
-##      emit time via ``from_source_publish.deriveCacheKeyHex`` over
-##      the M9.L.4 v1 ``CacheEntryIdentity`` tuple with the
-##      ``"cmake"`` toolchain identity tag. See the shared
-##      ``from_source_publish`` module for the populated-vs-deferred
-##      identity-slot breakdown.
+## ## Binary-cache publishing (M9.L.4-refactor Step B)
+##
+## The install + stage-copy actions stamp
+## ``BuildActionDef.publishToBinaryCache = true`` AND
+## ``cacheEntryIdentity = some(computeCacheEntryIdentity(...))`` so the
+## engine's ``BinaryCachePublisher`` hook publishes the install tree to
+## ``repro-cache`` after a successful run. The convention no longer
+## emits a publish edge of its own — see the meson convention's
+## "Binary-cache publishing" section for the architectural rationale.
 ##
 ## ## Honest deferrals
 ##
@@ -134,17 +130,15 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
 
-# M9.L.4.1 binary-cache publish wiring. The shared
-# ``from_source_publish`` module owns the cache-key composition + the
-# publish-action emitter; this convention contributes the cmake-
-# specific publish prefix (``<staging>`` itself, because the install
-# action passes ``cmake --install --prefix <staging>`` rather than
-# meson's ``--destdir`` so artefacts land directly under
-# ``<staging>/{bin,lib}/`` without the extra ``usr/local`` rebase) and
-# the convention tag (``"cmake"``) which lands in the action id
-# (``from-source-cmake-publish-<pkg>``) AND in the
-# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
-import repro_standard_provider/conventions/from_source_publish
+# M9.L.4-refactor Step B binary-cache identity wiring. The shared
+# ``from_source_identity`` module owns the cache-key composition; this
+# convention only supplies the convention tag (``"cmake"``) per stage-
+# copy / install action. The Step-A-era publish-action emitter is gone
+# — the engine's ``BinaryCachePublisher`` hook publishes transparently
+# when ``BuildActionDef.publishToBinaryCache`` is true and
+# ``cacheEntryIdentity`` is populated.
+import std/options
+import repro_standard_provider/conventions/from_source_identity
 
 const
   ScratchDirName* = ".repro/build"
@@ -463,7 +457,8 @@ proc emitBuildAction(projectRoot, cmakeExe, buildDir, configureStamp: string):
   (action, stamp)
 
 proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
-                       buildStamp: string):
+                       buildStamp: string;
+                       identity: CacheEntryIdentity):
                          tuple[action: BuildActionDef; stamp: string] =
   ## ``cmake --install <buildDir> --prefix <staging>``.
   ##
@@ -474,6 +469,10 @@ proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
   ## layout (``<staging>/bin/`` for executables, ``<staging>/lib/`` for
   ## libraries) and harvest binaries accordingly. See module
   ## docstring's "Honest deferrals" section for the limitations.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the install action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful install.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
   let shExe = findExe("sh")
@@ -497,7 +496,9 @@ proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.install")
+    commandStatsId = "from-source-cmake.install",
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
   (action, stamp)
 
 proc dasherise(name: string): string =
@@ -543,12 +544,17 @@ proc stagedBinaryPath(staging, member: string;
     staging / "lib" / ("lib" & member & ".a")
 
 proc emitStageCopyAction(projectRoot, staging, installStamp: string;
-                         member: FromSourceCmakeMember): BuildActionDef =
+                         member: FromSourceCmakeMember;
+                         identity: CacheEntryIdentity): BuildActionDef =
   ## Copy ``<staging>/bin/<member>`` (or ``<staging>/lib/lib<member>.a``)
   ## to ``<projectRoot>/.repro/output/<member>/<member>``. This action
   ## is what the engine's output-collection step keys off — the
   ## canonical per-artifact output path matches the existing direct
   ## conventions' ``<root>/.repro/output/<name>/<name>`` schema.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful per-artifact stage.
   let outDir = artifactOutputDir(projectRoot, member.name)
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
@@ -575,7 +581,9 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     outputs = @[outPath],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.stage." & kindTag)
+    commandStatsId = "from-source-cmake.stage." & kindTag,
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
 
 # ---------------------------------------------------------------------------
 # Convention entry
@@ -655,6 +663,12 @@ proc fromSourceCmakeEmitFragment(projectRoot: string;
     let buildDir = buildScratchDir(projectRoot)
     let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
+    # M9.L.4-refactor Step B: compose the binary-cache identity once
+    # and thread it onto the install + stage-copy edges. The engine's
+    # ``BinaryCachePublisher`` hook consumes the same tuple from the
+    # decoded ``BuildAction``; conventions stay tool-agnostic.
+    let identity = computeCacheEntryIdentity(projectRoot,
+      dslPackageName, "cmake")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
@@ -671,29 +685,19 @@ proc fromSourceCmakeEmitFragment(projectRoot: string;
       let buildPair = emitBuildAction(projectRoot, cmakeExe, buildDir,
         configurePair.stamp)
       allActions.add(buildPair.action)
-      # 4. Install
+      # 4. Install — carries the binary-cache identity so the engine
+      # hook publishes the install tree after success.
       let installPair = emitInstallAction(projectRoot, cmakeExe, buildDir,
-        staging, buildPair.stamp)
+        staging, buildPair.stamp, identity)
       allActions.add(installPair.action)
-      # 5. Per-artifact stage-copy
-      var stageDeps: seq[string] = @[]
-      var stageOutputs: seq[string] = @[]
+      # 5. Per-artifact stage-copy — each edge also carries the
+      # identity. The engine's hook fires per successful action; the
+      # convention does NOT emit a separate publish edge any more (the
+      # Step-A-era ``emitPublishAction`` retired in Step B).
       for member in members:
         let stageAct = emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member)
+          installPair.stamp, member, identity)
         allActions.add(stageAct)
-        stageDeps.add(stageAct.id)
-        for outPath in stageAct.outputs:
-          stageOutputs.add(outPath)
-      # 6. Binary-cache publish (M9.L.4.1). Best-effort: argv wraps the
-      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
-      # missing key+cert / missing CLI does NOT abort the build. The
-      # publish prefix is the staging dir itself — cmake's ``--install
-      # --prefix <staging>`` lays artefacts directly under
-      # ``<staging>/{bin,lib}/``, no extra ``usr/local`` rebase
-      # (unlike meson's ``--destdir`` semantics).
-      allActions.add(emitPublishAction(projectRoot, staging,
-        dslPackageName, "cmake", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

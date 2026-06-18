@@ -60,19 +60,21 @@
 ##      per declared ``executable``/``library`` member. Depends on the
 ##      install action.
 ##
-##   6. **Binary-cache publish** (``from-source-meson-publish-<package>``)
-##      — best-effort upload of ``<stagingDir>/usr/local`` to
-##      ``repro-cache`` via ``apps/repro-binary-cache-client publish``.
-##      Argv wraps the CLI invocation in ``sh -c ".. || true"`` so an
-##      unreachable cache / missing key+cert env vars / missing CLI
-##      degrades to a soft-fail without aborting the build. Depends on
-##      every stage-copy action so the publish runs AFTER the install
-##      tree is fully materialised. The 64-char hex cache-entry key is
-##      derived at emit time via
-##      ``cache_key.deriveCacheEntryKeyHex`` over the M9.L.4 v1
-##      ``CacheEntryIdentity`` tuple (see ``deriveCacheKeyHex`` below
-##      and the "Honest deferrals" section for the populated-vs-deferred
-##      breakdown).
+## ## Binary-cache publishing (M9.L.4-refactor Step B)
+##
+## The install + stage-copy actions stamp
+## ``BuildActionDef.publishToBinaryCache = true`` AND
+## ``cacheEntryIdentity = some(computeCacheEntryIdentity(...))`` so the
+## engine's ``BinaryCachePublisher`` hook (see
+## ``libs/repro_build_engine/src/repro_build_engine.nim``
+## §publishBinaryCacheBundle) uploads the install tree to ``repro-cache``
+## after a successful run. The convention no longer emits a publish
+## edge of its own — the Step A engine hook + this convention's passive
+## metadata together replace the Step-A-era ``from-source-meson-publish-
+## <pkg>`` action that lived in ``from_source_publish.nim`` before
+## Step B. The 64-char hex cache-entry key is derived at run time by
+## the publisher closure from the same ``CacheEntryIdentity`` tuple via
+## ``cache_key.deriveCacheEntryKeyHex``.
 ##
 ## ## Scratch layout
 ##
@@ -138,15 +140,18 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
 
-# M9.L.4 binary-cache publish wiring. The shared
-# ``from_source_publish`` module owns the cache-key composition + the
-# publish-action emitter; the meson convention only supplies the
-# convention tag (``"meson"``) and the staging prefix
-# (``<staging>/usr/local``). Sibling conventions
+# M9.L.4-refactor Step B binary-cache identity wiring. The shared
+# ``from_source_identity`` module owns the cache-key composition; the
+# meson convention only supplies the convention tag (``"meson"``) per
+# stage-copy / install action. Sibling conventions
 # (``from_source_cmake`` / ``from_source_autotools`` /
 # ``from_source_make``) share the same helper to keep the identity
-# tuple's wiring single-sourced.
-import repro_standard_provider/conventions/from_source_publish
+# tuple's wiring single-sourced. The Step-A-era publish-action emitter
+# is gone — the engine's ``BinaryCachePublisher`` hook publishes
+# transparently when ``BuildActionDef.publishToBinaryCache`` is true
+# and ``cacheEntryIdentity`` is populated.
+import std/options
+import repro_standard_provider/conventions/from_source_identity
 
 const
   ScratchDirName* = ".repro/build"
@@ -463,7 +468,8 @@ proc emitCompileAction(projectRoot, mesonExe, buildDir, setupStamp: string):
   (action, stamp)
 
 proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
-                       compileStamp: string):
+                       compileStamp: string;
+                       identity: CacheEntryIdentity):
                          tuple[action: BuildActionDef; stamp: string] =
   ## ``meson install -C <buildDir> --destdir <staging>``.
   ##
@@ -474,6 +480,11 @@ proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
   ## the recipe pins via ``mesonOptions``) and harvest binaries from
   ## ``<staging><prefix>/bin/<member>``. See module docstring's "Honest
   ## deferrals" section for the limitations.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the install action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful install. The convention is unaware of the
+  ## CLI shape (publish argv / network) — that lives in the engine.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
   let shExe = findExe("sh")
@@ -497,7 +508,9 @@ proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.install")
+    commandStatsId = "from-source-meson.install",
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
   (action, stamp)
 
 proc dasherise(name: string): string =
@@ -532,12 +545,19 @@ proc stagedBinaryPath(staging, member: string;
     staging / "usr" / "local" / "lib" / ("lib" & dashName & ".a")
 
 proc emitStageCopyAction(projectRoot, staging, installStamp: string;
-                         member: FromSourceMesonMember): BuildActionDef =
+                         member: FromSourceMesonMember;
+                         identity: CacheEntryIdentity): BuildActionDef =
   ## Copy ``<staging>/usr/local/bin/<member>`` to
   ## ``<projectRoot>/.repro/output/<member>/<member>``. This action is
   ## what the engine's output-collection step keys off — the canonical
   ## per-artifact output path matches the existing direct conventions'
   ## ``<root>/.repro/output/<name>/<name>`` schema.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful per-artifact stage. The identity is the
+  ## same value the install action carries — both edges contribute to
+  ## the same logical cache entry.
   let outDir = artifactOutputDir(projectRoot, member.name)
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
@@ -564,18 +584,21 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     outputs = @[outPath],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.stage." & kindTag)
+    commandStatsId = "from-source-meson.stage." & kindTag,
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
 
 # ---------------------------------------------------------------------------
-# M9.L.4 — binary-cache publish action emission lives in the shared
-# ``from_source_publish`` module so the four from-source siblings share
-# the same identity-tuple wiring. This convention contributes the
-# meson-specific publish prefix (``<staging>/usr/local`` — meson's
-# default ``${prefix}`` is ``/usr/local`` and the install's ``--destdir
-# <staging>`` lays the tree under ``<staging>/usr/local/``) and the
-# convention tag (``"meson"``) which lands in the action id
-# (``from-source-meson-publish-<pkg>``) AND in the
-# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
+# M9.L.4-refactor Step B — the convention NO LONGER emits a publish
+# action. The engine's ``BinaryCachePublisher`` hook (see
+# ``libs/repro_build_engine/src/repro_build_engine.nim``) fires after
+# every successful action that carries
+# ``BuildAction.publishToBinaryCache = true`` AND
+# ``cacheEntryIdentity.isSome``. The install + stage-copy actions above
+# stamp both fields via the ``from_source_identity`` helper module so
+# the engine publishes transparently when an instrumented producer
+# build wires a non-nil publisher closure into its
+# ``BuildEngineConfig``.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -656,6 +679,12 @@ proc fromSourceMesonEmitFragment(projectRoot: string;
     let buildDir = buildScratchDir(projectRoot)
     let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
+    # M9.L.4-refactor Step B: compose the binary-cache identity once
+    # and thread it onto the install + stage-copy edges. The engine's
+    # ``BinaryCachePublisher`` hook consumes the same tuple from the
+    # decoded ``BuildAction``; conventions stay tool-agnostic.
+    let identity = computeCacheEntryIdentity(projectRoot,
+      dslPackageName, "meson")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
@@ -672,28 +701,19 @@ proc fromSourceMesonEmitFragment(projectRoot: string;
       let compilePair = emitCompileAction(projectRoot, mesonExe, buildDir,
         setupPair.stamp)
       allActions.add(compilePair.action)
-      # 4. Install
+      # 4. Install — carries the binary-cache identity so the engine
+      # hook publishes the install tree after success.
       let installPair = emitInstallAction(projectRoot, mesonExe, buildDir,
-        staging, compilePair.stamp)
+        staging, compilePair.stamp, identity)
       allActions.add(installPair.action)
-      # 5. Per-artifact stage-copy
-      var stageDeps: seq[string] = @[]
-      var stageOutputs: seq[string] = @[]
+      # 5. Per-artifact stage-copy — each edge also carries the
+      # identity. The engine's hook fires per successful action; the
+      # convention does NOT emit a separate publish edge any more (the
+      # Step-A-era ``emitPublishAction`` retired in Step B).
       for member in members:
         let stageAct = emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member)
+          installPair.stamp, member, identity)
         allActions.add(stageAct)
-        stageDeps.add(stageAct.id)
-        for outPath in stageAct.outputs:
-          stageOutputs.add(outPath)
-      # 6. Binary-cache publish (M9.L.4). Best-effort: argv wraps the
-      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
-      # missing key+cert / missing CLI does NOT abort the build. The
-      # prefix is meson's default ``${prefix}=/usr/local`` rebased
-      # under ``--destdir <staging>``.
-      let publishPrefix = staging / "usr" / "local"
-      allActions.add(emitPublishAction(projectRoot, publishPrefix,
-        dslPackageName, "meson", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

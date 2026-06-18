@@ -398,6 +398,23 @@ type
       ## ``env`` extends rather than replaces. Empty for legacy
       ## recipes (and the v13-and-earlier payload codec round-trips
       ## the field as empty so older artifacts decode cleanly).
+    publishToBinaryCache*: bool
+      ## M9.L.4-refactor Step B: passive flag the from-source
+      ## conventions stamp on each install + stage-copy action so the
+      ## engine's binary-cache publisher hook fires after a successful
+      ## run. Default ``false`` keeps legacy actions inert — the
+      ## engine's hook only consults the publisher closure when both
+      ## this flag and ``cacheEntryIdentity.isSome`` AND the engine
+      ## config carries a non-nil ``binaryCachePublisher`` hold.
+      ## Payload codec v15+.
+    cacheEntryIdentity*: Option[CacheEntryIdentity]
+      ## M9.L.4-refactor Step B: convention-supplied identity tuple
+      ## from which the engine's publisher re-derives the canonical
+      ## 64-char hex entry key (drift-guard) and which signs the
+      ## manifest. ``none`` (the default) means "no identity wired" —
+      ## conventions that don't opt into binary-cache publishing leave
+      ## the slot empty so the engine's hook skips the action even when
+      ## the flag above is true. Payload codec v15+.
     sourceFile*: string
     sourceLine*: int
 

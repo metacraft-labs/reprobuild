@@ -113,28 +113,20 @@
 ##      members and the kernel's in-source artefacts both round-trip
 ##      through the same convention.
 ##
-##   5. **Binary-cache publish** (``from-source-make-publish-<package>``)
-##      — best-effort upload of ``<staging>`` to ``repro-cache`` via
-##      ``apps/repro-binary-cache-client publish``. Argv wraps the CLI
-##      invocation in ``sh -c ".. || true"`` so an unreachable cache /
-##      missing key+cert env vars / missing CLI degrades to a soft-fail
-##      without aborting the build. Depends on every stage-copy action
-##      so the publish runs AFTER the install tree is fully
-##      materialised. The 64-char hex cache-entry key is derived at
-##      emit time via ``from_source_publish.deriveCacheKeyHex`` over
-##      the M9.L.4 v1 ``CacheEntryIdentity`` tuple with the ``"make"``
-##      toolchain identity tag. The publish prefix is the staging dir
-##      itself (``<staging>``) rather than ``<staging>/usr/`` — the
-##      kernel recipe's kbuild ``install`` target doesn't really use
-##      DESTDIR (the stage-copy probes in-source paths instead), so
-##      the staging dir is the unifying prefix that covers libcap's
-##      ``<staging>/usr/{sbin,lib}/`` install tree AND the kernel's
-##      empty / partial staging tree. Documented asymmetry: libcap's
-##      published payload includes its install tree under
-##      ``<staging>/usr/``; the kernel's published payload is empty
-##      in v1 (deferred — kernel cache publish needs a custom prefix
-##      strategy when the in-source artefacts replace the install
-##      tree). See module's "Honest deferrals" section.
+## ## Binary-cache publishing (M9.L.4-refactor Step B)
+##
+## The install + stage-copy actions stamp
+## ``BuildActionDef.publishToBinaryCache = true`` AND
+## ``cacheEntryIdentity = some(computeCacheEntryIdentity(...))`` so the
+## engine's ``BinaryCachePublisher`` hook publishes ``<staging>`` to
+## ``repro-cache`` after a successful run. The convention no longer
+## emits a publish edge of its own — see the meson convention's
+## "Binary-cache publishing" section for the architectural rationale.
+## The kernel-vs-libcap publish-payload asymmetry called out in M9.L.4
+## still holds: libcap's published payload covers
+## ``<staging>/usr/{sbin,lib}/``; the kernel's published payload is
+## empty (deferred until a custom prefix strategy lifts kernel artefacts
+## out of the in-source tree).
 ##
 ## ## Scratch layout
 ##
@@ -205,15 +197,15 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
 
-# M9.L.4.3 binary-cache publish wiring. The shared
-# ``from_source_publish`` module owns the cache-key composition + the
-# publish-action emitter; this convention contributes the make-
-# specific publish prefix (the staging dir itself — kbuild doesn't
-# really use DESTDIR so the unifying prefix is ``<staging>``) and the
-# convention tag (``"make"``) which lands in the action id
-# (``from-source-make-publish-<pkg>``) AND in the
-# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
-import repro_standard_provider/conventions/from_source_publish
+# M9.L.4-refactor Step B binary-cache identity wiring. The shared
+# ``from_source_identity`` module owns the cache-key composition; this
+# convention only supplies the convention tag (``"make"``) per stage-
+# copy / install action. The Step-A-era publish-action emitter is gone
+# — the engine's ``BinaryCachePublisher`` hook publishes transparently
+# when ``BuildActionDef.publishToBinaryCache`` is true and
+# ``cacheEntryIdentity`` is populated.
+import std/options
+import repro_standard_provider/conventions/from_source_identity
 
 const
   ScratchDirName* = ".repro/build"
@@ -465,7 +457,8 @@ proc emitBuildAction(projectRoot, makeExe, srcDir: string;
 
 proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
                        buildStamp: string;
-                       makeFlags: seq[string]):
+                       makeFlags: seq[string];
+                       identity: CacheEntryIdentity):
                          tuple[action: BuildActionDef; stamp: string] =
   ## ``cd <srcDir> && make install DESTDIR=<staging> <makeFlags...>``.
   ##
@@ -480,6 +473,10 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
   ## The ``makeFlags`` are re-applied to the install action so any
   ## ``prefix=`` / ``lib=`` overrides the build action saw also apply
   ## to install — libcap's Makefile reads both at install time.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the install action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful install.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
   let shExe = findExe("sh")
@@ -510,7 +507,9 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-make.install")
+    commandStatsId = "from-source-make.install",
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
   (action, stamp)
 
 proc kernelInSourcePath(srcDir, member: string): string =
@@ -568,7 +567,8 @@ proc stagingCandidatePaths(staging, member: string;
 
 proc emitStageCopyAction(projectRoot, srcDir, staging,
                          installStamp: string;
-                         member: FromSourceMakeMember): BuildActionDef =
+                         member: FromSourceMakeMember;
+                         identity: CacheEntryIdentity): BuildActionDef =
   ## Copy the staged artefact to
   ## ``<projectRoot>/.repro/output/<member>/<member>``. The emitted
   ## shell script probes the in-source kernel path first (for the
@@ -576,6 +576,10 @@ proc emitStageCopyAction(projectRoot, srcDir, staging,
   ## list. The first existing path wins; the script hard-fails if
   ## NONE of the probes match (so a regression that breaks every
   ## probe surfaces as a build failure, not a silent missing-output).
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful per-artifact stage.
   let outDir = artifactOutputDir(projectRoot, member.name)
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
@@ -626,7 +630,9 @@ proc emitStageCopyAction(projectRoot, srcDir, staging,
     outputs = @[outPath],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-make.stage." & kindTag)
+    commandStatsId = "from-source-make.stage." & kindTag,
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
 
 # ---------------------------------------------------------------------------
 # Convention entry
@@ -723,6 +729,12 @@ proc fromSourceMakeEmitFragment(projectRoot: string;
     let srcDir = fetchExtractedRoot(projectRoot, spec)
     let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
+    # M9.L.4-refactor Step B: compose the binary-cache identity once
+    # and thread it onto the install + stage-copy edges. The engine's
+    # ``BinaryCachePublisher`` hook consumes the same tuple from the
+    # decoded ``BuildAction``; conventions stay tool-agnostic.
+    let identity = computeCacheEntryIdentity(projectRoot,
+      dslPackageName, "make")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
@@ -735,27 +747,19 @@ proc fromSourceMakeEmitFragment(projectRoot: string;
       let buildPair = emitBuildAction(projectRoot, makeExe, srcDir,
         makeFlags, @[fetchAct.id], @[fetchStamp])
       allActions.add(buildPair.action)
-      # 3. Install
+      # 3. Install — carries the binary-cache identity so the engine
+      # hook publishes the install tree after success.
       let installPair = emitInstallAction(projectRoot, makeExe, srcDir,
-        staging, buildPair.stamp, makeFlags)
+        staging, buildPair.stamp, makeFlags, identity)
       allActions.add(installPair.action)
-      # 4. Per-artifact stage-copy
-      var stageDeps: seq[string] = @[]
-      var stageOutputs: seq[string] = @[]
+      # 4. Per-artifact stage-copy — each edge also carries the
+      # identity. The engine's hook fires per successful action; the
+      # convention does NOT emit a separate publish edge any more (the
+      # Step-A-era ``emitPublishAction`` retired in Step B).
       for member in members:
         let stageAct = emitStageCopyAction(projectRoot, srcDir, staging,
-          installPair.stamp, member)
+          installPair.stamp, member, identity)
         allActions.add(stageAct)
-        stageDeps.add(stageAct.id)
-        for outPath in stageAct.outputs:
-          stageOutputs.add(outPath)
-      # 5. Binary-cache publish (M9.L.4.3). Best-effort: argv wraps the
-      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
-      # missing key+cert / missing CLI does NOT abort the build. The
-      # publish prefix is the staging dir itself — see module
-      # docstring for the libcap-vs-kernel asymmetry rationale.
-      allActions.add(emitPublishAction(projectRoot, staging,
-        dslPackageName, "make", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

@@ -85,19 +85,15 @@
 ##      declared ``executable`` / ``library`` member. Depends on the
 ##      install action.
 ##
-##   6. **Binary-cache publish** (``from-source-autotools-publish-<package>``)
-##      — best-effort upload of ``<staging>/usr`` to ``repro-cache`` via
-##      ``apps/repro-binary-cache-client publish``. Argv wraps the CLI
-##      invocation in ``sh -c ".. || true"`` so an unreachable cache /
-##      missing key+cert env vars / missing CLI degrades to a soft-fail
-##      without aborting the build. Depends on every stage-copy action
-##      so the publish runs AFTER the install tree is fully
-##      materialised. The 64-char hex cache-entry key is derived at
-##      emit time via ``from_source_publish.deriveCacheKeyHex`` over
-##      the M9.L.4 v1 ``CacheEntryIdentity`` tuple with the
-##      ``"autotools"`` toolchain identity tag. See the shared
-##      ``from_source_publish`` module for the populated-vs-deferred
-##      identity-slot breakdown.
+## ## Binary-cache publishing (M9.L.4-refactor Step B)
+##
+## The install + stage-copy actions stamp
+## ``BuildActionDef.publishToBinaryCache = true`` AND
+## ``cacheEntryIdentity = some(computeCacheEntryIdentity(...))`` so the
+## engine's ``BinaryCachePublisher`` hook publishes ``<staging>/usr`` to
+## ``repro-cache`` after a successful run. The convention no longer
+## emits a publish edge of its own — see the meson convention's
+## "Binary-cache publishing" section for the architectural rationale.
 ##
 ## ## Scratch layout
 ##
@@ -188,16 +184,15 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
 
-# M9.L.4.2 binary-cache publish wiring. The shared
-# ``from_source_publish`` module owns the cache-key composition + the
-# publish-action emitter; this convention contributes the autotools-
-# specific publish prefix (``<staging>/usr`` — autoconf's default
-# ``--prefix=/usr`` anchor combined with ``make install
-# DESTDIR=<staging>`` lays artefacts under ``<staging>/usr/{bin,lib}/``)
-# and the convention tag (``"autotools"``) which lands in the action
-# id (``from-source-autotools-publish-<pkg>``) AND in the
-# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
-import repro_standard_provider/conventions/from_source_publish
+# M9.L.4-refactor Step B binary-cache identity wiring. The shared
+# ``from_source_identity`` module owns the cache-key composition; this
+# convention only supplies the convention tag (``"autotools"``) per
+# stage-copy / install action. The Step-A-era publish-action emitter is
+# gone — the engine's ``BinaryCachePublisher`` hook publishes
+# transparently when ``BuildActionDef.publishToBinaryCache`` is true
+# and ``cacheEntryIdentity`` is populated.
+import std/options
+import repro_standard_provider/conventions/from_source_identity
 
 const
   ScratchDirName* = ".repro/build"
@@ -474,7 +469,8 @@ proc emitBuildAction(projectRoot, makeExe, srcDir, configureStamp: string):
   (action, stamp)
 
 proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
-                       buildStamp: string):
+                       buildStamp: string;
+                       identity: CacheEntryIdentity):
                          tuple[action: BuildActionDef; stamp: string] =
   ## ``cd <srcDir> && make install DESTDIR=<staging>``.
   ##
@@ -483,6 +479,10 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
   ## prefixes every install path with ``<destdir>``. Binaries land at
   ## ``<staging>/usr/bin/...`` and libraries at ``<staging>/usr/lib/...``
   ## given the ``--prefix=/usr`` anchor.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the install action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful install.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
   let shExe = findExe("sh")
@@ -506,7 +506,9 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.install")
+    commandStatsId = "from-source-autotools.install",
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
   (action, stamp)
 
 proc stripLibPrefix(name: string): string =
@@ -552,13 +554,18 @@ proc stagedBinaryPath(staging, member: string;
     staging / "usr" / "lib" / (lowered & ".so")
 
 proc emitStageCopyAction(projectRoot, staging, installStamp: string;
-                         member: FromSourceAutotoolsMember): BuildActionDef =
+                         member: FromSourceAutotoolsMember;
+                         identity: CacheEntryIdentity): BuildActionDef =
   ## Copy ``<staging>/usr/bin/<member>`` (or
   ## ``<staging>/usr/lib/lib<member>.so``) to
   ## ``<projectRoot>/.repro/output/<member>/<member>``. This action is
   ## what the engine's output-collection step keys off — the canonical
   ## per-artifact output path matches the existing direct conventions'
   ## ``<root>/.repro/output/<name>/<name>`` schema.
+  ##
+  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
+  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
+  ## fires after a successful per-artifact stage.
   let outDir = artifactOutputDir(projectRoot, member.name)
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
@@ -585,7 +592,9 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     outputs = @[outPath],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.stage." & kindTag)
+    commandStatsId = "from-source-autotools.stage." & kindTag,
+    publishToBinaryCache = true,
+    cacheEntryIdentity = some(identity))
 
 # ---------------------------------------------------------------------------
 # Convention entry
@@ -674,6 +683,12 @@ proc fromSourceAutotoolsEmitFragment(projectRoot: string;
     let srcDir = fetchExtractedRoot(projectRoot, spec)
     let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
+    # M9.L.4-refactor Step B: compose the binary-cache identity once
+    # and thread it onto the install + stage-copy edges. The engine's
+    # ``BinaryCachePublisher`` hook consumes the same tuple from the
+    # decoded ``BuildAction``; conventions stay tool-agnostic.
+    let identity = computeCacheEntryIdentity(projectRoot,
+      dslPackageName, "autotools")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
@@ -690,30 +705,19 @@ proc fromSourceAutotoolsEmitFragment(projectRoot: string;
       let buildPair = emitBuildAction(projectRoot, makeExe, srcDir,
         configurePair.stamp)
       allActions.add(buildPair.action)
-      # 4. Install
+      # 4. Install — carries the binary-cache identity so the engine
+      # hook publishes the install tree after success.
       let installPair = emitInstallAction(projectRoot, makeExe, srcDir,
-        staging, buildPair.stamp)
+        staging, buildPair.stamp, identity)
       allActions.add(installPair.action)
-      # 5. Per-artifact stage-copy
-      var stageDeps: seq[string] = @[]
-      var stageOutputs: seq[string] = @[]
+      # 5. Per-artifact stage-copy — each edge also carries the
+      # identity. The engine's hook fires per successful action; the
+      # convention does NOT emit a separate publish edge any more (the
+      # Step-A-era ``emitPublishAction`` retired in Step B).
       for member in members:
         let stageAct = emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member)
+          installPair.stamp, member, identity)
         allActions.add(stageAct)
-        stageDeps.add(stageAct.id)
-        for outPath in stageAct.outputs:
-          stageOutputs.add(outPath)
-      # 6. Binary-cache publish (M9.L.4.2). Best-effort: argv wraps the
-      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
-      # missing key+cert / missing CLI does NOT abort the build. The
-      # publish prefix is ``<staging>/usr`` — the autotools convention
-      # passes ``--prefix=/usr`` at configure time and ``DESTDIR=
-      # <staging>`` at install time, so the install tree lands under
-      # ``<staging>/usr/{bin,lib,sbin}/``.
-      let publishPrefix = staging / "usr"
-      allActions.add(emitPublishAction(projectRoot, publishPrefix,
-        dslPackageName, "autotools", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

@@ -33,7 +33,7 @@
 ## run for libcap is gated by
 ## ``scripts/validate-from-source-make-libcap.ps1``.
 
-import std/[os, strutils, unittest]
+import std/[options, os, strutils, unittest]
 
 import repro_core
 import repro_provider_runtime
@@ -178,17 +178,17 @@ suite "from-source-make convention M9.L.3 — libcap":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: produces fetch + build + install + stage-copy + publish chain":
+  test "emitFragment: produces fetch + build + install + stage-copy chain":
     let conv = from_source_make_convention.fromSourceMakeConvention()
     let request = dummyRequest(LibcapRecipe)
     require conv.recognize(LibcapRecipe, request)
     let fragment = conv.emitFragment(LibcapRecipe, request)
     let actions = extractActions(fragment)
 
-    # The pipeline emits at least 8 actions: fetch + build + install
-    # + 4 stage-copies (1 library + 3 executables) +
-    # 1 binary-cache publish action (M9.L.4.3).
-    check actions.len >= 8
+    # M9.L.4-refactor Step B: the pipeline emits exactly 7 actions for
+    # libcap (fetch + build + install + 4 stage-copies). The Step-A-era
+    # binary-cache publish action retired in Step B.
+    check actions.len >= 7
 
     var sawFetch = false
     var sawBuild = false
@@ -197,7 +197,7 @@ suite "from-source-make convention M9.L.3 — libcap":
     var sawStageCapsh = false
     var sawStageGetcap = false
     var sawStageSetcap = false
-    var sawPublish = false
+    var sawPublishEdge = false
     for a in actions:
       if a.id == "ccpp-fetch-libcapSource":
         sawFetch = true
@@ -214,7 +214,7 @@ suite "from-source-make convention M9.L.3 — libcap":
       elif a.id == "from-source-make-stage-setcap":
         sawStageSetcap = true
       elif a.id == "from-source-make-publish-libcapSource":
-        sawPublish = true
+        sawPublishEdge = true
     check sawFetch
     check sawBuild
     check sawInstall
@@ -222,7 +222,9 @@ suite "from-source-make convention M9.L.3 — libcap":
     check sawStageCapsh
     check sawStageGetcap
     check sawStageSetcap
-    check sawPublish
+    # Step B: NO publish action emitted. The engine's hook publishes
+    # via the passive metadata on the install + stage-copy edges.
+    check not sawPublishEdge
 
   test "emitFragment: build argv carries make + every makeFlag":
     let conv = from_source_make_convention.fromSourceMakeConvention()
@@ -284,108 +286,86 @@ suite "from-source-make convention M9.L.3 — libcap":
     let capshUnified = stageCapsh.outputs[0].replace('\\', '/')
     check capshUnified.contains(".repro/output/capsh/")
 
-  test "emitFragment: publish action depends on every stage-copy action (M9.L.4.3)":
-    # M9.L.4.3 — the binary-cache publish action MUST wait for the install
-    # tree to be fully materialised before uploading. Its declared deps
-    # must contain every per-artifact stage-copy action's id (libCap +
-    # capsh + getcap + setcap).
+  test "emitFragment: install action carries publishToBinaryCache + identity (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: the install action stamps the
+    # binary-cache identity tuple on its ``BuildActionDef`` so the
+    # engine's ``BinaryCachePublisher`` hook fires after a successful
+    # install. The convention no longer emits a publish edge.
     let conv = from_source_make_convention.fromSourceMakeConvention()
     let request = dummyRequest(LibcapRecipe)
     let fragment = conv.emitFragment(LibcapRecipe, request)
     let actions = extractActions(fragment)
-    let publish = findById(actions,
-      "from-source-make-publish-libcapSource")
-    var sawStageLibDep = false
-    var sawStageCapshDep = false
-    var sawStageGetcapDep = false
-    var sawStageSetcapDep = false
-    for dep in publish.deps:
-      if dep == "from-source-make-stage-libCap":
-        sawStageLibDep = true
-      elif dep == "from-source-make-stage-capsh":
-        sawStageCapshDep = true
-      elif dep == "from-source-make-stage-getcap":
-        sawStageGetcapDep = true
-      elif dep == "from-source-make-stage-setcap":
-        sawStageSetcapDep = true
-    check sawStageLibDep
-    check sawStageCapshDep
-    check sawStageGetcapDep
-    check sawStageSetcapDep
-    # And no stale dep on the install action — that's a transitive
-    # dep via the stage-copy actions, NOT a direct one.
-    for dep in publish.deps:
-      check dep != "from-source-make-install"
+    let install = findById(actions, "from-source-make-install")
+    check install.publishToBinaryCache == true
+    check install.cacheEntryIdentity.isSome
+    let identity = install.cacheEntryIdentity.get()
+    # The identity is keyed on the recipe's ``package <name>:`` header.
+    check identity.packageName == "libcapSource"
+    # ``registeredVersions("libcapSource")`` exposes the version
+    # ``"2.71"`` from the recipe's ``versions:`` block.
+    check identity.packageVersion == "2.71"
+    # The toolchain identity name MUST be the convention tag so the
+    # canonical encoder distinguishes meson- / cmake- / autotools- /
+    # make-built artefacts for the same recipe.
+    check identity.toolchain.name == "make"
+    # The provider-revision field must be a BLAKE3-derived hex (32
+    # lowercase hex chars from ``providerRevisionHex``).
+    check identity.providerRevision.len == 32
+    for ch in identity.providerRevision:
+      check ch in {'0'..'9', 'a'..'f'}
 
-  test "emitFragment: publish action argv carries publish + 64-hex key + soft-fail wrapper (M9.L.4.3)":
-    # M9.L.4.3 — the publish action shells out to the binary-cache CLI
-    # via ``sh -c "<cli> publish <hex> <prefix> --package-name=...
-    # --package-version=... || true"``. The argv must contain the
-    # literal ``publish`` token, a 64-char lowercase hex cache-entry
-    # key derived via ``cache_key.deriveCacheEntryKeyHex``, the
-    # ``--package-name=libcapSource`` identity flag, and the
-    # ``|| true`` soft-fail wrapper.
+  test "emitFragment: stage-copy actions carry publishToBinaryCache + identity (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: every stage-copy action also carries the
+    # same identity tuple. The engine's hook fires per successful
+    # action; each contributing edge advertises the cache entry it
+    # belongs to via the passive metadata. libcap emits 4 stage-copy
+    # actions (libCap + capsh + getcap + setcap); we verify the
+    # library + one executable here.
     let conv = from_source_make_convention.fromSourceMakeConvention()
     let request = dummyRequest(LibcapRecipe)
     let fragment = conv.emitFragment(LibcapRecipe, request)
     let actions = extractActions(fragment)
-    let publish = findById(actions,
-      "from-source-make-publish-libcapSource")
-    let argv = inlineArgvOf(publish)
-    let argvJoined = argv.join(" ")
+    let stageLib = findById(actions, "from-source-make-stage-libCap")
+    let stageCapsh = findById(actions, "from-source-make-stage-capsh")
+    check stageLib.publishToBinaryCache == true
+    check stageLib.cacheEntryIdentity.isSome
+    check stageCapsh.publishToBinaryCache == true
+    check stageCapsh.cacheEntryIdentity.isSome
+    # The stage-copy identities MUST match the install action's
+    # identity byte-for-byte — they contribute to the same logical
+    # cache entry.
+    let install = findById(actions, "from-source-make-install")
+    let installIdy = install.cacheEntryIdentity.get()
+    let stageLibIdy = stageLib.cacheEntryIdentity.get()
+    let stageCapshIdy = stageCapsh.cacheEntryIdentity.get()
+    check stageLibIdy.packageName == installIdy.packageName
+    check stageLibIdy.packageVersion == installIdy.packageVersion
+    check stageLibIdy.toolchain.name == installIdy.toolchain.name
+    check stageLibIdy.providerRevision == installIdy.providerRevision
+    check stageCapshIdy.packageName == installIdy.packageName
+    check stageCapshIdy.packageVersion == installIdy.packageVersion
+    check stageCapshIdy.toolchain.name == installIdy.toolchain.name
+    check stageCapshIdy.providerRevision == installIdy.providerRevision
 
-    # The CLI subcommand literal MUST appear so the action actually
-    # publishes (and isn't a no-op).
-    check argvJoined.contains("publish")
-    # M9.L.4.3 identity-flag wiring — package name MUST be the recipe's
-    # ``package <name>:`` header.
-    check argvJoined.contains("--package-name=")
-    check argvJoined.contains("libcapSource")
-    # ``registeredVersions("libcapSource")`` registers
-    # ``DslVersionInfo(version: "2.71", ...)`` via the recipe's
-    # ``versions:`` block. The publish argv MUST thread the last
-    # version through ``--package-version=``.
-    check argvJoined.contains("--package-version=")
-    check argvJoined.contains("2.71")
-    # The ``|| true`` soft-fail wrapper makes the action always exit 0.
-    check argvJoined.contains("|| true")
-    # The from-source-make convention's publish prefix is the staging
-    # dir itself (``<staging>``) — kbuild doesn't really use DESTDIR
-    # so the unifying prefix covers both libcap (artefacts under
-    # ``<staging>/usr/``) AND the kernel (mostly empty staging).
-    let argvUnified = argvJoined.replace('\\', '/')
-    check argvUnified.contains("from-source-make/staging")
-    # The cache-entry hex key MUST be the canonical 64-char lowercase
-    # BLAKE3 digest. Scan the argv tokens for a 64-hex-char token.
-    var sawHex64 = false
-    for tok in argvJoined.split({' ', '"'}):
-      if tok.len != 64:
-        continue
-      var allHex = true
-      for ch in tok:
-        if ch notin {'0'..'9', 'a'..'f'}:
-          allHex = false
-          break
-      if allHex:
-        sawHex64 = true
-        break
-    check sawHex64
-
-  test "emitFragment: publish action's deriveCacheEntryKeyHex output stays stable across calls (M9.L.4.3)":
-    # M9.L.4.3 — the cache-entry key is a pure function of the recipe
-    # identity tuple. Re-emitting the fragment on the same recipe MUST
-    # yield the same hex; a regression that smuggles a non-deterministic
-    # input (timestamp, RNG, pid, ...) into the identity would surface
-    # here as drifting hexes between calls.
+  test "emitFragment: identity is stable across calls (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: the cache-entry identity is a pure
+    # function of recipe identity. Re-emitting the fragment must yield
+    # the same packageName / packageVersion / toolchain.name /
+    # providerRevision quadruple.
     let conv = from_source_make_convention.fromSourceMakeConvention()
     let request = dummyRequest(LibcapRecipe)
     let fragmentA = conv.emitFragment(LibcapRecipe, request)
     let fragmentB = conv.emitFragment(LibcapRecipe, request)
-    let publishA = findById(extractActions(fragmentA),
-      "from-source-make-publish-libcapSource")
-    let publishB = findById(extractActions(fragmentB),
-      "from-source-make-publish-libcapSource")
-    check inlineArgvOf(publishA) == inlineArgvOf(publishB)
+    let installA = findById(extractActions(fragmentA),
+      "from-source-make-install")
+    let installB = findById(extractActions(fragmentB),
+      "from-source-make-install")
+    let identA = installA.cacheEntryIdentity.get()
+    let identB = installB.cacheEntryIdentity.get()
+    check identA.packageName == identB.packageName
+    check identA.packageVersion == identB.packageVersion
+    check identA.toolchain.name == identB.toolchain.name
+    check identA.providerRevision == identB.providerRevision
 
 # ---------------------------------------------------------------------------
 # Sub-suite B: kernel — in-source artefacts (kbuild)

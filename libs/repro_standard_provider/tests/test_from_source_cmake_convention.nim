@@ -20,7 +20,7 @@
 ## that don't have cmake installed. The actual end-to-end build run
 ## is gated by ``scripts/validate-from-source-cmake-kcoreaddons.ps1``.
 
-import std/[os, strutils, unittest]
+import std/[options, os, strutils, unittest]
 
 import repro_core
 import repro_provider_runtime
@@ -152,24 +152,24 @@ suite "from-source-cmake convention M9.L.1 — kcoreaddons":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: produces fetch + configure + build + install + stage-copy + publish chain":
+  test "emitFragment: produces fetch + configure + build + install + stage-copy chain":
     let conv = from_source_cmake_convention.fromSourceCmakeConvention()
     let request = dummyRequest(KcoreaddonsRecipe)
     require conv.recognize(KcoreaddonsRecipe, request)
     let fragment = conv.emitFragment(KcoreaddonsRecipe, request)
     let actions = extractActions(fragment)
 
-    # The pipeline emits at least 6 actions: fetch + configure + build
-    # + install + 1 stage-copy (one per declared library) +
-    # 1 binary-cache publish action (M9.L.4.1).
-    check actions.len >= 6
+    # M9.L.4-refactor Step B: the pipeline emits exactly 5 actions for
+    # kcoreaddons (fetch + configure + build + install + 1 stage-copy).
+    # The Step-A-era binary-cache publish action retired in Step B.
+    check actions.len >= 5
 
     var sawFetch = false
     var sawConfigure = false
     var sawBuild = false
     var sawInstall = false
     var sawStageLib = false
-    var sawPublish = false
+    var sawPublishEdge = false
     for a in actions:
       if a.id == "ccpp-fetch-kcoreaddonsSource":
         sawFetch = true
@@ -182,13 +182,15 @@ suite "from-source-cmake convention M9.L.1 — kcoreaddons":
       elif a.id == "from-source-cmake-stage-libKF6CoreAddons":
         sawStageLib = true
       elif a.id == "from-source-cmake-publish-kcoreaddonsSource":
-        sawPublish = true
+        sawPublishEdge = true
     check sawFetch
     check sawConfigure
     check sawBuild
     check sawInstall
     check sawStageLib
-    check sawPublish
+    # Step B: NO publish action emitted. The engine's hook publishes
+    # via the passive metadata on the install + stage-copy edges.
+    check not sawPublishEdge
 
   test "emitFragment: configure argv carries cmake -S/-B/-G Ninja + buildtype + cmakeFlags":
     let conv = from_source_cmake_convention.fromSourceCmakeConvention()
@@ -300,97 +302,73 @@ suite "from-source-cmake convention M9.L.1 — kcoreaddons":
     let unified = argvJoined.replace('\\', '/')
     check unified.contains("from-source-cmake/staging")
 
-  test "emitFragment: publish action depends on every stage-copy action (M9.L.4.1)":
-    # M9.L.4.1 — the binary-cache publish action MUST wait for the install
-    # tree to be fully materialised before uploading. Its declared deps
-    # must contain every per-artifact stage-copy action's id.
+  test "emitFragment: install action carries publishToBinaryCache + identity (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: the install action stamps the
+    # binary-cache identity tuple on its ``BuildActionDef`` so the
+    # engine's ``BinaryCachePublisher`` hook fires after a successful
+    # install. The convention no longer emits a publish edge.
     let conv = from_source_cmake_convention.fromSourceCmakeConvention()
     let request = dummyRequest(KcoreaddonsRecipe)
     let fragment = conv.emitFragment(KcoreaddonsRecipe, request)
     let actions = extractActions(fragment)
-    let publish = findById(actions,
-      "from-source-cmake-publish-kcoreaddonsSource")
-    var sawStageLibDep = false
-    for dep in publish.deps:
-      if dep == "from-source-cmake-stage-libKF6CoreAddons":
-        sawStageLibDep = true
-    check sawStageLibDep
-    # And no stale dep on the install action — that's a transitive
-    # dep via the stage-copy actions, NOT a direct one.
-    for dep in publish.deps:
-      check dep != "from-source-cmake-install"
+    let install = findById(actions, "from-source-cmake-install")
+    check install.publishToBinaryCache == true
+    check install.cacheEntryIdentity.isSome
+    let identity = install.cacheEntryIdentity.get()
+    # The identity is keyed on the recipe's ``package <name>:`` header.
+    check identity.packageName == "kcoreaddonsSource"
+    # ``registeredVersions("kcoreaddonsSource")`` exposes the version
+    # ``"6.10.0"`` from the recipe's ``versions:`` block.
+    check identity.packageVersion == "6.10.0"
+    # The toolchain identity name MUST be the convention tag so the
+    # canonical encoder distinguishes meson- / cmake- / autotools- /
+    # make-built artefacts for the same recipe.
+    check identity.toolchain.name == "cmake"
+    # The provider-revision field must be a BLAKE3-derived hex (32
+    # lowercase hex chars from ``providerRevisionHex``).
+    check identity.providerRevision.len == 32
+    for ch in identity.providerRevision:
+      check ch in {'0'..'9', 'a'..'f'}
 
-  test "emitFragment: publish action argv carries publish + 64-hex key + soft-fail wrapper (M9.L.4.1)":
-    # M9.L.4.1 — the publish action shells out to the binary-cache CLI
-    # via ``sh -c "<cli> publish <hex> <prefix> --package-name=...
-    # --package-version=... || true"``. The argv must contain the
-    # literal ``publish`` token, a 64-char lowercase hex cache-entry
-    # key derived via ``cache_key.deriveCacheEntryKeyHex``, the
-    # ``--package-name=kcoreaddonsSource`` identity flag, and the
-    # ``|| true`` soft-fail wrapper that keeps the build from
-    # aborting on cache-unreachable / missing-key / missing-CLI.
+  test "emitFragment: stage-copy actions carry publishToBinaryCache + identity (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: every stage-copy action also carries the
+    # same identity tuple. The engine's hook fires per successful
+    # action; each contributing edge advertises the cache entry it
+    # belongs to via the passive metadata.
     let conv = from_source_cmake_convention.fromSourceCmakeConvention()
     let request = dummyRequest(KcoreaddonsRecipe)
     let fragment = conv.emitFragment(KcoreaddonsRecipe, request)
     let actions = extractActions(fragment)
-    let publish = findById(actions,
-      "from-source-cmake-publish-kcoreaddonsSource")
-    let argv = inlineArgvOf(publish)
-    let argvJoined = argv.join(" ")
+    let stageLib = findById(actions,
+      "from-source-cmake-stage-libKF6CoreAddons")
+    check stageLib.publishToBinaryCache == true
+    check stageLib.cacheEntryIdentity.isSome
+    # The stage-copy identity MUST match the install action's identity
+    # byte-for-byte — they contribute to the same logical cache entry.
+    let install = findById(actions, "from-source-cmake-install")
+    let installIdy = install.cacheEntryIdentity.get()
+    let stageLibIdy = stageLib.cacheEntryIdentity.get()
+    check stageLibIdy.packageName == installIdy.packageName
+    check stageLibIdy.packageVersion == installIdy.packageVersion
+    check stageLibIdy.toolchain.name == installIdy.toolchain.name
+    check stageLibIdy.providerRevision == installIdy.providerRevision
 
-    # The CLI subcommand literal MUST appear so the action actually
-    # publishes (and isn't a no-op).
-    check argvJoined.contains("publish")
-    # M9.L.4.1 identity-flag wiring — package name MUST be the recipe's
-    # ``package <name>:`` header (the same name the M9.H fetch
-    # registry is keyed on).
-    check argvJoined.contains("--package-name=")
-    check argvJoined.contains("kcoreaddonsSource")
-    # ``registeredVersions("kcoreaddonsSource")`` registers
-    # ``DslVersionInfo(version: "6.10.0", ...)`` via the recipe's
-    # ``versions:`` block. The publish argv MUST thread the last
-    # version through ``--package-version=`` so the canonical encoder
-    # produces a non-empty version slot.
-    check argvJoined.contains("--package-version=")
-    check argvJoined.contains("6.10.0")
-    # The ``|| true`` soft-fail wrapper is what makes the action
-    # always exit 0 — the build must not abort when the cache is
-    # unreachable, the key/cert env vars are unset, or the CLI is
-    # missing.
-    check argvJoined.contains("|| true")
-    # The cmake convention publishes the staging dir itself (cmake's
-    # ``--install --prefix <staging>`` lays artefacts directly under
-    # ``<staging>/{bin,lib}/`` — no extra ``usr/local`` rebase).
-    let argvUnified = argvJoined.replace('\\', '/')
-    check argvUnified.contains("from-source-cmake/staging")
-    # The cache-entry hex key MUST be the canonical 64-char lowercase
-    # BLAKE3 digest. Scan the argv tokens for a 64-hex-char token.
-    var sawHex64 = false
-    for tok in argvJoined.split({' ', '"'}):
-      if tok.len != 64:
-        continue
-      var allHex = true
-      for ch in tok:
-        if ch notin {'0'..'9', 'a'..'f'}:
-          allHex = false
-          break
-      if allHex:
-        sawHex64 = true
-        break
-    check sawHex64
-
-  test "emitFragment: publish action's deriveCacheEntryKeyHex output stays stable across calls (M9.L.4.1)":
-    # M9.L.4.1 — the cache-entry key is a pure function of the recipe
-    # identity tuple. Re-emitting the fragment on the same recipe MUST
-    # yield the same hex; a regression that smuggles a non-deterministic
-    # input (timestamp, RNG, pid, ...) into the identity would surface
-    # here as drifting hexes between calls.
+  test "emitFragment: identity is stable across calls (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: the cache-entry identity is a pure
+    # function of recipe identity. Re-emitting the fragment must yield
+    # the same packageName / packageVersion / toolchain.name /
+    # providerRevision quadruple.
     let conv = from_source_cmake_convention.fromSourceCmakeConvention()
     let request = dummyRequest(KcoreaddonsRecipe)
     let fragmentA = conv.emitFragment(KcoreaddonsRecipe, request)
     let fragmentB = conv.emitFragment(KcoreaddonsRecipe, request)
-    let publishA = findById(extractActions(fragmentA),
-      "from-source-cmake-publish-kcoreaddonsSource")
-    let publishB = findById(extractActions(fragmentB),
-      "from-source-cmake-publish-kcoreaddonsSource")
-    check inlineArgvOf(publishA) == inlineArgvOf(publishB)
+    let installA = findById(extractActions(fragmentA),
+      "from-source-cmake-install")
+    let installB = findById(extractActions(fragmentB),
+      "from-source-cmake-install")
+    let identA = installA.cacheEntryIdentity.get()
+    let identB = installB.cacheEntryIdentity.get()
+    check identA.packageName == identB.packageName
+    check identA.packageVersion == identB.packageVersion
+    check identA.toolchain.name == identB.toolchain.name
+    check identA.providerRevision == identB.providerRevision

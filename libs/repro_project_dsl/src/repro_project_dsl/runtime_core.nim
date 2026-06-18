@@ -170,7 +170,16 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 15'u16
+  BuildActionPayloadVersion = 16'u16
+    ## v16: M9.L.4-refactor Step B — appends an optional
+    ## ``BuildAction.publishToBinaryCache`` flag plus an optional
+    ## ``cacheEntryIdentity: CacheEntryIdentity`` tuple so the engine's
+    ## binary-cache publisher hook can fire after a successful install /
+    ## stage-copy edge produced by the from-source conventions. v15-and-
+    ## earlier payloads decode with both fields at their inert defaults
+    ## (``false`` + ``none``) so the engine's hook is a no-op for legacy
+    ## artefacts.
+    ##
     ## v15: MR16 — the dependency-policy section's single
     ## ``depfile: string`` is replaced by ``depfiles: seq[string]``
     ## carrying zero or more paths (each may be a literal or a glob
@@ -749,7 +758,9 @@ proc buildAction*(id: string; call: PublicCliCall;
                   dependencyPolicy = defaultDependencyPolicy();
                   actionCachePolicy = defaultActionCachePolicy();
                   outputTag = "";
-                  env: openArray[(string, string)] = []):
+                  env: openArray[(string, string)] = [];
+                  publishToBinaryCache = false;
+                  cacheEntryIdentity = none(CacheEntryIdentity)):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -760,6 +771,12 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## ``env`` (MR10): per-edge env-var injection. Each ``(NAME, VALUE)``
   ## entry is added to the action's spawned-process environment by the
   ## CLI's action-realisation path. Empty for legacy recipes.
+  ##
+  ## ``publishToBinaryCache`` + ``cacheEntryIdentity`` (M9.L.4-refactor
+  ## Step B): from-source conventions stamp these on each install +
+  ## stage-copy action so the engine's binary-cache publisher hook
+  ## fires after success. Conventions that don't opt in leave both at
+  ## their inert defaults.
   result = BuildActionDef(
     id: id,
     call: call,
@@ -775,7 +792,9 @@ proc buildAction*(id: string; call: PublicCliCall;
     dependencyPolicy: dependencyPolicy,
     actionCachePolicy: actionCachePolicy,
     outputTag: outputTag,
-    env: @env)
+    env: @env,
+    publishToBinaryCache: publishToBinaryCache,
+    cacheEntryIdentity: cacheEntryIdentity)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -1702,6 +1721,61 @@ proc readActionCachePolicy(bytes: openArray[byte]; pos: var int):
     raisePayload("invalid action cache policy in build action payload")
   ActionCacheFingerprintPolicy(policy)
 
+proc writeCacheEntryIdentity(outp: var seq[byte]; idy: CacheEntryIdentity) =
+  ## M9.L.4-refactor Step B v16 codec — encode the
+  ## ``CacheEntryIdentity`` tuple field-by-field. The shape mirrors
+  ## ``deriveCacheEntryKey`` so the lowering side can reconstruct the
+  ## same identity without re-running the BLAKE3 fold over deps.
+  ## ``selectedOptions`` may be nil (newly-constructed value) — encode
+  ## the empty-table case as a zero count.
+  outp.writeString(idy.packageName)
+  outp.writeString(idy.packageVersion)
+  if idy.selectedOptions.isNil:
+    outp.writeU32Le(0'u32)
+  else:
+    outp.writeU32Le(uint32(idy.selectedOptions.len))
+    # Sort by key so the canonical bytes are stable across hosts whose
+    # ``Table`` insertion-order randomisation differs.
+    var keys: seq[string] = @[]
+    for name in idy.selectedOptions.keys:
+      keys.add(name)
+    keys.sort(cmp)
+    for name in keys:
+      outp.writeString(name)
+      outp.writeString(idy.selectedOptions[name])
+  outp.writeString(idy.platform.cpu)
+  outp.writeString(idy.platform.os)
+  outp.writeString(idy.platform.abi)
+  outp.writeString(idy.platform.libcVariant)
+  outp.writeString(idy.toolchain.name)
+  outp.writeString(idy.toolchain.version)
+  outp.writeString(idy.toolchain.hostLdSoAbi)
+  outp.writeString(idy.toolchain.extraFingerprint)
+  outp.writeStringSeq(idy.depClosure)
+  outp.writeString(idy.providerRevision)
+
+proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
+    CacheEntryIdentity =
+  ## v16 codec counterpart of ``writeCacheEntryIdentity``.
+  result.packageName = readString(bytes, pos)
+  result.packageVersion = readString(bytes, pos)
+  let optionCount = int(readU32Le(bytes, pos))
+  result.selectedOptions = newTable[string, string]()
+  for _ in 0 ..< optionCount:
+    let name = readString(bytes, pos)
+    let value = readString(bytes, pos)
+    result.selectedOptions[name] = value
+  result.platform.cpu = readString(bytes, pos)
+  result.platform.os = readString(bytes, pos)
+  result.platform.abi = readString(bytes, pos)
+  result.platform.libcVariant = readString(bytes, pos)
+  result.toolchain.name = readString(bytes, pos)
+  result.toolchain.version = readString(bytes, pos)
+  result.toolchain.hostLdSoAbi = readString(bytes, pos)
+  result.toolchain.extraFingerprint = readString(bytes, pos)
+  result.depClosure = readStringSeq(bytes, pos)
+  result.providerRevision = readString(bytes, pos)
+
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
   var payload: seq[byte] = @[]
   payload.writeString(action.id)
@@ -1732,6 +1806,13 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   for entry in action.env:
     payload.writeString(entry[0])
     payload.writeString(entry[1])
+  # v16: M9.L.4-refactor Step B — passive binary-cache publish wiring.
+  payload.writeByte(if action.publishToBinaryCache: 1'u8 else: 0'u8)
+  if action.cacheEntryIdentity.isSome:
+    payload.writeByte(1'u8)
+    payload.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
+  else:
+    payload.writeByte(0'u8)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1747,7 +1828,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16,
+      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16,
       BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -1801,6 +1882,29 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # v1..v13 payloads decode with an empty ``env`` list; the CLI's
   # action-realisation path treats an empty list as "no per-edge env
   # injections," preserving pre-MR10 behavior for older artifacts.
+  if version >= 16'u16:
+    # M9.L.4-refactor Step B v16: passive binary-cache publish wiring.
+    # Both sentinel bytes are strict 0-or-1; anything else fails closed
+    # so a mutation / encoding-drift surfaces as a structured payload
+    # error instead of silently picking a default.
+    let publishByte = readByte(bytes, pos)
+    if publishByte > 1'u8:
+      raisePayload("invalid publishToBinaryCache sentinel in build " &
+        "action payload")
+    result.publishToBinaryCache = publishByte == 1'u8
+    let hasIdentityByte = readByte(bytes, pos)
+    if hasIdentityByte > 1'u8:
+      raisePayload("invalid cacheEntryIdentity sentinel in build " &
+        "action payload")
+    if hasIdentityByte == 1'u8:
+      result.cacheEntryIdentity = some(readCacheEntryIdentity(bytes, pos))
+    else:
+      result.cacheEntryIdentity = none(CacheEntryIdentity)
+  else:
+    # v15-and-earlier payloads: keep both fields at the inert defaults
+    # so the engine's binary-cache publisher hook stays a no-op.
+    result.publishToBinaryCache = false
+    result.cacheEntryIdentity = none(CacheEntryIdentity)
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

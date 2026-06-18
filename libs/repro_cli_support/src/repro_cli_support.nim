@@ -1369,6 +1369,17 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         types: entry.types,
         path: entry.path))
     result.typedOutputs = engineTypedOutputs
+    # M9.L.4-refactor Step B: stamp the convention-supplied
+    # binary-cache publish wiring on the engine-side ``BuildAction``.
+    # The DSL ``BuildActionDef`` and the engine ``BuildAction`` carry
+    # the same ``Option[CacheEntryIdentity]`` shape (both defined in
+    # terms of ``repro_binary_cache_client/cache_key.CacheEntryIdentity``)
+    # so the propagation is a straight field copy. The engine's
+    # ``publishBinaryCacheBundle`` honours both fields after a
+    # successful action when the config supplies a non-nil
+    # ``binaryCachePublisher`` closure.
+    result.publishToBinaryCache = payload.publishToBinaryCache
+    result.cacheEntryIdentity = payload.cacheEntryIdentity
   let actionCachePolicy =
     case payload.actionCachePolicy
     of acfpTimestamp:

@@ -24,7 +24,7 @@
 ## toolchain installed. The actual end-to-end build run is gated by
 ## ``scripts/validate-from-source-autotools-expat.ps1``.
 
-import std/[os, strutils, unittest]
+import std/[options, os, strutils, unittest]
 
 import repro_core
 import repro_provider_runtime
@@ -168,24 +168,24 @@ suite "from-source-autotools convention M9.L.2 — expat":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: produces fetch + configure + build + install + stage-copy + publish chain":
+  test "emitFragment: produces fetch + configure + build + install + stage-copy chain":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     require conv.recognize(ExpatRecipe, request)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
 
-    # The pipeline emits at least 6 actions: fetch + configure + build
-    # + install + 1 stage-copy (one per declared library) +
-    # 1 binary-cache publish action (M9.L.4.2).
-    check actions.len >= 6
+    # M9.L.4-refactor Step B: the pipeline emits exactly 5 actions for
+    # expat (fetch + configure + build + install + 1 stage-copy). The
+    # Step-A-era binary-cache publish action retired in Step B.
+    check actions.len >= 5
 
     var sawFetch = false
     var sawConfigure = false
     var sawBuild = false
     var sawInstall = false
     var sawStageLib = false
-    var sawPublish = false
+    var sawPublishEdge = false
     for a in actions:
       if a.id == "ccpp-fetch-expatSource":
         sawFetch = true
@@ -198,13 +198,15 @@ suite "from-source-autotools convention M9.L.2 — expat":
       elif a.id == "from-source-autotools-stage-libExpat":
         sawStageLib = true
       elif a.id == "from-source-autotools-publish-expatSource":
-        sawPublish = true
+        sawPublishEdge = true
     check sawFetch
     check sawConfigure
     check sawBuild
     check sawInstall
     check sawStageLib
-    check sawPublish
+    # Step B: NO publish action emitted. The engine's hook publishes
+    # via the passive metadata on the install + stage-copy edges.
+    check not sawPublishEdge
 
   test "emitFragment: configure argv carries ./configure + --prefix + configureFlags":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
@@ -314,92 +316,73 @@ suite "from-source-autotools convention M9.L.2 — expat":
     let unified = argvJoined.replace('\\', '/')
     check unified.contains("from-source-autotools/staging")
 
-  test "emitFragment: publish action depends on every stage-copy action (M9.L.4.2)":
-    # M9.L.4.2 — the binary-cache publish action MUST wait for the install
-    # tree to be fully materialised before uploading. Its declared deps
-    # must contain every per-artifact stage-copy action's id.
+  test "emitFragment: install action carries publishToBinaryCache + identity (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: the install action stamps the
+    # binary-cache identity tuple on its ``BuildActionDef`` so the
+    # engine's ``BinaryCachePublisher`` hook fires after a successful
+    # install. The convention no longer emits a publish edge.
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
-    let publish = findById(actions,
-      "from-source-autotools-publish-expatSource")
-    var sawStageLibDep = false
-    for dep in publish.deps:
-      if dep == "from-source-autotools-stage-libExpat":
-        sawStageLibDep = true
-    check sawStageLibDep
-    # And no stale dep on the install action — that's a transitive
-    # dep via the stage-copy actions, NOT a direct one.
-    for dep in publish.deps:
-      check dep != "from-source-autotools-install"
+    let install = findById(actions, "from-source-autotools-install")
+    check install.publishToBinaryCache == true
+    check install.cacheEntryIdentity.isSome
+    let identity = install.cacheEntryIdentity.get()
+    # The identity is keyed on the recipe's ``package <name>:`` header.
+    check identity.packageName == "expatSource"
+    # ``registeredVersions("expatSource")`` exposes the version
+    # ``"2.7.0"`` from the recipe's ``versions:`` block.
+    check identity.packageVersion == "2.7.0"
+    # The toolchain identity name MUST be the convention tag so the
+    # canonical encoder distinguishes meson- / cmake- / autotools- /
+    # make-built artefacts for the same recipe.
+    check identity.toolchain.name == "autotools"
+    # The provider-revision field must be a BLAKE3-derived hex (32
+    # lowercase hex chars from ``providerRevisionHex``).
+    check identity.providerRevision.len == 32
+    for ch in identity.providerRevision:
+      check ch in {'0'..'9', 'a'..'f'}
 
-  test "emitFragment: publish action argv carries publish + 64-hex key + soft-fail wrapper (M9.L.4.2)":
-    # M9.L.4.2 — the publish action shells out to the binary-cache CLI
-    # via ``sh -c "<cli> publish <hex> <prefix> --package-name=...
-    # --package-version=... || true"``. The argv must contain the
-    # literal ``publish`` token, a 64-char lowercase hex cache-entry
-    # key derived via ``cache_key.deriveCacheEntryKeyHex``, the
-    # ``--package-name=expatSource`` identity flag, and the
-    # ``|| true`` soft-fail wrapper.
+  test "emitFragment: stage-copy actions carry publishToBinaryCache + identity (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: every stage-copy action also carries the
+    # same identity tuple. The engine's hook fires per successful
+    # action; each contributing edge advertises the cache entry it
+    # belongs to via the passive metadata.
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
-    let publish = findById(actions,
-      "from-source-autotools-publish-expatSource")
-    let argv = inlineArgvOf(publish)
-    let argvJoined = argv.join(" ")
+    let stageLib = findById(actions,
+      "from-source-autotools-stage-libExpat")
+    check stageLib.publishToBinaryCache == true
+    check stageLib.cacheEntryIdentity.isSome
+    # The stage-copy identity MUST match the install action's identity
+    # byte-for-byte — they contribute to the same logical cache entry.
+    let install = findById(actions, "from-source-autotools-install")
+    let installIdy = install.cacheEntryIdentity.get()
+    let stageLibIdy = stageLib.cacheEntryIdentity.get()
+    check stageLibIdy.packageName == installIdy.packageName
+    check stageLibIdy.packageVersion == installIdy.packageVersion
+    check stageLibIdy.toolchain.name == installIdy.toolchain.name
+    check stageLibIdy.providerRevision == installIdy.providerRevision
 
-    # The CLI subcommand literal MUST appear so the action actually
-    # publishes (and isn't a no-op).
-    check argvJoined.contains("publish")
-    # M9.L.4.2 identity-flag wiring — package name MUST be the recipe's
-    # ``package <name>:`` header (the same name the M9.H fetch
-    # registry is keyed on).
-    check argvJoined.contains("--package-name=")
-    check argvJoined.contains("expatSource")
-    # ``registeredVersions("expatSource")`` registers
-    # ``DslVersionInfo(version: "2.7.0", ...)`` via the recipe's
-    # ``versions:`` block. The publish argv MUST thread the last
-    # version through ``--package-version=``.
-    check argvJoined.contains("--package-version=")
-    check argvJoined.contains("2.7.0")
-    # The ``|| true`` soft-fail wrapper makes the action always exit 0.
-    check argvJoined.contains("|| true")
-    # The autotools convention's publish prefix is ``<staging>/usr`` —
-    # autoconf's default ``--prefix=/usr`` anchor + ``DESTDIR=
-    # <staging>`` lays artefacts under ``<staging>/usr/{bin,lib,sbin}/``.
-    let argvUnified = argvJoined.replace('\\', '/')
-    check argvUnified.contains("from-source-autotools/staging/usr")
-    # The cache-entry hex key MUST be the canonical 64-char lowercase
-    # BLAKE3 digest. Scan the argv tokens for a 64-hex-char token.
-    var sawHex64 = false
-    for tok in argvJoined.split({' ', '"'}):
-      if tok.len != 64:
-        continue
-      var allHex = true
-      for ch in tok:
-        if ch notin {'0'..'9', 'a'..'f'}:
-          allHex = false
-          break
-      if allHex:
-        sawHex64 = true
-        break
-    check sawHex64
-
-  test "emitFragment: publish action's deriveCacheEntryKeyHex output stays stable across calls (M9.L.4.2)":
-    # M9.L.4.2 — the cache-entry key is a pure function of the recipe
-    # identity tuple. Re-emitting the fragment on the same recipe MUST
-    # yield the same hex; a regression that smuggles a non-deterministic
-    # input (timestamp, RNG, pid, ...) into the identity would surface
-    # here as drifting hexes between calls.
+  test "emitFragment: identity is stable across calls (M9.L.4-refactor Step B)":
+    # M9.L.4-refactor Step B: the cache-entry identity is a pure
+    # function of recipe identity. Re-emitting the fragment must yield
+    # the same packageName / packageVersion / toolchain.name /
+    # providerRevision quadruple.
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     let fragmentA = conv.emitFragment(ExpatRecipe, request)
     let fragmentB = conv.emitFragment(ExpatRecipe, request)
-    let publishA = findById(extractActions(fragmentA),
-      "from-source-autotools-publish-expatSource")
-    let publishB = findById(extractActions(fragmentB),
-      "from-source-autotools-publish-expatSource")
-    check inlineArgvOf(publishA) == inlineArgvOf(publishB)
+    let installA = findById(extractActions(fragmentA),
+      "from-source-autotools-install")
+    let installB = findById(extractActions(fragmentB),
+      "from-source-autotools-install")
+    let identA = installA.cacheEntryIdentity.get()
+    let identB = installB.cacheEntryIdentity.get()
+    check identA.packageName == identB.packageName
+    check identA.packageVersion == identB.packageVersion
+    check identA.toolchain.name == identB.toolchain.name
+    check identA.providerRevision == identB.providerRevision

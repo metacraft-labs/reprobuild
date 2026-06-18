@@ -73,10 +73,12 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # field down to 11 and truncating the trailing fields that
     # ``writeStringSeq`` / ``writeString`` for those empty defaults
     # emitted.
-    # Recipe-Val M8 (v13) + MR10 (v14): the encoded payload now ends
-    # with the u32 typedOutputs count + the u32 outputTag string
-    # length + the u32 env count (all zero for an empty action), so
-    # 12 trailing bytes need trimming to reach v11's wire shape.
+    # Recipe-Val M8 (v13) + MR10 (v14) + M9.L.4-refactor Step B (v16):
+    # the encoded payload now ends with the u32 typedOutputs count +
+    # the u32 outputTag string length + the u32 env count + the
+    # publishToBinaryCache sentinel byte + the hasIdentity sentinel
+    # byte (all zero for an empty action), so 14 trailing bytes need
+    # trimming to reach v11's wire shape.
     let action = BuildActionDef(
       id: "legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -92,11 +94,14 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # to 11 and re-encode the payload length so the framing self-
     # consistency check stays valid.
     # Magic is bytes 0..3; version is bytes 4..5; length is bytes 6..9.
-    # Truncate 12 trailing bytes: 4 for the empty typedOutputs count
+    # Truncate 14 trailing bytes: 4 for the empty typedOutputs count
     # (the v12 addition) + 4 for the empty outputTag string length
     # (the v13 addition) + 4 for the empty env count (the v14
-    # addition). All three fields are absent at v11.
-    let trimBytes = 12
+    # addition) + 1 for the publishToBinaryCache sentinel byte + 1
+    # for the hasIdentity sentinel byte (the v16 addition; both
+    # default-zero when the optional fields are inert). All five
+    # fields are absent at v11.
+    let trimBytes = 14
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
