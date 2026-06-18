@@ -39,6 +39,7 @@ import repro_standard_provider/conventions/c_cpp_autotools as c_cpp_autotools_co
 import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/from_source_meson as from_source_meson_convention
+import repro_standard_provider/conventions/from_source_cmake as from_source_cmake_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -177,6 +178,21 @@ when defined(reproProviderMode):
   addDefaultConvention(python_convention.pythonConvention())
   addDefaultConvention(jsts_convention.javaScriptTypeScriptConvention())
   addDefaultConvention(c_cpp_autotools_convention.cCppAutotoolsConvention())
+  # from_source_cmake (M9.L.1) registered BEFORE c_cpp_cmake so the
+  # from-source variant claims recipes that declare a ``fetch:`` block
+  # (no in-tree ``CMakeLists.txt`` at projectRoot — the source has to be
+  # fetched + extracted first). The convention's ``recognize`` rejects
+  # when ``CMakeLists.txt`` IS present at the root so the in-tree M38
+  # convention claims those projects; registration order is defensive
+  # in either direction. Covers from-source CMake recipes (kcoreaddons,
+  # json-c, future KF6 / Plasma stack members, ...).
+  #
+  # TODO(reprobuild-as-ninja-generator): the medium-term plan is to
+  # replace ``cmake -G Ninja`` with the ``reprobuild-cmake/`` workspace
+  # fork that lifts cmake's generator backend into reprobuild's DAG.
+  # See ``from_source_cmake.nim``'s module docstring for the cross-ref.
+  addDefaultConvention(
+    from_source_cmake_convention.fromSourceCmakeConvention())
   # c_cpp_cmake (M38) registered BEFORE c_cpp_make so CMake claims any
   # project with a root-level CMakeLists.txt before the Make convention
   # gets a chance (the Make convention separately rejects projects with
@@ -197,12 +213,14 @@ when defined(reproProviderMode):
   # in either direction. Covers the 74 ``recipes/packages/source/*``
   # production recipes (dbus-broker, glib2, fontconfig, ...).
   #
-  # TODO(reprobuild-as-ninja-generator): a follow-up milestone should
-  # add a sibling ``from_source_cmake.nim`` convention; the
-  # ``reprobuild-cmake/`` workspace fork is the upstream-CMake fork
-  # that lifts the generator backend into reprobuild's DAG. Same
-  # ninja-generator optimisation also applies to the from-source-meson
-  # path via parsing the generated ``build.ninja``.
+  # TODO(reprobuild-as-ninja-generator): the ``reprobuild-cmake/``
+  # workspace fork is the upstream-CMake fork that lifts the generator
+  # backend into reprobuild's DAG. The same ninja-generator
+  # optimisation applies to the from-source-meson path via parsing the
+  # generated ``build.ninja``. The M9.L.1 sibling ``from_source_cmake``
+  # convention exists (registered above, before c_cpp_cmake) and
+  # currently shells out via ``cmake --build``; once the fork lands
+  # both from-source siblings can switch to per-source DAG lifting.
   addDefaultConvention(
     from_source_meson_convention.fromSourceMesonConvention())
   # c_cpp_meson (M39) registered AFTER c_cpp_cmake and BEFORE
