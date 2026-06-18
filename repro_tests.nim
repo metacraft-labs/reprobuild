@@ -3174,6 +3174,87 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Sixty-seventh from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the network + audio infrastructure batch
+  # (alsa-lib + pipewire + wireplumber + NetworkManager). alsa-lib is
+  # THE userspace half of ALSA; every modern Linux audio stack (pipewire
+  # / wireplumber / pulseaudio / GStreamer-alsa) links libasound to
+  # reach the kernel /dev/snd/* ioctl surface. Pins alsa-lib 1.2.15.3's
+  # upstream-URL fetch (kernel-precedent pattern, no vendoring) +
+  # sha256 cross-checked against nixpkgs + two-flag configure sequence
+  # (``--disable-static`` + ``--disable-python``) + cross-channel
+  # isolation across configure/meson/cmake/make + one library artifact
+  # (``libAsound``).
+  TestSpec(
+    source: "recipes/packages/source/alsa-lib/test_alsa_lib_source.nim",
+    binary: "build/test-bin/t_alsa_lib_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-eighth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the network + audio infrastructure batch.
+  # pipewire is THE modern multimedia framework on Linux: replaces
+  # pulseaudio + jackd for audio AND provides the screen-capture
+  # transport every Wayland compositor uses for desktop sharing + screen
+  # recording. TWO-executable + ONE-library mixed-kind meson shape from
+  # a single ``meson setup`` + ``ninja`` invocation. Pins pipewire
+  # 1.6.5's upstream gitlab.freedesktop.org archive URL (kernel-
+  # precedent pattern, no vendoring) + placeholder sha256 (NEEDS
+  # VERIFICATION — nixpkgs records NAR-form hash, not tarball hash) +
+  # five-flag mesonOptions sequence + cross-channel isolation +
+  # ``pipewireDaemon`` + ``pwCat`` executables + ``libPipewire`` library.
+  TestSpec(
+    source: "recipes/packages/source/pipewire/test_pipewire_source.nim",
+    binary: "build/test-bin/t_pipewire_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-ninth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the network + audio infrastructure batch.
+  # wireplumber is THE session/policy manager for pipewire: implements
+  # the Lua-scripted session-policy layer that decides device-to-role
+  # mappings + per-application audio routing on top of pipewire's
+  # multimedia graph. ONE-executable + ONE-library mixed-kind meson
+  # shape (the libcap / xz pattern lifted onto the meson channel).
+  # Pins wireplumber 0.5.14's upstream gitlab.freedesktop.org archive
+  # URL (kernel-precedent pattern, no vendoring) + placeholder sha256
+  # (NEEDS VERIFICATION — nixpkgs records NAR-form hash, not tarball
+  # hash) + five-flag mesonOptions sequence + cross-channel isolation +
+  # ``wireplumber`` executable + ``libWireplumber`` library.
+  TestSpec(
+    source: "recipes/packages/source/wireplumber/test_wireplumber_source.nim",
+    binary: "build/test-bin/t_wireplumber_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventieth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING (FOURTH) recipe in the network + audio infrastructure
+  # batch. NetworkManager is THE canonical network configuration daemon
+  # on modern Linux desktops; every NDE-K1 v1 desktop (sway / GNOME /
+  # Plasma) consumes its D-Bus API for Wi-Fi connection management,
+  # Ethernet hot-plug response, VPN routing, and per-application
+  # network-status indicators. TWO-executable + ONE-library mixed-kind
+  # autotools shape with the LARGEST ``configureFlags:`` block in the
+  # corpus to date (six flags spanning mixed ``--disable-*`` /
+  # ``--without-*`` / ``--with-*=value`` polarities). Pins NetworkManager
+  # 1.56.0's upstream gitlab.freedesktop.org release-tarball URL
+  # (kernel-precedent pattern, no vendoring) + sha256 cross-checked
+  # against nixpkgs + six-flag configure sequence + cross-channel
+  # isolation + ``nmDaemon`` + ``nmcli`` executables + ``libNm`` library.
+  TestSpec(
+    source: "recipes/packages/source/networkmanager/test_networkmanager_source.nim",
+    binary: "build/test-bin/t_networkmanager_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
