@@ -3255,6 +3255,82 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Seventy-first from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the GNU text-processing + archiving CLI batch
+  # (tar + grep + sed + gawk). GNU tar is THE canonical archive packer/
+  # unpacker on every modern Linux distribution: every installer /
+  # backup tool / configuration-management agent / container image
+  # builder shells out to ``/usr/bin/tar``. Pins tar 1.35's upstream
+  # ftp.gnu.org release-tarball URL (kernel-precedent pattern, no
+  # vendoring) + sha256 cross-checked against nixpkgs + three-flag
+  # configure sequence (``--without-selinux`` + ``--without-posix-acls``
+  # + ``--without-xattrs``) + cross-channel isolation + single ``tar``
+  # executable.
+  TestSpec(
+    source: "recipes/packages/source/tar/test_tar_source.nim",
+    binary: "build/test-bin/t_tar_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventy-second from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the GNU text-processing + archiving CLI batch.
+  # GNU grep is THE canonical line-matching CLI on every modern Linux
+  # distribution: every shell pipeline / every log scanner / every
+  # config-search Makefile rule / every IDE file-search backend shells
+  # out to ``/usr/bin/grep``. Pins grep 3.11's upstream ftp.gnu.org
+  # release-tarball URL (kernel-precedent pattern, no vendoring) +
+  # canonical published sha256 (nixpkgs records 3.12 only) + one-flag
+  # configure sequence (``--disable-perl-regexp``) + cross-channel
+  # isolation + single ``grep`` executable.
+  TestSpec(
+    source: "recipes/packages/source/grep/test_grep_source.nim",
+    binary: "build/test-bin/t_grep_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventy-third from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the GNU text-processing + archiving CLI batch.
+  # GNU sed is THE canonical stream-editor CLI on every modern Linux
+  # distribution: every shell pipeline / every Makefile substitution
+  # rule / every config-rewrite script / every autotools ``./configure``
+  # run shells out to ``/usr/bin/sed``. Pins sed 4.9's upstream
+  # ftp.gnu.org release-tarball URL (kernel-precedent pattern, no
+  # vendoring) + sha256 cross-checked against nixpkgs + one-flag
+  # configure sequence (``--without-selinux``) + cross-channel
+  # isolation + single ``sed`` executable.
+  TestSpec(
+    source: "recipes/packages/source/sed/test_sed_source.nim",
+    binary: "build/test-bin/t_sed_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventy-fourth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING (FOURTH) recipe in the GNU text-processing + archiving
+  # CLI batch. GNU awk (gawk) is THE canonical AWK implementation on
+  # every modern Linux distribution: every shell pipeline / every
+  # Makefile field-extract rule / every log-analysis script / every
+  # report-generation pipeline shells out to ``/usr/bin/awk``. Pins
+  # gawk 5.3.0's upstream ftp.gnu.org release-tarball URL (kernel-
+  # precedent pattern, no vendoring) + canonical published sha256
+  # (nixpkgs records 5.4.0 only) + three-flag configure sequence
+  # (``--disable-extensions`` + ``--disable-mpfr`` +
+  # ``--disable-libsigsegv``) + cross-channel isolation + single
+  # ``awk`` executable (upstream ships as ``gawk`` and symlinks
+  # ``awk`` at install).
+  TestSpec(
+    source: "recipes/packages/source/gawk/test_gawk_source.nim",
+    binary: "build/test-bin/t_gawk_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
