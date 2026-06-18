@@ -2518,6 +2518,80 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Thirty-sixth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the KF6 module-sweep batch (kconfig / ki18n /
+  # kwidgetsaddons / kxmlgui) and SEVENTH CMake-driven recipe (json-c,
+  # kcoreaddons, kwin, plasma-workspace, sddm, fontconfig precedents).
+  # SECOND KF6 foundation module after kcoreaddons. FIRST CMake recipe
+  # to ship THREE library artifacts from a single ``package`` macro
+  # (libKF6Config + libKF6ConfigCore + libKF6ConfigGui split across
+  # the umbrella/core/GUI boundary). Pins kconfig 6.10.0's vendored
+  # sha256 + CMake flag sequence + cross-channel isolation + the three
+  # library artifacts. The KF6 configuration-storage stack
+  # (KConfig/KConfigGroup/KSharedConfig) every KF6 application + Plasma
+  # component links against.
+  TestSpec(
+    source: "recipes/packages/source/kconfig/test_kconfig_source.nim",
+    binary: "build/test-bin/t_kconfig_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirty-seventh from-source production recipe to exercise the
+  # M9.H/I/K trio — SECOND recipe in the KF6 module-sweep batch and
+  # EIGHTH CMake-driven recipe. THIRD KF6 foundation module after
+  # kcoreaddons + kconfig. Pins ki18n 6.10.0's vendored sha256 + CMake
+  # flag sequence + cross-channel isolation + ``libKF6I18n`` library
+  # artifact. The KF6 translation/internationalisation layer wrapping
+  # gettext/libintl with a Qt-native interface (KLocalizedString /
+  # i18n() / i18nc() / i18np() macros) every KF6 application + Plasma
+  # component uses for user-facing strings.
+  TestSpec(
+    source: "recipes/packages/source/ki18n/test_ki18n_source.nim",
+    binary: "build/test-bin/t_ki18n_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirty-eighth from-source production recipe to exercise the
+  # M9.H/I/K trio — THIRD recipe in the KF6 module-sweep batch and
+  # NINTH CMake-driven recipe. FOURTH KF6 foundation module after
+  # kcoreaddons + kconfig + ki18n. Pins kwidgetsaddons 6.10.0's
+  # vendored sha256 + CMake flag sequence + cross-channel isolation +
+  # ``libKF6WidgetsAddons`` library artifact (the longest compound-
+  # word artifact identifier in the KF6 batch, pinning the package-
+  # name -> PascalCase artifact-name lowering when the upstream module
+  # name is itself a compound word). The cross-cutting QtWidgets
+  # extensions (KMessageBox + KPasswordDialog + KSeparator + KPageWidget
+  # + ...) every KF6 application links against on the GUI side.
+  TestSpec(
+    source: "recipes/packages/source/kwidgetsaddons/test_kwidgetsaddons_source.nim",
+    binary: "build/test-bin/t_kwidgetsaddons_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirty-ninth from-source production recipe to exercise the
+  # M9.H/I/K trio — CLOSING recipe in the KF6 module-sweep batch and
+  # TENTH CMake-driven recipe. FIFTH KF6 foundation module after
+  # kcoreaddons + kconfig + ki18n + kwidgetsaddons. Pins kxmlgui
+  # 6.10.0's vendored sha256 + CMake flag sequence + cross-channel
+  # isolation + ``libKF6XmlGui`` library artifact. The
+  # action/menu/toolbar XML-driven UI surface (KAction +
+  # KStandardAction + KActionCollection + KXmlGuiWindow + ``*ui.rc``
+  # reader) plasma-workspace's krunner / systemsettings / kickoff
+  # launcher pull in for their panel + window-frame UI plumbing.
+  TestSpec(
+    source: "recipes/packages/source/kxmlgui/test_kxmlgui_source.nim",
+    binary: "build/test-bin/t_kxmlgui_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
