@@ -170,7 +170,15 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 14'u16
+  BuildActionPayloadVersion = 15'u16
+    ## v15: MR16 — the dependency-policy section's single
+    ## ``depfile: string`` is replaced by ``depfiles: seq[string]``
+    ## carrying zero or more paths (each may be a literal or a glob
+    ## the engine expands at evidence-collection time). Backward
+    ## compatibility: v14 and earlier payloads (single string field)
+    ## decode by lifting the one string into a one-element seq when
+    ## non-empty.
+    ##
     ## v14: MR10 — appends a length-prefixed list of
     ## ``(name: string, value: string)`` env-var entries carrying the
     ## per-edge env injections from the typed-tool wrapper's
@@ -645,11 +653,26 @@ proc automaticMonitorPolicy*(
     ignoredInputPrefixes: @ignoredInputPrefixes)
 
 proc makeDepfilePolicy*(depfile = "";
+                        depfiles: openArray[string] = [];
                         ignoredInputPrefixes: openArray[string] = []):
     BuildActionDependencyPolicy {.dynOrStatic.} =
+  ## MR16: dependency-gathering policy for tools that emit one or
+  ## more recognized ``make-depfile`` reports. ``depfile`` (single
+  ## path) and ``depfiles`` (multiple paths) are merged into one
+  ## ``seq[string]`` carried on the policy; both literal paths and
+  ## globs (``*``, ``?``, ``**``) are accepted and the engine
+  ## expands globs at evidence-collection time against the action's
+  ## cwd. Empty inputs are filtered out so passing
+  ## ``depfile = ""`` from default-valued recipe wrappers is safe.
+  var merged: seq[string] = @[]
+  if depfile.len > 0:
+    merged.add(depfile)
+  for path in depfiles:
+    if path.len > 0 and path notin merged:
+      merged.add(path)
   BuildActionDependencyPolicy(
     kind: bdpMakeDepfile,
-    depfile: depfile,
+    depfiles: merged,
     ignoredInputPrefixes: @ignoredInputPrefixes)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
@@ -1646,7 +1669,7 @@ proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
 proc writeDependencyPolicy(outp: var seq[byte];
                            policy: BuildActionDependencyPolicy) =
   outp.writeByte(byte(ord(policy.kind)))
-  outp.writeString(policy.depfile)
+  outp.writeStringSeq(policy.depfiles)
   outp.writeStringSeq(policy.ignoredInputPrefixes)
 
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
@@ -1655,7 +1678,16 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16)
   if kind > byte(ord(bdpMakeDepfile)):
     raisePayload("invalid dependency policy kind in build action payload")
   result.kind = BuildActionDependencyPolicyKind(kind)
-  result.depfile = readString(bytes, pos)
+  if version >= 15'u16:
+    result.depfiles = readStringSeq(bytes, pos)
+  else:
+    # MR16: v14 and earlier payloads carried a single ``depfile``
+    # string; lift it into a one-element ``depfiles`` seq (empty
+    # string -> empty seq) so older artifacts decode without a
+    # source-level fallback elsewhere.
+    let legacy = readString(bytes, pos)
+    if legacy.len > 0:
+      result.depfiles = @[legacy]
   if version >= 10'u16:
     result.ignoredInputPrefixes = readStringSeq(bytes, pos)
 
@@ -1715,7 +1747,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, BuildActionPayloadVersion}:
+      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16,
+      BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:

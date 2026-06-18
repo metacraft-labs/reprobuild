@@ -1281,26 +1281,40 @@ proc argvForCall(call: PublicCliCall; profile: PathOnlyToolProfile): seq[string]
   for arg in positional:
     result.addPositionalArg(arg)
 
-proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
-  if depfile.len == 0:
-    # No recognized depfile to drive gathering -> the executor monitors the
-    # action and records every file it reads. This is the default policy for
-    # actions that do not opt into a depfile/converter; the removed
-    # ``dgDeclaredOnly`` used to track only declared inputs here, which let
-    # depended-on files change without invalidating the action.
+proc depfilePolicyMulti(paths: openArray[string]): DependencyGatheringPolicy =
+  ## MR16: build a recognized-format policy from N depfile paths. Each
+  ## path becomes one ``ExpectedDependencyFile`` on a single
+  ## ``RecognizedDependencyReportSpec``. The engine's evidence reader
+  ## walks every output and expands literal/glob paths at
+  ## evidence-collection time. Empty input -> automatic-monitor
+  ## fallback (matches the legacy single-path behavior on ``""``).
+  if paths.len == 0:
     return repro_core.automaticMonitorGatheringPolicy()
+  var outputs: seq[ExpectedDependencyFile] = @[]
+  for path in paths:
+    outputs.add(ExpectedDependencyFile(
+      logicalName: "deps",
+      path: path,
+      required: false))
+        # ``required = false`` because glob entries may legitimately
+        # expand to zero files (e.g. cargo's debug/release split: only
+        # one profile dir exists per build). The engine surfaces "no
+        # depfile produced at all" as a missing-evidence diagnostic at
+        # the aggregate-policy level, not per-path.
   DependencyGatheringPolicy(
     kind: dgRecognizedFormat,
     completeness: decComplete,
     recognizedReports: @[
       RecognizedDependencyReportSpec(
         formatName: DependencyFormatName(MakeDepfileFormatName),
-        outputs: @[ExpectedDependencyFile(
-          logicalName: "deps",
-          path: depfile,
-          required: true)],
+        outputs: outputs,
         completeness: decComplete)
     ])
+
+proc depfilePolicy(depfile: string): DependencyGatheringPolicy =
+  if depfile.len == 0:
+    return repro_core.automaticMonitorGatheringPolicy()
+  depfilePolicyMulti([depfile])
 
 proc lowerDependencyPolicy(actionId, depfile: string;
                            policy: BuildActionDependencyPolicy):
@@ -1317,19 +1331,20 @@ proc lowerDependencyPolicy(actionId, depfile: string;
     result = DependencyGatheringPolicy(kind: dgAutomaticMonitor,
         completeness: decComplete)
   of bdpMakeDepfile:
-    let selectedDepfile =
-      if policy.depfile.len > 0:
-        policy.depfile
-      else:
-        depfile
-    if selectedDepfile.len == 0:
+    # MR16: ``policy.depfiles`` is the canonical multi-path list.
+    # ``depfile`` (the per-action legacy single-path field) is merged
+    # in so recipes that still set both keep working — duplicates are
+    # filtered.
+    var merged: seq[string] = @[]
+    if depfile.len > 0:
+      merged.add(depfile)
+    for path in policy.depfiles:
+      if path.len > 0 and path notin merged:
+        merged.add(path)
+    if merged.len == 0:
       raise newException(ValueError,
         "action " & actionId & " uses makeDepfilePolicy without a depfile path")
-    if depfile.len > 0 and policy.depfile.len > 0 and depfile != policy.depfile:
-      raise newException(ValueError,
-        "action " & actionId & " supplies conflicting depfile paths: " &
-          depfile & " and " & policy.depfile)
-    result = depfilePolicy(selectedDepfile)
+    result = depfilePolicyMulti(merged)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];

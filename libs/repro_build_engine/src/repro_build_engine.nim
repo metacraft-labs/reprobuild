@@ -813,6 +813,39 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   for report in reports:
     for output in report.outputs:
       let path = action.expectedPath(output)
+      # MR16: a depfile entry whose path contains a glob meta-character
+      # is expanded against the action's cwd at evidence-collection
+      # time and the matched files are each parsed as the declared
+      # ``formatName``. Cargo / rustc emit one ``.d`` per crate at
+      # ``target/<profile>/deps/<crate>-<hash>.d`` (the hash depends
+      # on the compiler-input content, so the recipe cannot enumerate
+      # them at DSL-eval time); the recipe declares
+      # ``target/debug/deps/*.d`` and ``target/release/deps/*.d`` and
+      # we walk the patterns here. Literal paths take the original
+      # single-file branch unchanged.
+      let isGlob = '*' in path or '?' in path or '[' in path
+      if isGlob:
+        var matched = 0
+        # walkPattern receives the ordinary form (not ``\\?\``) so
+        # std/os glob expansion works on Windows; per-match reads
+        # still apply ``extendedPath`` inside
+        # ``readRecognizedDependencyReport`` to survive paths beyond
+        # the 260-character ``MAX_PATH`` limit.
+        for resolved in walkPattern(path):
+          inc matched
+          try:
+            result.evidence.addPathSet(seen,
+              readRecognizedDependencyReport($report.formatName, resolved),
+              recognized = true)
+          except DependencyReportError as err:
+            result.evidence.diagnostics.add(
+              "dependency report invalid: " & err.msg)
+            result.publishable = false
+        if output.required and matched == 0:
+          result.evidence.diagnostics.add(
+            "dependency report glob produced no matches: " & path)
+          result.publishable = false
+        continue
       if output.required and not fileExists(extendedPath(path)):
         result.evidence.diagnostics.add("dependency report missing: " & path)
         result.publishable = false

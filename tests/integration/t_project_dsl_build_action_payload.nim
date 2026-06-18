@@ -53,7 +53,15 @@ proc writeCliCallLegacy(outp: var seq[byte]; call: PublicCliCall;
 proc writeDependencyPolicy(outp: var seq[byte];
                            policy: BuildActionDependencyPolicy) =
   outp.writeByte(byte(ord(policy.kind)))
-  outp.writeString(policy.depfile)
+  # MR16: legacy v3..v14 payloads carried a single ``depfile: string``
+  # in the dependency-policy section. We synthesise the legacy wire
+  # by writing the first ``depfiles`` entry (or the empty string when
+  # the policy has no depfile), letting these legacy-encoder tests
+  # continue to verify the read-side migration in
+  # ``readDependencyPolicy`` (v14 -> v15 lift to one-element seq).
+  let legacy =
+    if policy.depfiles.len > 0: policy.depfiles[0] else: ""
+  outp.writeString(legacy)
 
 proc encodeLegacyBuildActionPayload(action: BuildActionDef;
                                     version: uint16): seq[byte] =
@@ -112,14 +120,14 @@ suite "project DSL build action payload":
     check automatic.call.arguments[3].format == cafSeparate
     check automatic.call.arguments[3].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
-    check automatic.dependencyPolicy.depfile == ""
+    check automatic.dependencyPolicy.depfiles.len == 0
     check automatic.actionCachePolicy == acfpTimestamp
 
     let makeDepfile = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d"),
         actionCachePolicy = acfpChecksum)))
     check makeDepfile.dependencyPolicy.kind == bdpMakeDepfile
-    check makeDepfile.dependencyPolicy.depfile == "deps/generated.d"
+    check makeDepfile.dependencyPolicy.depfiles == @["deps/generated.d"]
     check makeDepfile.cacheable == false
     check makeDepfile.commandStatsId == "compile-stats"
     check makeDepfile.actionCachePolicy == acfpChecksum
@@ -131,7 +139,7 @@ suite "project DSL build action payload":
     check decoded.call.arguments.len == 4
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
-    check decoded.dependencyPolicy.depfile == "deps/generated.d"
+    check decoded.dependencyPolicy.depfiles == @["deps/generated.d"]
     check decoded.actionCachePolicy == acfpTimestamp
 
   test "version 2 payloads decode with default dependency policy":
@@ -141,7 +149,7 @@ suite "project DSL build action payload":
     check decoded.depfile == ""
     check decoded.call.arguments[0].role == carOrdinary
     check decoded.dependencyPolicy.kind == bdpDefault
-    check decoded.dependencyPolicy.depfile == ""
+    check decoded.dependencyPolicy.depfiles.len == 0
     check decoded.actionCachePolicy == acfpTimestamp
 
   test "invalid dependency policy kind fails closed":
@@ -168,7 +176,7 @@ suite "project DSL build action payload":
     check not decoded.call.arguments[0].repeated
     check decoded.call.arguments[1].placement == capAfterSubcommand
     check decoded.dependencyPolicy.kind == bdpMakeDepfile
-    check decoded.dependencyPolicy.depfile == "deps/generated.d"
+    check decoded.dependencyPolicy.depfiles == @["deps/generated.d"]
 
   test "version 5 payloads decode with after-subcommand CLI argument placement":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(

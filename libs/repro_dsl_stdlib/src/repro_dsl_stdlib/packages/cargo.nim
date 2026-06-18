@@ -76,26 +76,27 @@ package cargo:
 
   executable cargo:
     cli:
-      # Cargo manages its own incremental cache + fingerprint database
-      # under ``target/``, with semantics far more precise than the
-      # engine's fs-snoop can infer. Wrapping cargo with the automatic
-      # monitor adds no precision (cargo's cache decides invalidation;
-      # snoop's read/write set just duplicates what target/ already
-      # records) but does introduce the IAT-patching shim into every
-      # rustc / linker / build-script subprocess cargo spawns — a
-      # production hazard on Windows where rustc + LLVM do enough
-      # process-level fiddling that the inline-hook propagation
-      # interacts badly with rustc's exception handling. Declaring
-      # ``declaredOnly`` here means cargo edges key on their declared
-      # inputs/outputs (Cargo.toml, Cargo.lock, src/, etc.) and let
-      # cargo's own cache handle the fine-grained recompile decisions.
-      # Recipe authors who really want monitor evidence on a cargo
-      # call can opt back in by passing
-      # ``dependencyPolicy = automaticMonitorPolicy()`` to the
-      # per-call wrapper.
-      dependencyPolicy declaredOnly
+      # MR16: cargo + rustc emit one Make-format ``.d`` depfile per
+      # crate under ``target/<profile>/deps/<crate>-<hash>.d`` (the
+      # hash depends on compiler-input content so the recipe cannot
+      # enumerate them at DSL-eval time). Each subcmd below declares
+      # both the debug and release deps dirs as glob patterns; the
+      # engine's evidence collector expands each glob at action-end
+      # and parses every matching ``.d`` as a recognized make-depfile
+      # report. Only the profile dir cargo actually wrote to has
+      # files; the other glob legitimately expands to zero matches.
+      #
+      # This replaces the previous ``dependencyPolicy declaredOnly``
+      # opt-out (which bypassed dependency evidence entirely) with
+      # first-class evidence collection driven by cargo's own ``.d``
+      # outputs. The recognized-format gathering kind does NOT wrap
+      # subprocesses with the IAT-patching fs-snoop shim, so the
+      # rustc-on-Windows monitor-shim crash class that motivated the
+      # original ``declaredOnly`` opt-out is still avoided.
 
       subcmd "build":
+        dependencyPolicy makeDepfile,
+          depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
         boolFlag locked is bool, alias = "--locked"
         boolFlag release is bool, alias = "--release"
         flag manifestPath is string,
@@ -113,6 +114,13 @@ package cargo:
         ## run inside this subcommand without `--no-run` are still
         ## supported (the legacy `just test` carries them) but they do
         ## not produce reusable typed outputs.
+        ##
+        ## MR16: ``cargo test --no-run`` writes the same
+        ## ``target/<profile>/deps/<crate>-<hash>.d`` files for the
+        ## test crates as ``cargo build`` does for normal crates, so
+        ## the same multi-glob spec applies.
+        dependencyPolicy makeDepfile,
+          depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
         boolFlag locked is bool, alias = "--locked"
         boolFlag release is bool, alias = "--release"
         boolFlag noRun is bool, alias = "--no-run"
@@ -166,9 +174,21 @@ proc run*(self: CargoTestBinary; filter = "";
   let selectedActionId =
     if actionId.len > 0: actionId
     else: defaultToolActionId(call)
+  # MR16: the test-binary execute edge reuses the build-time ``.d``
+  # files left behind in ``target/<profile>/deps/`` by the
+  # ``cargo.test --no-run`` build that produced this binary. The
+  # binary's true source-input set lives in that depfile (cargo's
+  # rustc invocation wrote one ``.d`` per crate the binary links),
+  # so keying the execute edge on it correctly invalidates the run
+  # whenever a source file the binary depends on changed since the
+  # last successful execution. We declare both the debug and release
+  # globs for the same reason the build subcmd does: at most one
+  # profile dir exists per workspace, the other glob legitimately
+  # expands to zero matches.
   result = recordToolInvocation(selectedActionId, call,
     deps = combineActionDeps(deps, after),
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = makeDepfilePolicy(depfiles = [
+      "target/debug/deps/*.d", "target/release/deps/*.d"]),
     extraEnv = extraEnv)
 
 # M65 cakBuiltin catalog -- consumed on Windows and non-Nix Linux.

@@ -204,7 +204,14 @@ proc parseCommandDependencyPolicy(node: NimNode;
   for i in 2 ..< node.len:
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
-      result.depfile = stringLiteral(depfileValue)
+      let single = stringLiteral(depfileValue)
+      if single.len > 0 and single notin result.depfiles:
+        result.depfiles.add(single)
+    let depfilesValue = namedValue(node[i], "depfiles")
+    if not depfilesValue.isNil:
+      for path in stringSeqLiteral(depfilesValue):
+        if path.len > 0 and path notin result.depfiles:
+          result.depfiles.add(path)
     let ignoredValue = namedValue(node[i], "ignoredInputPrefixes")
     if not ignoredValue.isNil:
       result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
@@ -1309,15 +1316,26 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
       result.add(escForCode(prefix))
     result.add("]")
 
+  proc depfilesCode(): string =
+    result = "depfiles = @["
+    for i, path in policy.depfiles:
+      if i > 0:
+        result.add(", ")
+      result.add(escForCode(path))
+    result.add("]")
+
   case policy.kind
   of bdpDefault:
     "defaultDependencyPolicy(" & ignoredCode() & ")"
   of bdpAutomaticMonitor:
     "automaticMonitorPolicy(" & ignoredCode() & ")"
   of bdpMakeDepfile:
-    "makeDepfilePolicy(" & escForCode(policy.depfile) &
-      (if policy.ignoredInputPrefixes.len > 0: ", " & ignoredCode() else: "") &
-      ")"
+    var parts: seq[string] = @[]
+    if policy.depfiles.len > 0:
+      parts.add(depfilesCode())
+    if policy.ignoredInputPrefixes.len > 0:
+      parts.add(ignoredCode())
+    "makeDepfilePolicy(" & parts.join(", ") & ")"
 
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
@@ -2183,8 +2201,6 @@ proc dependencyPolicyLiteral(node: NimNode;
   case text
   of "default":
     defaultDependencyPolicy()
-  of "declaredonly":
-    automaticMonitorPolicy()
   of "automaticmonitor", "monitor":
     when defined(macosx) or defined(linux) or defined(windows):
       automaticMonitorPolicy()
@@ -2204,7 +2220,14 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
   for i in 2 ..< node.len:
     let depfileValue = namedValue(node[i], "depfile")
     if not depfileValue.isNil:
-      result.depfile = stringLiteral(depfileValue)
+      let single = stringLiteral(depfileValue)
+      if single.len > 0 and single notin result.depfiles:
+        result.depfiles.add(single)
+    let depfilesValue = namedValue(node[i], "depfiles")
+    if not depfilesValue.isNil:
+      for path in stringSeqLiteral(depfilesValue):
+        if path.len > 0 and path notin result.depfiles:
+          result.depfiles.add(path)
 
 proc collectParamGroup(node: NimNode): tuple[name: string,
                                             statements: seq[NimNode]] =

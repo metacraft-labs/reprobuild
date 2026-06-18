@@ -306,7 +306,16 @@ type
 
   BuildActionDependencyPolicy* = object
     kind*: BuildActionDependencyPolicyKind
-    depfile*: string
+    depfiles*: seq[string]
+      ## MR16: zero or more depfile path patterns the engine reads as
+      ## recognized ``make-depfile`` reports. Each entry may be a
+      ## literal path OR a glob (``*``, ``?``, ``**``) expanded at
+      ## evidence-collection time against the action's cwd. Multiple
+      ## entries are aggregated into a single
+      ## ``RecognizedDependencyReportSpec`` with one
+      ## ``ExpectedDependencyFile`` per path. The legacy single
+      ## ``depfile: string`` field has been removed; recipes that need
+      ## one depfile pass a one-element ``depfiles`` seq.
     ignoredInputPrefixes*: seq[string]
 
   ActionCacheFingerprintPolicy* = enum
