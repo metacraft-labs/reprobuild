@@ -81,6 +81,14 @@ type
     listenHost*: string
     listenPort*: Port
     running*: bool
+    serveFut*: Future[void]
+      ## The in-flight ``AsyncHttpServer.serve`` accept loop. Held so
+      ## ``close`` can install a completion handler that swallows the
+      ## ``Bad file descriptor`` (``OSError``) that the pending accept
+      ## raises once the listening socket is torn down. Without this,
+      ## ``asyncCheck`` would reraise that expected shutdown error into
+      ## the next ``poll`` and crash an in-process caller that boots and
+      ## closes the server inside a single event loop.
 
 # ---------------------------------------------------------------------------
 # Multipart parser — tight enough to debug, lax enough to accept
@@ -655,11 +663,24 @@ proc start*(srv: BinaryCacheHttpServer; listenAddr: string) {.async.} =
   proc cb(req: Request) {.async, gcsafe.} =
     {.cast(gcsafe).}:
       await handleRequest(srv, req)
-  asyncCheck srv.server.serve(port, cb, host)
+  # Hold the serve future instead of ``asyncCheck``-ing it: ``close``
+  # tears down the listening socket while this accept loop is still
+  # pending, which surfaces as a ``Bad file descriptor`` ``OSError``.
+  # That failure is expected during shutdown, so ``close`` installs a
+  # handler that consumes it; ``asyncCheck`` would instead reraise it
+  # into the next ``poll`` and crash an in-process caller.
+  srv.serveFut = srv.server.serve(port, cb, host)
   asyncCheck sweeperLoop(srv)
 
 proc close*(srv: BinaryCacheHttpServer) =
   if srv.isNil or not srv.running:
     return
   srv.running = false
+  # Drain the pending accept loop's expected post-close failure before
+  # tearing down the socket, so the event loop never reraises it.
+  if not srv.serveFut.isNil and not srv.serveFut.finished:
+    # Installing a no-op completion callback marks the future's
+    # eventual failure as consumed, so ``asyncCheck``'s default reraise
+    # path never runs for the shutdown-induced ``OSError``.
+    srv.serveFut.callback = proc () = discard
   try: srv.server.close() except CatchableError: discard

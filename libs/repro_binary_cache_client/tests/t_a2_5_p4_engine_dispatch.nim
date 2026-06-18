@@ -23,7 +23,7 @@ import ../../repro_binary_cache_server/src/repro_binary_cache_server/index as bc
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import ../../blake3/src/blake3
 
-const ServerBinary = "build/test-bin/repro_binary_cache.exe"
+const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
 proc pickPort(): int =
   randomize()
@@ -98,6 +98,16 @@ suite "A2.5 P4 — engine-dispatch":
     var payloadDigest: Blake3Hash
     for i in 0 ..< 32: payloadDigest[i] = payloadDigestRaw[i]
 
+    # Detect the host CPU so the manifest keys on the SAME triple the
+    # client's compat-check derives. Hardcoding ``x86_64`` made the
+    # substitute fail the compat gate (``CPU mismatch: manifest=x86_64
+    # local=aarch64``) on arm64 macOS / Linux.
+    when defined(amd64) or defined(x86_64):
+      const localCpu = "x86_64"
+    elif defined(arm64) or defined(aarch64):
+      const localCpu = "aarch64"
+    else:
+      const localCpu = "unknown"
     when defined(linux):
       const localOs = "linux"
       const localAbi = "gnu"
@@ -117,7 +127,7 @@ suite "A2.5 P4 — engine-dispatch":
     for i in 0 ..< 32: realizedPrefix[i] = byte((i * 19 + 5) and 0xff)
     let entryKey = CacheEntryKey(
       packageName: "p4", packageVersion: "1.0",
-      platform: PlatformTriple(cpu: "x86_64", os: localOs,
+      platform: PlatformTriple(cpu: localCpu, os: localOs,
                                abi: localAbi, libcVariant: ""),
       toolchain: ToolchainIdentity(),
       depClosureDigest: payloadDigest,

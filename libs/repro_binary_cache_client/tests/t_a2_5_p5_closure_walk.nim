@@ -20,7 +20,7 @@ import ../../repro_binary_cache_server/src/repro_binary_cache_server/index as bc
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import ../../blake3/src/blake3
 
-const ServerBinary = "build/test-bin/repro_binary_cache.exe"
+const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
 proc pickPort(): int =
   randomize(); 23_000 + rand(8_999)
@@ -43,12 +43,14 @@ proc startServer(serverRoot: string; port: int): Process =
                options = {poStdErrToStdOut, poParentStreams})
 
 proc localPlatform(): PlatformTriple =
-  when defined(linux):
-    PlatformTriple(cpu: "x86_64", os: "linux", abi: "gnu", libcVariant: "")
-  elif defined(windows):
-    PlatformTriple(cpu: "x86_64", os: "windows", abi: "msvc", libcVariant: "")
-  else:
-    PlatformTriple(cpu: "x86_64", os: "darwin", abi: "", libcVariant: "")
+  # Mirror the client's own ``detectLocalPlatform`` so the synthesized
+  # manifests key on the SAME platform triple the compat-check derives
+  # for this host. Hardcoding ``x86_64`` made every substitute trip the
+  # compat gate (``CPU mismatch: manifest=x86_64 local=aarch64``) on
+  # arm64 macOS / Linux.
+  let local = detectLocalPlatform("")
+  PlatformTriple(cpu: local.cpu, os: local.os, abi: local.abi,
+                 libcVariant: local.libcVariant)
 
 proc buildMember(state: BinaryCacheServerState;
                  name: string; deps: seq[Blake3Hash]; seed: int):

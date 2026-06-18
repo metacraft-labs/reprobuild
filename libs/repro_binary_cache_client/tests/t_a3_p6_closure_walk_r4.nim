@@ -19,7 +19,7 @@ import ../../repro_binary_cache_server/src/repro_binary_cache_server
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import ../../blake3/src/blake3
 
-const ServerBinary = "build/test-bin/repro_binary_cache.exe"
+const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
 proc pickPort(): int =
   randomize(); 24_000 + rand(6_999)

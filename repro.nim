@@ -224,6 +224,22 @@ package reprobuild:
   executable harnessApplyLockHolder:
     name: "harness_apply_lock_holder"
 
+  # The A2/A2.5/A3/A4 binary-cache integration tests under
+  # ``libs/repro_binary_cache_client/tests/`` spawn the
+  # ``repro-binary-cache`` server daemon (and, for the A3 CLI gate, the
+  # ``repro-binary-cache-client`` CLI) as a subprocess from
+  # ``build/test-bin/``. These were previously built only by the
+  # Windows-only ``scripts/run-a2-gate.ps1`` gate, so the helpers were
+  # absent on Linux/macOS and every binary-cache integration test
+  # tripped its ``fileExists`` guard. Declaring them as ordinary
+  # ``test-helpers`` build edges (below) makes them available on every
+  # platform via the graph-native ``repro build .#test-helpers`` path.
+  executable reproBinaryCacheHelper:
+    name: "repro_binary_cache"
+
+  executable reproBinaryCacheClientCliHelper:
+    name: "repro_binary_cache_client_cli"
+
   build:
     # Project-DSL-Composition M6: declared typed-output build edges for
     # every ``t_*.nim`` / ``test_*.nim`` file under tests/,
@@ -507,6 +523,33 @@ package reprobuild:
       source = "tests/e2e/home-generations/harness_apply_lock_holder.nim",
       binary = "build/test-bin/harness_apply_lock_holder",
       actionId = "reprobuild.test_helpers.harness_apply_lock_holder"))
+
+    # Binary-cache integration-test subprocess helpers (A2/A2.5/A3/A4).
+    #
+    # The ``repro-binary-cache`` server daemon and the
+    # ``repro-binary-cache-client`` CLI are the SAME shipping app
+    # sources used under ``apps/``, but the integration tests spawn them
+    # from ``build/test-bin/`` (alongside the other test helpers) rather
+    # than from ``build/bin/``. Previously these were produced only by
+    # the Windows-only ``scripts/run-a2-gate.ps1`` gate, so the helper
+    # binaries never existed on Linux/macOS and every binary-cache
+    # integration test failed its ``fileExists`` guard. Declaring them
+    # here as ordinary graph edges materialises both on every platform
+    # via ``repro build .#test-helpers``.
+    #
+    # The CLI carries ``-d:ssl`` because it links ``std/httpclient`` for
+    # the HTTPS substitute path (the server itself only serves over
+    # ``std/asynchttpserver`` and needs no ssl define).
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "apps/repro-binary-cache/repro_binary_cache.nim",
+      binary = "build/test-bin/repro_binary_cache",
+      actionId = "reprobuild.test_helpers.repro_binary_cache"))
+
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim",
+      binary = "build/test-bin/repro_binary_cache_client_cli",
+      defines = @["ssl"],
+      actionId = "reprobuild.test_helpers.repro_binary_cache_client_cli"))
 
     discard collect("test-helpers", reprobuildTestHelpersActions)
 

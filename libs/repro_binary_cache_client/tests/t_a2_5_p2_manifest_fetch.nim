@@ -19,7 +19,7 @@ import ../../repro_binary_cache_server/src/repro_binary_cache_server/index as bc
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import ../../blake3/src/blake3
 
-const ServerBinary = "build/test-bin/repro_binary_cache.exe"
+const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
 proc pickPort(): int =
   randomize()
@@ -99,7 +99,7 @@ proc waitForListener(port: int; tries = 100; sleepMs = 50): bool =
 proc startServer(serverRoot: string; port: int): Process =
   let exePath = absolutePath(ServerBinary)
   doAssert fileExists(exePath), "missing " & exePath &
-    " — build via `pwsh scripts/run-a2-gate.ps1`"
+    " — build via `repro build .#test-helpers`"
   result = startProcess(
     exePath,
     args = @["--root=" & serverRoot,
