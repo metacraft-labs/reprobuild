@@ -94,11 +94,24 @@ proc parseMakeLikeText(path, text: string): DependencyPathSet =
     let ch = normalized[i]
     case ch
     of '\\':
+      # GNU Make's depfile escape rules: ``\`` only escapes the next char
+      # when it would otherwise be a Make meta-character (space, tab, the
+      # depfile separators, ``$``, ``#``, or another ``\``). When the
+      # next char is anything else — notably an alphanumeric, as in
+      # Windows paths like ``D:\m\dev\foo`` — the backslash is a literal
+      # path separator and must be preserved.
+      # Without this distinction the parser silently drops ``\m``,
+      # ``\d``, etc. from cargo/rustc-emitted ``.d`` depfiles on Windows,
+      # mangling every input path and breaking the engine's
+      # cache-invalidation logic.
       if i + 1 >= normalized.len:
         token.add('\\')
-      else:
+      elif normalized[i + 1] in {' ', '\t', ':', '\\', '#', '$'}:
         inc i
         token.add(normalized[i])
+        sawRuleText = true
+      else:
+        token.add('\\')
         sawRuleText = true
     of '$':
       if i + 1 < normalized.len and normalized[i + 1] == '$':
@@ -112,7 +125,21 @@ proc parseMakeLikeText(path, text: string): DependencyPathSet =
         inc i
       dec i
     of ':':
-      if inDeps:
+      # Drive-letter heuristic for Windows depfiles. cargo + rustc emit
+      # absolute Windows paths like ``D:\foo\target.d: D:\src\lib.rs``
+      # without any escaping. A bare ``:`` whose token is a single
+      # letter AND whose next char is a path separator is part of a
+      # drive prefix, NOT the make-rule target/deps separator.
+      # Without this, the parser would chop ``D:`` off both sides:
+      # ``D`` becomes the first target and ``\foo\target.d: D:\src\…``
+      # appears as the deps section.
+      let isDriveColon =
+        token.len == 1 and token[0] in {'A'..'Z', 'a'..'z'} and
+          i + 1 < normalized.len and normalized[i + 1] in {'\\', '/'}
+      if isDriveColon:
+        token.add(ch)
+        sawRuleText = true
+      elif inDeps:
         token.add(ch)
       else:
         flushToken(targets, token)
