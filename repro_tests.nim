@@ -2341,6 +2341,95 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Twenty-seventh from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the system-tier infrastructure batch (zlib +
+  # libxml2 + openssl + systemd) and the FIRST recipe in the corpus to
+  # drive a CUSTOM (non-autotools, non-meson, non-cmake) ``./configure``
+  # script through the abstract ``configureFlags:`` channel. zlib's
+  # custom ``./configure`` is NOT autoconf-generated and accepts a much
+  # smaller flag set with different naming conventions (``--shared``
+  # not ``--enable-shared``); the convention layer treats the
+  # ``configureFlags:`` channel as the abstract "argv passed to
+  # ``./configure``" carrier so a custom-configure recipe reuses the
+  # same channel without needing a new flag-channel taxonomy. Pins
+  # zlib 1.3.1's vendored sha256 + custom configure flag sequence +
+  # cross-channel isolation + ``libZ`` library artifact. The deflate /
+  # inflate compression foundation; glib2 / qt6-base / libxml2 /
+  # openssl / freetype / linux-kernel all link this transitively.
+  TestSpec(
+    source: "recipes/packages/source/zlib/test_zlib_source.nim",
+    binary: "build/test-bin/t_zlib_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-eighth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the system-tier infrastructure batch and
+  # the SIXTH autotools-driven recipe (expat + gdm + freetype +
+  # fontconfig + zlib precedents). Pins libxml2 2.13.5's vendored sha256
+  # + configure flag sequence (six-element seq, all negative-form
+  # ``--without-X`` flags exercising the autotools-grammar variant
+  # different from fontconfig's ``--enable-X`` positive-form) +
+  # cross-channel isolation + ``libXml2`` library artifact. The
+  # canonical full-DOM + SAX XML parser that pairs with expat for the
+  # heavyweight tree-based + XPath + XSLT entry points GNOME / KDE
+  # settings systems consume.
+  TestSpec(
+    source: "recipes/packages/source/libxml2/test_libxml2_source.nim",
+    binary: "build/test-bin/t_libxml2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-ninth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the system-tier infrastructure batch and the
+  # SECOND recipe in the corpus to drive a CUSTOM (non-autotools,
+  # non-meson, non-cmake) ``./Configure`` script (zlib was first this
+  # batch). openssl's ``Configure`` (with a capital ``C``) is a Perl
+  # script accepting a positional target triplet (``linux-x86_64``)
+  # FOLLOWED by ``no-<feature>`` / ``enable-<feature>`` toggles, a
+  # quite different argv grammar than autotools. Pins openssl 3.4.0's
+  # vendored sha256 + Configure flag sequence (with the positional
+  # target triplet exercising the order-sensitive parsing) +
+  # cross-channel isolation + ``libCrypto`` + ``libSsl`` library
+  # artifacts. The SEVENTH multi-library single-package shape and the
+  # FIRST non-meson / non-cmake multi-library recipe. The TLS +
+  # cryptography foundation; qt6-base / glib2 / systemd / kwallet /
+  # polkit / kernel IMA all link this transitively.
+  TestSpec(
+    source: "recipes/packages/source/openssl/test_openssl_source.nim",
+    binary: "build/test-bin/t_openssl_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirtieth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the system-tier infrastructure batch and
+  # the SEVENTEENTH meson-driven recipe. FIRST recipe in the corpus to
+  # ship a SIX-ARTIFACT MIXED-KIND shape from a single ``package`` macro:
+  # four executables (``systemdInit`` + ``systemctl`` + ``journalctl``
+  # + ``systemdLogind``) PLUS two libraries (``libSystemd`` + ``libUdev``)
+  # all built from one meson invocation. Every prior multi-artifact
+  # recipe shipped at most six (qt6-base's SIX libs, all of one kind)
+  # or three (sddm's two-exec + one-lib mixed-kind) — systemd pushes
+  # the artifact-name partitioning + per-artifact kind-tagging at the
+  # six-artifact mixed-kind cardinality. Also the LARGEST meson option
+  # set in the corpus (fourteen-element seq). Pins systemd 257's
+  # vendored sha256 + meson flag sequence + cross-channel isolation +
+  # the six artifacts within a single package's artifact set. The init
+  # system + service manager + session manager + log aggregator
+  # underpinning every modern Linux desktop.
+  TestSpec(
+    source: "recipes/packages/source/systemd/test_systemd_source.nim",
+    binary: "build/test-bin/t_systemd_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
