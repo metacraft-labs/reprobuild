@@ -2592,6 +2592,85 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Fortieth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the foundation-tier-closing batch (dbus /
+  # sqlite / glibc / coreutils) and FIRST from-source dbus daemon
+  # family recipe driven by autotools (sibling ``dbusBrokerSource``
+  # covers the alternative bus1 broker via meson + ninja). Pins dbus
+  # 1.16.0's vendored sha256 + ``./configure`` flag sequence + cross-
+  # channel isolation + ``dbusDaemon`` executable + ``libDbus1``
+  # library artifacts. The reference freedesktop D-Bus daemon the
+  # NDE0-D ``dbus.service`` unit invokes when
+  # ``busActivationStrategy = basDaemon``; the libdbus client library
+  # every glib / Qt / KDE D-Bus binding links against regardless of
+  # which daemon implementation is active.
+  TestSpec(
+    source: "recipes/packages/source/dbus/test_dbus_source.nim",
+    binary: "build/test-bin/t_dbus_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-first from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the foundation-tier-closing batch and the
+  # SQLite-authoritative ``sqlite-autoconf-*.tar.gz`` amalgamation
+  # tarball (single-translation-unit C99 source distribution shipping
+  # a hand-rolled ``./configure`` script with the standard autoconf-
+  # shaped flag grammar). Pins sqlite 3.47.1's vendored sha256 +
+  # ``./configure`` flag sequence + cross-channel isolation +
+  # ``libSqlite3`` library + ``sqlite3Cli`` executable artifacts. The
+  # canonical embedded SQL database underpinning tracker + baloo +
+  # every modern web browser (Firefox / Chromium / WebKitGTK persist
+  # cookies + history + IndexedDB in SQLite databases) + every
+  # modern messaging client.
+  TestSpec(
+    source: "recipes/packages/source/sqlite/test_sqlite_source.nim",
+    binary: "build/test-bin/t_sqlite_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-second from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the foundation-tier-closing batch and the
+  # LARGEST single from-source artifact set (SEVEN artifacts: six
+  # libraries + one executable for the dynamic linker). Closes the
+  # foundation tier on the C-library side; complementary to the R5/R6
+  # bootstrap glibc-2.42 wrappers under
+  # ``recipes/bootstrap/tcc-chain/`` which continue to cover the lift-
+  # from-hex0 chain while THIS recipe covers everything downstream of
+  # the lifted gcc. Pins glibc 2.40's vendored sha256 + ``./configure``
+  # flag sequence + cross-channel isolation + ``libC`` + ``libM`` +
+  # ``libPthread`` + ``libDl`` + ``libRt`` + ``libCrypt`` library
+  # artifacts + ``ldso`` executable for the dynamic linker.
+  TestSpec(
+    source: "recipes/packages/source/glibc/test_glibc_source.nim",
+    binary: "build/test-bin/t_glibc_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-third from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the foundation-tier-closing batch and the
+  # canonical GNU userland (~100 distinct binaries from a single
+  # ``./configure`` + ``make`` invocation; v1 records the SIX most-
+  # used). Pins coreutils 9.5's vendored sha256 + ``./configure`` flag
+  # sequence + cross-channel isolation + ``ls`` + ``cp`` + ``mv`` +
+  # ``rm`` + ``cat`` + ``echo`` executable artifacts. The middle
+  # ``--enable-no-install-program=kill,uptime,arch`` flag's comma-
+  # separated value pins the per-channel handling of comma-list
+  # values — a regression that split the value on commas would surface
+  # as a flag-count mismatch.
+  TestSpec(
+    source: "recipes/packages/source/coreutils/test_coreutils_source.nim",
+    binary: "build/test-bin/t_coreutils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
