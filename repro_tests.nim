@@ -3331,6 +3331,47 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Seventy-fifth from-source production recipe — FIRST recipe in the
+  # M9.N Batch C build-tool slice (meson + ninja). meson is a Python-
+  # based meta-build system: registration-only because none of the four
+  # ``from-source-*`` conventions claims a recipe that ships zero flag
+  # blocks AND a single ``executable`` artifact AND ``uses: "python
+  # >=3.8"`` alone. Pins meson 1.6.1's upstream GitHub release-tarball
+  # URL + locally-computed sha256 (2,276,144 bytes) + four-channel
+  # cross-isolation empty-state on a load-bearing executable-shaped
+  # recipe (vs ca-certificates' files-shaped empty-state precedent) +
+  # single ``meson`` executable. Guards the registry round-trip so a
+  # future ``from-source-python-tool`` convention (or DSL ``build:
+  # shell ...`` widening) can attach without re-touching the recipe.
+  TestSpec(
+    source: "recipes/packages/source/meson/test_meson_source.nim",
+    binary: "build/test-bin/t_meson_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventy-sixth from-source production recipe — CLOSING (SECOND)
+  # recipe in the M9.N Batch C build-tool slice. ninja is C++ with a
+  # Python ``configure.py --bootstrap`` driver: registration-only for
+  # the same convention-gap reason as meson (no flag channel matches a
+  # bootstrap-driven build). Pairs with the sibling ``mesonSource``
+  # recipe — both close the meson + ninja toolchain floor every C / C++
+  # ``from-source-meson`` / ``from-source-cmake`` recipe consumes at
+  # build time. Pins ninja 1.12.1's upstream GitHub source-archive URL
+  # + locally-computed sha256 (240,483 bytes) + four-channel cross-
+  # isolation empty-state + single ``ninja`` executable. Unique vs
+  # ``mesonSource``: ALSO declares ``uses: "gcc >=11"`` because the
+  # bootstrap step compiles C++ sources (whereas meson is pure
+  # Python).
+  TestSpec(
+    source: "recipes/packages/source/ninja/test_ninja_source.nim",
+    binary: "build/test-bin/t_ninja_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
