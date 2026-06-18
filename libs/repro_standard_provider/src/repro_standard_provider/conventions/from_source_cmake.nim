@@ -365,12 +365,12 @@ proc sanitizeNamePart(value: string): string =
 # ---------------------------------------------------------------------------
 
 proc cmakeExecutable(): string =
-  let resolved = findExe("cmake")
-  if resolved.len > 0:
-    return resolved
-  # Stable placeholder so ``inlineExecCall`` doesn't refuse an empty
-  # argv[0]. The action will fail at execution time with a clearer
-  # diagnostic than a silent skip.
+  ## M9.N Batch B: emit the BARE tool name ``cmake``. The convention
+  ## stamps ``toolIdentityRefs = @["cmake", ...]`` on every action and
+  ## the engine prepends the resolved bin directory to PATH at fork
+  ## time, so the bare argv entry finds the right binary regardless
+  ## of whether the host has cmake installed. See ``from_source_meson``
+  ## §mesonExecutable for the design rationale.
   "cmake"
 
 # ---------------------------------------------------------------------------
@@ -392,7 +392,8 @@ proc emitConfigureAction(projectRoot, cmakeExe, srcDir, buildDir: string;
   ## consistent with the in-tree c_cpp_cmake convention's behaviour.
   createDir(extendedPath(buildDir))
   let stamp = configureStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -425,7 +426,11 @@ proc emitConfigureAction(projectRoot, cmakeExe, srcDir, buildDir: string;
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.configure")
+    commandStatsId = "from-source-cmake.configure",
+    # M9.N Batch B: cmake configure probes ``ninja`` (the chosen
+    # generator) and a working C compiler at this step; the script
+    # itself is shelled via ``sh``.
+    toolIdentityRefs = @["cmake", "ninja", "gcc", "sh"])
   (action, stamp)
 
 proc emitBuildAction(projectRoot, cmakeExe, buildDir, configureStamp: string):
@@ -434,7 +439,8 @@ proc emitBuildAction(projectRoot, cmakeExe, buildDir, configureStamp: string):
   ## actions key off build success without relying on cmake's internal
   ## file-touch behaviour.
   let stamp = buildStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -453,7 +459,10 @@ proc emitBuildAction(projectRoot, cmakeExe, buildDir, configureStamp: string):
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.build")
+    commandStatsId = "from-source-cmake.build",
+    # M9.N Batch B: ``cmake --build`` re-invokes ninja which invokes
+    # the C compiler.
+    toolIdentityRefs = @["cmake", "ninja", "gcc", "sh"])
   (action, stamp)
 
 proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
@@ -475,7 +484,8 @@ proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
   ## fires after a successful install.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -498,7 +508,10 @@ proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-cmake.install",
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: ``cmake --install`` runs the install-time scripts;
+    # bare ``cmake`` resolves via PATH.
+    toolIdentityRefs = @["cmake", "sh"])
   (action, stamp)
 
 proc dasherise(name: string): string =
@@ -559,7 +572,8 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
   let stagedPath = stagedBinaryPath(staging, member.name, member.kind)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedStaged = stagedPath.replace("\\", "/").replace("\"", "\\\"")
@@ -583,7 +597,9 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-cmake.stage." & kindTag,
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp).
+    toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------
 # Convention entry

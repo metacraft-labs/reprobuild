@@ -345,21 +345,11 @@ proc resolveTarget(projectRoot: string; member: CCppMember): CCppEmitTarget =
   of ccmkLibraryStatic: resolveLibraryTarget(projectRoot, member)
 
 proc ccCompiler(): string =
-  ## Resolve a C compiler driver on PATH. Prefer ``gcc``; fall back to
-  ## ``clang``. Returns the empty string when neither is found — the
-  ## convention then declines recognition.
-  let gcc = findExe("gcc")
-  if gcc.len > 0:
-    return gcc
-  findExe("clang")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "gcc"
 
 proc arDriver(): string =
-  ## Resolve ``ar`` on PATH. Falls back to the literal ``"ar"`` so emit
-  ## still produces a coherent argv even when ``ar`` is missing (the
-  ## resulting action fails loudly at build time).
-  let candidate = findExe("ar")
-  if candidate.len > 0:
-    return candidate
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
   "ar"
 
 proc hasCMakeLists(projectRoot: string): bool =
@@ -517,7 +507,9 @@ proc emitCompileAction(projectRoot, ccExe: string;
     pool = "compile",
     depfile = depFile,
     dependencyPolicy = makeDepfilePolicy(depFile),
-    commandStatsId = "ccpp-make." & kindTag & ".compile")
+    commandStatsId = "ccpp-make." & kindTag & ".compile",
+    # M9.N Batch B: gcc compile step.
+    toolIdentityRefs = @["gcc"])
 
 proc emitLinkAction(projectRoot, ccExe: string;
                     member: CCppMember;
@@ -552,7 +544,9 @@ proc emitLinkAction(projectRoot, ccExe: string;
     outputs = @[binaryOutput],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-make.executable.link")
+    commandStatsId = "ccpp-make.executable.link",
+    # M9.N Batch B: gcc link step.
+    toolIdentityRefs = @["gcc"])
 
 proc emitArchiveAction(projectRoot, arExe: string;
                        member: CCppMember;
@@ -579,7 +573,9 @@ proc emitArchiveAction(projectRoot, arExe: string;
     outputs = @[archiveOutput],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-make.library-static.archive")
+    commandStatsId = "ccpp-make.library-static.archive",
+    # M9.N Batch B: ar archive step.
+    toolIdentityRefs = @["ar"])
 
 proc emitForMember(projectRoot, ccExe, arExe: string;
                    target: CCppEmitTarget;

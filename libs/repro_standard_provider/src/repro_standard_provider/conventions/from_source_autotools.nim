@@ -375,12 +375,8 @@ proc sanitizeNamePart(value: string): string =
 # ---------------------------------------------------------------------------
 
 proc makeExecutable(): string =
-  let resolved = findExe("make")
-  if resolved.len > 0:
-    return resolved
-  # Stable placeholder so ``inlineExecCall`` doesn't refuse an empty
-  # argv[0]. The action will fail at execution time with a clearer
-  # diagnostic than a silent skip.
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  ## See ``from_source_meson`` §mesonExecutable for rationale.
   "make"
 
 # ---------------------------------------------------------------------------
@@ -402,7 +398,8 @@ proc emitConfigureAction(projectRoot, srcDir: string;
   ## docstring.
   createDir(extendedPath(stampDir(projectRoot)))
   let stamp = configureStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
@@ -437,7 +434,10 @@ proc emitConfigureAction(projectRoot, srcDir: string;
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.configure")
+    commandStatsId = "from-source-autotools.configure",
+    # M9.N Batch B: autotools configure shells out to the project's
+    # ``./configure`` script which probes ``make`` + a C compiler.
+    toolIdentityRefs = @["make", "gcc", "sh"])
   (action, stamp)
 
 proc emitBuildAction(projectRoot, makeExe, srcDir, configureStamp: string):
@@ -446,7 +446,8 @@ proc emitBuildAction(projectRoot, makeExe, srcDir, configureStamp: string):
   ## off build success without relying on autotools-generated
   ## ``Makefile`` touch behaviour.
   let stamp = buildStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -465,7 +466,10 @@ proc emitBuildAction(projectRoot, makeExe, srcDir, configureStamp: string):
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.build")
+    commandStatsId = "from-source-autotools.build",
+    # M9.N Batch B: ``make`` re-invokes the C compiler per the
+    # generated Makefile.
+    toolIdentityRefs = @["make", "gcc", "sh"])
   (action, stamp)
 
 proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
@@ -485,7 +489,8 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
   ## fires after a successful install.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -508,7 +513,10 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-autotools.install",
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: ``make install`` invokes the autotools install
+    # rules.
+    toolIdentityRefs = @["make", "sh"])
   (action, stamp)
 
 proc stripLibPrefix(name: string): string =
@@ -570,7 +578,8 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
   let stagedPath = stagedBinaryPath(staging, member.name, member.kind)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedStaged = stagedPath.replace("\\", "/").replace("\"", "\\\"")
@@ -594,7 +603,9 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-autotools.stage." & kindTag,
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp).
+    toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------
 # Convention entry

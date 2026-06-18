@@ -384,3 +384,22 @@ suite "from-source-cmake convention M9.L.1 — kcoreaddons":
     check identA.packageVersion == identB.packageVersion
     check identA.toolchain.name == identB.toolchain.name
     check identA.providerRevision == identB.providerRevision
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every emitted action stamps the list of ``uses:``
+    # tools it invokes so the engine's ``toolIdentityResolver`` can
+    # prepend the resolved bin directories to ``PATH`` at fork time.
+    let conv = from_source_cmake_convention.fromSourceCmakeConvention()
+    let request = dummyRequest(KcoreaddonsRecipe)
+    let fragment = conv.emitFragment(KcoreaddonsRecipe, request)
+    let actions = extractActions(fragment)
+    let configure = findById(actions, "from-source-cmake-configure")
+    check "cmake" in configure.toolIdentityRefs
+    check "ninja" in configure.toolIdentityRefs
+    check "gcc" in configure.toolIdentityRefs
+    check "sh" in configure.toolIdentityRefs
+    let build = findById(actions, "from-source-cmake-build")
+    check "cmake" in build.toolIdentityRefs
+    check "ninja" in build.toolIdentityRefs
+    let install = findById(actions, "from-source-cmake-install")
+    check "cmake" in install.toolIdentityRefs

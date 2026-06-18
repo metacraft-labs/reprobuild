@@ -278,23 +278,19 @@ proc hasAutotoolsArtifacts(projectRoot: string): bool =
     fileExists(extendedPath(projectRoot / "Makefile.am"))
 
 proc ccCompiler(): string =
-  ## Resolve a C compiler driver on PATH. Prefer ``gcc``; fall back to
-  ## ``clang``.
-  let gcc = findExe("gcc")
-  if gcc.len > 0:
-    return gcc
-  findExe("clang")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing
+  ## from ``toolIdentityRefs``. Pre-Batch-B the convention probed
+  ## host PATH at emit time which produced an invalid argv on hosts
+  ## without a C compiler installed.
+  "gcc"
 
 proc mesonExecutable(): string =
-  ## Resolve a ``meson`` driver on PATH. Returns the empty string when
-  ## meson is missing — the convention then declines recognition. On
-  ## Windows hosts that pip-installed meson, the binary lives at
-  ## ``<python>\Scripts\meson.exe`` which the dev shell's env.ps1
-  ## prepends to PATH (when the meson catalogue entry is requested).
-  findExe("meson")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "meson"
 
 proc ninjaExecutable(): string =
-  findExe("ninja")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "ninja"
 
 proc cCppMesonRecognize(projectRoot: string;
                        request: ProviderGraphRequest): bool {.gcsafe.} =
@@ -428,7 +424,8 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string;
   createDir(extendedPath(scratch))
   let buildNinja = buildNinjaPath(projectRoot)
   let stamp = configureStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     # Compound: meson setup, then touch the stamp.
@@ -486,7 +483,10 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string;
     # actions. Enumerate inputs explicitly via ``collectMesonInputs``
     # so per-file invalidation still works without monitoring.
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-meson.configure")
+    commandStatsId = "ccpp-meson.configure",
+    # M9.N Batch B: meson configure invokes ninja + the C compiler at
+    # probe time; the script itself is shelled via ``sh``.
+    toolIdentityRefs = @["meson", "ninja", "gcc", "sh"])
   (action, stamp)
 
 proc emitBuildAction(projectRoot, mesonExe: string;
@@ -525,7 +525,10 @@ proc emitBuildAction(projectRoot, mesonExe: string;
     outputs = @[outputPath],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-meson." & kindTag & ".build")
+    commandStatsId = "ccpp-meson." & kindTag & ".build",
+    # M9.N Batch B: ``meson compile`` re-invokes ninja + the C
+    # compiler per the build rules.
+    toolIdentityRefs = @["meson", "ninja", "gcc"])
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[CCppMesonMember]): PackageDef =

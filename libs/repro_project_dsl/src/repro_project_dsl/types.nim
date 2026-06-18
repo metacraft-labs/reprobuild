@@ -415,6 +415,28 @@ type
       ## conventions that don't opt into binary-cache publishing leave
       ## the slot empty so the engine's hook skips the action even when
       ## the flag above is true. Payload codec v15+.
+    toolIdentityRefs*: seq[string]
+      ## M9.N Batch B: names of tools (matching the recipe's
+      ## ``uses:`` package selectors, e.g. ``"meson"``, ``"gcc"``,
+      ## ``"sh"``) this action invokes at execution time. The engine
+      ## resolves each ref via the CLI-supplied
+      ## ``BuildEngineConfig.toolIdentityResolver`` closure to a
+      ## ``ToolActionIdentity`` and prepends the resolved binary
+      ## directory to the action's ``PATH`` env at fork time. Empty
+      ## (the default) keeps legacy behaviour — the action's argv
+      ## must reference absolute paths or the host's pre-existing
+      ## PATH. Payload codec v17+.
+      ##
+      ## Why this exists: pre-M9.N-Batch-A the from-source +
+      ## c_cpp conventions baked absolute ``findExe(...)`` paths into
+      ## argv at recognise time. On a host without meson/cmake/gcc
+      ## installed this produces an invalid argv and the engine
+      ## fork fails before the tool catalog can substitute. Batch B
+      ## moves identity resolution into the engine: the convention
+      ## emits a bare tool name + the list of ``toolIdentityRefs``,
+      ## the engine resolves them at fork time, and PATH is
+      ## populated with the resolved store paths so the bare tool
+      ## name finds the right binary.
     sourceFile*: string
     sourceLine*: int
 

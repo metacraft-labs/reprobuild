@@ -238,6 +238,36 @@ suite "c-cpp-direct convention emit (Mode 3 fixture)":
             sawMathlibIDash = true
       check sawMathlibIDash
 
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every emitted compile / link / archive action
+    # stamps the catalog tool refs the engine resolves at fork time.
+    if not gccOnPath():
+      skip()
+    else:
+      let conv = c_cpp_direct_convention.cCppDirectConvention()
+      let request = dummyRequest(Mode3Fixture)
+      require conv.recognize(Mode3Fixture, request)
+      let fragment = conv.emitFragment(Mode3Fixture, request)
+      var sawCompileRefs = false
+      var sawLinkRefs = false
+      var sawArchiveRefs = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("ccpp-direct-compile-"):
+          check "gcc" in action.toolIdentityRefs
+          sawCompileRefs = true
+        elif action.id.startsWith("ccpp-direct-link-"):
+          check "gcc" in action.toolIdentityRefs
+          sawLinkRefs = true
+        elif action.id.startsWith("ccpp-direct-archive-"):
+          check "ar" in action.toolIdentityRefs
+          sawArchiveRefs = true
+      check sawCompileRefs
+      check sawLinkRefs
+      check sawArchiveRefs
+
 suite "c-cpp-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":

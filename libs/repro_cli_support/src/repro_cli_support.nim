@@ -1389,6 +1389,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # ``binaryCachePublisher`` closure.
     result.publishToBinaryCache = payload.publishToBinaryCache
     result.cacheEntryIdentity = payload.cacheEntryIdentity
+    # M9.N Batch B: propagate the convention-supplied tool-identity
+    # refs through to the engine-side ``BuildAction``. The engine
+    # resolves each ref via ``BuildEngineConfig.toolIdentityResolver``
+    # at fork time and prepends the resolved bin dirs to PATH so the
+    # action's bare-name argv (``meson`` / ``ninja`` / ``gcc`` / ...)
+    # finds the right binaries.
+    result.toolIdentityRefs = payload.toolIdentityRefs
   let actionCachePolicy =
     case payload.actionCachePolicy
     of acfpTimestamp:
@@ -3411,6 +3418,70 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
     identityEvidence: durableFileEvidence(result.identityPath),
     keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
 
+proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
+    ToolIdentityResolver =
+  ## M9.N Batch B: project a ``PathOnlyBuildIdentity`` into the engine-
+  ## side ``ToolIdentityResolver`` closure shape. The CLI calls this
+  ## once at build start and hands the result to
+  ## ``BuildEngineConfig.toolIdentityResolver``. The engine then walks
+  ## each action's ``toolIdentityRefs`` through the closure at fork
+  ## time and prepends the resolved bin dirs to PATH.
+  ##
+  ## Matching: the ref name (e.g. ``"meson"``) is matched against
+  ## ``ToolActionIdentity.executableName`` AND
+  ## ``ToolActionIdentity.packageSelector`` (the package selector
+  ## carries the bare package name when no version constraint is
+  ## pinned; once a constraint is added it includes the operator + ver
+  ## suffix which we strip via a prefix-with-space-or-comparator probe).
+  ## Empty refs and unmatched refs return ``none`` — the engine then
+  ## leaves PATH alone for that ref.
+  ##
+  ## Bin-dir derivation: prefers the parent directory of
+  ## ``resolvedExecutablePath`` (so the catalog's chosen binary is
+  ## leftmost in PATH); falls back to the entries of
+  ## ``pathSearchList`` (each a ``<storePath>/bin`` for nix/tarball/
+  ## scoop adapters) when ``resolvedExecutablePath`` is empty. Both
+  ## fields can legitimately be empty when the catalog couldn't
+  ## resolve the tool (e.g. path-only mode without the tool
+  ## installed) — the closure then returns ``none`` so PATH is
+  ## untouched and the action's bare-name argv falls through to the
+  ## host's existing PATH.
+  let snapshot = identity
+  result = proc(name: string): Option[ResolvedToolIdentity]
+      {.gcsafe, closure.} =
+    if name.len == 0:
+      return none(ResolvedToolIdentity)
+    for actionIdy in snapshot.actionIdentities:
+      let matchByName = actionIdy.executableName == name
+      let bareSelector = block:
+        # Strip a trailing constraint like ``" >=3.20"`` so a recipe
+        # whose ``uses: cmake >=3.20`` constraint pins a version still
+        # matches ``toolIdentityRefs = @["cmake"]``.
+        var pkgSel = actionIdy.packageSelector
+        for i, ch in pkgSel:
+          if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+              ch == '~' or ch == '^':
+            pkgSel = pkgSel[0 ..< i]
+            break
+        pkgSel
+      let matchBySelector = bareSelector == name
+      if not (matchByName or matchBySelector):
+        continue
+      var binDirs: seq[string] = @[]
+      if actionIdy.resolvedExecutablePath.len > 0:
+        let parent = parentDir(actionIdy.resolvedExecutablePath)
+        if parent.len > 0:
+          binDirs.add(parent)
+      for searchDir in actionIdy.pathSearchList:
+        if searchDir.len > 0 and searchDir notin binDirs:
+          binDirs.add(searchDir)
+      if binDirs.len == 0:
+        return none(ResolvedToolIdentity)
+      return some(ResolvedToolIdentity(
+        binDirs: binDirs,
+        resolvedExecutablePath: actionIdy.resolvedExecutablePath))
+    none(ResolvedToolIdentity)
+
 proc runQuotaSocketDiagnostic(): string =
   let socket = getEnv("RUNQUOTA_SOCKET", "")
   if socket.len > 0:
@@ -4560,6 +4631,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       " (no quotas/leases enforced). Start `runquotad` and rerun to " &
       "use the real lease coordinator.")
 
+  # M9.N Batch B: late-bound holder for the tool-identity resolver
+  # closure. The closure is built once the build identity is resolved
+  # (further below) and attached to the engine config inside
+  # ``runLoweredGraphBuild``. On the early cache-warm fast path the
+  # holder is still ``nil`` — the engine then doesn't prepend any
+  # catalog bin dirs to PATH, and bare-name argv entries fall through
+  # to the host's existing PATH (the legacy pre-Batch-B behaviour).
+  var pendingToolIdentityResolver: ToolIdentityResolver = nil
+
   proc runLoweredGraphBuild(lowered: tuple[actions: seq[BuildAction];
                                           pools: seq[BuildPool]];
                             selectedActionId: string): int =
@@ -4606,6 +4686,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # populated ``cacheEntryIdentity`` — the from-source conventions
     # tag install + stage-copy actions accordingly.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # M9.N Batch B: attach the tool-identity resolver closure once
+    # the outer scope has resolved the build identity. ``nil`` is
+    # the legitimate fast-path-no-identity value — the engine then
+    # leaves PATH alone for actions that carry refs.
+    engineConfig.toolIdentityResolver = pendingToolIdentityResolver
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
@@ -5016,6 +5101,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
+    # M9.N Batch B: now that the build identity is resolved, build the
+    # tool-identity resolver closure once and stash it in the outer-
+    # scope holder so ``runLoweredGraphBuild`` (which may be called
+    # both before AND after this point in different fast paths) can
+    # pick it up on subsequent invocations. Calls that happen on the
+    # cache-warm fast path BEFORE this point fall through to a nil
+    # resolver — see the holder's declaration.
+    pendingToolIdentityResolver = mkToolIdentityResolver(identity)
     logSummary("repro build: tool provisioning active (tool-provisioning=" &
       effectiveMode.modeName & ")")
     if effectiveMode == tpmPathOnly:
@@ -5331,6 +5424,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``publishToBinaryCache = true`` + populated
     # ``cacheEntryIdentity``.
     engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
+    # M9.N Batch B: attach the tool-identity resolver closure here
+    # too. ``identity`` is in scope at this site (the main inline
+    # build path resolves it before reaching here); the closure
+    # walks each action's ``toolIdentityRefs`` and prepends the
+    # resolved bin dirs to PATH at fork time.
+    engineConfig.toolIdentityResolver = mkToolIdentityResolver(identity)
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =

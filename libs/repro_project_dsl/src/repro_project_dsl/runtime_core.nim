@@ -170,7 +170,15 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 16'u16
+  BuildActionPayloadVersion = 17'u16
+    ## v17: M9.N Batch B — appends a length-prefixed string array of
+    ## ``BuildAction.toolIdentityRefs`` so the engine can resolve each
+    ## referenced tool through the catalog at fork time and prepend
+    ## the resolved binary directory to the action's ``PATH``. v16-and-
+    ## earlier payloads decode with an empty ``toolIdentityRefs`` slice
+    ## (the engine's resolver block is a no-op) so legacy artefacts
+    ## round-trip without behaviour change.
+    ##
     ## v16: M9.L.4-refactor Step B — appends an optional
     ## ``BuildAction.publishToBinaryCache`` flag plus an optional
     ## ``cacheEntryIdentity: CacheEntryIdentity`` tuple so the engine's
@@ -760,7 +768,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   outputTag = "";
                   env: openArray[(string, string)] = [];
                   publishToBinaryCache = false;
-                  cacheEntryIdentity = none(CacheEntryIdentity)):
+                  cacheEntryIdentity = none(CacheEntryIdentity);
+                  toolIdentityRefs: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -777,6 +786,13 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## stage-copy action so the engine's binary-cache publisher hook
   ## fires after success. Conventions that don't opt in leave both at
   ## their inert defaults.
+  ##
+  ## ``toolIdentityRefs`` (M9.N Batch B): names of ``uses:`` tools the
+  ## action invokes (e.g. ``@["meson", "ninja", "gcc"]``). The engine
+  ## resolves each ref through ``BuildEngineConfig.toolIdentityResolver``
+  ## at fork time and prepends the resolved binary directory to the
+  ## action's PATH. Empty (the default) keeps legacy behaviour where
+  ## the action's argv must reference absolute paths.
   result = BuildActionDef(
     id: id,
     call: call,
@@ -794,7 +810,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     outputTag: outputTag,
     env: @env,
     publishToBinaryCache: publishToBinaryCache,
-    cacheEntryIdentity: cacheEntryIdentity)
+    cacheEntryIdentity: cacheEntryIdentity,
+    toolIdentityRefs: @toolIdentityRefs)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -1813,6 +1830,14 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
     payload.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
   else:
     payload.writeByte(0'u8)
+  # v17: M9.N Batch B — tool-identity refs the engine resolves at fork
+  # time. Each ref names a ``uses:`` tool whose ``ToolActionIdentity``
+  # contributes its binary directory to the action's ``PATH``. Encoded
+  # as a length-prefixed string seq so empty lists round-trip with no
+  # behaviour change on hosts that supply no resolver.
+  payload.writeU32Le(uint32(action.toolIdentityRefs.len))
+  for refName in action.toolIdentityRefs:
+    payload.writeString(refName)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1828,7 +1853,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
-      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16,
+      9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
       BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
@@ -1905,6 +1930,17 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # so the engine's binary-cache publisher hook stays a no-op.
     result.publishToBinaryCache = false
     result.cacheEntryIdentity = none(CacheEntryIdentity)
+  if version >= 17'u16:
+    # M9.N Batch B v17: length-prefixed string array of
+    # ``toolIdentityRefs``. v16-and-earlier payloads decode with an
+    # empty seq — the engine's resolver block is a no-op when the
+    # action carries no refs.
+    let refCount = int(readU32Le(bytes, pos))
+    result.toolIdentityRefs = newSeq[string](refCount)
+    for i in 0 ..< refCount:
+      result.toolIdentityRefs[i] = readString(bytes, pos)
+  else:
+    result.toolIdentityRefs = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

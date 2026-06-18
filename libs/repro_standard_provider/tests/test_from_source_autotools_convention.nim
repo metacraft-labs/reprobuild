@@ -400,3 +400,20 @@ suite "from-source-autotools convention M9.L.2 — expat":
     check identA.packageVersion == identB.packageVersion
     check identA.toolchain.name == identB.toolchain.name
     check identA.providerRevision == identB.providerRevision
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every emitted action stamps the list of ``uses:``
+    # tools it invokes so the engine resolves them at fork time.
+    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
+    let request = dummyRequest(ExpatRecipe)
+    let fragment = conv.emitFragment(ExpatRecipe, request)
+    let actions = extractActions(fragment)
+    let configure = findById(actions, "from-source-autotools-configure")
+    check "make" in configure.toolIdentityRefs
+    check "gcc" in configure.toolIdentityRefs
+    check "sh" in configure.toolIdentityRefs
+    let build = findById(actions, "from-source-autotools-build")
+    check "make" in build.toolIdentityRefs
+    check "gcc" in build.toolIdentityRefs
+    let install = findById(actions, "from-source-autotools-install")
+    check "make" in install.toolIdentityRefs

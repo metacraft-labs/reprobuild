@@ -142,6 +142,18 @@ type
       ## ``publishToBinaryCache`` is true. Step B populates this
       ## from recipe metadata in the from-source conventions; Step A
       ## leaves it ``none`` everywhere.
+    toolIdentityRefs*: seq[string]
+      ## M9.N Batch B. Names of ``uses:`` tools (e.g. ``"meson"``,
+      ## ``"ninja"``, ``"gcc"``, ``"sh"``) this action invokes at
+      ## execution time. When non-empty AND
+      ## ``BuildEngineConfig.toolIdentityResolver`` is non-nil, the
+      ## engine resolves each ref to a ``ToolActionIdentity`` and
+      ## prepends the binary directory derived from the identity
+      ## (``parentDir(resolvedExecutablePath)`` first, falling back
+      ## to each ``pathSearchList`` entry) to the action's ``PATH``
+      ## env at fork time. Empty (the default) keeps legacy
+      ## behaviour where ``argv[0]`` must be absolute or the host
+      ## PATH must already carry the binary.
 
   BuildPool* = object
     name*: string
@@ -229,6 +241,17 @@ type
       ## stats but does NOT abort the build. ``nil`` keeps the engine
       ## pure-local (legacy behaviour) — the publish hook becomes a
       ## no-op for every action regardless of the per-action flag.
+    toolIdentityResolver*: ToolIdentityResolver
+      ## M9.N Batch B. Optional tool-identity resolver closure.
+      ## When non-nil AND ``BuildAction.toolIdentityRefs.len > 0``,
+      ## the engine resolves each ref to its catalog-derived
+      ## binary directory and prepends those dirs to the action's
+      ## ``PATH`` env at fork time so a bare ``meson`` /
+      ## ``ninja`` / ``gcc`` invocation in the action's argv finds
+      ## the right binary regardless of whether the host has the
+      ## tool installed. ``nil`` keeps the engine ignorant of the
+      ## catalog (legacy behaviour); the action's argv must then
+      ## reference absolute paths.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -395,6 +418,43 @@ type
     ## standard-provider / CLI binding layer (reading the
     ## ``REPRO_BINARY_CACHE_*`` env vars + calling
     ## ``publishInProcess``).
+
+  ResolvedToolIdentity* = object
+    ## M9.N Batch B. Opaque engine-side view of the catalog's
+    ## ``ToolActionIdentity`` (defined in ``repro_tool_profiles``).
+    ## The engine deliberately does NOT import the catalog: the CLI's
+    ## ``toolIdentityResolver`` closure projects a ``ToolActionIdentity``
+    ## into this minimal shape so the engine stays free of the heavier
+    ## catalog modules (Nix / tarball / Scoop adapters) and so the
+    ## interface that crosses the seam is just "give me a list of bin
+    ## dirs to prepend to PATH" — exactly what the engine needs at
+    ## fork time.
+    ##
+    ## Fields:
+    ##   * ``binDirs`` — directories to prepend to the action's
+    ##     ``PATH`` env in order. For nix/tarball/scoop modes this is
+    ##     the resolved store path's ``bin`` directory; for path-only
+    ##     mode it's the host-PATH parent directory of the resolved
+    ##     executable. Multiple entries are prepended preserving order
+    ##     (first entry ends up leftmost in PATH).
+    ##   * ``resolvedExecutablePath`` — the catalog's
+    ##     ``ToolActionIdentity.resolvedExecutablePath`` for
+    ##     diagnostics. Not used by the env-plumbing path itself.
+    binDirs*: seq[string]
+    resolvedExecutablePath*: string
+
+  ToolIdentityResolver* = proc(name: string): Option[ResolvedToolIdentity]
+    {.gcsafe, closure.}
+    ## M9.N Batch B. The engine's seam to the tool catalog. When non-
+    ## nil AND ``BuildAction.toolIdentityRefs.len > 0``, the engine
+    ## calls the resolver once per ref at fork time and prepends each
+    ## returned ``binDirs`` entry to the action's ``PATH``. ``none``
+    ## is the fail-soft signal that the ref doesn't resolve (e.g. the
+    ## tool isn't declared by the recipe or the catalog substituted a
+    ## bare host-PATH lookup) — the engine then leaves PATH unaltered
+    ## for that ref. ``nil`` keeps the engine ignorant of catalog
+    ## state (legacy behaviour); the action's argv must reference
+    ## absolute paths or the host PATH must already carry the binary.
 
   RunningProcessKind = enum
     rpkHelperProcess
@@ -1377,7 +1437,124 @@ when defined(windows):
       return -1
     indices[signaled]
 
-proc launchChildEnv(action: BuildAction): seq[string] =
+proc findPathKey(table: StringTableRef): string =
+  ## Return the ``PATH`` env var key as it currently appears in
+  ## ``table``, accounting for Windows' case-insensitive env-var
+  ## naming. ``VsDevCmd.bat`` exports the variable as ``Path``;
+  ## ``REPROBUILD_NO_RUNQUOTA`` etc. use uppercase. Returns
+  ## ``"PATH"`` when the table doesn't already have an entry, so the
+  ## new entry stays consistent with POSIX-style uppercase.
+  for key, _ in table.pairs:
+    if cmpIgnoreCase(key, "PATH") == 0:
+      return key
+  "PATH"
+
+proc readPathValue(table: StringTableRef): string =
+  ## Read the table's existing ``PATH`` value regardless of case.
+  for key, value in table.pairs:
+    if cmpIgnoreCase(key, "PATH") == 0:
+      return value
+  ""
+
+proc prependPathDirsToArgvEnv(env: seq[string];
+                              binDirs: openArray[string]): seq[string] =
+  ## Walk an argv-style ``KEY=VALUE`` env list, collapse any
+  ## case-variant ``PATH`` entries into one, and prepend ``binDirs``
+  ## to the resulting ``PATH`` value. Used by the RunQuota helper-
+  ## spawn path (which carries env as ``seq[string]`` rather than a
+  ## ``StringTableRef``) so the same M9.N Batch B behaviour applies
+  ## to the daemon-backed launch as well as the bypass launch.
+  if binDirs.len == 0:
+    return env
+  let sep =
+    when defined(windows): ";"
+    else: ":"
+  var pathValue = ""
+  var pathSeen = false
+  result = newSeqOfCap[string](env.len + 1)
+  for entry in env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      result.add(entry)
+      continue
+    let key = entry[0 ..< eq]
+    if cmpIgnoreCase(key, "PATH") == 0:
+      # Last-write-wins matches the StringTableRef merge — keep the
+      # most recent value, drop earlier duplicates.
+      pathValue = entry[eq + 1 .. ^1]
+      pathSeen = true
+    else:
+      result.add(entry)
+  var parts: seq[string] = @[]
+  for d in binDirs:
+    if d.len > 0:
+      parts.add(d)
+  if pathSeen and pathValue.len > 0:
+    parts.add(pathValue)
+  elif not pathSeen:
+    let inherited = getEnv("PATH")
+    if inherited.len > 0:
+      parts.add(inherited)
+  result.add("PATH=" & parts.join(sep))
+
+proc prependPathDirs(table: StringTableRef; binDirs: openArray[string]) =
+  ## Prepend ``binDirs`` to the table's existing ``PATH`` value,
+  ## preserving case-insensitive key match on Windows. Removes any
+  ## duplicate ``Path`` / ``PATH`` entries so the final env carries
+  ## a single canonical ``PATH``.
+  if table == nil or binDirs.len == 0:
+    return
+  let sep =
+    when defined(windows): ";"
+    else: ":"
+  var parts: seq[string] = @[]
+  for d in binDirs:
+    if d.len > 0:
+      parts.add(d)
+  let existing = readPathValue(table)
+  if existing.len > 0:
+    parts.add(existing)
+  let combined = parts.join(sep)
+  # Remove any case-variant duplicates so the resulting table only
+  # has one PATH key. Without this step Windows' StartProcess sees
+  # both ``PATH`` and ``Path`` and may pick the wrong one.
+  var keysToDel: seq[string] = @[]
+  for key, _ in table.pairs:
+    if cmpIgnoreCase(key, "PATH") == 0:
+      keysToDel.add(key)
+  for key in keysToDel:
+    table.del(key)
+  table["PATH"] = combined
+
+proc resolvedToolBinDirs(action: BuildAction;
+                         resolver: ToolIdentityResolver): seq[string] =
+  ## M9.N Batch B. Walk ``action.toolIdentityRefs`` through the engine's
+  ## ``ToolIdentityResolver`` and return the in-order list of binary
+  ## directories to prepend to the action's ``PATH``. The first ref's
+  ## first ``binDir`` ends up leftmost in PATH so a ref order of
+  ## ``@["meson", "gcc"]`` puts meson's bin dir BEFORE gcc's — useful
+  ## when two refs share a directory and tool-of-record semantics
+  ## matter. ``none`` returns or empty ``binDirs`` are silently skipped:
+  ## the catalog signals "no contribution for this ref" by returning
+  ## ``none`` and the engine then leaves PATH untouched for that ref.
+  ##
+  ## Returns an empty seq when the action carries no refs OR when the
+  ## resolver is nil — both paths skip the PATH-override layer below
+  ## so legacy actions and unconfigured engines behave byte-for-byte
+  ## as before this milestone.
+  if action.toolIdentityRefs.len == 0 or resolver == nil:
+    return @[]
+  result = @[]
+  for refName in action.toolIdentityRefs:
+    let resolved = resolver(refName)
+    if resolved.isNone:
+      continue
+    for binDir in resolved.get().binDirs:
+      if binDir.len > 0:
+        result.add(binDir)
+
+proc launchChildEnv(action: BuildAction;
+                    config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
   ## invoke ``repro build`` (the e2e/integration tests spawn an *inner*
   ## ``repro``). The OUTER action is the unit RunQuota schedules — it holds a
@@ -1408,6 +1585,14 @@ proc launchChildEnv(action: BuildAction): seq[string] =
   result = @["REPROBUILD_NO_RUNQUOTA=1"]
   for entry in action.env:
     result.add(entry)
+  # M9.N Batch B: the resolved-tool ``PATH`` prepend happens in
+  # ``envTableFromArgvStyle`` rather than as a ``PATH=...`` argv entry
+  # so that Windows' case-insensitive env-var matching (``Path`` vs
+  # ``PATH``) is honoured. The argv-style env is filtered into a
+  # ``StringTableRef`` first, then ``prependPathDirs`` (next to that
+  # filter) does a single case-insensitive PATH override. This avoids
+  # the "MSVC's ``Path`` and the action's ``PATH`` are stored as
+  # separate keys; Windows CreateProcess picks one" pitfall.
 
 proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
@@ -1438,7 +1623,7 @@ proc readBypassActionLog(path: string): string =
     ""
 
 proc startBypassRunQuotaProcess(action: BuildAction;
-                                cacheRoot: string): Process =
+                                config: BuildEngineConfig): Process =
   ## Path-mode escape hatch: spawn the action's argv directly via osproc,
   ## bypassing the RunQuota helper. Only used when
   ## ``BuildEngineConfig.bypassRunQuota`` is true (currently set on
@@ -1479,8 +1664,21 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # (cl.exe on PATH + INCLUDE/LIB/LIBPATH/VCToolsInstallDir/WindowsSdk*).
   # No-op on non-Windows and when VS Build Tools is not installed; the
   # action's own ``env`` entries override on key collision.
-  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action))
-  let env = envTableFromArgvStyle(mergedEnv)
+  let cacheRoot = config.cacheRoot
+  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
+  var env = envTableFromArgvStyle(mergedEnv)
+  # M9.N Batch B: prepend the resolved-tool bin dirs to PATH after the
+  # MSVC + action env layers have been merged into the StringTableRef.
+  # Doing it here (not as a PATH= argv entry) ensures case-insensitive
+  # key matching on Windows (``Path`` vs ``PATH``) so the resolved
+  # dirs win regardless of which casing the upstream merge produced.
+  let binDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
+  if binDirs.len > 0:
+    if env == nil:
+      env = newStringTable(modeCaseSensitive)
+      for key, value in envPairs():
+        env[key] = value
+    prependPathDirs(env, binDirs)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
   let stdoutLog = bypassActionStdoutLogPath(cacheRoot, action.id)
   let stderrLog = bypassActionStderrLogPath(cacheRoot, action.id)
@@ -1523,7 +1721,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string; bypassRunQuota: bool): Process =
   if bypassRunQuota:
-    return startBypassRunQuotaProcess(action, config.cacheRoot)
+    return startBypassRunQuotaProcess(action, config)
   let rq = ReproResourceRequest(
     label: action.id,
     commandStatsId: action.commandStatsId,
@@ -1537,10 +1735,12 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   # The action's own ``env`` entries are appended after, so any
   # recipe-supplied overrides win on key collision. No-op on non-Windows
   # and when VS Build Tools is not installed.
+  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
+  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let command = ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: mergeActionEnvWithMsvc(launchChildEnv(action)),
+    env: prependPathDirsToArgvEnv(mergedEnv, toolBinDirs),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
@@ -1562,10 +1762,12 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   # MR8: prepend the cached MSVC dev-env diff (Windows-only) so the
   # inline-runquota batch path matches the helper-spawn path's env
   # shape. The action's own ``env`` entries override on key collision.
+  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
+  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: mergeActionEnvWithMsvc(launchChildEnv(action)),
+    env: prependPathDirsToArgvEnv(mergedEnv, toolBinDirs),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 

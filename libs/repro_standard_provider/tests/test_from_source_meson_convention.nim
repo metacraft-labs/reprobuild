@@ -389,3 +389,32 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
     check argvJoined.contains("dbus-broker-v36.tar.gz")
     check argvJoined.contains(
       "5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8")
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every emitted action stamps the list of ``uses:``
+    # tools it invokes so the engine's ``toolIdentityResolver`` can
+    # prepend the resolved bin directories to ``PATH`` at fork time.
+    # The setup / compile / install actions reference the build-system
+    # toolchain; the stage-copy actions reference only ``sh`` because
+    # they shell out via mkdir + cp.
+    let conv = from_source_meson_convention.fromSourceMesonConvention()
+    let request = dummyRequest(DbusBrokerRecipe)
+    let fragment = conv.emitFragment(DbusBrokerRecipe, request)
+    let actions = extractActions(fragment)
+    let setup = findById(actions, "from-source-meson-setup")
+    check "meson" in setup.toolIdentityRefs
+    check "ninja" in setup.toolIdentityRefs
+    check "gcc" in setup.toolIdentityRefs
+    check "sh" in setup.toolIdentityRefs
+    let compile = findById(actions, "from-source-meson-compile")
+    check "meson" in compile.toolIdentityRefs
+    check "ninja" in compile.toolIdentityRefs
+    check "gcc" in compile.toolIdentityRefs
+    let install = findById(actions, "from-source-meson-install")
+    check "meson" in install.toolIdentityRefs
+    let stageBroker = findById(actions,
+      "from-source-meson-stage-dbusBroker")
+    check "sh" in stageBroker.toolIdentityRefs
+    # Stage-copy MUST NOT pull in meson/ninja/gcc — it's just mkdir+cp.
+    check "meson" notin stageBroker.toolIdentityRefs
+    check "gcc" notin stageBroker.toolIdentityRefs

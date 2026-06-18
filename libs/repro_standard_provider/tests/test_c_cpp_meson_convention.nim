@@ -397,3 +397,31 @@ suite "c-cpp-meson convention M39":
       check sawAudit
       check sawLauncher
       check sawNinjaPassthrough
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every action stamps the catalog tool refs the
+    # engine resolves at fork time. The assertion runs regardless of
+    # whether the host has meson / ninja / gcc installed because the
+    # convention's new ``toolIdentityRefs`` are pure compile-time tags.
+    let conv = meson_convention.cCppMesonConvention()
+    let request = dummyRequest(HelloBinaryFixture)
+    require conv.recognize(HelloBinaryFixture, request)
+    let fragment = conv.emitFragment(HelloBinaryFixture, request)
+    var sawConfigureRefs = false
+    var sawBuildRefs = false
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id == "ccpp-meson-configure":
+        check "meson" in action.toolIdentityRefs
+        check "ninja" in action.toolIdentityRefs
+        check "gcc" in action.toolIdentityRefs
+        check "sh" in action.toolIdentityRefs
+        sawConfigureRefs = true
+      elif action.id.startsWith("ccpp-meson-build-"):
+        check "meson" in action.toolIdentityRefs
+        check "ninja" in action.toolIdentityRefs
+        sawBuildRefs = true
+    check sawConfigureRefs
+    check sawBuildRefs

@@ -521,3 +521,17 @@ suite "from-source-make convention M9.L.3 — kernel":
     check argvJoined.contains("linux-6.6.142.tar.xz")
     check argvJoined.contains(
       "b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70")
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every emitted action stamps the list of ``uses:``
+    # tools it invokes so the engine resolves them at fork time.
+    let conv = from_source_make_convention.fromSourceMakeConvention()
+    let request = dummyRequest(KernelRecipe)
+    let fragment = conv.emitFragment(KernelRecipe, request)
+    let actions = extractActions(fragment)
+    let build = findById(actions, "from-source-make-build")
+    check "make" in build.toolIdentityRefs
+    check "gcc" in build.toolIdentityRefs
+    check "sh" in build.toolIdentityRefs
+    let install = findById(actions, "from-source-make-install")
+    check "make" in install.toolIdentityRefs

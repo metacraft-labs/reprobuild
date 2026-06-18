@@ -385,12 +385,8 @@ proc sanitizeNamePart(value: string): string =
 # ---------------------------------------------------------------------------
 
 proc makeExecutable(): string =
-  let resolved = findExe("make")
-  if resolved.len > 0:
-    return resolved
-  # Stable placeholder so ``inlineExecCall`` doesn't refuse an empty
-  # argv[0]. The action will fail at execution time with a clearer
-  # diagnostic than a silent skip.
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  ## See ``from_source_meson`` §mesonExecutable for rationale.
   "make"
 
 proc stripLibPrefix(name: string): string =
@@ -423,7 +419,8 @@ proc emitBuildAction(projectRoot, makeExe, srcDir: string;
   ## verbatim.
   createDir(extendedPath(stampDir(projectRoot)))
   let stamp = buildStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -452,7 +449,10 @@ proc emitBuildAction(projectRoot, makeExe, srcDir: string;
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-make.build")
+    commandStatsId = "from-source-make.build",
+    # M9.N Batch B: ``make`` reads the project's Makefile which
+    # invokes the C compiler per the build rules.
+    toolIdentityRefs = @["make", "gcc", "sh"])
   (action, stamp)
 
 proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
@@ -479,7 +479,8 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
   ## fires after a successful install.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
@@ -509,7 +510,10 @@ proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-make.install",
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: ``make install`` re-invokes ``make``'s install
+    # target.
+    toolIdentityRefs = @["make", "sh"])
   (action, stamp)
 
 proc kernelInSourcePath(srcDir, member: string): string =
@@ -583,7 +587,8 @@ proc emitStageCopyAction(projectRoot, srcDir, staging,
   let outDir = artifactOutputDir(projectRoot, member.name)
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
 
   # Build the ordered candidate list.
@@ -632,7 +637,9 @@ proc emitStageCopyAction(projectRoot, srcDir, staging,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-make.stage." & kindTag,
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp probe chain).
+    toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------
 # Convention entry

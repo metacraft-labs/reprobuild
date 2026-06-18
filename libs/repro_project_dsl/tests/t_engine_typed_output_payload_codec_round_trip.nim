@@ -73,11 +73,12 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # field down to 11 and truncating the trailing fields that
     # ``writeStringSeq`` / ``writeString`` for those empty defaults
     # emitted.
-    # Recipe-Val M8 (v13) + MR10 (v14) + M9.L.4-refactor Step B (v16):
-    # the encoded payload now ends with the u32 typedOutputs count +
-    # the u32 outputTag string length + the u32 env count + the
-    # publishToBinaryCache sentinel byte + the hasIdentity sentinel
-    # byte (all zero for an empty action), so 14 trailing bytes need
+    # Recipe-Val M8 (v13) + MR10 (v14) + M9.L.4-refactor Step B (v16)
+    # + M9.N Batch B (v17): the encoded payload now ends with the
+    # u32 typedOutputs count + the u32 outputTag string length + the
+    # u32 env count + the publishToBinaryCache sentinel byte + the
+    # hasIdentity sentinel byte + the u32 toolIdentityRefs count
+    # (all zero for an empty action), so 18 trailing bytes need
     # trimming to reach v11's wire shape.
     let action = BuildActionDef(
       id: "legacy",
@@ -94,14 +95,15 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # to 11 and re-encode the payload length so the framing self-
     # consistency check stays valid.
     # Magic is bytes 0..3; version is bytes 4..5; length is bytes 6..9.
-    # Truncate 14 trailing bytes: 4 for the empty typedOutputs count
+    # Truncate 18 trailing bytes: 4 for the empty typedOutputs count
     # (the v12 addition) + 4 for the empty outputTag string length
     # (the v13 addition) + 4 for the empty env count (the v14
     # addition) + 1 for the publishToBinaryCache sentinel byte + 1
     # for the hasIdentity sentinel byte (the v16 addition; both
-    # default-zero when the optional fields are inert). All five
+    # default-zero when the optional fields are inert) + 4 for the
+    # empty toolIdentityRefs count (the v17 addition). All six
     # fields are absent at v11.
-    let trimBytes = 14
+    let trimBytes = 18
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
@@ -122,3 +124,39 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # empty typed-output list and an empty outputTag.
     check decoded.typedOutputs.len == 0
     check decoded.outputTag == ""
+
+  test "older v16 payload decodes with empty toolIdentityRefs (M9.N Batch B)":
+    # Forge a v16 payload by encoding the current-version action with
+    # no toolIdentityRefs, then patching the version field down to 16
+    # and trimming the trailing 4 bytes (the v17 toolIdentityRefs
+    # length-prefix). v16-and-earlier payloads MUST decode with an
+    # empty ``toolIdentityRefs`` so legacy artefacts keep working.
+    let action = BuildActionDef(
+      id: "v16-legacy",
+      call: publicCliCall("pkg", "exe", "build",
+        "pkg.exe.build", @[]),
+      cacheable: true,
+      commandStatsId: "v16-legacy",
+      dependencyPolicy: defaultDependencyPolicy(),
+      actionCachePolicy: defaultActionCachePolicy())
+
+    var payload = encodeBuildActionPayload(action)
+    let trimBytes = 4
+    let oldLen = int(uint32(payload[6]) or
+      (uint32(payload[7]) shl 8) or
+      (uint32(payload[8]) shl 16) or
+      (uint32(payload[9]) shl 24))
+    payload.setLen(payload.len - trimBytes)
+    let newLen = uint32(oldLen - trimBytes)
+    payload[4] = 16'u8
+    payload[5] = 0'u8
+    payload[6] = byte(newLen and 0xff)
+    payload[7] = byte((newLen shr 8) and 0xff)
+    payload[8] = byte((newLen shr 16) and 0xff)
+    payload[9] = byte((newLen shr 24) and 0xff)
+
+    let decoded = decodeBuildActionPayload(payload)
+    check decoded.id == "v16-legacy"
+    # v16-and-earlier payloads decode with an empty toolIdentityRefs
+    # slice — the engine's resolver block is a no-op for them.
+    check decoded.toolIdentityRefs.len == 0

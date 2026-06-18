@@ -334,3 +334,38 @@ suite "c-cpp-autotools convention M17":
           sawEnableBar = true
       check sawWithFoo
       check sawEnableBar
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every action stamps the catalog tool refs the
+    # engine resolves at fork time. The assertion runs regardless of
+    # whether the host has autotools / gcc installed because the
+    # convention's new ``toolIdentityRefs`` are pure compile-time
+    # tags. The configure action references autoreconf+make+gcc+sh;
+    # compile actions reference gcc; link references gcc; archive
+    # references ar.
+    let conv = autotools_convention.cCppAutotoolsConvention()
+    let request = dummyRequest(HelloBinaryFixture)
+    require conv.recognize(HelloBinaryFixture, request)
+    let fragment = conv.emitFragment(HelloBinaryFixture, request)
+    var sawConfigureRefs = false
+    var sawCompileRefs = false
+    var sawLinkRefs = false
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id == "ccpp-autotools-configure":
+        check "autoreconf" in action.toolIdentityRefs
+        check "make" in action.toolIdentityRefs
+        check "gcc" in action.toolIdentityRefs
+        check "sh" in action.toolIdentityRefs
+        sawConfigureRefs = true
+      elif action.id.startsWith("ccpp-autotools-compile-"):
+        check "gcc" in action.toolIdentityRefs
+        sawCompileRefs = true
+      elif action.id.startsWith("ccpp-autotools-link-"):
+        check "gcc" in action.toolIdentityRefs
+        sawLinkRefs = true
+    check sawConfigureRefs
+    check sawCompileRefs
+    check sawLinkRefs

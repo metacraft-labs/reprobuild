@@ -374,3 +374,37 @@ suite "c-cpp-make convention M17":
           sawStatic = true
       check sawLm
       check sawStatic
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every emitted compile / link / archive action
+    # stamps the catalog tool refs the engine resolves at fork time.
+    let conv = c_cpp_make_convention.cCppMakeConvention()
+    let request = dummyRequest(BinaryFixture)
+    require conv.recognize(BinaryFixture, request)
+    let fragment = conv.emitFragment(BinaryFixture, request)
+    var sawCompileRefs = false
+    var sawLinkRefs = false
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id.startsWith("ccpp-make-compile-"):
+        check "gcc" in action.toolIdentityRefs
+        sawCompileRefs = true
+      elif action.id.startsWith("ccpp-make-link-"):
+        check "gcc" in action.toolIdentityRefs
+        sawLinkRefs = true
+    check sawCompileRefs
+    check sawLinkRefs
+    # The library fixture's archive action references ``ar``.
+    let libFragment = conv.emitFragment(LibraryStaticFixture,
+      dummyRequest(LibraryStaticFixture))
+    var sawArchiveRefs = false
+    for node in libFragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id.startsWith("ccpp-make-archive-"):
+        check "ar" in action.toolIdentityRefs
+        sawArchiveRefs = true
+    check sawArchiveRefs

@@ -376,12 +376,21 @@ proc sanitizeNamePart(value: string): string =
 # ---------------------------------------------------------------------------
 
 proc mesonExecutable(): string =
-  let resolved = findExe("meson")
-  if resolved.len > 0:
-    return resolved
-  # Stable placeholder so ``inlineExecCall`` doesn't refuse an empty
-  # argv[0]. The action will fail at execution time with a clearer
-  # diagnostic than a silent skip.
+  ## M9.N Batch B: emit the BARE tool name ``meson`` (not an absolute
+  ## path returned by ``findExe``). The convention now stamps
+  ## ``toolIdentityRefs = @["meson", ...]`` on every action it emits;
+  ## the engine resolves that ref through its catalog at fork time and
+  ## prepends the resolved bin directory to ``PATH``, so the bare
+  ## ``meson`` argv-entry finds the right binary regardless of whether
+  ## the host has meson installed.
+  ##
+  ## Pre-Batch-B the convention baked the host-resolved absolute path
+  ## here, which produced an invalid argv on hosts without meson —
+  ## the engine then tried to fork ``""`` and failed. With Batch B's
+  ## env-plumbing in place, deferring resolution to the engine is the
+  ## only honest shape: a host without meson now sees the engine fall
+  ## through to the substitute / source-build path instead of
+  ## tripping at recognise / emit time.
   "meson"
 
 # ---------------------------------------------------------------------------
@@ -403,7 +412,12 @@ proc emitSetupAction(projectRoot, mesonExe, srcDir, buildDir: string;
   ## c_cpp_meson convention's behaviour.
   createDir(extendedPath(buildDir))
   let stamp = setupStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: emit bare ``sh`` so the engine's PATH plumbing
+  # (via ``toolIdentityRefs``) resolves it through the catalog at
+  # fork time. ``findExe`` is the legacy fallback only when the
+  # caller didn't supply the ref list — once Batch B lands, every
+  # action emitted here carries ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
@@ -436,7 +450,16 @@ proc emitSetupAction(projectRoot, mesonExe, srcDir, buildDir: string;
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.setup")
+    commandStatsId = "from-source-meson.setup",
+    # M9.N Batch B: the setup action shells out via ``sh -c`` to
+    # ``meson setup --backend=ninja`` which probes ``ninja`` and a
+    # working C compiler at configure time. The engine resolves each
+    # ref via the catalog and prepends the resolved bin dirs to PATH
+    # at fork time, so the script's bare ``meson`` invocation finds
+    # the right binary regardless of whether the host has meson
+    # installed. ``sh`` is added so the shell-wrapped script path
+    # itself is plumbed when the host lacks ``sh`` on PATH.
+    toolIdentityRefs = @["meson", "ninja", "gcc", "sh"])
   (action, stamp)
 
 proc emitCompileAction(projectRoot, mesonExe, buildDir, setupStamp: string):
@@ -445,7 +468,9 @@ proc emitCompileAction(projectRoot, mesonExe, buildDir, setupStamp: string):
   ## actions key off compile success without relying on meson's internal
   ## ``build.ninja`` touch behaviour.
   let stamp = compileStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: see emitSetupAction — bare ``sh`` is resolved via
+  # ``toolIdentityRefs`` at fork time.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
@@ -464,7 +489,11 @@ proc emitCompileAction(projectRoot, mesonExe, buildDir, setupStamp: string):
     outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.compile")
+    commandStatsId = "from-source-meson.compile",
+    # M9.N Batch B: same toolset as setup. ``meson compile`` re-invokes
+    # the ninja backend (which in turn invokes the C compiler) and
+    # shells out via ``sh -c``.
+    toolIdentityRefs = @["meson", "ninja", "gcc", "sh"])
   (action, stamp)
 
 proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
@@ -487,7 +516,9 @@ proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
   ## CLI shape (publish argv / network) — that lives in the engine.
   createDir(extendedPath(staging))
   let stamp = installStampPath(projectRoot)
-  let shExe = findExe("sh")
+  # M9.N Batch B: see emitSetupAction — bare ``sh`` is resolved via
+  # ``toolIdentityRefs`` at fork time.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
@@ -510,7 +541,10 @@ proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-meson.install",
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: ``meson install`` re-invokes the build system to
+    # determine install targets; bare ``meson`` resolves via PATH.
+    toolIdentityRefs = @["meson", "ninja", "sh"])
   (action, stamp)
 
 proc dasherise(name: string): string =
@@ -562,7 +596,9 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
   createDir(extendedPath(outDir))
   let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
   let stagedPath = stagedBinaryPath(staging, member.name, member.kind)
-  let shExe = findExe("sh")
+  # M9.N Batch B: see emitSetupAction — bare ``sh`` is resolved via
+  # ``toolIdentityRefs`` at fork time.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     let escapedStaged = stagedPath.replace("\\", "/").replace("\"", "\\\"")
@@ -586,7 +622,10 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "from-source-meson.stage." & kindTag,
     publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity))
+    cacheEntryIdentity = some(identity),
+    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp); no
+    # toolchain refs needed.
+    toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------
 # M9.L.4-refactor Step B — the convention NO LONGER emits a publish

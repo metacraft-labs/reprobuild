@@ -335,3 +335,34 @@ suite "c-cpp-cmake convention M38":
           sawFooVersion = true
       check sawEnableFoo
       check sawFooVersion
+
+  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
+    # M9.N Batch B: every action carries the list of catalog tool refs
+    # the engine resolves at fork time. The configure action lists the
+    # build-system + compiler + sh; the build action lists the build-
+    # system + compiler. The assertion runs regardless of whether the
+    # host has cmake / ninja / gcc installed because the convention's
+    # new ``toolIdentityRefs`` are pure compile-time tags.
+    let conv = cmake_convention.cCppCMakeConvention()
+    let request = dummyRequest(HelloBinaryFixture)
+    require conv.recognize(HelloBinaryFixture, request)
+    let fragment = conv.emitFragment(HelloBinaryFixture, request)
+    var sawConfigureRefs = false
+    var sawBuildRefs = false
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id == "ccpp-cmake-configure":
+        check "cmake" in action.toolIdentityRefs
+        check "ninja" in action.toolIdentityRefs
+        check "gcc" in action.toolIdentityRefs
+        check "sh" in action.toolIdentityRefs
+        sawConfigureRefs = true
+      elif action.id.startsWith("ccpp-cmake-build-"):
+        check "cmake" in action.toolIdentityRefs
+        check "ninja" in action.toolIdentityRefs
+        check "gcc" in action.toolIdentityRefs
+        sawBuildRefs = true
+    check sawConfigureRefs
+    check sawBuildRefs

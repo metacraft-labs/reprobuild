@@ -295,41 +295,25 @@ proc findExeAnyExt(exe: string): string =
     return ""
 
 proc autoreconfExecutable(): string =
-  findExeAnyExt("autoreconf")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "autoreconf"
 
 proc makeExecutable(): string =
-  ## Resolve ``make`` on PATH. Prefers GNU ``make``; falls back to
-  ## ``mingw32-make`` on Windows when the MSYS2 ``make`` package isn't
-  ## installed (mingw-w64 GCC ships ``mingw32-make.exe`` instead). Empty
-  ## string when neither resolves.
-  let candidate = findExe("make")
-  if candidate.len > 0:
-    return candidate
-  when defined(windows):
-    let mingw = findExe("mingw32-make")
-    if mingw.len > 0:
-      return mingw
-  ""
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  ## The catalog dispatches to the platform-appropriate make
+  ## (``mingw32-make`` on Windows when needed).
+  "make"
 
 proc shExecutable(): string =
-  ## Resolve ``sh`` on PATH. Required for the configure script and the
-  ## autoreconf+configure ``sh -c`` compound. Returns the empty string
-  ## when missing — the convention then declines to recognise so the
-  ## E2E gate SKIPs cleanly on Windows hosts without MSYS2 / Git Bash.
-  findExe("sh")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "sh"
 
 proc ccCompiler(): string =
-  let gcc = findExe("gcc")
-  if gcc.len > 0:
-    return gcc
-  findExe("clang")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "gcc"
 
 proc arDriver(): string =
-  ## Resolve ``ar`` on PATH. Falls back to the literal ``"ar"`` so emit
-  ## still produces a coherent argv even when ``ar`` is missing.
-  let candidate = findExe("ar")
-  if candidate.len > 0:
-    return candidate
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
   "ar"
 
 proc parseMakefileAmVariables(content: string): seq[(string, string)] =
@@ -652,7 +636,11 @@ proc emitConfigureAction(projectRoot, shExe: string;
     # project root via ``collectAutotoolsSources`` so per-file
     # invalidation still works without monitoring.
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-autotools.configure")
+    commandStatsId = "ccpp-autotools.configure",
+    # M9.N Batch B: autoreconf + ./configure compound shells out to
+    # autotools' perl/m4 cascade and probes the C compiler at
+    # configure time.
+    toolIdentityRefs = @["autoreconf", "make", "gcc", "sh"])
   (action, stamp)
 
 proc emitCompileAction(projectRoot, ccExe: string;
@@ -702,7 +690,9 @@ proc emitCompileAction(projectRoot, ccExe: string;
     pool = "compile",
     depfile = depFile,
     dependencyPolicy = makeDepfilePolicy(depFile),
-    commandStatsId = "ccpp-autotools." & kindTag & ".compile")
+    commandStatsId = "ccpp-autotools." & kindTag & ".compile",
+    # M9.N Batch B: gcc compile step.
+    toolIdentityRefs = @["gcc"])
 
 proc emitLinkAction(projectRoot, ccExe: string;
                     member: CCppAutotoolsMember;
@@ -722,7 +712,9 @@ proc emitLinkAction(projectRoot, ccExe: string;
     outputs = @[binaryOutput],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-autotools.executable.link")
+    commandStatsId = "ccpp-autotools.executable.link",
+    # M9.N Batch B: gcc link step.
+    toolIdentityRefs = @["gcc"])
 
 proc emitArchiveAction(projectRoot, arExe: string;
                        member: CCppAutotoolsMember;
@@ -742,7 +734,9 @@ proc emitArchiveAction(projectRoot, arExe: string;
     outputs = @[archiveOutput],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-autotools.library-static.archive")
+    commandStatsId = "ccpp-autotools.library-static.archive",
+    # M9.N Batch B: ar archive step.
+    toolIdentityRefs = @["ar"])
 
 proc emitForMember(projectRoot, ccExe, arExe: string;
                    target: CCppAutotoolsEmitTarget;

@@ -252,50 +252,32 @@ proc hasAutotoolsArtifacts(projectRoot: string): bool =
     fileExists(extendedPath(projectRoot / "Makefile.am"))
 
 proc ccCompiler(): string =
-  ## Resolve a C compiler driver on PATH. Prefer ``gcc``; fall back to
-  ## ``clang``.
-  let gcc = findExe("gcc")
-  if gcc.len > 0:
-    return gcc
-  findExe("clang")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "gcc"
 
 proc cmakeExecutable(): string =
-  findExe("cmake")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "cmake"
 
 proc ninjaExecutable(): string =
-  findExe("ninja")
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  "ninja"
 
 proc platformMakeExecutable(): string =
-  ## Resolve a single-config ``make`` driver for the CMake-emitted
-  ## Makefile. On Windows we prefer ``mingw32-make`` (MinGW Makefiles
-  ## generator); on POSIX we prefer ``make`` (Unix Makefiles generator).
-  ## Returns the empty string when neither resolves.
+  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
+  ## Pre-Batch-B this preferred ``mingw32-make`` on Windows; the
+  ## catalog entry for ``make`` handles platform-appropriate dispatch.
   when defined(windows):
-    let mingw = findExe("mingw32-make")
-    if mingw.len > 0:
-      return mingw
-    let make = findExe("make")
-    if make.len > 0:
-      return make
-    ""
+    "mingw32-make"
   else:
-    findExe("make")
+    "make"
 
 proc selectGenerator(): tuple[name, driverExe: string] =
   ## Pick the single-config generator + the build driver CMake will
-  ## invoke. Prefers Ninja when on PATH; falls back to the platform's
-  ## Make. Returns ``("", "")`` when neither builder resolves — the
-  ## convention then declines recognition.
-  let ninja = ninjaExecutable()
-  if ninja.len > 0:
-    return ("Ninja", ninja)
-  let plat = platformMakeExecutable()
-  if plat.len == 0:
-    return ("", "")
-  when defined(windows):
-    ("MinGW Makefiles", plat)
-  else:
-    ("Unix Makefiles", plat)
+  ## invoke. M9.N Batch B: defaults to Ninja unconditionally; the
+  ## engine's catalog ensures ninja is on PATH at fork time. Hosts
+  ## that lack ninja get the substitute fall-through.
+  ("Ninja", ninjaExecutable())
 
 proc cCppCMakeRecognize(projectRoot: string;
                        request: ProviderGraphRequest): bool {.gcsafe.} =
@@ -427,7 +409,8 @@ proc emitConfigureAction(projectRoot, cmakeExe, generator: string;
   # Always declare the cache file as a primary output; stamp is also
   # declared but the action's command list creates it directly via a
   # platform-portable wrapper.
-  let shExe = findExe("sh")
+  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
+  let shExe = "sh"
   var argv: seq[string]
   if shExe.len > 0:
     # Compound: cmake configure, then touch the stamp.
@@ -477,7 +460,10 @@ proc emitConfigureAction(projectRoot, cmakeExe, generator: string;
     # enumerate inputs explicitly via ``collectCMakeInputs`` so per-
     # file invalidation still works without monitoring.
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-cmake.configure")
+    commandStatsId = "ccpp-cmake.configure",
+    # M9.N Batch B: cmake configure probes the generator + a C
+    # compiler at this step.
+    toolIdentityRefs = @["cmake", "ninja", "gcc", "sh"])
   (action, stamp)
 
 proc emitBuildAction(projectRoot, cmakeExe: string;
@@ -504,7 +490,10 @@ proc emitBuildAction(projectRoot, cmakeExe: string;
     outputs = @[outputPath],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "ccpp-cmake." & kindTag & ".build")
+    commandStatsId = "ccpp-cmake." & kindTag & ".build",
+    # M9.N Batch B: ``cmake --build`` re-invokes the generator + C
+    # compiler.
+    toolIdentityRefs = @["cmake", "ninja", "gcc"])
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[CCppCMakeMember]): PackageDef =
