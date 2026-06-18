@@ -2592,6 +2592,93 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Forty-third from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the SECOND KF6 module-sweep batch (kservice
+  # / kglobalaccel / knotifications / plasma-framework) and ELEVENTH
+  # CMake-driven recipe (json-c, kcoreaddons, kwin, plasma-workspace,
+  # sddm, fontconfig, kconfig, ki18n, kwidgetsaddons, kxmlgui
+  # precedents). SIXTH KF6 foundation module after kcoreaddons +
+  # kconfig + ki18n + kwidgetsaddons + kxmlgui. Pins kservice 6.10.0's
+  # vendored sha256 + CMake flag sequence + cross-channel isolation +
+  # ``libKF6Service`` library artifact. The KF6 service-registry layer
+  # (KService + KSycoca + KApplicationTrader + KMimeTypeTrader +
+  # KServiceGroup + KServiceTypeTrader) plasma-workspace's kickoff
+  # launcher / krunner / kded MIME-bus / KIO open-with-dialog link
+  # against for desktop-entry discovery + MIME-type → application
+  # mapping.
+  TestSpec(
+    source: "recipes/packages/source/kservice/test_kservice_source.nim",
+    binary: "build/test-bin/t_kservice_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-fourth from-source production recipe to exercise the
+  # M9.H/I/K trio — SECOND recipe in the SECOND KF6 module-sweep batch
+  # and TWELFTH CMake-driven recipe. SEVENTH KF6 foundation module
+  # after kcoreaddons + kconfig + ki18n + kwidgetsaddons + kxmlgui +
+  # kservice. Pins kglobalaccel 6.10.0's vendored sha256 + CMake flag
+  # sequence + cross-channel isolation + ``libKF6GlobalAccel`` library
+  # artifact (two-token PascalCase brand). The KF6 global-shortcut
+  # broker (KGlobalAccel + KGlobalShortcutInfo + KGlobalAccelComponent
+  # + kglobalacceld D-Bus proxy) plasma-workspace's khotkeys / kded /
+  # plasma-shell consume to bind Meta / Ctrl-Alt / hardware-media keys
+  # to actions across all running applications.
+  TestSpec(
+    source: "recipes/packages/source/kglobalaccel/test_kglobalaccel_source.nim",
+    binary: "build/test-bin/t_kglobalaccel_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-fifth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the SECOND KF6 module-sweep batch and
+  # THIRTEENTH CMake-driven recipe. EIGHTH KF6 foundation module after
+  # kcoreaddons + kconfig + ki18n + kwidgetsaddons + kxmlgui +
+  # kservice + kglobalaccel. Pins knotifications 6.10.0's vendored
+  # sha256 + CMake flag sequence + cross-channel isolation +
+  # ``libKF6Notifications`` library artifact (plural-noun PascalCase
+  # brand). The KF6 desktop-notification dispatch layer (KNotification
+  # + KNotificationAction + KNotificationPermission + freedesktop
+  # ``org.freedesktop.Notifications`` D-Bus proxy) every KF6
+  # application uses to surface popup notifications + sounds +
+  # action-button events through plasma-workspace's notification
+  # daemon.
+  TestSpec(
+    source: "recipes/packages/source/knotifications/test_knotifications_source.nim",
+    binary: "build/test-bin/t_knotifications_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-sixth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the SECOND KF6 module-sweep batch and
+  # FOURTEENTH CMake-driven recipe. FIRST recipe in the recipe suite
+  # to lift from ``stable/plasma/<x.y.z>/`` instead of
+  # ``stable/frameworks/<x.y>/`` — Plasma 6.x renamed the kpackage +
+  # kdeclarative + plasma-framework trio into a unified ``libplasma``
+  # release tarball, so the historical ``plasmaFrameworkSource`` slot
+  # now pins ``libplasma-6.2.5`` per the task brief's fallback clause
+  # (frameworks/6.10/plasma-framework-6.10.0.tar.xz returns HTTP 404
+  # upstream). FIRST recipe to register a Plasma-stack-branded library
+  # artifact (``libPlasma``) WITHOUT the ``KF6`` prefix the sibling
+  # framework recipes carry. Pins libplasma 6.2.5's vendored sha256 +
+  # CMake flag sequence + cross-channel isolation + ``libPlasma``
+  # library artifact (Plasma applet runtime + PlasmaCore +
+  # PlasmaComponents + PlasmaExtras QML bindings + KPackage plugin
+  # loader). plasma-workspace's plasma-shell loads this library at
+  # startup and refuses to start without it.
+  TestSpec(
+    source: "recipes/packages/source/plasma-framework/test_plasma_framework_source.nim",
+    binary: "build/test-bin/t_plasma_framework_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # Fortieth from-source production recipe to exercise the M9.H/I/K
   # trio — FIRST recipe in the foundation-tier-closing batch (dbus /
   # sqlite / glibc / coreutils) and FIRST from-source dbus daemon
