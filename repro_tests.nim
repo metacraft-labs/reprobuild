@@ -3005,6 +3005,88 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Fifty-ninth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the FOUR-recipe essential-userland batch
+  # (bash / less / vim / ncurses). All four are autotools and cover
+  # the critical interactive-terminal surface every shell session +
+  # every TUI application on the v1 desktop depends on. bash is THE
+  # canonical POSIX shell — ``/bin/bash`` is the login shell on every
+  # major Linux distribution + the shebang line at the top of every
+  # sysadmin script + the implicit interpreter every Makefile recipe
+  # is evaluated under. Pins bash 5.2.37's vendored sha256 + autotools
+  # five-flag configure sequence (``--disable-static`` +
+  # ``--without-bash-malloc`` + ``--enable-readline`` +
+  # ``--enable-history`` + ``--enable-job-control``) + cross-channel
+  # isolation + single ``bash`` executable artifact.
+  TestSpec(
+    source: "recipes/packages/source/bash/test_bash_source.nim",
+    binary: "build/test-bin/t_bash_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixtieth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the essential-userland batch. less is THE
+  # canonical Unix pager; every ``man <topic>`` + every ``git log`` +
+  # every ``systemctl status`` on a TTY pipes through ``/usr/bin/less``.
+  # FIRST source recipe in the corpus with a SINGLE-flag
+  # ``configureFlags:`` block — pins the M9.I block parser's one-flag
+  # path against potential off-by-one regressions at the low end.
+  # Pins less 668's vendored sha256 + ``--with-regex=posix`` flag +
+  # cross-channel isolation + single ``less`` executable artifact.
+  TestSpec(
+    source: "recipes/packages/source/less/test_less_source.nim",
+    binary: "build/test-bin/t_less_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-first from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the essential-userland batch. vim is the
+  # de-facto Unix modal editor; ``/usr/bin/vim`` is the default
+  # ``EDITOR=`` on every major Linux distribution that doesn't pin
+  # emacs, and the implicit interpreter every ``visudo`` / ``vipw`` /
+  # ``crontab -e`` invocation spawns. FIRST recipe in the corpus with
+  # a SEVEN-flag ``configureFlags:`` block (largest cardinality so
+  # far) — pins the M9.I block parser's upper end against potential
+  # off-by-one regressions. The mixed ``--enable-`` / ``--disable-`` /
+  # ``--without-`` prefixes pin the parser's grammar-agnostic flag
+  # handling. Pins vim 9.1.1000's vendored sha256 + seven-flag
+  # configure sequence + cross-channel isolation + three executable
+  # artifacts (``vim`` + ``vimdiff`` + ``vimtutor``).
+  TestSpec(
+    source: "recipes/packages/source/vim/test_vim_source.nim",
+    binary: "build/test-bin/t_vim_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-second from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING (FOURTH) recipe in the essential-userland batch.
+  # ncurses is THE canonical Unix terminal-UI library; every TTY
+  # application that paints a full-screen TUI (top, htop, less, vim,
+  # tmux, mc, ncdu) links against ``libncursesw.so`` and consults the
+  # terminfo database under ``/usr/share/terminfo/`` via
+  # ``libtinfow.so``. FIRST source recipe in the corpus to ship a
+  # TWO-library + TWO-executable mixed-kind shape from a single
+  # autotools ``./configure`` + ``make`` invocation — the prior
+  # precedents (libcap one-lib + three-exec, procps one-lib +
+  # five-exec) covered the library/executable mix at different
+  # cardinalities but not the TWO-of-each balance. Pins ncurses 6.5's
+  # vendored sha256 + six-flag configure sequence + cross-channel
+  # isolation + two library artifacts (``libNcursesw`` + ``libTinfow``)
+  # + two executable artifacts (``tic`` + ``infocmp``).
+  TestSpec(
+    source: "recipes/packages/source/ncurses/test_ncurses_source.nim",
+    binary: "build/test-bin/t_ncurses_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
