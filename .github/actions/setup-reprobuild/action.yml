@@ -103,13 +103,26 @@ runs:
 
         version="${{ inputs.version }}"
         if [ "${version}" = "latest" ]; then
-          # GitHub Releases API; falls back to `source` if the repo has no
-          # published release yet (the current state during Phase 4).
-          resolved="$(curl -fsSL \
-            -H "Authorization: Bearer ${{ inputs.github-token }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/metacraft-labs/reprobuild/releases/latest \
-            2>/dev/null | jq -r '.tag_name // ""' || true)"
+          # `gh release view --json tagName` is the preferred path —
+          # it transparently handles GHE hosts and uses the same auth
+          # mechanism as the rest of the workflow. We fall back to the
+          # raw REST API when `gh` is unavailable (e.g. self-hosted
+          # runners without the GitHub CLI preinstalled). If both paths
+          # return nothing, we fall back to a source build — the
+          # current state on `dev` before the first release ships.
+          resolved=""
+          if command -v gh >/dev/null 2>&1; then
+            resolved="$(GH_TOKEN="${{ inputs.github-token }}" \
+              gh release view --repo metacraft-labs/reprobuild \
+                --json tagName --jq '.tagName' 2>/dev/null || true)"
+          fi
+          if [ -z "${resolved}" ]; then
+            resolved="$(curl -fsSL \
+              -H "Authorization: Bearer ${{ inputs.github-token }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/metacraft-labs/reprobuild/releases/latest \
+              2>/dev/null | jq -r '.tag_name // ""' || true)"
+          fi
           if [ -z "${resolved}" ] || [ "${resolved}" = "null" ]; then
             echo "::warning::no published release found; falling back to source build"
             version=source
@@ -144,38 +157,103 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
+        # Triples + archive extensions match
+        # .github/workflows/release.yml + scripts/package-release.sh.
+        # When the matching asset is missing (e.g. an aarch64-linux-gnu
+        # runner asking for a release that only published x86_64), we
+        # mark the version as `source` so the next step rebuilds from
+        # the in-tree checkout. The fallback chain is:
+        #     1. release tarball (this step)
+        #     2. source build (the step after this one)
         version="${{ steps.resolve.outputs.version }}"
         os="${{ steps.resolve.outputs.os }}"
         install_dir="${{ steps.resolve.outputs.install-dir }}"
         mkdir -p "${install_dir}"
         case "${os}" in
-          Linux)   triplet="x86_64-linux-gnu"; ext="tar.zst" ;;
+          Linux)
+            case "$(uname -m)" in
+              aarch64|arm64) triple="aarch64-unknown-linux-gnu" ;;
+              *)             triple="x86_64-unknown-linux-gnu" ;;
+            esac
+            ext="tar.gz" ;;
           macOS)
-            if [ "$(uname -m)" = "arm64" ]; then triplet="aarch64-apple-darwin"
-            else triplet="x86_64-apple-darwin"; fi
-            ext="tar.zst" ;;
-          Windows) triplet="x86_64-windows";   ext="zip" ;;
+            if [ "$(uname -m)" = "arm64" ]; then triple="aarch64-apple-darwin"
+            else triple="x86_64-apple-darwin"; fi
+            ext="tar.gz" ;;
+          Windows)
+            triple="x86_64-pc-windows-msvc"
+            ext="zip" ;;
         esac
-        asset="reprobuild-${version}-${triplet}.${ext}"
+        # Strip a leading `v` from the version when forming the archive
+        # base name (release.yml encodes versions without the prefix).
+        ver_bare="${version#v}"
+        stage="reprobuild-${ver_bare}-${triple}"
+        asset="${stage}.${ext}"
         url="https://github.com/metacraft-labs/reprobuild/releases/download/${version}/${asset}"
         echo "fetching ${url}"
         tmp="$(mktemp -d)"
-        curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -o "${tmp}/${asset}" "${url}"
+        http_status="$(curl -sSL -o "${tmp}/${asset}" -w '%{http_code}' \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "Accept: application/octet-stream" \
+          "${url}" || echo "000")"
+        if [ "${http_status}" != "200" ]; then
+          echo "::warning::release asset ${asset} not found at ${url} (HTTP ${http_status}); falling back to source build"
+          # The fall-back signal is consumed by the next step's `if:`.
+          # We deliberately do NOT mutate the resolved version here —
+          # that would corrupt the cache key. The exposed `repro-version`
+          # output is recomputed in the `expose` step to read
+          # `source@<sha>` when this flag is set.
+          echo "fell-back-to-source=true" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+        # Optional checksum verification when the publisher uploaded a
+        # `.sha256` sidecar (release.yml does — see PART B).
+        sha_url="${url}.sha256"
+        if curl -fsSL -o "${tmp}/${asset}.sha256" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${sha_url}" 2>/dev/null; then
+          ( cd "${tmp}" && \
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -c "${asset}.sha256"
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 -c "${asset}.sha256"
+            fi
+          )
+        fi
         case "${ext}" in
-          tar.zst) tar --use-compress-program=unzstd -xf "${tmp}/${asset}" -C "${install_dir}" ;;
+          tar.gz)
+            # Archives published by package-release.sh wrap a
+            # `reprobuild-<ver>-<triple>/` directory; strip one path
+            # component so `bin/` / `lib/` land directly under
+            # ${install_dir}.
+            tar -xzf "${tmp}/${asset}" -C "${install_dir}" --strip-components=1
+            ;;
           zip)
+            unzip_tmp="$(mktemp -d)"
             if command -v unzip >/dev/null 2>&1; then
-              unzip -q "${tmp}/${asset}" -d "${install_dir}"
+              unzip -q "${tmp}/${asset}" -d "${unzip_tmp}"
             else
-              # Windows runners have `tar` (BSD) which speaks zip.
-              tar -xf "${tmp}/${asset}" -C "${install_dir}"
-            fi ;;
+              # Windows runners have BSD `tar` which speaks zip.
+              tar -xf "${tmp}/${asset}" -C "${unzip_tmp}"
+            fi
+            # Flatten the single top-level `reprobuild-<ver>-<triple>/`
+            # directory the same way the tarball path does.
+            top_dir="$(ls -1 "${unzip_tmp}" | head -n1)"
+            cp -R "${unzip_tmp}/${top_dir}/." "${install_dir}/"
+            ;;
         esac
+        echo "fell-back-to-source=false" >>"$GITHUB_OUTPUT"
 
     - name: Build from source (fallback)
       id: source-build
+      # Three trigger paths:
+      #   1. User explicitly asked for `version: source`.
+      #   2. `version: latest` resolved to empty (no release published yet).
+      #   3. The release exists but lacks the matching per-triple asset
+      #      (the download step exits cleanly with fell-back-to-source=true).
       if: >-
-        steps.resolve.outputs.version == 'source'
+        (steps.resolve.outputs.version == 'source'
+          || steps.download.outputs.fell-back-to-source == 'true')
         && steps.cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
@@ -218,7 +296,12 @@ runs:
         esac
         echo "REPROBUILD_HOME=${install_dir}" >>"$GITHUB_ENV"
         echo "repro-bin=${bin_dir}" >>"$GITHUB_OUTPUT"
-        if [ "${{ steps.resolve.outputs.version }}" = "source" ]; then
+        # `repro-version` mirrors the actually-realised binary: source
+        # for explicit fallback + on missing-asset fallback (the
+        # download step's `fell-back-to-source` flag), or the upstream
+        # release tag otherwise.
+        if [ "${{ steps.resolve.outputs.version }}" = "source" ] \
+            || [ "${{ steps.download.outputs.fell-back-to-source }}" = "true" ]; then
           resolved="source@${{ github.sha }}"
         else
           resolved="${{ steps.resolve.outputs.version }}"

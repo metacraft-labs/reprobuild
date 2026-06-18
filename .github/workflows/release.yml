@@ -1,0 +1,229 @@
+name: Release
+
+# Release pipeline for the portable reprobuild archives described in
+# docs/PACKAGING.md. Triggered by a `vX.Y.Z` tag push (creates / updates
+# the matching GitHub Release) or via `workflow_dispatch` for smoke
+# testing — manual dispatches use `softprops/action-gh-release@v2`'s
+# `dry_run: true` mode so a manual fire against `dev` exercises the
+# build + package path without publishing anything.
+#
+# Signing / notarisation / native installers (MSI, pkg, deb, rpm) are
+# out of scope for this iteration — see docs/PACKAGING.md "Signing" and
+# "Open Items" for the follow-up plan. The portable .zip / .tar.gz
+# artifacts shipped here are consumed by:
+#   - .github/actions/setup-reprobuild  (the composite action)
+#   - downstream recorder repos via setup-reprobuild
+#
+# Triples follow MR17's Rust-style canonical names:
+#   x86_64-unknown-linux-gnu   ubuntu-latest
+#   x86_64-apple-darwin        macos-13   (Intel)
+#   aarch64-apple-darwin       macos-latest (Apple Silicon)
+#   x86_64-pc-windows-msvc     windows-latest
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version-override:
+        description: >-
+          Optional version string to use for dispatched runs (omit to
+          fall back to `0.0.0-dev-<sha>`). Tag-push runs ignore this and
+          use the tag.
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # softprops/action-gh-release@v2 needs this to upload
+
+jobs:
+  build:
+    name: Build & package (${{ matrix.triple }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+            shell: bash
+          - os: macos-13
+            triple: x86_64-apple-darwin
+            archive_ext: tar.gz
+            shell: bash
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            archive_ext: tar.gz
+            shell: bash
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            archive_ext: zip
+            shell: pwsh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Toolchain ------------------------------------------------------
+      # The release pipeline deliberately avoids the nix devShell used by
+      # ci.yml: release runners need to mirror what an end user gets when
+      # they install reprobuild via the published tarball, which means
+      # plain system toolchains (gcc / clang / MSVC, system nim, system
+      # clingo). The nix path is exercised separately by ci.yml.
+      - name: Setup Nim 2.2.x
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- clingo (ASP solver runtime) -----------------------------------
+      - name: Install clingo (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libclingo-dev clingo
+
+      - name: Install clingo (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install clingo
+
+      - name: Install clingo (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # MR4 stages `clingo.dll` next to repro.exe via scripts/build_apps.sh
+          # at build time — that step requires clingo.exe on PATH. The
+          # simplest cross-runner-friendly source for a Windows clingo
+          # binary is the Potassco conda-forge channel; we install only
+          # what's strictly needed (no Anaconda Python).
+          $clingoVersion = '5.7.1'
+          $url = "https://github.com/potassco/clingo/releases/download/v$clingoVersion/clingo-$clingoVersion-win64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'clingo.zip'
+          $dst = Join-Path $env:RUNNER_TEMP 'clingo'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          $clingoBin = (Get-ChildItem -Recurse -Path $dst -Filter clingo.exe |
+            Select-Object -First 1).DirectoryName
+          if (-not $clingoBin) {
+            throw "clingo.exe not found inside $url"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $clingoBin
+          Write-Host "clingo on PATH: $clingoBin"
+
+      # ---- Resolve version -----------------------------------------------
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF:-}"
+          if [[ "${ref}" == refs/tags/v* ]]; then
+            ver="${ref#refs/tags/v}"
+          elif [[ -n "${{ github.event.inputs.version-override }}" ]]; then
+            ver="${{ github.event.inputs.version-override }}"
+            ver="${ver#v}"
+          else
+            short="${GITHUB_SHA::7}"
+            ver="0.0.0-dev-${short}"
+          fi
+          echo "version=${ver}" >>"$GITHUB_OUTPUT"
+          echo "resolved version: ${ver}"
+
+      # ---- Build ----------------------------------------------------------
+      - name: just build (POSIX)
+        if: runner.os != 'Windows'
+        env:
+          REPROBUILD_BUILD_MODE: release
+        run: |
+          bash ./scripts/build_apps.sh
+
+      - name: just build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          REPROBUILD_BUILD_MODE: release
+        run: |
+          # The Git-Bash that ships on windows-latest can run the existing
+          # build_apps.sh end-to-end; the script detects MSYS via uname.
+          bash ./scripts/build_apps.sh
+
+      # ---- Sanity check ---------------------------------------------------
+      - name: Verify repro binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="build/bin/repro.exe"
+          else
+            bin="build/bin/repro"
+          fi
+          if [ ! -x "${bin}" ] && [ ! -f "${bin}" ]; then
+            echo "::error::expected ${bin} after just build" >&2
+            ls -la build/bin || true
+            exit 2
+          fi
+          "${bin}" --version
+
+      # ---- Package --------------------------------------------------------
+      - name: Package (POSIX)
+        if: runner.os != 'Windows'
+        id: pkg-posix
+        shell: bash
+        run: |
+          mkdir -p dist
+          bash ./scripts/package-release.sh \
+            --version "${{ steps.ver.outputs.version }}" \
+            --triple  "${{ matrix.triple }}" \
+            --out-dir "dist"
+          stage="reprobuild-${{ steps.ver.outputs.version }}-${{ matrix.triple }}"
+          ext="${{ matrix.archive_ext }}"
+          echo "archive_path=dist/${stage}.${ext}"   >>"$GITHUB_OUTPUT"
+          echo "sha256_path=dist/${stage}.${ext}.sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        id: pkg-win
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          ./scripts/package-release.ps1 `
+            -Version '${{ steps.ver.outputs.version }}' `
+            -Triple  '${{ matrix.triple }}' `
+            -OutDir  'dist'
+          $stage = "reprobuild-${{ steps.ver.outputs.version }}-${{ matrix.triple }}"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "archive_path=dist/$stage.zip"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "sha256_path=dist/$stage.zip.sha256"
+
+      # ---- Upload per-runner artifact (always; used by dispatch smoke) ----
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reprobuild-${{ matrix.triple }}
+          path: |
+            dist/reprobuild-${{ steps.ver.outputs.version }}-${{ matrix.triple }}.${{ matrix.archive_ext }}
+            dist/reprobuild-${{ steps.ver.outputs.version }}-${{ matrix.triple }}.${{ matrix.archive_ext }}.sha256
+          retention-days: 14
+
+      # ---- Publish to GitHub Release --------------------------------------
+      # Tag pushes create / update the release; `workflow_dispatch` runs
+      # use dry_run: true so a maintainer can exercise this workflow
+      # without publishing a real release (no signing / notarisation in
+      # place yet — see docs/PACKAGING.md > "Signing").
+      - name: Publish artifact to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: reprobuild ${{ steps.ver.outputs.version }}
+          draft: ${{ github.event_name != 'push' }}
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          # dry_run on dispatches: never modifies the release; only used
+          # for smoke testing the workflow shape itself.
+          dry_run: ${{ github.event_name == 'workflow_dispatch' }}
+          files: |
+            dist/reprobuild-${{ steps.ver.outputs.version }}-${{ matrix.triple }}.${{ matrix.archive_ext }}
+            dist/reprobuild-${{ steps.ver.outputs.version }}-${{ matrix.triple }}.${{ matrix.archive_ext }}.sha256
