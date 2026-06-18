@@ -43,20 +43,15 @@
 ## directly (no vendoring), and pin the sha256 over the upstream tarball
 ## bytes.
 ##
-## **HASH NEEDS VERIFICATION**: nixpkgs's
-## ``pkgs/by-name/pi/pipewire/package.nix`` consumes the GitLab archive
-## via ``fetchFromGitLab`` which records a NAR-form SRI hash over the
-## EXTRACTED directory contents, NOT the tarball bytes. The two hashes
-## differ for the same upstream URL (GitLab's
-## ``/archive/<tag>/<repo>-<tag>.tar.gz`` is regenerated with mutable
-## tarball metadata — file mtime / gzip mtime / tar block padding — that
-## the NAR canonicalisation strips). Without a live download +
-## ``sha256sum`` here, the placeholder zeros below are a sentinel for a
-## future maintainer to fill in with the actual tarball hash. The
-## recipe surface is otherwise identical to a hash-pinned recipe; the
-## M9.K convention lowering treats the placeholder as a normal
-## 64-char hex string. The version cross-check still holds: nixpkgs
-## pins 1.6.5 as the current upstream stable; this recipe matches.
+## The sha256 below pins the upstream gitlab.freedesktop.org tarball
+## bytes (downloaded + ``sha256sum``ed). This differs from the
+## nixpkgs ``fetchFromGitLab`` SRI hash which is computed over the
+## NAR-form EXTRACTED directory contents rather than the tarball
+## bytes — GitLab's ``/archive/<tag>/<repo>-<tag>.tar.gz`` carries
+## mutable tarball metadata (file mtime / gzip mtime / tar block
+## padding) that the NAR canonicalisation strips. The version
+## cross-check still holds: nixpkgs pins 1.6.5 as the current
+## upstream stable; this recipe matches.
 ##
 ## ## Version choice — 1.6.5 (current upstream stable)
 ##
@@ -168,16 +163,14 @@ package pipewireSource:
     ## fetch on first build, then cached by the M9.K fetch action
     ## keyed on (url, sha256, extractStrip).
     ##
-    ## **HASH PLACEHOLDER**: nixpkgs uses ``fetchFromGitLab`` whose
-    ## SRI hash covers the EXTRACTED directory contents (NAR-form),
-    ## NOT the tarball bytes the M9.K fetch action's content-
-    ## addressed cache keys on. A future maintainer must download
-    ## this URL once and ``sha256sum`` the tarball to replace the
-    ## placeholder zeros below. The recipe surface is otherwise
+    ## The sha256 pins the tarball bytes returned by GitLab. nixpkgs
+    ## records a NAR-form SRI hash over the EXTRACTED directory
+    ## contents via ``fetchFromGitLab``; that hash is NOT the same
+    ## as the tarball-bytes hash here. The recipe surface is
     ## complete; the version cross-check (1.6.5 matches nixpkgs)
     ## already holds.
     url: "https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/1.6.5/pipewire-1.6.5.tar.gz"
-    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    sha256: "4c9f7e85a760a4169cd4bc668bafea90fe4838aaf3f08a93f11bb9222809d490"
     extractStrip: 1
 
   uses:

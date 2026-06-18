@@ -32,12 +32,11 @@ import ./repro
 const ExpectedUrl =
   "https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/1.6.5/pipewire-1.6.5.tar.gz"
 
-# Placeholder hash — see recipe header for context on why this is
-# zeros (nixpkgs records the NAR-form hash of the extracted directory,
-# not the tarball bytes; a future maintainer must download once +
-# sha256sum to replace).
+# Tarball-bytes sha256 — distinct from the nixpkgs SRI hash which
+# covers the NAR-form EXTRACTED directory rather than the tarball
+# bytes (gzip mtime + tar block padding differ between the two).
 const ExpectedHash =
-  "0000000000000000000000000000000000000000000000000000000000000000"
+  "4c9f7e85a760a4169cd4bc668bafea90fe4838aaf3f08a93f11bb9222809d490"
 
 const ExpectedMesonOptions = @[
   "-Dtests=disabled",
@@ -57,9 +56,8 @@ suite "pipewireSource — from-source recipe smoke test":
 
   test "fetch spec hash is a 64-char sha256 hex string":
     # Length + algorithm check guards against a future bump that
-    # forgets to widen the hash alongside the URL. The placeholder
-    # value is the all-zeros sentinel a future maintainer must replace
-    # with the actual tarball sha256.
+    # forgets to widen the hash alongside the URL. The pinned value
+    # is the upstream gitlab.freedesktop.org tarball-bytes sha256.
     let spec = registeredFetchSpec("pipewireSource")
     check spec.hashHex.len == 64
     check spec.hashHex == ExpectedHash

@@ -44,18 +44,15 @@
 ## directly (no vendoring), and pin the sha256 over the upstream tarball
 ## bytes.
 ##
-## **HASH NEEDS VERIFICATION**: nixpkgs's
-## ``pkgs/by-name/wi/wireplumber/package.nix`` consumes the GitLab
-## archive via ``fetchFromGitLab`` which records a NAR-form SRI hash
-## over the EXTRACTED directory contents, NOT the tarball bytes. The
-## two hashes differ for the same upstream URL (GitLab's
-## ``/archive/<tag>/<repo>-<tag>.tar.gz`` is regenerated with mutable
-## tarball metadata that the NAR canonicalisation strips). Without a
-## live download + ``sha256sum`` here, the placeholder zeros below are
-## a sentinel for a future maintainer to fill in with the actual
-## tarball hash. The recipe surface is otherwise identical to a
-## hash-pinned recipe. The version cross-check still holds: nixpkgs
-## pins 0.5.14 as the current upstream stable; this recipe matches.
+## The sha256 below pins the upstream gitlab.freedesktop.org tarball
+## bytes (downloaded + ``sha256sum``ed). This differs from the
+## nixpkgs ``fetchFromGitLab`` SRI hash which is computed over the
+## NAR-form EXTRACTED directory contents rather than the tarball
+## bytes — GitLab's ``/archive/<tag>/<repo>-<tag>.tar.gz`` carries
+## mutable tarball metadata (gzip mtime + tar block padding) that the
+## NAR canonicalisation strips. The version cross-check still holds:
+## nixpkgs pins 0.5.14 as the current upstream stable; this recipe
+## matches.
 ##
 ## ## Version choice — 0.5.14 (current upstream stable)
 ##
@@ -155,16 +152,14 @@ package wireplumberSource:
     ## fetch on first build, then cached by the M9.K fetch action
     ## keyed on (url, sha256, extractStrip).
     ##
-    ## **HASH PLACEHOLDER**: nixpkgs uses ``fetchFromGitLab`` whose
-    ## SRI hash covers the EXTRACTED directory contents (NAR-form),
-    ## NOT the tarball bytes the M9.K fetch action's content-
-    ## addressed cache keys on. A future maintainer must download
-    ## this URL once and ``sha256sum`` the tarball to replace the
-    ## placeholder zeros below. The recipe surface is otherwise
+    ## The sha256 pins the tarball bytes returned by GitLab. nixpkgs
+    ## records a NAR-form SRI hash over the EXTRACTED directory
+    ## contents via ``fetchFromGitLab``; that hash is NOT the same
+    ## as the tarball-bytes hash here. The recipe surface is
     ## complete; the version cross-check (0.5.14 matches nixpkgs)
     ## already holds.
     url: "https://gitlab.freedesktop.org/pipewire/wireplumber/-/archive/0.5.14/wireplumber-0.5.14.tar.gz"
-    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    sha256: "e91f04cd8cec75d72b8a2aaa7e90b1ba0a5e2094b7a882fc3a29a484a48a87e9"
     extractStrip: 1
 
   uses:
