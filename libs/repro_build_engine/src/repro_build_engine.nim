@@ -1232,6 +1232,38 @@ when defined(windows):
       return -1
     indices[signaled]
 
+proc launchChildEnv(action: BuildAction): seq[string] =
+  ## Nested-build resource model: an action's child process tree may itself
+  ## invoke ``repro build`` (the e2e/integration tests spawn an *inner*
+  ## ``repro``). The OUTER action is the unit RunQuota schedules — it holds a
+  ## lease whose measurement already covers its whole process group (peak
+  ## RSS + process count), so the inner build's resource use is accounted to
+  ## the outer lease. What must NOT happen is the inner ``repro`` acquiring
+  ## its OWN lease from the same daemon: it would request a second lease from
+  ## the pool while the parent already holds the outer action's lease, a
+  ## parent⇄child cycle the scheduler can only surface as ``build graph made
+  ## no progress``. (Clearing ``RUNQUOTA_SOCKET`` alone is insufficient —
+  ## ``runquota_ipc`` falls back to the default ``XDG_RUNTIME_DIR``/``TMPDIR``
+  ## socket path and reconnects to the very same daemon.)
+  ##
+  ## So we set ``REPROBUILD_NO_RUNQUOTA=1`` (the documented full-bypass
+  ## switch, equivalent to ``--no-runquota``) in every action child env: an
+  ## inner ``repro`` runs its own actions unmanaged, as ordinary child
+  ## processes of the outer leased action, and its CPU/memory rolls up into
+  ## the outer lease's group measurement — exactly the "outer managed, inner
+  ## unmanaged, outer measures the whole tree" model.
+  ##
+  ## The runquota launcher (``runquota_process.applyChildEnv`` on POSIX /
+  ## ``windowsChildEnv`` on Windows) and ``envTableFromArgvStyle`` both LAYER
+  ## this over the inherited environment, so ``PATH`` etc. survive. The value
+  ## is constant, so it does not perturb the action-cache fingerprint, and is
+  ## inert for the ~99% of actions (plain ``nim c`` compiles) whose children
+  ## never invoke ``repro``. Any explicit ``action.env`` entry wins (appended
+  ## after).
+  result = @["REPROBUILD_NO_RUNQUOTA=1"]
+  for entry in action.env:
+    result.add(entry)
+
 proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
   ## files live under ``<cacheRoot>/actions/`` so the same scratch dir
@@ -1302,7 +1334,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # (cl.exe on PATH + INCLUDE/LIB/LIBPATH/VCToolsInstallDir/WindowsSdk*).
   # No-op on non-Windows and when VS Build Tools is not installed; the
   # action's own ``env`` entries override on key collision.
-  let mergedEnv = mergeActionEnvWithMsvc(action.env)
+  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action))
   let env = envTableFromArgvStyle(mergedEnv)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
   let stdoutLog = bypassActionStdoutLogPath(cacheRoot, action.id)
@@ -1363,7 +1395,7 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   let command = ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: mergeActionEnvWithMsvc(action.env),
+    env: mergeActionEnvWithMsvc(launchChildEnv(action)),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
@@ -1388,7 +1420,7 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: mergeActionEnvWithMsvc(action.env),
+    env: mergeActionEnvWithMsvc(launchChildEnv(action)),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 

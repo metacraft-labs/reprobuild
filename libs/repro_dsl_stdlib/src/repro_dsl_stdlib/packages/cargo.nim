@@ -168,7 +168,7 @@ proc run*(self: CargoTestBinary; filter = "";
     else: defaultToolActionId(call)
   result = recordToolInvocation(selectedActionId, call,
     deps = combineActionDeps(deps, after),
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(),
     extraEnv = extraEnv)
 
 # M65 cakBuiltin catalog -- consumed on Windows and non-Nix Linux.
