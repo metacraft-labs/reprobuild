@@ -42,6 +42,7 @@ import repro_standard_provider/conventions/from_source_meson as from_source_meso
 import repro_standard_provider/conventions/from_source_cmake as from_source_cmake_convention
 import repro_standard_provider/conventions/from_source_autotools as from_source_autotools_convention
 import repro_standard_provider/conventions/from_source_make as from_source_make_convention
+import repro_standard_provider/conventions/from_source_custom as from_source_custom_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -264,6 +265,18 @@ when defined(reproProviderMode):
   # autotools).
   addDefaultConvention(
     from_source_make_convention.fromSourceMakeConvention())
+  # from_source_custom (M9.N Batch C.1) — registered AFTER the four
+  # standard from-source-* siblings so the more-specific flag-channel
+  # conventions claim first. Catch-all for recipes whose upstream build
+  # is expressed as a verbatim ``shell()`` sequence on a ``build:``
+  # block — meson (Python-only tool), ninja (bootstrap-driven), and any
+  # future build-tool recipe that doesn't map to one of the four
+  # standard flag-channel moulds. The convention's recognise gate
+  # requires at least one ``shell()`` action AND every standard flag
+  # channel (meson / cmake / configure / make) empty; the registration
+  # order keeps the standard siblings as the first-match wins.
+  addDefaultConvention(
+    from_source_custom_convention.fromSourceCustomConvention())
   addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
   # java_maven (M40) — first JVM-ecosystem Tier 2b convention. Keys on
   # ``pom.xml`` at the project root; no overlap with the C/C++

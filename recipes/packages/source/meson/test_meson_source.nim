@@ -30,7 +30,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
@@ -125,3 +125,38 @@ suite "mesonSource — from-source recipe smoke test":
       "https://github.com/mesonbuild/meson/releases/download/1.6.1/meson-1.6.1.tar.gz"
     check vs[0].sourceRepository ==
       "https://github.com/mesonbuild/meson"
+
+  test "shell() action registry records the meson install sequence":
+    # M9.N Batch C.1 — the recipe's ``build:`` block records four
+    # shell actions that lay out the install tree, copy the bundled
+    # ``mesonbuild`` Python package, write the wrapper script, and
+    # make it executable. The from-source-custom convention consumes
+    # the sequence verbatim.
+    let rows = registeredShellActions("mesonSource")
+    check rows.len == 4
+    # Declaration-order shape: every row attributes to the ``meson``
+    # executable's artifact-scoped ``build:`` block.
+    for r in rows:
+      check r.packageName == "mesonSource"
+      check r.artifactName == "meson"
+    # Commands round-trip verbatim including the ``$out`` / ``$extracted``
+    # placeholders the from-source-custom convention substitutes at emit
+    # time.
+    check rows[0].command == "mkdir -p $out/share/meson $out/bin"
+    check rows[1].command == "cp -r $extracted/mesonbuild $out/share/meson/"
+    check rows[2].command.contains("printf")
+    check rows[2].command.contains("$out/bin/meson")
+    check rows[3].command == "chmod +x $out/bin/meson"
+
+  test "shell() ids carry the per-artifact sequence number":
+    # M9.N Batch C.1 — auto-generated ids follow the
+    # ``<package>-<artifact>-<seq>`` shape; sequence increments per
+    # artifact. Pins the runtime's id-synthesis contract from the
+    # recipe side (the runtime acceptance lives in
+    # ``libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim``).
+    let rows = registeredShellActions("mesonSource")
+    check rows.len == 4
+    check rows[0].id == "mesonSource-meson-1"
+    check rows[1].id == "mesonSource-meson-2"
+    check rows[2].id == "mesonSource-meson-3"
+    check rows[3].id == "mesonSource-meson-4"

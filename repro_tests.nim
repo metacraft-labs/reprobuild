@@ -173,6 +173,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.N Step A/B/C — in-process publisher path.
+  TestSpec(
+    source: "libs/repro_binary_cache_client/tests/test_publish_in_process.nim",
+    binary: "build/test-bin/test_publish_in_process",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim",
     binary: "build/test-bin/t_a2_p1_manifest_roundtrip",
@@ -245,6 +254,23 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.N Step A/B/C — binary cache publisher hook + tool-identity env plumbing.
+  TestSpec(
+    source: "libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim",
+    binary: "build/test-bin/test_binary_cache_publisher_hook",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
+    binary: "build/test-bin/test_tool_identity_env_plumbing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim",
     binary: "build/test-bin/t_m5_peer_cache_build_wiring",
@@ -272,6 +298,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim",
     binary: "build/test-bin/t_partition_planner_reads_runquota_estimates",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # M9.N Step A/B/C — engine publisher CLI wiring.
+  TestSpec(
+    source: "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim",
+    binary: "build/test-bin/test_engine_publisher_wiring",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1777,6 +1812,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim",
     binary: "build/test-bin/t_dsl_service_dependencies",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # M9.N Batch C.1 — ``shell()`` DSL action. Records passive shell
+  # invocations into a per-package registry consumed by the
+  # from_source_custom convention.
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim",
+    binary: "build/test-bin/t_dsl_shell_action",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -3879,6 +3925,49 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_examples_layout.nim",
     binary: "build/test-bin/test_examples_layout",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # M9.N Batch B/C — the 5 ``from_source_*`` conventions. The
+  # custom variant (Batch C.1) acts as a catch-all for recipes
+  # that declare ``shell()`` actions but no in-tree manifest.
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_from_source_autotools_convention.nim",
+    binary: "build/test-bin/test_from_source_autotools_convention",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim",
+    binary: "build/test-bin/test_from_source_cmake_convention",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_from_source_custom_convention.nim",
+    binary: "build/test-bin/test_from_source_custom_convention",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_from_source_make_convention.nim",
+    binary: "build/test-bin/test_from_source_make_convention",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_from_source_meson_convention.nim",
+    binary: "build/test-bin/test_from_source_meson_convention",
     defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],

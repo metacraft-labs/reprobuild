@@ -164,8 +164,21 @@ package ninjaSource:
     ## cmake compile actions invoke against the generated
     ## ``build.ninja`` manifest. Consumed by every C / C++ recipe in
     ## ``recipes/packages/source/`` that drives meson or cmake
-    ## (dbus-broker, glib2, kded, kio, plasma-framework, ...). v1
-    ## records the artifact only; the per-artifact bootstrap body
-    ## lands when either a ``from-source-python-bootstrap``
-    ## convention or a DSL ``build: shell ...`` widening lands.
-    discard
+    ## (dbus-broker, glib2, kded, kio, plasma-framework, ...).
+    ##
+    ## M9.N Batch C.1 — bootstrap body via the new ``shell()`` action
+    ## surface on ``build:`` blocks. The new ``from-source-custom``
+    ## convention claims this recipe (no flag channels declared, two
+    ## shell actions registered) and emits one ``BuildActionDef`` per
+    ## shell line. ``$extracted`` resolves to ``<projectRoot>/src/``;
+    ## ``$out`` resolves to
+    ## ``<projectRoot>/.repro/build/from-source-custom/ninjaSource/``.
+    build:
+      # Bootstrap ninja's C++ sources into the self-hosting binary at
+      # the source root. ``cd $extracted`` is added by the convention's
+      # script-composition step so this shell runs in the extracted
+      # source tree.
+      shell "python3 configure.py --bootstrap"
+      # Install the resulting binary into the output bin dir where the
+      # stage-copy step expects it.
+      shell "mkdir -p $out/bin && install -Dm755 ninja $out/bin/ninja"

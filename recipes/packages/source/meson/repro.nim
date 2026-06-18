@@ -162,7 +162,28 @@ package mesonSource:
     ## ``recipes/packages/source/`` that declares ``uses: "meson"``
     ## (dbus-broker, glib2, gdk-pixbuf, pipewire, wireplumber, wayland,
     ## wlroots, sway, gnome-shell, mutter, pango, systemd, etc).
-    ## v1 records the artifact only; the per-artifact install body
-    ## lands when either a ``from-source-python-tool`` convention or a
-    ## DSL ``build: shell ...`` widening lands.
-    discard
+    ##
+    ## M9.N Batch C.1 — install body via the new ``shell()`` action
+    ## surface on ``build:`` blocks. The new ``from-source-custom``
+    ## convention claims this recipe (no flag channels declared, one or
+    ## more shell actions registered) and emits one ``BuildActionDef``
+    ## per shell line. ``$extracted`` resolves to ``<projectRoot>/src/``
+    ## (where the fetch action extracted the tarball); ``$out`` resolves
+    ## to ``<projectRoot>/.repro/build/from-source-custom/mesonSource/``
+    ## (the per-package output root the stage-copy action probes for
+    ## ``bin/meson``).
+    build:
+      # Lay out the on-disk install tree the wrapper script expects.
+      shell "mkdir -p $out/share/meson $out/bin"
+      # Copy the bundled ``mesonbuild`` Python package into the
+      # share dir.
+      shell "cp -r $extracted/mesonbuild $out/share/meson/"
+      # Write the wrapper script — execs the bundled package via
+      # ``python3``. The double-quoted shell heredoc keeps the
+      # ``$@``/``$out`` placeholders distinguishable: ``$out`` is the
+      # DSL substitution (resolved at emit time), ``$@`` is the shell
+      # variable expanded at run time.
+      shell "printf '#!/bin/sh\\nexec python3 %s/share/meson/__main__.py \"$@\"\\n' \"$out\" > $out/bin/meson"
+      # Make the wrapper executable so the stage-copy step finds a
+      # runnable binary.
+      shell "chmod +x $out/bin/meson"

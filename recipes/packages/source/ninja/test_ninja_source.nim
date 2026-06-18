@@ -31,7 +31,7 @@
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
-import std/[unittest]
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
@@ -125,3 +125,26 @@ suite "ninjaSource — from-source recipe smoke test":
       "https://github.com/ninja-build/ninja/archive/refs/tags/v1.12.1.tar.gz"
     check vs[0].sourceRepository ==
       "https://github.com/ninja-build/ninja"
+
+  test "shell() action registry records the ninja bootstrap sequence":
+    # M9.N Batch C.1 — the recipe's ``build:`` block records two
+    # shell actions: ``python3 configure.py --bootstrap`` followed by
+    # ``install -Dm755 ninja $out/bin/ninja``. The from-source-custom
+    # convention consumes the sequence verbatim; ``$out`` is resolved
+    # to the per-package output dir at emit time.
+    let rows = registeredShellActions("ninjaSource")
+    check rows.len == 2
+    for r in rows:
+      check r.packageName == "ninjaSource"
+      check r.artifactName == "ninja"
+    check rows[0].command == "python3 configure.py --bootstrap"
+    check rows[1].command.contains("install -Dm755 ninja $out/bin/ninja")
+
+  test "shell() ids carry the per-artifact sequence number":
+    # M9.N Batch C.1 — auto-generated ids follow the
+    # ``<package>-<artifact>-<seq>`` shape; sequence increments per
+    # artifact.
+    let rows = registeredShellActions("ninjaSource")
+    check rows.len == 2
+    check rows[0].id == "ninjaSource-ninja-1"
+    check rows[1].id == "ninjaSource-ninja-2"

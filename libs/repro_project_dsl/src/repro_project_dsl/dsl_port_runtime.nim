@@ -3690,3 +3690,171 @@ proc registeredBuildFlags*(packageName, artifactName, channel: string):
   of "make": return row.makeFlags
   of "ninja": return row.ninjaFlags
   else: return @[]
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.N Batch C.1 — ``shell()`` action surface for ``build:`` blocks.
+# ---------------------------------------------------------------------------
+##
+## ## What the surface covers
+##
+## The four standard ``from-source-*`` conventions (meson / cmake /
+## autotools / make) all key on a populated flag-channel registry. Recipes
+## that don't fit any of those moulds — meson (Python-only), ninja
+## (bootstrap-driven), and any future build-tool recipe whose upstream
+## build is a custom shell sequence — currently have no DSL surface to
+## express their build steps. The ``shell()`` proc fills that gap:
+## recipe authors call ``shell "<cmd>"`` from inside a ``build:`` block
+## and the runtime records the command verbatim against the active
+## ``(packageName, artifactName)`` frame. The new ``from-source-custom``
+## convention (M9.N Batch C.1) consumes the recorded sequence and emits
+## one ``BuildActionDef`` per shell action.
+##
+## ## Substitution placeholders
+##
+## The recorded commands may carry three engine-time substitution
+## placeholders that the convention layer resolves at fragment-emit time:
+##
+##   * ``$fetch``      — path to the fetched tarball (used rarely; the
+##                       fetch action already extracts on success).
+##   * ``$extracted``  — absolute path to ``<projectRoot>/src/`` (or the
+##                       recipe's ``extractedRoot``). The default ``cwd``
+##                       for shell actions is also this directory.
+##   * ``$out``        — absolute path to
+##                       ``<projectRoot>/.repro/output/<artifactName>/``.
+##                       The per-artifact output directory the engine's
+##                       output-collection step keys off.
+##
+## Substitution is a token replacement on the recorded command string
+## performed by the convention (NOT by this runtime). The recipe sees a
+## verbatim string; the action's argv is ``[sh, -c, <substituted>]``.
+##
+## ## Auto-generated action id
+##
+## When the caller omits ``id``, the runtime synthesises
+## ``<packageName>-<artifactName>-<sequenceNumber>``. The sequence
+## number increments per ``(packageName, artifactName)`` pair so a
+## single artifact's shell actions get stable, distinguishable ids
+## across multiple ``shell()`` calls within the same ``build:`` block.
+##
+## ## Threading model
+##
+## ``dslPortShellActions`` is ``threadvar`` so concurrent test fixtures
+## do not cross-attribute shell-action rows. ``resetDslPortShellState``
+## resets the per-thread slot. Matches the M9.H / M9.I shape.
+
+type
+  DslShellAction* = object
+    ## One ``shell()`` registration. The convention layer emits one
+    ## ``BuildActionDef`` per row in declaration order.
+    packageName*: string
+      ## The owning package; auto-filled from ``currentBuildPackage()``.
+    artifactName*: string
+      ## The owning artifact; auto-filled from
+      ## ``currentBuildArtifact()`` (empty for the package-level
+      ## ``build:`` form).
+    id*: string
+      ## Stable action id. Caller may supply explicitly; otherwise
+      ## auto-generated as ``<package>-<artifact>-<seq>``.
+    command*: string
+      ## The verbatim shell command. May embed ``$fetch`` / ``$extracted``
+      ## / ``$out`` placeholders the convention resolves at emit time.
+    deps*: seq[string]
+      ## Optional action-id deps. Empty means the convention adds the
+      ## default chain (depends on the previous shell action OR on the
+      ## fetch action when this is the first shell action).
+    cwd*: string
+      ## Working dir override. Empty means "use the convention's default"
+      ## (typically the extracted source dir).
+    outputs*: seq[string]
+      ## Optional declared outputs. Empty means the convention picks a
+      ## stamp file under the per-convention scratch dir so downstream
+      ## actions can dep on it.
+
+var dslPortShellActions {.threadvar.}: Table[string, seq[DslShellAction]]
+  ## Per-package shell-action registry. Keyed by ``packageName``. The
+  ## value seq is in source-declaration order across all artifacts so
+  ## the convention layer can replay the sequence verbatim.
+
+var dslPortShellSequence {.threadvar.}: Table[string, int]
+  ## Per-``(packageName, artifactName)`` monotonic counter used to
+  ## synthesise unique action ids when the caller omits ``id``.
+
+proc resetDslPortShellState*() =
+  ## Drop every shell-action registration + counter. Test fixtures call
+  ## this between scenarios so registry entries do not leak across cases.
+  ## Symmetric with ``resetDslPortFetchState`` /
+  ## ``resetDslPortBuildFlagState``.
+  dslPortShellActions.clear()
+  dslPortShellSequence.clear()
+
+proc shell*(command: string;
+            id: string = "";
+            deps: seq[string] = @[];
+            outputs: seq[string] = @[];
+            cwd: string = "") =
+  ## Record one shell action against the active build context's
+  ## ``(packageName, artifactName)`` frame. The call is a SILENT no-op
+  ## when no build context is active (matches the M4 ``output(path)``
+  ## convention so legacy provider-mode call chains stay compatible).
+  ##
+  ## ``command`` is recorded verbatim — embedded ``$fetch`` /
+  ## ``$extracted`` / ``$out`` placeholders are resolved at convention
+  ## emit time, NOT here.
+  ##
+  ## When ``id`` is empty the runtime synthesises
+  ## ``<package>-<artifact>-<seq>`` where ``<seq>`` is a monotonic per-
+  ## ``(package, artifact)`` counter. When the caller supplies ``id`` it
+  ## is recorded verbatim and the synthesised counter is NOT advanced
+  ## for that row — but the next omitted-id row still gets a fresh
+  ## sequence number.
+  ##
+  ## Frame resolution: the M4 ``dslPortActiveBuildContext`` stack is the
+  ## primary source. When that is empty (e.g. the legacy
+  ## ``buildXxxPackage*()`` proc runs the body in ``reproProviderMode``
+  ## without re-pushing M4 frames), we fall back to the M5
+  ## ``activeBuilds`` stack so the shell-action registry stays
+  ## observable in both code paths. The fallback uses ``packageName`` +
+  ## ``ownerName`` (or a blank artifact when the frame is package-level).
+  var pkg = ""
+  var artifact = ""
+  if dslPortActiveBuildContext.len > 0:
+    let frame = dslPortActiveBuildContext[^1]
+    pkg = frame.packageName
+    artifact = frame.artifactName
+  else:
+    let m5 = tryCurrentBuildState()
+    if m5 == nil:
+      return
+    pkg = m5.packageName
+    if m5.ownerKind != "package":
+      artifact = m5.ownerName
+  let seqKey = pkg & "\x00" & artifact
+  var resolvedId = id
+  if resolvedId.len == 0:
+    let nextSeq =
+      if seqKey in dslPortShellSequence: dslPortShellSequence[seqKey] + 1
+      else: 1
+    dslPortShellSequence[seqKey] = nextSeq
+    var artifactPart = artifact
+    if artifactPart.len == 0:
+      artifactPart = "package"
+    resolvedId = pkg & "-" & artifactPart & "-" & $nextSeq
+  let row = DslShellAction(
+    packageName: pkg,
+    artifactName: artifact,
+    id: resolvedId,
+    command: command,
+    deps: deps,
+    cwd: cwd,
+    outputs: outputs)
+  if pkg notin dslPortShellActions:
+    dslPortShellActions[pkg] = @[]
+  dslPortShellActions[pkg].add(row)
+
+proc registeredShellActions*(packageName: string): seq[DslShellAction] =
+  ## Return every shell action recorded against ``packageName`` in
+  ## declaration order across all of the package's ``build:`` blocks.
+  ## Returns the empty seq when the package never called ``shell()``.
+  if packageName in dslPortShellActions:
+    return dslPortShellActions[packageName]
+  return @[]
