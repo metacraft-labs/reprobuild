@@ -3512,6 +3512,69 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Eighty-second from-source production recipe — FIRST recipe in the
+  # M9.N Batch E compiler-chain slice (gcc + binutils + make). gcc's
+  # upstream build is a hand-rolled mkdir-out-of-tree-configure-build-
+  # install driver: ``from-source-custom`` convention consumer with
+  # four shell actions registered under the ``gcc`` artifact and a
+  # MIXED-KIND artifact set (three executables gcc + g++ + cpp, plus
+  # two libraries libgcc_s + libstdc++) sharing the same install-
+  # tree. Pins the 14.2.0 upstream ftp.gnu.org release-tarball URL +
+  # real sha256 computed locally + four-channel cross-isolation
+  # empty-state + per-artifact stage-copy fan-out at the (3 exec, 2
+  # lib) mixed cardinality. The actual compilation is DEFERRED — gcc
+  # is the largest package in the corpus (88 MB tarball, 15 GB build
+  # tree, 2-4 hours compile time) — but the recipe shape lands so
+  # the convention layer can lower the pipeline when a downstream
+  # consumer recipe asks for the host C / C++ toolchain.
+  TestSpec(
+    source: "recipes/packages/source/gcc/test_gcc_source.nim",
+    binary: "build/test-bin/t_gcc_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eighty-third from-source production recipe — SECOND recipe in the
+  # M9.N Batch E compiler-chain slice. binutils is the GNU binary
+  # utilities collection: ``from-source-autotools`` convention
+  # consumer with an ELEVEN-executable install-tree (ld + as + ar +
+  # nm + objcopy + objdump + ranlib + strip + readelf + size +
+  # strings) from a single ``./configure`` + ``make`` invocation.
+  # Pins the 2.43 upstream ftp.gnu.org release-tarball URL + real
+  # sha256 computed locally + FIVE-flag configureFlags channel
+  # (``--enable-gold`` + ``--enable-ld=default`` + ``--enable-
+  # plugins`` + ``--enable-shared`` + ``--disable-werror``) + per-
+  # artifact stage-copy fan-out at the ELEVEN-executable cardinality.
+  # First recipe in the corpus to declare an executable named ``as``
+  # via string-form declaration (``executable "as":``) because
+  # ``as`` is a reserved Nim keyword.
+  TestSpec(
+    source: "recipes/packages/source/binutils/test_binutils_source.nim",
+    binary: "build/test-bin/t_binutils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eighty-fourth from-source production recipe — CLOSING (THIRD)
+  # recipe in the M9.N Batch E compiler-chain slice. make is the
+  # canonical GNU build-system driver: ``from-source-autotools``
+  # convention consumer with a SINGLE-executable install-tree (just
+  # ``make``) from a single ``./configure`` + ``make`` invocation.
+  # Pins the 4.4.1 upstream ftp.gnu.org release-tarball URL + real
+  # sha256 computed locally + single-flag configureFlags channel
+  # (``--disable-nls``) + per-artifact stage-copy fan-out at the
+  # 1-executable cardinality. The ONLY from-source recipe in the
+  # corpus that bootstraps the build-system-driver ITSELF.
+  TestSpec(
+    source: "recipes/packages/source/make/test_make_source.nim",
+    binary: "build/test-bin/t_make_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
