@@ -2430,6 +2430,94 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Thirty-second from-source production recipe to exercise the
+  # M9.H/I/K trio — FIRST recipe in the system-userland batch
+  # (util-linux + pam + libcap + eudev) and the SEVENTH autotools-
+  # driven recipe. FIRST recipe in the corpus to ship an
+  # EIGHT-ARTIFACT MIXED-KIND shape from a single ``package`` macro:
+  # five executables (``mount`` + ``umount`` + ``mkfsBin`` + ``fdisk``
+  # + ``lsblk``) PLUS three libraries (``libBlkid`` + ``libUuid`` +
+  # ``libMount``) all built from one autotools ``./configure`` +
+  # ``make`` invocation. systemd previously held the multi-artifact
+  # record with six mixed-kind artifacts; util-linux pushes the
+  # artifact-name partitioning + per-artifact kind-tagging at the
+  # EIGHT-artifact mixed-kind cardinality. Pins util-linux 2.40.4's
+  # vendored sha256 + configure flag sequence + cross-channel
+  # isolation + the eight artifacts within a single package's
+  # artifact set. The canonical Linux system utilities bundle
+  # (mount/umount/mkfs/fdisk/lsblk + libblkid/libuuid/libmount).
+  TestSpec(
+    source: "recipes/packages/source/util-linux/test_util_linux_source.nim",
+    binary: "build/test-bin/t_util_linux_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirty-third from-source production recipe to exercise the
+  # M9.H/I/K trio — SECOND recipe in the system-userland batch and
+  # the EIGHTH autotools-driven recipe. THREE-library single-package
+  # autotools recipe (libpam + libpam_misc + libpamc) pushing the
+  # per-channel partitioning property at the three-library autotools
+  # cardinality (openssl was the prior two-library autotools peak).
+  # Pins Linux-PAM 1.6.1's vendored sha256 + configure flag sequence
+  # + cross-channel isolation + the three library artifacts. The
+  # canonical Linux authentication stack consumed by gdm / sddm /
+  # sshd / sudo / polkit / screen-lock unlock.
+  TestSpec(
+    source: "recipes/packages/source/pam/test_pam_source.nim",
+    binary: "build/test-bin/t_pam_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirty-fourth from-source production recipe to exercise the
+  # M9.H/I/K trio — THIRD recipe in the system-userland batch and
+  # the SECOND consumer of the M9.I ``makeFlags:`` channel (linux-
+  # kernel was the first). FIRST recipe to drive a non-kbuild raw
+  # Makefile through the channel — pins the ``makeFlags:`` channel's
+  # grammar from a second flavour angle (libcap-style ``BUILD_CC=`` +
+  # ``prefix=`` overrides vs the kernel's ``ARCH=`` + ``LOCALVERSION=``
+  # + ``-j1`` kbuild grammar). Also the FIRST recipe in the corpus
+  # to ship a ONE-library + THREE-executable mixed-kind shape from
+  # a raw Makefile package. Pins libcap 2.71's vendored sha256 +
+  # make flag sequence + cross-channel isolation + the four
+  # artifacts. The canonical POSIX capabilities library consumed by
+  # systemd / sshd / NetworkManager / kwin_wayland.
+  TestSpec(
+    source: "recipes/packages/source/libcap/test_libcap_source.nim",
+    binary: "build/test-bin/t_libcap_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Thirty-fifth from-source production recipe to exercise the
+  # M9.H/I/K trio — CLOSING recipe in the system-userland batch and
+  # the NINTH autotools-driven recipe. FIRST recipe in the corpus
+  # with an intentional artifact-name collision against a sibling
+  # recipe: eudev's ``libUdev`` deliberately shares an artifactName
+  # with systemd's ``libUdev`` (both packages emit ``libudev.so``
+  # with a compatible API; the variant resolver picks ONE at
+  # consumer-resolution time). The collision pins the convention
+  # layer's artifact registry's (packageName, artifactName) tuple
+  # tracking — a regression that flattened the tuple to
+  # ``artifactName`` alone would merge the two entries and mis-route
+  # the install action. Pins eudev 3.2.14's vendored sha256 +
+  # configure flag sequence + cross-channel isolation + the three
+  # artifacts (``udevd`` + ``udevadm`` + ``libUdev``) + the
+  # collision-distinctness property. The systemd-independent fork of
+  # udev maintained by the Gentoo project, used by the sysvinit-
+  # edition NDE-K1 variant.
+  TestSpec(
+    source: "recipes/packages/source/eudev/test_eudev_source.nim",
+    binary: "build/test-bin/t_eudev_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
