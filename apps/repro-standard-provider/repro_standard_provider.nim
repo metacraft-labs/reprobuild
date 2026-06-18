@@ -40,6 +40,7 @@ import repro_standard_provider/conventions/c_cpp_cmake as c_cpp_cmake_convention
 import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/from_source_meson as from_source_meson_convention
 import repro_standard_provider/conventions/from_source_cmake as from_source_cmake_convention
+import repro_standard_provider/conventions/from_source_autotools as from_source_autotools_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -177,6 +178,19 @@ when defined(reproProviderMode):
   addDefaultConvention(go_convention.goConvention())
   addDefaultConvention(python_convention.pythonConvention())
   addDefaultConvention(jsts_convention.javaScriptTypeScriptConvention())
+  # from_source_autotools (M9.L.2) registered BEFORE c_cpp_autotools so
+  # the from-source variant claims recipes that declare a ``fetch:``
+  # block AND a non-empty ``configureFlags:`` channel (no in-tree
+  # ``configure.ac`` / ``Makefile.am`` at projectRoot — the source has to
+  # be fetched + extracted first). The convention's ``recognize`` rejects
+  # when those autoconf-source files ARE present at the root so the
+  # in-tree M17/M28 convention claims those projects; registration order
+  # is defensive in either direction. Covers ~30 from-source recipes
+  # (expat, fontconfig, freetype, libpng, libjpeg-turbo, ...) plus a
+  # handful of custom-configure dialects (zlib, openssl, sqlite) that
+  # are honest deferrals per the convention's module docstring.
+  addDefaultConvention(
+    from_source_autotools_convention.fromSourceAutotoolsConvention())
   addDefaultConvention(c_cpp_autotools_convention.cCppAutotoolsConvention())
   # from_source_cmake (M9.L.1) registered BEFORE c_cpp_cmake so the
   # from-source variant claims recipes that declare a ``fetch:`` block
