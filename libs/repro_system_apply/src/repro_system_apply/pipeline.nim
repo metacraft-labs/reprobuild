@@ -1321,11 +1321,31 @@ proc repairPartialApply*(stateDir: string;
 proc readCurrentGeneration*(stateDir: string): int =
   ## Returns the confirmed-current generation number, or 0 if no
   ## generation is currently confirmed.
+  ##
+  ## ``rotateCurrentPointer`` writes ``<state>/current`` as a POSIX
+  ## symlink to the generation directory on Unix and as a plain text
+  ## file holding the directory path on Windows (or as the symlink
+  ## fallback when symlink creation fails). We must accept all three
+  ## shapes: a symlink-to-directory is NOT visible to ``fileExists`` and
+  ## cannot be ``readFile``-d, so probe ``symlinkExists`` first and read
+  ## the link target rather than the file body.
   let curPath = currentPathFor(stateDir)
-  if not fileExists(extendedPath(curPath)):
+  let extPath = extendedPath(curPath)
+  var last: string
+  if symlinkExists(extPath):
+    # POSIX symlink: the target's last path component is the generation
+    # directory name (the integer generation number).
+    let target =
+      try: expandSymlink(extPath)
+      except OSError: return 0
+    last = target.strip().lastPathPart
+  elif fileExists(extPath):
+    # Windows / symlink-fallback text file: the body is the generation
+    # directory path.
+    let body = readFile(extPath).strip()
+    last = body.lastPathPart
+  else:
     return 0
-  let body = readFile(extendedPath(curPath)).strip()
-  let last = body.lastPathPart
   try: parseInt(last)
   except ValueError: 0
 

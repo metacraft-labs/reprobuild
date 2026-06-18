@@ -130,6 +130,19 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
 # BuildEngineConfig defaults appropriate for a single profile compile.
 # ---------------------------------------------------------------------------
 
+## Selector args that turn ``<publicCliPath>`` into the in-process
+## ``repro internal fs-snoop`` monitor driver. ``monitoredAction``
+## prepends ``monitorCliPath & monitorCliArgs`` ahead of ``--depfile
+## <path> --`` and the real command, so WITHOUT these args the monitored
+## argv degenerates to ``repro --depfile <path> -- <cmd>`` — an invalid
+## invocation that exits non-zero and makes every profile-compile action
+## fail under ``automaticMonitorGatheringPolicy``. Every production build
+## config in ``repro_cli_support`` (``internalFsSnoopArgs``) sets the same
+## pair; we mirror the literal here because ``repro_profile_compile`` sits
+## below ``repro_cli_support`` in the dependency graph and cannot import
+## it without a cycle.
+const ProfileCompileMonitorCliArgs* = @["internal", "fs-snoop"]
+
 proc profileCompileEngineConfig*(stateDir, publicCliPath: string):
     BuildEngineConfig =
   ## A `BuildEngineConfig` tuned for a one-off profile compile. We park
@@ -140,6 +153,7 @@ proc profileCompileEngineConfig*(stateDir, publicCliPath: string):
     cacheRoot: stateDir / ProfileCacheDirName / "build-engine-cache",
     runQuotaCliPath: publicCliPath,
     monitorCliPath: publicCliPath,
+    monitorCliArgs: ProfileCompileMonitorCliArgs,
     maxParallelism: 1'u32,
     stdoutLimit: 1024 * 1024,
     stderrLimit: 1024 * 1024,
