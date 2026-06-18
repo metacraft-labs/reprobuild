@@ -2314,6 +2314,94 @@ proc nixPrefix(namePattern, header: string;
       if firstExistingPrefix([path], header, [libraryName]).len > 0:
         return path
 
+proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
+                            candidates: openArray[string]; marker: string) =
+  ## Replay one of ``config.nims``'s ``addPackagePath`` resolutions as an
+  ## explicit ``--path`` flag. ``config.nims`` resolves each third-party /
+  ## sibling-repo package by checking ``getEnv(envName)`` first and then a
+  ## list of candidate directories, gating each on a marker file so a stale or
+  ## wrong directory is never added. We mirror that exact logic here.
+  ##
+  ## This is required because the interface-extraction runner and the per-
+  ## project provider binary are compiled from a scratch tree that lives
+  ## OUTSIDE reprobuild (under ``<project>/.repro/...`` for dev-env, under the
+  ## build out-dir otherwise). Nim only evaluates reprobuild's ``config.nims``
+  ## when the compiled main module sits inside reprobuild's directory tree (the
+  ## project-config parent walk); for an arbitrary project it does not, so the
+  ## ``--path`` switches ``config.nims`` would have added (e.g. ``NIMCRYPTO_SRC``
+  ## for ``nimcrypto/sha2``, pulled in transitively by ``repro_project_dsl``)
+  ## are missing and the compile fails with ``cannot open file: nimcrypto/sha2``.
+  ## ``externalHashFlags`` replays ``config.nims``'s C-library flags for the same
+  ## reason; this helper extends that to the Nim package source paths.
+  ##
+  ## Candidate paths are resolved relative to ``workDir`` (the
+  ## ``reprobuildLibraryWorkDir``) so they match ``config.nims``'s
+  ## reprobuild-root-relative candidates regardless of the compile's cwd.
+  let resolve = proc(path: string): string =
+    if path.len == 0 or path.isAbsolute: path else: workDir / path
+  let envPath = getEnv(envName)
+  if envPath.len > 0 and fileExists(extendedPath(envPath / marker)):
+    flags.add("--path:" & envPath)
+    return
+  for candidate in candidates:
+    let resolved = resolve(candidate)
+    if fileExists(extendedPath(resolved / marker)):
+      flags.add("--path:" & resolved)
+      return
+
+proc reproPackagePathFlags(workDir: string): seq[string] =
+  ## Replay the third-party / sibling-repo package ``--path`` switches that
+  ## reprobuild's ``config.nims`` adds via ``addPackagePath``. Kept byte-for-byte
+  ## in sync with the ``addPackagePath(...)`` block in ``config.nims``; when a
+  ## package is added or its candidate list changes there, update it here too.
+  ## (reprobuild's OWN ``libs/*/src`` tree is replayed separately by
+  ## ``reproLibPathFlags``; this helper covers only the out-of-tree packages.)
+  if workDir.len == 0:
+    return
+  result.addExternalPackagePath(workDir, "FASTSTREAMS_SRC", [
+    "libs" / "nim-faststreams" / "src",
+    ".." / "codetracer" / "libs" / "nim-faststreams",
+    ".." / "nim-faststreams",
+  ], "faststreams" / "inputs.nim")
+  result.addExternalPackagePath(workDir, "NIM_STEW_SRC", [
+    "libs" / "nim-stew" / "src",
+    ".." / "codetracer" / "libs" / "nim-stew",
+    ".." / "nim-stew",
+  ], "stew" / "objects.nim")
+  result.addExternalPackagePath(workDir, "NIM_SERIALIZATION_SRC", [
+    "libs" / "nim-serialization" / "src",
+    ".." / "codetracer" / "libs" / "nim-serialization",
+    ".." / "nim-serialization",
+  ], "serialization" / "case_objects.nim")
+  result.addExternalPackagePath(workDir, "NIM_JSON_SERIALIZATION_SRC", [
+    "libs" / "nim-json-serialization" / "src",
+    ".." / "codetracer" / "libs" / "nim-json-serialization",
+    ".." / "nim-json-serialization",
+  ], "json_serialization.nim")
+  result.addExternalPackagePath(workDir, "NIM_TOML_SERIALIZATION_SRC", [
+    "libs" / "nim-toml-serialization" / "src",
+    ".." / "codetracer" / "libs" / "nim-toml-serialization",
+    ".." / "nim-toml-serialization",
+  ], "toml_serialization.nim")
+  result.addExternalPackagePath(workDir, "SSZ_SERIALIZATION_SRC", [
+    "libs" / "nim-ssz-serialization" / "src",
+    ".." / "nim-ssz-serialization",
+  ], "ssz_serialization.nim")
+  result.addExternalPackagePath(workDir, "NIMCRYPTO_SRC", [
+    ".." / "codetracer" / "libs" / "nimcrypto",
+    ".." / "nimcrypto",
+  ], "nimcrypto" / "hash.nim")
+  result.addExternalPackagePath(workDir, "BEARSSL_SRC", [
+    ".." / "nim-bearssl",
+    "libs" / "nim-bearssl",
+  ], "bearssl.nim")
+  result.addExternalPackagePath(workDir, "RESULTS_SRC", [
+    "libs" / "results" / "src",
+  ], "results.nim")
+  result.addExternalPackagePath(workDir, "STINT_SRC", [
+    "libs" / "stint" / "src",
+  ], "stint.nim")
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both under
@@ -2547,6 +2635,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ]
   command.insert(hostFlags, 2)
   command.insert(externalHashFlags(workDir), 2)
+  command.insert(reproPackagePathFlags(workDir), 2)
   command.insert(libFlags, 4)
   let compileExecution = runCommand(command, cwd = workDir)
   let runnerExe = compiledExecutablePath(runnerBin)
@@ -2710,6 +2799,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   ]
   result.insert(hostFlags, 2)
   result.insert(externalHashFlags(workDir), 2)
+  result.insert(reproPackagePathFlags(workDir), 2)
   result.insert(libFlags, 2)
   if providerDynamicEnabled():
     # Tier 1 shared DSL runtime DLL: opt-in via ``REPRO_PROVIDER_DYNAMIC=1``.
