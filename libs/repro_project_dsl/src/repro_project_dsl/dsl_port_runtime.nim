@@ -812,7 +812,7 @@ proc endBuildContext*() =
   if dslPortActiveBuildContext.len > 0:
     dslPortActiveBuildContext.setLen(dslPortActiveBuildContext.len - 1)
 
-proc currentBuildContext*(): DslBuildContextFrame =
+proc currentBuildContextFrame*(): DslBuildContextFrame =
   ## Return the top frame, or a zero-value frame (both fields empty)
   ## when no ``build:`` block is open. Helper for inspection paths that
   ## want to attribute a side-effect to the active artifact without
@@ -858,10 +858,10 @@ proc currentBuildContext*(): DslBuildContextFrame =
 ##
 ## ─────────────────────────────────────────────────────────────────────────
 ## Why convenience procs instead of having callers reach
-## ``currentBuildContext()`` directly?
+## ``currentBuildContextFrame()`` directly?
 ## ─────────────────────────────────────────────────────────────────────────
 ##
-## ``currentBuildContext()`` returns a ``DslBuildContextFrame`` whose two
+## ``currentBuildContextFrame()`` returns a ``DslBuildContextFrame`` whose two
 ## string fields the caller would have to dot-access (``.packageName`` /
 ## ``.artifactName``). Recipes that just want "what package am I in?" then
 ## have to ALSO import the type. The convenience accessors:
@@ -878,7 +878,7 @@ proc currentBuildPackage*(): string =
   ## string when no build context is on the stack. Safe to call from any
   ## Nim proc reached as a side effect from inside the body of a
   ## recipe's ``build:`` block.
-  let frame = currentBuildContext()
+  let frame = currentBuildContextFrame()
   result = frame.packageName
 
 proc currentBuildArtifact*(): string =
@@ -889,7 +889,7 @@ proc currentBuildArtifact*(): string =
   ## need to disambiguate use ``currentBuildPackage()`` in tandem (a
   ## non-empty package name with an empty artifact name signals the
   ## package-level form).
-  let frame = currentBuildContext()
+  let frame = currentBuildContextFrame()
   result = frame.artifactName
 
 # ---------------------------------------------------------------------------
@@ -1139,7 +1139,7 @@ proc toolBuild*(toolName: string;
   ## without re-querying the registry; ``{.discardable.}`` lets the
   ## return value be ignored at the call site.
   discard toolName  # captured intentionally; reserved for a follow-up milestone
-  let frame = currentBuildContext()
+  let frame = currentBuildContextFrame()
   for (slot, producer) in inputs:
     registerBuildInput(frame.packageName, frame.artifactName, slot, producer)
   result = output(outputPath)
@@ -1206,7 +1206,7 @@ proc toolBuild*(toolName: string;
 ##
 ## ``currentServiceContext()`` returns a zero-value frame when the stack
 ## is empty rather than raising. This matches M4's
-## ``currentBuildContext()`` decision (M4 reviewer's risk #5: "M5 should
+## ``currentBuildContextFrame()`` decision (M4 reviewer's risk #5: "M5 should
 ## pick + document"). The body-setter procs check the stack length AND
 ## treat an empty stack as a silent no-op — services declared from a
 ## ``when`` branch that the test fixture never opens never push a frame,
@@ -1587,7 +1587,7 @@ proc finishServiceContext*() =
 # public wrappers). The two accessors below expose the package name and
 # service name as plain strings, mirroring the M7 build-context surface.
 # Empty string when the stack is empty, mirroring the M4
-# ``currentBuildContext`` empty-stack convention.
+# ``currentBuildContextFrame`` empty-stack convention.
 # ---------------------------------------------------------------------------
 
 proc currentServicePackage*(): string =
