@@ -2343,8 +2343,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var running: seq[RunningAction] = @[]
   var runQuotaDaemonReachable: Option[bool]
 
+  # ``REPROBUILD_NO_RUNQUOTA=1`` is the engine's own documented full-bypass
+  # switch, which it forces into every action child env (see ``childBypassEnv``)
+  # precisely so a NESTED ``repro`` invocation runs unmanaged and never requests
+  # its OWN lease from the same daemon — the parent⇄child lease cycle documented
+  # there, which otherwise surfaces only as "build graph made no progress" (or,
+  # on macOS, a hard hang in the inline grant poll waiting for a lease the outer
+  # action already holds). When we observe that switch in our OWN environment we
+  # ARE such an inner repro, so we must bypass runquota regardless of the
+  # ``bypassRunQuota`` flag the CLI happened to build into the config. Honouring
+  # it here — at the single runquota gate — covers every config path (provider
+  # compile, dev-env materialisation, command run) without each CLI call site
+  # having to remember to translate the env into the flag.
+  let effectiveBypassRunQuota =
+    config.bypassRunQuota or
+    (getEnv("REPROBUILD_NO_RUNQUOTA").normalize in ["1", "true", "yes", "on"])
+
   proc launchBypassesRunQuota(): bool =
-    if config.bypassRunQuota:
+    if effectiveBypassRunQuota:
       return true
     if not config.fallbackToRunQuotaBypass:
       return false
@@ -2971,7 +2987,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let resultPath = runQuotaResultRoot / ($launchSeq & ".json")
         var bypassRunQuota = false
         var inlineRunQuota = false
-        if config.inlineRunQuota and not config.bypassRunQuota:
+        if config.inlineRunQuota and not effectiveBypassRunQuota:
           inlineRunQuota = tryEnsureInlineRunQuotaSession()
           bypassRunQuota = not inlineRunQuota
         else:
