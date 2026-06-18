@@ -41,6 +41,7 @@ import repro_standard_provider/conventions/c_cpp_meson as c_cpp_meson_convention
 import repro_standard_provider/conventions/from_source_meson as from_source_meson_convention
 import repro_standard_provider/conventions/from_source_cmake as from_source_cmake_convention
 import repro_standard_provider/conventions/from_source_autotools as from_source_autotools_convention
+import repro_standard_provider/conventions/from_source_make as from_source_make_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -249,6 +250,20 @@ when defined(reproProviderMode):
   # out to a stock ``meson`` + ``ninja`` for configure + per-member
   # build.
   addDefaultConvention(c_cpp_meson_convention.cCppMesonConvention())
+  # from_source_make (M9.L.3) registered BEFORE c_cpp_make so the
+  # from-source variant claims recipes that declare a ``fetch:`` block
+  # AND a non-empty ``makeFlags:`` channel (no in-tree ``Makefile.am``
+  # / ``configure.ac`` / ``meson.build`` / ``CMakeLists.txt`` at
+  # projectRoot — the source has to be fetched + extracted first).
+  # The convention's ``recognize`` rejects when in-tree build-system
+  # manifests ARE present at the root so the in-tree M17 convention
+  # claims those projects; registration order is defensive in either
+  # direction. Covers the two from-source plain-Make / kbuild recipes
+  # (``libcapSource`` + ``kernelSource``) and complements the M9.L.0
+  # / M9.L.1 / M9.L.2 from-source siblings (meson / cmake /
+  # autotools).
+  addDefaultConvention(
+    from_source_make_convention.fromSourceMakeConvention())
   addDefaultConvention(c_cpp_make_convention.cCppMakeConvention())
   # java_maven (M40) — first JVM-ecosystem Tier 2b convention. Keys on
   # ``pom.xml`` at the project root; no overlap with the C/C++
