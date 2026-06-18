@@ -1137,6 +1137,22 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   result.action = action
   if action.dependencyPolicy.kind notin MonitorPolicyKinds:
     return
+  # Built-in actions (``kind != bakProcess`` — copy-file, write-text, stamp,
+  # workspace-vcs, preserve-tree, binary-cache-substitute) run entirely
+  # in-process via ``executeBuiltinAction``: there is no child process to
+  # interpose on, so there is nothing for ``repro-fs-snoop`` to monitor and
+  # nothing to gain from wrapping ``argv``. Their dependency evidence is the
+  # statically declared inputs/outputs (and, for recognized/converter
+  # policies, the post-build reports) — ``monitorEvidenceRequired`` already
+  # returns false for them because no RMDF is ever wired. ``builtinAction``
+  # tags every such action with the default ``automaticMonitorGatheringPolicy``
+  # (a ``MonitorPolicyKinds`` member), so without this guard a built-in would
+  # incorrectly fall into the fs-snoop wiring below and fail with a spurious
+  # "requires repro-fs-snoop" diagnostic on any host without the snoop driver
+  # wired (e.g. the hermetic workspace/VCS integration tests). Only
+  # ``bakProcess`` actions spawn a monitorable subprocess.
+  if action.kind != bakProcess:
+    return
   # Windows: automatic monitor dependency gathering now works on Windows via
   # the IAT-patching shim + CreateRemoteThread injection (see
   # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim and
