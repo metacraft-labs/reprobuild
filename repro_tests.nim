@@ -2758,6 +2758,83 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Forty-seventh from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the system-userland-coverage batch (kmod +
+  # procps + iproute2 + libcap-ng). Five-artifact mixed-kind autotools
+  # shape (four executables + one library). Pins kmod 33's vendored
+  # sha256 + ``./configure`` flag sequence + cross-channel isolation +
+  # ``modprobe`` + ``lsmod`` + ``insmod`` + ``rmmod`` executable +
+  # ``libKmod`` library artifacts. The canonical Linux kernel-module
+  # userland (libkmod.so consumed by ModemManager + NetworkManager;
+  # modprobe / lsmod / insmod / rmmod consumed by systemd-modules-load
+  # + udev rules + initramfs scripts + power-management hooks).
+  TestSpec(
+    source: "recipes/packages/source/kmod/test_kmod_source.nim",
+    binary: "build/test-bin/t_kmod_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-eighth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the system-userland-coverage batch and the
+  # FIRST recipe in the corpus to consume the GitLab archive endpoint
+  # (``/-/archive/<tag>/<name>-<tag>.tar.gz``). Six-artifact mixed-kind
+  # autotools shape (five executables + one library). Pins procps-ng
+  # 4.0.5's vendored sha256 + ``./configure`` flag sequence (incl. the
+  # ``--with-systemd=no`` ``--with-X=value`` polarity-explicit idiom) +
+  # cross-channel isolation + ``ps`` + ``top`` + ``free`` + ``kill`` +
+  # ``uptime`` executable + ``libProc`` library artifacts. The canonical
+  # Linux process-utilities userland; libproc2.so consumed by htop +
+  # glances + btop.
+  TestSpec(
+    source: "recipes/packages/source/procps/test_procps_source.nim",
+    binary: "build/test-bin/t_procps_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Forty-ninth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the system-userland-coverage batch and the
+  # FIRST recipe to drive a hand-rolled ``./configure`` shell-script
+  # wrapper (NOT autoconf-generated) paired with a raw top-level
+  # Makefile. Four-executable shape. Pins iproute2 6.12.0's vendored
+  # sha256 + ``./configure`` flag sequence (SMALLEST production
+  # configure-flag set in the corpus — a single ``--without-libelf``
+  # flag pinning the one-flag-only edge case) + cross-channel isolation
+  # + ``ip`` + ``tc`` + ``ss`` + ``bridge`` executable artifacts. The
+  # canonical Linux networking-utilities userland; consumed by
+  # NetworkManager dispatcher hooks + containerd / podman + systemd-
+  # networkd + every sysadmin network diagnostic.
+  TestSpec(
+    source: "recipes/packages/source/iproute2/test_iproute2_source.nim",
+    binary: "build/test-bin/t_iproute2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fiftieth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the system-userland-coverage batch.
+  # SINGLE-library autotools shape that COMPLEMENTS (does NOT replace)
+  # the libcap recipe (thirty-fourth): libcap covers the "raw" POSIX
+  # 1003.1e capabilities API, libcap-ng covers the higher-level wrapper
+  # API consumed by auditd + cronie. Pins libcap-ng 0.8.5's vendored
+  # sha256 + ``./configure`` flag sequence (incl. two consecutive
+  # ``--without-python*`` flags that guard against prefix-collapse
+  # regressions in the per-channel flag-lowering logic) + cross-channel
+  # isolation + ``libCapNg`` library artifact. The kebab-cased upstream
+  # SONAME ``cap-ng`` -> ``libCapNg`` PascalCase mapping pins the
+  # json-c -> libJsonC precedent on a second hyphenated SONAME.
+  TestSpec(
+    source: "recipes/packages/source/libcap-ng/test_libcap_ng_source.nim",
+    binary: "build/test-bin/t_libcap_ng_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
