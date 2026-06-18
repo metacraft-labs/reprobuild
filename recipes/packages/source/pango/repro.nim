@@ -125,8 +125,6 @@ package pangoSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Two-library single-package recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.gnome.org release tarball URL so a future maintainer

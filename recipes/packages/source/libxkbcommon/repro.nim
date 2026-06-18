@@ -141,8 +141,6 @@ package libxkbcommonSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Mixed library + executable artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical GitHub
     ## release archive URL so a future maintainer running

@@ -137,8 +137,6 @@ package wlrootsSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## freedesktop.org gitlab release tarball URL so a future

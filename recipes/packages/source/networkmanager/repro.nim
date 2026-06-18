@@ -170,8 +170,6 @@ package networkManagerSource:
   ## wired with the right URL + hash + flags. Two-executable +
   ## one-library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## gitlab.freedesktop.org release tarball URL — the same URL the

@@ -995,6 +995,16 @@ proc cCppDirectRecognize(projectRoot: string;
   ##     through ``pascal-direct`` (which embeds the C/C++ cross
   ##     helpers and emits both directions of the Pascal ↔ C
   ##     cross-language matrix from a single fragment).
+  ##
+  ## M9.N: tool availability (``gcc`` / ``clang`` on PATH) is NOT gated
+  ## here. Recognition claims a recipe based on DECLARATION (no
+  ## conflicting in-tree build manifest + ``uses:`` lists a C compiler +
+  ## per-member source resolution). Tool identity is resolved AFTER
+  ## recognise, possibly via cache substitute or source build, so a
+  ## host-PATH probe at recognise time is wrong.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if rootMakefile(projectRoot).len > 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -1022,8 +1032,6 @@ proc cCppDirectRecognize(projectRoot: string;
     return false
   let members = extractMembersWithOwnership(source)
   if members.len == 0:
-    return false
-  if ccCompiler().len == 0:
     return false
   var atLeastOneResolved = false
   for member in members:

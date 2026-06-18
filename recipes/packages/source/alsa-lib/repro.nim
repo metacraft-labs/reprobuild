@@ -123,8 +123,6 @@ package alsaLibSource:
   ## lowers them into fetch + configure BuildActions wired with the
   ## right URL + hash + flags. Single library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## alsa-project.org release tarball URL — the same URL the live

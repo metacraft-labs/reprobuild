@@ -150,8 +150,6 @@ package ncursesSource:
   ## right URL + hash + flags. Two-library + two-executable artifact
   ## recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## ftp.gnu.org release tarball URL so a future maintainer running

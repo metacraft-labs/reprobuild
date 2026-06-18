@@ -117,8 +117,6 @@ package sqliteSource:
   ## lowers them into fetch + configure BuildActions wired with the
   ## right URL + hash + flags.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream release. ``sourceUrl`` records the canonical
     ## sqlite.org release tarball URL so a future maintainer running

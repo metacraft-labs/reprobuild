@@ -138,8 +138,6 @@ package dbusSource:
   ## right URL + hash + flags. One executable + one library artifact
   ## recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## freedesktop release tarball URL so a future maintainer running

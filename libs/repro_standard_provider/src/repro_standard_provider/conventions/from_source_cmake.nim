@@ -592,6 +592,15 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
 proc fromSourceCmakeRecognize(projectRoot: string;
                               request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
+  ##
+  ## M9.N: claims a recipe based on DECLARATION (``fetch:`` registered +
+  ## ``uses:`` declares ``cmake`` + non-empty cmake flags channel + no
+  ## in-tree ``CMakeLists.txt`` at projectRoot). NO host-PATH gate — the
+  ## engine resolves tool identity AFTER recognise, possibly via cache
+  ## substitute or source build.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if hasCMakeListsTxt(projectRoot):
     # In-tree project — the existing M38 ``c-cpp-cmake`` convention
     # claims this. The from-source variant intentionally yields so the

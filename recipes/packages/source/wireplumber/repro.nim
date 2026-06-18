@@ -131,8 +131,6 @@ package wireplumberSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. One-executable + one-library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## gitlab.freedesktop.org archive URL — the same URL the live

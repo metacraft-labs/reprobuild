@@ -110,6 +110,20 @@ suite "from-source-autotools convention M9.L.2 — expat":
     let request = dummyRequest(ExpatRecipe)
     check conv.recognize(ExpatRecipe, request)
 
+  test "recognize: returns true even without autoconf/make on PATH (M9.N)":
+    # M9.N architectural correction: recognize must claim a recipe based
+    # on DECLARATION (fetch: + configure flags channel non-empty), NOT
+    # host PATH availability. Tool identity is resolved AFTER recognise
+    # by the engine — possibly via cache substitute or source build.
+    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
+    let request = dummyRequest(ExpatRecipe)
+    check fileExists(ExpatRecipe / "repro.nim")
+    let autoconfOnPath = findExe("autoconf").len > 0
+    let makeOnPath = findExe("make").len > 0
+    checkpoint "autoconf on PATH: " & $autoconfOnPath &
+      ", make on PATH: " & $makeOnPath
+    check conv.recognize(ExpatRecipe, request)
+
   test "recognize: negative — projectRoot carries in-tree configure.ac":
     # If ``configure.ac`` is present at the root, the existing M17/M28
     # ``c-cpp-autotools`` convention claims the project; the from-source

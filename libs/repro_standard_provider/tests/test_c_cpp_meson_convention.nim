@@ -74,18 +74,33 @@ proc mesonToolchainReady(): bool =
 
 suite "c-cpp-meson convention M39":
 
-  test "recognize: positive — hello-binary fixture (toolchain-gated)":
+  test "recognize: positive — hello-binary fixture (declaration-only)":
+    # M9.N: recognise claims a recipe based on DECLARATION (meson.build
+    # at projectRoot + uses: meson + executable/library member), NOT
+    # host PATH availability. Tool identity is resolved AFTER recognise
+    # by the engine.
     let conv = meson_convention.cCppMesonConvention()
     check conv.name == "c-cpp-meson"
     if not fileExists(HelloBinaryFixture / "meson.build"):
       checkpoint "fixture missing — looked at " & HelloBinaryFixture
       fail()
     let request = dummyRequest(HelloBinaryFixture)
-    if mesonToolchainReady():
-      check conv.recognize(HelloBinaryFixture, request)
-    else:
-      checkpoint "meson toolchain unavailable — recognize must be false"
-      check not conv.recognize(HelloBinaryFixture, request)
+    check conv.recognize(HelloBinaryFixture, request)
+
+  test "recognize: returns true even without meson on PATH (M9.N)":
+    # M9.N architectural correction: explicit assertion that the
+    # host-PATH gate has been dropped from recognise — the convention
+    # claims the recipe regardless of whether meson/ninja/gcc resolve.
+    let conv = meson_convention.cCppMesonConvention()
+    if not fileExists(HelloBinaryFixture / "meson.build"):
+      checkpoint "fixture missing — looked at " & HelloBinaryFixture
+      fail()
+    let request = dummyRequest(HelloBinaryFixture)
+    let mesonOnPath = findExe("meson").len > 0
+    let ninjaOnPath = findExe("ninja").len > 0
+    checkpoint "meson on PATH: " & $mesonOnPath &
+      ", ninja on PATH: " & $ninjaOnPath
+    check conv.recognize(HelloBinaryFixture, request)
 
   test "recognize: negative — meson.build missing":
     let scratch = getTempDir() / "test_c_cpp_meson_convention_no_meson_build"

@@ -483,6 +483,17 @@ proc cCppAutotoolsRecognize(projectRoot: string;
   ##     both need it).
   ##   * EITHER a generated ``configure`` is checked in, OR
   ##     ``autoreconf`` is on PATH (so the convention can regenerate it).
+  ##
+  ## M9.N: tool availability (``gcc`` / ``make`` / ``sh`` /
+  ## ``autoreconf`` on PATH) is NOT gated here. Recognition claims a
+  ## recipe based on DECLARATION (``configure.ac`` + ``Makefile.am`` at
+  ## projectRoot + ``uses:`` lists autotools tokens + per-member source
+  ## resolution). Tool identity is resolved AFTER recognise, possibly
+  ## via cache substitute or source build, so a host-PATH probe at
+  ## recognise time is wrong.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if not hasConfigureSource(projectRoot):
     return false
   if not hasMakefileAm(projectRoot):
@@ -495,15 +506,6 @@ proc cCppAutotoolsRecognize(projectRoot: string;
   let members = extractMembers(source)
   if members.len == 0:
     return false
-  if ccCompiler().len == 0:
-    return false
-  if makeExecutable().len == 0:
-    return false
-  if shExecutable().len == 0:
-    return false
-  if not hasGeneratedConfigure(projectRoot):
-    if autoreconfExecutable().len == 0:
-      return false
   # M28 per-source lift: every declared member must resolve to at least
   # one source file from ``Makefile.am``.
   let makefileAmPath = projectRoot / "Makefile.am"

@@ -129,6 +129,19 @@ suite "from-source-make convention M9.L.3 — libcap":
     let request = dummyRequest(LibcapRecipe)
     check conv.recognize(LibcapRecipe, request)
 
+  test "recognize: returns true even without make on PATH (M9.N)":
+    # M9.N architectural correction: recognize must claim a recipe based
+    # on DECLARATION (fetch: + make flags channel non-empty + empty
+    # configure/meson/cmake channels), NOT host PATH availability. Tool
+    # identity is resolved AFTER recognise by the engine — possibly via
+    # cache substitute or source build.
+    let conv = from_source_make_convention.fromSourceMakeConvention()
+    let request = dummyRequest(LibcapRecipe)
+    check fileExists(LibcapRecipe / "repro.nim")
+    let makeOnPath = findExe("make").len > 0
+    checkpoint "make on PATH: " & $makeOnPath
+    check conv.recognize(LibcapRecipe, request)
+
   test "recognize: negative — projectRoot carries in-tree Makefile.am":
     # If ``Makefile.am`` is present at the root, the existing M28
     # ``c-cpp-autotools`` convention claims the project.

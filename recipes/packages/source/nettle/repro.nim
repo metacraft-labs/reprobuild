@@ -124,8 +124,6 @@ package nettleSource:
   ## wired with the right URL + hash + flags. Two library artifact
   ## recipe (libnettle + libhogweed).
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## ftp.gnu.org release tarball URL so a future maintainer running

@@ -163,8 +163,6 @@ package qt6BaseSource:
   ## them into fetch + configure BuildActions wired with the right URL +
   ## hash + flags. Six library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.qt.io release tarball URL so a future maintainer running

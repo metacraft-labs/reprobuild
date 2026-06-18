@@ -300,6 +300,17 @@ proc selectGenerator(): tuple[name, driverExe: string] =
 proc cCppCMakeRecognize(projectRoot: string;
                        request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
+  ##
+  ## M9.N: tool availability (``cmake`` / ``ninja`` / ``make`` /
+  ## ``gcc`` on PATH) is NOT gated here. Recognition claims a recipe
+  ## based on DECLARATION (``CMakeLists.txt`` at projectRoot + ``uses:``
+  ## lists ``cmake`` + ``executable`` / ``library`` member declared).
+  ## Tool identity is resolved AFTER recognise, possibly via cache
+  ## substitute or source build, so a host-PATH probe at recognise time
+  ## is wrong.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if not hasCMakeListsTxt(projectRoot):
     return false
   if hasAutotoolsArtifacts(projectRoot):
@@ -311,13 +322,6 @@ proc cCppCMakeRecognize(projectRoot: string;
     return false
   let members = extractMembers(source)
   if members.len == 0:
-    return false
-  if ccCompiler().len == 0:
-    return false
-  if cmakeExecutable().len == 0:
-    return false
-  let gen = selectGenerator()
-  if gen.name.len == 0:
     return false
   true
 

@@ -177,8 +177,6 @@ package utilLinuxSource:
   ## right URL + hash + flags. Five executable + three library
   ## artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## kernel.org release tarball URL so a future maintainer running

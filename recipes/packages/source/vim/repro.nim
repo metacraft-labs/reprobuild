@@ -149,8 +149,6 @@ package vimSource:
   ## lowers them into fetch + configure BuildActions wired with the
   ## right URL + hash + flags. Three-executable artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## github.com archive URL so a future maintainer running

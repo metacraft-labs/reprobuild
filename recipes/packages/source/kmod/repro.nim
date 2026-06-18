@@ -127,8 +127,6 @@ package kmodSource:
   ## right URL + hash + flags. Four executable + one library artifact
   ## recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## kernel.org release tarball URL so a future maintainer running

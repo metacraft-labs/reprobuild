@@ -642,6 +642,15 @@ proc fromSourceMakeRecognize(projectRoot: string;
                              request: ProviderGraphRequest):
                                bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
+  ##
+  ## M9.N: claims a recipe based on DECLARATION (``fetch:`` registered +
+  ## non-empty make flags channel + empty configure/meson/cmake channels
+  ## + no in-tree build manifest at projectRoot). NO host-PATH gate —
+  ## the engine resolves tool identity AFTER recognise, possibly via
+  ## cache substitute or source build.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if hasInTreeBuildArtifact(projectRoot):
     # In-tree build-system manifest at projectRoot — defer to the
     # existing in-tree convention.

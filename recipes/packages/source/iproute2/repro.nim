@@ -124,8 +124,6 @@ package iproute2Source:
   ## lowers them into fetch + configure BuildActions wired with the
   ## right URL + hash + flags. Four executable artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## kernel.org release tarball URL so a future maintainer running

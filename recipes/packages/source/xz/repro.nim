@@ -128,8 +128,6 @@ package xzSource:
   ## right URL + hash + flags. One-executable + one-library artifact
   ## recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## tukaani.org release tarball URL so a future maintainer running

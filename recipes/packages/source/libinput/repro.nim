@@ -147,8 +147,6 @@ package libinputSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Library + executable name-collision recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the Debian source
     ## pool URL so a future maintainer running ``repro update-source``

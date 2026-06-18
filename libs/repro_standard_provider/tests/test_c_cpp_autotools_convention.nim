@@ -104,19 +104,37 @@ proc autotoolsAvailable(projectRoot: string): bool =
 
 suite "c-cpp-autotools convention M17":
 
-  test "recognize: positive — hello-binary fixture (toolchain-gated)":
+  test "recognize: positive — hello-binary fixture (declaration-only)":
+    # M9.N: recognise claims a recipe based on DECLARATION (configure.ac
+    # + Makefile.am at projectRoot + uses: autotools tokens +
+    # executable/library member + per-source resolution), NOT host PATH
+    # availability. Tool identity is resolved AFTER recognise by the
+    # engine.
     let conv = autotools_convention.cCppAutotoolsConvention()
     check conv.name == "c-cpp-autotools"
     if not fileExists(HelloBinaryFixture / "configure.ac"):
       checkpoint "fixture missing — looked at " & HelloBinaryFixture
       fail()
     let request = dummyRequest(HelloBinaryFixture)
-    if not autotoolsAvailable(HelloBinaryFixture):
-      checkpoint "autotools toolchain incomplete — positive recognize " &
-        "will return false"
-      check not conv.recognize(HelloBinaryFixture, request)
-    else:
-      check conv.recognize(HelloBinaryFixture, request)
+    check conv.recognize(HelloBinaryFixture, request)
+
+  test "recognize: returns true even without autotools on PATH (M9.N)":
+    # M9.N architectural correction: explicit assertion that the
+    # host-PATH gate has been dropped from recognise — the convention
+    # claims the recipe regardless of whether gcc/make/sh/autoreconf
+    # resolve.
+    let conv = autotools_convention.cCppAutotoolsConvention()
+    if not fileExists(HelloBinaryFixture / "configure.ac"):
+      checkpoint "fixture missing — looked at " & HelloBinaryFixture
+      fail()
+    let request = dummyRequest(HelloBinaryFixture)
+    let gccOnPath = findExe("gcc").len > 0
+    let makeOnPath = findExe("make").len > 0
+    let autoreconfOnPath = findExeAnyExt("autoreconf").len > 0
+    checkpoint "gcc on PATH: " & $gccOnPath &
+      ", make on PATH: " & $makeOnPath &
+      ", autoreconf on PATH: " & $autoreconfOnPath
+    check conv.recognize(HelloBinaryFixture, request)
 
   test "recognize: negative — configure.ac missing":
     let scratch = getTempDir() / "test_c_cpp_autotools_no_configure_ac"

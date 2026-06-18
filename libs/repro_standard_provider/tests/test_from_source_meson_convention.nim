@@ -99,6 +99,21 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
     let request = dummyRequest(DbusBrokerRecipe)
     check conv.recognize(DbusBrokerRecipe, request)
 
+  test "recognize: returns true even without meson on PATH (M9.N)":
+    # M9.N architectural correction: recognize must claim a recipe based
+    # on DECLARATION (fetch: + uses: "meson" + meson flags channel), NOT
+    # host PATH availability. Tool identity is resolved AFTER recognise
+    # by the engine — possibly via cache substitute or source build.
+    let conv = from_source_meson_convention.fromSourceMesonConvention()
+    let request = dummyRequest(DbusBrokerRecipe)
+    # Sanity: the production recipe is registered.
+    check fileExists(DbusBrokerRecipe / "repro.nim")
+    # The Windows CI host lacks meson on PATH; recognize must still
+    # return true based on the declaration alone.
+    let mesonOnPath = findExe("meson").len > 0
+    checkpoint "meson on PATH: " & $mesonOnPath
+    check conv.recognize(DbusBrokerRecipe, request)
+
   test "recognize: negative — projectRoot carries in-tree meson.build":
     # If ``meson.build`` is present at the root, the existing M39
     # ``c-cpp-meson`` convention claims the project; the from-source

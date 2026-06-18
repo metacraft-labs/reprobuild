@@ -127,8 +127,6 @@ package gawkSource:
   ## wired with the right URL + hash + flags. Single-executable
   ## artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## ftp.gnu.org release tarball URL — the same URL the live

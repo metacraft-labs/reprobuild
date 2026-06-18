@@ -113,8 +113,6 @@ package libgcryptSource:
   ## wired with the right URL + hash + flags. Single library artifact
   ## recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## gnupg.org release tarball URL so a future maintainer running

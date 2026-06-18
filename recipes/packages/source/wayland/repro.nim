@@ -123,8 +123,6 @@ package waylandSource:
   ## URL + hash + flags. FIRST recipe to mix ``library`` + ``executable``
   ## artifacts in a single from-source production package.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## freedesktop.org gitlab release tarball URL so a future

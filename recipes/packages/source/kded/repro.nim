@@ -83,8 +83,6 @@ package kdedSource:
   ## Tier-2b c_cpp_cmake convention consumer. Two artifacts (one
   ## library + one executable).
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.kde.org release tarball URL so a future maintainer

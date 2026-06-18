@@ -131,8 +131,6 @@ package caCertificatesSource:
   ## ``cmakeOptions:`` because the upstream is a single PEM file with
   ## no build-system surface. Single ``files`` artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream cut. ``sourceUrl`` records the canonical
     ## curl.se URL so a future maintainer running ``repro

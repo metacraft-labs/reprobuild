@@ -604,6 +604,15 @@ proc fromSourceAutotoolsRecognize(projectRoot: string;
                                   request: ProviderGraphRequest):
                                     bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
+  ##
+  ## M9.N: claims a recipe based on DECLARATION (``fetch:`` registered +
+  ## non-empty configure flags channel + no in-tree autotools manifest
+  ## at projectRoot). NO host-PATH gate — the engine resolves tool
+  ## identity AFTER recognise, possibly via cache substitute or source
+  ## build.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if hasConfigureAc(projectRoot) or hasMakefileAm(projectRoot):
     # In-tree autotools project — the existing M17/M28
     # ``c-cpp-autotools`` convention claims this. The from-source

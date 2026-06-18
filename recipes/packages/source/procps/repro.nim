@@ -142,8 +142,6 @@ package procpsSource:
   ## with the right URL + hash + flags. Five executable + one library
   ## artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## gitlab.com archive URL so a future maintainer running

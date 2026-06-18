@@ -125,8 +125,6 @@ package kconfigSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Three-library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.kde.org release tarball URL so a future maintainer

@@ -608,6 +608,15 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
 proc fromSourceMesonRecognize(projectRoot: string;
                               request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
+  ##
+  ## M9.N: claims a recipe based on DECLARATION (``fetch:`` registered +
+  ## ``uses:`` declares ``meson`` + non-empty meson flags channel + no
+  ## in-tree ``meson.build`` at projectRoot). NO host-PATH gate — the
+  ## engine resolves tool identity AFTER recognise, possibly via cache
+  ## substitute or source build.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if hasMesonBuild(projectRoot):
     # In-tree project — the existing M39 ``c-cpp-meson`` convention
     # claims this. The from-source variant intentionally yields so the

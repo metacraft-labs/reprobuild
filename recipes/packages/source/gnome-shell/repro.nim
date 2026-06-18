@@ -151,8 +151,6 @@ package gnomeShellSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Library + executable artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.gnome.org release tarball URL so a future maintainer

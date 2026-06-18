@@ -77,18 +77,33 @@ proc cmakeToolchainReady(): bool =
 
 suite "c-cpp-cmake convention M38":
 
-  test "recognize: positive — hello-binary fixture (toolchain-gated)":
+  test "recognize: positive — hello-binary fixture (declaration-only)":
+    # M9.N: recognise claims a recipe based on DECLARATION
+    # (CMakeLists.txt at projectRoot + uses: cmake +
+    # executable/library member), NOT host PATH availability. Tool
+    # identity is resolved AFTER recognise by the engine.
     let conv = cmake_convention.cCppCMakeConvention()
     check conv.name == "c-cpp-cmake"
     if not fileExists(HelloBinaryFixture / "CMakeLists.txt"):
       checkpoint "fixture missing — looked at " & HelloBinaryFixture
       fail()
     let request = dummyRequest(HelloBinaryFixture)
-    if cmakeToolchainReady():
-      check conv.recognize(HelloBinaryFixture, request)
-    else:
-      checkpoint "cmake toolchain unavailable — recognize must be false"
-      check not conv.recognize(HelloBinaryFixture, request)
+    check conv.recognize(HelloBinaryFixture, request)
+
+  test "recognize: returns true even without cmake on PATH (M9.N)":
+    # M9.N architectural correction: explicit assertion that the
+    # host-PATH gate has been dropped from recognise — the convention
+    # claims the recipe regardless of whether cmake/ninja/gcc resolve.
+    let conv = cmake_convention.cCppCMakeConvention()
+    if not fileExists(HelloBinaryFixture / "CMakeLists.txt"):
+      checkpoint "fixture missing — looked at " & HelloBinaryFixture
+      fail()
+    let request = dummyRequest(HelloBinaryFixture)
+    let cmakeOnPath = findExe("cmake").len > 0
+    let ninjaOnPath = findExe("ninja").len > 0
+    checkpoint "cmake on PATH: " & $cmakeOnPath &
+      ", ninja on PATH: " & $ninjaOnPath
+    check conv.recognize(HelloBinaryFixture, request)
 
   test "recognize: negative — CMakeLists.txt missing":
     let scratch = getTempDir() / "test_c_cpp_cmake_convention_no_cmakelists"

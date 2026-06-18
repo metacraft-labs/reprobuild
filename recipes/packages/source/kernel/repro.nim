@@ -200,8 +200,6 @@ package kernelSource:
   ## hash + flags. Complements the NDE-E ``reproosKernel`` package
   ## (config-emitting front end) with the upstream-source back end.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream stable-line release. ``sourceUrl`` records the
     ## canonical cdn.kernel.org URL so a future maintainer running

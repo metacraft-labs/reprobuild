@@ -151,8 +151,6 @@ package sddmSource:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Two executables + one library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## github.com release tarball URL so a future maintainer running

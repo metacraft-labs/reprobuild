@@ -393,6 +393,16 @@ proc cCppMakeRecognize(projectRoot: string;
   ##     reject otherwise so the no-match diagnostic surfaces the missing
   ##     ``src/main.c`` / ``src/<name>.c`` rather than the convention
   ##     producing an empty graph at build time.
+  ##
+  ## M9.N: tool availability (``gcc`` / ``clang`` on PATH) is NOT gated
+  ## here. Recognition claims a recipe based on DECLARATION (root
+  ## Makefile + ``uses:`` lists a C compiler + per-member source
+  ## resolution). Tool identity is resolved AFTER recognise, possibly
+  ## via cache substitute or source build, so a host-PATH probe at
+  ## recognise time is wrong.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if rootMakefile(projectRoot).len == 0:
     return false
   if hasCMakeLists(projectRoot):
@@ -408,8 +418,6 @@ proc cCppMakeRecognize(projectRoot: string;
     return false
   let members = extractMembers(source)
   if members.len == 0:
-    return false
-  if ccCompiler().len == 0:
     return false
   for member in members:
     let resolved = resolveTarget(projectRoot, member)

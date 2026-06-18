@@ -299,6 +299,16 @@ proc ninjaExecutable(): string =
 proc cCppMesonRecognize(projectRoot: string;
                        request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
+  ##
+  ## M9.N: tool availability (``meson`` / ``ninja`` / ``gcc`` on PATH) is
+  ## NOT gated here. Recognition claims a recipe based on DECLARATION
+  ## (``meson.build`` at projectRoot + ``uses:`` lists ``meson`` +
+  ## ``executable`` / ``library`` member declared). Tool identity is
+  ## resolved AFTER recognise, possibly via cache substitute or source
+  ## build, so a host-PATH probe at recognise time is wrong.
+  ##
+  ## TODO(M9.N Batch B): resolve tool identity through engine instead of
+  ## findExe at emit time.
   if not hasMesonBuild(projectRoot):
     return false
   if hasCMakeLists(projectRoot):
@@ -312,12 +322,6 @@ proc cCppMesonRecognize(projectRoot: string;
     return false
   let members = extractMembers(source)
   if members.len == 0:
-    return false
-  if ccCompiler().len == 0:
-    return false
-  if mesonExecutable().len == 0:
-    return false
-  if ninjaExecutable().len == 0:
     return false
   true
 

@@ -158,8 +158,6 @@ package glibcSource:
   ## lowers them into fetch + configure BuildActions wired with the
   ## right URL + hash + flags.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## ftp.gnu.org release tarball URL so a future maintainer running

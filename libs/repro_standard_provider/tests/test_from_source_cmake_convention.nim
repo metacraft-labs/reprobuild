@@ -99,6 +99,18 @@ suite "from-source-cmake convention M9.L.1 — kcoreaddons":
     let request = dummyRequest(KcoreaddonsRecipe)
     check conv.recognize(KcoreaddonsRecipe, request)
 
+  test "recognize: returns true even without cmake on PATH (M9.N)":
+    # M9.N architectural correction: recognize must claim a recipe based
+    # on DECLARATION (fetch: + uses: "cmake" + cmake flags channel), NOT
+    # host PATH availability. Tool identity is resolved AFTER recognise
+    # by the engine — possibly via cache substitute or source build.
+    let conv = from_source_cmake_convention.fromSourceCmakeConvention()
+    let request = dummyRequest(KcoreaddonsRecipe)
+    check fileExists(KcoreaddonsRecipe / "repro.nim")
+    let cmakeOnPath = findExe("cmake").len > 0
+    checkpoint "cmake on PATH: " & $cmakeOnPath
+    check conv.recognize(KcoreaddonsRecipe, request)
+
   test "recognize: negative — projectRoot carries in-tree CMakeLists.txt":
     # If ``CMakeLists.txt`` is present at the root, the existing M38
     # ``c-cpp-cmake`` convention claims the project; the from-source

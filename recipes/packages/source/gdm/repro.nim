@@ -154,8 +154,6 @@ package gdmSource:
   ## wired with the right URL + hash + flags. Two executable
   ## artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.gnome.org release tarball URL so a future maintainer

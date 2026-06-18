@@ -140,8 +140,6 @@ package glib2Source:
   ## them into fetch + configure BuildActions wired with the right
   ## URL + hash + flags. Four library artifacts recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## download.gnome.org release tarball URL so a future maintainer

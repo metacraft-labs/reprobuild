@@ -167,8 +167,6 @@ package swaySource:
   ## URL + hash + flags. Caps the upstream Wayland stack from-source
   ## chain (wayland-scanner → libwayland → wlroots → SWAY).
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical GitHub
     ## release tarball URL so a future maintainer running

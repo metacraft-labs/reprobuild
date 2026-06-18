@@ -80,13 +80,23 @@ proc makeScratch(name: string): string =
 
 suite "c-cpp-direct convention recognition":
 
-  test "recognize: positive — Mode 3 fixture (no Makefile, gcc available)":
-    if not gccOnPath():
-      skip()
-    else:
-      let conv = c_cpp_direct_convention.cCppDirectConvention()
-      let request = dummyRequest(Mode3Fixture)
-      check conv.recognize(Mode3Fixture, request)
+  test "recognize: positive — Mode 3 fixture (declaration-only)":
+    # M9.N: recognise claims a recipe based on DECLARATION (no
+    # conflicting in-tree manifest + uses: gcc/clang + per-member source
+    # resolution), NOT host PATH availability. Tool identity is resolved
+    # AFTER recognise by the engine.
+    let conv = c_cpp_direct_convention.cCppDirectConvention()
+    let request = dummyRequest(Mode3Fixture)
+    check conv.recognize(Mode3Fixture, request)
+
+  test "recognize: returns true even without C compiler on PATH (M9.N)":
+    # M9.N architectural correction: explicit assertion that the
+    # host-PATH gate has been dropped from recognise — the convention
+    # claims the recipe regardless of whether gcc/clang resolve.
+    let conv = c_cpp_direct_convention.cCppDirectConvention()
+    let request = dummyRequest(Mode3Fixture)
+    checkpoint "C compiler on PATH: " & $gccOnPath()
+    check conv.recognize(Mode3Fixture, request)
 
   test "recognize: negative — Makefile at the project root":
     let dir = makeScratch("with-makefile")

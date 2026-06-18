@@ -81,29 +81,38 @@ proc gccOnPath(): bool =
 
 suite "c-cpp-make convention M17":
 
-  test "recognize: positive — binary fixture":
+  test "recognize: positive — binary fixture (declaration-only)":
+    # M9.N: recognise claims a recipe based on DECLARATION (Makefile at
+    # projectRoot + uses: gcc/clang + executable/library member +
+    # per-source resolution), NOT host PATH availability. Tool identity
+    # is resolved AFTER recognise by the engine.
     let conv = c_cpp_make_convention.cCppMakeConvention()
     check conv.name == "c-cpp-make"
     if not fileExists(BinaryFixture / "Makefile"):
       checkpoint "fixture missing — looked at " & BinaryFixture
       fail()
     let request = dummyRequest(BinaryFixture)
-    if not gccOnPath():
-      checkpoint "no C compiler on PATH — positive recognize will return false"
-      check not conv.recognize(BinaryFixture, request)
-    else:
-      check conv.recognize(BinaryFixture, request)
+    check conv.recognize(BinaryFixture, request)
 
-  test "recognize: positive — library-static fixture":
+  test "recognize: positive — library-static fixture (declaration-only)":
     let conv = c_cpp_make_convention.cCppMakeConvention()
     if not fileExists(LibraryStaticFixture / "Makefile"):
       checkpoint "fixture missing — looked at " & LibraryStaticFixture
       fail()
     let request = dummyRequest(LibraryStaticFixture)
-    if not gccOnPath():
-      check not conv.recognize(LibraryStaticFixture, request)
-    else:
-      check conv.recognize(LibraryStaticFixture, request)
+    check conv.recognize(LibraryStaticFixture, request)
+
+  test "recognize: returns true even without C compiler on PATH (M9.N)":
+    # M9.N architectural correction: explicit assertion that the
+    # host-PATH gate has been dropped from recognise — the convention
+    # claims the recipe regardless of whether gcc/clang resolve.
+    let conv = c_cpp_make_convention.cCppMakeConvention()
+    if not fileExists(BinaryFixture / "Makefile"):
+      checkpoint "fixture missing — looked at " & BinaryFixture
+      fail()
+    let request = dummyRequest(BinaryFixture)
+    checkpoint "C compiler on PATH: " & $gccOnPath()
+    check conv.recognize(BinaryFixture, request)
 
   test "recognize: negative — Makefile missing":
     let scratch = getTempDir() / "test_c_cpp_make_convention_no_makefile"

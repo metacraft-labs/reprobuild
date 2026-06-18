@@ -121,8 +121,6 @@ package libcapNgSource:
   ## lowers them into fetch + configure BuildActions wired with the
   ## right URL + hash + flags. Single library artifact recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## people.redhat.com release tarball URL so a future maintainer

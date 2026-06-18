@@ -168,8 +168,6 @@ package eudevSource:
   ## right URL + hash + flags. Two executable + one library artifact
   ## recipe.
 
-  defaultToolProvisioning "path"
-
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the canonical
     ## github.com release tarball URL so a future maintainer running
