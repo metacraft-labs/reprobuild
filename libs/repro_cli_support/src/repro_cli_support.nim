@@ -10320,6 +10320,16 @@ proc renderBuildGraphDot(info: BuildGraphInspection; focus = ""): string =
   lines.add("}")
   lines.join("\n")
 
+proc runQuotaBypassedByEnv(): bool =
+  ## ``REPROBUILD_NO_RUNQUOTA`` is the documented full-bypass switch the build
+  ## engine forces onto every test edge (see ``childBypassEnv`` in
+  ## repro_build_engine). Internal build steps that a test's ``repro exec``
+  ## drives — notably the provider-compile refresh below — must honour it too,
+  ## otherwise they open an inline runquota session that the surrounding test
+  ## explicitly opted out of. (Mirrors the ``--no-runquota`` handling in the
+  ## ``build`` command parser.)
+  getEnv("REPROBUILD_NO_RUNQUOTA").normalize in ["1", "true", "yes", "on"]
+
 proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  publicCliPath: string;
                                  selectDefaultAction = false;
@@ -10409,7 +10419,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
       deferLocalOutputBlobs: true,
-      bypassRunQuota: false,
+      bypassRunQuota: runQuotaBypassedByEnv(),
       fallbackToRunQuotaBypass: effectiveMode in {tpmPathOnly, tpmScoop},
       inlineRunQuota: true,
       dryRun: false,
