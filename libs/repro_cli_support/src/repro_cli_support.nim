@@ -66,6 +66,15 @@ import repro_peer_cache
 # Spec-Implementation M2e — ``repro lock explain`` consumes the
 # explainer surface to render structured chosen / unsat justifications.
 import repro_solver
+# M9.L.4-refactor Step C: the off-the-shelf factory that returns a
+# ``BinaryCachePublisher`` closure ready to wire into
+# ``BuildEngineConfig.binaryCachePublisher``. The closure reads
+# ``REPRO_BINARY_CACHE_*`` env vars on first call, honours
+# ``REPRO_CACHE_DISABLE=1`` silently, soft-fails when the key/cert env
+# vars are unset, and otherwise forwards to ``publishInProcess``. See
+# ``libs/repro_binary_cache_client/src/repro_binary_cache_client/
+# engine_publisher.nim`` for the contract.
+import repro_binary_cache_client/engine_publisher
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -4587,6 +4596,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       peerCacheActionFetcher: peerCacheFetcher,
       peerCacheActionPublisher: peerCachePublisher,
       peerCacheActionInstaller: peerCacheInstaller)
+    # M9.L.4-refactor Step C: wire the binary-cache publisher closure
+    # into the production engine config. The closure is inert when
+    # ``REPRO_CACHE_DISABLE=1`` (silent) or when the key/cert env vars
+    # are unset (soft-fail with structured warning); otherwise it
+    # forwards each engine ``BinaryCachePublishRequest`` to
+    # ``publishInProcess``. The engine only fires the closure for
+    # actions that carry ``publishToBinaryCache = true`` AND a
+    # populated ``cacheEntryIdentity`` — the from-source conventions
+    # tag install + stage-copy actions accordingly.
+    engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
@@ -5304,6 +5323,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       suppressTrace: reportMode == brmNone,
       skipCacheHitEvidence: reportMode == brmNone and logMode == blmQuiet,
       cancelCallback: cancelCheck)
+    # M9.L.4-refactor Step C: wire the binary-cache publisher closure
+    # into the production engine config for the main inline build
+    # path (the runLoweredGraphBuild helper above gets the same
+    # wiring). Closure is inert without ``REPRO_BINARY_CACHE_*`` env
+    # vars; engine only fires it for actions carrying
+    # ``publishToBinaryCache = true`` + populated
+    # ``cacheEntryIdentity``.
+    engineConfig.binaryCachePublisher = mkBinaryCachePublisher()
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
