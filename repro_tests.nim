@@ -3087,6 +3087,93 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Sixty-third from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the system-base batch (xz + readline +
+  # gettext + ca-certificates). xz is THE canonical modern LZMA2
+  # compressor on Linux; every ``.tar.xz`` extraction shells through
+  # ``xz`` + every distro packager (rpm / pacman / dpkg / ostree) links
+  # against ``liblzma``. FIRST source recipe in the corpus to ship a
+  # ONE-executable + ONE-library mixed-kind autotools shape (the
+  # cleanest one-of-each balance — prior precedents at multi-of-each).
+  # Pins xz 5.6.3's vendored sha256 + three-flag configure sequence
+  # (``--disable-static`` + ``--disable-doc`` + ``--disable-rpath``) +
+  # cross-channel isolation + one executable artifact (``xz``) + one
+  # library artifact (``libLzma``).
+  TestSpec(
+    source: "recipes/packages/source/xz/test_xz_source.nim",
+    binary: "build/test-bin/t_xz_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-fourth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the system-base batch. readline is THE
+  # canonical line-editing + history + tab-completion library for every
+  # interactive Unix CLI (bash, gdb, psql, sqlite3, ipython). Pairs
+  # with the sibling ``bashSource`` recipe (#59) which configures
+  # ``--enable-readline`` against this library. TWO-library autotools
+  # shape (``libReadline`` + ``libHistory``) — pins the canonical
+  # readline + history SONAME pair convention. Pins readline 8.2's
+  # vendored sha256 + two-flag configure sequence (``--disable-static``
+  # + ``--enable-shared``) + cross-channel isolation + two library
+  # artifacts.
+  TestSpec(
+    source: "recipes/packages/source/readline/test_readline_source.nim",
+    binary: "build/test-bin/t_readline_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-fifth from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the system-base batch. gettext is THE
+  # canonical GNU i18n / l10n toolchain on Linux; every translated
+  # menu item / button label / dialog title on the v1 desktop flows
+  # through ``libintl`` at runtime + every ``.po`` translation file
+  # flows through ``msgfmt`` / ``msgmerge`` / ``xgettext`` at build
+  # time. FIRST source recipe in the corpus to ship a THREE-executable
+  # + ONE-library mixed-kind autotools shape from a single
+  # ``./configure`` + ``make`` invocation (prior precedents capped at
+  # two-of-each). Pins gettext 0.22.5's vendored sha256 + five-flag
+  # configure sequence (``--disable-static`` + ``--disable-java`` +
+  # ``--disable-csharp`` + ``--without-emacs`` +
+  # ``--without-included-libintl``, mixed ``--disable-*`` /
+  # ``--without-*`` polarity) + cross-channel isolation + three
+  # executable artifacts (``msgfmt`` + ``msgmerge`` + ``xgettext``) +
+  # one library artifact (``libIntl``).
+  TestSpec(
+    source: "recipes/packages/source/gettext/test_gettext_source.nim",
+    binary: "build/test-bin/t_gettext_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Sixty-sixth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING (FOURTH) recipe in the system-base batch and FIRST
+  # from-source recipe in the corpus to exercise the M3 ``files:``
+  # artifact kind (``dakFiles``) as a load-bearing artifact attribution
+  # (prior ``dakFiles`` users were the NDE-E ``kernelSource``
+  # auxiliary outputs + DSL-port self-tests). ca-certificates is THE
+  # canonical Mozilla CA bundle on Linux; every TLS handshake on the
+  # v1 desktop verifies its server certificate chain against this
+  # bundle. UNIQUE coverage angles: single ``files`` artifact
+  # (``dakFiles`` discriminator end-to-end on a load-bearing recipe);
+  # ``extractStrip: 0`` (NEW value in the from-source corpus — pins
+  # the 0-value registry round-trip against a regression that defaulted
+  # to 1); NO build-system flag block on ANY channel (pins the
+  # four-channel cross-isolation registry's empty-state on a real
+  # load-bearing recipe). Pins the 2024-12-31 cacert.pem cut's
+  # vendored sha256 + single ``caBundle`` files artifact.
+  TestSpec(
+    source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
+    binary: "build/test-bin/t_ca_certificates_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
