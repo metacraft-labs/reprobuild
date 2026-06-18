@@ -60,6 +60,20 @@
 ##      per declared ``executable``/``library`` member. Depends on the
 ##      install action.
 ##
+##   6. **Binary-cache publish** (``from-source-meson-publish-<package>``)
+##      — best-effort upload of ``<stagingDir>/usr/local`` to
+##      ``repro-cache`` via ``apps/repro-binary-cache-client publish``.
+##      Argv wraps the CLI invocation in ``sh -c ".. || true"`` so an
+##      unreachable cache / missing key+cert env vars / missing CLI
+##      degrades to a soft-fail without aborting the build. Depends on
+##      every stage-copy action so the publish runs AFTER the install
+##      tree is fully materialised. The 64-char hex cache-entry key is
+##      derived at emit time via
+##      ``cache_key.deriveCacheEntryKeyHex`` over the M9.L.4 v1
+##      ``CacheEntryIdentity`` tuple (see ``deriveCacheKeyHex`` below
+##      and the "Honest deferrals" section for the populated-vs-deferred
+##      breakdown).
+##
 ## ## Scratch layout
 ##
 ##   * Source extraction lives at ``<projectRoot>/src/`` (shared with
@@ -91,17 +105,48 @@
 ##     but the per-library archive path heuristic (``lib<name>.a`` vs
 ##     ``<name>.so`` vs ``<name>.dll``) is not exhaustively covered;
 ##     dbus-broker (the M9.L.0 vertical slice) is executable-only.
+##   * **M9.L.4 publish — partial cache-key identity.** The v1
+##     ``CacheEntryIdentity`` populates ``packageName`` (from the recipe
+##     header), ``packageVersion`` (from the last entry of
+##     ``registeredVersions(pkg)`` — empty when no ``versions:`` block
+##     exists), ``providerRevision`` (BLAKE3 hex of the recipe bytes,
+##     truncated to 32 chars), a hardcoded Linux x86_64 / GNU / glibc
+##     ``PlatformTriple``, and a ``ToolchainIdentity`` whose ``name`` is
+##     ``"meson"``. Deferred: ``sortedOptions`` (currently empty — the
+##     M9.I mesonOptions registry needs to be projected into the
+##     identity), ``sortedDepClosureDigest`` (currently empty — needs
+##     cross-recipe dep resolution at emit time), host-specific platform
+##     detection, toolchain version + host-ldso detection.
+##   * **M9.L.4 publish — CLI path resolution.** The action argv
+##     resolves the CLI via ``findExe("repro_binary_cache_client_cli")``
+##     with a stable placeholder fallback. Hosts without the CLI built
+##     soft-fail via the ``|| true`` wrapper; a follow-up can lift a
+##     ``REPRO_BINARY_CACHE_CLIENT`` env-var override into the emitter.
+##   * **M9.L.4 vertical-slice scope.** Only ``from_source_meson``
+##     carries the publish action in this milestone; ``from_source_cmake``,
+##     ``from_source_autotools``, and ``from_source_make`` follow in
+##     M9.L.4.1 / L.4.2 / L.4.3.
 ##
 ## See ``reprobuild-specs/M9-DSL-Port-Engine-Provider.milestones.org``
 ## §M9.L.
 
-import std/[os, strutils]
+import std/[os, strutils, tables]
 
 import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
+
+# M9.L.4 binary-cache publish wiring. ``cache_key`` derives the on-wire
+# entry-key hex from a ``CacheEntryIdentity`` tuple; the convention
+# threads the hex through the publish action's argv so other machines
+# can substitute instead of rebuilding. ``types`` carries the
+# ``PlatformTriple`` + ``ToolchainIdentity`` shapes that
+# ``CacheEntryIdentity`` requires.
+import repro_binary_cache_client/cache_key
+import repro_binary_cache_server/types as bcs_types
+import blake3
 
 const
   ScratchDirName* = ".repro/build"
@@ -522,6 +567,169 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
     commandStatsId = "from-source-meson.stage." & kindTag)
 
 # ---------------------------------------------------------------------------
+# M9.L.4 — binary-cache publish action emission.
+#
+# After the per-artifact stage-copy actions complete the convention emits
+# a best-effort publish action that uploads the install staging tree to
+# ``repro-cache`` (see ``apps/repro-binary-cache-client/`` and
+# ``recipes/cache/scripts/cache-helper.sh`` §cache_phase_publish for the
+# CLI shape). The action's argv wraps the CLI call in ``sh -c ".. || true"``
+# so an unreachable cache / missing key+cert env vars / CLI failure does
+# NOT abort the build. The CLI itself short-circuits 0 on
+# ``REPRO_CACHE_DISABLE=1`` and when the key/cert env vars are unset, so
+# the convention does not duplicate that logic.
+#
+# Cache-key composition pulls from:
+#   * packageName: ``extractFirstPackageName`` (recipe header).
+#   * packageVersion: M2 ``registeredVersions(pkg)[^1].version`` (the
+#     last-declared version wins; recipes typically declare a single
+#     version). ``""`` when the recipe omits a ``versions:`` block.
+#   * sortedOptions: empty for v1 — meson option mapping is deferred to
+#     a follow-up milestone (see honest deferrals below).
+#   * PlatformTriple: hardcoded to ``x86_64-linux-gnu`` with libc
+#     variant ``glibc`` for v1 (the M9.L.4 vertical-slice target). Host
+#     detection lives in a follow-up.
+#   * ToolchainIdentity: ``name="meson"``, version + host-ldso left
+#     empty — version/ldso detection deferred.
+#   * sortedDepClosureDigest: empty for v1 — cross-recipe dep
+#     resolution at emit time is deferred.
+#   * providerRevision: BLAKE3 hex of the recipe file bytes (truncated
+#     to 32 hex chars for human readability). Deterministic across
+#     hosts when the recipe is byte-identical.
+# ---------------------------------------------------------------------------
+
+proc binaryCacheClientCli(): string =
+  ## Resolve the publish CLI binary. Mirrors
+  ## ``cache-helper.sh::cache_repro_binary_cache_client_bin`` shape —
+  ## prefer the in-repo ``build/test-bin`` location, fall back to
+  ## ``PATH`` lookup. The convention emits the resolved path verbatim
+  ## into the action argv; the publish action's ``|| true`` wrapper
+  ## means a missing CLI degrades to a soft-fail at execution time
+  ## instead of an abort.
+  let resolved = findExe("repro_binary_cache_client_cli")
+  if resolved.len > 0:
+    return resolved
+  # Stable placeholder so ``inlineExecCall`` accepts the argv; the
+  # ``|| true`` wrapper swallows the missing-binary failure at run
+  # time. Documented in the module's "Honest deferrals" section.
+  "repro_binary_cache_client_cli"
+
+proc providerRevisionHex(projectRoot: string): string =
+  ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars. Empty
+  ## when the recipe file can't be read (the publish key still derives
+  ## via the rest of the identity tuple — the empty string round-trips
+  ## through the canonical encoder).
+  let match = resolveProjectFile(projectRoot)
+  if match.path.len == 0:
+    return ""
+  let bodyStr =
+    try: readFile(extendedPath(match.path))
+    except CatchableError: ""
+  if bodyStr.len == 0:
+    return ""
+  let dig = blake3.digest(bodyStr)
+  let full = blake3.toHex(dig)
+  if full.len >= 32: full[0 ..< 32] else: full
+
+proc m9L4PlatformTriple(): bcs_types.PlatformTriple =
+  ## Hardcoded Linux x86_64 GNU glibc triple — the M9.L.4 vertical-slice
+  ## target. A follow-up milestone lifts host detection (Windows / macOS
+  ## / aarch64) into a shared helper. The convention DOES populate every
+  ## field so the canonical encoder round-trips identically across hosts
+  ## that compute the same identity tuple.
+  bcs_types.PlatformTriple(
+    cpu: "x86_64",
+    os: "linux",
+    abi: "gnu",
+    libcVariant: "glibc")
+
+proc m9L4ToolchainIdentity(): bcs_types.ToolchainIdentity =
+  ## Toolchain identity for the meson-driven from-source pipeline.
+  ## Version + host-ldso detection are deferred (see module docstring
+  ## "Honest deferrals"); the empty strings round-trip through the
+  ## canonical encoder so a follow-up that fills them in will produce
+  ## a DIFFERENT cache key (intended — the spec mandates toolchain
+  ## differences shift the key).
+  bcs_types.ToolchainIdentity(
+    name: "meson",
+    version: "",
+    hostLdSoAbi: "",
+    extraFingerprint: "")
+
+proc deriveCacheKeyHex(projectRoot, packageName: string): string =
+  ## Compose the M9.L.4 v1 ``CacheEntryIdentity`` and derive its
+  ## 64-char hex key. The deferrals (empty options / empty dep-closure
+  ## / hardcoded platform / partial toolchain) are documented in the
+  ## module docstring's "Honest deferrals" section.
+  let versionStr = block:
+    var v = ""
+    let vs = registeredVersions(packageName)
+    if vs.len > 0:
+      v = vs[^1].version
+    v
+  var identity = newCacheEntryIdentity(
+    packageName = packageName,
+    packageVersion = versionStr,
+    platform = m9L4PlatformTriple(),
+    toolchain = m9L4ToolchainIdentity(),
+    providerRevision = providerRevisionHex(projectRoot))
+  # options + depClosure intentionally empty for v1.
+  deriveCacheEntryKeyHex(identity)
+
+proc emitPublishAction(projectRoot, staging, packageName: string;
+                      stageDeps: seq[string];
+                      stageOutputs: seq[string]): BuildActionDef =
+  ## Emit a best-effort publish action that uploads ``<staging>/usr/local``
+  ## to ``repro-cache`` via the ``repro_binary_cache_client_cli publish``
+  ## subcommand. Depends on every per-artifact stage-copy action so the
+  ## publish runs AFTER the install tree is fully populated.
+  ##
+  ## The action's argv is ``sh -c "<cli> publish <hex> <prefix>
+  ## --package-name=<pkg> --package-version=<ver> || true"`` — the
+  ## ``|| true`` wrapper makes the action always exit 0 so an
+  ## unreachable cache / missing key+cert / missing CLI does NOT abort
+  ## the build. The CLI itself short-circuits 0 on
+  ## ``REPRO_CACHE_DISABLE=1``.
+  let cliBin = binaryCacheClientCli()
+  let hexKey = deriveCacheKeyHex(projectRoot, packageName)
+  let prefixDir = staging / "usr" / "local"
+  let versionStr = block:
+    var v = ""
+    let vs = registeredVersions(packageName)
+    if vs.len > 0:
+      v = vs[^1].version
+    v
+  let shExe = findExe("sh")
+  var argv: seq[string]
+  if shExe.len > 0:
+    let escapedCli = cliBin.replace("\\", "/").replace("\"", "\\\"")
+    let escapedPrefix = prefixDir.replace("\\", "/").replace("\"", "\\\"")
+    let escapedPkg = packageName.replace("\"", "\\\"")
+    let escapedVer = versionStr.replace("\"", "\\\"")
+    let script = "\"" & escapedCli & "\" publish " & hexKey & " \"" &
+      escapedPrefix & "\" --package-name=\"" & escapedPkg &
+      "\" --package-version=\"" & escapedVer & "\" || true"
+    argv = @[shExe, "-c", script]
+  else:
+    # No ``sh`` on PATH — fall back to a direct invocation. The action
+    # will exit non-zero on failure (no shell ``|| true`` available),
+    # but this branch only triggers on truly minimal Windows hosts
+    # without MSYS2 / git-bash sh, which the convention's other
+    # actions ALSO require.
+    argv = @[cliBin, "publish", hexKey, prefixDir,
+      "--package-name=" & packageName,
+      "--package-version=" & versionStr]
+  buildAction(
+    id = "from-source-meson-publish-" & sanitizeNamePart(packageName),
+    call = inlineExecCall(argv, projectRoot),
+    deps = stageDeps,
+    inputs = stageOutputs,
+    outputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "from-source-meson.publish")
+
+# ---------------------------------------------------------------------------
 # Convention entry
 # ---------------------------------------------------------------------------
 
@@ -620,9 +828,20 @@ proc fromSourceMesonEmitFragment(projectRoot: string;
         staging, compilePair.stamp)
       allActions.add(installPair.action)
       # 5. Per-artifact stage-copy
+      var stageDeps: seq[string] = @[]
+      var stageOutputs: seq[string] = @[]
       for member in members:
-        allActions.add(emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member))
+        let stageAct = emitStageCopyAction(projectRoot, staging,
+          installPair.stamp, member)
+        allActions.add(stageAct)
+        stageDeps.add(stageAct.id)
+        for outPath in stageAct.outputs:
+          stageOutputs.add(outPath)
+      # 6. Binary-cache publish (M9.L.4). Best-effort: argv wraps the
+      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
+      # missing key+cert / missing CLI does NOT abort the build.
+      allActions.add(emitPublishAction(projectRoot, staging,
+        dslPackageName, stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

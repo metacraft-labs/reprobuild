@@ -101,6 +101,11 @@ for libName in [
   # library + apps/repro-binary-cache HTTP daemon. Layer-3 substitute
   # plane per Binary-Caches.md; see THREE-LAYER-TAXONOMY.md.
   "repro_binary_cache_server",
+  # ReproOS-Generations-And-Foreign-Packages A2.5: binary-cache
+  # substitution client + cache-entry-key derivation. The M9.L.4
+  # from-source publish action shells out to the client CLI using a
+  # hex key derived via ``cache_key.deriveCacheEntryKeyHex``.
+  "repro_binary_cache_client",
   # Spec-Implementation M2a: ``repro_solver`` ships the clingo Nim
   # bindings + the high-level Solver/Solution/Constraint placeholder
   # types. M2b-M2e extend it with the ASP encoder; downstream libs

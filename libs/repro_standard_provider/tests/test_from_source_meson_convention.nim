@@ -150,16 +150,17 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: produces fetch + setup + compile + install + stage-copy chain":
+  test "emitFragment: produces fetch + setup + compile + install + stage-copy + publish chain":
     let conv = from_source_meson_convention.fromSourceMesonConvention()
     let request = dummyRequest(DbusBrokerRecipe)
     require conv.recognize(DbusBrokerRecipe, request)
     let fragment = conv.emitFragment(DbusBrokerRecipe, request)
     let actions = extractActions(fragment)
 
-    # The pipeline emits at least 6 actions: fetch + setup + compile +
-    # install + 2 stage-copy (one per declared executable).
-    check actions.len >= 6
+    # The pipeline emits at least 7 actions: fetch + setup + compile +
+    # install + 2 stage-copy (one per declared executable) +
+    # 1 binary-cache publish action (M9.L.4).
+    check actions.len >= 7
 
     var sawFetch = false
     var sawSetup = false
@@ -167,6 +168,7 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
     var sawInstall = false
     var sawStageBroker = false
     var sawStageLaunch = false
+    var sawPublish = false
     for a in actions:
       if a.id == "ccpp-fetch-dbusBrokerSource":
         sawFetch = true
@@ -180,12 +182,15 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
         sawStageBroker = true
       elif a.id == "from-source-meson-stage-dbusBrokerLaunch":
         sawStageLaunch = true
+      elif a.id == "from-source-meson-publish-dbusBrokerSource":
+        sawPublish = true
     check sawFetch
     check sawSetup
     check sawCompile
     check sawInstall
     check sawStageBroker
     check sawStageLaunch
+    check sawPublish
 
   test "emitFragment: setup argv carries meson setup + buildtype + mesonOptions":
     let conv = from_source_meson_convention.fromSourceMesonConvention()
@@ -262,6 +267,109 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
       if dep == "ccpp-fetch-dbusBrokerSource":
         sawFetchDep = true
     check sawFetchDep
+
+  test "emitFragment: publish action depends on every stage-copy action (M9.L.4)":
+    # M9.L.4 — the binary-cache publish action MUST wait for the install
+    # tree to be fully materialised before uploading. Its declared deps
+    # must contain every per-artifact stage-copy action's id.
+    let conv = from_source_meson_convention.fromSourceMesonConvention()
+    let request = dummyRequest(DbusBrokerRecipe)
+    let fragment = conv.emitFragment(DbusBrokerRecipe, request)
+    let actions = extractActions(fragment)
+    let publish = findById(actions,
+      "from-source-meson-publish-dbusBrokerSource")
+    var sawStageBrokerDep = false
+    var sawStageLaunchDep = false
+    for dep in publish.deps:
+      if dep == "from-source-meson-stage-dbusBroker":
+        sawStageBrokerDep = true
+      elif dep == "from-source-meson-stage-dbusBrokerLaunch":
+        sawStageLaunchDep = true
+    check sawStageBrokerDep
+    check sawStageLaunchDep
+    # And no stale dep on the install action — that's a transitive
+    # dep via the stage-copy actions, NOT a direct one.
+    for dep in publish.deps:
+      check dep != "from-source-meson-install"
+
+  test "emitFragment: publish action argv carries publish + 64-hex key + soft-fail wrapper (M9.L.4)":
+    # M9.L.4 — the publish action shells out to the binary-cache CLI
+    # via ``sh -c "<cli> publish <hex> <prefix> --package-name=...
+    # --package-version=... || true"``. The argv must contain the
+    # literal ``publish`` token, a 64-char lowercase hex cache-entry
+    # key derived via ``cache_key.deriveCacheEntryKeyHex``, the
+    # ``--package-name=dbusBrokerSource`` identity flag, and the
+    # ``|| true`` soft-fail wrapper that keeps the build from
+    # aborting on cache-unreachable / missing-key / missing-CLI.
+    let conv = from_source_meson_convention.fromSourceMesonConvention()
+    let request = dummyRequest(DbusBrokerRecipe)
+    let fragment = conv.emitFragment(DbusBrokerRecipe, request)
+    let actions = extractActions(fragment)
+    let publish = findById(actions,
+      "from-source-meson-publish-dbusBrokerSource")
+    let argv = inlineArgvOf(publish)
+    let argvJoined = argv.join(" ")
+
+    # The CLI subcommand literal MUST appear so the action actually
+    # publishes (and isn't a no-op).
+    check argvJoined.contains("publish")
+    # M9.L.4 identity-flag wiring — package name MUST be the recipe's
+    # ``package <name>:`` header (the same name the M9.H fetch
+    # registry is keyed on), NOT a sanitised member name.
+    check argvJoined.contains("--package-name=")
+    check argvJoined.contains("dbusBrokerSource")
+    # ``registeredVersions("dbusBrokerSource")`` registers
+    # ``DslVersionInfo(version: "36", ...)`` via the recipe's
+    # ``versions:`` block. The publish argv MUST thread the last
+    # version through ``--package-version=`` so the canonical encoder
+    # produces a non-empty version slot.
+    check argvJoined.contains("--package-version=")
+    check argvJoined.contains("36")
+    # The ``|| true`` soft-fail wrapper is what makes the action
+    # always exit 0 — the build must not abort when the cache is
+    # unreachable, the key/cert env vars are unset, or the CLI is
+    # missing. Validated as a literal because the engine's argv codec
+    # preserves the script body verbatim.
+    check argvJoined.contains("|| true")
+    # The staging prefix the publish action uploads MUST be the
+    # meson-install destdir's ``usr/local`` subtree (the default
+    # meson prefix). The literal ``usr/local`` appearing in the
+    # script keeps a follow-up rename in ``stagingDir`` honest.
+    let argvUnified = argvJoined.replace('\\', '/')
+    check argvUnified.contains("usr/local")
+    # The cache-entry hex key MUST be the canonical 64-char lowercase
+    # BLAKE3 digest. Scan the argv tokens for a 64-hex-char token; the
+    # publish-subcommand-second-positional-argument shape is what the
+    # CLI's ``publish <entry-key-hex> <prefix-dir>`` contract expects.
+    var sawHex64 = false
+    for tok in argvJoined.split({' ', '"'}):
+      if tok.len != 64:
+        continue
+      var allHex = true
+      for ch in tok:
+        if ch notin {'0'..'9', 'a'..'f'}:
+          allHex = false
+          break
+      if allHex:
+        sawHex64 = true
+        break
+    check sawHex64
+
+  test "emitFragment: publish action's deriveCacheEntryKeyHex output stays stable across calls (M9.L.4)":
+    # M9.L.4 — the cache-entry key is a pure function of the recipe
+    # identity tuple. Re-emitting the fragment on the same recipe MUST
+    # yield the same hex; a regression that smuggles a non-deterministic
+    # input (timestamp, RNG, pid, ...) into the identity would surface
+    # here as drifting hexes between calls.
+    let conv = from_source_meson_convention.fromSourceMesonConvention()
+    let request = dummyRequest(DbusBrokerRecipe)
+    let fragmentA = conv.emitFragment(DbusBrokerRecipe, request)
+    let fragmentB = conv.emitFragment(DbusBrokerRecipe, request)
+    let publishA = findById(extractActions(fragmentA),
+      "from-source-meson-publish-dbusBrokerSource")
+    let publishB = findById(extractActions(fragmentB),
+      "from-source-meson-publish-dbusBrokerSource")
+    check inlineArgvOf(publishA) == inlineArgvOf(publishB)
 
   test "emitFragment: fetch action's argv carries the recipe's URL + sha256":
     # M9.H/M9.K round-trip: the fetch action's argv must embed the
