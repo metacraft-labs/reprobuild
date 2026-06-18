@@ -1,0 +1,227 @@
+name: Setup Reprobuild
+description: >-
+  Provision the reprobuild build engine (the `repro` CLI and its sibling
+  tools) on a GitHub Actions runner. Prefers downloading the matching
+  release artifact and falls back to a build-from-source path that drives
+  `just build` from this repository.
+author: Metacraft Labs
+
+# This composite action lives inside the reprobuild repository so the
+# `dogfood` CI job can exercise it against the current branch. When the
+# packaging story in docs/PACKAGING.md ships, the action moves to its own
+# repository (`metacraft-labs/setup-reprobuild`) and this copy becomes a
+# thin shim that re-uses it.
+
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      Reprobuild version to install (e.g. `v1.4.0`). Use `latest` to resolve
+      the most recent GitHub release, or `source` to force the
+      build-from-source fallback regardless of whether a matching binary
+      release exists.
+    required: false
+    default: latest
+  os:
+    description: >-
+      Target operating system. Defaults to auto-detection via `runner.os`.
+      Accepted: `Linux`, `macOS`, `Windows`.
+    required: false
+    default: ""
+  tool-provisioning:
+    description: >-
+      Channel to use when fetching binary artifacts: `tarball` (default)
+      pulls the portable archive from the GitHub release; `installer`
+      reserves the slot for the native MSI / pkg / deb / rpm channel once
+      it ships.
+    required: false
+    default: tarball
+  cache:
+    description: >-
+      Cache the resolved binaries (and, in the source fallback, the
+      `build/bin` + `build/lib` outputs) between runs.
+    required: false
+    default: "true"
+  repo-root:
+    description: >-
+      Path to a reprobuild source checkout used by the build-from-source
+      fallback. Defaults to the repository that invoked the workflow
+      (`github.workspace`), which is correct for the in-repo `dogfood`
+      job. Downstream callers point this at a sibling checkout.
+    required: false
+    default: ""
+  github-token:
+    description: >-
+      Token used to query the GitHub Releases API and to download release
+      assets from private repositories. Defaults to the workflow's
+      `github.token`.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  repro-bin:
+    description: Absolute path to the directory containing `repro` (and siblings).
+    value: ${{ steps.expose.outputs.repro-bin }}
+  repro-version:
+    description: Fully resolved reprobuild version (e.g. `v1.4.0` or `source@<sha>`).
+    value: ${{ steps.expose.outputs.repro-version }}
+  cache-hit:
+    description: >-
+      `true` when the binaries were restored from the actions cache,
+      `false` otherwise.
+    value: ${{ steps.expose.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve inputs
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+        os="${{ inputs.os }}"
+        if [ -z "${os}" ]; then
+          case "${{ runner.os }}" in
+            Linux)   os=Linux ;;
+            macOS)   os=macOS ;;
+            Windows) os=Windows ;;
+            *)
+              echo "::error::unsupported runner.os: ${{ runner.os }}" >&2
+              exit 2 ;;
+          esac
+        fi
+        echo "os=${os}" >>"$GITHUB_OUTPUT"
+
+        repo_root="${{ inputs.repo-root }}"
+        if [ -z "${repo_root}" ]; then
+          repo_root="${{ github.workspace }}"
+        fi
+        echo "repo-root=${repo_root}" >>"$GITHUB_OUTPUT"
+
+        version="${{ inputs.version }}"
+        if [ "${version}" = "latest" ]; then
+          # GitHub Releases API; falls back to `source` if the repo has no
+          # published release yet (the current state during Phase 4).
+          resolved="$(curl -fsSL \
+            -H "Authorization: Bearer ${{ inputs.github-token }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/metacraft-labs/reprobuild/releases/latest \
+            2>/dev/null | jq -r '.tag_name // ""' || true)"
+          if [ -z "${resolved}" ] || [ "${resolved}" = "null" ]; then
+            echo "::warning::no published release found; falling back to source build"
+            version=source
+          else
+            version="${resolved}"
+          fi
+        fi
+        echo "version=${version}" >>"$GITHUB_OUTPUT"
+
+        # Layout under RUNNER_TOOL_CACHE keeps the install isolated per
+        # version and platform so multiple workflows on the same runner do
+        # not clobber each other.
+        install_dir="${RUNNER_TOOL_CACHE:-${HOME}/.cache}/reprobuild/${version}/${os}"
+        echo "install-dir=${install_dir}" >>"$GITHUB_OUTPUT"
+
+    - name: Restore reprobuild cache
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.resolve.outputs.install-dir }}
+        key: reprobuild-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.version }}-v1
+
+    - name: Download release tarball
+      id: download
+      if: >-
+        steps.resolve.outputs.version != 'source'
+        && steps.cache.outputs.cache-hit != 'true'
+        && inputs.tool-provisioning == 'tarball'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        version="${{ steps.resolve.outputs.version }}"
+        os="${{ steps.resolve.outputs.os }}"
+        install_dir="${{ steps.resolve.outputs.install-dir }}"
+        mkdir -p "${install_dir}"
+        case "${os}" in
+          Linux)   triplet="x86_64-linux-gnu"; ext="tar.zst" ;;
+          macOS)
+            if [ "$(uname -m)" = "arm64" ]; then triplet="aarch64-apple-darwin"
+            else triplet="x86_64-apple-darwin"; fi
+            ext="tar.zst" ;;
+          Windows) triplet="x86_64-windows";   ext="zip" ;;
+        esac
+        asset="reprobuild-${version}-${triplet}.${ext}"
+        url="https://github.com/metacraft-labs/reprobuild/releases/download/${version}/${asset}"
+        echo "fetching ${url}"
+        tmp="$(mktemp -d)"
+        curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -o "${tmp}/${asset}" "${url}"
+        case "${ext}" in
+          tar.zst) tar --use-compress-program=unzstd -xf "${tmp}/${asset}" -C "${install_dir}" ;;
+          zip)
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q "${tmp}/${asset}" -d "${install_dir}"
+            else
+              # Windows runners have `tar` (BSD) which speaks zip.
+              tar -xf "${tmp}/${asset}" -C "${install_dir}"
+            fi ;;
+        esac
+
+    - name: Build from source (fallback)
+      id: source-build
+      if: >-
+        steps.resolve.outputs.version == 'source'
+        && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        repo_root="${{ steps.resolve.outputs.repo-root }}"
+        install_dir="${{ steps.resolve.outputs.install-dir }}"
+        if [ ! -f "${repo_root}/scripts/build_apps.sh" ]; then
+          echo "::error::no reprobuild source at ${repo_root} (missing scripts/build_apps.sh)" >&2
+          exit 2
+        fi
+        echo "building reprobuild from source at ${repo_root}"
+        ( cd "${repo_root}" && bash ./scripts/build_apps.sh )
+        mkdir -p "${install_dir}/bin" "${install_dir}/lib"
+        cp -R "${repo_root}/build/bin/." "${install_dir}/bin/"
+        # `build/lib` is missing on platforms where no shared lib is produced
+        # (e.g. unusual cross-builds); only copy when present.
+        if [ -d "${repo_root}/build/lib" ]; then
+          cp -R "${repo_root}/build/lib/." "${install_dir}/lib/"
+        fi
+
+    - name: Expose binaries on PATH
+      id: expose
+      shell: bash
+      run: |
+        set -euo pipefail
+        install_dir="${{ steps.resolve.outputs.install-dir }}"
+        bin_dir="${install_dir}/bin"
+        if [ ! -d "${bin_dir}" ]; then
+          echo "::error::reprobuild install dir is empty: ${bin_dir}" >&2
+          exit 2
+        fi
+        echo "${bin_dir}" >>"$GITHUB_PATH"
+        # macOS / Linux: surface the shared-lib dir to the dynamic loader
+        # for the duration of the workflow.
+        case "${{ steps.resolve.outputs.os }}" in
+          Linux)
+            echo "LD_LIBRARY_PATH=${install_dir}/lib:${LD_LIBRARY_PATH:-}" >>"$GITHUB_ENV" ;;
+          macOS)
+            echo "DYLD_LIBRARY_PATH=${install_dir}/lib:${DYLD_LIBRARY_PATH:-}" >>"$GITHUB_ENV" ;;
+        esac
+        echo "REPROBUILD_HOME=${install_dir}" >>"$GITHUB_ENV"
+        echo "repro-bin=${bin_dir}" >>"$GITHUB_OUTPUT"
+        if [ "${{ steps.resolve.outputs.version }}" = "source" ]; then
+          resolved="source@${{ github.sha }}"
+        else
+          resolved="${{ steps.resolve.outputs.version }}"
+        fi
+        echo "repro-version=${resolved}" >>"$GITHUB_OUTPUT"
+        echo "cache-hit=${{ steps.cache.outputs.cache-hit == 'true' }}" >>"$GITHUB_OUTPUT"

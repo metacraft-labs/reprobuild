@@ -126,3 +126,39 @@ jobs:
           name: build-logs
           path: test-logs/
           retention-days: 30
+
+  dogfood-setup-reprobuild:
+    # Exercises the `setup-reprobuild` composite action against the
+    # current branch's source. Because no release tarball exists yet for
+    # PR branches, the action falls through to the build-from-source
+    # path via `scripts/build_apps.sh` (the canonical local build). This
+    # job verifies that path on each supported OS so the action stays in
+    # working shape until the installer artifacts are wired up — see
+    # docs/PACKAGING.md for the migration plan.
+    name: Dogfood setup-reprobuild (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup reprobuild via the in-repo composite action
+        id: reprobuild
+        uses: ./.github/actions/setup-reprobuild
+        with:
+          # `source` forces the build-from-source fallback; once the
+          # release workflow publishes tarballs, swap to `latest`.
+          version: source
+          cache: 'true'
+          repo-root: ${{ github.workspace }}
+
+      - name: Smoke-test the provisioned binary
+        shell: bash
+        run: |
+          echo "repro-bin:     ${{ steps.reprobuild.outputs.repro-bin }}"
+          echo "repro-version: ${{ steps.reprobuild.outputs.repro-version }}"
+          echo "cache-hit:     ${{ steps.reprobuild.outputs.cache-hit }}"
+          repro --help >/dev/null
+          ls "${{ steps.reprobuild.outputs.repro-bin }}"

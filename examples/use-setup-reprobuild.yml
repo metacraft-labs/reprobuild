@@ -1,0 +1,52 @@
+# Example workflow showing how a downstream repository (e.g. one of the
+# codetracer recorder repos) consumes the `setup-reprobuild` composite
+# action. Copy this into `.github/workflows/` in the consumer repo and
+# adapt the matrix / steps to taste.
+#
+# Once the standalone action ships at `metacraft-labs/setup-reprobuild`,
+# replace the `uses:` line below — see the inline comment.
+
+name: Example - setup-reprobuild
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+jobs:
+  use-reprobuild:
+    name: Build a project with reprobuild (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout the consumer repo
+        uses: actions/checkout@v4
+
+      - name: Provision reprobuild
+        id: reprobuild
+        # When this action lives in the reprobuild repo itself the consumer
+        # would clone reprobuild first and then `uses:
+        # ./reprobuild/.github/actions/setup-reprobuild`. The recommended
+        # form after the action graduates to its own repo is:
+        #
+        #   uses: metacraft-labs/setup-reprobuild@v1
+        uses: metacraft-labs/reprobuild/.github/actions/setup-reprobuild@dev
+        with:
+          version: latest
+          cache: 'true'
+
+      - name: Show the resolved repro binary
+        shell: bash
+        run: |
+          echo "repro lives at: ${{ steps.reprobuild.outputs.repro-bin }}"
+          echo "resolved version: ${{ steps.reprobuild.outputs.repro-version }}"
+          echo "cache hit: ${{ steps.reprobuild.outputs.cache-hit }}"
+          repro --version
+
+      - name: Build the project
+        shell: bash
+        run: repro build
