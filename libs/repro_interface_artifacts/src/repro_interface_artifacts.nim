@@ -1716,6 +1716,134 @@ proc siblingReprobuildLibsRoot(workDir: string): string =
     return candidate
   ""
 
+proc resolveBootstrapPackagePath*(envName: string;
+                                  candidates: openArray[string];
+                                  marker: string): string =
+  ## MR14 — mirror ``config.nims``'s ``addPackagePath`` resolution shape
+  ## so the recipe-compile (extract_runner) ``nim c`` invocation sees the
+  ## same sibling source-only dependencies that reprobuild itself sees
+  ## when it is compiled. ``config.nims`` is loaded by ``nim`` when the
+  ## current directory is the reprobuild repo root; the recipe-compile
+  ## step runs from the *consumer* repo's workdir so it never loads
+  ## reprobuild's ``config.nims``. Without this helper, an ``import``
+  ## that the dev-shell could resolve (e.g. ``import nimcrypto/sha2``
+  ## inside ``repro_project_dsl``) fails at extract_runner compile time
+  ## with ``Error: cannot open file: nimcrypto/sha2``.
+  ##
+  ## Resolution order (mirrors ``config.nims:112-121``):
+  ## 1. ``$<envName>`` environment variable (if set and contains marker)
+  ## 2. each candidate path in declaration order (if it contains marker)
+  ## 3. "" (caller skips the ``--path:`` flag entirely)
+  let envPath = getEnv(envName)
+  if envPath.len > 0 and fileExists(extendedPath(envPath / marker)):
+    return envPath
+  for candidate in candidates:
+    if fileExists(extendedPath(candidate / marker)):
+      return candidate
+  ""
+
+proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
+  ## MR14 — produce the ``--path:`` flags for the source-only sibling
+  ## dependencies that ``reprobuild/config.nims`` lines 126-192 register
+  ## via ``addPackagePath``. The list MUST stay in sync with config.nims
+  ## so the recipe-compile reaches the same path set as reprobuild itself.
+  ##
+  ## The candidate lists below are written relative to
+  ## ``reprobuildRoot`` (the absolute path to reprobuild's repo root)
+  ## rather than to ``getCurrentDir()`` because the recipe-compile runs
+  ## from the consumer's workdir, where ``".." / "nimcrypto"`` would
+  ## point at a sibling of the *consumer* repo and not at a sibling of
+  ## reprobuild. We resolve every candidate against ``reprobuildRoot``
+  ## so the same workspace layout that satisfies ``nim c`` for
+  ## reprobuild itself also satisfies the recipe-compile.
+  if reprobuildRoot.len == 0:
+    return
+  let reprobuildParent = reprobuildRoot.parentDir
+  proc anchored(candidates: openArray[string]): seq[string] =
+    for c in candidates:
+      if isAbsolute(c):
+        result.add(c)
+      elif c.startsWith(".." & DirSep) or c.startsWith("../") or c == ".." or
+           c.startsWith(".." & "\\"):
+        # Strip a single leading "../" and anchor at reprobuild's parent.
+        var rest = c
+        if rest == "..":
+          rest = ""
+        elif rest.startsWith("../"):
+          rest = rest[3 .. ^1]
+        elif rest.startsWith(".." & DirSep):
+          rest = rest[3 .. ^1]
+        elif rest.startsWith("..\\"):
+          rest = rest[3 .. ^1]
+        result.add(if rest.len > 0: reprobuildParent / rest else: reprobuildParent)
+      else:
+        result.add(reprobuildRoot / c)
+
+  type SiblingSpec = tuple
+    envName: string
+    candidates: seq[string]
+    marker: string
+  let specs: seq[SiblingSpec] = @[
+    ("FASTSTREAMS_SRC", anchored([
+      "libs" / "nim-faststreams" / "src",
+      ".." / "codetracer" / "libs" / "nim-faststreams",
+      ".." / "nim-faststreams",
+    ]), "faststreams" / "inputs.nim"),
+    ("NIM_STEW_SRC", anchored([
+      "libs" / "nim-stew" / "src",
+      ".." / "codetracer" / "libs" / "nim-stew",
+      ".." / "nim-stew",
+    ]), "stew" / "objects.nim"),
+    ("NIM_SERIALIZATION_SRC", anchored([
+      "libs" / "nim-serialization" / "src",
+      ".." / "codetracer" / "libs" / "nim-serialization",
+      ".." / "nim-serialization",
+    ]), "serialization" / "case_objects.nim"),
+    ("NIM_JSON_SERIALIZATION_SRC", anchored([
+      "libs" / "nim-json-serialization" / "src",
+      ".." / "codetracer" / "libs" / "nim-json-serialization",
+      ".." / "nim-json-serialization",
+    ]), "json_serialization.nim"),
+    ("NIM_TOML_SERIALIZATION_SRC", anchored([
+      "libs" / "nim-toml-serialization" / "src",
+      ".." / "codetracer" / "libs" / "nim-toml-serialization",
+      ".." / "nim-toml-serialization",
+    ]), "toml_serialization.nim"),
+    ("SSZ_SERIALIZATION_SRC", anchored([
+      "libs" / "nim-ssz-serialization" / "src",
+      ".." / "nim-ssz-serialization",
+    ]), "ssz_serialization.nim"),
+    ("NIMCRYPTO_SRC", anchored([
+      ".." / "codetracer" / "libs" / "nimcrypto",
+      ".." / "nimcrypto",
+    ]), "nimcrypto" / "hash.nim"),
+    ("BEARSSL_SRC", anchored([
+      ".." / "nim-bearssl",
+      "libs" / "nim-bearssl",
+    ]), "bearssl.nim"),
+    ("RESULTS_SRC", anchored([
+      "libs" / "results" / "src",
+    ]), "results.nim"),
+    ("STINT_SRC", anchored([
+      "libs" / "stint" / "src",
+    ]), "stint.nim"),
+    ("STACKABLE_HOOKS_SRC", anchored([
+      ".." / "nim-stackable-hooks" / "src",
+      "libs" / "repro_monitor_shim" / "vendor" / "nim-stackable-hooks" / "src",
+    ]), "stackable_hooks.nim"),
+    ("VM_HARNESS_SRC", anchored([
+      ".." / "vm-harness" / "src",
+    ]), "vm_harness.nim"),
+    ("CT_TEST_SRC", anchored([
+      ".." / "ct-test" / "libs" / "ct_test_interface" / "src",
+    ]), "ct_test_interface.nim"),
+  ]
+  for spec in specs:
+    let resolved = resolveBootstrapPackagePath(spec.envName, spec.candidates,
+                                               spec.marker)
+    if resolved.len > 0:
+      result.add("--path:" & resolved)
+
 proc reproLibPathFlags(workDir: string): seq[string] =
   ## Build the ``--path:`` flags the engine passes to ``nim c`` when
   ## compiling a project's provider library. Includes:
@@ -1726,6 +1854,12 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   ##    b. the running ``repro`` binary's location (when it lives inside
   ##       a reprobuild source checkout — the develop-mode default), or
   ##    c. a sibling ``../reprobuild/`` checkout next to the consumer.
+  ## 3. (MR14) The source-only sibling dependencies that
+  ##    ``reprobuild/config.nims`` registers via ``addPackagePath`` —
+  ##    nimcrypto, nim-stew, nim-faststreams, nim-bearssl, etc. The
+  ##    recipe-compile (extract_runner) never loads ``config.nims`` so
+  ##    those flags have to be reconstructed here, anchored at the
+  ##    reprobuild repo root located in step (2).
   ##
   ## Step (2) is the develop-mode sibling-repo detection per
   ## codetracer-specs/Repo-Requirements.md §2.8: the engine ensures
@@ -1752,6 +1886,18 @@ proc reproLibPathFlags(workDir: string): seq[string] =
     if not seen.containsOrIncl(p):
       result.add("--path:" & p)
   result.sort(system.cmp[string])
+
+  # MR14 — append the sibling source-only ``--path:`` flags after the
+  # reprobuild-libs flags so the standard libs win on ambiguity but
+  # imports like ``nimcrypto/sha2`` (added during the Phase-2 migration
+  # to ``repro_project_dsl``) still resolve. ``reprobuildLibsRoot`` is
+  # ``<reprobuild-root>/libs`` so ``parentDir`` gives the reprobuild
+  # repo root the candidate lists are anchored at.
+  if reprobuildLibsRoot.len > 0:
+    let siblingFlags = bootstrapSiblingPackagePathFlags(
+      reprobuildLibsRoot.parentDir)
+    for flag in siblingFlags:
+      result.add(flag)
 
 proc normalizedStampPath(path: string): string =
   os.normalizedPath(path).replace('\\', '/')
