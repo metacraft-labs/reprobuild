@@ -2191,6 +2191,81 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Nineteenth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the Plasma stack batch (kcoreaddons / kwin /
+  # plasma-workspace / sddm) and SECOND CMake-driven recipe after
+  # json-c. Pins kcoreaddons 6.10.0's vendored sha256 + CMake flag
+  # sequence + cross-channel isolation + ``libKF6CoreAddons`` library
+  # artifact. The bottom of the KDE Frameworks 6 dependency graph;
+  # every other KF6 module + every Plasma component links against it.
+  # Upstream-source side of the ``kcoreaddons >=6.0`` dependency
+  # ``kwinSource`` declares and the NDE-K1 Plasma desktop entry pins.
+  TestSpec(
+    source: "recipes/packages/source/kcoreaddons/test_kcoreaddons_source.nim",
+    binary: "build/test-bin/t_kcoreaddons_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twentieth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the Plasma stack batch and THIRD CMake-
+  # driven recipe. FIRST CMake recipe to ship BOTH a library AND an
+  # executable from the same ``package`` macro (the mutter / gnome-
+  # shell precedents are meson; this is the CMake-side analogue).
+  # Pins kwin 6.2.5's vendored sha256 + CMake flag sequence +
+  # cross-channel isolation + ``libKWin`` library artifact +
+  # ``kwinWayland`` executable artifact within a single package's
+  # artifact set. The KDE Plasma Wayland compositor — analogue of
+  # mutter for the Plasma story.
+  TestSpec(
+    source: "recipes/packages/source/kwin/test_kwin_source.nim",
+    binary: "build/test-bin/t_kwin_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-first from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the Plasma stack batch and FOURTH CMake-
+  # driven recipe. FIRST CMake recipe to combine BOTH a multi-word-
+  # kebab package name (``plasma-workspace`` -> ``plasmaWorkspaceSource``)
+  # AND a mixed-kind artifact set (library + executable) — the
+  # gnome-shell precedent exercised the same shape on the meson channel,
+  # this is the CMake-side analogue. Pins plasma-workspace 6.2.5's
+  # vendored sha256 + CMake flag sequence + cross-channel isolation +
+  # ``libPlasmaWorkspace`` library artifact + ``plasmashell`` executable
+  # artifact within a single package's artifact set. The Plasma user-
+  # session UI: task bar, system tray, application launcher, activities,
+  # lock screen, notifications.
+  TestSpec(
+    source: "recipes/packages/source/plasma-workspace/test_plasma_workspace_source.nim",
+    binary: "build/test-bin/t_plasma_workspace_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Twenty-second from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING recipe in the Plasma stack batch and FIFTH CMake-
+  # driven recipe. FIRST recipe in the suite to ship THREE artifacts
+  # (two executables + one library) from a single ``package`` macro
+  # — prior multi-artifact recipes shipped either TWO (wayland, pango,
+  # mutter, gnome-shell, kwin, plasma-workspace, gdm) or FOUR (glib2).
+  # Pins sddm 0.21.0's vendored sha256 + CMake flag sequence +
+  # cross-channel isolation + ``sddm`` daemon executable artifact +
+  # ``sddmGreeter`` greeter executable artifact + ``libSddmCommon``
+  # library artifact within a single package's artifact set. NDE-K1's
+  # display-manager entry point — the KDE-flavoured analogue of gdm
+  # for the Plasma story.
+  TestSpec(
+    source: "recipes/packages/source/sddm/test_sddm_source.nim",
+    binary: "build/test-bin/t_sddm_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
