@@ -113,6 +113,29 @@
 ##      members and the kernel's in-source artefacts both round-trip
 ##      through the same convention.
 ##
+##   5. **Binary-cache publish** (``from-source-make-publish-<package>``)
+##      — best-effort upload of ``<staging>`` to ``repro-cache`` via
+##      ``apps/repro-binary-cache-client publish``. Argv wraps the CLI
+##      invocation in ``sh -c ".. || true"`` so an unreachable cache /
+##      missing key+cert env vars / missing CLI degrades to a soft-fail
+##      without aborting the build. Depends on every stage-copy action
+##      so the publish runs AFTER the install tree is fully
+##      materialised. The 64-char hex cache-entry key is derived at
+##      emit time via ``from_source_publish.deriveCacheKeyHex`` over
+##      the M9.L.4 v1 ``CacheEntryIdentity`` tuple with the ``"make"``
+##      toolchain identity tag. The publish prefix is the staging dir
+##      itself (``<staging>``) rather than ``<staging>/usr/`` — the
+##      kernel recipe's kbuild ``install`` target doesn't really use
+##      DESTDIR (the stage-copy probes in-source paths instead), so
+##      the staging dir is the unifying prefix that covers libcap's
+##      ``<staging>/usr/{sbin,lib}/`` install tree AND the kernel's
+##      empty / partial staging tree. Documented asymmetry: libcap's
+##      published payload includes its install tree under
+##      ``<staging>/usr/``; the kernel's published payload is empty
+##      in v1 (deferred — kernel cache publish needs a custom prefix
+##      strategy when the in-source artefacts replace the install
+##      tree). See module's "Honest deferrals" section.
+##
 ## ## Scratch layout
 ##
 ##   * Source extraction lives at ``<projectRoot>/src/`` (shared with
@@ -181,6 +204,16 @@ import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
+
+# M9.L.4.3 binary-cache publish wiring. The shared
+# ``from_source_publish`` module owns the cache-key composition + the
+# publish-action emitter; this convention contributes the make-
+# specific publish prefix (the staging dir itself — kbuild doesn't
+# really use DESTDIR so the unifying prefix is ``<staging>``) and the
+# convention tag (``"make"``) which lands in the action id
+# (``from-source-make-publish-<pkg>``) AND in the
+# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
+import repro_standard_provider/conventions/from_source_publish
 
 const
   ScratchDirName* = ".repro/build"
@@ -707,9 +740,22 @@ proc fromSourceMakeEmitFragment(projectRoot: string;
         staging, buildPair.stamp, makeFlags)
       allActions.add(installPair.action)
       # 4. Per-artifact stage-copy
+      var stageDeps: seq[string] = @[]
+      var stageOutputs: seq[string] = @[]
       for member in members:
-        allActions.add(emitStageCopyAction(projectRoot, srcDir, staging,
-          installPair.stamp, member))
+        let stageAct = emitStageCopyAction(projectRoot, srcDir, staging,
+          installPair.stamp, member)
+        allActions.add(stageAct)
+        stageDeps.add(stageAct.id)
+        for outPath in stageAct.outputs:
+          stageOutputs.add(outPath)
+      # 5. Binary-cache publish (M9.L.4.3). Best-effort: argv wraps the
+      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
+      # missing key+cert / missing CLI does NOT abort the build. The
+      # publish prefix is the staging dir itself — see module
+      # docstring for the libcap-vs-kernel asymmetry rationale.
+      allActions.add(emitPublishAction(projectRoot, staging,
+        dslPackageName, "make", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

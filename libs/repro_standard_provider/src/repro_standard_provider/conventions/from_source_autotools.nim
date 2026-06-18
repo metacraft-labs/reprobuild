@@ -85,6 +85,20 @@
 ##      declared ``executable`` / ``library`` member. Depends on the
 ##      install action.
 ##
+##   6. **Binary-cache publish** (``from-source-autotools-publish-<package>``)
+##      — best-effort upload of ``<staging>/usr`` to ``repro-cache`` via
+##      ``apps/repro-binary-cache-client publish``. Argv wraps the CLI
+##      invocation in ``sh -c ".. || true"`` so an unreachable cache /
+##      missing key+cert env vars / missing CLI degrades to a soft-fail
+##      without aborting the build. Depends on every stage-copy action
+##      so the publish runs AFTER the install tree is fully
+##      materialised. The 64-char hex cache-entry key is derived at
+##      emit time via ``from_source_publish.deriveCacheKeyHex`` over
+##      the M9.L.4 v1 ``CacheEntryIdentity`` tuple with the
+##      ``"autotools"`` toolchain identity tag. See the shared
+##      ``from_source_publish`` module for the populated-vs-deferred
+##      identity-slot breakdown.
+##
 ## ## Scratch layout
 ##
 ##   * Source extraction lives at ``<projectRoot>/src/`` (shared with
@@ -173,6 +187,17 @@ import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
+
+# M9.L.4.2 binary-cache publish wiring. The shared
+# ``from_source_publish`` module owns the cache-key composition + the
+# publish-action emitter; this convention contributes the autotools-
+# specific publish prefix (``<staging>/usr`` — autoconf's default
+# ``--prefix=/usr`` anchor combined with ``make install
+# DESTDIR=<staging>`` lays artefacts under ``<staging>/usr/{bin,lib}/``)
+# and the convention tag (``"autotools"``) which lands in the action
+# id (``from-source-autotools-publish-<pkg>``) AND in the
+# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
+import repro_standard_provider/conventions/from_source_publish
 
 const
   ScratchDirName* = ".repro/build"
@@ -670,9 +695,25 @@ proc fromSourceAutotoolsEmitFragment(projectRoot: string;
         staging, buildPair.stamp)
       allActions.add(installPair.action)
       # 5. Per-artifact stage-copy
+      var stageDeps: seq[string] = @[]
+      var stageOutputs: seq[string] = @[]
       for member in members:
-        allActions.add(emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member))
+        let stageAct = emitStageCopyAction(projectRoot, staging,
+          installPair.stamp, member)
+        allActions.add(stageAct)
+        stageDeps.add(stageAct.id)
+        for outPath in stageAct.outputs:
+          stageOutputs.add(outPath)
+      # 6. Binary-cache publish (M9.L.4.2). Best-effort: argv wraps the
+      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
+      # missing key+cert / missing CLI does NOT abort the build. The
+      # publish prefix is ``<staging>/usr`` — the autotools convention
+      # passes ``--prefix=/usr`` at configure time and ``DESTDIR=
+      # <staging>`` at install time, so the install tree lands under
+      # ``<staging>/usr/{bin,lib,sbin}/``.
+      let publishPrefix = staging / "usr"
+      allActions.add(emitPublishAction(projectRoot, publishPrefix,
+        dslPackageName, "autotools", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

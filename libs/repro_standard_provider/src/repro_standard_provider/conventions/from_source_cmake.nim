@@ -73,6 +73,20 @@
 ##   * Per-artifact output lives at
 ##     ``<projectRoot>/.repro/output/<member>/<member>``.
 ##
+##   6. **Binary-cache publish** (``from-source-cmake-publish-<package>``)
+##      — best-effort upload of ``<stagingDir>`` to ``repro-cache`` via
+##      ``apps/repro-binary-cache-client publish``. Argv wraps the CLI
+##      invocation in ``sh -c ".. || true"`` so an unreachable cache /
+##      missing key+cert env vars / missing CLI degrades to a soft-fail
+##      without aborting the build. Depends on every stage-copy action
+##      so the publish runs AFTER the install tree is fully
+##      materialised. The 64-char hex cache-entry key is derived at
+##      emit time via ``from_source_publish.deriveCacheKeyHex`` over
+##      the M9.L.4 v1 ``CacheEntryIdentity`` tuple with the
+##      ``"cmake"`` toolchain identity tag. See the shared
+##      ``from_source_publish`` module for the populated-vs-deferred
+##      identity-slot breakdown.
+##
 ## ## Honest deferrals
 ##
 ##   * **End-to-end build run.** On hosts without ``cmake`` / ``ninja``
@@ -119,6 +133,18 @@ import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
+
+# M9.L.4.1 binary-cache publish wiring. The shared
+# ``from_source_publish`` module owns the cache-key composition + the
+# publish-action emitter; this convention contributes the cmake-
+# specific publish prefix (``<staging>`` itself, because the install
+# action passes ``cmake --install --prefix <staging>`` rather than
+# meson's ``--destdir`` so artefacts land directly under
+# ``<staging>/{bin,lib}/`` without the extra ``usr/local`` rebase) and
+# the convention tag (``"cmake"``) which lands in the action id
+# (``from-source-cmake-publish-<pkg>``) AND in the
+# ``ToolchainIdentity.name`` field that feeds the cache-entry key.
+import repro_standard_provider/conventions/from_source_publish
 
 const
   ScratchDirName* = ".repro/build"
@@ -650,9 +676,24 @@ proc fromSourceCmakeEmitFragment(projectRoot: string;
         staging, buildPair.stamp)
       allActions.add(installPair.action)
       # 5. Per-artifact stage-copy
+      var stageDeps: seq[string] = @[]
+      var stageOutputs: seq[string] = @[]
       for member in members:
-        allActions.add(emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member))
+        let stageAct = emitStageCopyAction(projectRoot, staging,
+          installPair.stamp, member)
+        allActions.add(stageAct)
+        stageDeps.add(stageAct.id)
+        for outPath in stageAct.outputs:
+          stageOutputs.add(outPath)
+      # 6. Binary-cache publish (M9.L.4.1). Best-effort: argv wraps the
+      # CLI in ``sh -c ".. || true"`` so an unreachable cache /
+      # missing key+cert / missing CLI does NOT abort the build. The
+      # publish prefix is the staging dir itself — cmake's ``--install
+      # --prefix <staging>`` lays artefacts directly under
+      # ``<staging>/{bin,lib}/``, no extra ``usr/local`` rebase
+      # (unlike meson's ``--destdir`` semantics).
+      allActions.add(emitPublishAction(projectRoot, staging,
+        dslPackageName, "cmake", stageDeps, stageOutputs))
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

@@ -168,22 +168,24 @@ suite "from-source-autotools convention M9.L.2 — expat":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: produces fetch + configure + build + install + stage-copy chain":
+  test "emitFragment: produces fetch + configure + build + install + stage-copy + publish chain":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     require conv.recognize(ExpatRecipe, request)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
 
-    # The pipeline emits at least 5 actions: fetch + configure + build
-    # + install + 1 stage-copy (one per declared library).
-    check actions.len >= 5
+    # The pipeline emits at least 6 actions: fetch + configure + build
+    # + install + 1 stage-copy (one per declared library) +
+    # 1 binary-cache publish action (M9.L.4.2).
+    check actions.len >= 6
 
     var sawFetch = false
     var sawConfigure = false
     var sawBuild = false
     var sawInstall = false
     var sawStageLib = false
+    var sawPublish = false
     for a in actions:
       if a.id == "ccpp-fetch-expatSource":
         sawFetch = true
@@ -195,11 +197,14 @@ suite "from-source-autotools convention M9.L.2 — expat":
         sawInstall = true
       elif a.id == "from-source-autotools-stage-libExpat":
         sawStageLib = true
+      elif a.id == "from-source-autotools-publish-expatSource":
+        sawPublish = true
     check sawFetch
     check sawConfigure
     check sawBuild
     check sawInstall
     check sawStageLib
+    check sawPublish
 
   test "emitFragment: configure argv carries ./configure + --prefix + configureFlags":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
@@ -308,3 +313,93 @@ suite "from-source-autotools convention M9.L.2 — expat":
     check argvJoined.contains("DESTDIR=")
     let unified = argvJoined.replace('\\', '/')
     check unified.contains("from-source-autotools/staging")
+
+  test "emitFragment: publish action depends on every stage-copy action (M9.L.4.2)":
+    # M9.L.4.2 — the binary-cache publish action MUST wait for the install
+    # tree to be fully materialised before uploading. Its declared deps
+    # must contain every per-artifact stage-copy action's id.
+    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
+    let request = dummyRequest(ExpatRecipe)
+    let fragment = conv.emitFragment(ExpatRecipe, request)
+    let actions = extractActions(fragment)
+    let publish = findById(actions,
+      "from-source-autotools-publish-expatSource")
+    var sawStageLibDep = false
+    for dep in publish.deps:
+      if dep == "from-source-autotools-stage-libExpat":
+        sawStageLibDep = true
+    check sawStageLibDep
+    # And no stale dep on the install action — that's a transitive
+    # dep via the stage-copy actions, NOT a direct one.
+    for dep in publish.deps:
+      check dep != "from-source-autotools-install"
+
+  test "emitFragment: publish action argv carries publish + 64-hex key + soft-fail wrapper (M9.L.4.2)":
+    # M9.L.4.2 — the publish action shells out to the binary-cache CLI
+    # via ``sh -c "<cli> publish <hex> <prefix> --package-name=...
+    # --package-version=... || true"``. The argv must contain the
+    # literal ``publish`` token, a 64-char lowercase hex cache-entry
+    # key derived via ``cache_key.deriveCacheEntryKeyHex``, the
+    # ``--package-name=expatSource`` identity flag, and the
+    # ``|| true`` soft-fail wrapper.
+    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
+    let request = dummyRequest(ExpatRecipe)
+    let fragment = conv.emitFragment(ExpatRecipe, request)
+    let actions = extractActions(fragment)
+    let publish = findById(actions,
+      "from-source-autotools-publish-expatSource")
+    let argv = inlineArgvOf(publish)
+    let argvJoined = argv.join(" ")
+
+    # The CLI subcommand literal MUST appear so the action actually
+    # publishes (and isn't a no-op).
+    check argvJoined.contains("publish")
+    # M9.L.4.2 identity-flag wiring — package name MUST be the recipe's
+    # ``package <name>:`` header (the same name the M9.H fetch
+    # registry is keyed on).
+    check argvJoined.contains("--package-name=")
+    check argvJoined.contains("expatSource")
+    # ``registeredVersions("expatSource")`` registers
+    # ``DslVersionInfo(version: "2.7.0", ...)`` via the recipe's
+    # ``versions:`` block. The publish argv MUST thread the last
+    # version through ``--package-version=``.
+    check argvJoined.contains("--package-version=")
+    check argvJoined.contains("2.7.0")
+    # The ``|| true`` soft-fail wrapper makes the action always exit 0.
+    check argvJoined.contains("|| true")
+    # The autotools convention's publish prefix is ``<staging>/usr`` —
+    # autoconf's default ``--prefix=/usr`` anchor + ``DESTDIR=
+    # <staging>`` lays artefacts under ``<staging>/usr/{bin,lib,sbin}/``.
+    let argvUnified = argvJoined.replace('\\', '/')
+    check argvUnified.contains("from-source-autotools/staging/usr")
+    # The cache-entry hex key MUST be the canonical 64-char lowercase
+    # BLAKE3 digest. Scan the argv tokens for a 64-hex-char token.
+    var sawHex64 = false
+    for tok in argvJoined.split({' ', '"'}):
+      if tok.len != 64:
+        continue
+      var allHex = true
+      for ch in tok:
+        if ch notin {'0'..'9', 'a'..'f'}:
+          allHex = false
+          break
+      if allHex:
+        sawHex64 = true
+        break
+    check sawHex64
+
+  test "emitFragment: publish action's deriveCacheEntryKeyHex output stays stable across calls (M9.L.4.2)":
+    # M9.L.4.2 — the cache-entry key is a pure function of the recipe
+    # identity tuple. Re-emitting the fragment on the same recipe MUST
+    # yield the same hex; a regression that smuggles a non-deterministic
+    # input (timestamp, RNG, pid, ...) into the identity would surface
+    # here as drifting hexes between calls.
+    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
+    let request = dummyRequest(ExpatRecipe)
+    let fragmentA = conv.emitFragment(ExpatRecipe, request)
+    let fragmentB = conv.emitFragment(ExpatRecipe, request)
+    let publishA = findById(extractActions(fragmentA),
+      "from-source-autotools-publish-expatSource")
+    let publishB = findById(extractActions(fragmentB),
+      "from-source-autotools-publish-expatSource")
+    check inlineArgvOf(publishA) == inlineArgvOf(publishB)
