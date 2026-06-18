@@ -90,6 +90,27 @@ jobs:
           path: ${{ github.workspace }}/../reprobuild-examples
           gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
 
+      # vm-harness ships the ``vm_harness`` library that the ReproOS
+      # R2 / R9 boot integration tests import unconditionally at the
+      # top of the file.  ``addPackagePath("VM_HARNESS_SRC", …)`` in
+      # ``config.nims`` falls back to ``../vm-harness/src`` when the
+      # env var isn't set, so a sibling clone is all the test runner
+      # needs.  Without this clone, ``tests/integration/t_r2_iso_boot.
+      # nim`` and ``tests/integration/t_r9_systemd_boot.nim`` fail at
+      # the ``import vm_harness`` line and ``repro build
+      # .#test-builds`` surfaces ``Error: cannot open file: vm_harness``
+      # long before the ``when not defined(windows): quit(0)`` skip
+      # block can run.  The tests still skip at runtime on Linux /
+      # macOS because the Hyper-V backend they exercise is Windows-
+      # only.
+      - name: Clone vm-harness sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        with:
+          repo: metacraft-labs/vm-harness
+          ref: main
+          path: ${{ github.workspace }}/../vm-harness
+          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix

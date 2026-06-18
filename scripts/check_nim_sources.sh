@@ -25,12 +25,28 @@ while read -r lib _; do
     "libs/${lib}/src/${lib}.nim"
 done < libs/libraries.txt
 
-while read -r name path _; do
+# ``apps/entrypoints.txt`` is ``name path [extra-nim-flags...]`` per
+# its header: every token AFTER ``path`` is an extra ``nim`` flag the
+# entrypoint needs (``--define:ssl``, ``--path:apps/<name>/src``,
+# ``--define:reproProviderMode``, …).  ``nim check`` MUST receive
+# them too — without ``--path:apps/repro-harvest-apt/src`` the
+# repro_harvest_apt entry's local sub-module imports
+# (``repro_harvest_apt/fetch`` / ``signature`` / ``source_spec``)
+# fail to resolve and the lint reports spurious "cannot open file"
+# errors while the actual ``nim c`` build in
+# ``scripts/build_apps.sh`` succeeds.
+while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
   esac
+  # ``read -r name path extra_flags`` packs everything after ``path``
+  # into ``extra_flags`` as a single whitespace-separated string;
+  # word-split it here so each token becomes its own ``nim`` argv
+  # entry.  Empty when the entry has no extra flags.
+  read -r -a extra_flags_array <<<"${extra_flags:-}"
   nim check \
     "${nim_check_flags[@]}" \
+    ${extra_flags_array[@]+"${extra_flags_array[@]}"} \
     --nimcache:"build/nimcache/check-${name}" \
     "${path}"
 done < apps/entrypoints.txt
