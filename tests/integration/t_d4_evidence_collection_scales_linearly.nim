@@ -36,17 +36,28 @@
 ##    caught here.
 ##
 ## 2. BEHAVIOURAL: replicate the EXACT two ``addUnique`` overloads
-##    locally and timing-compare them at N=200 and N=500. The N=500
+##    locally and timing-compare them at N=800 and N=2000. The N=2000
 ##    run on the legacy form should grow roughly N^2 / N = 2.5x +
 ##    extra for the find walks (worst case ~6.25x), while the new
 ##    HashSet form should grow nearly linearly. We assert:
-##      * legacy/new ratio at N=500 is large (>5x) — confirms the
+##      * legacy/new ratio at N=2000 is large (>3x) — confirms the
 ##        old shape was quadratic.
-##      * new(N=500) / new(N=200) < 5x — confirms the new shape is
+##      * new(N=2000) / new(N=800) < 5x — confirms the new shape is
 ##        sub-quadratic (linear would be 2.5x; we allow slack for
 ##        hash + alloc + cache jitter).
 ##    The behavioural arm tolerates noisy CI hardware: timings are
 ##    averaged across multiple runs.
+##
+##    Sample sizes: the earlier N=200/N=500 pair was chosen for the
+##    original B1-era 14-app collection, but at N=500 the quadratic
+##    ``find`` walk over short, common-prefix strings is still cheap
+##    enough on fast CPUs (Apple Silicon) that the legacy/HashSet
+##    ratio only reaches ~2.3x — below the 3x floor — so the arm
+##    failed spuriously. The B3/B5 workloads grew the action count to
+##    ~1044, so N=2000 (with the ratio-preserving N=800 lower point)
+##    both matches the realistic scale AND pushes the quadratic term
+##    far enough past the per-element constant factor that the gap is
+##    unambiguous on every host.
 ##
 ## Caveat: the behavioural arm exercises a LOCAL COPY of the helpers,
 ## not the engine's actual code paths. The structural arm is what
@@ -202,50 +213,53 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
 
     const Runs = 5
 
-    let paths200 = makePaths(200)
-    let paths500 = makePaths(500)
+    # N=800 / N=2000 keep the 2.5x ratio the linear-scale arm reasons
+    # about while landing both points well past the constant-factor
+    # regime where the quadratic ``find`` walk is masked on fast CPUs.
+    let pathsLow = makePaths(800)
+    let pathsHigh = makePaths(2000)
 
-    let legacy200 = avgNanos(paths200, Runs, timeLegacyDedup)
-    let legacy500 = avgNanos(paths500, Runs, timeLegacyDedup)
-    let fast200 = avgNanos(paths200, Runs, timeFastDedup)
-    let fast500 = avgNanos(paths500, Runs, timeFastDedup)
+    let legacyLow = avgNanos(pathsLow, Runs, timeLegacyDedup)
+    let legacyHigh = avgNanos(pathsHigh, Runs, timeLegacyDedup)
+    let fastLow = avgNanos(pathsLow, Runs, timeFastDedup)
+    let fastHigh = avgNanos(pathsHigh, Runs, timeFastDedup)
 
-    checkpoint("legacy  N=200: " & $legacy200 & " ns")
-    checkpoint("legacy  N=500: " & $legacy500 & " ns")
-    checkpoint("fast    N=200: " & $fast200 & " ns")
-    checkpoint("fast    N=500: " & $fast500 & " ns")
+    checkpoint("legacy  N=800: " & $legacyLow & " ns")
+    checkpoint("legacy  N=2000: " & $legacyHigh & " ns")
+    checkpoint("fast    N=800: " & $fastLow & " ns")
+    checkpoint("fast    N=2000: " & $fastHigh & " ns")
 
     # Sanity: each timing is positive — the monotonic clock is sane.
-    check legacy200 > 0
-    check legacy500 > 0
-    check fast200 > 0
-    check fast500 > 0
+    check legacyLow > 0
+    check legacyHigh > 0
+    check fastLow > 0
+    check fastHigh > 0
 
     # The hash-set form must out-scale the linear-find form by a wide
-    # margin at N=500. Even on noisy CI hardware the legacy form is
-    # ~10x slower at N=500. Require at least 3x.
-    let speedup500 = legacy500.float / fast500.float
-    checkpoint("fast speedup at N=500: " & speedup500.formatFloat(ffDecimal, 2) & "x")
-    check speedup500 >= 3.0
+    # margin at N=2000. At this scale the legacy form is ~6-10x slower
+    # even on fast Apple-Silicon hardware. Require at least 3x.
+    let speedupHigh = legacyHigh.float / fastHigh.float
+    checkpoint("fast speedup at N=2000: " & speedupHigh.formatFloat(ffDecimal, 2) & "x")
+    check speedupHigh >= 3.0
 
     # The hash-set form must scale near-linearly. Pure linear is 2.5x
-    # going from N=200 to N=500. We allow up to 5x slack for jitter,
+    # going from N=800 to N=2000. We allow up to 5x slack for jitter,
     # alloc behaviour, and the constant factor on small N.
-    let fastScale = fast500.float / fast200.float
-    checkpoint("fast scale 500/200: " & fastScale.formatFloat(ffDecimal, 2) & "x")
+    let fastScale = fastHigh.float / fastLow.float
+    checkpoint("fast scale 2000/800: " & fastScale.formatFloat(ffDecimal, 2) & "x")
     check fastScale < 5.0
 
     # The legacy form's scale ratio is expected to be markedly
-    # super-linear (quadratic would be ~6.25x going from N=200 to
-    # N=500). On a quiet machine this asserts ≥ 4.0, but the ratio is
+    # super-linear (quadratic would be ~6.25x going from N=800 to
+    # N=2000). On a quiet machine this asserts ≥ 4.0, but the ratio is
     # flaky on shared CI runners — small absolute timings amplify
     # noise, and modern CPUs can hide quadratic-find behaviour at
     # L1-cache sizes when the seq holds simple ints. So we report
     # the ratio via checkpoint() (visible in the JSON results) and
     # gate the hard assertion behind ``D4_LEGACY_SCALE_HARD=1`` so
     # local + tuning runs still validate it without making CI flaky.
-    let legacyScale = legacy500.float / legacy200.float
-    checkpoint("legacy scale 500/200: " & legacyScale.formatFloat(ffDecimal, 2) & "x")
+    let legacyScale = legacyHigh.float / legacyLow.float
+    checkpoint("legacy scale 2000/800: " & legacyScale.formatFloat(ffDecimal, 2) & "x")
     if getEnv("D4_LEGACY_SCALE_HARD") == "1":
       check legacyScale >= 4.0
     else:
