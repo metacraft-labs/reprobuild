@@ -3418,6 +3418,100 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Seventy-seventh from-source production recipe — FIRST recipe in the
+  # M9.N Batch D build-tool slice (cmake + autoconf + automake +
+  # libtool + pkgconf). cmake's upstream build is a hand-rolled
+  # ``./bootstrap && make && make install`` driver: ``from-source-
+  # custom`` convention consumer with three shell actions registered
+  # under the ``cmake`` artifact and three executable artifacts
+  # (cmake + ctest + cpack) sharing the same install-tree. Pins the
+  # 3.31.2 upstream cmake.org release-tarball URL + real sha256
+  # computed locally (nixpkgs pins 4.1.2; cross-check deferred) +
+  # four-channel cross-isolation empty-state + per-artifact stage-
+  # copy fan-out at the THREE-executable cardinality.
+  TestSpec(
+    source: "recipes/packages/source/cmake/test_cmake_source.nim",
+    binary: "build/test-bin/t_cmake_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventy-eighth from-source production recipe — SECOND recipe in
+  # the M9.N Batch D build-tool slice. autoconf is the GNU build
+  # system's source-configuration generator: ``from-source-autotools``
+  # convention consumer with a SEVEN-executable install-tree (autoconf
+  # + autoheader + autom4te + autoreconf + autoscan + autoupdate +
+  # ifnames) from a single ``./configure`` + ``make`` invocation. Pins
+  # the 2.72 upstream ftp.gnu.org release-tarball URL + real sha256
+  # computed locally (nixpkgs pins 2.73; cross-check deferred) +
+  # single-flag configureFlags channel (``--disable-static``) + per-
+  # artifact stage-copy fan-out at the SEVEN-executable cardinality.
+  TestSpec(
+    source: "recipes/packages/source/autoconf/test_autoconf_source.nim",
+    binary: "build/test-bin/t_autoconf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Seventy-ninth from-source production recipe — THIRD recipe in the
+  # M9.N Batch D build-tool slice. automake is the GNU build system's
+  # ``Makefile.in`` generator: ``from-source-autotools`` convention
+  # consumer with a TWO-executable install-tree (automake + aclocal)
+  # from a single ``./configure`` + ``make`` invocation. Pins the
+  # 1.17 upstream ftp.gnu.org release-tarball URL + real sha256
+  # computed locally (nixpkgs pins 1.18.1; cross-check deferred) +
+  # single-flag configureFlags channel + per-artifact stage-copy
+  # fan-out at the TWO-executable cardinality.
+  TestSpec(
+    source: "recipes/packages/source/automake/test_automake_source.nim",
+    binary: "build/test-bin/t_automake_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eightieth from-source production recipe — FOURTH recipe in the
+  # M9.N Batch D build-tool slice. libtool is the GNU build system's
+  # library-compilation abstraction layer: ``from-source-autotools``
+  # convention consumer with a MIXED-KIND artifact set (two
+  # executables libtool + libtoolize, plus one library libltdl)
+  # sharing a single ``./configure`` + ``make`` install-tree. Pins
+  # the 2.5.4 upstream ftp.gnu.org release-tarball URL + real sha256
+  # computed locally over the .tar.xz variant (nixpkgs consumes the
+  # .tar.gz variant so the cross-check is byte-incompatible) +
+  # single-flag configureFlags channel + per-artifact stage-copy
+  # fan-out at the (2 exec, 1 lib) mixed cardinality.
+  TestSpec(
+    source: "recipes/packages/source/libtool/test_libtool_source.nim",
+    binary: "build/test-bin/t_libtool_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Eighty-first from-source production recipe — CLOSING (FIFTH) recipe
+  # in the M9.N Batch D build-tool slice. pkgconf is the modern, ISC-
+  # licensed replacement for the original freedesktop pkg-config:
+  # ``from-source-autotools`` convention consumer with a MIXED-KIND
+  # artifact set (one executable pkgconf + one library libpkgconf)
+  # sharing a single ``./configure`` + ``make`` install-tree. Pins
+  # the 2.3.0 upstream distfiles.ariadne.space release-tarball URL +
+  # real sha256 computed locally (nixpkgs pins 2.5.1; cross-check
+  # deferred) + THREE-flag configureFlags channel
+  # (``--disable-static`` + ``--with-system-libdir`` +
+  # ``--with-system-includedir``) with embedded colon-separated path
+  # lists + per-artifact stage-copy fan-out at the (1 exec, 1 lib)
+  # mixed cardinality.
+  TestSpec(
+    source: "recipes/packages/source/pkgconf/test_pkgconf_source.nim",
+    binary: "build/test-bin/t_pkgconf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
