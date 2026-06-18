@@ -2917,6 +2917,94 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # Fifty-fifth from-source production recipe to exercise the M9.H/I/K
+  # trio — FIRST recipe in the THIRD KF6 module-sweep batch (ksvg /
+  # ksolid / kio / kded). Thirteenth CMake-driven recipe and the
+  # NINTH KF6 foundation module after kcoreaddons + kconfig + ki18n +
+  # kwidgetsaddons + kxmlgui + kservice + kglobalaccel + knotifications.
+  # Pins ksvg 6.10.0's vendored sha256 + CMake flag sequence + cross-
+  # channel isolation + ``libKF6Svg`` library artifact. The QtSvg-on-
+  # top KF6 wrapper Plasma 6's theme engine consumes for scalable
+  # vector assets (panel icons, popup-menu chrome, system-tray badges,
+  # plasmoid backgrounds via Svg / SvgItem / FrameSvg QML primitives).
+  TestSpec(
+    source: "recipes/packages/source/ksvg/test_ksvg_source.nim",
+    binary: "build/test-bin/t_ksvg_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifty-sixth from-source production recipe to exercise the M9.H/I/K
+  # trio — SECOND recipe in the THIRD KF6 module-sweep batch.
+  # Fourteenth CMake-driven recipe and the TENTH KF6 foundation
+  # module. FIRST KF6-batch recipe whose vendored tarball filename
+  # (``solid-6.10.0.tar.xz``) does NOT match the package identifier
+  # (``ksolidSource``) — upstream publishes the project as bare
+  # ``solid`` while the recipe shelves it under ``ksolid`` for
+  # consistency with the rest of the KF6 cluster. Pins ksolid 6.10.0's
+  # vendored sha256 + CMake flag sequence + cross-channel isolation +
+  # ``libKF6Solid`` library artifact. The hardware-abstraction layer
+  # KF6 applications consume to enumerate block devices, network
+  # interfaces, batteries, optical drives, and removable storage
+  # (Device + Battery + StorageVolume + NetworkInterface +
+  # OpticalDrive + Predicate) — every kded ``solidautoeject`` /
+  # ``solidnotify`` module + plasma-workspace's device-notifier applet
+  # + Dolphin's mount-point sidebar pulls it in.
+  TestSpec(
+    source: "recipes/packages/source/ksolid/test_ksolid_source.nim",
+    binary: "build/test-bin/t_ksolid_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifty-seventh from-source production recipe to exercise the M9.H/I/K
+  # trio — THIRD recipe in the THIRD KF6 module-sweep batch. Fifteenth
+  # CMake-driven recipe and the ELEVENTH KF6 foundation module. The
+  # LARGEST KF6 framework in the recipe suite by source-size and the
+  # FIRST KF6 recipe whose upstream SONAME contains a three-letter
+  # all-caps acronym (``KF6KIO``) — the artifact identifier
+  # (``libKF6Kio``) pins the brand-conventional casing rule (``Kio``
+  # not ``KIO``) on the M3 registry. Pins kio 6.10.0's vendored sha256
+  # + CMake flag sequence + cross-channel isolation + ``libKF6Kio``
+  # library artifact. The KIO transparent-network-IO layer every KF6
+  # application (Dolphin, KMail, Okular, KDevelop) consumes for
+  # cross-protocol URL access (``smb://``, ``sftp://``, ``http(s)://``,
+  # ``trash:/``, ``recently:/``, ``man:/``).
+  TestSpec(
+    source: "recipes/packages/source/kio/test_kio_source.nim",
+    binary: "build/test-bin/t_kio_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # Fifty-eighth from-source production recipe to exercise the M9.H/I/K
+  # trio — CLOSING (FOURTH) recipe in the THIRD KF6 module-sweep
+  # batch. Sixteenth CMake-driven recipe and the TWELFTH KF6
+  # foundation module. FIRST KF6-batch recipe to ship a LIBRARY +
+  # EXECUTABLE pair from a single ``package`` macro — the sddm
+  # precedent (3 artifacts) and gdm precedent (2 executables) cover
+  # the multi-artifact-per-package M9.K registry path; kded covers
+  # the (lib, exe) doublet specifically. The ``kded6`` digit-suffixed
+  # binary name pins the gdm + sddm precedent of retaining ABI-line
+  # digits in artifact identifiers. Pins kded 6.10.0's vendored
+  # sha256 + CMake flag sequence + cross-channel isolation +
+  # ``libKF6Ded`` library artifact + ``kded6`` executable artifact.
+  # The central KF6 module-host daemon every Plasma session spawns
+  # at autostart-phase 1; loads ``.desktop`` modules from
+  # ``$XDG_DATA_DIRS/kded6/`` (solidautoeject, networkmanagement,
+  # kfilemetadata, ksysguard) and keeps them alive across
+  # application launches.
+  TestSpec(
+    source: "recipes/packages/source/kded/test_kded_source.nim",
+    binary: "build/test-bin/t_kded_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
