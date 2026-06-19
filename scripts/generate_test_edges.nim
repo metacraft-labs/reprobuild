@@ -171,6 +171,18 @@ proc acceptToolsTree(rel: string): bool =
   let stem = rel.splitFile().name
   rel.endsWith(".nim") and stem.startsWith("test_")
 
+proc acceptRecipesTree(rel: string): bool =
+  # M9.N from-source recipes ship a ``test_<pkg>_source.nim`` next to each
+  # recipe under ``recipes/packages/source/<pkg>/``. They are real
+  # reprobuild unittest binaries (built + run as part of the ``test``
+  # collection), so they need a build edge like any other test — they
+  # simply live outside the tests/ ∙ libs/ ∙ tools/ roots.
+  let parts = rel.split('/')
+  if parts.len < 5: return false
+  if parts[1] != "packages" or parts[2] != "source": return false
+  let stem = rel.splitFile().name
+  rel.endsWith(".nim") and stem.startsWith("test_")
+
 proc walkRoot(repoRoot, dir: string;
               accept: proc (rel: string): bool): seq[string] =
   result = @[]
@@ -213,6 +225,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
   candidates.add(walkRoot(repoRoot, "tests", acceptTestsTree))
   candidates.add(walkRoot(repoRoot, "libs", acceptLibsTree))
   candidates.add(walkRoot(repoRoot, "tools", acceptToolsTree))
+  candidates.add(walkRoot(repoRoot, "recipes", acceptRecipesTree))
 
   # Deterministic sort by source path so the generated file diffs
   # cleanly across runs.

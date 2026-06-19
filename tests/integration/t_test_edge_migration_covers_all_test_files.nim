@@ -9,6 +9,7 @@
 ##   * ``tests/**/t_*.nim``
 ##   * ``libs/**/tests/{t_,test_}*.nim``
 ##   * ``tools/**/tests/test_*.nim``
+##   * ``recipes/packages/source/**/test_*.nim``
 ##
 ## If a new test file lands without re-running the generator the count
 ## diverges and this test fails, surfacing the missed regeneration
@@ -72,6 +73,11 @@ proc countTestFilesOnDisk(repoRoot: string): int =
   result += walk("tests", pmTOnly, false)
   result += walk("libs", pmTOrTest, true)
   result += walk("tools", pmTestOnly, true)
+  # M9.N from-source recipes carry a ``test_<pkg>_source.nim`` per recipe
+  # under ``recipes/packages/source/<pkg>/``. The generator discovers
+  # them (acceptRecipesTree) and emits a build edge for each, so count
+  # them here too or ``declared`` over-reports relative to ``onDisk``.
+  result += walk("recipes/packages/source", pmTestOnly, false)
 
 proc countGeneratedBuildCalls(repoRoot: string): int =
   # Project-DSL-Composition M6: the generated table moved from
