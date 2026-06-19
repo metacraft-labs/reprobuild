@@ -33,6 +33,8 @@
 import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/types/library
+import repro_dsl_stdlib/types/options
 export packages_schema
 
 # ---------------------------------------------------------------------------
@@ -161,3 +163,144 @@ let gccCatalog* = @[
     ],
     pre_install_unrecognized: @["Get-ChildItem \"$dir\\*.7z\" | Remove-Item -Recurse -Force"])
 ]
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.R.2b — Layer-2 operation implementations.
+#
+# The dispatcher in ``operations/{compile,link,archive,strip}.nim`` reads
+# ``currentCompiler()`` and routes to one of the ``gcc<X>`` /
+# ``clang<X>`` / ``msvc<X>`` implementations defined below. Each
+# implementation takes a typed ``*Options`` record + an optional
+# ``LibraryApi`` interface contribution and emits a ``BuildActionDef``
+# whose ``call.arguments`` carry the gcc-shaped argv (``-I`` / ``-l`` /
+# ``-D`` / ``-std=`` etc.).
+#
+# The implementations call into the existing ``gcc(...)`` wrapper proc
+# emitted by the package macro from the ``executable gcc: cli: call:``
+# block above — that wrapper records each non-default flag in
+# ``call.arguments`` with the role-tagged metadata downstream consumers
+# need.
+# ---------------------------------------------------------------------------
+
+{.experimental: "callOperator".}
+
+proc apiHeaders(api: LibraryApi): seq[string] =
+  ## Lift PUBLIC + PRIVATE header search paths from a ``LibraryApi``
+  ## into a flat ``-I`` contribution list.
+  if api.declared:
+    for h in api.headers: result.add(h)
+    for h in api.privateHeaders: result.add(h)
+
+proc apiDefines(api: LibraryApi): seq[string] =
+  if api.declared:
+    for d in api.defines: result.add(d)
+    for d in api.privateDefines: result.add(d)
+
+proc apiLinks(api: LibraryApi): seq[string] =
+  if api.declared:
+    for l in api.links: result.add(l)
+    for l in api.privateLinks: result.add(l)
+
+proc gccCompile*(opts: CompileOptions): BuildActionDef =
+  ## gcc-shaped compile action.
+  var includeDirs: seq[string] = @[]
+  var defs: seq[string] = @[]
+  for api in opts.inputs:
+    for h in apiHeaders(api): includeDirs.add(h)
+    for d in apiDefines(api): defs.add(d)
+  for d in opts.defines: defs.add(d)
+  let std = opts.standard
+  if includeDirs.len == 0 and defs.len == 0 and std.len == 0:
+    return gcc(source = opts.source, output = opts.target,
+      compileOnly = true)
+  gcc(source = opts.source, output = opts.target,
+    compileOnly = true,
+    includeDirs = includeDirs,
+    defines = defs,
+    standard = std)
+
+proc gccLink*(opts: LinkOptions): BuildActionDef =
+  ## gcc-shaped link action.
+  var libs: seq[string] = @[]
+  var libDirs: seq[string] = @[]
+  for dep in opts.deps:
+    for l in apiLinks(dep.api): libs.add(l)
+    if dep.installPrefix.len > 0:
+      libDirs.add(dep.installPrefix)
+  let firstObj =
+    if opts.objects.len > 0 and opts.objects[0].outputs.len > 0:
+      opts.objects[0].outputs[0]
+    else: opts.target
+  result = gcc(
+    source = firstObj,
+    output = opts.target,
+    shared = (opts.kind == lokShared),
+    staticLink = (opts.kind == lokStatic),
+    libs = libs,
+    libDirs = libDirs)
+
+proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
+  ## ``ar`` archive call. v1 emits a thin ``BuildActionDef`` carrying
+  ## the canonical ``ar rcs <archive> <objs...>`` argv directly.
+  result = BuildActionDef(
+    call: PublicCliCall(
+      packageName: "binutils",
+      executableName: "ar",
+      subcommand: "",
+      arguments: @[]))
+  let modifiers =
+    if opts.modifiers.len > 0: opts.modifiers else: "rcs"
+  result.call.arguments.add(PublicCliArg(
+    name: "modifiers",
+    kind: cpkPositional,
+    position: 0,
+    encodedValue: modifiers))
+  result.call.arguments.add(PublicCliArg(
+    name: "archive",
+    kind: cpkPositional,
+    position: 1,
+    role: carOutput,
+    encodedValue: opts.target))
+  for i, obj in opts.objects:
+    let path =
+      if obj.outputs.len > 0: obj.outputs[0] else: ""
+    result.call.arguments.add(PublicCliArg(
+      name: "object" & $i,
+      kind: cpkPositional,
+      position: 2 + i,
+      role: carInput,
+      encodedValue: path))
+  result.outputs.add(opts.target)
+
+proc gccStrip*(opts: StripOptions): BuildActionDef =
+  ## ``strip`` invocation.
+  result = BuildActionDef(
+    call: PublicCliCall(
+      packageName: "binutils",
+      executableName: "strip",
+      subcommand: "",
+      arguments: @[]))
+  if opts.target.len > 0:
+    result.call.arguments.add(PublicCliArg(
+      name: "output",
+      kind: cpkFlag,
+      alias: "-o",
+      format: cafSeparate,
+      role: carOutput,
+      encodedValue: opts.target))
+    result.outputs.add(opts.target)
+  for sym in opts.keepSymbols:
+    result.call.arguments.add(PublicCliArg(
+      name: "keep",
+      kind: cpkFlag,
+      alias: "-K",
+      format: cafSeparate,
+      encodedValue: sym))
+  let inputPath =
+    if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
+  result.call.arguments.add(PublicCliArg(
+    name: "input",
+    kind: cpkPositional,
+    position: 0,
+    role: carInput,
+    encodedValue: inputPath))

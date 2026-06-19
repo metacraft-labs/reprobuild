@@ -6860,6 +6860,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.2b: stdlib typed-value layer (Library / Executable /
+  # CompileOptions / LinkOptions / MesonPackageResult etc.) + Layer-2
+  # mid-level operation overloads (compile / link / archive / strip
+  # dispatching on a Configurable[Compiler]) + Layer-1 high-level
+  # artifact constructors (c_library / c_executable / nim_library /
+  # nim_executable / meson_package / cmake_package /
+  # autotools_package). Added by hand for the same generator-wipe
+  # reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r2b_typed_value_layer.nim",
+    binary: "build/test-bin/t_m9r2b_typed_value_layer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
