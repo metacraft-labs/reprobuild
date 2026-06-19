@@ -16,6 +16,13 @@ set -euo pipefail
 
 mkdir -p build/test-bin build/nimcache test-logs
 
+# Provision the NDE0-A jammy .deb fixtures (sha-pinned download, no
+# binaries vendored into git) so t_nde0a_apt_jammy has its inputs. The
+# step is idempotent, Linux-only, and best-effort — a network failure
+# warns and continues; the test stays the loud gate if a fixture is
+# absent.
+bash recipes/reproos-mvp-config/fetch-test-fixtures.sh || true
+
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     exe_ext=".exe"
