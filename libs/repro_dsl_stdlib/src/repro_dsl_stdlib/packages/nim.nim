@@ -212,6 +212,8 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
         imports: seq[string] = @[];
+        passC: seq[string] = @[];
+        passL: seq[string] = @[];
         appLib = false;
         threadsOn = false;
         actionId = "";
@@ -220,13 +222,14 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     {.discardable.} =
   ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
   ## added to the convenience alias so the monitor-shim fixture edge in
-  ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` through
-  ## the ``binary``-shorthand surface the rest of the build block uses
-  ## (the long-form ``output = ...`` proc already exposed these flags).
+  ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
+  ## backend ``--passC:`` / ``--passL:`` flags through the
+  ## ``binary``-shorthand surface the rest of the build block uses.
   discard imports
   c(pkg = pkg, source = source, output = binary, defines = defines,
-    paths = paths, appLib = appLib, threadsOn = threadsOn,
-    actionId = actionId, deps = deps, after = after)
+    paths = paths, passC = passC, passL = passL, appLib = appLib,
+    threadsOn = threadsOn, actionId = actionId, deps = deps,
+    after = after)
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

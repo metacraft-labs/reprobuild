@@ -581,7 +581,7 @@ package reprobuild:
           @[]
       reprobuildTestFixturesActions.add(nim.c(
         source = "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim",
-        output = "build/lib/librepro_monitor_shim.dylib",
+        binary = "build/lib/librepro_monitor_shim.dylib",
         appLib = true,
         threadsOn = true,
         passC = macosShimArchFlags,
