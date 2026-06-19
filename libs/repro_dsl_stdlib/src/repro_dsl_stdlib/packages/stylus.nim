@@ -33,6 +33,20 @@ package stylus:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:node@24.16.0:sha256:9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211"
+    # Linux x86_64: same Node.js distribution as `node.nim`. Same
+    # caveat as the Windows entry — stylus itself is npm-only and
+    # the project's `yarn install` lands the actual `stylus` binary
+    # in `node_modules/.bin/stylus`; this points at `bin/node` to
+    # satisfy build-time tool resolution.
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.xz",
+      sha256 = "d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/node",
+      packageId = "node@24.16.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:node@24.16.0:linux:sha256:d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9"
 
   executable stylus:
     cli:

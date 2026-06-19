@@ -35,3 +35,16 @@ package uv:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:uv@0.7.12:sha256:2cf29c8ffaa2549aa0f86927b2510008e8ca3dcd2100277d86faf437382a371b"
+    # Linux x86_64: astral-sh/uv ships a glibc tarball that contains
+    # `uv` + `uvx` under a single `uv-x86_64-unknown-linux-gnu/`
+    # top-level directory. stripComponents=1 flattens to the prefix
+    # root so the binaries sit at `<prefix>/uv` and `<prefix>/uvx`.
+    tarball url = "https://github.com/astral-sh/uv/releases/download/0.7.12/uv-x86_64-unknown-linux-gnu.tar.gz",
+      sha256 = "735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "uv",
+      packageId = "uv@0.7.12",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:uv@0.7.12:linux:sha256:735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a"
