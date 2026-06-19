@@ -62,6 +62,20 @@ package rustc:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:rust@1.92.0:sha256:7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702"
+    # Linux x86_64: same rust standalone-distribution tarball as the
+    # Windows entry — different triple. The realize loop's rust-installer
+    # auto-merge flattens rustc / cargo / rust-std into a single prefix
+    # so `rustc` lands at `<prefix>/bin/rustc` and libstd at the
+    # canonical `<prefix>/lib/rustlib/<triple>/lib/` sysroot location.
+    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz",
+      sha256 = "d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/rustc",
+      packageId = "rust@1.92.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:rust@1.92.0:linux:sha256:d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c"
 
 let rustcCatalog* = @[
   VersionedProvisioning(

@@ -43,6 +43,17 @@ package just:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:just@1.51.0:sha256:09d1138b6845e73f04bff5e26be3f57663bddca25e36fe6241d28a5aa310b64e"
+    # Linux x86_64: musl static binary from GitHub Releases. Archive
+    # ships `just` flat at the root (no enclosing directory). Same
+    # source as the `justCatalog` Linux platform slice below.
+    tarball url = "https://github.com/casey/just/releases/download/1.51.0/just-1.51.0-x86_64-unknown-linux-musl.tar.gz",
+      sha256 = "c8f085ca3e885723c341d06243fc291b5abfdc8bbe3b2c076b117de490387b59",
+      archiveType = "tar.gz",
+      executablePath = "just",
+      packageId = "just@1.51.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:just@1.51.0:linux:sha256:c8f085ca3e885723c341d06243fc291b5abfdc8bbe3b2c076b117de490387b59"
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
