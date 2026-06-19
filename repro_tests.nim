@@ -6975,6 +6975,31 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.8 — dispatcher gate + buildDeps fallthrough. Pins:
+  #   * ``parseToolProvisioning("from-source") == tpmFromSource`` round-
+  #     trips through the env-var + CLI flag path.
+  #   * ``shouldEnterBuildPipeline(tpmFromSource) == true`` — the
+  #     extracted predicate Part 1 introduces so the dispatcher gate
+  #     no longer short-circuits ``--tool-provisioning=from-source``
+  #     to "no external tools requested" (the symptom captured at
+  #     ``D:/metacraft/gap-a-wayland.stdout.log``).
+  #   * buildDeps fallthrough — a useDef whose sibling recipe exists
+  #     but is unbuilt surfaces the M9.Q "has not produced an artefact"
+  #     diagnostic (the M9.R.9 auto-recurse target), NOT the Gap A
+  #     "does not declare provisioning" diagnostic.
+  #   * Non-from-source modes (``tpmTarball``, ``tpmNix``) still raise
+  #     the "does not declare provisioning" diagnostic for the same
+  #     useDef shape — guards against an over-broad fix relaxing the
+  #     existing error surface.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r8_dispatcher_gate.nim",
+    binary: "build/test-bin/t_m9r8_dispatcher_gate",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
   #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
   #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block

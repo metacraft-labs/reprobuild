@@ -3435,6 +3435,32 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
     identityEvidence: durableFileEvidence(result.identityPath),
     keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
 
+proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
+  ## M9.R.8 Part 1 — extracted predicate for the build-pipeline dispatch
+  ## gate (formerly an inline ``in {tpmPathOnly, tpmNix, tpmTarball,
+  ## tpmScoop}`` literal at three sites in this module). Centralising the
+  ## set membership here:
+  ##
+  ##   * makes the dispatcher gate testable in isolation
+  ##     (``t_m9r8_dispatcher_gate.nim``);
+  ##   * keeps the three call sites in sync when a new
+  ##     ``ToolProvisioningMode`` is added (previously the new mode had
+  ##     to remember to update three places — the M9.Q ``tpmFromSource``
+  ##     mode missed all three, which is the gap M9.R.8 closes).
+  ##
+  ## ``tpmFromSource`` is included here so a build invoked with
+  ## ``--tool-provisioning=from-source`` enters the same provider-
+  ## compile / lowered-graph / engine-run pipeline as the four
+  ## pre-existing modes. ``resolveFromSourceTool`` is the downstream
+  ## resolver (already wired through ``toolProfileFor``) and the M9.R.7
+  ## ``mkToolIdentityResolver`` returns the from-source artefact's
+  ## ``parentDir`` in ``binDirs`` so action argv resolves correctly.
+  ##
+  ## ``tpmUnspecified`` deliberately stays out — the caller resolves
+  ## it via ``parseToolProvisioning`` / env var / project default
+  ## before reaching this predicate.
+  mode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop, tpmFromSource}
+
 proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
     ToolIdentityResolver =
   ## M9.N Batch B: project a ``PathOnlyBuildIdentity`` into the engine-
@@ -5122,7 +5148,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("standardDirect: provider binary missing; falling back to " &
         "per-project provider compile")
 
-  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if shouldEnterBuildPipeline(effectiveMode):
     let identityStart = statStart(statsEnabled)
     progressRenderer.renderPhase("resolving tool identities")
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
@@ -10500,7 +10526,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var identity = PathOnlyBuildIdentity(
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
-  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if shouldEnterBuildPipeline(effectiveMode):
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
@@ -13292,9 +13318,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
-  if mode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if not shouldEnterBuildPipeline(mode):
     raise newException(ValueError,
-      "repro watch requires --tool-provisioning=path|nix|tarball|scoop")
+      "repro watch requires --tool-provisioning=path|nix|tarball|scoop|from-source")
   # Windows: kqueue gate dropped — Windows now reaches the live watch loop
   # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
   # surfaces the deferred-backend OSError from openFilesystemWatcher.
@@ -14176,7 +14202,7 @@ proc runDevelopCommand(args: openArray[string]): int =
         interfaceFingerprint: artifact.interfaceFingerprint),
       "", "", interfacePath)
 
-  if effectiveMode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if not shouldEnterBuildPipeline(effectiveMode):
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & effectiveMode.modeName)
 

@@ -1264,8 +1264,17 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       if stmt.len != 2:
         error("defaultToolProvisioning expects exactly one string literal", stmt)
       let provisioning = stringLiteral(stmt[1])
-      if provisioning.normalize notin ["path", "nix", "tarball", "scoop"]:
-        error("defaultToolProvisioning must be one of: path, nix, tarball, scoop", stmt[1])
+      # M9.R.8 — accept ``from-source`` (the CLI canonical spelling)
+      # alongside the four pre-existing modes so a recipe can opt in
+      # to from-source provisioning declaratively without depending on
+      # the CLI flag / env var. The CLI-side ``parseToolProvisioning``
+      # also accepts ``fromSource`` and ``source`` aliases; the DSL
+      # validator pins the canonical hyphenated form for consistency
+      # with the existing ``defaultToolProvisioning "path"`` /
+      # ``defaultToolProvisioning "nix"`` precedent in production
+      # recipes.
+      if provisioning.normalize notin ["path", "nix", "tarball", "scoop", "from-source"]:
+        error("defaultToolProvisioning must be one of: path, nix, tarball, scoop, from-source", stmt[1])
       result.defaultToolProvisioning = provisioning
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
