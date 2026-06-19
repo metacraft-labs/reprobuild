@@ -2057,8 +2057,17 @@ proc usesImportCode(pkg: PackageDef): string =
       "make",
       "maturin",
       "mdbook",
+      # M9.P stop-gap: ``meson`` + ``ninja`` added so ``uses: "meson"``
+      # / ``uses: "ninja"`` lines on from-source recipes (e.g. the
+      # ``recipes/packages/source/dbus-broker`` family) auto-import
+      # the hand-authored ``package meson:`` / ``package ninja:``
+      # provisioning blocks. Without this entry the runner's
+      # ``isBundledStdlibSelector`` rejects the selector and the
+      # provisioning shape never reaches the tool-identity resolver.
+      "meson",
       "nim",
       "nimble",
+      "ninja",
       "nix",
       "nsis",
       "node",

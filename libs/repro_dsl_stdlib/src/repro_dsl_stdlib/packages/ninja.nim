@@ -12,8 +12,60 @@
 ## "glibc-2.17 floor" target is honored by upstream's CI base image.
 
 import std/tables
+import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
+
+# ---------------------------------------------------------------------------
+# M9.P stop-gap: hand-authored ``package ninja:`` DSL block carrying
+# the provisioning shape the M9 tool-identity resolver needs to map
+# ``uses: "ninja"`` recipe declarations into a concrete adapter
+# (nix on Nix-capable hosts; scoop or tarball on Windows / non-Nix
+# Linux). The downstream ``ninjaCatalog`` slice below remains intact
+# for the M64 ``cakBuiltin`` adapter on Windows.
+#
+# Direct-download pins use the official ninja-build/ninja v1.12.1
+# release artifacts. The Windows ``ninja-win.zip`` and Linux
+# ``ninja-linux.zip`` ship the ``ninja.exe`` / ``ninja`` binary flat
+# at the archive root (no enclosing directory), so ``stripComponents``
+# stays at 0.
+#
+# The architectural fix (M9.Q) is a new ``tpmFromSource`` mode + a
+# resolver pre-pass that schedules from-source builds for build tools
+# such as ninja. This stop-gap unblocks the M9.P smoke today by giving
+# the resolver something actionable for ``uses: "ninja"``.
+
+package ninja:
+  provisioning:
+    nixPackage "nixpkgs#ninja", executablePath = "bin/ninja",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: ninja via ScoopInstaller/Main.
+    scoopApp(bucket = "main", app = "ninja",
+      preferredVersion = ">=1", executablePath = "ninja.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: ninja v1.12.1 Windows binary release. The .zip
+    # ships ``ninja.exe`` flat at the archive root.
+    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip",
+      sha256 = "f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a",
+      archiveType = "zip",
+      executablePath = "ninja.exe",
+      packageId = "ninja@1.12.1",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:ninja@1.12.1:sha256:f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a"
+    # Direct-download: ninja v1.12.1 Linux binary release. The .zip
+    # ships ``ninja`` (no .exe suffix) flat at the archive root.
+    # ninja's upstream Linux build targets glibc 2.17 on its CI base
+    # image — matches the M9.5 honest-scope target.
+    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip",
+      sha256 = "6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255",
+      archiveType = "zip",
+      executablePath = "ninja",
+      packageId = "ninja@1.12.1-linux",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:ninja@1.12.1-linux:sha256:6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255"
 
 let ninjaCatalog* = @[
   VersionedProvisioning(

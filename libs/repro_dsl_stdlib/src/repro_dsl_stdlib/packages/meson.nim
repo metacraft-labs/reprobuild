@@ -23,8 +23,58 @@
 ## Versions (newest-first): 1.11.0
 
 import std/tables
+import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
+
+# ---------------------------------------------------------------------------
+# M9.P stop-gap: hand-authored ``package meson:`` DSL block carrying
+# the provisioning shape the M9 tool-identity resolver needs to map a
+# ``uses: "meson"`` recipe declaration into a concrete adapter
+# (nix on Nix-capable hosts, scoop or tarball on Windows / non-Nix
+# Linux). The downstream ``mesonCatalog`` slice below remains intact
+# for the M64 ``cakBuiltin`` adapter on Windows.
+#
+# The tarball pin points at meson 1.6.1's source release. The upstream
+# tarball lays out ``meson-1.6.1/`` at the root and ships ``meson.py``
+# directly inside (no shell wrapper); ``stripComponents = 1`` flattens
+# the tree so the realized prefix carries ``meson.py`` at its root.
+# ``executablePath = "meson.py"`` reflects the actual layout — the
+# resolver invokes it via ``python meson.py`` on hosts that have a
+# Python interpreter on PATH (covered by the recipe's ``uses:`` /
+# convention layer).
+#
+# The architectural fix (M9.Q) is a new ``tpmFromSource`` mode + a
+# resolver pre-pass that schedules from-source builds for build tools
+# such as meson. This stop-gap unblocks the M9.P smoke today by giving
+# the resolver something actionable for ``uses: "meson"``.
+
+package meson:
+  provisioning:
+    nixPackage "nixpkgs#meson", executablePath = "bin/meson",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+    # Windows / non-Nix Linux: meson via ScoopInstaller/Main. The Scoop
+    # manifest installs the upstream MSI (handled by the M4 lessmsi
+    # extractor downstream); the Scoop side surfaces ``meson.exe`` at
+    # the prefix root.
+    scoopApp(bucket = "main", app = "meson",
+      preferredVersion = ">=1", executablePath = "meson.exe",
+      requiresExecutionProfileChecksum = false)
+    # Direct-download: meson source release from GitHub Releases.
+    # Cross-platform — works on any host with Python 3 on PATH. The
+    # tarball ships ``meson.py`` at the root of ``meson-1.6.1/`` so
+    # ``stripComponents = 1`` lands ``meson.py`` at the realized
+    # prefix root.
+    tarball url = "https://github.com/mesonbuild/meson/releases/download/1.6.1/meson-1.6.1.tar.gz",
+      sha256 = "1eca49eb6c26d58bbee67fd3337d8ef557c0804e30a6d16bfdf269db997464de",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "meson.py",
+      packageId = "meson@1.6.1",
+      cpu = "any",
+      os = "any",
+      lockIdentity = "tarball:meson@1.6.1:sha256:1eca49eb6c26d58bbee67fd3337d8ef557c0804e30a6d16bfdf269db997464de"
 
 let mesonCatalog* = @[
   VersionedProvisioning(
