@@ -6860,6 +6860,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.4: ``library api: exports:`` FFI sub-block — declares
+  # FFI-callable symbols as Nim proc signatures stored as raw source-
+  # text records (``name`` / ``paramsRaw`` / ``returnRaw`` / ``doc``).
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r4_library_api_exports.nim",
+    binary: "build/test-bin/t_m9r4_library_api_exports",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.2b: stdlib typed-value layer (Library / Executable /
   # CompileOptions / LinkOptions / MesonPackageResult etc.) + Layer-2
   # mid-level operation overloads (compile / link / archive / strip

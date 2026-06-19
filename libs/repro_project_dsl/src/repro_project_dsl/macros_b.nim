@@ -2618,6 +2618,114 @@ proc m9r3CollectListAppends(body: NimNode; targetVar: NimNode): NimNode =
     else:
       result.add(m9r3RewriteListChild(child, targetVar))
 
+proc m9r4ProcDefName(procDef: NimNode): string =
+  ## Return the proc's identifier with the trailing ``*`` export marker
+  ## stripped. ``procDef[0]`` is either a bare ``nnkIdent`` /
+  ## ``nnkSym`` (``proc foo(...)``) or ``nnkPostfix(*, <ident>)`` (the
+  ## canonical ``proc foo*(...)`` exports: shape).
+  let head = procDef[0]
+  case head.kind
+  of nnkPostfix:
+    if head.len >= 2 and head[1].kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      result = head[1].repr
+    else:
+      result = head.repr
+  of nnkIdent, nnkSym, nnkAccQuoted:
+    result = head.repr
+  else:
+    result = head.repr
+
+proc m9r4FormalParamsRaw(formalParams: NimNode): string =
+  ## Render the ``nnkFormalParams`` node as the raw Nim parameter list
+  ## text the registry stores (without the surrounding ``()``).
+  ##
+  ## ``formalParams[0]`` is the return type slot — we skip it here, the
+  ## return text is rendered separately by ``m9r4ReturnRaw``.
+  ##
+  ## We use ``repr`` on each ``nnkIdentDefs`` child so author-supplied
+  ## types (``ptr Pcm``, ``cstring``, generic params, etc.) survive
+  ## intact; the macro never type-checks the parameters because the
+  ## library types are typically opaque at this expansion site.
+  if formalParams.kind != nnkFormalParams:
+    return ""
+  result = ""
+  var first = true
+  for i in 1 ..< formalParams.len:
+    let child = formalParams[i]
+    if not first:
+      result.add(", ")
+    first = false
+    result.add(child.repr.strip)
+
+proc m9r4ReturnRaw(formalParams: NimNode): string =
+  ## Render the return-type slot (``formalParams[0]``) as raw Nim text.
+  ## ``nnkEmpty`` (no return type) collapses to "".
+  if formalParams.kind != nnkFormalParams or formalParams.len == 0:
+    return ""
+  let ret = formalParams[0]
+  if ret.kind == nnkEmpty:
+    return ""
+  result = ret.repr.strip
+
+proc m9r4DocFromBody(body: NimNode): string =
+  ## Extract the first doc-comment statement from a proc body, if any.
+  ## ``nnkCommentStmt`` carries the comment text in ``strVal``. Returns
+  ## empty string when the body is missing, empty, or has no leading
+  ## doc comment. Matches the Nim convention that the doc comment is
+  ## the first statement of the proc body.
+  if body.kind == nnkEmpty:
+    return ""
+  if body.kind != nnkStmtList:
+    return ""
+  for child in body:
+    case child.kind
+    of nnkCommentStmt:
+      return child.strVal.strip
+    else:
+      return ""
+  return ""
+
+proc m9r4ProcDefRecord(procDef: NimNode; exportsSym: NimNode): NimNode =
+  ## Emit one ``exportsSym.add(ExportedSymbol(...))`` statement for a
+  ## single ``proc <name>*(<params>): <ret>`` declaration inside an
+  ## ``exports:`` sub-block.
+  let name = m9r4ProcDefName(procDef)
+  let formalParams = procDef[3]
+  let paramsRaw = m9r4FormalParamsRaw(formalParams)
+  let returnRaw = m9r4ReturnRaw(formalParams)
+  let doc = m9r4DocFromBody(procDef[^1])
+  let nameLit = newLit(name)
+  let paramsLit = newLit(paramsRaw)
+  let returnLit = newLit(returnRaw)
+  let docLit = newLit(doc)
+  result = quote do:
+    `exportsSym`.add(ExportedSymbol(
+      name: `nameLit`,
+      paramsRaw: `paramsLit`,
+      returnRaw: `returnLit`,
+      doc: `docLit`))
+
+proc m9r4CollectExports(body: NimNode; exportsSym: NimNode): NimNode =
+  ## Walk the children of an ``exports:`` sub-block and emit one
+  ## ``exportsSym.add(...)`` statement per ``nnkProcDef`` child. Doc
+  ## comments and discard statements at the block level are skipped.
+  ## Any other node shape is rejected with an actionable compile-time
+  ## error naming the offending node + suggesting the canonical
+  ## ``proc <name>*(<params>): <ret>`` shape.
+  result = newStmtList()
+  if body.kind != nnkStmtList:
+    return
+  for child in body:
+    case child.kind
+    of nnkCommentStmt, nnkDiscardStmt:
+      continue
+    of nnkProcDef:
+      result.add(m9r4ProcDefRecord(child, exportsSym))
+    else:
+      error("library api: exports: only accepts proc declarations; got " &
+            $child.kind & " (" & child.repr.strip & "). " &
+            "Use the shape: proc <name>*(<params>): <return>", child)
+
 proc emitM9R3LibraryApis*(packageName: string;
                           classified: seq[ClassifiedSection]): NimNode =
   ## Walk the classified section list for ``soM3LibraryArtifact``
@@ -2666,6 +2774,7 @@ proc emitM9R3LibraryApis*(packageName: string;
     let privateDefinesSym = ident("m9r3PrivateDefines")
     let compileOptsSym = ident("m9r3CompileOptions")
     let privateCompileOptsSym = ident("m9r3PrivateCompileOptions")
+    let exportsSym = ident("m9r4Exports")
     # Per-field setter statements. We START with the seq-init lines so
     # ``targetVar`` is always defined before the rewriter touches it.
     var setters = newStmtList()
@@ -2685,6 +2794,8 @@ proc emitM9R3LibraryApis*(packageName: string;
       var `compileOptsSym`: seq[string] = @[])
     setters.add(quote do:
       var `privateCompileOptsSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `exportsSym`: seq[ExportedSymbol] = @[])
     setters.add(quote do:
       var `apiSym` = LibraryApi(declared: true))
     # Walk the api: body and dispatch per-field.
@@ -2790,9 +2901,20 @@ proc emitM9R3LibraryApis*(packageName: string;
         if fieldStmt.len >= 2:
           let body = fieldStmt[^1]
           setters.add(m9r3CollectListAppends(body, privateCompileOptsSym))
+      of "exports":
+        # DSL-port M9.R.4: ``exports:`` sub-block declares the library's
+        # FFI-callable symbols as Nim proc signatures. Each
+        # ``nnkProcDef`` child gets lowered to an ``ExportedSymbol``
+        # record whose ``name`` / ``paramsRaw`` / ``returnRaw`` / ``doc``
+        # fields preserve the source text faithfully. Non-proc children
+        # raise an actionable compile-time error inside
+        # ``m9r4CollectExports``.
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r4CollectExports(body, exportsSym))
       else:
         # Unknown field — silently ignore for forward compatibility
-        # (e.g. M9.R.4's ``exports:`` sub-block).
+        # (future ``api:`` sub-blocks).
         discard
     # Wrap the setters + registration call in a ``block:`` so the
     # local vars don't leak into the surrounding scope. The
@@ -2810,6 +2932,7 @@ proc emitM9R3LibraryApis*(packageName: string;
         `apiSym`.privateDefines = `privateDefinesSym`
         `apiSym`.compileOptions = `compileOptsSym`
         `apiSym`.privateCompileOptions = `privateCompileOptsSym`
+        `apiSym`.exports = `exportsSym`
         registerLibraryApi(`pkgLit`, `libLit`, `apiSym`))
 
 macro package*(name: untyped; body: untyped): untyped =

@@ -4052,6 +4052,35 @@ type
     llkShared
     llkBoth
 
+  ExportedSymbol* = object
+    ## DSL-port M9.R.4: one FFI-callable symbol declared inside a
+    ## library's ``api: exports:`` sub-block.
+    ##
+    ## v1 stores the symbol's signature as **raw Nim source-text
+    ## strings**. The recipe author's Nim types (``Pcm`` /
+    ## ``PcmStream`` / etc.) are not necessarily resolvable in the
+    ## macro-expansion context — they're typically opaque library
+    ## types declared elsewhere. Storing the text faithfully lets
+    ## downstream tooling (cross-language binding generation, ABI-
+    ## stability validation) consume the surface without needing
+    ## sema-checked types here.
+    name*: string
+      ## C symbol name — the Nim ident with the trailing ``*`` export
+      ## marker stripped. The C ABI dispatches on this name verbatim.
+    paramsRaw*: string
+      ## Raw Nim source text of the parameter list (the inside of the
+      ## ``()`` after the proc name), e.g.
+      ## ``"pcm: ptr Pcm, name: cstring, stream: PcmStream, mode: cint"``.
+      ## The outer parentheses are stripped. Empty string means no
+      ## parameters.
+    returnRaw*: string
+      ## Raw Nim source text of the return type, e.g. ``"cint"``.
+      ## Empty string means a ``void`` / unspecified return.
+    doc*: string
+      ## Optional doc-comment captured from the first ``## ...``
+      ## statement inside the proc body. Empty string when the proc
+      ## carries no doc comment.
+
   LibraryApi* = object
     ## DSL-port M9.R.3: typed record for a library's ``api:`` block.
     ## Field-for-field mirror of the DSL surface; every field is
@@ -4100,6 +4129,13 @@ type
     privateCompileOptions*: seq[string]
       ## CMake PRIVATE compiler flags applied only while compiling
       ## this library.
+    exports*: seq[ExportedSymbol]
+      ## DSL-port M9.R.4: FFI-callable symbols declared inside the
+      ## library's ``api: exports:`` sub-block. Each entry stores the
+      ## C symbol name + raw Nim signature text + optional doc-comment.
+      ## Empty seq when the recipe declared no ``exports:`` sub-block
+      ## (the common case for non-FFI libraries). See ``ExportedSymbol``
+      ## for the per-symbol storage shape and rationale.
 
 var dslPortLibraryApis {.threadvar.}: Table[string, LibraryApi]
   ## Per-(packageName, libraryName) typed record. The key encoding
