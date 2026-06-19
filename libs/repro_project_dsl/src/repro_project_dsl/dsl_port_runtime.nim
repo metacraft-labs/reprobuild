@@ -726,6 +726,16 @@ type
     ## ``beginBuildContext``, popped by ``endBuildContext``.
     packageName*: string
     artifactName*: string
+    legacyBuildState*: PackageBuildState
+      ## The matching frame on ``runtime_core``'s ``activeBuilds`` stack
+      ## (pushed via ``beginBuildBlock``). The M4 module-init emission
+      ## drives ``beginBuildContext`` / ``endBuildContext``, but stdlib
+      ## recipe helpers reach the active package through
+      ## ``currentBuildContext()`` → ``currentBuildState()``, which reads
+      ## ``activeBuilds`` — a SEPARATE stack. Pushing both in lockstep
+      ## lets a ``build:`` body call those helpers (e.g.
+      ## ``currentBuildContext().toolchain.compile(...)``) without
+      ## tripping "build DSL operation used outside an active build".
 
 var dslPortBuildActions: seq[DslBuildAction]
   ## Append-only registry. ``registerBuildAction`` adds one row per
@@ -800,9 +810,14 @@ proc beginBuildContext*(packageName, artifactName: string) =
   ## wraps every recognised ``build:`` body in a try/finally that pairs
   ## this with ``endBuildContext``. Multiple pushes nest cleanly —
   ## ``output(path)`` always attributes to the TOP frame.
+  # Also push the matching ``activeBuilds`` frame so recipe helpers that
+  # read ``currentBuildState()`` / ``currentBuildContext()`` resolve the
+  # active package when invoked from inside the M4-driven build body.
+  let legacy = beginBuildBlock(packageName, ownerName = artifactName)
   dslPortActiveBuildContext.add(DslBuildContextFrame(
     packageName: packageName,
-    artifactName: artifactName))
+    artifactName: artifactName,
+    legacyBuildState: legacy))
 
 proc endBuildContext*() =
   ## Pop the top frame. Safe to call on an empty stack (no-op) — the
@@ -810,7 +825,11 @@ proc endBuildContext*() =
   ## defensive no-op semantics let unit tests reset between scenarios
   ## without crashing when state was already clean.
   if dslPortActiveBuildContext.len > 0:
+    let frame = dslPortActiveBuildContext[^1]
     dslPortActiveBuildContext.setLen(dslPortActiveBuildContext.len - 1)
+    # Pop the paired ``activeBuilds`` frame pushed in ``beginBuildContext``.
+    if frame.legacyBuildState != nil:
+      endBuildBlock(frame.legacyBuildState)
 
 proc currentBuildContextFrame*(): DslBuildContextFrame =
   ## Return the top frame, or a zero-value frame (both fields empty)
