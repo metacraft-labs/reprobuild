@@ -17,8 +17,18 @@ case "${REPROBUILD_BUILD_MODE:-debug}" in
 esac
 
 if [ "$(uname -s)" = "Darwin" ]; then
+  macos_shim_arch_flags=()
+  if [ "$(uname -m)" = "arm64" ]; then
+    macos_shim_arch_flags+=(
+      --passC:-arch --passC:arm64
+      --passC:-arch --passC:arm64e
+      --passL:-arch --passL:arm64
+      --passL:-arch --passL:arm64e
+    )
+  fi
   nim c \
     ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+    ${macos_shim_arch_flags[@]+"${macos_shim_arch_flags[@]}"} \
     --app:lib \
     --threads:on \
     --nimcache:build/nimcache/repro-monitor-shim-dylib \
