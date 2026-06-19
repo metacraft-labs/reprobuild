@@ -3698,6 +3698,24 @@ proc registeredBuildFlags*(packageName, artifactName, channel: string):
   ## Return the registered flag seq for the ``(packageName, artifactName,
   ## channel)`` triple in source-declaration order. Returns an empty seq
   ## when nothing was registered or ``channel`` is unknown.
+  ##
+  ## **DEPRECATED — M9.R.6.** This accessor is retained for
+  ## backward-decode of recipes that still spell ``mesonOptions:`` /
+  ## ``cmakeFlags:`` / ``configureFlags:`` / ``makeFlags:`` /
+  ## ``ninjaFlags:`` blocks. The M9.R.5b recipe sweep will lift these
+  ## flags into the per-package ``config:`` block; once the sweep
+  ## lands, this accessor + its underlying registry will be removed.
+  ## New code MUST route flag values through ``config:`` Configurables
+  ## instead. The narrowed from-source conventions (M9.R.6) no longer
+  ## read this registry directly — the synthesis layer at
+  ## ``libs/repro_dsl_stdlib/.../synthesis/from_source_default_build.nim``
+  ## owns the channel-to-constructor-arg mapping during the transition
+  ## via ``legacyMesonOptions`` / ``legacyCmakeFlags`` /
+  ## ``legacyConfigureFlags`` / ``legacyMakeFlags``. A ``{.deprecated.}``
+  ## pragma is intentionally NOT added here because every from-source
+  ## convention still calls this proc until the synthesis migration
+  ## completes; adding the pragma would emit warnings on every recipe
+  ## build until the sweep retires the remaining call sites.
   let key = m9iFlagSetKey(packageName, artifactName)
   if key notin dslPortBuildFlagSets:
     return @[]

@@ -6923,6 +6923,32 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.6 — convention narrowing + default-build synthesis.
+  # Pins:
+  #   * defaultBuildConventionFor dispatch table (meson / cmake /
+  #     autotools / make / custom / "");
+  #   * shouldSynthesizeDefaultBuild gate (fetch + no-explicit-build +
+  #     known convention) including the custom-no-build raise;
+  #   * synthesizeMesonPackage / synthesizeCmakePackage /
+  #     synthesizeAutotoolsPackage thread legacy flag-channel values
+  #     into the M9.R.2b constructors;
+  #   * raiseCustomBuildRequired surfaces an actionable error for
+  #     custom-convention recipes lacking an explicit ``build:``
+  #     block;
+  #   * registeredBuildFlags backward-decode stays functional with
+  #     the deprecation comment in place;
+  #   * registry-based recognition (registriesIncludeMeson + sibling
+  #     helpers) consults registeredNativeBuildDeps in lieu of the
+  #     legacy source-text scanner.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
+    binary: "build/test-bin/t_m9r6_convention_narrowing_default_synthesis",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",

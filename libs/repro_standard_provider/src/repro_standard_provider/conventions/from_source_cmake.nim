@@ -615,14 +615,36 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
 # Convention entry
 # ---------------------------------------------------------------------------
 
+proc registriesIncludeCmake(packageName: string): bool {.gcsafe.} =
+  ## M9.R.6: structured-registry check. Replaces the source-text
+  ## ``usesIncludesCmake`` parser for primary recognition. Reads
+  ## ``registeredNativeBuildDeps(packageName)`` and matches when any
+  ## constraint string's leading token is ``"cmake"``.
+  {.cast(gcsafe).}:
+    for raw in registeredNativeBuildDeps(packageName):
+      let stripped = raw.strip()
+      var head = ""
+      for ch in stripped:
+        if ch in {' ', '\t', '>', '<', '=', '!', ',', ';'}:
+          break
+        head.add(ch)
+      if head == "cmake":
+        return true
+  false
+
 proc fromSourceCmakeRecognize(projectRoot: string;
                               request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
   ##
+  ## M9.R.6: registry-based recognition. Reads
+  ## ``registeredNativeBuildDeps`` (M9.R.1) for the ``"cmake"`` token
+  ## as the primary signal, with the legacy source-text
+  ## ``usesIncludesCmake`` scanner as a fallback.
+  ##
   ## M9.N: claims a recipe based on DECLARATION (``fetch:`` registered +
-  ## ``uses:`` declares ``cmake`` + non-empty cmake flags channel + no
-  ## in-tree ``CMakeLists.txt`` at projectRoot). NO host-PATH gate — the
-  ## engine resolves tool identity AFTER recognise, possibly via cache
+  ## ``nativeBuildDeps:`` declares ``cmake`` + no in-tree
+  ## ``CMakeLists.txt`` at projectRoot). NO host-PATH gate — the engine
+  ## resolves tool identity AFTER recognise, possibly via cache
   ## substitute or source build.
   ##
   ## TODO(M9.N Batch B): resolve tool identity through engine instead of
@@ -635,10 +657,13 @@ proc fromSourceCmakeRecognize(projectRoot: string;
   let source = readReprobuildSource(projectRoot)
   if source.len == 0:
     return false
-  if not usesIncludesCmake(source):
-    return false
   let dslPackageName = extractFirstPackageName(source)
   if dslPackageName.len == 0:
+    return false
+  # M9.R.6: structured-registry check first; legacy text scanner is the
+  # OR'd fallback so the recognise behaviour stays a superset.
+  if not registriesIncludeCmake(dslPackageName) and
+      not usesIncludesCmake(source):
     return false
   {.cast(gcsafe).}:
     let spec = registeredFetchSpec(dslPackageName)

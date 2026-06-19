@@ -657,14 +657,41 @@ proc emitStageCopyAction(projectRoot, staging, installStamp: string;
 # Convention entry
 # ---------------------------------------------------------------------------
 
+proc registriesIncludeMeson(packageName: string): bool {.gcsafe.} =
+  ## M9.R.6: structured-registry check. Replaces the source-text
+  ## ``usesIncludesMeson`` parser for primary recognition. Reads
+  ## ``registeredNativeBuildDeps(packageName)`` and matches when any
+  ## constraint string's leading token is ``"meson"``. The registry is
+  ## populated by the recipe macro at module-init time so the check
+  ## fires reliably even when ``nativeBuildDeps:`` was declared inside
+  ## a ``when`` / ``case`` branch the text scanner can't reach.
+  {.cast(gcsafe).}:
+    for raw in registeredNativeBuildDeps(packageName):
+      let stripped = raw.strip()
+      var head = ""
+      for ch in stripped:
+        if ch in {' ', '\t', '>', '<', '=', '!', ',', ';'}:
+          break
+        head.add(ch)
+      if head == "meson":
+        return true
+  false
+
 proc fromSourceMesonRecognize(projectRoot: string;
                               request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
   ##
+  ## M9.R.6: registry-based recognition. Reads
+  ## ``registeredNativeBuildDeps`` (M9.R.1) for the ``"meson"`` token
+  ## as the primary signal, with the legacy source-text
+  ## ``usesIncludesMeson`` scanner as a fallback for recipes whose
+  ## macro hasn't yet populated the registry at probe time (the lock-
+  ## free registry takes one module-init pass to be visible).
+  ##
   ## M9.N: claims a recipe based on DECLARATION (``fetch:`` registered +
-  ## ``uses:`` declares ``meson`` + non-empty meson flags channel + no
-  ## in-tree ``meson.build`` at projectRoot). NO host-PATH gate — the
-  ## engine resolves tool identity AFTER recognise, possibly via cache
+  ## ``nativeBuildDeps:`` declares ``meson`` + no in-tree
+  ## ``meson.build`` at projectRoot). NO host-PATH gate — the engine
+  ## resolves tool identity AFTER recognise, possibly via cache
   ## substitute or source build.
   ##
   ## TODO(M9.N Batch B): resolve tool identity through engine instead of
@@ -677,10 +704,15 @@ proc fromSourceMesonRecognize(projectRoot: string;
   let source = readReprobuildSource(projectRoot)
   if source.len == 0:
     return false
-  if not usesIncludesMeson(source):
-    return false
   let dslPackageName = extractFirstPackageName(source)
   if dslPackageName.len == 0:
+    return false
+  # M9.R.6: structured-registry check first; legacy text scanner is
+  # the OR'd fallback so the recognise behaviour stays a superset of
+  # the pre-M9.R.6 shape (no regression on recipes whose macros haven't
+  # populated the registry yet).
+  if not registriesIncludeMeson(dslPackageName) and
+      not usesIncludesMeson(source):
     return false
   {.cast(gcsafe).}:
     let spec = registeredFetchSpec(dslPackageName)
