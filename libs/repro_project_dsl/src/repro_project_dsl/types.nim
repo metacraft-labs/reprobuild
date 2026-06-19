@@ -321,6 +321,7 @@ type
     bdpDefault
     bdpAutomaticMonitor
     bdpMakeDepfile
+    bdpDeclaredOnly
 
   BuildActionDependencyPolicy* = object
     kind*: BuildActionDependencyPolicyKind
