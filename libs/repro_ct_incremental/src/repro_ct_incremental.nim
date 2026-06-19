@@ -9,5 +9,7 @@
 ## repo for the campaign plan.
 
 import repro_ct_incremental/trace_reader
+import repro_ct_incremental/engine
 
 export trace_reader
+export engine

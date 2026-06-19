@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: M0 complete, M1 next
+#+STATUS: M1 complete, M2 next
 
 * Overview
 
@@ -96,26 +96,26 @@
   the fixture README cites the real trace it was modeled on.
 
 * M1 — Deep-hash invalidation engine (the core)
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: decide skip vs re-run from executed functions + current source.
 
   Deliverables:
-  - [ ] `proc shallowHash*(funcSource: string): string` — stable hash of a
+  - [X] `proc shallowHash*(funcSource: string): string` — stable hash of a
     function's body text (normalize trailing whitespace; document what is/ isn't
     significant). Source extraction: given `ExecutedFunction{file, defLine}`,
     extract the function body via a simple, documented indentation/brace
     heuristic adequate for the fixture language (tree-sitter is a later
     milestone).
-  - [ ] `proc deepHash*(funcs: seq[(name, shallow)]): string` — sort by name,
+  - [X] `proc deepHash*(funcs: seq[(name, shallow)]): string` — sort by name,
     hash the concatenation (§16.7.3).
-  - [ ] A cache type + JSON persistence: `test → {deepHash, deps:[ExecutedFunction]}`
+  - [X] A cache type + JSON persistence: `test → {deepHash, deps:[ExecutedFunction]}`
     stored under `.repro-ct-incremental/cache.json` (path configurable).
-  - [ ] `proc decide*(testId; traceDir; sourceRoot; cache): IncrementalDecision`
+  - [X] `proc decide*(testId; traceDir; sourceRoot; cache): IncrementalDecision`
     returning `idRunFresh` (no cache / new test), `idSkipUnchanged`, or
     `idRerunChanged{changedFuncs}`. On a fresh/changed run the caller is expected
     to re-execute, re-trace, and call `record*` to update the cache.
-  - [ ] `proc record*(cache; testId; traceDir; sourceRoot)` — recompute deps +
+  - [X] `proc record*(cache; testId; traceDir; sourceRoot)` — recompute deps +
     deep hash from a fresh trace and store them.
 
   Automated tests (the "simple integration test, few functions"):
