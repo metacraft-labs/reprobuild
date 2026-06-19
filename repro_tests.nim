@@ -182,6 +182,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.O — auto-generated producer credentials + lazy WSL repro-cache start.
+  TestSpec(
+    source: "libs/repro_binary_cache_client/tests/test_auto_credentials.nim",
+    binary: "build/test-bin/test_auto_credentials",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim",
     binary: "build/test-bin/t_a2_p1_manifest_roundtrip",

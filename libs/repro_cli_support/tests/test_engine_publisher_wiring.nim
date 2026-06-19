@@ -104,22 +104,31 @@ suite "M9.L.4-refactor Step C — production publisher wiring":
     check res.error.len == 0
     check res.bytesUploaded == 0
 
-  test "closure soft-fails with structured error when key/cert env vars are unset":
-    # When no key/cert env vars are configured, the closure returns
-    # ``ok = false`` with a warning naming both env vars. The engine
-    # logs the warning into stats but does NOT abort the build (soft
-    # fail by design). This is what every developer machine without
-    # the binary-cache credentials hits — the build still succeeds
-    # locally.
+  test "closure soft-fails when REPRO_CACHE_DISABLE silences auto-gen":
+    # M9.O — when ``REPRO_CACHE_DISABLE=1`` is set, the auto-credential
+    # path is skipped along with everything else. The closure returns
+    # ``ok = false`` with an empty error (silent disable) — the same
+    # contract the in-process substitution path honours. This is the
+    # cleanest way for a CI / test harness to opt out of touching
+    # user-config state during a publisher smoke test.
+    #
+    # M9.O removed the prior "env vars unset → structured warning"
+    # gate: developer machines without preconfigured env vars now hit
+    # the auto-credential path (generating keys under
+    # ``~/.config/repro/producer-keypair/`` or
+    # ``%LOCALAPPDATA%\repro\producer-keypair\``) and the soft-fail
+    # surfaces at the HTTP layer when the cache endpoint isn't
+    # reachable. Production callers that need the old "no env vars =
+    # silent skip" semantics MUST set ``REPRO_CACHE_DISABLE=1``.
     resetTmp()
     clearEnv()
+    putEnv("REPRO_CACHE_DISABLE", "1")
+    defer: delEnv("REPRO_CACHE_DISABLE")
     let pub = mkBinaryCachePublisher()
     check pub != nil
     let res = pub(stubRequest())
     check res.ok == false
-    check res.error.len > 0
-    check "REPRO_BINARY_CACHE_KEY_PATH" in res.error
-    check "REPRO_BINARY_CACHE_CERT_PATH" in res.error
+    check res.error.len == 0
     check res.bytesUploaded == 0
 
   test "defaultBuildEngineConfig leaves binaryCachePublisher nil " &
