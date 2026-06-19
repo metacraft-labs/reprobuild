@@ -2505,6 +2505,28 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passL:-L" & clingoPrefix / "lib")
     result.add("--passL:-Wl,-rpath," & clingoPrefix / "lib")
 
+proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
+  ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module
+  ## must be compiled with when it ``import``s ``repro_project_dsl`` (or a
+  ## generated interface stub, which itself ``import``s the DSL umbrella)
+  ## from OUTSIDE the reprobuild source tree.
+  ##
+  ## The DSL umbrella takes hard dependencies on reprobuild's own
+  ## libraries (``repro_binary_cache_client``, ``repro_binary_cache_server``,
+  ## ``repro_core`` …) plus out-of-tree packages (``nimcrypto`` …). In a
+  ## normal in-tree compile reprobuild's ``config.nims`` registers all of
+  ## those on ``--path``; a consumer compiled in a scratch directory never
+  ## loads that ``config.nims``, so the flags have to be replayed
+  ## explicitly. This is the same flag set the interface-extraction and
+  ## provider-compile commands assemble (see ``interfaceExtractionCommand``
+  ## / ``providerCompileCommand``), exposed publicly so the engine-side
+  ## consumer compile and the integration tests share one authoritative
+  ## source of truth instead of hand-maintaining a parallel ``--path``
+  ## list.
+  result.add(reproLibPathFlags(workDir))
+  result.add(reproPackagePathFlags(workDir))
+  result.add(externalHashFlags(workDir))
+
 proc fnvHex64(parts: openArray[string]): string =
   ## FNV-1a 64-bit hex digest of the concatenation of `parts` (with a NUL
   ## separator between parts so prefix collisions are impossible). Rendered

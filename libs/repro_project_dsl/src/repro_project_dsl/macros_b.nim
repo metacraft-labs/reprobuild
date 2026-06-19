@@ -1049,7 +1049,7 @@ proc emitM4BuildActions*(packageName: string;
         registerBuildAction(`pkgLit`, `artifactLit`, `bodyReprLit`)
         beginBuildContext(`pkgLit`, `artifactLit`)
         try:
-          when not defined(reproProviderMode):
+          when not defined(reproProviderMode) and not defined(reproInterfaceMode):
             `body`
         finally:
           endBuildContext())
@@ -1118,7 +1118,7 @@ proc emitM4ArtifactBuildLowering*(packageName: string;
           registerBuildAction(`pkgLit`, `artifactLit`, `bodyReprLit`)
           beginBuildContext(`pkgLit`, `artifactLit`)
           try:
-            when not defined(reproProviderMode):
+            when not defined(reproProviderMode) and not defined(reproInterfaceMode):
               `body`
           finally:
             endBuildContext())
