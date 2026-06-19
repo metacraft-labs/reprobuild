@@ -154,12 +154,13 @@ suite "DSL-port M9.R.5b — recipe options sweep":
       "m9r5bTest.demoKey", "<unset>")
     check overridden == "override-val"
 
-  test "the M9.I registry is empty for sampled recipes (sweep gate)":
-    # After the M9.R.5b sweep, no recipe registers ``mesonOptions:`` /
-    # ``cmakeFlags:`` / ``configureFlags:`` / ``makeFlags:`` rows. The
-    # legacy accessor for these channels returns empty seqs across the
-    # sampled recipes. This is the M9.R.6.1 unblocker on the runtime
-    # side (complementary to the source-text gate above).
-    check registeredBuildFlags("dbusBrokerSource", "", "meson").len == 0
-    check registeredBuildFlags("jsonCSource", "", "cmake").len == 0
-    check registeredBuildFlags("opensslSource", "", "configure").len == 0
+  test "registeredBuildFlags accessor was retired (M9.R.6.1)":
+    # M9.R.6.1 (2026-06-19) physically removed the M9.I
+    # ``registerBuildFlag`` / ``registeredBuildFlags`` runtime API
+    # plus the ``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:``
+    # / ``makeFlags:`` / ``ninjaFlags:`` parser arms. The test below
+    # uses ``compiles(...)`` to confirm the accessor is unreachable —
+    # if anyone resurrects the registry, this assertion fails at
+    # compile time, signalling the regression.
+    check not compiles((proc (): int =
+      result = registeredBuildFlags("dbusBrokerSource", "", "meson").len)())

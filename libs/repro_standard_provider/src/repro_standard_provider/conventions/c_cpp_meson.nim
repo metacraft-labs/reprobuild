@@ -583,14 +583,13 @@ proc cCppMesonEmitFragment(projectRoot: string;
       if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
       else: DslFetchSpec()
     let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
-    let mesonOptions =
-      if dslPackageName.len > 0:
-        registeredBuildFlags(dslPackageName, "", "meson")
-      else: @[]
-    let ninjaFlags =
-      if dslPackageName.len > 0:
-        registeredBuildFlags(dslPackageName, "", "ninja")
-      else: @[]
+    # M9.R.6.1: the M9.I ``registeredBuildFlags`` registry was retired.
+    # The in-tree c_cpp_meson convention no longer threads recipe-side
+    # mesonOptions / ninjaFlags into the configure / compile argv. The
+    # recipe author drives per-tool options via an explicit ``build:``
+    # block calling the M9.R.2b ``meson_package(...)`` constructor.
+    let mesonOptions: seq[string] = @[]
+    let ninjaFlags: seq[string] = @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]

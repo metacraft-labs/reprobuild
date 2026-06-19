@@ -105,13 +105,22 @@ suite "from-source-custom convention M9.N Batch C.1 — meson recipe":
     check spec.url.len > 0
     let shellRows = registeredShellActions("mesonSource")
     check shellRows.len == 4
-    # All four standard flag channels must be empty — that's how the
-    # catch-all distinguishes itself from the standard from-source-*
-    # siblings.
-    check registeredBuildFlags("mesonSource", "", "meson").len == 0
-    check registeredBuildFlags("mesonSource", "", "cmake").len == 0
-    check registeredBuildFlags("mesonSource", "", "configure").len == 0
-    check registeredBuildFlags("mesonSource", "", "make").len == 0
+    # M9.R.6.1: the flag-channel discriminators retired with the
+    # registry. The custom convention now distinguishes itself from
+    # the standard from-source-* siblings by checking
+    # ``registeredNativeBuildDeps`` for the canonical drivers.
+    var sawHigherPriorityDriver = false
+    for raw in registeredNativeBuildDeps("mesonSource"):
+      let stripped = raw.strip()
+      var head = ""
+      for ch in stripped:
+        if ch in {' ', '\t', '>', '<', '=', '!', ',', ';'}:
+          break
+        head.add(ch)
+      if head in ["meson", "cmake", "autoconf", "automake", "libtool",
+                  "make"]:
+        sawHigherPriorityDriver = true
+    check not sawHigherPriorityDriver
     let request = dummyRequest(MesonRecipe)
     check conv.recognize(MesonRecipe, request)
 

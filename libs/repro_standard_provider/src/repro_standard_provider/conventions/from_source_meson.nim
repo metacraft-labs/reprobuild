@@ -1,4 +1,5 @@
-## From-source Meson language convention (Tier 2b) — M9.L.0.
+## From-source Meson language convention (Tier 2b) — M9.L.0 +
+## M9.R.6.1 narrowing.
 ##
 ## Sibling of the M39 ``c-cpp-meson`` convention. Where ``c-cpp-meson``
 ## recognises in-tree meson projects (``<projectRoot>/meson.build``
@@ -8,6 +9,27 @@
 ## to be fetched + extracted first. The 74 ``recipes/packages/source/*``
 ## production recipes (dbus-broker, glib2, fontconfig, ...) all follow
 ## this shape.
+##
+## ## M9.R.6.1 — convention narrowed to fetch + sentinel
+##
+## As of 2026-06-19 the convention emits only TWO actions per recipe:
+##
+##   1. A **fetch action** (downloads + extracts the source tarball).
+##   2. A **synthesis sentinel** marker action (``from-source-meson-
+##      sentinel``) that records which convention claimed the recipe.
+##      The sentinel exists so downstream tooling can inspect the
+##      recipe graph without having to re-run the convention dispatch;
+##      it carries no argv that affects build behaviour.
+##
+## The build-graph actions (configure / compile / install) were
+## removed from this module's ``emitFragment``. They now come from
+## the recipe's explicit ``build:`` block calling the M9.R.2b
+## Layer-1 typed constructor ``meson_package(...)`` — every recipe
+## that needs per-tool options has been swept onto that shape by
+## M9.R.5b. Recipes without an explicit ``build:`` block fall
+## through to the stdlib synthesis path at
+## ``libs/repro_dsl_stdlib/.../synthesis/from_source_default_build.nim``
+## via ``synthesizeMesonPackage``.
 ##
 ## ## Recognition contract
 ##
@@ -343,35 +365,6 @@ proc hasMesonBuild(projectRoot: string): bool =
 proc buildScratchDir(projectRoot: string): string =
   projectRoot / ScratchDirName / FromSourceMesonSubdir / "build"
 
-proc stagingDir(projectRoot: string): string =
-  projectRoot / ScratchDirName / FromSourceMesonSubdir / "staging"
-
-proc setupStampPath(projectRoot: string): string =
-  ## A custom stamp file the setup action touches on success. The
-  ## downstream compile / install actions key off the stamp instead of
-  ## meson's ``build.ninja`` (which can be touched during compile too).
-  buildScratchDir(projectRoot) / "from-source-meson-setup.stamp"
-
-proc compileStampPath(projectRoot: string): string =
-  buildScratchDir(projectRoot) / "from-source-meson-compile.stamp"
-
-proc installStampPath(projectRoot: string): string =
-  buildScratchDir(projectRoot) / "from-source-meson-install.stamp"
-
-proc artifactOutputDir(projectRoot, member: string): string =
-  projectRoot / OutputDirName / member
-
-proc artifactOutputPath(projectRoot, member: string;
-                        kind: FromSourceMesonMemberKind): string =
-  case kind
-  of fsmExecutable:
-    when defined(windows):
-      artifactOutputDir(projectRoot, member) / (member & ".exe")
-    else:
-      artifactOutputDir(projectRoot, member) / member
-  of fsmLibraryStatic:
-    artifactOutputDir(projectRoot, member) / ("lib" & member & ".a")
-
 proc sanitizeNamePart(value: string): string =
   for ch in value:
     if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
@@ -381,263 +374,63 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-# ---------------------------------------------------------------------------
-# Tool discovery — lazy. ``recognize`` does NOT call these (per the
-# module docstring): a host without meson can still register the
-# convention, exercise it via tests, and lower the action graph; the
-# actual build run will fail loudly at execution time.
-# ---------------------------------------------------------------------------
-
-proc mesonExecutable(): string =
-  ## M9.N Batch B: emit the BARE tool name ``meson`` (not an absolute
-  ## path returned by ``findExe``). The convention now stamps
-  ## ``toolIdentityRefs = @["meson", ...]`` on every action it emits;
-  ## the engine resolves that ref through its catalog at fork time and
-  ## prepends the resolved bin directory to ``PATH``, so the bare
-  ## ``meson`` argv-entry finds the right binary regardless of whether
-  ## the host has meson installed.
-  ##
-  ## Pre-Batch-B the convention baked the host-resolved absolute path
-  ## here, which produced an invalid argv on hosts without meson —
-  ## the engine then tried to fork ``""`` and failed. With Batch B's
-  ## env-plumbing in place, deferring resolution to the engine is the
-  ## only honest shape: a host without meson now sees the engine fall
-  ## through to the substitute / source-build path instead of
-  ## tripping at recognise / emit time.
-  "meson"
+# M9.R.6.1: the ``stagingDir`` / ``setupStampPath`` / ``compileStampPath``
+# / ``installStampPath`` / ``artifactOutputDir`` / ``artifactOutputPath``
+# helpers + the ``mesonExecutable`` shim were removed alongside the
+# 5-stage ``emitFragment`` body. Only the sentinel-action helpers
+# below remain.
 
 # ---------------------------------------------------------------------------
 # Action emission
 # ---------------------------------------------------------------------------
 
-proc emitSetupAction(projectRoot, mesonExe, srcDir, buildDir: string;
-                     mesonOptions: seq[string];
-                     fetchDeps: seq[string];
-                     fetchStamps: seq[string]):
-                       tuple[action: BuildActionDef; stamp: string] =
-  ## ``meson setup <buildDir> <srcDir> --buildtype=release
-  ## --backend=ninja <mesonOptions...>``.
+proc sentinelStampPath(projectRoot: string): string =
+  ## The synthesis sentinel's stamp output — a tiny marker file so the
+  ## sentinel action has a deterministic output path the engine can
+  ## key dependents off.
+  buildScratchDir(projectRoot) / "from-source-meson-sentinel.stamp"
+
+proc emitSynthesisSentinelAction(projectRoot, dslPackageName: string;
+                                 fetchActionId, fetchStamp: string;
+                                 identity: CacheEntryIdentity):
+                                   BuildActionDef =
+  ## Emit the M9.R.6.1 narrowed synthesis sentinel.
   ##
-  ## The convention always passes ``--buildtype=release`` AND
-  ## ``--backend=ninja`` as anchor flags. Recipes whose mesonOptions
-  ## already include ``--buildtype=...`` will see meson honour the LAST
-  ## occurrence (right-most wins) — this is consistent with the in-tree
-  ## c_cpp_meson convention's behaviour.
-  createDir(extendedPath(buildDir))
-  let stamp = setupStampPath(projectRoot)
-  # M9.N Batch B: emit bare ``sh`` so the engine's PATH plumbing
-  # (via ``toolIdentityRefs``) resolves it through the catalog at
-  # fork time. ``findExe`` is the legacy fallback only when the
-  # caller didn't supply the ref list — once Batch B lands, every
-  # action emitted here carries ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    var trailingOpts = ""
-    for opt in mesonOptions:
-      trailingOpts.add(" \"")
-      trailingOpts.add(opt.replace("\"", "\\\""))
-      trailingOpts.add("\"")
-    let script = "set -e; \"" & escapedMeson & "\" setup \"" &
-      escapedBuild & "\" \"" & escapedSrc &
-      "\" --buildtype=release --backend=ninja" & trailingOpts &
-      "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[mesonExe, "setup", buildDir, srcDir,
-      "--buildtype=release", "--backend=ninja"]
-    for opt in mesonOptions:
-      argv.add(opt)
-  var inputs: seq[string] = @[]
-  for st in fetchStamps:
-    inputs.add(st)
-  let action = buildAction(
-    id = "from-source-meson-setup",
-    call = inlineExecCall(argv, projectRoot),
-    deps = fetchDeps,
-    inputs = inputs,
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.setup",
-    # M9.N Batch B: the setup action shells out via ``sh -c`` to
-    # ``meson setup --backend=ninja`` which probes ``ninja`` and a
-    # working C compiler at configure time. The engine resolves each
-    # ref via the catalog and prepends the resolved bin dirs to PATH
-    # at fork time, so the script's bare ``meson`` invocation finds
-    # the right binary regardless of whether the host has meson
-    # installed. ``sh`` is added so the shell-wrapped script path
-    # itself is plumbed when the host lacks ``sh`` on PATH.
-    toolIdentityRefs = @["meson", "ninja", "gcc", "sh"])
-  (action, stamp)
-
-proc emitCompileAction(projectRoot, mesonExe, buildDir, setupStamp: string):
-                        tuple[action: BuildActionDef; stamp: string] =
-  ## ``meson compile -C <buildDir>``. The stamp file lets downstream
-  ## actions key off compile success without relying on meson's internal
-  ## ``build.ninja`` touch behaviour.
-  let stamp = compileStampPath(projectRoot)
-  # M9.N Batch B: see emitSetupAction — bare ``sh`` is resolved via
-  # ``toolIdentityRefs`` at fork time.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; \"" & escapedMeson & "\" compile -C \"" &
-      escapedBuild & "\"; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[mesonExe, "compile", "-C", buildDir]
-  let action = buildAction(
-    id = "from-source-meson-compile",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-meson-setup"],
-    inputs = @[setupStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.compile",
-    # M9.N Batch B: same toolset as setup. ``meson compile`` re-invokes
-    # the ninja backend (which in turn invokes the C compiler) and
-    # shells out via ``sh -c``.
-    toolIdentityRefs = @["meson", "ninja", "gcc", "sh"])
-  (action, stamp)
-
-proc emitInstallAction(projectRoot, mesonExe, buildDir, staging,
-                       compileStamp: string;
-                       identity: CacheEntryIdentity):
-                         tuple[action: BuildActionDef; stamp: string] =
-  ## ``meson install -C <buildDir> --destdir <staging>``.
+  ## The sentinel is a single ``BuildAction`` whose argv touches a stamp
+  ## file under the convention's scratch dir. It exists to:
   ##
-  ## Meson's ``--destdir`` is the standard escape hatch for non-root
-  ## installs: meson honours the recipe's ``--prefix`` setting but
-  ## prefixes every install path with ``<destdir>``. For the M9.L.0
-  ## slice we assume the default prefix ``/usr/local`` (or whatever
-  ## the recipe pins via ``mesonOptions``) and harvest binaries from
-  ## ``<staging><prefix>/bin/<member>``. See module docstring's "Honest
-  ## deferrals" section for the limitations.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the install action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful install. The convention is unaware of the
-  ## CLI shape (publish argv / network) — that lives in the engine.
-  createDir(extendedPath(staging))
-  let stamp = installStampPath(projectRoot)
-  # M9.N Batch B: see emitSetupAction — bare ``sh`` is resolved via
-  # ``toolIdentityRefs`` at fork time.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStaging = staging.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; \"" & escapedMeson & "\" install -C \"" &
-      escapedBuild & "\" --destdir \"" & escapedStaging &
-      "\"; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[mesonExe, "install", "-C", buildDir, "--destdir", staging]
-  let action = buildAction(
-    id = "from-source-meson-install",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-meson-compile"],
-    inputs = @[compileStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.install",
-    publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity),
-    # M9.N Batch B: ``meson install`` re-invokes the build system to
-    # determine install targets; bare ``meson`` resolves via PATH.
-    toolIdentityRefs = @["meson", "ninja", "sh"])
-  (action, stamp)
-
-proc dasherise(name: string): string =
-  ## Heuristic camelCase → dash conversion: ``dbusBroker`` →
-  ## ``dbus-broker``. Used to map a recipe-side member name to the
-  ## meson-installed binary name. Limited to the M9.L.0 vertical slice
-  ## (dbus-broker) — a follow-up milestone can lift a per-artifact
-  ## ``installedAs:`` override into the DSL when more recipes surface
-  ## naming mismatches.
-  for i, ch in name:
-    if ch in {'A' .. 'Z'} and i > 0:
-      result.add('-')
-      result.add(chr(ord(ch) - ord('A') + ord('a')))
-    else:
-      result.add(ch)
-
-proc stagedBinaryPath(staging, member: string;
-                      kind: FromSourceMesonMemberKind): string =
-  ## Heuristic guess at the meson-installed path. ``meson install
-  ## --destdir <staging>`` lays binaries at ``<staging><prefix>/bin/...``.
-  ## We assume the default prefix ``/usr/local`` per Meson's docs;
-  ## recipes that override ``--prefix`` via mesonOptions will need an
-  ## ``installPrefix:`` knob (deferred — see module docstring).
-  let dashName = dasherise(member)
-  case kind
-  of fsmExecutable:
-    when defined(windows):
-      staging / "usr" / "local" / "bin" / (dashName & ".exe")
-    else:
-      staging / "usr" / "local" / "bin" / dashName
-  of fsmLibraryStatic:
-    staging / "usr" / "local" / "lib" / ("lib" & dashName & ".a")
-
-proc emitStageCopyAction(projectRoot, staging, installStamp: string;
-                         member: FromSourceMesonMember;
-                         identity: CacheEntryIdentity): BuildActionDef =
-  ## Copy ``<staging>/usr/local/bin/<member>`` to
-  ## ``<projectRoot>/.repro/output/<member>/<member>``. This action is
-  ## what the engine's output-collection step keys off — the canonical
-  ## per-artifact output path matches the existing direct conventions'
-  ## ``<root>/.repro/output/<name>/<name>`` schema.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful per-artifact stage. The identity is the
-  ## same value the install action carries — both edges contribute to
-  ## the same logical cache entry.
-  let outDir = artifactOutputDir(projectRoot, member.name)
-  createDir(extendedPath(outDir))
-  let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
-  let stagedPath = stagedBinaryPath(staging, member.name, member.kind)
-  # M9.N Batch B: see emitSetupAction — bare ``sh`` is resolved via
-  # ``toolIdentityRefs`` at fork time.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedStaged = stagedPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOut = outPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOutDir = outDir.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; mkdir -p \"" & escapedOutDir &
-      "\"; cp -f \"" & escapedStaged & "\" \"" & escapedOut & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @["cp", stagedPath, outPath]
-  let kindTag = case member.kind
-    of fsmExecutable: "executable"
-    of fsmLibraryStatic: "library-static"
+  ##   1. Record the convention identity (``meson``) on a discoverable
+  ##      build-graph node so downstream tooling can introspect the
+  ##      recipe graph without re-running convention dispatch.
+  ##   2. Provide a stable dep-target for the synthesis-layer path
+  ##      (``synthesizeMesonPackage`` in
+  ##      ``libs/repro_dsl_stdlib/.../synthesis/from_source_default_build.nim``)
+  ##      to hang the configure/compile/install actions off when a
+  ##      recipe takes the no-``build:``-block synthesis path.
+  ##   3. Stamp the binary-cache identity so the engine's
+  ##      ``BinaryCachePublisher`` hook stays wired even when the
+  ##      configure/compile/install actions live in the recipe's
+  ##      ``build:`` block (M9.R.6.1).
+  createDir(extendedPath(parentDir(sentinelStampPath(projectRoot))))
+  let stamp = sentinelStampPath(projectRoot)
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStampDir = parentDir(stamp).replace("\\", "/").
+    replace("\"", "\\\"")
+  let script = "set -e; mkdir -p \"" & escapedStampDir &
+    "\"; printf 'from-source-meson sentinel for %s\\n' \"" &
+    dslPackageName & "\" > \"" & escapedStamp & "\""
+  let argv = @["sh", "-c", script]
   buildAction(
-    id = "from-source-meson-stage-" & sanitizeNamePart(member.name),
+    id = "from-source-meson-sentinel",
     call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-meson-install"],
-    inputs = @[installStamp],
-    outputs = @[outPath],
+    deps = @[fetchActionId],
+    inputs = @[fetchStamp],
+    outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-meson.stage." & kindTag,
+    commandStatsId = "from-source-meson.sentinel",
     publishToBinaryCache = true,
     cacheEntryIdentity = some(identity),
-    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp); no
-    # toolchain refs needed.
     toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------
@@ -741,9 +534,24 @@ proc syntheticPackage(projectRoot: string;
 proc fromSourceMesonEmitFragment(projectRoot: string;
                                  request: ProviderGraphRequest):
                                    GraphFragment {.gcsafe.} =
-  ## Lower the recipe into a fetch + setup + compile + install + per-
-  ## member stage-copy action graph. See module docstring's pipeline
-  ## section.
+  ## M9.R.6.1 narrowed emitFragment.
+  ##
+  ## Emits exactly TWO actions:
+  ##
+  ##   1. fetch (``ccpp-fetch-<package>``)
+  ##   2. synthesis sentinel (``from-source-meson-sentinel``)
+  ##
+  ## The configure/compile/install/stage-copy actions live in the
+  ## recipe's explicit ``build:`` block (calling the M9.R.2b
+  ## ``meson_package(...)`` constructor) — every option-bearing recipe
+  ## was swept onto that shape by M9.R.5b. Recipes without an explicit
+  ## ``build:`` block fall through to the stdlib synthesis path at
+  ## ``libs/repro_dsl_stdlib/.../synthesis/from_source_default_build.nim``
+  ## via ``synthesizeMesonPackage``.
+  ##
+  ## ``mesonExecutable()`` is no longer called — the recipe's ``build:``
+  ## body resolves the meson binary via the engine's tool catalog at
+  ## fork time, not at convention-emit time.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
@@ -766,16 +574,11 @@ proc fromSourceMesonEmitFragment(projectRoot: string;
         "from-source-meson convention: no fetch: spec registered for " &
           "package '" & dslPackageName & "' — recognise() should have " &
           "rejected this project")
-    let mesonExe = mesonExecutable()
-    let mesonOptions = registeredBuildFlags(dslPackageName, "", "meson")
-    let srcDir = fetchExtractedRoot(projectRoot, spec)
-    let buildDir = buildScratchDir(projectRoot)
-    let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
-    # M9.L.4-refactor Step B: compose the binary-cache identity once
-    # and thread it onto the install + stage-copy edges. The engine's
-    # ``BinaryCachePublisher`` hook consumes the same tuple from the
-    # decoded ``BuildAction``; conventions stay tool-agnostic.
+    # M9.L.4-refactor Step B + M9.R.6.1: the binary-cache identity now
+    # stamps the synthesis sentinel (replacing the install + stage-copy
+    # edges that carried it pre-narrowing). The engine's
+    # ``BinaryCachePublisher`` hook fires after the sentinel succeeds.
     let identity = computeCacheEntryIdentity(projectRoot,
       dslPackageName, "meson")
     let registerAll = proc() =
@@ -786,27 +589,10 @@ proc fromSourceMesonEmitFragment(projectRoot: string;
       let fetchAct = emitFetchAction(projectRoot, dslPackageName, spec)
       allActions.add(fetchAct)
       let fetchStamp = fetchStampPath(projectRoot, spec.hashHex)
-      # 2. Setup
-      let setupPair = emitSetupAction(projectRoot, mesonExe, srcDir,
-        buildDir, mesonOptions, @[fetchAct.id], @[fetchStamp])
-      allActions.add(setupPair.action)
-      # 3. Compile
-      let compilePair = emitCompileAction(projectRoot, mesonExe, buildDir,
-        setupPair.stamp)
-      allActions.add(compilePair.action)
-      # 4. Install — carries the binary-cache identity so the engine
-      # hook publishes the install tree after success.
-      let installPair = emitInstallAction(projectRoot, mesonExe, buildDir,
-        staging, compilePair.stamp, identity)
-      allActions.add(installPair.action)
-      # 5. Per-artifact stage-copy — each edge also carries the
-      # identity. The engine's hook fires per successful action; the
-      # convention does NOT emit a separate publish edge any more (the
-      # Step-A-era ``emitPublishAction`` retired in Step B).
-      for member in members:
-        let stageAct = emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member, identity)
-        allActions.add(stageAct)
+      # 2. Synthesis sentinel
+      let sentinelAct = emitSynthesisSentinelAction(projectRoot,
+        dslPackageName, fetchAct.id, fetchStamp, identity)
+      allActions.add(sentinelAct)
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

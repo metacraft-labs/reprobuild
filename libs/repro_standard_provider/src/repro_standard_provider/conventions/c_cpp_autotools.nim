@@ -844,10 +844,10 @@ proc cCppAutotoolsEmitFragment(projectRoot: string;
       if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
       else: DslFetchSpec()
     let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
-    let configureFlags =
-      if dslPackageName.len > 0:
-        registeredBuildFlags(dslPackageName, "", "configure")
-      else: @[]
+    # M9.R.6.1: ``registeredBuildFlags`` registry retired; recipes route
+    # configureFlags through an explicit ``build:`` calling
+    # ``autotools_package(...)``.
+    let configureFlags: seq[string] = @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]

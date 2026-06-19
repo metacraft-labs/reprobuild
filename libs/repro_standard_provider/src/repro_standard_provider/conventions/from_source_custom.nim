@@ -456,14 +456,22 @@ proc fromSourceCustomRecognize(projectRoot: string;
     let shellRows = registeredShellActions(dslPackageName)
     if shellRows.len == 0:
       return false
-    # All four standard flag channels must be empty — otherwise the
-    # more-specific from-source sibling claims the recipe first. The
-    # registration order in ``apps/repro-standard-provider`` puts the
-    # standard from-source siblings BEFORE this convention, so the
-    # check is defensive in either direction.
-    for channel in ["meson", "cmake", "configure", "make"]:
-      let flags = registeredBuildFlags(dslPackageName, "", channel)
-      if flags.len > 0:
+    # M9.R.6.1: the four flag-channel discriminators are gone with the
+    # ``registeredBuildFlags`` registry. The from-source siblings now
+    # claim a recipe based on ``registeredNativeBuildDeps`` tokens
+    # (meson > cmake > autoconf|automake|libtool > make). The custom
+    # convention should NOT claim a recipe that lists any of those
+    # canonical drivers — defensive in case the registration order
+    # changes.
+    for raw in registeredNativeBuildDeps(dslPackageName):
+      let stripped = raw.strip()
+      var head = ""
+      for ch in stripped:
+        if ch in {' ', '\t', '>', '<', '=', '!', ',', ';'}:
+          break
+        head.add(ch)
+      if head in ["meson", "cmake", "autoconf", "automake", "libtool",
+                  "make"]:
         return false
   if extractMembers(source).len == 0:
     return false

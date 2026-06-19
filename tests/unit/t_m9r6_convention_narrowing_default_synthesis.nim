@@ -1,7 +1,7 @@
 ## DSL-port M9.R.6 — convention-narrowing + default-build-synthesis
 ## regression suite.
 ##
-## Pins the load-bearing pieces of M9.R.6:
+## Pins the load-bearing pieces of M9.R.6 (updated for M9.R.6.1):
 ##
 ##   1. **Convention dispatch via the registry.** The synthesis layer's
 ##      ``defaultBuildConventionFor`` reads
@@ -16,23 +16,18 @@
 ##      explicit ``build:`` are reported via the synthesis gate's
 ##      ``false`` return + the ``raiseCustomBuildRequired`` raiser.
 ##
-##   3. **Per-convention dispatch.** The four ``synthesize<X>Package``
+##   3. **Per-convention dispatch.** The three ``synthesize<X>Package``
 ##      entry points wrap the M9.R.2b ``meson_package`` /
-##      ``cmake_package`` / ``autotools_package`` constructors and
-##      thread the legacy flag-channel values (``mesonOptions:`` /
-##      ``cmakeFlags:`` / ``configureFlags:`` /``makeFlags:``) through
-##      as constructor arguments.
+##      ``cmake_package`` / ``autotools_package`` constructors with NO
+##      options argument. Recipes that need per-tool options provide
+##      an explicit ``build:`` block calling the constructor with the
+##      options inlined.
 ##
 ##   4. **Custom recipe raise.** ``raiseCustomBuildRequired`` raises a
 ##      ``ValueError`` with the recipe name + an actionable error
 ##      message naming the ``shell()`` action surface.
 ##
-##   5. **Backward-decode of ``registeredBuildFlags``.** The M9.I
-##      ``registeredBuildFlags`` registry is still populated by recipes
-##      that spell ``mesonOptions:`` etc.; the deprecation comment
-##      lands but the accessor still returns the registered options.
-##
-##   6. **Recognition via registry.** The convention layer's
+##   5. **Recognition via registry.** The convention layer's
 ##      ``recognize`` proc now consults
 ##      ``registeredNativeBuildDeps`` BEFORE falling back to the
 ##      source-text scanner. Verified indirectly via the synthesis
@@ -40,10 +35,20 @@
 ##      end-to-end by the existing
 ##      ``test_from_source_meson_convention.nim`` /
 ##      ``test_from_source_cmake_convention.nim`` suites).
+##
+## ## M9.R.6.1 changes
+##
+## The fixtures no longer declare ``mesonOptions:`` / ``cmakeFlags:`` /
+## ``configureFlags:`` / ``makeFlags:`` blocks — those parser arms were
+## retired in M9.R.6.1 (2026-06-19). The synthesizer entry points no
+## longer accept legacy flag-channel inputs. Tests for the
+## ``legacy<X>Options`` shims were removed.
 
 import std/[unittest, strutils]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — Library/Executable in scope for typed artifact slot vars.
+import repro_dsl_stdlib/types
 import repro_dsl_stdlib/synthesis
 
 # ---------------------------------------------------------------------------
@@ -59,9 +64,6 @@ package m9r6MesonFixture:
     "meson >=1.3"
     "ninja >=1.10"
     "gcc"
-  mesonOptions:
-    "-Dfoo=true"
-    "--buildtype=release"
   executable mesonFoo:
     discard
 
@@ -73,8 +75,6 @@ package m9r6CmakeFixture:
     "cmake >=3.20"
     "ninja"
     "gcc"
-  cmakeFlags:
-    "-DBUILD_SHARED_LIBS=ON"
   library cmakeBar:
     discard
 
@@ -87,8 +87,6 @@ package m9r6AutotoolsFixture:
     "automake"
     "make"
     "gcc"
-  configureFlags:
-    "--enable-shared"
   executable autoBaz:
     discard
 
@@ -99,8 +97,6 @@ package m9r6MakeFixture:
   nativeBuildDeps:
     "make"
     "gcc"
-  makeFlags:
-    "PREFIX=/usr"
   executable makeQux:
     discard
 
@@ -208,52 +204,26 @@ suite "DSL-port M9.R.6 — convention narrowing + default-build synthesis":
     check caughtMessage.contains("build:")
     check caughtMessage.contains("shell(")
 
-  test "synthesizeMesonPackage: returns MesonPackageResult driven by legacy options":
+  test "synthesizeMesonPackage: returns MesonPackageResult (no options arg)":
     let result = synthesizeMesonPackage(
       packageName = "m9r6MesonFixture",
       srcDir = "/tmp/m9r6-meson-fixture")
-    # MesonPackageResult has buildEdge / compileEdge / installEdge —
-    # we don't pin the action shape (M9.R.2b owns that) but we do
-    # check the result type's fields are populated.
+    # MesonPackageResult has destdir / installEdge / etc; we don't pin
+    # the action shape (M9.R.2b owns that) but we do check the result
+    # type's fields are populated.
     check result.destdir.len > 0
 
-  test "synthesizeCmakePackage: returns CmakePackageResult driven by legacy flags":
+  test "synthesizeCmakePackage: returns CmakePackageResult (no options arg)":
     let result = synthesizeCmakePackage(
       packageName = "m9r6CmakeFixture",
       srcDir = "/tmp/m9r6-cmake-fixture")
     check result.destdir.len > 0
 
-  test "synthesizeAutotoolsPackage: returns AutotoolsPackageResult driven by legacy flags":
+  test "synthesizeAutotoolsPackage: returns AutotoolsPackageResult (no options arg)":
     let result = synthesizeAutotoolsPackage(
       packageName = "m9r6AutotoolsFixture",
       srcDir = "/tmp/m9r6-autotools-fixture")
     check result.destdir.len > 0
-
-  test "legacyMesonOptions: backward-decode retained for ``mesonOptions:``":
-    # The M9.I ``registeredBuildFlags`` registry is still populated
-    # by the ``mesonOptions:`` parser arm. M9.R.6 retires the public
-    # accessor in spirit (deprecation comment) but the M9.R.5b sweep
-    # is what actually empties the registry. Until then, the
-    # synthesis layer reads it via ``legacyMesonOptions``.
-    let options = legacyMesonOptions("m9r6MesonFixture")
-    check options.len == 2
-    check "-Dfoo=true" in options
-    check "--buildtype=release" in options
-
-  test "legacyCmakeFlags: backward-decode retained for ``cmakeFlags:``":
-    let flags = legacyCmakeFlags("m9r6CmakeFixture")
-    check flags.len == 1
-    check "-DBUILD_SHARED_LIBS=ON" in flags
-
-  test "legacyConfigureFlags: backward-decode retained for ``configureFlags:``":
-    let flags = legacyConfigureFlags("m9r6AutotoolsFixture")
-    check flags.len == 1
-    check "--enable-shared" in flags
-
-  test "legacyMakeFlags: backward-decode retained for ``makeFlags:``":
-    let flags = legacyMakeFlags("m9r6MakeFixture")
-    check flags.len == 1
-    check "PREFIX=/usr" in flags
 
   test "registry-based recognition: nativeBuildDeps consulted regardless of order":
     # The recognise check reads the registry rather than scanning

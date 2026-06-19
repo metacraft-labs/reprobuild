@@ -289,51 +289,14 @@ suite "c-cpp-autotools convention M17":
       # convention should produce exactly one compile action.
       check compileActions.len == 1
 
-  test "M9.K: configureFlags appear in ./configure invocation":
-    # DSL-port M9.K: when the M9.I registry holds configureFlags for
-    # the DSL package, ``emitFragment`` must inject them into the
-    # ``./configure ...`` invocation inside the sh -c wrapper.
-    if not autotoolsAvailable(HelloBinaryFixture):
-      skip()
-    else:
-      # Read the fixture's recipe to pull the DSL package name so the
-      # M9.K lookup key matches.
-      let recipePath = HelloBinaryFixture / "reprobuild.nim"
-      let recipeSrc = if fileExists(recipePath): readFile(recipePath) else: ""
-      var pkgName = ""
-      for rawLine in recipeSrc.splitLines():
-        let stripped = rawLine.strip()
-        if stripped.startsWith("package"):
-          let rest = stripped[len("package") .. ^1].strip()
-          for ch in rest:
-            if ch in {' ', '\t', ':', ','}: break
-            pkgName.add(ch)
-          if pkgName.len > 0:
-            break
-      check pkgName.len > 0
-      resetDslPortBuildFlagState()
-      registerBuildFlag(pkgName, "", "configure", "--with-foo")
-      registerBuildFlag(pkgName, "", "configure", "--enable-bar")
-      defer:
-        resetDslPortBuildFlagState()
-      let conv = autotools_convention.cCppAutotoolsConvention()
-      let request = dummyRequest(HelloBinaryFixture)
-      let fragment = conv.emitFragment(HelloBinaryFixture, request)
-      var sawWithFoo = false
-      var sawEnableBar = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id != "ccpp-autotools-configure":
-          continue
-        let argvJoined = inlineArgvOf(action).join(" ")
-        if argvJoined.contains("--with-foo"):
-          sawWithFoo = true
-        if argvJoined.contains("--enable-bar"):
-          sawEnableBar = true
-      check sawWithFoo
-      check sawEnableBar
+  test "M9.K: configureFlags injection retired (M9.R.6.1)":
+    # M9.R.6.1 (2026-06-19): the ``registeredBuildFlags`` runtime
+    # registry + the ``configureFlags:`` parser arm were retired.
+    # Recipes route per-tool options through their explicit ``build:``
+    # body calling ``autotools_package(...)`` directly. This assertion
+    # documents the retirement at compile time.
+    check not compiles((proc (): seq[string] =
+      result = registeredBuildFlags("autotoolsPkg", "", "configure"))())
 
   test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
     # M9.N Batch B: every action stamps the catalog tool refs the
