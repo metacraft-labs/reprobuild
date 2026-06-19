@@ -73,6 +73,15 @@ const AuditExemptions = [
   "foreign_dnf",
   "foreign_pacman",
   "apt_index",
+  # D2 / NDE0-A: more foreign-distro library code that lives alongside
+  # the catalog but carries no per-package provisioning shape — the
+  # ``dnf`` / ``pacman`` repo-index parsers (counterparts of the
+  # already-exempt ``apt_index``) and the ``apt-jammy`` native adapter.
+  # Their realize metadata comes from the C2 harvester's per-package
+  # JSON, not from these .nim helpers, exactly like the entries above.
+  "dnf_index",
+  "pacman_index",
+  "apt_jammy",
   # Bootstrap-And-Self-Build B4: ``python_unittest_runner`` is a
   # TestRunner-adapter wrapper; its provisioning is inherited from
   # ``python3.nim`` (the engine resolves the runner's execution path
