@@ -6836,6 +6836,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.3: optional ``library api:`` block — pkgConfig /
+  # headers / links / defines / soname / sover / linkKind +
+  # PUBLIC/PRIVATE visibility-keyed fields. Added by hand for the
+  # same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r3_library_api_block.nim",
+    binary: "build/test-bin/t_m9r3_library_api_block",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",

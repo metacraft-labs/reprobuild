@@ -2424,6 +2424,394 @@ proc emitM9IBuildFlags*(packageName: string;
         registerBuildFlag(`pkgLit`, `artifactLit`, `channelLit`,
                           `flagNodeCopy`))
 
+# ---------------------------------------------------------------------------
+# DSL-port M9.R.3 — ``library <name>: api:`` block emission.
+#
+# Walks the classified section list looking for ``soM3LibraryArtifact``
+# entries whose body contains a nested ``api:`` block. For each
+# matching library emits one runtime block that builds a ``LibraryApi``
+# record from the per-field body contents and calls
+# ``registerLibraryApi(packageName, libraryName, api)`` into module-init
+# code.
+#
+# Field grammar (re-walked at emit time):
+#
+#   * Scalar setters: ``pkgConfig "..."`` / ``soname "..."`` /
+#     ``sover "..."`` / ``languageStandard <ident>`` /
+#     ``linkKind <ident>`` — single string-literal or single identifier
+#     argument.
+#   * Listing blocks: ``headers:`` / ``privateHeaders:`` / ``links:`` /
+#     ``privateLinks:`` / ``defines:`` / ``privateDefines:`` /
+#     ``compileOptions:`` / ``privateCompileOptions:`` — body of
+#     children, each child is either a string literal, a bare
+#     identifier (the M9.R.3 ``links:`` shape — the identifier name
+#     becomes a string at the registry layer), or arbitrary Nim
+#     control-flow (``if`` / ``case``) whose leaves resolve to one of
+#     the two scalar shapes. Variant-conditional content is supported
+#     because the macro splices control-flow nodes verbatim into the
+#     registration block; the variant's resolved ``.value`` is
+#     available at registration time (which runs at module init —
+#     AFTER ``finalizeVariants()`` from the M1 emission chain).
+# ---------------------------------------------------------------------------
+
+proc m9r3IsApiBody(node: NimNode): bool =
+  ## Recognise the ``api:`` body callsite inside a ``library <name>:``
+  ## body. Both ``Call(api, StmtList(...))`` and
+  ## ``Command(api, StmtList(...))`` parse as call-kind nodes here; the
+  ## section head is the bare ident ``api``.
+  if node.kind notin {nnkCall, nnkCommand}:
+    return false
+  if node.len < 2:
+    return false
+  let head = node[0]
+  if head.kind notin {nnkIdent, nnkSym}:
+    return false
+  result = ($head).normalize == "api"
+
+proc m9r3FindApiBody(libraryStmt: NimNode): NimNode =
+  ## Return the ``StmtList`` node of the ``api:`` body inside a
+  ## ``library <name>: ...`` call, or ``nil`` when the library has no
+  ## ``api:`` block. The ``library`` statement always has the
+  ## ``StmtList`` body as its trailing child (per ``parseLibrary``'s
+  ## ``node[2]`` access).
+  result = nil
+  if libraryStmt.kind notin {nnkCall, nnkCommand}:
+    return
+  if libraryStmt.len < 3:
+    return
+  let libBody = libraryStmt[^1]
+  if libBody.kind != nnkStmtList:
+    return
+  for child in libBody:
+    if m9r3IsApiBody(child):
+      let apiBody = child[^1]
+      if apiBody.kind == nnkStmtList:
+        return apiBody
+
+proc m9r3LinkKindLit(text: string; node: NimNode): NimNode =
+  ## Lower a ``linkKind`` literal to the corresponding ``LibraryLinkKind``
+  ## enum value AST. Raises a compile-time error for unrecognised tokens
+  ## so typos surface early.
+  let norm = text.normalize
+  case norm
+  of "static", "llkstatic":   ident("llkStatic")
+  of "shared", "llkshared":   ident("llkShared")
+  of "both", "llkboth":       ident("llkBoth")
+  of "unset", "llkunset":     ident("llkUnset")
+  else:
+    error("library api: linkKind must be one of: static, shared, both " &
+          "(got '" & text & "')", node)
+    ident("llkUnset")
+
+proc m9r3IdentOrStrText(node: NimNode): tuple[ok: bool; text: string] =
+  ## Project a single-token AST node onto the string the registry
+  ## stores. Accepts string literals (use ``strVal``), bare identifiers
+  ## (stringify), and ``AccQuoted`` (concatenate components). Returns
+  ## ``ok=false`` for anything else so the caller can fall back to
+  ## ``$node.repr`` or skip.
+  case node.kind
+  of nnkStrLit..nnkTripleStrLit:
+    (true, node.strVal)
+  of nnkIdent, nnkSym:
+    (true, $node)
+  of nnkAccQuoted:
+    var acc = ""
+    for c in node:
+      let part = m9r3IdentOrStrText(c)
+      if part.ok: acc.add(part.text)
+    (true, acc)
+  else:
+    (false, "")
+
+proc m9r3RewriteListChild(node: NimNode; targetVar: NimNode): NimNode =
+  ## Transform a single ``headers:`` / ``links:`` / etc. body child into
+  ## a statement that appends one or more string values to
+  ## ``targetVar`` (a local ``var seq[string]`` the registration block
+  ## holds). The transformation rules:
+  ##
+  ##   * String literal     → ``targetVar.add("<lit>")``
+  ##   * Bare identifier    → ``targetVar.add("<ident name>")``
+  ##   * AccQuoted          → ``targetVar.add("<reconstructed text>")``
+  ##   * Control-flow (if / case / when) → recurse into the branch
+  ##     bodies and emit the rewritten arm statements.
+  ##   * Anything else      → splice as-is wrapped in
+  ##     ``targetVar.add(<expr>)`` so author-supplied expressions that
+  ##     evaluate to ``string`` still land in the seq. The Nim
+  ##     semchecker validates the expression type at the call site.
+  case node.kind
+  of nnkCommentStmt, nnkDiscardStmt:
+    return newStmtList()
+  of nnkStrLit..nnkTripleStrLit:
+    let lit = newLit(node.strVal)
+    return quote do:
+      `targetVar`.add(`lit`)
+  of nnkIdent, nnkSym:
+    let lit = newLit($node)
+    return quote do:
+      `targetVar`.add(`lit`)
+  of nnkAccQuoted:
+    let parsed = m9r3IdentOrStrText(node)
+    if parsed.ok:
+      let lit = newLit(parsed.text)
+      return quote do:
+        `targetVar`.add(`lit`)
+    return newStmtList()
+  of nnkStmtList:
+    result = newStmtList()
+    for child in node:
+      result.add(m9r3RewriteListChild(child, targetVar))
+  of nnkIfStmt, nnkIfExpr, nnkWhenStmt:
+    result = newNimNode(node.kind)
+    for branch in node:
+      let newBranch = newNimNode(branch.kind)
+      case branch.kind
+      of nnkElifBranch, nnkElifExpr:
+        newBranch.add(branch[0].copyNimTree())
+        newBranch.add(m9r3RewriteListChild(branch[1], targetVar))
+      of nnkElse, nnkElseExpr:
+        newBranch.add(m9r3RewriteListChild(branch[0], targetVar))
+      else:
+        for child in branch:
+          newBranch.add(child.copyNimTree())
+      result.add(newBranch)
+  of nnkCaseStmt:
+    result = newNimNode(nnkCaseStmt)
+    result.add(node[0].copyNimTree())
+    for i in 1 ..< node.len:
+      let branch = node[i]
+      let newBranch = newNimNode(branch.kind)
+      case branch.kind
+      of nnkOfBranch:
+        for j in 0 ..< branch.len - 1:
+          newBranch.add(branch[j].copyNimTree())
+        newBranch.add(m9r3RewriteListChild(branch[^1], targetVar))
+      of nnkElifBranch:
+        newBranch.add(branch[0].copyNimTree())
+        newBranch.add(m9r3RewriteListChild(branch[1], targetVar))
+      of nnkElse:
+        newBranch.add(m9r3RewriteListChild(branch[0], targetVar))
+      else:
+        for child in branch:
+          newBranch.add(child.copyNimTree())
+      result.add(newBranch)
+  else:
+    # Catch-all: splice the expression verbatim, expecting it to
+    # evaluate to a string at runtime.
+    let exprCopy = node.copyNimTree()
+    return quote do:
+      `targetVar`.add(`exprCopy`)
+
+proc m9r3CollectListAppends(body: NimNode; targetVar: NimNode): NimNode =
+  ## Walk the children of an ``api:`` listing block and emit the seq-
+  ## append statements (with control-flow preserved for variant-
+  ## conditional content). Returns a ``StmtList`` of zero or more
+  ## ``targetVar.add(<value>)`` statements.
+  result = newStmtList()
+  if body.kind != nnkStmtList:
+    return
+  for child in body:
+    case child.kind
+    of nnkCommentStmt:
+      continue
+    of nnkDiscardStmt:
+      continue
+    else:
+      result.add(m9r3RewriteListChild(child, targetVar))
+
+proc emitM9R3LibraryApis*(packageName: string;
+                          classified: seq[ClassifiedSection]): NimNode =
+  ## Walk the classified section list for ``soM3LibraryArtifact``
+  ## entries; for each library whose body contains an ``api:`` block,
+  ## emit one ``block: ... registerLibraryApi(pkg, lib, api)`` statement
+  ## that builds the typed record + registers it.
+  ##
+  ## Recipes whose library body is bare (``library libFoo: discard`` or
+  ## carries only a ``kind:`` setter) produce NO emission so the
+  ## registry stays empty for them — ``registeredLibraryApi`` returns
+  ## the default-zero record with ``declared == false``.
+  result = newStmtList()
+  let pkgLit = newLit(packageName)
+  for entry in classified:
+    if entry.ownership != soM3LibraryArtifact:
+      continue
+    let stmt = entry.stmt
+    if stmt.kind notin {nnkCall, nnkCommand}:
+      continue
+    if stmt.len < 3:
+      continue
+    let apiBody = m9r3FindApiBody(stmt)
+    if apiBody == nil:
+      continue
+    # Library name: the second child is the name node (string-form or
+    # ident-form, mirroring ``m3ArtifactNameNode``).
+    let nameNode = stmt[1]
+    var libraryName = ""
+    case nameNode.kind
+    of nnkStrLit..nnkTripleStrLit:
+      libraryName = nameNode.strVal
+    of nnkIdent, nnkSym, nnkAccQuoted:
+      libraryName = $nameNode.repr
+    else:
+      libraryName = nameNode.repr
+    let libLit = newLit(libraryName)
+    # Local var names used inside the registration block. Pre-built
+    # identifiers so the ``quote do:`` splice + the per-field appends
+    # bind to the same symbol.
+    let apiSym = ident("m9r3ApiRec")
+    let headersSym = ident("m9r3Headers")
+    let privateHeadersSym = ident("m9r3PrivateHeaders")
+    let linksSym = ident("m9r3Links")
+    let privateLinksSym = ident("m9r3PrivateLinks")
+    let definesSym = ident("m9r3Defines")
+    let privateDefinesSym = ident("m9r3PrivateDefines")
+    let compileOptsSym = ident("m9r3CompileOptions")
+    let privateCompileOptsSym = ident("m9r3PrivateCompileOptions")
+    # Per-field setter statements. We START with the seq-init lines so
+    # ``targetVar`` is always defined before the rewriter touches it.
+    var setters = newStmtList()
+    setters.add(quote do:
+      var `headersSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `privateHeadersSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `linksSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `privateLinksSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `definesSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `privateDefinesSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `compileOptsSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `privateCompileOptsSym`: seq[string] = @[])
+    setters.add(quote do:
+      var `apiSym` = LibraryApi(declared: true))
+    # Walk the api: body and dispatch per-field.
+    for fieldStmt in apiBody:
+      case fieldStmt.kind
+      of nnkCommentStmt, nnkDiscardStmt:
+        continue
+      else: discard
+      let head = calleeName(fieldStmt).normalize
+      case head
+      of "pkgconfig":
+        if fieldStmt.len < 2:
+          error("library api: pkgConfig requires a string argument", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if parsed.ok:
+          let lit = newLit(parsed.text)
+          setters.add(quote do:
+            `apiSym`.pkgConfig = `lit`)
+        else:
+          let exprCopy = valueNode.copyNimTree()
+          setters.add(quote do:
+            `apiSym`.pkgConfig = `exprCopy`)
+      of "soname":
+        if fieldStmt.len < 2:
+          error("library api: soname requires a string argument", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if parsed.ok:
+          let lit = newLit(parsed.text)
+          setters.add(quote do:
+            `apiSym`.soname = `lit`)
+        else:
+          let exprCopy = valueNode.copyNimTree()
+          setters.add(quote do:
+            `apiSym`.soname = `exprCopy`)
+      of "sover":
+        if fieldStmt.len < 2:
+          error("library api: sover requires a string argument", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if parsed.ok:
+          let lit = newLit(parsed.text)
+          setters.add(quote do:
+            `apiSym`.sover = `lit`)
+        else:
+          let exprCopy = valueNode.copyNimTree()
+          setters.add(quote do:
+            `apiSym`.sover = `exprCopy`)
+      of "languagestandard":
+        if fieldStmt.len < 2:
+          error("library api: languageStandard requires a value", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if parsed.ok:
+          let lit = newLit(parsed.text)
+          setters.add(quote do:
+            `apiSym`.languageStandard = `lit`)
+        else:
+          let exprCopy = valueNode.copyNimTree()
+          setters.add(quote do:
+            `apiSym`.languageStandard = `exprCopy`)
+      of "linkkind":
+        if fieldStmt.len < 2:
+          error("library api: linkKind requires a value", fieldStmt)
+        let valueNode = fieldStmt[1]
+        let parsed = m9r3IdentOrStrText(valueNode)
+        if not parsed.ok:
+          error("library api: linkKind must be one of: static, shared, both",
+                valueNode)
+        let kindLit = m9r3LinkKindLit(parsed.text, valueNode)
+        setters.add(quote do:
+          `apiSym`.linkKind = `kindLit`)
+      of "headers":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, headersSym))
+      of "privateheaders":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, privateHeadersSym))
+      of "links":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, linksSym))
+      of "privatelinks":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, privateLinksSym))
+      of "defines":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, definesSym))
+      of "privatedefines":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, privateDefinesSym))
+      of "compileoptions":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, compileOptsSym))
+      of "privatecompileoptions":
+        if fieldStmt.len >= 2:
+          let body = fieldStmt[^1]
+          setters.add(m9r3CollectListAppends(body, privateCompileOptsSym))
+      else:
+        # Unknown field — silently ignore for forward compatibility
+        # (e.g. M9.R.4's ``exports:`` sub-block).
+        discard
+    # Wrap the setters + registration call in a ``block:`` so the
+    # local vars don't leak into the surrounding scope. The
+    # ``block:`` runs at module-init time (the package macro emits
+    # the M9.R.3 emission AFTER ``variantsEmission`` so resolved
+    # variant values are queryable from inside the block).
+    result.add(quote do:
+      block:
+        `setters`
+        `apiSym`.headers = `headersSym`
+        `apiSym`.privateHeaders = `privateHeadersSym`
+        `apiSym`.links = `linksSym`
+        `apiSym`.privateLinks = `privateLinksSym`
+        `apiSym`.defines = `definesSym`
+        `apiSym`.privateDefines = `privateDefinesSym`
+        `apiSym`.compileOptions = `compileOptsSym`
+        `apiSym`.privateCompileOptions = `privateCompileOptsSym`
+        registerLibraryApi(`pkgLit`, `libLit`, `apiSym`))
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration.
   ##
@@ -2715,6 +3103,18 @@ macro package*(name: untyped; body: untyped): untyped =
     let constraintLit = newLit(useDef.rawConstraint)
     result.add(quote do:
       registerPackageDep(`pkgLitForDeps`, `runtimeKindLit`, `constraintLit`))
+  # ── DSL-port M9.R.3: per-library ``api:`` block registration emission.
+  # ``emitM9R3LibraryApis`` walks the M3 ``soM3LibraryArtifact`` entries,
+  # finds nested ``api:`` blocks, and emits one runtime block per match
+  # that builds a ``LibraryApi`` value + calls ``registerLibraryApi``.
+  # Libraries without an ``api:`` block produce NO emission so the
+  # registry stays empty for them (the accessor returns the default-
+  # zero record with ``declared == false``). The emission sits AFTER
+  # the M9.R.1 dep registrations so the registry surface ordering
+  # matches the source declaration ordering (M9.R.1's reset proc has
+  # no overlap with M9.R.3's so the two reset calls are independent).
+  let m9r3LibraryApiEmission = emitM9R3LibraryApis(packageName, classifiedSections)
+  result.add(m9r3LibraryApiEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

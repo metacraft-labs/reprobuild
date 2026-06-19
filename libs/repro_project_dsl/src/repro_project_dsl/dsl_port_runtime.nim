@@ -3990,3 +3990,157 @@ proc registeredShellActions*(packageName: string): seq[DslShellAction] =
   if packageName in dslPortShellActions:
     return dslPortShellActions[packageName]
   return @[]
+
+# ---------------------------------------------------------------------------
+# DSL-port M9.R.3 — ``library <name>: api:`` block surface.
+# ---------------------------------------------------------------------------
+##
+## ## Surface
+##
+## An optional ``api:`` block inside ``library <name>:`` declares the
+## library's consumer-facing metadata. Fields:
+##
+##   * ``pkgConfig "<name>"``                — pkg-config module name.
+##   * ``soname "<name>"`` / ``sover "<v>"`` — shared-object metadata.
+##   * ``linkKind static | shared | both``    — consumer link mode.
+##   * ``languageStandard <feature>``         — minimum language standard
+##                                              (e.g. ``cxx_std_17``,
+##                                              ``c_std_11``); always
+##                                              propagated.
+##   * CMake PUBLIC/PRIVATE pairs (PUBLIC propagates to consumers;
+##     PRIVATE applies only while compiling the library):
+##       - ``headers:`` / ``privateHeaders:``
+##       - ``links:`` / ``privateLinks:``        (string identifiers
+##                                                pointing at sibling
+##                                                ``library`` handles)
+##       - ``defines:`` / ``privateDefines:``
+##       - ``compileOptions:`` / ``privateCompileOptions:``
+##
+## All fields are individually optional; the whole ``api:`` block is
+## optional (``library libFoo: discard`` keeps working). When a recipe
+## declares an ``api:`` block, the macro emits a runtime registration
+## call into module-init code that walks the body and populates a
+## ``LibraryApi`` value in the per-thread registry. Variant-conditional
+## content inside ``headers:`` / ``links:`` / etc. resolves at registry
+## evaluation time (after the solver stage) because the body is spliced
+## into the registration call's expression — the identifier strings the
+## registry stores reflect the resolved variant value.
+##
+## ## Registry shape
+##
+## A single ``threadvar`` table keyed by ``packageName & '\x00' &
+## libraryName`` holds the populated ``LibraryApi`` value. Recipes that
+## never declared an ``api:`` block do NOT have a row; the accessor
+## returns a default-zero value with ``declared == false`` for unknown
+## ``(pkg, lib)`` pairs so callers can distinguish "no api: block" from
+## "empty api: block" without try/except.
+##
+## ## Threading
+##
+## ``threadvar`` so concurrent test fixtures do not cross-attribute
+## registrations. ``resetDslPortLibraryApiState`` resets the per-thread
+## slot. Matches the M9.H / M9.I / M9.R.1 shape.
+
+type
+  LibraryLinkKind* = enum
+    ## ``linkKind`` field's value. ``llkUnset`` is the default for
+    ## ``api:`` blocks that omit ``linkKind`` (or for libraries with no
+    ## ``api:`` block at all). Names map directly onto the four DSL
+    ## tokens accepted by ``linkKind <token>``.
+    llkUnset
+    llkStatic
+    llkShared
+    llkBoth
+
+  LibraryApi* = object
+    ## DSL-port M9.R.3: typed record for a library's ``api:`` block.
+    ## Field-for-field mirror of the DSL surface; every field is
+    ## individually optional (empty string / empty seq / ``llkUnset``
+    ## means "field omitted").
+    declared*: bool
+      ## ``true`` when the recipe declared an ``api:`` block on this
+      ## library. Callers use this discriminant to distinguish "no
+      ## api: block" (return default-zero record) from "empty api:
+      ## block" (all fields zero/empty but ``declared == true``).
+    pkgConfig*: string
+      ## pkg-config module name (``.pc`` basename without ``.pc``).
+    soname*: string
+      ## SONAME — platform decoration applied by packagers.
+    sover*: string
+      ## SOVERSION — combined with ``soname`` to produce the fully
+      ## versioned library filename.
+    linkKind*: LibraryLinkKind
+      ## How consumers link against this library — static archive,
+      ## shared object, or both. ``llkUnset`` when ``linkKind`` was
+      ## omitted from the ``api:`` block.
+    languageStandard*: string
+      ## CMake ``target_compile_features``-equivalent minimum language
+      ## standard (e.g. ``cxx_std_17``, ``c_std_11``). Always
+      ## propagated to consumers; v1 has no PRIVATE counterpart.
+    headers*: seq[string]
+      ## CMake PUBLIC header search paths consumers ``#include``.
+    privateHeaders*: seq[string]
+      ## CMake PRIVATE header search paths used only while compiling
+      ## this library.
+    links*: seq[string]
+      ## CMake PUBLIC link deps — sibling library identifiers (string
+      ## form). Symbol resolution to actual install paths is deferred
+      ## to the M9.R.5 / M9.R.6 consumer sweep.
+    privateLinks*: seq[string]
+      ## CMake PRIVATE link deps — sibling library identifiers used
+      ## only while building this library, not propagated to
+      ## consumers.
+    defines*: seq[string]
+      ## CMake PUBLIC preprocessor defines propagated to consumers.
+    privateDefines*: seq[string]
+      ## CMake PRIVATE preprocessor defines applied only while
+      ## compiling this library.
+    compileOptions*: seq[string]
+      ## CMake PUBLIC compiler flags propagated to consumers.
+    privateCompileOptions*: seq[string]
+      ## CMake PRIVATE compiler flags applied only while compiling
+      ## this library.
+
+var dslPortLibraryApis {.threadvar.}: Table[string, LibraryApi]
+  ## Per-(packageName, libraryName) typed record. The key encoding
+  ## ``packageName & '\x00' & libraryName`` matches the M9.I /
+  ## M9.R.1 conventions (the ``\x00`` byte cannot appear in either
+  ## component so the encoding is unambiguous).
+
+proc m9r3LibraryApiKey(packageName, libraryName: string): string {.inline.} =
+  ## Compose the ``(packageName, libraryName)`` registry key. Symmetric
+  ## with ``m9iFlagSetKey`` / ``m9r1PackageDepsKey``.
+  result = packageName & '\x00' & libraryName
+
+proc resetDslPortLibraryApiState*() =
+  ## Drop every library-api registration. Test fixtures call this
+  ## between scenarios so registry entries do not leak across cases.
+  ## Symmetric with ``resetDslPortPackageDepsState`` /
+  ## ``resetDslPortBuildFlagState`` / ``resetDslPortFetchState``.
+  dslPortLibraryApis.clear()
+
+proc registerLibraryApi*(packageName, libraryName: string;
+                         api: LibraryApi) =
+  ## Record ``api`` against ``(packageName, libraryName)``. Called once
+  ## per library that declares an ``api:`` block — the package macro
+  ## emits the call into module-init code; recipes without an ``api:``
+  ## block produce no emission so this proc is never called for them.
+  ##
+  ## Multiple registrations for the same key OVERWRITE — the last
+  ## declared wins. The DSL grammar permits only ONE ``api:`` block per
+  ## library so the overwrite path is a defensive fallback (a future
+  ## milestone could lift it to an error).
+  let key = m9r3LibraryApiKey(packageName, libraryName)
+  var rec = api
+  rec.declared = true
+  dslPortLibraryApis[key] = rec
+
+proc registeredLibraryApi*(packageName, libraryName: string): LibraryApi =
+  ## Return the registered ``LibraryApi`` record for
+  ## ``(packageName, libraryName)``. Returns a default-zero record with
+  ## ``declared == false`` when no ``api:`` block was registered for the
+  ## pair (so callers can probe a recipe table without try/except).
+  let key = m9r3LibraryApiKey(packageName, libraryName)
+  if key in dslPortLibraryApis:
+    return dslPortLibraryApis[key]
+  result = LibraryApi(declared: false)
