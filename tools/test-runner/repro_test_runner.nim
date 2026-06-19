@@ -39,6 +39,9 @@
 import std/[algorithm, json, locks, os, osproc, parseopt, streams,
             strtabs, strutils, times]
 
+when defined(posix):
+  import std/posix
+
 const
   DefaultBinDir = "build/test-bin"
   DefaultResultsSubdir = "test-logs/results"
@@ -313,6 +316,56 @@ proc drainToEof(p: Process; output: var string) =
     output.add(line)
     output.add('\n')
 
+const PostExitDrainGraceSec = 10.0
+
+proc drainToEofBounded(p: Process; output: var string;
+                       graceSec: float): bool =
+  ## Drain the merged stdout/stderr pipe after the child has exited,
+  ## but give up after ``graceSec`` if EOF never arrives. Returns
+  ## ``true`` if EOF was reached, ``false`` if we bailed out.
+  ##
+  ## Why this is bounded where ``drainToEof`` is not: a test can spawn a
+  ## long-lived helper (e.g. the ``repro_binary_cache`` server, started
+  ## with ``poParentStreams``) that inherits the test's stdout — i.e.
+  ## the write end of *this* pipe. If the test then exits without
+  ## reaping that helper (the classic case being a crashed test whose
+  ## ``defer`` teardown never runs), the helper keeps the write end open
+  ## and a blocking ``readLine`` here never sees EOF. That parked the
+  ## whole runner for hours on Linux (glibc, where the leaked-daemon
+  ## scenario is reachable). Bounding the drain turns "runner hangs
+  ## forever, masking every later test" into "this one test reports with
+  ## a clear leaked-fd note and the suite continues".
+  when defined(posix):
+    let fd = cint(p.outputHandle)
+    let flags = fcntl(fd, F_GETFL, cint(0))
+    if flags != -1:
+      discard fcntl(fd, F_SETFL, flags or O_NONBLOCK)
+    var buf: array[4096, char]
+    let deadline = epochTime() + graceSec
+    while true:
+      let n = read(fd, addr buf[0], buf.len)
+      if n > 0:
+        var chunk = newString(int(n))
+        copyMem(addr chunk[0], addr buf[0], int(n))
+        output.add(chunk)
+      elif n == 0:
+        return true
+      else:
+        let e = errno
+        if e == EAGAIN or e == EWOULDBLOCK:
+          if epochTime() > deadline:
+            return false
+          sleep(50)
+        elif e == EINTR:
+          continue
+        else:
+          return false
+  else:
+    # Non-posix (Windows CI is not a supported runner host today): keep
+    # the original blocking behaviour.
+    drainToEof(p, output)
+    return true
+
 proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
     tuple[output: string; exitCode: int; timedOut: bool] =
   ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
@@ -353,9 +406,13 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
   while true:
     let code = p.peekExitCode()
     if code != -1:
-      # Child exited on its own. Drain the buffered output now that
-      # ``readLine`` is guaranteed to return EOF at the end.
-      drainToEof(p, output)
+      # Child exited on its own. Drain the buffered output, but bound
+      # the wait: a leaked helper that inherited the test's stdout would
+      # otherwise hold the pipe open and park us here forever.
+      if not drainToEofBounded(p, output, PostExitDrainGraceSec):
+        output.add("\nrepro_test_runner: gave up draining stdout after " &
+          $PostExitDrainGraceSec.int & "s; the test left a process " &
+          "holding its output pipe open (leaked daemon / unreaped child).\n")
       close(p)
       return (output, code, false)
     if (epochTime() - start) > timeoutSec.float:
@@ -382,7 +439,10 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
     # the kernel must reap the zombie before peekExitCode returns a
     # real code, but the wait window is bounded by the kill itself.
     discard p.waitForExit()
-  drainToEof(p, output)
+  if not drainToEofBounded(p, output, PostExitDrainGraceSec):
+    output.add("\nrepro_test_runner: gave up draining stdout after " &
+      $PostExitDrainGraceSec.int & "s; a killed test left a process " &
+      "holding its output pipe open (leaked daemon / unreaped child).\n")
   close(p)
   result = (output, TimeoutExitCode, timedOut)
 
