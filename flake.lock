@@ -306,23 +306,6 @@
         "type": "github"
       }
     },
-    "ct-test-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1781704209,
-        "narHash": "sha256-Qlh/9nxSEj47VYWtvXudmXWWrq9NKP/+9zOq7ROffNM=",
-        "owner": "metacraft-labs",
-        "repo": "ct-test",
-        "rev": "1838cd92dae9ce12c30ecdef28b875c544e5e526",
-        "type": "github"
-      },
-      "original": {
-        "owner": "metacraft-labs",
-        "ref": "main",
-        "repo": "ct-test",
-        "type": "github"
-      }
-    },
     "devenv": {
       "inputs": {
         "cachix": [
@@ -1992,11 +1975,42 @@
         "type": "github"
       }
     },
+    "reprobuild-ct-test-runner-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781901869,
+        "narHash": "sha256-H/yEanzDCr192n4KU0BVBdNB3oykdIlJvGkh9x1146c=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-ct-test-runner",
+        "rev": "1a2fceae68cf7ac4f3352c8eb9897b2646dbcf08",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-ct-test-runner",
+        "type": "github"
+      }
+    },
+    "reprobuild-test-adapters-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781890546,
+        "narHash": "sha256-bFEY9KZz16url8mcnNjNC7Ix6RuluNy3/OtYdaZb0yY=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-test-adapters",
+        "rev": "517a484b3781d0132698394f451a11f52363e719",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild-test-adapters",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "bearssl-src": "bearssl-src",
         "codetracer-native-recorder": "codetracer-native-recorder",
-        "ct-test-src": "ct-test-src",
         "flake-parts": [
           "nixos-modules",
           "flake-parts"
@@ -2011,6 +2025,8 @@
           "nixos-modules",
           "nixpkgs-unstable"
         ],
+        "reprobuild-ct-test-runner-src": "reprobuild-ct-test-runner-src",
+        "reprobuild-test-adapters-src": "reprobuild-test-adapters-src",
         "runquota-src": "runquota-src",
         "stackable-hooks-src": "stackable-hooks-src"
       }
