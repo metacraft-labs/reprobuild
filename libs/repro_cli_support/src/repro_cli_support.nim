@@ -63,6 +63,11 @@ import repro_home_resources/drivers/managed_block
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
 import repro_peer_cache
+# Trace-Based-Incremental-Testing M2: the pure skip/re-run seam
+# (``watchTestEdgeDecision``) the ``--ct-incremental`` watch hook calls on each
+# filesystem-change cycle. The package re-exports the M1 engine
+# (``record``/``decide``/``loadCache``/``defaultCachePath``) too.
+import repro_ct_incremental
 # Spec-Implementation M2e — ``repro lock explain`` consumes the
 # explainer surface to render structured chosen / unsat justifications.
 import repro_solver
@@ -13390,6 +13395,38 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
       "functions": functions
     })
 
+type
+  WatchCtIncrementalFlags* = object
+    ## Trace-Based-Incremental-Testing M2: the two ``repro watch`` flags that
+    ## control runtime-incremental skip/re-run. Parsed by
+    ## ``applyWatchCtIncrementalFlag`` from the same argument loop that parses
+    ## every other watch flag, so the test that drives this parser exercises the
+    ## real CLI surface (no duplicated grammar).
+    enabled*: bool        ## Set by ``--ct-incremental``.
+    traceDir*: string     ## Set by ``--ct-incremental-trace-dir=PATH``.
+
+proc applyWatchCtIncrementalFlag*(flags: var WatchCtIncrementalFlags;
+                                  arg: string): bool =
+  ## Apply a single CLI argument to `flags` if it is one of the M2
+  ## ct-incremental flags. Returns ``true`` when `arg` was consumed (so the
+  ## caller's elif chain can stop), ``false`` when it is some other flag.
+  ##
+  ## A bare ``--ct-incremental-trace-dir`` (no inline value) raises the same
+  ## ``ValueError`` shape as the other value-taking watch flags — the value is
+  ## mandatory, never silently empty.
+  if arg == "--ct-incremental":
+    flags.enabled = true
+    true
+  elif arg.startsWith("--ct-incremental-trace-dir="):
+    flags.traceDir = arg.split("=", maxsplit = 1)[1]
+    true
+  elif arg == "--ct-incremental-trace-dir":
+    raise newException(ValueError,
+      "--ct-incremental-trace-dir requires an inline value, for example " &
+        "--ct-incremental-trace-dir=.repro/ct-trace")
+  else:
+    false
+
 proc runWatchCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
@@ -13416,6 +13453,13 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   var attachSessionId = ""
   var stopSessionId = ""
   var statsCapture = StatsCaptureConfig()
+  # Trace-Based-Incremental-Testing M2: opt-in runtime-incremental mode for a
+  # watched test edge. ``--ct-incremental`` enables the mode;
+  # ``--ct-incremental-trace-dir=PATH`` points at the directory where the
+  # watched test produces its CodeTracer trace (prototype assumption — a fixed
+  # dir the test writes its trace to). Absence of ``--ct-incremental`` leaves
+  # the legacy watch behaviour byte-for-byte unchanged.
+  var ctFlags = WatchCtIncrementalFlags()
 
   for arg in args:
     if arg.startsWith("--tool-provisioning="):
@@ -13549,6 +13593,10 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
           "--hcr-target=alpha:/tmp/a.sock:.repro/hcr-alpha " &
           "or --hcr-target=name=pkgA:cli,socket=/tmp/a.sock," &
           "artifacts=.repro/hcr-alpha")
+    elif applyWatchCtIncrementalFlag(ctFlags, arg):
+      # Trace-Based-Incremental-Testing M2: ``--ct-incremental`` /
+      # ``--ct-incremental-trace-dir=PATH`` consumed by the shared parser.
+      discard
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported watch flag: " & arg)
     else:
@@ -13738,6 +13786,30 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       for i in 0 ..< hcrSessions.len:
         hcrSessions[i].closeHcrWatchSession()
 
+    # Trace-Based-Incremental-Testing M2 -----------------------------------
+    # When ``--ct-incremental`` is set, the watched target is treated as a
+    # single test edge (the prototype assumption). We resolve the seam inputs
+    # once: the test id is the resolved ``target`` selector, the source root is
+    # the project root the trace's recorded paths resolve under, the trace dir
+    # is ``--ct-incremental-trace-dir`` (defaulting to a fixed dir under the
+    # project root), and the cache lives at the engine's default path under the
+    # project root. On every *rebuild* cycle (cycle > 1, i.e. after a real
+    # filesystem change) we call the pure ``watchTestEdgeDecision`` seam: if it
+    # says skip, we emit ``skipped (unchanged: <test>)`` and do NOT re-run the
+    # edge; otherwise we re-run and ``record`` the fresh trace. Cycle 1 (the
+    # initial build) always runs + records so a baseline exists. None of this
+    # executes when the flag is absent, keeping the legacy path unchanged.
+    let ctProjectRoot = requestProjectRoot()
+    let ctTestId = target
+    let ctTraceDir =
+      if ctFlags.traceDir.len > 0: ctFlags.traceDir
+      else: ctProjectRoot / ".repro" / "ct-incremental" / "trace"
+    let ctCachePath = defaultCachePath(ctProjectRoot)
+    # The watch paths last computed from a real build outcome, reused by the
+    # M2 skip branch so a skipped rebuild can resume watching the same paths
+    # without a stale ``outcome`` from a prior (out-of-scope) loop iteration.
+    var ctLastWatchPaths: seq[string] = @[]
+
     # The shared SSE emit hook for HCR events — wires each per-target
     # ``hcr/*`` event into the watch event stream so SSE consumers can
     # route by ``target`` (HCR/CLI-Integration §3.4).
@@ -13754,6 +13826,47 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         (if cycle == 1: " initial" else: " rebuild"),
         payloadJson = "{\"watchEvent\":\"cycle-start\",\"cycle\":" & $cycle &
           "}")
+      # Trace-Based-Incremental-Testing M2: on a rebuild cycle (cycle > 1,
+      # triggered by a real filesystem change), consult the pure seam. A
+      # ``weaSkip`` verdict means no executed function changed, so we report the
+      # skip and loop straight back to watching WITHOUT re-running the test edge
+      # or recording. Any non-skip verdict (fresh/changed/fail-safe error) falls
+      # through to the normal build+record below.
+      if ctFlags.enabled and cycle > 1:
+        let ctDecision = watchTestEdgeDecision(
+          ctTestId, ctTraceDir, ctProjectRoot, ctCachePath)
+        if ctDecision.action == weaSkip:
+          emitWatchLine("repro watch: skipped (unchanged: " &
+              ctDecision.testId & ")",
+            payloadJson = "{\"watchEvent\":\"ct-incremental\",\"decision\":" &
+              "\"skip\",\"test\":\"" &
+              ctDecision.testId.replace("\\", "\\\\").replace("\"", "\\\"") &
+              "\"}",
+            lastResult = "ct-incremental=skip test=" & ctDecision.testId)
+          # Resume watching without re-running: rebuild the watcher over the
+          # paths last computed from a real build outcome and block until the
+          # next change.
+          var skipWatcher = openFilesystemWatcher(ctLastWatchPaths)
+          try:
+            discard skipWatcher.waitForEvent(
+              proc(): bool = cancelCheck != nil and cancelCheck())
+            discard skipWatcher.drainDebouncedEvents(debounceMs)
+          finally:
+            skipWatcher.closeFilesystemWatcher()
+          if maxCycles > 0 and cycle >= maxCycles:
+            emitWatchLine("repro watch: max cycles reached",
+              payloadJson = "{\"watchEvent\":\"max-cycles\"}", terminal = true,
+              watchedPaths = @[], lastResult = "max-cycles")
+            return 0
+          continue
+        else:
+          emitWatchLine("repro watch: ct-incremental rerun (" &
+              ctDecision.reason & ") test=" & ctDecision.testId,
+            payloadJson = "{\"watchEvent\":\"ct-incremental\",\"decision\":" &
+              "\"rerun\",\"test\":\"" &
+              ctDecision.testId.replace("\\", "\\\\").replace("\"", "\\\"") &
+              "\"}",
+            lastResult = "ct-incremental=rerun test=" & ctDecision.testId)
       # Adapter: executeBuildTarget speaks the build-event shape; the watch
       # caller's eventSink takes additional terminal/exitCode/path fields.
       # Forwarding nested logSummary / logAction lines through the daemon
@@ -13780,6 +13893,28 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         lastResult = "cycle=" & $cycle & " exitCode=" & $outcome.exitCode)
       if outcome.exitCode != 0:
         return outcome.exitCode
+      # Trace-Based-Incremental-Testing M2: the test edge actually ran this
+      # cycle (fresh/changed/initial), so refresh the incremental cache from
+      # the freshly-produced trace. ``record`` recomputes the executed-function
+      # dependency set + deep hash; a missing/unreadable trace is reported but
+      # not fatal — the next decision then falls back to a re-run (fail-safe).
+      if ctFlags.enabled:
+        var ctCache = block:
+          let loaded = loadCache(ctCachePath)
+          if loaded.isOk: loaded.value else: initCache(ctCachePath)
+        let rec = record(ctCache, ctTestId, ctTraceDir, ctProjectRoot)
+        if rec.isErr:
+          emitWatchLine("repro watch: ct-incremental record skipped (" &
+              rec.error & ")",
+            payloadJson = "{\"watchEvent\":\"ct-incremental\",\"decision\":" &
+              "\"record-error\"}")
+        else:
+          let saved = saveCache(ctCache)
+          if saved.isErr:
+            emitWatchLine("repro watch: ct-incremental cache save failed (" &
+                saved.error & ")",
+              payloadJson = "{\"watchEvent\":\"ct-incremental\",\"decision\":" &
+                "\"save-error\"}")
       # Named-Targets M4: per-target HCR session lifecycle. Each enabled
       # session runs its own baseline (cycle 1) or patch delivery (cycle
       # N>1). A failure on any single session is isolated: the session
@@ -13830,6 +13965,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         return 0
 
       let paths = watchPathsFromReport(outcome)
+      ctLastWatchPaths = paths
       var watcher = openFilesystemWatcher(paths)
       try:
         emitWatchLine("repro watch: watching paths=" &

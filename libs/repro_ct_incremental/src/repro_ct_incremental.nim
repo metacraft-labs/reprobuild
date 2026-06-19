@@ -10,6 +10,8 @@
 
 import repro_ct_incremental/trace_reader
 import repro_ct_incremental/engine
+import repro_ct_incremental/watch
 
 export trace_reader
 export engine
+export watch
