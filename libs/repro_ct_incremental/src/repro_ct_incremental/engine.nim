@@ -14,30 +14,19 @@
 ##   against the *current* source. We only re-trace and `record` when the test
 ##   is actually re-run.
 ##
-## # Source extraction heuristic (documented)
+## # Source extraction (language-agnostic; M3)
 ##
-## The fixture language is Ruby; Ruby (like Python) is indentation/`def`/`end`
-## structured. `extractFunctionBody` uses a simple, language-agnostic
-## indentation heuristic adequate for the M1 fixture (tree-sitter is a later
-## milestone, M3):
-##
-##   * The function starts at `defLine` (1-based, as the trace records it).
-##   * Let `indent` be the leading-whitespace width of the `def` line.
-##   * The body is the `def` line plus every following line, up to but NOT
-##     including the next *non-blank* line whose indentation is `<= indent`
-##     (a sibling/closing construct). Blank lines never terminate the body;
-##     they are carried along so a blank line inside the body does not truncate
-##     it. For a top-level Ruby `def` (indent 0) the terminating line is the
-##     matching `end`, which sits at indent 0 — so the `end` line is the first
-##     line at `<= indent` and is therefore EXCLUDED. The captured body is the
-##     `def` line through the last body statement. This is sufficient for
-##     change detection: any edit inside the body (or to the `def` signature)
-##     changes the captured text, while edits to *sibling* functions do not.
-##
-## The exact boundary rule matters only for stability, not correctness of the
-## skip/re-run decision: as long as the same physical lines are captured for an
-## unchanged function and different lines/text for a changed one, the engine is
-## correct. The chosen rule is deterministic and documented here.
+## Per-function source extraction is delegated to a `FunctionBodyExtractor`
+## selected purely by file extension (see `extractors.nim`). The engine itself
+## contains NO per-language logic: it asks `extractors.extractFunctionBody` for
+## the body given the source file path, the source lines, and the 1-based
+## `defLine`. Ruby (`.rb`) and Python (`.py`) use an indentation heuristic;
+## JavaScript (`.js`) uses brace matching. An unknown extension yields an
+## `Err`, which the engine maps to the reserved `"missing"` shallow hash so the
+## test fail-safes to a re-run (never a silent wrong hash). The exact boundary
+## rule matters only for stability, not correctness of the skip/re-run
+## decision: as long as the same physical lines are captured for an unchanged
+## function and different lines/text for a changed one, the engine is correct.
 ##
 ## # Normalization (documented)
 ##
@@ -57,20 +46,22 @@
 ## # Missing functions
 ##
 ## If a function named in the cached dependency set no longer exists at its
-## recorded `defLine` (the file is shorter than `defLine`, or that line is not
-## a function definition we can extract), `shallowHash` of an *empty* extracted
-## body is used and the body is flagged via the sentinel produced by
-## `extractFunctionBody` returning an empty string. The deep hash therefore
-## changes versus the recorded one, so `decide` returns `idRerunChanged` with
-## the missing function listed — a removed dependency is treated as changed and
-## is never silently skipped (see `removed_executed_function_reruns`).
+## recorded `defLine` (the file is shorter than `defLine`, or the extractor
+## cannot read a body there), or its source file's extension has no registered
+## extractor, the body extraction returns an `Err`. The engine maps that to the
+## reserved `"missing"` shallow hash. The deep hash therefore changes versus the
+## recorded one, so `decide` returns `idRerunChanged` with the missing function
+## listed — a removed/unreadable dependency is treated as changed and is never
+## silently skipped (see `removed_executed_function_reruns`).
 
 import std/[json, os, algorithm, hashes, strutils, tables]
 import results
 
 import trace_reader
+import extractors
 
 export trace_reader
+export extractors
 
 type
   IncrementalDecisionKind* = enum
@@ -135,45 +126,6 @@ func hexOfHash(h: Hash): string =
   ## range error), then `toHex` on the unsigned value.
   toHex(cast[uint](h)).toLowerAscii()
 
-func leadingIndent(line: string): int =
-  ## Number of leading whitespace characters (spaces/tabs) on a line.
-  for ch in line:
-    if ch == ' ' or ch == '\t': inc result
-    else: break
-
-proc extractFunctionBody*(sourceLines: seq[string]; defLine: int): string =
-  ## Extract the body text of the function defined at `defLine` (1-based) using
-  ## the documented indentation heuristic. Returns the captured text (the `def`
-  ## line through the last body line). Returns the empty string when no
-  ## function can be extracted at `defLine` (line out of range) — the caller
-  ## treats that as a removed/changed dependency.
-  ##
-  ## `sourceLines` is the source file split on `\n`.
-  if defLine < 1 or defLine > sourceLines.len:
-    return ""
-  let startIdx = defLine - 1
-  let indent = leadingIndent(sourceLines[startIdx])
-  var captured = @[sourceLines[startIdx]]
-  var i = startIdx + 1
-  while i < sourceLines.len:
-    let line = sourceLines[i]
-    if line.strip().len == 0:
-      # Blank lines never terminate the body; carry them along so an interior
-      # blank line does not truncate the function.
-      captured.add line
-      inc i
-      continue
-    if leadingIndent(line) <= indent:
-      # First non-blank line at sibling-or-shallower indentation ends the body.
-      break
-    captured.add line
-    inc i
-  # Drop trailing blank lines that were carried past the last real statement,
-  # so trailing blank padding between functions does not affect the hash.
-  while captured.len > 0 and captured[^1].strip().len == 0:
-    captured.setLen(captured.len - 1)
-  captured.join("\n")
-
 func normalizeBody(funcSource: string): string =
   ## Apply the documented normalization: strip trailing whitespace per line
   ## (including a stray `\r` from CRLF sources), keep leading indentation,
@@ -230,15 +182,21 @@ proc readSourceLines(path: string): Result[seq[string], string] =
 
 proc shallowHashOfDep(dep: ExecutedFunction; sourceRoot: string): string =
   ## Compute the current shallow hash of a single executed function against the
-  ## source under `sourceRoot`. A missing file or missing function yields the
-  ## reserved `"missing"` shallow hash (via `shallowHash` of an empty body), so
-  ## a removed dependency is treated as changed.
+  ## source under `sourceRoot`. A missing file, a missing function, OR an
+  ## unsupported source extension yields the reserved `"missing"` shallow hash
+  ## (via `shallowHash` of an empty body), so a removed/unreadable dependency is
+  ## treated as changed — never silently skipped, never hashed with the wrong
+  ## extractor. The extractor is chosen purely by `dep.file`'s extension.
   let path = resolveSourcePath(sourceRoot, dep.file)
   let linesRes = readSourceLines(path)
   if linesRes.isErr:
     return shallowHash("")  # missing file => missing function => "missing"
-  let body = extractFunctionBody(linesRes.value, dep.defLine)
-  shallowHash(body)
+  # `dep.file` (the trace-recorded path) carries the extension that selects the
+  # extractor; `path` is only where the bytes live under the temp sourceRoot.
+  let bodyRes = extractFunctionBody(dep.file, linesRes.value, dep.defLine)
+  if bodyRes.isErr:
+    return shallowHash("")  # unknown ext / out-of-range / unmatched => "missing"
+  shallowHash(bodyRes.value)
 
 # ---------------------------------------------------------------------------
 # Deep hash (§16.7.3)

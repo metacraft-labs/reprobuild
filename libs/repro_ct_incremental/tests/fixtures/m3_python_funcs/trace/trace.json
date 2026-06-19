@@ -1,0 +1,18 @@
+[
+  {"Path": ""},
+  {"Path": "/fixtures/m3_python_funcs/src/three_funcs.py"},
+  {"Function": {"path_id": 1, "line": 32, "name": "main"}},
+  {"Function": {"path_id": 1, "line": 20, "name": "used_a"}},
+  {"Function": {"path_id": 1, "line": 24, "name": "used_b"}},
+  {"Function": {"path_id": 1, "line": 28, "name": "unused_c"}},
+  {"Call": {"function_id": 0, "args": []}},
+  {"Step": {"path_id": 1, "line": 33}},
+  {"Call": {"function_id": 1, "args": []}},
+  {"Step": {"path_id": 1, "line": 21}},
+  {"Return": {"return_value": {"kind": "None", "type_id": 0}}},
+  {"Step": {"path_id": 1, "line": 34}},
+  {"Call": {"function_id": 2, "args": []}},
+  {"Step": {"path_id": 1, "line": 25}},
+  {"Return": {"return_value": {"kind": "None", "type_id": 0}}},
+  {"Return": {"return_value": {"kind": "None", "type_id": 0}}}
+]

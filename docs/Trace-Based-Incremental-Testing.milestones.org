@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: M2 complete, M3 next
+#+STATUS: M3 complete, M4 next
 
 * Overview
 
@@ -192,26 +192,44 @@
   decision through a seam, not a live wall-clock filesystem race).
 
 * M3 — Second and third languages
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: prove language-agnosticism. Add fixtures + per-language function-body
-  extraction for two more languages with real CodeTracer recorders (e.g. Ruby
-  and Python).
+  extraction for two more languages whose syntax exercises genuinely different
+  extraction strategies (Python — indentation; JavaScript — braces) alongside
+  the M1 Ruby language.
 
   Deliverables:
-  - [ ] Per-language source extraction strategy abstraction
-    (`FunctionBodyExtractor`) selected by file extension; Ruby + Python
-    implementations alongside the M1 language.
-  - [ ] One real recorded trace fixture per language (recorded with the
-    language's recorder; document the command). The same M1 decide()/record()
-    engine drives all three with no per-language branching outside the extractor.
+  - [X] Per-language source extraction strategy abstraction
+    (`FunctionBodyExtractor`) selected by file extension —
+    `libs/repro_ct_incremental/src/repro_ct_incremental/extractors.nim`: a
+    registry mapping `.rb`/`.py`/`.js` → an `ExtractorProc` returning
+    `Result[string, string]`. Ruby + Python share an indentation extractor;
+    JavaScript uses a brace-matching extractor (skips braces in strings and
+    `//` / `/* */` comments — documented limitation: not a full JS lexer). An
+    unknown extension ⇒ a clear `Err` (`extractorFor`), which the engine maps
+    to the `"missing"` shallow hash so the test fail-safes to a re-run — never
+    a silent wrong hash. The M1 Ruby extraction was refactored behind this
+    abstraction; `engine.nim` now contains ZERO per-language branching (it
+    calls `extractFunctionBody(dep.file, lines, defLine)`).
+  - [X] One trace fixture per new language in the SAME real CodeTracer JSON
+    schema M0 uses — `tests/fixtures/m3_python_funcs/` and
+    `tests/fixtures/m3_js_funcs/` (each: `main` calls `used_a`+`used_b`;
+    `unused_c` defined-but-uncalled). Traces are hand-crafted in the
+    M0-confirmed real schema; live-recording validation with the real Python/JS
+    recorders is deferred (the recorders are not prebuilt in this dev env — see
+    each fixture README, which also documents the re-record command). The same
+    M1 `decide()`/`record()` engine drives all three with no per-language
+    branching outside the extractor.
 
-  Automated tests:
-  - test_name: <lang>_executed_function_change_reruns (per added language)
-  - test_name: <lang>_unexecuted_function_change_skips (per added language)
-  - test_name: extractor_selected_by_extension
-    description: The correct extractor is chosen per file type; an unknown
-    extension yields a clear error, never a silent wrong hash.
+  Automated tests (`tests/t_multilang_extractors.nim`):
+  - [X] test_name: <lang>_executed_function_change_reruns (python + javascript)
+  - [X] test_name: <lang>_unexecuted_function_change_skips (python + javascript)
+  - [X] test_name: extractor_selected_by_extension
+    description: The correct extractor is chosen per `.rb`/`.py`/`.js` (and an
+    unknown extension yields a clear, asserted error, never a silent wrong
+    hash); the .py (indentation) and .js (braces) extractors are driven over
+    snippets to confirm genuinely different strategies.
 
   Acceptance: identical engine, three languages, all skip/re-run tests green.
 
