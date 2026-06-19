@@ -141,12 +141,21 @@ proc fetchPayloadStreaming*(ctx: ClientContext;
   createDir(parentDir(tempPath))
 
   var f = open(tempPath, fmWrite)
+  var fClosed = false
   var hasher = blake3lib.initHasher()
   var hasherClosed = false
   defer:
     if not hasherClosed:
       hasher.close()
-    try: f.close() except CatchableError: discard
+    # Guard against a double ``close``: the success path closes ``f``
+    # explicitly before the rename (see below). Nim's ``File.close``
+    # calls ``fclose`` without nilling the handle, so a second close
+    # is ``fclose`` on a freed ``FILE*`` — glibc aborts the process
+    # ("double free detected in tcache"), which a ``try/except`` can't
+    # catch since it's a C-level abort, not a Nim exception. macOS's
+    # allocator tolerates it, which is why this only crashed on Linux.
+    if not fClosed:
+      try: f.close() except CatchableError: discard
     if fileExists(tempPath):
       try: removeFile(tempPath) except CatchableError: discard
 
@@ -233,6 +242,7 @@ proc fetchPayloadStreaming*(ctx: ClientContext;
   # Close the file BEFORE the rename to flush kernel buffers on
   # Windows + give the OS a chance to fsync.
   f.close()
+  fClosed = true
 
   let casFinalPath = ctx.store.casPath(payload.digest)
   createDir(parentDir(casFinalPath))
