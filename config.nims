@@ -316,10 +316,11 @@ let useSystemHashLibs = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii()
 if not useSystemHashLibs:
   switch("define", "reproVendoredHash")
 
-# Windows and the default local build use the vendored blake3 / xxhash sources
-# we already ship under references/mold/. `blake3.nim` and `xxh3.nim` compile
-# the portable .c implementations directly when `reproVendoredHash` is defined;
-# we just need their headers on the include path.
+# The default local build uses the vendored blake3 / xxhash sources we already
+# ship under references/mold/. `blake3.nim` and `xxh3.nim` compile the portable
+# .c implementations directly when `reproVendoredHash` is defined; system-hash
+# mode, including on Windows, leaves that define unset and relies on the
+# configured system prefixes instead.
 if not useSystemHashLibs:
   let vendoredBlake3Inc = thisDir() / "references" / "mold" / "third-party" /
     "blake3" / "c"

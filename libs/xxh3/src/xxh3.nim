@@ -1,8 +1,9 @@
 {.compile: "xxh3/capi.c".}
 
-# Windows and vendored-hash builds compile the vendored xxhash.c directly. The
-# upstream xxhash.c is a single translation unit and uses only stddef/stdint.
-when defined(windows) or defined(reproVendoredHash):
+# Vendored-hash builds compile the vendored xxhash.c directly. In system-hash
+# mode, including on Windows, `xxh3/capi.c` relies on the include/link flags
+# configured by config.nims.
+when defined(reproVendoredHash):
   const xxh3Root = "../../../references/mold/third-party/xxhash"
   {.compile: xxh3Root & "/xxhash.c".}
 
