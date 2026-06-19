@@ -166,7 +166,7 @@ package dbusSource:
     sha256: "9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -187,6 +187,8 @@ package dbusSource:
     ## expat (the XML parser dbus uses for the introspection XML +
     ## bus-config file parsing).
     "pkg-config"
+
+  buildDeps:
     ## expat is the SAX XML parser dbus uses for the introspection
     ## XML layer + the bus-config file parser. Sibling from-source
     ## ``expatSource`` recipe pins ``>=2.6``.
@@ -229,4 +231,11 @@ package dbusSource:
     ## libGlib2 / libKF6I18n precedent of dropping the hyphen + version-
     ## suffix separator while preserving the canonical ``lib`` prefix.
     ## v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

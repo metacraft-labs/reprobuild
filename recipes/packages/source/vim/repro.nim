@@ -180,7 +180,7 @@ package vimSource:
     sha256: "c8ccd457bba5563513ab3e2088ad10d62b982682af9a9278686b48202b8c7697"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf is REQUIRED (not just a fallback): vim's GitHub archive
     ## ships ``src/configure.ac`` with a pre-generated ``src/configure``
     ## script but the top-level Makefile re-runs ``autoconf`` whenever
@@ -196,6 +196,8 @@ package vimSource:
     "make"
     ## gcc is the host C toolchain — vim is C99 + GNU extensions.
     "gcc >=11"
+
+  buildDeps:
     ## ncurses is required for the TTY frontend (terminfo lookups +
     ## the alternate-screen / cup / smkx grammar vim's redraw layer
     ## drives). With ``--without-x`` set the GUI surface is skipped
@@ -252,4 +254,11 @@ package vimSource:
     ## major distribution; consumed by every first-time vim user
     ## following the ``vim`` install README. v1 records the artifact
     ## only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

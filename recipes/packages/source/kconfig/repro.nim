@@ -150,7 +150,7 @@ package kconfigSource:
     sha256: "00ef2c75be68bacf8c30e3bf072358b8f6d2bc78d462e7b14c086808c69d8d7f"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## kconfig 6.x requires cmake 3.16 for the modern ECM + Qt6
@@ -162,6 +162,8 @@ package kconfigSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kconfig is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtGui / QtWidgets / QtXml which the
     ## three kconfig libraries wrap on top of. 6.6 is the minimum the
     ## 6.10 frameworks line targets.
@@ -207,4 +209,11 @@ package kconfigSource:
     ## (KConfigSkeletonGui / shortcut management) consumed by KF6
     ## applications that present GUI config. v1 records the artifact
     ## only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

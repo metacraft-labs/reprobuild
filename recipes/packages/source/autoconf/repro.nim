@@ -115,7 +115,7 @@ package autoconfSource:
     sha256: "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## m4 is the macro processor autoconf shells out to for the
     ## ``configure.ac`` → ``./configure`` template expansion.
     "m4"
@@ -168,4 +168,11 @@ package autoconfSource:
   executable ifnames:
     ## ``$PREFIX/bin/ifnames`` — helper for enumerating preprocessor
     ## identifiers. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

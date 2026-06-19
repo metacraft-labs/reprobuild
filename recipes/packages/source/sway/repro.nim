@@ -201,7 +201,7 @@ package swaySource:
     sha256: "034ec4519326d6af5275814700dde46e852c5174614109affe4c86b2fbee062a"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.60"
@@ -211,6 +211,8 @@ package swaySource:
     ## gcc is the host C toolchain — Sway is C11; 1.11 requires
     ## gcc 11+ for the same C11 atomics / TLS features wlroots uses.
     "gcc >=11"
+
+  buildDeps:
     ## wlroots is the modular Wayland compositor library Sway links
     ## against for its backend / renderer / scene-graph / protocol
     ## implementations. 0.19 is the line Sway 1.11 pins; the sibling
@@ -297,4 +299,11 @@ package swaySource:
     ## socket; used by user scripts, status bars, and Sway's own
     ## internal helpers to query workspace state and dispatch
     ## commands.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

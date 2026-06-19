@@ -182,7 +182,7 @@ package gdmSource:
     sha256: "c5858326bfbcc8ace581352e2be44622dc0e9e5c2801c8690fd2eed502607f84"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -200,6 +200,8 @@ package gdmSource:
     ## gcc is the host C toolchain — gdm is C11 with light use of
     ## autoconf macros.
     "gcc >=11"
+
+  buildDeps:
     ## glib2 is the foundation library gdm's daemon + greeter consume
     ## (GMainLoop event loop, GDBus client/server for accountsservice
     ## + logind IPC, GSettings for configuration). The sibling
@@ -252,4 +254,11 @@ package gdmSource:
     ## greeter binary gdm spawns as the login-screen UI; runs as the
     ## unprivileged ``gdm`` system user, displays the login form,
     ## hands off to the user session on successful authentication.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

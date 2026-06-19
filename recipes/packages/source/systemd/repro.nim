@@ -172,7 +172,7 @@ package systemdSource:
     sha256: "14f6907eb5e289d8c39cbe1ef891ca54d8a0e3582c986a9ef5844b3f29add43b"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. systemd v257 requires
     ## meson 1.2 for the modern dependency-fallback semantics it
@@ -184,6 +184,12 @@ package systemdSource:
     ## gcc is the host C toolchain — systemd is C11 with light use of
     ## GNU extensions.
     "gcc >=11"
+    ## pkg-config is used by the meson configure step to probe for
+    ## the libcap / libmount / libacl / libcrypt / kmod / libseccomp
+    ## dependencies.
+    "pkg-config"
+
+  buildDeps:
     ## libcap supplies the POSIX capabilities library systemd consumes
     ## to drop-and-keep capabilities when forking unit processes.
     "libcap >=2.60"
@@ -202,10 +208,6 @@ package systemdSource:
     ## libseccomp supplies the seccomp BPF filter library systemd's
     ## per-unit SystemCallFilter= directive compiles against.
     "libseccomp >=2.5"
-    ## pkg-config is used by the meson configure step to probe for
-    ## the libcap / libmount / libacl / libcrypt / kmod / libseccomp
-    ## dependencies.
-    "pkg-config"
 
   mesonOptions:
     ## Flag set mirroring the modern-desktop baseline per the task
@@ -293,4 +295,11 @@ package systemdSource:
     ## enumeration), libinput (udev device enumeration), and
     ## fontconfig (udev hot-plug for font-cache invalidation on
     ## external font mounts). v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

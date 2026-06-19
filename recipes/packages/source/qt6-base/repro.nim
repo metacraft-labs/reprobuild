@@ -195,7 +195,7 @@ package qt6BaseSource:
     sha256: "40b14562ef3bd779bc0e0418ea2ae08fa28235f8ea6e8c0cb3bce1d6ad58dcaf"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``. qt6-base
     ## 6.8.x requires cmake 3.21 for the modern qt-internal-build helper
@@ -211,6 +211,12 @@ package qt6BaseSource:
     ## perl is needed by qt6-base's syncqt helper script which generates
     ## the public-header forwarding layer at configure time.
     "perl >=5.32"
+    ## pkg-config is used by the CMake configure step to probe for the
+    ## wayland / freetype / fontconfig / harfbuzz / libdbus / sqlite /
+    ## libssl / zlib dependencies.
+    "pkg-config"
+
+  buildDeps:
     ## python is invoked by qt6-base's QML compiler driver + a handful
     ## of code-generation helpers in the build.
     "python >=3.8"
@@ -253,10 +259,6 @@ package qt6BaseSource:
     ## QtNetwork consume for HTTP compression + QFile transparent
     ## decompression.
     "zlib >=1.2.11"
-    ## pkg-config is used by the CMake configure step to probe for the
-    ## wayland / freetype / fontconfig / harfbuzz / libdbus / sqlite /
-    ## libssl / zlib dependencies.
-    "pkg-config"
 
   cmakeFlags:
     ## Flag set mirroring the modern-desktop baseline per the task
@@ -316,4 +318,11 @@ package qt6BaseSource:
     ## ``libQt6Sql.so`` — the DB driver framework used by KConfigData
     ## + Plasma activities (SQLite driver enabled via
     ## ``FEATURE_sql_sqlite=ON``). v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

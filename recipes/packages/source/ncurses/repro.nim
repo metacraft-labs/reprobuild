@@ -178,7 +178,7 @@ package ncursesSource:
     sha256: "136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. ncurses's
     ## release tarball pre-generates ``configure`` but the convention's
@@ -256,4 +256,11 @@ package ncursesSource:
     ## emulator compatibility (e.g. ``infocmp xterm-256color`` to
     ## inspect the cup / setaf / smkx grammar of a TERM entry). v1
     ## records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

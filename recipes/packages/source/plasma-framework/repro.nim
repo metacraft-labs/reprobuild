@@ -122,13 +122,15 @@ package plasmaFrameworkSource:
     sha256: "af770f5fef978512c70491889516fb769d340f00a02270987d2d1d17753658ec"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — libplasma is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtGui / QtQml / QtQuick / QtSvg /
     ## QtDBus the libplasma applet runtime + ``PlasmaCore`` QML bindings
     ## consume.
@@ -172,4 +174,11 @@ package plasmaFrameworkSource:
     ## KPackage plugin loader). v1 records the artifact only; the per-
     ## artifact build body lands in M9.L when the convention's ninja-
     ## spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

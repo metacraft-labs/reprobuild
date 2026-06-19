@@ -186,7 +186,7 @@ package glibcSource:
     sha256: "19a890175e9263d748f627993de6f4b1af9cd21e03f080e4bfb3a1fac10205a2"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -203,6 +203,8 @@ package glibcSource:
     ## bison is required by the build for the parser-generator passes
     ## in the localedef / iconv tools.
     "bison >=3.0"
+
+  buildDeps:
     ## python is required by the build for the misc/syscall-list code
     ## generators glibc 2.x switched to in the 2.32 cut.
     "python >=3.9"
@@ -283,4 +285,11 @@ package glibcSource:
     ## exec()'s it directly when the ELF interpreter field points at
     ## it); distinct from the libraries the linker itself resolves.
     ## v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

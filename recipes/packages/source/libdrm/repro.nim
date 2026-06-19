@@ -136,7 +136,7 @@ package libdrmSource:
     sha256: "fc68f9d0ba2ea63c9432a299e14fea09fad7a8a66e8039fcd7802ca59f77b4f5"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.59"
@@ -187,4 +187,11 @@ package libdrmSource:
   library libdrmNouveau:
     ## ``libdrm_nouveau.so`` — open NVIDIA driver side library,
     ## gated on ``-Dnouveau=enabled`` above.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

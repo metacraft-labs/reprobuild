@@ -155,7 +155,7 @@ package harfbuzzSource:
     sha256: "6ce3520f2d089a33cef0fc48321334b8e0b72141f6a763719aaaecd2779ecb82"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. harfbuzz 10.x requires
     ## meson 0.55 for the modern option semantics.
@@ -166,6 +166,8 @@ package harfbuzzSource:
     ## gcc is the host C/C++ toolchain — harfbuzz is C++11 with light
     ## use of C++17 features in the OT layout layer.
     "gcc >=11"
+
+  buildDeps:
     ## glib is consumed for the GObject wrapper (disabled) AND for the
     ## ``g_uchar_*`` helpers in non-gobject builds; meson can probe it
     ## via pkg-config even when gobject=disabled.
@@ -203,4 +205,11 @@ package harfbuzzSource:
     ## text shaping. v1 records the artifact only; the per-artifact
     ## build body lands in M9.L when the convention's ninja-spawn +
     ## install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

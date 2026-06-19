@@ -88,13 +88,15 @@ package ksvgSource:
     sha256: "173e151f6ef8360149f835b1fc7494e97a33f9056d294ab213c9ef9e6d84d0c8"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — ksvg is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtGui / QtSvg / QtQml ksvg wraps for
     ## the scalable-asset surface.
     "qt6-base >=6.6"
@@ -127,4 +129,11 @@ package ksvgSource:
     ## FrameSvg + ImageSet). v1 records the artifact only; the per-
     ## artifact build body lands in M9.L when the convention's ninja-
     ## spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

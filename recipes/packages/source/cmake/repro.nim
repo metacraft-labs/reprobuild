@@ -126,7 +126,7 @@ package cmakeSource:
     sha256: "42abb3f48f37dbd739cdfeb19d3712db0c5935ed5c2aef6c340f9ae9114238a2"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## gcc is the host C++ toolchain — cmake is C++17 with no external
     ## runtime dependencies beyond the system libstdc++.
     "gcc >=11"
@@ -172,4 +172,11 @@ package cmakeSource:
     ## same install-tree as ``cmake``. No per-artifact build body: the
     ## cmake ``build:`` block above already installs ``cpack`` under
     ## ``$out/bin/`` via the ``make install`` step.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

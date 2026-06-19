@@ -193,7 +193,7 @@ package gccSource:
     sha256: "a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## binutils provides ``ld`` / ``as`` / ``ar`` that gcc shells out
     ## to at link + assemble time. gcc's configure probes for the
     ## binutils versions at ``./configure`` time so the version pin
@@ -203,6 +203,17 @@ package gccSource:
     ## pipeline shells out to ``make`` after the out-of-tree
     ## ``../configure`` step lays out the generated ``Makefile``s.
     "make >=4.3"
+    ## perl is invoked by gcc's ``configure`` script for a handful
+    ## of code-generation passes (e.g. ``gcc/genopinit.pl``).
+    "perl >=5.32"
+    ## bison + flex are consumed by gcc's parser-generation passes
+    ## under ``gcc/`` (the C / C++ parsers are hand-written but the
+    ## modula-2 + d frontends use bison-generated parsers; the
+    ## configure script probes for both unconditionally).
+    "bison >=3.6"
+    "flex >=2.6"
+
+  buildDeps:
     ## gmp / mpfr / mpc are the arbitrary-precision-arithmetic
     ## libraries gcc's middle-end consumes for constant folding +
     ## floating-point analysis. The upstream tarball ships a
@@ -213,15 +224,6 @@ package gccSource:
     "gmp >=6.2"
     "mpfr >=4.1"
     "mpc >=1.2"
-    ## perl is invoked by gcc's ``configure`` script for a handful
-    ## of code-generation passes (e.g. ``gcc/genopinit.pl``).
-    "perl >=5.32"
-    ## bison + flex are consumed by gcc's parser-generation passes
-    ## under ``gcc/`` (the C / C++ parsers are hand-written but the
-    ## modula-2 + d frontends use bison-generated parsers; the
-    ## configure script probes for both unconditionally).
-    "bison >=3.6"
-    "flex >=2.6"
 
   executable gcc:
     ## ``$PREFIX/bin/gcc`` — the canonical C compiler driver every
@@ -303,4 +305,11 @@ package gccSource:
     ## identifier character; the M3 artifact registry stores the
     ## literal ``"libstdc++"`` string. No per-artifact build body:
     ## shared install-tree with ``gcc``.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -149,7 +149,7 @@ package pamSource:
     sha256: "f8923c740159052d719dbfc2a2f81942d68dd34fcaf61c706a02c9b80feeef8e"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -222,4 +222,11 @@ package pamSource:
     ## ``pamc_converse``). The upstream SONAME ``pamc`` is preserved
     ## as-is in the artifact identifier. v1 records the artifact
     ## only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

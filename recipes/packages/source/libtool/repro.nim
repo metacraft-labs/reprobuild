@@ -104,19 +104,21 @@ package libtoolSource:
     sha256: "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## m4 is the macro processor libtool's bootstrap chain shells out
     ## to for the ``libtool.m4`` macro expansion.
     "m4"
-    ## file is consumed by libtool 2.4.7+ for the ``FILECMD`` shim
-    ## that replaces the hardcoded ``/usr/bin/file`` reference.
-    "file"
     ## make is the build-system driver — the from-source-autotools
     ## convention's compile action invokes ``make`` after
     ## ``./configure``.
     "make"
     ## gcc is the host C toolchain — libltdl is C99.
     "gcc >=11"
+
+  buildDeps:
+    ## file is consumed by libtool 2.4.7+ for the ``FILECMD`` shim
+    ## that replaces the hardcoded ``/usr/bin/file`` reference.
+    "file"
 
   configureFlags:
     ## Modern-desktop baseline. ``--disable-static`` skips the static
@@ -138,4 +140,11 @@ package libtoolSource:
     ## ``$PREFIX/lib/libltdl.so`` — the dynamic-module loader library
     ## autotools projects link against when they need portable
     ## ``dlopen`` semantics. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

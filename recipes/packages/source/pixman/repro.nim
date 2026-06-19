@@ -141,7 +141,7 @@ package pixmanSource:
     sha256: "d09c44ebc3bd5bee7021c79f922fe8fb2fb57f7320f55e97ff9914d2346a591c"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.59"
@@ -177,4 +177,11 @@ package pixmanSource:
     ## v1 records the artifact only; the per-artifact build body
     ## lands in M9.L when the convention's ninja-spawn + install-glue
     ## closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

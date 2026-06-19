@@ -179,7 +179,7 @@ package gnomeShellSource:
     sha256: "5174d25bb05d35f3612498efc33a1de533fc4e0f39e3eb377fd09591c94a10e6"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. gnome-shell 47.x
     ## requires meson 1.3 for its modern GResource bundling.
@@ -190,6 +190,8 @@ package gnomeShellSource:
     ## gcc is the host C toolchain — gnome-shell is C11 with GJS
     ## (gjs-1.0) glue.
     "gcc >=11"
+
+  buildDeps:
     ## glib2 is the foundation library gnome-shell consumes for the
     ## entire GObject hierarchy + GMainLoop + GSettings + GDBus.
     "glib2 >=2.62"
@@ -258,4 +260,11 @@ package gnomeShellSource:
     ## hyphenated upstream SONAME is camelCased to ``libGnomeShell``
     ## per the gdk-pixbuf / glib2 precedent. v1 records the artifact
     ## only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

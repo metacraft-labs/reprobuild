@@ -196,7 +196,7 @@ package eudevSource:
     sha256: "8da4319102f24abbf7fff5ce9c416af848df163b29590e666d334cc1927f006f"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -219,6 +219,8 @@ package eudevSource:
     ## modules-load builtin consumes) and gperf (the hwdb compiler
     ## driver).
     "pkg-config"
+
+  buildDeps:
     ## kmod supplies the kernel-module loader library eudev's
     ## modules-load builtin consumes.
     "kmod >=29"
@@ -279,4 +281,11 @@ package eudevSource:
     ## (``eudevSource``, ``libUdev``) entry are DISTINCT entries in
     ## the registry.
     ## v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

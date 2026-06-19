@@ -152,7 +152,7 @@ package alsaLibSource:
     sha256: "7b079d614d582cade7ab8db2364e65271d0877a37df8757ac4ac0c8970be861e"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. alsa-lib's
     ## release tarball pre-generates ``configure`` but the convention's
@@ -192,4 +192,11 @@ package alsaLibSource:
     ## v1 records the artifact only; the per-artifact build body
     ## lands in M9.L when the convention's make-spawn + install-glue
     ## closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

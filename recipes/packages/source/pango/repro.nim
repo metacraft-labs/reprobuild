@@ -153,7 +153,7 @@ package pangoSource:
     sha256: "8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. pango 1.54 requires
     ## meson 0.64 for the upstream build's option semantics.
@@ -164,6 +164,8 @@ package pangoSource:
     ## gcc is the host C toolchain — pango is plain C99 with light
     ## use of GLib-style autoconf macros via meson's gnome module.
     "gcc >=7"
+
+  buildDeps:
     ## glib provides GObject + GIO that pango's text-layout objects
     ## subclass; pango is a GObject library at heart.
     "glib >=2.62"
@@ -217,4 +219,11 @@ package pangoSource:
     ## lets cairo surfaces render pango layouts; the sibling
     ## ``cairoSource`` recipe is the upstream-source side of this
     ## edge. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -150,7 +150,7 @@ package gdkPixbufSource:
     sha256: "b9505b3445b9a7e48ced34760c3bcb73e966df3ac94c95a148cb669ab748e3c7"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. gdk-pixbuf 2.42
     ## requires meson 0.62 for the upstream build's option semantics.
@@ -162,6 +162,8 @@ package gdkPixbufSource:
     ## light use of GLib-style autoconf macros via meson's gnome
     ## module.
     "gcc >=7"
+
+  buildDeps:
     ## glib provides GObject + GIO that gdk-pixbuf's loader objects
     ## subclass; gdk-pixbuf is a GObject library at heart.
     "glib >=2.62"
@@ -201,4 +203,11 @@ package gdkPixbufSource:
     ## library consumed by GTK / GNOME shell / swaybg. v1 records
     ## the artifact only; the per-artifact build body lands in M9.L
     ## when the convention's ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -105,7 +105,7 @@ package ki18nSource:
     sha256: "2f59f093f8ce340ab46c556b35c2ead2b96dfeb2ff0024c553ac8c53e9b8a11a"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## ki18n 6.x requires cmake 3.16 for the modern ECM + Qt6
@@ -115,6 +115,12 @@ package ki18nSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — ki18n is C++17.
     "gcc >=11"
+    ## gettext supplies the libintl runtime ki18n wraps + the
+    ## ``msgfmt``/``msgmerge`` build-time tools the CMake build invokes
+    ## to compile ``.po`` translation catalogues into ``.mo`` files.
+    "gettext >=0.21"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtQml / QtTest the ki18n surface
     ## wraps. 6.6 is the minimum the 6.10 frameworks line targets.
     "qt6-base >=6.6"
@@ -122,10 +128,6 @@ package ki18nSource:
     ## disable QCH via ``BUILD_QCH=OFF`` but the ECM module still
     ## probes for the tool at configure time).
     "qt6-tools >=6.6"
-    ## gettext supplies the libintl runtime ki18n wraps + the
-    ## ``msgfmt``/``msgmerge`` build-time tools the CMake build invokes
-    ## to compile ``.po`` translation catalogues into ``.mo`` files.
-    "gettext >=0.21"
 
   cmakeFlags:
     ## Flag set mirroring the modern-desktop baseline per the task
@@ -145,4 +147,11 @@ package ki18nSource:
     ## classes wrapping gettext for the KF6 ecosystem. v1 records the
     ## artifact only; the per-artifact build body lands in M9.L when
     ## the convention's ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -205,7 +205,7 @@ package utilLinuxSource:
     sha256: "5c1daf733b04e9859afdc3bd87cc481180ee0f88b5c0946b16fdec931975fb79"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## tarball does ship a pre-generated ``configure`` but we list
@@ -309,4 +309,11 @@ package utilLinuxSource:
     ## ``libmount.so`` — the abstract mount-table library consumed by
     ## systemd's mount-unit machinery + gvfs. v1 records the artifact
     ## only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -173,7 +173,7 @@ package gettextSource:
     sha256: "fe10c37353213d78a5b83d48af231e005c4da84db5ce88037d88355938259640"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. gettext's
     ## release tarball pre-generates ``configure`` but the convention's
@@ -195,6 +195,8 @@ package gettextSource:
     ## pkg-config is used by the autotools configure step to probe for
     ## libxml2 + ncurses + the libintl probe path.
     "pkg-config"
+
+  buildDeps:
     ## libxml2 is consumed by gettext's ``msgfmt --xml`` codepath that
     ## emits XML-formatted message catalogs for the (deprecated)
     ## glade / qt-linguist consumers.
@@ -258,4 +260,11 @@ package gettextSource:
     ## precedent of preserving the canonical ``lib`` prefix while
     ## PascalCasing the SONAME body. v1 records the artifact only;
     ## the per-artifact build body lands in M9.L.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

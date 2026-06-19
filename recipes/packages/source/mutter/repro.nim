@@ -181,7 +181,7 @@ package mutterSource:
     sha256: "ee8a583c2b6ff309b501dc97e7c0b4f11d6197a9529ed22247ee95e89663e969"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. mutter 47.x requires
     ## meson 1.3 for its modern Wayland-protocol scanner integration.
@@ -192,6 +192,8 @@ package mutterSource:
     ## gcc is the host C toolchain — mutter is C11 with light use of
     ## GLib-style autoconf macros via meson's gnome module.
     "gcc >=11"
+
+  buildDeps:
     ## glib2 is the foundation library mutter's compositor + window-
     ## manager layers consume (GObject type system, GMainLoop event
     ## loop, GSettings configuration). The sibling ``glib2Source``
@@ -274,4 +276,11 @@ package mutterSource:
     ## artifact-name -> $prefix/bin/$name mapping but the convention
     ## layer's binary-discovery glob recognises ``mutter`` as the
     ## upstream-emitted basename).
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -180,7 +180,7 @@ package kwinSource:
     sha256: "5cc450a6e41105c8c49929b72550b331237f96aafb294690f4707bdc5f776848"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## kwin 6.x requires cmake 3.16 for the modern ECM + Qt6
@@ -192,6 +192,8 @@ package kwinSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kwin is C++20.
     "gcc >=11"
+
+  buildDeps:
     ## kcoreaddons is the KF6 foundation library kwin links against
     ## for KJob / KAboutData / KPluginFactory plumbing. The sibling
     ## ``kcoreaddonsSource`` recipe vendors 6.10.0 to match the KF6
@@ -260,4 +262,11 @@ package kwinSource:
     ## against to register window-management hooks + effect plugins.
     ## Third-party kwin effects also link against this for their UI
     ## plugin contracts. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

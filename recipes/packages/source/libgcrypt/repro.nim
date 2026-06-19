@@ -143,7 +143,7 @@ package libgcryptSource:
     sha256: "09120c9867ce7f2081d6aaa1775386b98c2f2f246135761aae47d81f58685b9c"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## release tarball does ship a pre-generated ``configure`` but we
@@ -164,6 +164,8 @@ package libgcryptSource:
     ## gcc is the host C toolchain — libgcrypt is C99 with assembly
     ## fast-paths for the AES / SHA / RSA / ECC primitives.
     "gcc >=11"
+
+  buildDeps:
     ## libgpg-error is libgcrypt's helper library for the canonical
     ## GnuPG error-code namespace. The upstream ``./configure`` probes
     ## for it through ``gpg-error-config``; the ``uses:`` entry pins
@@ -205,4 +207,11 @@ package libgcryptSource:
     ## while PascalCasing the SONAME body. v1 records the artifact
     ## only; the per-artifact build body lands in M9.L when the
     ## convention's make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

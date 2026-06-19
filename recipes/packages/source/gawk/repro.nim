@@ -154,7 +154,7 @@ package gawkSource:
     sha256: "ca9c16d3d11d0ff8c69d79dc0b47267e1329a69b39b799895604ed447d3ca90b"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. gawk's release
     ## tarball pre-generates ``configure`` but the convention's
@@ -191,4 +191,11 @@ package gawkSource:
     ## ``awk`` on install; v1 records the canonical short name
     ## ``awk`` per the task brief (the install-glue is the M9.L
     ## responsibility once the convention's make-spawn closes).
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

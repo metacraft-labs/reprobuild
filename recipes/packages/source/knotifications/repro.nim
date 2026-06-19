@@ -93,13 +93,15 @@ package knotificationsSource:
     sha256: "36b7881d50400f37b4f3aeaa4c0a6a943e5783d35441e2b0cacdc6dad06af2a1"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — knotifications is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtDBus / QtGui / QtNetwork +
     ## QtMultimedia the knotifications surface consumes (action
     ## buttons, sound playback, popup widgets, fallback channels).
@@ -129,4 +131,11 @@ package knotificationsSource:
     ## freedesktop ``org.freedesktop.Notifications`` D-Bus proxy). v1
     ## records the artifact only; the per-artifact build body lands in
     ## M9.L when the convention's ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

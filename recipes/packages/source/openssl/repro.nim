@@ -184,7 +184,7 @@ package opensslSource:
     sha256: "e15dda82fe2fe8139dc2ac21a36d4ca01d5313c75f99f46c4e8a27709b7294bf"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## make is the build-system driver — openssl's custom Perl
     ## ``./Configure`` emits a ``Makefile`` that ``make`` then drives.
     "make"
@@ -196,6 +196,8 @@ package opensslSource:
     ## generators in the build that emit AT&T-syntax assembly for the
     ## crypto fast-paths.
     "perl >=5.32"
+
+  buildDeps:
     ## zlib is consumed by openssl's TLS record compression layer
     ## (historical, now off-by-default but still built unless explicitly
     ## disabled with ``no-comp``). The sibling ``zlibSource`` recipe
@@ -244,4 +246,11 @@ package opensslSource:
     ## streams, and systemd-resolved's DNS-over-TLS layer. The upstream
     ## SONAME ``ssl`` is PascalCased to ``libSsl`` per the libGlib2 /
     ## libExpat precedent. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

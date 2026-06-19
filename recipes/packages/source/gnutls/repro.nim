@@ -155,7 +155,7 @@ package gnutlsSource:
     sha256: "ac4f020e583880b51380ed226e59033244bc536cad2623f2e26f5afa2939d8fb"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## release tarball does ship a pre-generated ``configure`` but we
@@ -179,6 +179,8 @@ package gnutlsSource:
     ## pkg-config is used by the autotools configure step to probe for
     ## nettle + libgcrypt + libtasn1 + libunistring + zlib.
     "pkg-config"
+
+  buildDeps:
     ## nettle is gnutls's symmetric-cipher + hash backend (sibling
     ## ``nettleSource`` recipe 52 vendors a compatible version).
     "nettle >=3.7"
@@ -236,4 +238,11 @@ package gnutlsSource:
     ## while PascalCasing the SONAME body. v1 records the artifact
     ## only; the per-artifact build body lands in M9.L when the
     ## convention's make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

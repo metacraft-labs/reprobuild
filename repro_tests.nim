@@ -6892,6 +6892,25 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.5a: 84-recipe sweep smoke. Pins
+  #   * sampled meson / cmake / autotools / make recipe registries
+  #     post-rename (``uses:`` -> ``buildDeps:`` + categorise into
+  #     ``nativeBuildDeps:`` per the M9.R.5a heuristic).
+  #   * convention bridge: ``nativeBuildDeps:`` entries fold into
+  #     ``ProjectInterface.toolUses`` so the convention layer's
+  #     PATH-setup surface sees them even when a recipe declares
+  #     them in ``nativeBuildDeps:`` only.
+  #   * runtimeDeps stub stays empty for sampled recipes (the M9.R.5b
+  #     pass will populate per-recipe runtime closures).
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
+    binary: "build/test-bin/t_m9r5a_recipe_sweep_smoke",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",

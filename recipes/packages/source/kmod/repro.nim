@@ -155,7 +155,7 @@ package kmodSource:
     sha256: "dc768b3155172091f56dc69430b5481f2d76ecd9ccb54ead8c2540dbcf5ea9bc"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## tarball does ship a pre-generated ``configure`` but we list
@@ -235,4 +235,11 @@ package kmodSource:
     ## libZ / libGlib2 / libCap precedent of preserving the canonical
     ## ``lib`` prefix while PascalCasing the SONAME body. v1 records
     ## the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

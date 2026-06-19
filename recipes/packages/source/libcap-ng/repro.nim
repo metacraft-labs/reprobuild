@@ -149,7 +149,7 @@ package libcapNgSource:
     sha256: "3ba5294d1cbdfa98afaacfbc00b6af9ed2b83e8a21817185dfd844cc8c7ac6ff"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## tarball does ship a pre-generated ``configure`` but we list
@@ -169,6 +169,8 @@ package libcapNgSource:
     ## gcc is the host C toolchain — libcap-ng is plain C99 with a
     ## small Linux-specific kernel-header dependency surface.
     "gcc >=11"
+
+  buildDeps:
     ## swig is invoked by the autotools build for the bindings layer
     ## (we ``--without-python`` + ``--without-python3`` so swig is
     ## elided in practice, but autoconf still probes for it; the
@@ -204,4 +206,11 @@ package libcapNgSource:
     ## kebab-to-PascalCase mapping. v1 records the artifact only; the
     ## per-artifact build body lands in M9.L when the convention's
     ## make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

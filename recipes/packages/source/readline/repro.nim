@@ -141,7 +141,7 @@ package readlineSource:
     sha256: "3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a5f6d5fd58b2f2c5f4ec"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. readline 8.x
     ## tarballs pre-generate ``configure`` but the convention's
@@ -160,6 +160,8 @@ package readlineSource:
     ## gcc is the host C toolchain — readline is C89 + a small amount
     ## of POSIX glue.
     "gcc >=11"
+
+  buildDeps:
     ## ncurses provides the terminfo database lookup + the curses
     ## key-handling primitives readline reaches for when the host
     ## terminal has a non-trivial cap set (the sibling ``ncursesSource``
@@ -200,4 +202,11 @@ package readlineSource:
     ## wants line-editing but rolls its own persistent history). v1
     ## records the artifact only; the per-artifact build body lands
     ## in M9.L.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

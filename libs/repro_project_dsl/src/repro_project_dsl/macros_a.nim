@@ -1453,7 +1453,27 @@ proc packageLiteral(pkg: PackageDef): string =
     ", sourceLine: " & $pkg.sourceLine &
     ", hasDevEnv: " & $pkg.hasDevEnv &
     ", devEnvBodyHash: " & escForCode(pkg.devEnvBodyHash) &
-    ", toolUses: " & packageUseSeqLiteral(pkg.toolUses) &
+    # DSL-port M9.R.5a convention bridge: the ``PackageDef.toolUses``
+    # slot — read by ``toProjectInterface`` to populate
+    # ``ProjectInterface.toolUses`` — is the union of the legacy
+    # ``uses:`` / ``buildDeps:`` entries (``pkg.toolUses``) AND the
+    # new ``nativeBuildDeps:`` entries (``pkg.nativeBuildDeps``).
+    # Without this fold, anything moved into ``nativeBuildDeps:`` by
+    # the M9.R.5a recipe sweep would silently drop out of the
+    # convention layer's tool-PATH setup (the convention reads only
+    # ``projectInterface.toolUses`` for PATH prepending — see the
+    # consumers at ``libs/repro_cli_support/src/repro_cli_support.nim``
+    # lines 3213, 5050, 10492, 14161). The per-kind separation is
+    # preserved at the ``registeredBuildDeps`` /
+    # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``
+    # accessors (M9.R.1) and at the M9.R.7 ``cachePlatformTagFor``
+    # site where the resolver caller threads the right ``DepKind``;
+    # this fold only affects the surface the convention's PATH
+    # builder sees, which is exactly what M9.R.5a needs. The
+    # ``nativeBuildDeps:`` slot below still emits the kind-tagged
+    # seq so any downstream consumer that needs the BUILD-platform
+    # subset can read it directly.
+    ", toolUses: " & packageUseSeqLiteral(pkg.toolUses & pkg.nativeBuildDeps) &
     # DSL-port M9.R.1: emit the two new package-level dep slots.
     # Empty seqs serialize as ``@[]`` so legacy recipes that don't
     # declare either block round-trip byte-identically to their

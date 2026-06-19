@@ -175,7 +175,7 @@ package libinputSource:
     sha256: "a13f8c9a7d93df3c85c66afd135f0296701d8d32f911991b7aa4273fdd6a42a3"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.59"
@@ -185,6 +185,8 @@ package libinputSource:
     ## gcc is the host C toolchain — libinput is plain C99 with a
     ## modern compiler-flag surface.
     "gcc >=7"
+
+  buildDeps:
     ## libudev is the userspace device-management library libinput's
     ## evdev backend wraps for hot-plug event delivery.
     "libudev >=232"
@@ -238,4 +240,11 @@ package libinputSource:
     ## name; the M9.L install glue will resolve it to the
     ## ``$prefix/bin/libinput`` filename. v1 records the artifact
     ## only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -230,8 +230,18 @@ proc usesIncludesCmake(source: string): bool =
           let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
           consume(firstToken)
         continue
-    if stripped.startsWith("uses:"):
-      let payload = stripped[5 .. ^1].strip()
+    # M9.R.5a: accept the renamed ``buildDeps:`` / ``nativeBuildDeps:``
+    # block headers alongside the legacy ``uses:`` synonym. The from-
+    # source-cmake convention needs to keep claiming cmake-driven
+    # recipes after the M9.R.5a sweep moved every ``cmake`` entry into
+    # ``nativeBuildDeps:`` (the BUILD-platform tools bucket).
+    let blockHeader = block:
+      if stripped.startsWith("uses:"): "uses:"
+      elif stripped.startsWith("nativeBuildDeps:"): "nativeBuildDeps:"
+      elif stripped.startsWith("buildDeps:"): "buildDeps:"
+      else: ""
+    if blockHeader.len > 0:
+      let payload = stripped[blockHeader.len .. ^1].strip()
       if payload.len == 0:
         inBlock = true
       else:

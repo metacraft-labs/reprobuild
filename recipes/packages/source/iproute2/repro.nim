@@ -152,7 +152,7 @@ package iproute2Source:
     sha256: "bbd141ef7b5d0127cc2152843ba61f274dc32814fa3e0f13e7d07a080bef53d9"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## make is the build-system driver — iproute2's top-level Makefile
     ## is driven directly by ``make`` after the hand-rolled
     ## ``./configure`` wrapper writes ``config.mk``.
@@ -211,4 +211,11 @@ package iproute2Source:
     ## libvirt's per-VM bridge setup, docker / podman's bridge-network
     ## driver, and systemd-networkd's ``Bridge=`` directive. v1 records
     ## the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

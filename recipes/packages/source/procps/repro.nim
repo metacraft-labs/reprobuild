@@ -170,7 +170,7 @@ package procpsSource:
     sha256: "2c6d7ed9f2acde1d4dd4602c6172fe56eff86953fe8639bd633dbd22cc18f5db"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf is REQUIRED (not just a fallback): procps's GitLab
     ## archive ships ``configure.ac`` but NO pre-generated
     ## ``configure`` script, so the convention layer runs
@@ -249,4 +249,11 @@ package procpsSource:
     ## canonical ``lib`` prefix while PascalCasing the SONAME body,
     ## with the ``2`` version-suffix folded into the convention layer's
     ## lib-versioning metadata). v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -151,7 +151,7 @@ package expatSource:
     sha256: "25df13dd2819e85fb27a1ce0431772b7047d72af81ae78dc26b4c6e0805f48d1"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## release tarball does ship a pre-generated ``configure`` but we
@@ -198,4 +198,11 @@ package expatSource:
     ## at-spi accessibility XML message decoder. v1 records the
     ## artifact only; the per-artifact build body lands in M9.L when
     ## the convention's make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -170,7 +170,7 @@ package wlrootsSource:
     sha256: "5d02693175e5afd9af5f10e3e4976d6e9249dc39a90eb17d23fa5f54b125ccc5"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.59"
@@ -180,6 +180,8 @@ package wlrootsSource:
     ## gcc is the host C toolchain — wlroots is C11; 0.19 requires
     ## gcc 11+ for atomics + C11 thread-local storage portability.
     "gcc >=11"
+
+  buildDeps:
     ## libdrm is the user-space DRM ioctl wrapper that wlroots' DRM
     ## backend invokes for KMS mode-setting / page-flip / GBM
     ## allocation. 2.4.122 matches wlroots 0.19's documented minimum.
@@ -230,4 +232,11 @@ package wlrootsSource:
     ## against this single .so.
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

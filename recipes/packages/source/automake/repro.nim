@@ -96,7 +96,7 @@ package automakeSource:
     sha256: "b069564d4361e50dfe31956fb1982f43201c558588fd1f9142a00b3db6aeecc2"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf is automake's primary peer in the autotools chain;
     ## the ``automake`` driver consumes ``configure.ac`` to know
     ## which ``Makefile.am`` templates to process.
@@ -122,4 +122,11 @@ package automakeSource:
     ## ``$PREFIX/bin/aclocal`` — generates ``aclocal.m4`` from the
     ## system + project M4 macro tree so autoconf can find third-
     ## party macros. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -161,7 +161,7 @@ package zlibSource:
     sha256: "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## make is the build-system driver — zlib's custom ``./configure``
     ## emits a ``Makefile`` that ``make`` then drives.
     "make"
@@ -197,4 +197,11 @@ package zlibSource:
     ## canonical ``lib`` prefix while PascalCasing the SONAME body.
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

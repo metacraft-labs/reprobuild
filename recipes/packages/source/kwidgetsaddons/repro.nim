@@ -87,13 +87,15 @@ package kwidgetsaddonsSource:
     sha256: "e0fa4943d7874287fd2c2c254f1ef21edf7e573b6b19354df5fdef8cbbefe74e"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kwidgetsaddons is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtGui / QtWidgets which the
     ## kwidgetsaddons surface extends.
     "qt6-base >=6.6"
@@ -118,4 +120,11 @@ package kwidgetsaddonsSource:
     ## KAssistantDialog + ...). v1 records the artifact only; the
     ## per-artifact build body lands in M9.L when the convention's
     ## ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

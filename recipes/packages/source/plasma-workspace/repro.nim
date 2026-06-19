@@ -174,7 +174,7 @@ package plasmaWorkspaceSource:
     sha256: "b82511e46f62e1b8f60b969c828c8d8d32fc7928401a70cc28c29f85f46c412f"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## plasma-workspace 6.x requires cmake 3.16 for the modern ECM +
@@ -187,6 +187,8 @@ package plasmaWorkspaceSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — plasma-workspace is C++20.
     "gcc >=11"
+
+  buildDeps:
     ## kwin is the Wayland compositor plasma-workspace's session leader
     ## chain-execs into after the Plasma session bootstraps. The
     ## sibling ``kwinSource`` recipe vendors 6.2.5 to match the
@@ -234,4 +236,11 @@ package plasmaWorkspaceSource:
     ## ``plasma-workspace`` is camelCased to ``libPlasmaWorkspace``
     ## per the gdk-pixbuf precedent + preserved ``lib`` prefix.
     ## v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

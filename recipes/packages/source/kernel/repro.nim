@@ -232,7 +232,7 @@ package kernelSource:
     sha256: "b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## gcc is the host C toolchain — kbuild assumes a C11-capable gcc
     ## for kernel 6.x. R8 Tier-2 reference uses jammy gcc 11.4.
     "gcc >=12"
@@ -251,6 +251,12 @@ package kernelSource:
     ## flex is the lexer generator paired with bison in
     ## ``scripts/dtc``.
     "flex >=2.6"
+    ## perl is invoked by ``scripts/checkpatch.pl`` (build-time
+    ## lint, optional) and a handful of code-generation scripts in
+    ## ``scripts/`` that emit C source files consumed by the build.
+    "perl >=5.32"
+
+  buildDeps:
     ## libelf is consumed by kbuild's ``objtool`` (in tools/objtool)
     ## for the CONFIG_STACK_VALIDATION pass that rewrites .o files
     ## to add unwind metadata.
@@ -271,10 +277,6 @@ package kernelSource:
     ## rsync is invoked by ``make headers_install`` and (in some
     ## configs) by the modules-install step.
     "rsync"
-    ## perl is invoked by ``scripts/checkpatch.pl`` (build-time
-    ## lint, optional) and a handful of code-generation scripts in
-    ## ``scripts/`` that emit C source files consumed by the build.
-    "perl >=5.32"
 
   makeFlags:
     ## Flag set tuned for a deterministic single-threaded build of
@@ -352,4 +354,11 @@ package kernelSource:
     ## without re-parsing bzImage; the NDE-E ``reproosKernel``
     ## ``kernelRelease`` artifact uses the same path semantics so
     ## a future ``toolBuild`` edge can swap one for the other.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

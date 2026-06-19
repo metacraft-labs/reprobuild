@@ -179,7 +179,7 @@ package libcapSource:
     sha256: "b7006c9af5168315f35fc734bf1a8d2aa70766bd8b8c4340962e05b19c35b900"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## make is the build-system driver — libcap's raw Makefile is
     ## driven directly by ``make`` (no ``./configure`` step).
     "make"
@@ -246,4 +246,11 @@ package libcapSource:
     ## ``setcap cap_net_bind_service=+ep /usr/bin/python3.11`` to let
     ## a Python script bind port 80 unprivileged). v1 records the
     ## artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

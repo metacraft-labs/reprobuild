@@ -106,13 +106,15 @@ package kdedSource:
     sha256: "5601d9dbfdc9507feaf17f4774bb7d12d38c7e19724ae8b987639a16ff0e6a8e"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kded is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtDBus / QtNetwork the kded daemon
     ## consumes for the IPC service-bus + sycoca refresher loop.
     "qt6-base >=6.6"
@@ -168,4 +170,11 @@ package kdedSource:
     ## artifact identifier. v1 records the artifact only; the per-
     ## artifact build body lands in M9.L when the convention's
     ## ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

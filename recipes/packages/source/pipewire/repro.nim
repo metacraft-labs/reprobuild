@@ -171,7 +171,7 @@ package pipewireSource:
     sha256: "4c9f7e85a760a4169cd4bc668bafea90fe4838aaf3f08a93f11bb9222809d490"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. pipewire 1.6
     ## requires meson 0.61 for the modern dependency-fallback
@@ -186,6 +186,8 @@ package pipewireSource:
     ## pkg-config is used by the meson configure step to probe for
     ## the alsa-lib + glib2 + dbus + udev + libudev dependencies.
     "pkg-config"
+
+  buildDeps:
     ## alsa-lib supplies ``libasound`` — pipewire's ALSA source +
     ## sink SPA plugins consume it for the kernel /dev/snd/* PCM
     ## transport.
@@ -250,4 +252,11 @@ package pipewireSource:
     ## artifact identifier (matching the libGlib2 / libGObject
     ## precedent of stripping ``-2.0`` suffixes). v1 records the
     ## artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

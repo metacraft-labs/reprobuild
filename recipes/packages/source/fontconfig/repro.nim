@@ -153,7 +153,7 @@ package fontconfigSource:
     sha256: "6a33dc555cc9ba8b10caf7695878ef134eeb36d0af366041f639b1da9b6ed220"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -173,6 +173,8 @@ package fontconfigSource:
     ## pkg-config is used by the configure script to probe for the
     ## freetype + libxml2 dependencies.
     "pkg-config"
+
+  buildDeps:
     ## freetype is the font-glyph loader fontconfig uses to scan TTF /
     ## OTF font properties (family name, weight, slant, charset, etc.)
     ## when building its font cache. The sibling ``freetypeSource``
@@ -207,4 +209,11 @@ package fontconfigSource:
     ## transitively to resolve font families to actual files on disk.
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

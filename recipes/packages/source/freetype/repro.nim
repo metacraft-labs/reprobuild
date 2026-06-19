@@ -157,7 +157,7 @@ package freetypeSource:
     sha256: "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -207,4 +207,11 @@ package freetypeSource:
     ## harfbuzz + fontconfig + cairo. v1 records the artifact only; the
     ## per-artifact build body lands in M9.L when the convention's
     ## make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

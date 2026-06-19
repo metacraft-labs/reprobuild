@@ -151,7 +151,7 @@ package bashSource:
     sha256: "9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. bash 5.2.x
     ## tarballs pre-generate ``configure`` but the convention's
@@ -199,4 +199,11 @@ package bashSource:
     ## are evaluated under. v1 records the artifact only; the per-
     ## artifact build body lands in M9.L when the convention's make-
     ## spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

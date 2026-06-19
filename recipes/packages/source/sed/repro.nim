@@ -132,7 +132,7 @@ package sedSource:
     sha256: "6e226b732e1cd739464ad6862bd1a1aba42d7982922da7a53519631d24975181"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. sed's release
     ## tarball pre-generates ``configure`` but the convention's
@@ -163,4 +163,11 @@ package sedSource:
     ## run. v1 records the artifact only; the per-artifact build
     ## body lands in M9.L when the convention's make-spawn +
     ## install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

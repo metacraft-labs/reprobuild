@@ -93,13 +93,15 @@ package kserviceSource:
     sha256: "04ad53850967e38822f8af1652b118992cd1bfa382e2718278bb6de03a0bdbb3"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kservice is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtDBus / QtXml the kservice surface
     ## consumes (KService / KSycoca / KApplicationTrader / ...).
     "qt6-base >=6.6"
@@ -131,4 +133,11 @@ package kserviceSource:
     ## KServiceTypeTrader). v1 records the artifact only; the per-
     ## artifact build body lands in M9.L when the convention's ninja-
     ## spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

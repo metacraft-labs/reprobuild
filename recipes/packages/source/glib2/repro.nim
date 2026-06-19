@@ -168,7 +168,7 @@ package glib2Source:
     sha256: "05c2031f9bdf6b5aba7a06ca84f0b4aced28b19bf1b50c6ab25cc675277cbc3f"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. glib2 2.82 requires
     ## meson 0.79 for the ``-Dnls=disabled`` + ``-Dxattr=false``
@@ -180,6 +180,8 @@ package glib2Source:
     ## gcc is the host C toolchain — glib2 is C99 with light use of
     ## GLib-style autoconf macros via meson's gnome module.
     "gcc >=11"
+
+  buildDeps:
     ## pcre2 is the regex engine glib's GRegex API delegates to.
     ## glib2 2.82 requires pcre2 10.34 for the JIT-compile API
     ## semantics it relies on.
@@ -244,4 +246,11 @@ package glib2Source:
     ## Consumed by gdk-pixbuf's loader-plugin discovery + by GLib
     ## itself for dlopen-style module loading. v1 records the
     ## artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -156,7 +156,7 @@ package kcoreaddonsSource:
     sha256: "89bf28747915e987cab21c77397b0971caffa1258b6f575543d73d4188184a72"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## kcoreaddons 6.x requires cmake 3.16 for the modern
@@ -169,6 +169,8 @@ package kcoreaddonsSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kcoreaddons is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtConcurrent / QtNetwork the KF6
     ## helpers wrap on top of (KJob ~ QObject, KAboutData ~ QSettings,
     ## KPluginFactory ~ QPluginLoader, etc.). 6.6 is the minimum the
@@ -203,4 +205,11 @@ package kcoreaddonsSource:
     ## etc.). v1 records the artifact only; the per-artifact build
     ## body lands in M9.L when the convention's ninja-spawn +
     ## install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

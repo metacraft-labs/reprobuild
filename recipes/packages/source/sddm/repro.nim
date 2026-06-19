@@ -179,7 +179,7 @@ package sddmSource:
     sha256: "f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## sddm 0.21 requires cmake 3.16 for the modern Qt6 ``find_package``
@@ -191,6 +191,8 @@ package sddmSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — sddm is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtGui / QtQml / QtQuick which the
     ## QML-driven sddm greeter uses for its login-form UI surface.
     ## 6.6 is the minimum the sddm 0.21 line targets.
@@ -242,4 +244,11 @@ package sddmSource:
     ## ``lib`` prefix and reducing the SDDM acronym to ``Sddm`` to
     ## match the kwin/libKWin precedent of brand-conventional casing
     ## in artifact identifiers.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

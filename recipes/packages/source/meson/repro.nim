@@ -147,7 +147,7 @@ package mesonSource:
     sha256: "1eca49eb6c26d58bbee67fd3337d8ef557c0804e30a6d16bfdf269db997464de"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## python3 is the runtime interpreter the ``meson`` wrapper script
     ## execs against the bundled ``mesonbuild`` package source. The
     ## upstream tarball ships pure-Python code with no native
@@ -187,3 +187,10 @@ package mesonSource:
       # Make the wrapper executable so the stage-copy step finds a
       # runnable binary.
       shell "chmod +x $out/bin/meson"
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
+    discard

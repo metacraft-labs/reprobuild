@@ -147,7 +147,7 @@ package jsonCSource:
     sha256: "3112c1f25d39eca661fe3fc663431e130cc6e2f900c081738317fba49d29e298"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver — the c_cpp_cmake convention's
     ## configure action invokes ``cmake -S <src> -B <build>``.
     ## json-c 0.18 requires cmake 3.9 for the
@@ -188,4 +188,11 @@ package jsonCSource:
     ## v1 records the artifact only; the per-artifact build body
     ## lands in M9.L when the convention's ninja-spawn + install-glue
     ## closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

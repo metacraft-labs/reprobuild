@@ -160,7 +160,7 @@ package wireplumberSource:
     sha256: "e91f04cd8cec75d72b8a2aaa7e90b1ba0a5e2094b7a882fc3a29a484a48a87e9"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. wireplumber 0.5
     ## requires meson 0.59 for the modern dependency-fallback
@@ -175,6 +175,8 @@ package wireplumberSource:
     ## pkg-config is used by the meson configure step to probe for
     ## the pipewire + glib2 + lua + libsystemd dependencies.
     "pkg-config"
+
+  buildDeps:
     ## pipewire supplies ``libpipewire-0.3`` — wireplumber is a
     ## first-party pipewire client and links every WpCore /
     ## WpSession primitive against it.
@@ -225,4 +227,11 @@ package wireplumberSource:
     ## ``-0.5`` is stripped in the artifact identifier (matching the
     ## libPipewire / libGlib2 precedent of stripping version
     ## suffixes). v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

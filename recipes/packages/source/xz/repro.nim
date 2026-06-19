@@ -158,7 +158,7 @@ package xzSource:
     sha256: "db0590629b6f0fa36e74aea5f9731dc6f8df068ce7b7bafa45301832a5eebc3a"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. xz's release
     ## tarball pre-generates ``configure`` but the convention's
@@ -215,4 +215,11 @@ package xzSource:
     ## libGlib2 / libGnutls precedent of preserving the canonical
     ## ``lib`` prefix while PascalCasing the SONAME body. v1 records
     ## the artifact only; the per-artifact build body lands in M9.L.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

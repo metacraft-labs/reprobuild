@@ -154,7 +154,7 @@ package nettleSource:
     sha256: "b4c518adb174e484cb4acea54118f02380c7133771e7e9beb98a0787194ee47c"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac`` (the upstream
     ## release tarball does ship a pre-generated ``configure`` but we
@@ -218,4 +218,11 @@ package nettleSource:
     ## same family as stinging nettle.) The upstream SONAME ``hogweed``
     ## is PascalCased to ``libHogweed`` per the libCrypto / libSsl
     ## precedent. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -152,7 +152,7 @@ package coreutilsSource:
     sha256: "cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -226,4 +226,11 @@ package coreutilsSource:
     ## builtin; the standalone ``/usr/bin/echo`` is consumed when a
     ## script uses ``\`echo X\``` via env shimming or when the path is
     ## explicit. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

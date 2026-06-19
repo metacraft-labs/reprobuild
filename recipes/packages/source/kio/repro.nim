@@ -95,13 +95,15 @@ package kioSource:
     sha256: "7eb454438f149e7ed513c3bbd526b67e3e3ecfe32ae7c986168baa59600b699c"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kio is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtDBus / QtGui / QtNetwork / QtWidgets
     ## / QtXml the kio surface consumes for protocol slaves +
     ## file-dialog UI.
@@ -170,4 +172,11 @@ package kioSource:
     ## dispatch table). v1 records the artifact only; the per-
     ## artifact build body lands in M9.L when the convention's
     ## ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

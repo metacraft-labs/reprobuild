@@ -127,7 +127,7 @@ package makeSource:
     sha256: "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## gcc is the host C toolchain — make is C99.
     "gcc >=11"
     ## perl is invoked by make's ``configure`` script for a handful
@@ -143,4 +143,11 @@ package makeSource:
   executable make:
     ## ``$PREFIX/bin/make`` — the canonical build-system driver. v1
     ## records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

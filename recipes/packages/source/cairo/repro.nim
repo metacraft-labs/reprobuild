@@ -159,7 +159,7 @@ package cairoSource:
     sha256: "445ed8208a6e4823de1226a74ca319d3600e83f6369f99b14265006599c32ccb"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``. cairo 1.18 requires
     ## meson 0.64 for the ``--buildtype=release`` semantics it relies
@@ -171,6 +171,8 @@ package cairoSource:
     ## gcc is the host C toolchain — cairo is C99 with light C++ in
     ## the test harness (skipped via ``-Dtests=disabled``).
     "gcc >=7"
+
+  buildDeps:
     ## pixman is cairo's per-pixel software-rasteriser backend; the
     ## sibling ``pixmanSource`` recipe is the upstream-source side of
     ## this edge.
@@ -211,4 +213,11 @@ package cairoSource:
     ## v1 records the artifact only; the per-artifact build body
     ## lands in M9.L when the convention's ninja-spawn + install-glue
     ## closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

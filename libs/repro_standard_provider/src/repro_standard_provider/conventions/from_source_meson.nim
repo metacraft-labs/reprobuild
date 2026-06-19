@@ -242,8 +242,21 @@ proc usesIncludesMeson(source: string): bool =
           let firstToken = entry.split({' ', '\t', '>', '<', '='})[0]
           consume(firstToken)
         continue
-    if stripped.startsWith("uses:"):
-      let payload = stripped[5 .. ^1].strip()
+    # M9.R.5a: the recipe sweep renamed ``uses:`` to ``buildDeps:`` and
+    # split BUILD-platform tools into ``nativeBuildDeps:``. The recognise
+    # parser accepts all three block headers so the from-source-meson
+    # convention keeps claiming meson-driven recipes regardless of
+    # whether ``meson`` lives under the legacy ``uses:`` synonym, the
+    # canonical ``buildDeps:`` slot, or the new ``nativeBuildDeps:``
+    # bucket (which is where the sweep put meson for every from-source
+    # recipe — see ``recipes/packages/source/dbus-broker/repro.nim``).
+    let blockHeader = block:
+      if stripped.startsWith("uses:"): "uses:"
+      elif stripped.startsWith("nativeBuildDeps:"): "nativeBuildDeps:"
+      elif stripped.startsWith("buildDeps:"): "buildDeps:"
+      else: ""
+    if blockHeader.len > 0:
+      let payload = stripped[blockHeader.len .. ^1].strip()
       if payload.len == 0:
         inBlock = true
       else:

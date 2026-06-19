@@ -103,7 +103,7 @@ package dbusBrokerSource:
     sha256: "5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=1.3"
@@ -139,4 +139,11 @@ package dbusBrokerSource:
     ## ``/usr/bin/dbus-broker-launch`` — the activation helper the
     ## NDE0-D ``dbus.service`` unit invokes when
     ## ``busActivationStrategy = basBroker``.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

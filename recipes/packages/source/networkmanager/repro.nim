@@ -198,7 +198,7 @@ package networkManagerSource:
     sha256: "59a32d385cc1e7ae26e43798c6f12d07ff6198abd041ec0620b3a08cfc021ccc"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``. NetworkManager's
     ## release tarball pre-generates ``configure`` but the convention's
@@ -221,6 +221,8 @@ package networkManagerSource:
     ## pkg-config is used by the autotools configure step to probe for
     ## the glib2 + libnl + libuuid + dbus + libcurl dependencies.
     "pkg-config"
+
+  buildDeps:
     ## glib2 supplies ``libglib-2.0`` + ``libgobject-2.0`` +
     ## ``libgio-2.0`` — NetworkManager's main loop integrates with
     ## GMainLoop and the NMClient / NMDevice public API are GObject
@@ -295,4 +297,11 @@ package networkManagerSource:
     ## libAsound / libExpat / libGlib2 precedent of preserving the
     ## canonical ``lib`` prefix while PascalCasing the SONAME body.
     ## v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

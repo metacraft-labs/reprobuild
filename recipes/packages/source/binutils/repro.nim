@@ -189,7 +189,7 @@ package binutilsSource:
     sha256: "b53606f443ac8f01d1d5fc9c39497f2af322d99e14cea5c0b4b124d630379365"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## gcc is the host C toolchain — binutils is C99 with a handful
     ## of C++ helpers in gold + libctf. The version pin matches the
     ## gccSource recipe in this batch.
@@ -207,6 +207,8 @@ package binutilsSource:
     ## script parser).
     "bison >=3.6"
     "flex >=2.6"
+
+  buildDeps:
     ## texinfo is consumed by the documentation build pass; even
     ## with ``--disable-doc`` not declared, the configure probes
     ## for it.
@@ -290,4 +292,11 @@ package binutilsSource:
   executable strings:
     ## ``$PREFIX/bin/strings`` — the printable-ASCII-extractor. v1
     ## records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

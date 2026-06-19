@@ -151,13 +151,15 @@ package ninjaSource:
     sha256: "821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a"
     extractStrip: 1
 
-  uses:
-    ## python3 drives the ``configure.py --bootstrap`` step that
-    ## compiles ninja's C++ sources into the self-hosting binary.
-    "python >=3.8"
+  nativeBuildDeps:
     ## gcc is the host C++ toolchain — ninja is C++14 with no external
     ## runtime dependencies beyond the system libstdc++.
     "gcc >=11"
+
+  buildDeps:
+    ## python3 drives the ``configure.py --bootstrap`` step that
+    ## compiles ninja's C++ sources into the self-hosting binary.
+    "python >=3.8"
 
   executable ninja:
     ## ``$PREFIX/bin/ninja`` — the build-driver binary the meson /
@@ -182,3 +184,10 @@ package ninjaSource:
       # Install the resulting binary into the output bin dir where the
       # stage-copy step expects it.
       shell "mkdir -p $out/bin && install -Dm755 ninja $out/bin/ninja"
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
+    discard

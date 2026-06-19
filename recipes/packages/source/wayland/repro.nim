@@ -154,7 +154,7 @@ package waylandSource:
     sha256: "c065f040afdff3177680600f249727e41a1afc22fccf27222f15f5306faa1f03"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.59"
@@ -164,6 +164,8 @@ package waylandSource:
     ## gcc is the host C toolchain — Wayland is plain C11 with no
     ## C++ component, so the C compiler is sufficient.
     "gcc >=7"
+
+  buildDeps:
     ## expat is the XML parser the wayland-scanner code generator
     ## links against to read protocol XML files.
     "expat >=2.4"
@@ -219,4 +221,11 @@ package waylandSource:
     ## graphics-stack + NDE-H Sway + NDE-G1 GNOME + NDE-K1 Plasma
     ## recipes all transitively consume this binary at their own
     ## build time.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

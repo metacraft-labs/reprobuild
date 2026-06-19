@@ -103,13 +103,15 @@ package ksolidSource:
     sha256: "24892e81a3047f753519dbd384b47635c5a2543d8ee0bf3c299b0fcfef318e8c"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — ksolid is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtDBus / QtXml / QtQml ksolid wraps
     ## for the udev / UPower / NetworkManager bridges.
     "qt6-base >=6.6"
@@ -134,4 +136,11 @@ package ksolidSource:
     ## Predicate). v1 records the artifact only; the per-artifact
     ## build body lands in M9.L when the convention's ninja-spawn +
     ## install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -169,7 +169,7 @@ package libxkbcommonSource:
     sha256: "acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## meson is the build-system driver — the c_cpp_meson convention's
     ## configure action invokes ``meson setup``.
     "meson >=0.59"
@@ -183,6 +183,8 @@ package libxkbcommonSource:
     ## upstream's meson build hard-requires a bison-compatible
     ## yacc(1).
     "bison >=3.0"
+
+  buildDeps:
     ## libwayland-client + wayland-scanner are pulled in by the
     ## ``enable-wayland=true`` flag below — the Wayland interactive
     ## demo links libwayland-client and the protocol XML stubs are
@@ -230,4 +232,11 @@ package libxkbcommonSource:
     ## (``compile-keymap``, ``how-to-type``, ``interactive-evdev``,
     ## ``interactive-wayland``, ``list-models``) used by users +
     ## tooling to debug keymaps. v1 records the artifact only.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

@@ -92,13 +92,15 @@ package kglobalaccelSource:
     sha256: "05b0ec6a44d43ce7a9cfd6cd70c8d07dca5c5f6216968af8128fe9a5ed9b1928"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kglobalaccel is C++17.
     "gcc >=11"
+
+  buildDeps:
     ## qt6-base supplies QtCore / QtDBus / QtGui the kglobalaccel
     ## client + daemon proxy classes consume.
     "qt6-base >=6.6"
@@ -126,4 +128,11 @@ package kglobalaccelSource:
     ## KGlobalAccelComponent + kglobalacceld D-Bus proxy). v1 records
     ## the artifact only; the per-artifact build body lands in M9.L
     ## when the convention's ninja-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard

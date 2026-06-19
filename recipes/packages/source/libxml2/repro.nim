@@ -151,7 +151,7 @@ package libxml2Source:
     sha256: "74fc163217a3964257d3be39af943e08861263c4231f9ef5b496b6f6d4c7b2b6"
     extractStrip: 1
 
-  uses:
+  nativeBuildDeps:
     ## autoconf generates the upstream ``configure`` script when the
     ## release tarball ships a stale ``configure.ac``.
     "autoconf"
@@ -169,6 +169,8 @@ package libxml2Source:
     ## gcc is the host C toolchain — libxml2 is C89 / C99 with light
     ## use of autoconf macros.
     "gcc >=11"
+
+  buildDeps:
     ## zlib is consumed by libxml2's gzip-compressed XML stream
     ## reader (libxml2 transparently decompresses ``.xml.gz`` and
     ## gzip-encoded HTTP responses). The sibling ``zlibSource`` recipe
@@ -208,4 +210,11 @@ package libxml2Source:
     ## the canonical ``lib`` prefix while PascalCasing the SONAME body.
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's make-spawn + install-glue closes.
+    discard
+
+  runtimeDeps:
+    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
+    ## DT_NEEDED inspection of the linked artifacts. Empty until
+    ## the M9.R.5b per-recipe pass populates per-output ELF
+    ## interrogation.
     discard
