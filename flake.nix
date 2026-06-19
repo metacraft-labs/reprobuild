@@ -22,6 +22,15 @@
       url = "git+https://github.com/status-im/nim-bearssl?submodules=1&rev=9a4eed052abbded2d94feaf3f5bbd95a30ec4671";
       flake = false;
     };
+    # nim-stackable-hooks (the framework the macOS monitor shim migrated to in
+    # 86cb1bf). The package build compiles repro_monitor_hooks against it, so —
+    # like bearssl-src — it must be supplied as a source input; the dev shell
+    # resolves it from the sibling checkout, but the sandboxed package build has
+    # no sibling and otherwise fails with "cannot open file: stackable_hooks/…".
+    stackable-hooks-src = {
+      url = "github:metacraft-labs/nim-stackable-hooks";
+      flake = false;
+    };
     ct-test-src = {
       # ct-test ships the ct_test_nim_unittest adapter that
       # `buildNimUnittest.build` in repro.tests.nim depends on, plus the
@@ -52,6 +61,7 @@
       git-hooks,
       nimcrypto-src,
       bearssl-src,
+      stackable-hooks-src,
       ct-test-src,
       codetracer-native-recorder,
       runquota-src,
@@ -144,6 +154,7 @@
                 export BLAKE3_PREFIX=${blake3Prefix}
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
+                export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
                 export CT_TEST_SRC=${ct-test-src}
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
@@ -193,6 +204,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
+            STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             CT_TEST_SRC = ct-test-src;
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
@@ -262,6 +274,7 @@
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
+            STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             CT_TEST_SRC = ct-test-src;
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
