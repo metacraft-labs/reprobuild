@@ -6822,6 +6822,20 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.1: package-level dep-block surface
+  # (``buildDeps:`` / ``nativeBuildDeps:`` / ``runtimeDeps:``).
+  # Added by hand because ``scripts/generate_test_edges.nim`` wipes
+  # ``tests/unit/`` entries on regeneration (see the M9.R.1 commit
+  # body for the rationale; the test-runner picks the row up on the
+  # next ``repro build test`` pass without further intervention).
+  TestSpec(
+    source: "tests/unit/t_m9r1_deps_package_level.nim",
+    binary: "build/test-bin/t_m9r1_deps_package_level",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",

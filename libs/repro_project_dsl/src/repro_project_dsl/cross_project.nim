@@ -373,7 +373,15 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # literals (one per line, no setters) that get appended
                  # to the appropriate channel-specific registry.
                  "mesonoptions", "cmakeflags",
-                 "configureflags", "makeflags", "ninjaflags"]
+                 "configureflags", "makeflags", "ninjaflags",
+                 # DSL-port M9.R.1: package-level dependency declarations
+                 # — ``buildDeps:`` (canonical synonym for the legacy
+                 # ``uses:`` block), ``nativeBuildDeps:`` (BUILD-platform
+                 # tools / code generators), ``runtimeDeps:`` (HOST-
+                 # platform runtime / link deps that propagate to
+                 # consumers). Each block accepts the same minispec
+                 # grammar as ``uses:`` (``"name >=version"``).
+                 "builddeps", "nativebuilddeps", "runtimedeps"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.

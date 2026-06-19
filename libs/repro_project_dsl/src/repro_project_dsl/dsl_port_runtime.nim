@@ -3711,6 +3711,119 @@ proc registeredBuildFlags*(packageName, artifactName, channel: string):
   else: return @[]
 
 # ---------------------------------------------------------------------------
+# DSL-port M9.R.1 — package-level dependency-declaration surface.
+# ---------------------------------------------------------------------------
+##
+## ## Surface
+##
+## Three package-level blocks: ``buildDeps:`` / ``nativeBuildDeps:`` /
+## ``runtimeDeps:``. Each accepts the same constraint-string grammar as
+## the legacy ``uses:`` block (``"name >=version"``). The three blocks
+## carve up the Nix-style split:
+##
+##   * ``nativeBuildDeps:`` — BUILD-platform tools / code generators
+##     that drive the build (Nix ``nativeBuildInputs`` equivalent).
+##   * ``buildDeps:``       — HOST-platform libraries the produced
+##     binaries link against (Nix ``buildInputs`` equivalent). The
+##     legacy ``uses:`` block is a synonym: BOTH spellings populate the
+##     same registry, so existing 84 from-source recipes that still
+##     spell the block ``uses:`` are queryable via
+##     ``registeredBuildDeps(packageName)`` without any sweep.
+##   * ``runtimeDeps:``     — HOST-platform tools / libraries consumers
+##     need at runtime or link time (Nix ``propagatedBuildInputs`` +
+##     ``DT_NEEDED`` equivalent).
+##
+## ## Registry shape
+##
+## A single ``threadvar`` table keyed by
+## ``packageName & '\x00' & kind`` (where ``kind`` is one of ``"build"``
+## / ``"native"`` / ``"runtime"``) holds the seq of raw constraint
+## strings in source-declaration order. The constraint string is the
+## same one the legacy ``PackageUseDef.rawConstraint`` carries — the
+## solver-side parsing (selector / version-range / gate) is already
+## done by ``parsePackageDef`` and reaches the solver via
+## ``registerSolverDependency``. This new registry is the diagnostic
+## surface (the "did the parser see my block" pin) the M9.R.5 recipe
+## sweep + M9.R.2/M9.R.3 follow-ups consume.
+##
+## ## Threading
+##
+## ``threadvar`` so concurrent test fixtures do not cross-attribute
+## rows. ``resetDslPortPackageDepsState`` resets the per-thread slot.
+## Matches the M9.H / M9.I / M9.N Batch C.1 shape.
+
+var dslPortPackageDeps {.threadvar.}: Table[string, seq[string]]
+  ## Per-(packageName, kind) constraint-string seq. The key encoding
+  ## ``packageName & '\x00' & kind`` matches the M9.I
+  ## ``dslPortBuildFlagSets`` convention (the ``\x00`` byte cannot
+  ## appear in either component so the encoding is unambiguous).
+
+proc m9r1PackageDepsKey(packageName, kind: string): string {.inline.} =
+  ## Compose the ``(packageName, kind)`` registry key. Symmetric with
+  ## ``m9iFlagSetKey`` (M9.I) — both pin the ``\x00`` separator so the
+  ## encoding is unambiguous (Nim identifiers exclude NUL by
+  ## tokenisation).
+  result = packageName & '\x00' & kind
+
+proc resetDslPortPackageDepsState*() =
+  ## Drop every package-deps registration. Test fixtures call this
+  ## between scenarios so registry entries do not leak across cases.
+  ## Symmetric with ``resetDslPortBuildFlagState`` /
+  ## ``resetDslPortFetchState``.
+  dslPortPackageDeps.clear()
+
+proc registerPackageDep*(packageName, kind, constraint: string) =
+  ## Append ``constraint`` to the ``(packageName, kind)`` row. ``kind``
+  ## ∈ {``"build"``, ``"native"``, ``"runtime"``}; unknown kinds are
+  ## silently ignored so forward-compatibility with future kinds (e.g.
+  ## the deferred ``propagatedBuildDeps:`` per the open-extension note
+  ## in ``From-Source-Build-Recipes.md``) stays open at the emitter
+  ## layer.
+  ##
+  ## The ``package`` macro emits one ``registerPackageDep(...)`` call
+  ## per constraint-string literal in each ``buildDeps:`` /
+  ## ``nativeBuildDeps:`` / ``runtimeDeps:`` (and the legacy ``uses:``)
+  ## block, in source-declaration order. Multiple blocks of the same
+  ## kind on one package APPEND to the registered seq (matches M9.I's
+  ## ``mesonOptions:`` append semantics).
+  case kind
+  of "build", "native", "runtime":
+    let key = m9r1PackageDepsKey(packageName, kind)
+    if key notin dslPortPackageDeps:
+      dslPortPackageDeps[key] = @[]
+    dslPortPackageDeps[key].add(constraint)
+  else:
+    discard
+
+proc registeredBuildDeps*(packageName: string): seq[string] =
+  ## Return the constraint-string seq for ``packageName``'s
+  ## ``buildDeps:`` block (and the legacy ``uses:`` synonym) in source-
+  ## declaration order. Returns an empty seq when nothing was
+  ## registered.
+  let key = m9r1PackageDepsKey(packageName, "build")
+  if key in dslPortPackageDeps:
+    return dslPortPackageDeps[key]
+  return @[]
+
+proc registeredNativeBuildDeps*(packageName: string): seq[string] =
+  ## Return the constraint-string seq for ``packageName``'s
+  ## ``nativeBuildDeps:`` block in source-declaration order. Returns
+  ## an empty seq when nothing was registered.
+  let key = m9r1PackageDepsKey(packageName, "native")
+  if key in dslPortPackageDeps:
+    return dslPortPackageDeps[key]
+  return @[]
+
+proc registeredRuntimeDeps*(packageName: string): seq[string] =
+  ## Return the constraint-string seq for ``packageName``'s
+  ## ``runtimeDeps:`` block in source-declaration order. Returns an
+  ## empty seq when nothing was registered.
+  let key = m9r1PackageDepsKey(packageName, "runtime")
+  if key in dslPortPackageDeps:
+    return dslPortPackageDeps[key]
+  return @[]
+
+# ---------------------------------------------------------------------------
 # DSL-port M9.N Batch C.1 — ``shell()`` action surface for ``build:`` blocks.
 # ---------------------------------------------------------------------------
 ##

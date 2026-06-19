@@ -2687,6 +2687,34 @@ macro package*(name: untyped; body: untyped): untyped =
   # c_cpp_autotools / c_cpp_make widening) is deferred to M9.L.
   let m9iBuildFlagsEmission = emitM9IBuildFlags(packageName, classifiedSections)
   result.add(m9iBuildFlagsEmission)
+  # ── DSL-port M9.R.1: per-package dep-block registration emission.
+  # ``parsePackageDef`` already collected every constraint string into
+  # the three seqs ``pkg.toolUses`` (the ``uses:`` / ``buildDeps:``
+  # synonym pair), ``pkg.nativeBuildDeps``, and ``pkg.runtimeDeps``.
+  # We emit one ``registerPackageDep(...)`` call per entry so the
+  # in-memory accessors (``registeredBuildDeps`` /
+  # ``registeredNativeBuildDeps`` / ``registeredRuntimeDeps``) return
+  # the declared constraint strings at run / test time. The legacy
+  # solver path (``registerSolverDependency`` emitted by
+  # ``emitVariantDeclarations``) is UNCHANGED — this milestone
+  # ADDITIVELY widens the surface so M9.R.2 / M9.R.5 callers have a
+  # stable diagnostic registry to query.
+  let pkgLitForDeps = newLit(packageName)
+  let buildKindLit = newLit("build")
+  let nativeKindLit = newLit("native")
+  let runtimeKindLit = newLit("runtime")
+  for useDef in pkg.toolUses:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `buildKindLit`, `constraintLit`))
+  for useDef in pkg.nativeBuildDeps:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `nativeKindLit`, `constraintLit`))
+  for useDef in pkg.runtimeDeps:
+    let constraintLit = newLit(useDef.rawConstraint)
+    result.add(quote do:
+      registerPackageDep(`pkgLitForDeps`, `runtimeKindLit`, `constraintLit`))
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.

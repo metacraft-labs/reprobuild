@@ -1270,6 +1270,32 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)
+    elif calleeName(stmt).normalize == "builddeps":
+      # DSL-port M9.R.1: ``buildDeps:`` is the canonical spelling of
+      # the legacy ``uses:`` block. Both populate the SAME ``toolUses``
+      # seq so existing solver / wrapper-code paths see no change, and
+      # ``registeredBuildDeps(...)`` returns the union. The M9.R.5
+      # recipe sweep will rename ``uses:`` -> ``buildDeps:`` across the
+      # 84 from-source recipes; until then ``uses:`` keeps working
+      # untouched.
+      for i in 1 ..< stmt.len:
+        collectUses(stmt[i], @[], result.toolUses)
+    elif calleeName(stmt).normalize == "nativebuilddeps":
+      # DSL-port M9.R.1: ``nativeBuildDeps:`` carries BUILD-platform
+      # tools the recipe needs to run the build (compilers, code
+      # generators). Parsed with the same minispec grammar as
+      # ``uses:`` / ``buildDeps:``; stored in a separate slot on
+      # ``PackageDef`` so it does NOT leak into ``toolUses`` (the
+      # downstream solver / cross-project surface).
+      for i in 1 ..< stmt.len:
+        collectUses(stmt[i], @[], result.nativeBuildDeps)
+    elif calleeName(stmt).normalize == "runtimedeps":
+      # DSL-port M9.R.1: ``runtimeDeps:`` carries HOST-platform
+      # tools/libraries consumers need at runtime or link time.
+      # Parsed with the same minispec grammar as ``uses:`` /
+      # ``buildDeps:``; stored in a separate slot on ``PackageDef``.
+      for i in 1 ..< stmt.len:
+        collectUses(stmt[i], @[], result.runtimeDeps)
     elif calleeName(stmt).normalize == "provisioning":
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
@@ -1337,6 +1363,31 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
       parts.add(ignoredCode())
     "makeDepfilePolicy(" & parts.join(", ") & ")"
 
+proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
+  ## DSL-port M9.R.1: shared serializer for ``seq[PackageUseDef]``
+  ## (``toolUses`` / ``nativeBuildDeps`` / ``runtimeDeps`` all use the
+  ## same shape). Returns the bracket-form literal starting with ``@[``
+  ## and ending with ``]`` so the caller splices it directly after the
+  ## field name in a ``PackageDef(...)`` literal.
+  result = "@["
+  for useIndex, useDef in uses:
+    if useIndex > 0:
+      result.add(", ")
+    result.add("PackageUseDef(rawConstraint: " & escForCode(
+        useDef.rawConstraint) &
+      ", packageSelector: " & escForCode(useDef.packageSelector) &
+      ", executableName: " & escForCode(useDef.executableName) &
+      ", policyPath: @[")
+    for policyIndex, policy in useDef.policyPath:
+      if policyIndex > 0:
+        result.add(", ")
+      result.add(escForCode(policy))
+    result.add("], sourceFile: " & escForCode(useDef.sourceFile) &
+      ", sourceLine: " & $useDef.sourceLine &
+      ", gateVariant: " & escForCode(useDef.gateVariant) &
+      ", gateValue: " & escForCode(useDef.gateValue) & ")")
+  result.add("]")
+
 proc packageLiteral(pkg: PackageDef): string =
   result = "PackageDef(packageName: " & escForCode(pkg.packageName) &
     ", defaultToolProvisioning: " & escForCode(pkg.defaultToolProvisioning) &
@@ -1402,24 +1453,15 @@ proc packageLiteral(pkg: PackageDef): string =
     ", sourceLine: " & $pkg.sourceLine &
     ", hasDevEnv: " & $pkg.hasDevEnv &
     ", devEnvBodyHash: " & escForCode(pkg.devEnvBodyHash) &
-    ", toolUses: @[")
-  for useIndex, useDef in pkg.toolUses:
-    if useIndex > 0:
-      result.add(", ")
-    result.add("PackageUseDef(rawConstraint: " & escForCode(
-        useDef.rawConstraint) &
-      ", packageSelector: " & escForCode(useDef.packageSelector) &
-      ", executableName: " & escForCode(useDef.executableName) &
-      ", policyPath: @[")
-    for policyIndex, policy in useDef.policyPath:
-      if policyIndex > 0:
-        result.add(", ")
-      result.add(escForCode(policy))
-    result.add("], sourceFile: " & escForCode(useDef.sourceFile) &
-      ", sourceLine: " & $useDef.sourceLine &
-      ", gateVariant: " & escForCode(useDef.gateVariant) &
-      ", gateValue: " & escForCode(useDef.gateValue) & ")")
-  result.add("], executables: @[")
+    ", toolUses: " & packageUseSeqLiteral(pkg.toolUses) &
+    # DSL-port M9.R.1: emit the two new package-level dep slots.
+    # Empty seqs serialize as ``@[]`` so legacy recipes that don't
+    # declare either block round-trip byte-identically to their
+    # pre-M9.R.1 ``packageLiteral`` output (the field tail is the
+    # only change).
+    ", nativeBuildDeps: " & packageUseSeqLiteral(pkg.nativeBuildDeps) &
+    ", runtimeDeps: " & packageUseSeqLiteral(pkg.runtimeDeps) &
+    ", executables: @[")
   for exeIndex, exe in pkg.executables:
     if exeIndex > 0:
       result.add(", ")

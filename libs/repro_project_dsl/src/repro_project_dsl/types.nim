@@ -251,6 +251,24 @@ type
     executables*: seq[ExecutableDef]
     libraries*: seq[LibraryDef]
     toolUses*: seq[PackageUseDef]
+      ## DSL-port M9.R.1: legacy ``uses:`` AND the new ``buildDeps:``
+      ## block both populate this seq. ``buildDeps:`` is the canonical
+      ## name going forward; ``uses:`` is kept as a synonym until the
+      ## M9.R.5 recipe sweep renames the existing 84 recipes onto the
+      ## new spelling. Accessor: ``registeredBuildDeps(packageName)``.
+    nativeBuildDeps*: seq[PackageUseDef]
+      ## DSL-port M9.R.1: BUILD-platform tools and code generators
+      ## needed to drive the build (Nix ``nativeBuildInputs``
+      ## equivalent). Parsed with the same constraint-string grammar
+      ## as ``uses:``; populated by the ``nativeBuildDeps:`` block.
+      ## Accessor: ``registeredNativeBuildDeps(packageName)``.
+    runtimeDeps*: seq[PackageUseDef]
+      ## DSL-port M9.R.1: HOST-platform tools and libraries consumers
+      ## need at runtime or link time (propagated through
+      ## ``propagatedBuildInputs`` + ``DT_NEEDED`` in the Nix world).
+      ## Parsed with the same constraint-string grammar as ``uses:``;
+      ## populated by the ``runtimeDeps:`` block. Accessor:
+      ## ``registeredRuntimeDeps(packageName)``.
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
     scoopProvisioning*: seq[ScoopProvisioningDef]
