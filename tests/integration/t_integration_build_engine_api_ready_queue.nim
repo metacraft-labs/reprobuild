@@ -456,42 +456,57 @@ suite "integration_build_engine_api_ready_queue":
       check sawQueued
       check sawGrantedLaunch
 
-    test "inline RunQuota denied leases are action failures":
-      let repoRoot = getCurrentDir()
-      let tempRoot = createTempDir("repro-inline-rq-denied", "")
-      defer: removeDir(tempRoot)
+    # PENDING REWRITE per docs/runquota-policy.md (2026-06-18).
+    #
+    # The new policy says a denied lease MUST delay-and-retry — it must
+    # never surface as an ``asFailed`` ActionResult.  This test
+    # documents the *legacy* fail-fast behaviour and currently exercises
+    # a permanent hard denial (request asks for 2000 mCPU on a daemon
+    # configured with 1000), so under the new policy ``runBuild`` would
+    # loop forever.  Rewriting it requires either a daemon helper that
+    # eventually grants the lease (e.g. by widening the budget mid-test)
+    # or harness-level "deadlock-detected" plumbing the engine does not
+    # yet emit.  Disabled in source (commented out) until both the
+    # engine-side late-denial handling in
+    # ``pollInlineRunQuotaGrants`` and the replacement coverage from
+    # docs/runquota-policy.md ("Test surface") land.
+    when false:
+      test "inline RunQuota denied leases are action failures":
+        let repoRoot = getCurrentDir()
+        let tempRoot = createTempDir("repro-inline-rq-denied", "")
+        defer: removeDir(tempRoot)
 
-      var daemon = ensureRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = "1000")
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+        var daemon = ensureRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = "1000")
+        defer:
+          daemon.process.terminate()
+          discard daemon.process.waitForExit()
+          daemon.process.close()
+          if pathExists(daemon.socket):
+            removeFile(daemon.socket)
 
-      let app = getAppFilename()
-      let workRoot = tempRoot / "work"
-      let cacheRoot = tempRoot / ".repro-cache"
-      createDir(workRoot)
-      let outputPath = workRoot / "denied" / "out.txt"
+        let app = getAppFilename()
+        let workRoot = tempRoot / "work"
+        let cacheRoot = tempRoot / ".repro-cache"
+        createDir(workRoot)
+        let outputPath = workRoot / "denied" / "out.txt"
 
-      let buildResult = runBuild(graph([
-        action("inline-denied", [app, "fixture-action", "wide", "denied",
-          outputPath], cwd = workRoot, outputs = ["denied/out.txt"],
-          cpuMilli = 2000'u32, commandStatsId = "inline-denied")
-      ]), BuildEngineConfig(
-        cacheRoot: cacheRoot,
-        runQuotaCliPath: app,
-        maxParallelism: 1'u32,
-        stdoutLimit: 256 * 1024,
-        stderrLimit: 256 * 1024,
-        inlineRunQuota: true))
+        let buildResult = runBuild(graph([
+          action("inline-denied", [app, "fixture-action", "wide", "denied",
+            outputPath], cwd = workRoot, outputs = ["denied/out.txt"],
+            cpuMilli = 2000'u32, commandStatsId = "inline-denied")
+        ]), BuildEngineConfig(
+          cacheRoot: cacheRoot,
+          runQuotaCliPath: app,
+          maxParallelism: 1'u32,
+          stdoutLimit: 256 * 1024,
+          stderrLimit: 256 * 1024,
+          inlineRunQuota: true))
 
-      check buildResult.results.len == 1
-      check buildResult.results[0].status == asFailed
-      check buildResult.results[0].stderr.contains("denied")
-      check buildResult.results[0].runQuotaBackend == "runquota-inline"
-      check not fileExists(outputPath)
+        check buildResult.results.len == 1
+        check buildResult.results[0].status == asFailed
+        check buildResult.results[0].stderr.contains("denied")
+        check buildResult.results[0].runQuotaBackend == "runquota-inline"
+        check not fileExists(outputPath)
 
     test "runBuild infers declared output to input dependencies before scheduling":
       let repoRoot = getCurrentDir()

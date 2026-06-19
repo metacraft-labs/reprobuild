@@ -2681,6 +2681,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if running[j].queuedRunQuotaProcess.candidateId != grant.candidateId:
             continue
           if not grant.active or grant.queued:
+            # FOLLOWUP per docs/runquota-policy.md: a late denial on an
+            # already-queued lease MUST delay-and-retry, not surface as
+            # an asFailed ActionResult.  The proper fix is to re-offer
+            # the candidate via offerWithRunQuota (which now retries on
+            # denial with backoff) and reattach the resulting grant to
+            # the running entry.  Until that engine-side state-machine
+            # plumbing lands, this preserves the legacy fail-fast
+            # behaviour for queue-then-denied transitions; the spec
+            # explicitly calls this out as a known gap.
             failRunningAction(j, "runquota denied queued lease: " &
               grant.diagnostic)
             return j

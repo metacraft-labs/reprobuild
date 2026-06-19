@@ -110,35 +110,103 @@ proc diagnosticText(diagnostic: Diagnostic): string =
   else:
     diagnostic.message
 
+const
+  # Denial backoff per docs/runquota-policy.md: a denied lease MUST NOT
+  # break the build.  On every denial reprobuild waits and re-offers the
+  # same candidate; the wait grows on successive denials of the same
+  # candidate so a stuck build neither overloads the daemon nor wastes
+  # CPU.  ``denialBackoffMaxMs`` is the cap; ``denialBackoffStartMs`` is
+  # the first wait after a fresh candidate's initial denial.
+  denialBackoffStartMs = 100
+  denialBackoffMaxMs = 5000
+
+proc nextDenialBackoff(backoffMs: int): int =
+  if backoffMs <= 0: denialBackoffStartMs
+  else: min(backoffMs * 2, denialBackoffMaxMs)
+
+proc reportDenialRetry(label, statsId, diagnostic: string;
+                       attempt: int; backoffMs: int) =
+  ## Emit the canonical ``runquota.denied`` diagnostic so build operators
+  ## see "stuck" candidates without grep'ing.  See
+  ## docs/runquota-policy.md ("Diagnostics & observability") for the
+  ## contract — every retry must carry the candidate identity, the
+  ## daemon's diagnostic, and the current backoff so post-hoc analysis
+  ## can spot pressure hotspots.
+  let id = if statsId.len > 0: statsId else: label
+  try:
+    stderr.writeLine "runquota.denied " & id & " attempt=" & $attempt &
+      " backoffMs=" & $backoffMs & " reason=" & diagnostic
+  except IOError, OSError:
+    discard
+
+proc reportGrantedAfterRetry(label, statsId: string; attempts: int) =
+  if attempts <= 1:
+    return
+  let id = if statsId.len > 0: statsId else: label
+  try:
+    stderr.writeLine "runquota.granted-after-retry " & id &
+      " attempts=" & $attempts
+  except IOError, OSError:
+    discard
+
 proc waitForQueuedGrant(session: var RunQuotaSession;
                         request: ResourceRequest): RunQuotaLease =
   const CandidateId = 1'u64
-  let firstDecisions = session.offerCandidates([toCandidate(CandidateId, request)])
-  var sawQueued = false
-  for decision in firstDecisions:
-    if decision.clientCandidateId != CandidateId:
-      continue
-    if decision.lease.active and not decision.queued:
-      return decision.lease
-    if decision.lease.active and decision.queued:
-      sawQueued = true
-    else:
-      raise newException(ReproRunQuotaError,
-        "runquota denied lease: " & decision.diagnostic.diagnosticText())
-  if not sawQueued:
-    raise newException(ReproRunQuotaError,
-      "runquota did not return a decision for the offered lease")
-
+  # Denied leases MUST NOT break the build (docs/runquota-policy.md).
+  # We loop forever, re-offering the same candidate after a backoff on
+  # every denial.  A protocol-level error from the daemon is still a
+  # hard failure (raises) — denial is distinct from "daemon crashed".
+  var attempts = 0
+  var backoffMs = 0
   while true:
-    for decision in session.pollNextGrant():
+    inc attempts
+    let firstDecisions = session.offerCandidates(
+      [toCandidate(CandidateId, request)])
+    var sawQueued = false
+    var denied = false
+    var denialMessage = ""
+    for decision in firstDecisions:
       if decision.clientCandidateId != CandidateId:
         continue
       if decision.lease.active and not decision.queued:
+        reportGrantedAfterRetry(request.label, request.commandStatsId, attempts)
         return decision.lease
-      if not decision.lease.active:
-        raise newException(ReproRunQuotaError,
-          "runquota denied queued lease: " & decision.diagnostic.diagnosticText())
-    sleep(25)
+      if decision.lease.active and decision.queued:
+        sawQueued = true
+      else:
+        denied = true
+        denialMessage = decision.diagnostic.diagnosticText()
+    if denied:
+      backoffMs = nextDenialBackoff(backoffMs)
+      reportDenialRetry(request.label, request.commandStatsId,
+        denialMessage, attempts, backoffMs)
+      sleep(backoffMs)
+      continue
+    if not sawQueued:
+      raise newException(ReproRunQuotaError,
+        "runquota did not return a decision for the offered lease")
+
+    var queuedDenied = false
+    block awaitGrant:
+      while true:
+        for decision in session.pollNextGrant():
+          if decision.clientCandidateId != CandidateId:
+            continue
+          if decision.lease.active and not decision.queued:
+            reportGrantedAfterRetry(request.label, request.commandStatsId,
+              attempts)
+            return decision.lease
+          if not decision.lease.active:
+            queuedDenied = true
+            denialMessage = decision.diagnostic.diagnosticText()
+            break awaitGrant
+        sleep(25)
+    if queuedDenied:
+      backoffMs = nextDenialBackoff(backoffMs)
+      reportDenialRetry(request.label, request.commandStatsId,
+        denialMessage, attempts, backoffMs)
+      sleep(backoffMs)
+      continue
 
 proc finishOutcome(completion: ProcessCompletion): LeaseFinishOutcome =
   if completion.cancelled or completion.timedOut:
@@ -354,20 +422,42 @@ proc startWithRunQuota*(session: ReproRunQuotaSession;
 proc offerWithRunQuota*(session: ReproRunQuotaSession;
                         request: ReproResourceRequest;
                         command: ReproCommandSpec): ReproRunQuotaOffer =
+  ## Per docs/runquota-policy.md a denied lease MUST delay-and-retry; it
+  ## must never surface as a build-stopping error.  We loop in place,
+  ## re-offering the candidate with backoff until the daemon either
+  ## grants it (returns ``rqokStarted``) or queues it (returns
+  ## ``rqokQueued``).  Protocol-level failures still raise.
   if not session.active:
     raise newException(ReproRunQuotaError, "runquota session is not active")
-  try:
+  let rqRequest = request.toRunQuotaRequest()
+  var attempts = 0
+  var backoffMs = 0
+  while true:
+    inc attempts
     let candidateId = session.nextCandidateId
     inc session.nextCandidateId
-    let decisions = session.session.offerCandidates(
-      [toCandidate(candidateId, request.toRunQuotaRequest())])
+    var decisions: seq[OfferedLease]
+    try:
+      decisions = session.session.offerCandidates(
+        [toCandidate(candidateId, rqRequest)])
+    except CatchableError as err:
+      raise newException(ReproRunQuotaError, err.msg)
+    var sawDecision = false
+    var denied = false
+    var denialMessage = ""
     for decision in decisions:
       if decision.clientCandidateId != candidateId:
         continue
+      sawDecision = true
       if decision.lease.active and not decision.queued:
-        return ReproRunQuotaOffer(
-          kind: rqokStarted,
-          running: session.startGrantedWithRunQuota(decision.lease, command))
+        reportGrantedAfterRetry(rqRequest.label, rqRequest.commandStatsId,
+          attempts)
+        try:
+          return ReproRunQuotaOffer(
+            kind: rqokStarted,
+            running: session.startGrantedWithRunQuota(decision.lease, command))
+        except CatchableError as err:
+          raise newException(ReproRunQuotaError, err.msg)
       if decision.lease.active and decision.queued:
         return ReproRunQuotaOffer(
           kind: rqokQueued,
@@ -376,12 +466,17 @@ proc offerWithRunQuota*(session: ReproRunQuotaSession;
             lease: decision.lease,
             command: command,
             active: true))
+      denied = true
+      denialMessage = decision.diagnostic.diagnosticText()
+    if denied:
+      backoffMs = nextDenialBackoff(backoffMs)
+      reportDenialRetry(rqRequest.label, rqRequest.commandStatsId,
+        denialMessage, attempts, backoffMs)
+      sleep(backoffMs)
+      continue
+    if not sawDecision:
       raise newException(ReproRunQuotaError,
-        "runquota denied lease: " & decision.diagnostic.diagnosticText())
-    raise newException(ReproRunQuotaError,
-      "runquota did not return a decision for the offered lease")
-  except CatchableError as err:
-    raise newException(ReproRunQuotaError, err.msg)
+        "runquota did not return a decision for the offered lease")
 
 proc maxOfferBatchSize*(session: ReproRunQuotaSession): int =
   ## Maximum number of candidates the daemon will accept in a single
@@ -454,8 +549,24 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
               command: commands[inputIndex],
               active: true))
         else:
-          raise newException(ReproRunQuotaError,
-            "runquota denied lease: " & decision.diagnostic.diagnosticText())
+          # Per docs/runquota-policy.md: a denied candidate MUST delay
+          # and retry, not fail the build.  The other batch members have
+          # already been processed (started/queued); re-offer just this
+          # one synchronously with backoff until it lands as started or
+          # queued.  This serialises retries within the batch — a future
+          # rqokDeferred offer kind (tracked in the spec doc) would let
+          # the engine reinsert deferred candidates onto the ready queue
+          # so unrelated work keeps flowing in parallel.
+          var deniedRetryBackoff = 0
+          var deniedRetryAttempts = 1
+          let deniedMessage = decision.diagnostic.diagnosticText()
+          deniedRetryBackoff = nextDenialBackoff(deniedRetryBackoff)
+          reportDenialRetry(requests[inputIndex].label,
+            requests[inputIndex].commandStatsId,
+            deniedMessage, deniedRetryAttempts, deniedRetryBackoff)
+          sleep(deniedRetryBackoff)
+          result[inputIndex] = session.offerWithRunQuota(
+            requests[inputIndex], commands[inputIndex])
       processed += chunk
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
