@@ -17,7 +17,13 @@ build:
 # recipe + ``scripts/run_tests.sh`` call this first so a fresh checkout
 # without a pre-built engine binary still boots.
 bootstrap:
-    @if [ ! -x ./build/bin/repro ]; then \
+    @needs_bootstrap=0; \
+    if [ ! -x ./build/bin/repro ]; then \
+        needs_bootstrap=1; \
+    elif find apps libs config.nims flake.nix repro.nim -type f -newer ./build/bin/repro -print -quit | grep -q .; then \
+        needs_bootstrap=1; \
+    fi; \
+    if [ "${needs_bootstrap}" -eq 1 ]; then \
         echo "bootstrapping ./build/bin/repro from nim..."; \
         mkdir -p test-logs; \
         bash ./scripts/build_apps.sh 2>&1 | tee test-logs/bootstrap.log; \
