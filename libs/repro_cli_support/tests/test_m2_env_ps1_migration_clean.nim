@@ -76,12 +76,20 @@ const ExpectedIgnoredSet = [
   "MSYS2_AUTOTOOLS_VERSION",  # future system-profile track per M70
 ]
 
+# Catalog-eligible, non-deferred tools the current
+# ``windows/toolchain-versions.env`` pins. ``just`` / ``gh`` / ``python``
+# were delegated to the framework (dropped from the env file); ``go`` /
+# ``fpc`` were added with versioned catalog entries (packages/go.nim,
+# packages/fpc.nim), so they migrate cleanly.
 const ExpectedCleanMigrateTools = [
-  "jdk", "just", "gh", "maven", "gradle", "zig",
+  "jdk", "maven", "gradle", "zig", "go", "fpc",
 ]
 
+# M70 deferred tools that still appear in the env file. ``python3`` left
+# the env file with the framework-delegation change, so ``swift`` is the
+# only deferred pin the file now carries.
 const ExpectedDeferredTools = [
-  "swift", "python3",
+  "swift",
 ]
 
 # ---------------------------------------------------------------------------
@@ -109,20 +117,21 @@ suite "M2 — real toolchain-versions.env reconciles per the decision table":
     check envFilePath.len > 0
     check fileExists(envFilePath)
 
-  test "real env file parses to the expected 12 pins":
+  test "real env file parses to the expected 10 pins":
     let parsed = loadEnvFile(envFilePath)
-    # The M2 reconciliation neither added nor removed env-file lines;
-    # the count is the pre/post-M2 invariant.
-    check parsed.pins.len == 12
+    # Pin count tracks the current ``windows/toolchain-versions.env``:
+    # 10 lines after just/gh/python were delegated to the framework and
+    # go/fpc/vulkan/mesa were added.
+    check parsed.pins.len == 10
 
   test "post-M2 migrator reports the expected outcome distribution":
     let parsed = loadEnvFile(envFilePath)
     let plan = planMigration(parsed, "migrated_from_env_scripts",
       initHashSet[string]())
     let s = summarize(plan)
-    check s.ignored == 4
+    check s.ignored == 3
     check s.migrated == 6
-    check s.deferred == 2
+    check s.deferred == 1
     check s.missingVersion == 0
     check s.unknown == 0
     check s.alreadyOwned == 0

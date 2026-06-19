@@ -58,7 +58,7 @@ import repro_home_apply/catalog_lookup
 # ---------------------------------------------------------------------------
 
 const
-  EnvVarToToolMap*: array[14, tuple[envVar, tool: string]] = [
+  EnvVarToToolMap*: array[16, tuple[envVar, tool: string]] = [
     ## The hand-curated mapping from ``toolchain-versions.env`` keys to
     ## M67/M68 catalog tool names. Order is presentation order (used
     ## when the migrate command iterates a parsed env file with
@@ -78,6 +78,8 @@ const
     (envVar: "GCC_VERSION",     tool: "gcc"),
     (envVar: "GIT_VERSION",     tool: "git"),
     (envVar: "MESON_VERSION",   tool: "meson"),
+    (envVar: "GO_VERSION",      tool: "go"),
+    (envVar: "FPC_VERSION",     tool: "fpc"),
   ]
 
   IgnoredEnvVars*: array[5, string] = [

@@ -60,6 +60,7 @@ import ./packages/dotnet_sdk
 import ./packages/gcc
 import ./packages/gh
 import ./packages/git
+import ./packages/go
 import ./packages/just
 import ./packages/meson
 import ./packages/nim
@@ -269,6 +270,7 @@ proc getCatalog*(toolName: string):
   of "gcc":        selectIfNonEmpty(gccCatalog)
   of "gh":         selectIfNonEmpty(ghCatalog)
   of "git":        selectIfNonEmpty(gitCatalog)
+  of "go":         selectIfNonEmpty(goCatalog)
   of "just":       selectIfNonEmpty(justCatalog)
   of "meson":      selectIfNonEmpty(mesonCatalog)
   of "nim":        selectIfNonEmpty(nimCatalog)
