@@ -131,7 +131,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--diagnostics=PATH] [--benchmark=PATH] [--stats[=text|none]] [--report=full|none] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--no-runquota] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop] [--work-root=PATH] [--action-cache-root=PATH]\n       " &
           programName &
@@ -246,7 +246,7 @@ proc renderInternalUsage*(programName: string): string =
     "  cmake-regenerate …                          CMake regeneration helper " &
       "(alias of __repro-cmake-regenerate)"
 
-proc parseToolProvisioning(value: string): ToolProvisioningMode =
+proc parseToolProvisioning*(value: string): ToolProvisioningMode =
   case value
   of "path":
     tpmPathOnly
@@ -256,6 +256,16 @@ proc parseToolProvisioning(value: string): ToolProvisioningMode =
     tpmTarball
   of "scoop":
     tpmScoop
+  of "from-source", "fromSource", "source":
+    # M9.Q: principled from-source provisioning. Maps each ``uses:
+    # <name>`` selector onto a sibling recipe at
+    # ``recipes/packages/source/<name>/``; threads the recipe's
+    # output bin dir into ``pathSearchList``. v1 hard-fails when the
+    # sibling recipe or its artefact is missing — auto-recurse is
+    # the M9.Q.1 follow-up. Accepts the spelling ``from-source``
+    # (CLI canonical), ``fromSource`` (Nim/DSL canonical), and
+    # ``source`` (shorthand).
+    tpmFromSource
   else:
     raise newException(ValueError, "unsupported --tool-provisioning=" & value)
 
@@ -276,8 +286,11 @@ proc resolveToolProvisioningWithEnv(cliMode: ToolProvisioningMode):
   ## provisioning (``REPRO_TOOL_PROVISIONING=nix``) without editing every
   ## project's ``repro.nim`` or threading ``--tool-provisioning=nix`` through
   ## every invocation. An explicit flag still wins, so scripted callers are
-  ## unaffected. Accepts the same ``path|nix|tarball|scoop`` vocabulary as
-  ## the flag; an unset/empty value is a no-op.
+  ## unaffected. Accepts the same ``path|nix|tarball|scoop|from-source``
+  ## vocabulary as the flag; an unset/empty value is a no-op. M9.Q adds
+  ## the ``from-source`` mode that maps each ``uses:`` selector onto a
+  ## sibling recipe at ``recipes/packages/source/<name>/`` and threads
+  ## the recipe's output bin dir into ``pathSearchList``.
   if cliMode != tpmUnspecified:
     return cliMode
   let raw = getEnv(ToolProvisioningEnvVar).strip()
@@ -3165,6 +3178,9 @@ proc identityPaths(outDir: string; mode: ToolProvisioningMode):
   of tpmScoop:
     (identityPath: outDir / "scoop-tool-identities.rbtp",
       inspectionPath: outDir / "scoop-tool-identities.inspect.json")
+  of tpmFromSource:
+    (identityPath: outDir / "from-source-tool-identities.rbtp",
+      inspectionPath: outDir / "from-source-tool-identities.inspect.json")
   else:
     (identityPath: outDir / "path-only-tool-identities.rbtp",
       inspectionPath: outDir / "path-only-tool-identities.inspect.json")
@@ -3175,6 +3191,7 @@ proc modeName(mode: ToolProvisioningMode): string =
   of tpmNix: "nix"
   of tpmTarball: "tarball"
   of tpmScoop: "scoop"
+  of tpmFromSource: "from-source"
   else: "unspecified"
 
 proc addCacheField(payload: var string; value: string) =

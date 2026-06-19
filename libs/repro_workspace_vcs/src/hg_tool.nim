@@ -77,6 +77,7 @@ proc modeName(mode: ToolProvisioningMode): string =
   of tpmNix: "nix"
   of tpmTarball: "tarball"
   of tpmScoop: "scoop"
+  of tpmFromSource: "from-source"
 
 proc raiseUnresolved(mode: ToolProvisioningMode; reason: string) {.noreturn.} =
   var err = newException(EHgToolUnresolved,
@@ -181,7 +182,7 @@ proc resolveHgTool*(mode: ToolProvisioningMode;
       platformCpu: host.cpu,
       installMethod: profile.installMethod)
     result.digest = identityDigest(result)
-  of tpmNix, tpmTarball, tpmScoop:
+  of tpmNix, tpmTarball, tpmScoop, tpmFromSource:
     raiseUnresolved(mode,
       "M3 supports only --tool-provisioning=path for hg; the " &
         modeName(mode) & " backend will be wired through " &

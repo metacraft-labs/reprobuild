@@ -21,6 +21,18 @@ type
     tpmNix
     tpmTarball
     tpmScoop
+    tpmFromSource
+      ## M9.Q: from-source provisioning. The resolver looks for a sibling
+      ## recipe at ``recipes/packages/source/<name>/repro.nim``, then
+      ## checks whether its build artifact at
+      ## ``recipes/packages/source/<name>/.repro/output/<name>/<name>``
+      ## (or ``<name>.exe`` on Windows) exists and is executable. If so,
+      ## the tool's bin dir threads into ``pathSearchList``. If the
+      ## recipe is missing or unbuilt, the resolver fails closed with a
+      ## structured diagnostic naming the recipe path and the build
+      ## command an operator would invoke. v1 does NOT auto-recurse;
+      ## auto-build is M9.Q.1 follow-up. The principle of from-source
+      ## provisioning as a real mode is what matters in v1.
 
   AdapterStrength* = enum
     asWeak
@@ -3201,6 +3213,145 @@ proc actionSpecFor*(identity: ToolActionIdentity): ActionSpec =
     dependencyPolicy: automaticMonitorGatheringPolicy(),
     metadata: metadataFor(identity))
 
+# ---------------------------------------------------------------------------
+# M9.Q — From-source provisioning.
+#
+# ``tpmFromSource`` maps a ``uses: "<name>"`` recipe declaration to a
+# sibling from-source recipe at ``recipes/packages/source/<name>/``.
+# That recipe's ``executable <name>:`` block (claimed by the
+# ``from-source-custom`` / ``from-source-meson`` / ... conventions)
+# materialises a binary at
+# ``recipes/packages/source/<name>/.repro/output/<name>/<name>``
+# (or ``<name>.exe`` on Windows) per ``from_source_custom.nim``'s
+# stage-copy contract. The resolver consults that path; if the binary
+# exists and is executable, the bin dir threads into ``pathSearchList``
+# and the tool is "from-source provisioned".
+#
+# **v1 scope.** No auto-recurse. When the sibling recipe is missing OR
+# the artefact is not present, the resolver raises ``OSError`` with a
+# structured diagnostic naming the recipe path and the exact build
+# command the operator would invoke. The M9.Q.1 follow-up adds the
+# recursive sub-build (subprocess-invoking ``repro build
+# recipes/packages/source/<name> --tool-provisioning=tarball
+# --no-runquota`` for each missing tool); the v1 hard-fail keeps the
+# principled mode while leaving the recursion design decoupled.
+#
+# **Workspace anchor.** ``REPRO_FROM_SOURCE_ROOT`` (env var) overrides
+# the default ``getCurrentDir() / "recipes" / "packages" / "source"``
+# anchor — used by the unit test to point at a synthetic recipe tree
+# without touching the production checkout.
+# ---------------------------------------------------------------------------
+
+const FromSourceRootEnvVar* = "REPRO_FROM_SOURCE_ROOT"
+
+proc fromSourceRecipeRoot*(): string =
+  ## Resolve the from-source recipe anchor. Honours
+  ## ``REPRO_FROM_SOURCE_ROOT`` first; falls back to
+  ## ``getCurrentDir() / "recipes" / "packages" / "source"`` so an
+  ## operator invoking ``repro build`` from a reprobuild checkout finds
+  ## the recipes that ship in-tree.
+  let override = getEnv(FromSourceRootEnvVar)
+  if override.len > 0:
+    return override
+  getCurrentDir() / "recipes" / "packages" / "source"
+
+proc fromSourceArtifactCandidate*(recipeRoot, packageName,
+                                  executableName: string): string =
+  ## Construct the on-disk path the ``from-source-custom`` convention's
+  ## stage-copy action lands the artefact at:
+  ## ``<recipeRoot>/<packageName>/.repro/output/<executableName>/<executableName>``
+  ## (with ``.exe`` suffix appended on Windows when the file exists at
+  ## the suffixed path). Callers test ``fileExists`` themselves.
+  result = recipeRoot / packageName / ".repro" / "output" /
+    executableName / executableName
+
+proc resolveFromSourceTool*(useDef: InterfaceToolUse;
+                            recipeRoot = ""): PathOnlyToolProfile =
+  ## M9.Q resolver entry point. ``useDef.executableName`` drives the
+  ## sibling recipe lookup: the convention is that a tool ``foo`` is
+  ## built from ``recipes/packages/source/foo/`` and the resulting
+  ## binary is at ``.repro/output/foo/foo``.
+  ##
+  ## The recipe package is conventionally named ``<name>Source`` (e.g.
+  ## ``mesonSource``), but the from-source-custom convention's
+  ## stage-copy step is keyed off the ``executable <name>:`` member,
+  ## NOT the package name — so the resolver uses ``executableName``
+  ## (e.g. ``meson``) for the directory layout too.
+  let root =
+    if recipeRoot.len > 0: recipeRoot
+    else: fromSourceRecipeRoot()
+  let name = useDef.executableName
+  if name.len == 0:
+    raise newException(OSError,
+      "tool-resolution failed: from-source mode requires a non-empty " &
+      "executableName on the tool use (package \"" &
+      useDef.packageSelector & "\")")
+  let recipeDir = root / name
+  let recipeManifest = recipeDir / "repro.nim"
+  if not fileExists(extendedPath(recipeManifest)):
+    raise newException(OSError,
+      "tool-resolution failed: --tool-provisioning=from-source requested " &
+      "for \"" & name & "\" (package \"" & useDef.packageSelector &
+      "\") but no sibling recipe at " & recipeManifest &
+      ". Provide a from-source recipe or pick a different " &
+      "--tool-provisioning mode (path|nix|tarball|scoop).")
+
+  # Probe both the bare and ``.exe``-suffixed forms — the
+  # from-source-custom convention's stage-copy preserves the source's
+  # extension, so on Windows the binary lands as either ``meson``
+  # (script wrapper) or ``meson.exe`` (PE) depending on the recipe.
+  let baseCandidate = fromSourceArtifactCandidate(root, name, name)
+  var candidates: seq[string] = @[baseCandidate]
+  when defined(windows):
+    candidates.add(baseCandidate & ".exe")
+  else:
+    # Source recipes may still emit a ``.exe`` (e.g. cross-compiled
+    # Windows builds on Linux); try both even off Windows.
+    candidates.add(baseCandidate & ".exe")
+  var resolved = ""
+  for candidate in candidates:
+    if fileExists(extendedPath(candidate)):
+      # Require execute permission on Unix; on Windows ``fileExists``
+      # is sufficient (the OS infers executability from extension).
+      when defined(windows):
+        resolved = candidate
+        break
+      else:
+        if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+            it in getFilePermissions(extendedPath(candidate))):
+          resolved = candidate
+          break
+  if resolved.len == 0:
+    raise newException(OSError,
+      "tool-resolution failed: --tool-provisioning=from-source requested " &
+      "for \"" & name & "\" but its sibling recipe at " & recipeDir &
+      " has not produced an artefact at " & baseCandidate &
+      " (or .exe). Build the recipe first: `repro build " &
+      recipeDir & " --no-runquota` (M9.Q.1 follow-up will auto-recurse).")
+
+  let absolute = absolutePath(resolved)
+  result = PathOnlyToolProfile(
+    installMethod: "from-source",
+    packageSelector: useDef.packageSelector,
+    packageId:
+      if useDef.packageSelector.len > 0: useDef.packageSelector
+      else: name & "@from-source",
+    declaredExecutablePath: name,
+    executableName: name,
+    pathSearchList: @[parentDir(absolute)],
+    resolvedExecutablePath: absolute,
+    realizedStorePaths: @[recipeDir],
+    selectedStorePath: recipeDir,
+    realizationBoundary: recipeDir,
+    lockIdentity: "from-source:" & name & ":recipe:" & recipeDir,
+    adapterStrength: asStrong,
+    cachePortability: cpLocalOnly,
+    practicalHardening: phNone)
+
+  result.probes = collectConfiguredProbes(absolute,
+    useDef.packageSelector, useDef.executableName)
+  result.profileFingerprint = profileFingerprintFor(result)
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string): PathOnlyToolProfile =
   case mode
@@ -3229,6 +3380,13 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     result = resolveTarballTool(useDef, storeRoot)
   of tpmScoop:
     result = resolveScoopTool(useDef, storeRoot)
+  of tpmFromSource:
+    # M9.Q: principled from-source provisioning. The resolver maps the
+    # tool's ``executableName`` to a sibling recipe at
+    # ``recipes/packages/source/<name>/`` and threads the artefact dir
+    # into ``pathSearchList``. v1 is hard-fail on missing artefact;
+    # M9.Q.1 follow-up will auto-recurse.
+    result = resolveFromSourceTool(useDef)
   else:
     raise newException(ValueError, "tool provisioning mode is not resolved")
 

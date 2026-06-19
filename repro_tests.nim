@@ -6811,6 +6811,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.Q from-source provisioning resolver unit test (hand-inserted —
+  # the test specs table is auto-generated, but new tests added between
+  # generator runs are appended manually so the test target picks them up).
+  TestSpec(
+    source: "tests/unit/t_m9q_from_source_provisioning.nim",
+    binary: "build/test-bin/t_m9q_from_source_provisioning",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
