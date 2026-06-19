@@ -1,9 +1,12 @@
 import std/[json, os, osproc, streams, strutils, tempfiles, times]
 
 import repro_build_engine
+import repro_core
 import repro_hash
-import repro_monitor_depfile
 import repro_runquota
+
+when defined(macosx):
+  import repro_monitor_depfile
 
 type
   ThresholdDirection = enum
@@ -192,6 +195,22 @@ proc requireAll(run: BuildRunResult; statuses: set[ActionStatus]) =
         item.id & " status=" & $item.status & " exit=" & $item.exitCode &
         " stderr=" & item.stderr)
 
+proc noRuntimeDependencyPolicy(): DependencyGatheringPolicy =
+  DependencyGatheringPolicy(
+    kind: dgNoRuntimeDependencies,
+    completeness: decComplete)
+
+proc benchmarkEngineConfig(cacheRoot, app: string;
+                           rebuildMissingOutputsOnCacheHit = false):
+    BuildEngineConfig =
+  BuildEngineConfig(
+    cacheRoot: cacheRoot,
+    runQuotaCliPath: app,
+    maxParallelism: 8'u32,
+    stdoutLimit: 16 * 1024,
+    stderrLimit: 16 * 1024,
+    rebuildMissingOutputsOnCacheHit: rebuildMissingOutputsOnCacheHit)
+
 proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
   createDir(workRoot)
@@ -201,14 +220,10 @@ proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
       $i, workRoot / "wide" / ($i & ".txt")], cwd = workRoot,
       outputs = ["wide/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
-      commandStatsId = "m23-wide-" & $i)
+      commandStatsId = "m23-wide-" & $i,
+      dependencyPolicy = noRuntimeDependencyPolicy())
   let start = epochTime()
-  result.result = runBuild(graph(actions), BuildEngineConfig(
-    cacheRoot: cacheRoot,
-    runQuotaCliPath: app,
-    maxParallelism: 8'u32,
-    stdoutLimit: 16 * 1024,
-    stderrLimit: 16 * 1024))
+  result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
   requireAll(result.result, {asSucceeded})
 
@@ -221,20 +236,11 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
       $i, workRoot / "noop" / ($i & ".txt")], cwd = workRoot,
       outputs = ["noop/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
-      commandStatsId = "m23-noop-" & $i)
-  discard runBuild(graph(actions), BuildEngineConfig(
-    cacheRoot: cacheRoot,
-    runQuotaCliPath: app,
-    maxParallelism: 8'u32,
-    stdoutLimit: 16 * 1024,
-    stderrLimit: 16 * 1024))
+      commandStatsId = "m23-noop-" & $i,
+      dependencyPolicy = noRuntimeDependencyPolicy())
+  discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   let start = epochTime()
-  result.result = runBuild(graph(actions), BuildEngineConfig(
-    cacheRoot: cacheRoot,
-    runQuotaCliPath: app,
-    maxParallelism: 8'u32,
-    stdoutLimit: 16 * 1024,
-    stderrLimit: 16 * 1024))
+  result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
   requireAll(result.result, {asUpToDate})
 
@@ -253,25 +259,16 @@ proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
       weakFingerprint = weak("cache-" & $i),
       cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
-      commandStatsId = "m23-cache-" & $i)
-  discard runBuild(graph(actions), BuildEngineConfig(
-    cacheRoot: cacheRoot,
-    runQuotaCliPath: app,
-    maxParallelism: 8'u32,
-    stdoutLimit: 16 * 1024,
-    stderrLimit: 16 * 1024))
+      commandStatsId = "m23-cache-" & $i,
+      dependencyPolicy = noRuntimeDependencyPolicy())
+  discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   for i in 0 ..< count:
     let outputPath = workRoot / "cache" / ($i & ".txt")
     if fileExists(outputPath):
       removeFile(outputPath)
   let start = epochTime()
-  result.result = runBuild(graph(actions), BuildEngineConfig(
-    cacheRoot: cacheRoot,
-    runQuotaCliPath: app,
-    maxParallelism: 8'u32,
-    stdoutLimit: 16 * 1024,
-    stderrLimit: 16 * 1024,
-    rebuildMissingOutputsOnCacheHit: false))
+  result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot,
+    app, rebuildMissingOutputsOnCacheHit = false))
   result.millis = elapsedMillis(start)
   requireAll(result.result, {asCacheHit})
 

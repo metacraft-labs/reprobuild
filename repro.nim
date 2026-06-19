@@ -580,7 +580,7 @@ package reprobuild:
     when defined(macosx):
       const macosShimArchFlags =
         when defined(arm64) or defined(aarch64):
-          @["-arch", "arm64", "-arch", "arm64e"]
+          @["-arch arm64", "-arch arm64e"]
         else:
           @[]
       reprobuildTestFixturesActions.add(nim.c(
