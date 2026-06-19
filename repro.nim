@@ -37,6 +37,10 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
+import repro_dsl_stdlib/types
+
+# Interface extraction compiles this project file without the provider build
+# body. Keep the stdlib typed-value surface visible for generated DSL helpers.
 
 # Bootstrap-And-Self-Build B4: Python tests participate in the ``test``
 # build graph collection via the ``pythonUnittest`` typed-tool wrapper.
