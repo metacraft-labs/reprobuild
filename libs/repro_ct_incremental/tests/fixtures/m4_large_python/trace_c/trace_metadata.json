@@ -1,0 +1,5 @@
+{
+  "program": "/fixtures/m4_large_python/src/library.py",
+  "args": [],
+  "workdir": "/fixtures/m4_large_python"
+}

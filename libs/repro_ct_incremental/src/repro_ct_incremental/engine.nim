@@ -322,6 +322,53 @@ proc saveCache*(cache: IncrementalCache): Result[void, string] =
   ok()
 
 # ---------------------------------------------------------------------------
+# Cache pruning (M4)
+# ---------------------------------------------------------------------------
+
+proc pruneCache*(cache: var IncrementalCache;
+                 liveTestIds: openArray[string]): seq[string] =
+  ## Remove cache entries for tests that are no longer part of the live test
+  ## set, then PERSIST the pruned cache to disk. Returns the sorted list of
+  ## test ids that were removed (empty if nothing was pruned).
+  ##
+  ## # Semantics
+  ##
+  ## `liveTestIds` is the authoritative set of tests that currently exist (e.g.
+  ## the tests discovered in this run). Any cache entry whose test id is NOT in
+  ## that set is deleted: the test was renamed, removed, or is otherwise gone,
+  ## so keeping its `{deepHash, deps}` would only waste space and could mislead
+  ## a future run that re-introduces the same id with different behaviour.
+  ##
+  ## This handles the *removed-test* case specifically. The complementary
+  ## *removed-function within a still-present test* case needs no pruning: M1
+  ## already treats a dependency that no longer exists in source as the
+  ## reserved `"missing"` shallow hash, so such a test re-runs (never a silent
+  ## skip) and is re-recorded with the current dependency set on that run.
+  ##
+  ## Pruning is idempotent: a test absent from BOTH the cache and `liveTestIds`
+  ## is simply ignored, and an entry already pruned stays pruned. After this
+  ## returns, a subsequent `decide` for a pruned test id yields `idRunFresh`
+  ## (no entry ⇒ run-and-record), exactly as for a never-seen test.
+  ##
+  ## The on-disk cache is rewritten via `saveCache`. A persistence failure does
+  ## NOT raise: the in-memory cache is still pruned, and the failure surfaces on
+  ## the next explicit `saveCache` the caller performs. (Callers that need the
+  ## persisted state guaranteed should call `saveCache` and check its Result.)
+  var live = initTable[string, bool]()
+  for id in liveTestIds:
+    live[id] = true
+  var removed: seq[string]
+  for id in cache.entries.keys:
+    if not live.hasKey(id):
+      removed.add id
+  for id in removed:
+    cache.entries.del id
+  removed.sort()
+  # Persist the pruned cache. Best-effort: see the doc comment above.
+  discard saveCache(cache)
+  removed
+
+# ---------------------------------------------------------------------------
 # record / decide (§16.7.4)
 # ---------------------------------------------------------------------------
 

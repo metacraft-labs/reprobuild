@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: M3 complete, M4 next
+#+STATUS: M4 complete, M5 next
 
 * Overview
 
@@ -234,25 +234,56 @@
   Acceptance: identical engine, three languages, all skip/re-run tests green.
 
 * M4 — Larger programs and transitive dependencies
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: scale to many functions, transitive call chains, and multiple test
   edges; demonstrate the "unchanged transitive dependency graph ⇒ skip" case.
 
   Deliverables:
-  - [ ] A larger fixture (≥15 functions, ≥3 call levels, ≥3 tests with
+  - [X] A larger fixture (≥15 functions, ≥3 call levels, ≥3 tests with
     overlapping and disjoint dependency sets).
-  - [ ] Per-test dependency precision: editing a leaf function re-runs exactly
+    Implemented as `tests/fixtures/m4_large_python/` — a Python program with
+    18 functions, a depth-4 call graph (`run_a→mid_a→helper_one→leaf_deep`),
+    and three per-test traces (`trace_a/`, `trace_b/`, `trace_c/`) whose Call
+    streams encode the executed sets documented in the fixture README. The
+    `.py` indentation extractor is used (no JavaScript here).
+  - [X] Per-test dependency precision: editing a leaf function re-runs exactly
     the tests that executed it, and skips the rest.
-  - [ ] Cache pruning of removed tests/functions across runs.
+    Driven by `recordAll` in `t_large_program_precision.nim`, which records all
+    three tests into ONE cache; editing `leaf_shared` (in A and B) re-runs only
+    A and B, editing `leaf_a_only` (in A only) re-runs only A — verified with
+    function-level changed-set assertions and no false skips.
+  - [X] Cache pruning of removed tests/functions across runs.
+    `engine.pruneCache(cache, liveTestIds)` removes entries for tests absent
+    from the live set and persists the result; removed FUNCTIONS within a
+    still-present test are already handled by M1 (missing ⇒ "missing" hash ⇒
+    re-run + re-record).
 
-  Automated tests:
-  - test_name: editing_shared_leaf_reruns_only_dependent_tests
-  - test_name: editing_disjoint_function_skips_unrelated_tests
-  - test_name: transitive_callee_change_reruns_caller_test
+  Automated tests (`tests/t_large_program_precision.nim`, all driving the
+  three `m4_large_python` tests through ONE cache):
+  - [X] test_name: editing_shared_leaf_reruns_only_dependent_tests
+    description: Edit `leaf_shared` (executed by test_a + test_b, not test_c)
+    ⇒ A and B `idRerunChanged` (changed-set == `@["leaf_shared"]`), C
+    `idSkipUnchanged`.
+  - [X] test_name: editing_disjoint_function_skips_unrelated_tests
+    description: Edit `leaf_a_only` (executed by only test_a) ⇒ A reruns, B
+    and C skip.
+  - [X] test_name: transitive_callee_change_reruns_caller_test
     description: A test that executed `a→b→c` re-runs when `c` changes, because
     `c` is in its executed set (runtime deps are transitive by construction).
-  - test_name: removed_test_is_pruned_from_cache
+    Here `run_a→mid_a→helper_one→leaf_deep` (depth 4): editing `leaf_deep`
+    re-runs only test_a; B and C skip. The precondition (`leaf_deep` ∈ test_a's
+    recorded set, ∉ B/C) is asserted directly from the trace.
+  - [X] test_name: removed_test_is_pruned_from_cache
+    description: After recording 3 tests, `pruneCache(cache, [A, B])` removes
+    C's entry from the in-memory AND persisted cache; a subsequent decide for C
+    ⇒ `idRunFresh`. Pruning is idempotent. Survivors A/B still skip.
+
+  Supporting guard tests (same file): `fixture_executed_sets_match_readme`
+  (the committed traces encode exactly the documented per-test sets, and
+  `dead_code`/`unused_helper` are in no set), `all_tests_skip_when_source_
+  unchanged` (the unchanged-graph ⇒ skip baseline across all three tests), and
+  `editing_dead_code_reruns_nothing`.
 
   Acceptance: selective re-run across a multi-test fixture with no false skips.
 
