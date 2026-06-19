@@ -1,0 +1,250 @@
+#+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
+#+STATUS: M0 complete, M1 next
+
+* Overview
+
+  Prototype of the CodeTracer test runner's *runtime-based incremental
+  testing* (codetracer-specs `Planned-Features/Nim-Parallel-Test-Framework.md`
+  §16.7): **skip re-running a test when none of the functions it previously
+  executed have changed.** Dependency discovery comes from a CodeTracer trace
+  (the exact set of functions a test executed); a per-function *shallow hash*
+  is computed from source; the test's *deep hash* is the combination of its
+  executed functions' shallow hashes. If the deep hash is unchanged, the test
+  is skipped ("skipped (unchanged)").
+
+  This prototype is integrated with `repro watch`: watching a particular test
+  edge with `--ct-incremental` enables the mode, so a file change only re-runs
+  the watched test when a function it actually executed changed.
+
+** Home & scope
+
+  - *Code home (prototype):* the **reprobuild** repo — core engine in
+    `libs/repro_ct_incremental/`, the watch integration in
+    `libs/repro_cli_support` (the `repro watch` command). Chosen for a clean
+    Nim build via the dev shell and because `repro watch` lives here.
+  - *Trace source:* CodeTracer traces. The prototype reads the **JSON trace
+    form** (`trace.json` + `trace_paths.json` + `trace_metadata.json`) with
+    `std/json` only — no CTFS binary parsing or `codetracer-trace-format-nim`
+    dependency in early milestones (CTFS `.ct` support is a later milestone).
+  - *Productionization note:* in production the core would live in the
+    CodeTracer `ct test` runner (`codetracer/src/ct_test`); reprobuild would
+    consume it. The prototype keeps the same algorithm so the move is
+    mechanical.
+
+** Spec anchors
+
+  - §16.1 — concept + the five incremental-testing levels.
+  - §16.7.1 — shallow hash (per-function), §16.7.2 — dependency discovery via
+    traces, §16.7.3 — deep hash, §16.7.4 — workflow.
+  - §16.6 — explicit workflow flags (`--changed-since-catalog`, `--test-list`).
+  - Non-determinism: a test marked non-deterministic is always re-run (§16.7,
+    lines ~1090/1108).
+
+** Integration points (verified)
+
+  - `repro watch` command: `libs/repro_cli_support/src/repro_cli_support.nim`
+    `runWatchCommand` (~13063) → `runDirectWatch` (~13372). Initial build at
+    ~13439; watch-path extraction `watchPathsFromReport` at ~5587/13502 — the
+    re-run decision hook goes between these.
+  - Test edge: `ReproTestFixtureEdge` (~20544): `id`, `selector`, `historyKey`,
+    `buildDeps`, `runCmd`, `testName`.
+  - Trace records: `Function{path_id, line, name}` and `Call{function_id}` —
+    executed functions = the `Function` records referenced by `Call` records.
+
+** Global rules for this campaign
+
+  - No skipped/ignored/weakened tests. Every milestone ships *real* automated
+    tests that fail before the implementation and pass after.
+  - The shallow/deep hash and skip/re-run decisions are pure and unit-tested in
+    isolation; trace reading and watch integration get integration tests.
+  - Determinism: hashing must be stable across runs (sort dep sets by name).
+  - Each milestone updates this file's checkboxes + the per-milestone STATUS
+    line. The implementation agent updates status; the review agent verifies it.
+
+* M0 — Fixtures and trace→executed-functions reader
+  :STATUS: complete
+
+  Goal: read a CodeTracer trace and return the exact set of executed functions.
+
+  Deliverables:
+  - [X] `libs/repro_ct_incremental/` lib scaffold (nimble + src + tests) wired
+    onto `config.nims`'s `--path` lib list.
+  - [X] A tiny single-language fixture under
+    `libs/repro_ct_incremental/tests/fixtures/m0_three_funcs/`: a ~3-function
+    program (`main` calls `used_a` and `used_b`; an `unused_c` exists but is not
+    called) and a trace in the JSON form (`trace.json`, `trace_paths.json`,
+    `trace_metadata.json`). The fixture trace MUST match the real codetracer
+    JSON schema — derive it by inspecting a real trace
+    (`codetracer-example-recordings/` or by recording the fixture with a
+    recorder); document the schema you confirmed in a fixture README.
+  - [X] `ExecutedFunction = object {name: string; file: string; defLine: int}`.
+  - [X] `proc readExecutedFunctions*(traceDir: string): Result[seq[ExecutedFunction], string]`
+    — parses the trace, resolves `Call.function_id → Function.name/path/line`,
+    returns the de-duplicated, name-sorted executed set.
+
+  Automated tests:
+  - test_name: reads_executed_functions_from_fixture_trace
+    description: Over the m0 fixture, `readExecutedFunctions` returns exactly
+    {main, used_a, used_b} with correct file + defLine; `unused_c` is absent.
+  - test_name: malformed_trace_returns_err_not_crash
+    description: A truncated/garbage trace dir yields an `Err`, never a crash.
+  - test_name: empty_call_stream_returns_empty_set
+    description: A trace with `Function` records but no `Call` records returns
+    an empty executed set (defensive).
+
+  Acceptance: the reader works on the real JSON schema (not an invented one);
+  the fixture README cites the real trace it was modeled on.
+
+* M1 — Deep-hash invalidation engine (the core)
+  :STATUS: not started
+
+  Goal: decide skip vs re-run from executed functions + current source.
+
+  Deliverables:
+  - [ ] `proc shallowHash*(funcSource: string): string` — stable hash of a
+    function's body text (normalize trailing whitespace; document what is/ isn't
+    significant). Source extraction: given `ExecutedFunction{file, defLine}`,
+    extract the function body via a simple, documented indentation/brace
+    heuristic adequate for the fixture language (tree-sitter is a later
+    milestone).
+  - [ ] `proc deepHash*(funcs: seq[(name, shallow)]): string` — sort by name,
+    hash the concatenation (§16.7.3).
+  - [ ] A cache type + JSON persistence: `test → {deepHash, deps:[ExecutedFunction]}`
+    stored under `.repro-ct-incremental/cache.json` (path configurable).
+  - [ ] `proc decide*(testId; traceDir; sourceRoot; cache): IncrementalDecision`
+    returning `idRunFresh` (no cache / new test), `idSkipUnchanged`, or
+    `idRerunChanged{changedFuncs}`. On a fresh/changed run the caller is expected
+    to re-execute, re-trace, and call `record*` to update the cache.
+  - [ ] `proc record*(cache; testId; traceDir; sourceRoot)` — recompute deps +
+    deep hash from a fresh trace and store them.
+
+  Automated tests (the "simple integration test, few functions"):
+  - test_name: unchanged_source_skips
+    description: record() over the m0 fixture, then decide() with identical
+    source ⇒ `idSkipUnchanged`.
+  - test_name: changing_an_executed_function_reruns
+    description: After record(), edit `used_a`'s body ⇒ decide() ⇒
+    `idRerunChanged` listing `used_a`.
+  - test_name: changing_an_unexecuted_function_skips
+    description: After record(), edit `unused_c` (never executed) ⇒ decide() ⇒
+    `idSkipUnchanged` (proves function-level, not file-level, precision).
+  - test_name: new_test_without_cache_runs_fresh
+    description: decide() for a test absent from the cache ⇒ `idRunFresh`.
+  - test_name: deep_hash_is_order_independent_and_stable
+    description: deepHash is identical regardless of dep input order and stable
+    across calls.
+  - test_name: removed_executed_function_reruns
+    description: If a dep function is deleted from source after record(), decide()
+    ⇒ `idRerunChanged` (missing-dep treated as changed, never silently skipped).
+
+  Acceptance: function-level precision is demonstrated by
+  `changing_an_unexecuted_function_skips` passing alongside
+  `changing_an_executed_function_reruns`.
+
+* M2 — `repro watch --ct-incremental` integration
+  :STATUS: not started
+
+  Goal: wire the engine into `repro watch` for a single watched test edge.
+
+  Deliverables:
+  - [ ] New `repro watch` flags: `--ct-incremental` (enable the mode) and
+    `--ct-incremental-trace-dir=PATH` (where the test's trace is produced;
+    prototype assumption — a fixed dir the test writes its trace to). Parse them
+    alongside the existing watch flags (~13090).
+  - [ ] A watch decision hook between the build/run and `watchPathsFromReport`
+    (~13439–13502): when `--ct-incremental` is set and the target is a single
+    test edge, on each filesystem-change cycle call `decide()` and, when
+    `idSkipUnchanged`, report "skipped (unchanged: <test>)" and do NOT re-run the
+    test edge; otherwise re-run (and `record()` the fresh trace).
+  - [ ] An `eventSink`/report line so the skip vs re-run decision is observable
+    in the watch output (and assertable from a test).
+
+  Automated tests:
+  - test_name: watch_ct_incremental_flag_parses
+    description: `repro watch --ct-incremental --ct-incremental-trace-dir=…` is
+    accepted; absence leaves watch behaviour unchanged.
+  - test_name: watch_skips_test_edge_when_executed_funcs_unchanged
+    description: Drive one watch cycle (a change to an unexecuted function) ⇒ the
+    watched test edge is reported skipped, not re-run.
+  - test_name: watch_reruns_test_edge_when_executed_func_changed
+    description: Drive one watch cycle (a change to an executed function) ⇒ the
+    watched test edge is re-run.
+  - test_name: watch_without_flag_is_unchanged
+    description: Without `--ct-incremental`, the watch path/run behaviour is
+    byte-for-byte the legacy behaviour (no regression).
+
+  Acceptance: the two skip/re-run watch tests pass deterministically (drive the
+  decision through a seam, not a live wall-clock filesystem race).
+
+* M3 — Second and third languages
+  :STATUS: not started
+
+  Goal: prove language-agnosticism. Add fixtures + per-language function-body
+  extraction for two more languages with real CodeTracer recorders (e.g. Ruby
+  and Python).
+
+  Deliverables:
+  - [ ] Per-language source extraction strategy abstraction
+    (`FunctionBodyExtractor`) selected by file extension; Ruby + Python
+    implementations alongside the M1 language.
+  - [ ] One real recorded trace fixture per language (recorded with the
+    language's recorder; document the command). The same M1 decide()/record()
+    engine drives all three with no per-language branching outside the extractor.
+
+  Automated tests:
+  - test_name: <lang>_executed_function_change_reruns (per added language)
+  - test_name: <lang>_unexecuted_function_change_skips (per added language)
+  - test_name: extractor_selected_by_extension
+    description: The correct extractor is chosen per file type; an unknown
+    extension yields a clear error, never a silent wrong hash.
+
+  Acceptance: identical engine, three languages, all skip/re-run tests green.
+
+* M4 — Larger programs and transitive dependencies
+  :STATUS: not started
+
+  Goal: scale to many functions, transitive call chains, and multiple test
+  edges; demonstrate the "unchanged transitive dependency graph ⇒ skip" case.
+
+  Deliverables:
+  - [ ] A larger fixture (≥15 functions, ≥3 call levels, ≥3 tests with
+    overlapping and disjoint dependency sets).
+  - [ ] Per-test dependency precision: editing a leaf function re-runs exactly
+    the tests that executed it, and skips the rest.
+  - [ ] Cache pruning of removed tests/functions across runs.
+
+  Automated tests:
+  - test_name: editing_shared_leaf_reruns_only_dependent_tests
+  - test_name: editing_disjoint_function_skips_unrelated_tests
+  - test_name: transitive_callee_change_reruns_caller_test
+    description: A test that executed `a→b→c` re-runs when `c` changes, because
+    `c` is in its executed set (runtime deps are transitive by construction).
+  - test_name: removed_test_is_pruned_from_cache
+
+  Acceptance: selective re-run across a multi-test fixture with no false skips.
+
+* M5 — Robustness and correctness guards
+  :STATUS: not started
+
+  Goal: never skip a test that should run.
+
+  Deliverables:
+  - [ ] `deterministic`/non-deterministic marking: tests marked
+    non-deterministic are always re-run regardless of hashes (§16.7).
+  - [ ] Conservative fallbacks: missing trace, unreadable source, hash-tooling
+    error ⇒ re-run (fail-safe), with a diagnostic; never a silent skip.
+  - [ ] Cache schema versioning: a cache from an older schema is ignored
+    (re-run), not mis-parsed.
+  - [ ] Concurrent/independent watched edges keep separate cache entries.
+
+  Automated tests:
+  - test_name: nondeterministic_test_always_reruns
+  - test_name: missing_trace_falls_back_to_rerun
+  - test_name: unreadable_source_falls_back_to_rerun
+  - test_name: stale_cache_schema_is_ignored_and_reruns
+  - test_name: full_suite_has_no_regressions
+    description: The complete reprobuild test suite passes with the feature
+    present (and with `--ct-incremental` absent, behaviour is unchanged).
+
+  Acceptance: every fail-safe path re-runs; no path can silently skip a test
+  that should run.

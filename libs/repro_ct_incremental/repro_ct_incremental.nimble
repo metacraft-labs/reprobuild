@@ -1,0 +1,7 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Trace-based incremental testing engine for reprobuild (CodeTracer trace reader + deep-hash invalidation)"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"
+requires "results"

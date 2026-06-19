@@ -1,0 +1,9 @@
+[
+  {"Path": ""},
+  {"Path": "/fixtures/m0_three_funcs/src/three_funcs.rb"},
+  {"Function": {"path_id": 1, "line": 28, "name": "main"}},
+  {"Function": {"path_id": 1, "line": 16, "name": "used_a"}},
+  {"Function": {"path_id": 1, "line": 20, "name": "used_b"}},
+  {"Function": {"path_id": 1, "line": 24, "name": "unused_c"}},
+  {"Step": {"path_id": 1, "line": 32}}
+]

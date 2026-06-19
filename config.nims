@@ -127,6 +127,11 @@ for libName in [
   # types. M2b-M2e extend it with the ASP encoder; downstream libs
   # import it via ``import repro_solver`` once the encoder is alive.
   "repro_solver",
+  # Trace-Based-Incremental-Testing prototype (campaign in
+  # docs/Trace-Based-Incremental-Testing.milestones.org): M0 ships the
+  # CodeTracer JSON-trace reader; later milestones add the deep-hash
+  # invalidation engine and the ``repro watch --ct-incremental`` wiring.
+  "repro_ct_incremental",
 ]:
   switch("path", "libs" / libName / "src")
 
