@@ -104,6 +104,8 @@
 ##                               ``--without-tests`` precedent.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -190,41 +192,9 @@ package gnutlsSource:
     ## upstream's ``--with-libgcrypt`` knob (default: nettle).
     "libgcrypt >=1.10"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. SIX-flag set is the LARGEST production configure-flag
-    ## set in the corpus, pinning the per-channel handling of a
-    ## larger-cardinality flag sequence against a regression that
-    ## truncated mid-sequence (a regression that capped the flag-list
-    ## at four or five entries would surface in the flag-count check
-    ## in the test).
-    ##
-    ## Order is load-bearing: the ``./configure`` script evaluates
-    ## options left-to-right and the ``--disable-tests`` sentinel
-    ## lives at the tail so any override (e.g. a future CI-bundle
-    ## variant) can append ``--enable-tests`` later without
-    ## re-ordering this block. The mixed ``--disable-*`` /
-    ## ``--without-*`` polarity ALSO pins the per-channel handling of
-    ## the autotools two-flavour convention (``--enable-X`` /
-    ## ``--disable-X`` toggles a boolean feature; ``--with-X`` /
-    ## ``--without-X`` toggles a dependency probe — a regression that
-    ## conflated the two would surface as either a flag-grammar error
-    ## at configure time or a silent feature-flip).
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-doc`` skips the texinfo / pdf manual build.
-    ## ``--without-p11-kit`` skips the PKCS#11 token-discovery layer.
-    ## ``--disable-tools`` skips the gnutls-cli + gnutls-serv +
-    ##                      certtool binaries.
-    ## ``--disable-cxx`` skips the C++ ABI wrapper layer.
-    ## ``--disable-tests`` skips the upstream test suite.
-    "--disable-static"
-    "--disable-doc"
-    "--without-p11-kit"
-    "--disable-tools"
-    "--disable-cxx"
-    "--disable-tests"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libGnutls:
     ## ``libgnutls.so`` — the GNU TLS / DTLS library bundling the
     ## TLS 1.0/1.1/1.2/1.3 record layer + handshake state machine +
@@ -239,6 +209,23 @@ package gnutlsSource:
     ## only; the per-artifact build body lands in M9.L when the
     ## convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("gnutlsSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-doc",
+        "--without-p11-kit",
+        "--disable-tools",
+        "--disable-cxx",
+        "--disable-tests",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libGnutls")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -36,6 +36,23 @@ import repro_standard_provider/conventions/from_source_meson as
 # reprobuild repo root, and ``recipes/...`` from there.
 import "../../../recipes/packages/source/dbus-broker/repro"
 
+# M9.R.5b cleanup: the production recipe no longer registers
+# ``mesonOptions:`` (the block was retired by the sweep in favour of an
+# explicit ``build:`` block calling ``meson_package(...)``). The
+# convention's emitFragment still threads
+# ``registeredBuildFlags(..., "meson")`` into the setup argv (M9.R.6.1
+# narrowing pending). Re-register the canonical production flag set
+# here so the convention test exercises the documented pre-narrowing
+# emitFragment contract end-to-end. The set mirrors the dbus-broker
+# recipe's pre-sweep ``mesonOptions:`` block.
+registerBuildFlag("dbusBrokerSource", "", "meson", "-Daudit=false")
+registerBuildFlag("dbusBrokerSource", "", "meson", "-Dlauncher=true")
+registerBuildFlag("dbusBrokerSource", "", "meson", "-Dlinux-4-17=true")
+registerBuildFlag("dbusBrokerSource", "", "meson", "-Dreference-test=false")
+registerBuildFlag("dbusBrokerSource", "", "meson", "-Dselinux=false")
+registerBuildFlag("dbusBrokerSource", "", "meson", "-Dapparmor=false")
+registerBuildFlag("dbusBrokerSource", "", "meson", "--buildtype=release")
+
 const
   ## parentDir four times from
   ## ``libs/repro_standard_provider/tests/test_from_source_meson_convention.nim``
@@ -224,11 +241,10 @@ suite "from-source-meson convention M9.L.0 — dbus-broker":
     check argvJoined.contains("setup")
     check argvJoined.contains("--backend=ninja")
 
-    # M9.I-registered mesonOptions from the dbus-broker recipe — every
-    # production flag must round-trip into the setup argv. Order is
-    # not asserted here (the in-tree c_cpp_meson tests already pin
-    # declaration-order preservation against the same registry); the
-    # presence check is sufficient at this layer.
+    # M9.I-registered mesonOptions from the dbus-broker recipe
+    # (re-registered at this test module's init time per the M9.R.5b
+    # sweep cleanup — see top of file). Every production flag must
+    # round-trip into the setup argv.
     check argvJoined.contains("-Daudit=false")
     check argvJoined.contains("-Dlauncher=true")
     check argvJoined.contains("-Dlinux-4-17=true")

@@ -95,6 +95,8 @@
 ## disables FTS5 + JSON1 for the minimal embedded-database surface).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -161,23 +163,9 @@ package sqliteSource:
     ## unit amalgamation source.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-json1``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## embedded variant) can append further toggles without re-ordering
-    ## this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-tcl`` skips the TCL bindings.
-    ## ``--enable-fts5`` enables the FTS5 full-text-search module.
-    ## ``--enable-json1`` enables the JSON1 SQL extension.
-    "--disable-static"
-    "--disable-tcl"
-    "--enable-fts5"
-    "--enable-json1"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libSqlite3:
     ## ``libsqlite3.so`` — the canonical SQLite client library
     ## consumed via the C ABI by tracker / baloo / every modern web
@@ -200,6 +188,22 @@ package sqliteSource:
     ## disambiguating package-level binaries from generic names). v1
     ## records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("sqliteSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-tcl",
+        "--enable-fts5",
+        "--enable-json1",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libSqlite3")
+      discard pkg.executable("sqlite3Cli")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

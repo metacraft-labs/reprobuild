@@ -145,6 +145,8 @@
 ## that flips ``FEATURE_xcb=ON`` for legacy bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -260,31 +262,9 @@ package qt6BaseSource:
     ## decompression.
     "zlib >=1.2.11"
 
-  cmakeFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: CMake evaluates ``-D`` overrides
-    ## left-to-right and the ``CMAKE_BUILD_TYPE=Release`` sentinel
-    ## lives at the head (alongside ``BUILD_TESTING=OFF``) for the
-    ## hermetic-build pin, followed by the ``FEATURE_*`` per-feature
-    ## flags in alphabetical order so a future maintainer can grep for
-    ## ``FEATURE_X`` without scanning the whole block.
-    ##
-    ## ``BUILD_TESTING=OFF`` skips the upstream test suite.
-    ## ``CMAKE_BUILD_TYPE=Release`` enables release-mode optimisation.
-    ## ``FEATURE_developer_build=OFF`` disables the upstream dev-build
-    ##  mode.
-    ## ``FEATURE_xcb=OFF`` drops X11/XCB support (v1 is pure-Wayland).
-    ## ``FEATURE_dbus=ON`` enables the QtDBus module.
-    ## ``FEATURE_sql_sqlite=ON`` enables the QtSql SQLite driver.
-    ## ``FEATURE_widgets=ON`` enables the QtWidgets desktop widget set.
-    "-DBUILD_TESTING=OFF"
-    "-DCMAKE_BUILD_TYPE=Release"
-    "-DFEATURE_developer_build=OFF"
-    "-DFEATURE_xcb=OFF"
-    "-DFEATURE_dbus=ON"
-    "-DFEATURE_sql_sqlite=ON"
-    "-DFEATURE_widgets=ON"
-
+  config:
+    ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
+    discard
   library libQt6Core:
     ## ``libQt6Core.so`` — the event loop + signals/slots + container
     ## foundation every Qt-using app links. v1 records the artifact
@@ -319,6 +299,29 @@ package qt6BaseSource:
     ## + Plasma activities (SQLite driver enabled via
     ## ``FEATURE_sql_sqlite=ON``). v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
+    setCurrentOwningPackageOverride("qt6BaseSource")
+    try:
+      let opts = @[
+        "-DBUILD_TESTING=OFF",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DFEATURE_developer_build=OFF",
+        "-DFEATURE_xcb=OFF",
+        "-DFEATURE_dbus=ON",
+        "-DFEATURE_sql_sqlite=ON",
+        "-DFEATURE_widgets=ON",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      discard pkg.library("libQt6Core")
+      discard pkg.library("libQt6Gui")
+      discard pkg.library("libQt6Widgets")
+      discard pkg.library("libQt6Network")
+      discard pkg.library("libQt6DBus")
+      discard pkg.library("libQt6Sql")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

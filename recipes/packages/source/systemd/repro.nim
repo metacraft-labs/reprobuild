@@ -126,6 +126,8 @@
 ##                                 sibling from-source recipes.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -209,42 +211,9 @@ package systemdSource:
     ## per-unit SystemCallFilter= directive compiles against.
     "libseccomp >=2.5"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``mode=release`` enables production-mode build.
-    ## ``tests=false`` skips the upstream test suite.
-    ## ``man=disabled`` skips man-page generation.
-    ## ``translations=false`` skips the NLS translation build.
-    ## ``xdg-autostart=false`` skips the XDG autostart generator.
-    ## ``networkd=false`` skips systemd-networkd.
-    ## ``resolve=false`` skips systemd-resolved.
-    ## ``timesyncd=false`` skips systemd-timesyncd.
-    ## ``homed=false`` skips systemd-homed.
-    ## ``userdb=false`` skips systemd-userdbd.
-    ## ``importd=false`` skips systemd-importd.
-    ## ``portabled=false`` skips systemd-portabled.
-    ## ``polkit=false`` skips the polkit dependency.
-    "-Dmode=release"
-    "-Dtests=false"
-    "-Dman=disabled"
-    "-Dtranslations=false"
-    "-Dxdg-autostart=false"
-    "-Dnetworkd=false"
-    "-Dresolve=false"
-    "-Dtimesyncd=false"
-    "-Dhomed=false"
-    "-Duserdb=false"
-    "-Dimportd=false"
-    "-Dportabled=false"
-    "-Dpolkit=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   executable systemdInit:
     ## ``/lib/systemd/systemd`` — the init daemon that runs as PID 1.
     ## Renamed from the bare-``systemd`` upstream binary name to
@@ -296,6 +265,36 @@ package systemdSource:
     ## fontconfig (udev hot-plug for font-cache invalidation on
     ## external font mounts). v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("systemdSource")
+    try:
+      let opts = @[
+        "-Dmode=release",
+        "-Dtests=false",
+        "-Dman=disabled",
+        "-Dtranslations=false",
+        "-Dxdg-autostart=false",
+        "-Dnetworkd=false",
+        "-Dresolve=false",
+        "-Dtimesyncd=false",
+        "-Dhomed=false",
+        "-Duserdb=false",
+        "-Dimportd=false",
+        "-Dportabled=false",
+        "-Dpolkit=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("systemdInit")
+      discard pkg.executable("systemctl")
+      discard pkg.executable("journalctl")
+      discard pkg.executable("systemdLogind")
+      discard pkg.library("libSystemd")
+      discard pkg.library("libUdev")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

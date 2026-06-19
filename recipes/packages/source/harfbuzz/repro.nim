@@ -110,6 +110,8 @@
 ## ``-Dicu=enabled`` for legacy CJK bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -178,26 +180,9 @@ package harfbuzzSource:
     ## recipe vendors 2.13.3 to match the >=2.10 floor.
     "freetype >=2.10"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``tests=disabled`` skips the upstream test suite.
-    ## ``introspection=disabled`` skips GObject Introspection.
-    ## ``docs=disabled`` skips the gtk-doc HTML generation.
-    ## ``gobject=disabled`` skips the optional GObject wrapper.
-    ## ``icu=disabled`` skips the ICU script-data adapter.
-    "-Dtests=disabled"
-    "-Dintrospection=disabled"
-    "-Ddocs=disabled"
-    "-Dgobject=disabled"
-    "-Dicu=disabled"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libHarfbuzz:
     ## ``libharfbuzz.so`` — the OpenType layout + shaper + script +
     ## Unicode-tables core library. pango / cairo / GTK / Qt6 /
@@ -206,6 +191,23 @@ package harfbuzzSource:
     ## build body lands in M9.L when the convention's ninja-spawn +
     ## install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("harfbuzzSource")
+    try:
+      let opts = @[
+        "-Dtests=disabled",
+        "-Dintrospection=disabled",
+        "-Ddocs=disabled",
+        "-Dgobject=disabled",
+        "-Dicu=disabled",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libHarfbuzz")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

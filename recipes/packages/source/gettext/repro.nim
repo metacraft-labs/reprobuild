@@ -121,6 +121,8 @@
 ##                                       package's libintl.so.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -202,31 +204,9 @@ package gettextSource:
     ## glade / qt-linguist consumers.
     "libxml2 >=2.9"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-included-libintl``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## glibc-stub-only variant) can append ``--with-included-libintl``
-    ## later without re-ordering this block. The mixed ``--disable-*``
-    ## / ``--without-*`` polarity pins the autotools two-flavour
-    ## convention (``--enable-X`` / ``--disable-X`` toggles a boolean
-    ## feature; ``--with-X`` / ``--without-X`` toggles a dependency
-    ## probe).
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-java`` skips the Java ABI shim layer.
-    ## ``--disable-csharp`` skips the C# / mono ABI shim layer.
-    ## ``--without-emacs`` skips the emacs lisp bindings.
-    ## ``--without-included-libintl`` uses the system glibc libintl
-    ##                                  probe path instead of the
-    ##                                  upstream's bundled fallback.
-    "--disable-static"
-    "--disable-java"
-    "--disable-csharp"
-    "--without-emacs"
-    "--without-included-libintl"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable msgfmt:
     ## ``/usr/bin/msgfmt`` — compiles ``.po`` text catalogs into binary
     ## ``.mo`` catalogs under
@@ -261,6 +241,25 @@ package gettextSource:
     ## PascalCasing the SONAME body. v1 records the artifact only;
     ## the per-artifact build body lands in M9.L.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("gettextSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-java",
+        "--disable-csharp",
+        "--without-emacs",
+        "--without-included-libintl",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("msgfmt")
+      discard pkg.executable("msgmerge")
+      discard pkg.executable("xgettext")
+      discard pkg.library("libIntl")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

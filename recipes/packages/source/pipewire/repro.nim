@@ -124,6 +124,8 @@
 ##                                sibling from-source recipes.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -205,23 +207,9 @@ package pipewireSource:
     ## user service.
     "systemd >=240"
 
-  mesonOptions:
-    ## Flag set per the task brief. Order is load-bearing: meson
-    ## evaluates options left-to-right and the ``--buildtype=release``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## debug-build variant) can append ``--buildtype=debug`` later
-    ## without re-ordering this block.
-    ##
-    ## ``tests=disabled`` skips the upstream test suite.
-    ## ``docs=disabled`` skips the documentation build.
-    ## ``examples=disabled`` skips the bundled example apps.
-    ## ``man=disabled`` skips man-page generation.
-    "-Dtests=disabled"
-    "-Ddocs=disabled"
-    "-Dexamples=disabled"
-    "-Dman=disabled"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   executable pipewireDaemon:
     ## ``/usr/bin/pipewire`` — the multimedia server daemon that owns
     ## the graph + the per-client connection negotiation. Renamed
@@ -253,6 +241,24 @@ package pipewireSource:
     ## precedent of stripping ``-2.0`` suffixes). v1 records the
     ## artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("pipewireSource")
+    try:
+      let opts = @[
+        "-Dtests=disabled",
+        "-Ddocs=disabled",
+        "-Dexamples=disabled",
+        "-Dman=disabled",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("pipewireDaemon")
+      discard pkg.executable("pwCat")
+      discard pkg.library("libPipewire")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

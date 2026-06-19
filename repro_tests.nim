@@ -6949,6 +6949,30 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
+  #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
+  #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block
+  #     (the M9.R.6.1 unblocker — the registry is empty so the
+  #     ``legacy<X>Flags`` accessors can be retired);
+  #   * every swept recipe registers a package-level ``build:`` block
+  #     that calls the matching M9.R.2b high-level constructor
+  #     (``meson_package`` / ``cmake_package`` / ``autotools_package``)
+  #     with the lifted ``config:`` values + inlined verbatim flags;
+  #   * recipes WITHOUT options (the 5 ``ca-certificates`` / ``cmake`` /
+  #     ``gcc`` / ``meson`` / ``ninja`` packages) still compile and
+  #     register their dep surface;
+  #   * the configurable-override pathway (``setConfigurable`` ->
+  #     ``readConfigurable``) round-trips correctly so config values
+  #     can flow into the ``build:`` block's flag construction.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
+    binary: "build/test-bin/t_m9r5b_recipe_options_sweep",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",

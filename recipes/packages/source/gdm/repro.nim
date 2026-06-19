@@ -135,6 +135,8 @@
 ## that flips ``--with-plymouth`` for splash-enabled bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -214,31 +216,9 @@ package gdmSource:
     ## consumes to handle layout selection / password entry input.
     "libxkbcommon >=1.5"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-gdm-xsession``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## xsession-disabled variant) can append ``--disable-gdm-xsession``
-    ## later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--without-plymouth`` skips the Plymouth integration.
-    ## ``--without-systemdsystemunitdir`` disables automatic systemd
-    ## unit install path probing.
-    ## ``--with-default-pam-config=none`` opts out of per-distro PAM
-    ## config templating.
-    ## ``--disable-wayland-support=false`` enables Wayland session
-    ## launching.
-    ## ``--enable-gdm-xsession`` enables the gdm-xsession wrapper
-    ## script.
-    "--disable-static"
-    "--without-plymouth"
-    "--without-systemdsystemunitdir"
-    "--with-default-pam-config=none"
-    "--disable-wayland-support=false"
-    "--enable-gdm-xsession"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable gdm:
     ## ``/usr/sbin/gdm`` — the GNOME Display Manager daemon. The
     ## long-running display-manager process that owns the login VT
@@ -255,6 +235,24 @@ package gdmSource:
     ## unprivileged ``gdm`` system user, displays the login form,
     ## hands off to the user session on successful authentication.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("gdmSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-plymouth",
+        "--without-systemdsystemunitdir",
+        "--with-default-pam-config=none",
+        "--disable-wayland-support=false",
+        "--enable-gdm-xsession",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("gdm")
+      discard pkg.executable("gdmGreeterSession")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

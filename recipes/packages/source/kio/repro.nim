@@ -58,6 +58,8 @@
 ## ``BUILD_PYTHON_BINDINGS=OFF`` + ``CMAKE_BUILD_TYPE=Release``).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -155,15 +157,9 @@ package kioSource:
     ## file-dialog list / icon / tree views consume.
     "kitemviews >=6.0"
 
-  cmakeFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: CMake evaluates ``-D`` overrides
-    ## left-to-right.
-    "-DBUILD_TESTING=OFF"
-    "-DBUILD_QCH=OFF"
-    "-DBUILD_PYTHON_BINDINGS=OFF"
-    "-DCMAKE_BUILD_TYPE=Release"
-
+  config:
+    ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
+    discard
   library libKF6Kio:
     ## ``libKF6Kio.so`` — KIO transparent-network-IO surface (KIO::Job
     ## + KIO::CopyJob + KIO::FileCopyJob + KIO::TransferJob + KFileItem
@@ -173,6 +169,21 @@ package kioSource:
     ## artifact build body lands in M9.L when the convention's
     ## ninja-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
+    setCurrentOwningPackageOverride("kioSource")
+    try:
+      let opts = @[
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_QCH=OFF",
+        "-DBUILD_PYTHON_BINDINGS=OFF",
+        "-DCMAKE_BUILD_TYPE=Release",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      discard pkg.library("libKF6Kio")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

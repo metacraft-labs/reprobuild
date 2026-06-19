@@ -110,6 +110,8 @@
 ## that flips ``--static`` for the kernel's initramfs build).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -169,23 +171,9 @@ package zlibSource:
     ## external runtime dependencies.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. zlib's custom ``./configure`` accepts a much smaller flag
-    ## set than autotools-generated ``./configure`` scripts (~6 flags
-    ## total: ``--prefix=``, ``--shared``, ``--static``, ``--const``,
-    ## ``--zprefix``, ``--solo``) with different naming conventions
-    ## (``--shared`` not ``--enable-shared``).
-    ##
-    ## Order is load-bearing: zlib's ``./configure`` evaluates options
-    ## left-to-right and a regression that reorders this seq would
-    ## silently change build behaviour (shared-only vs both).
-    ##
-    ## ``--shared`` builds only the shared library variant; matches
-    ## the ``--disable-static`` baseline the sibling autotools recipes
-    ## use.
-    "--shared"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libZ:
     ## ``libz.so`` — the deflate / inflate compression library
     ## consumed by glib2 (GIO gzip streams), qt6-base (QtNetwork HTTP
@@ -198,6 +186,18 @@ package zlibSource:
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("zlibSource")
+    try:
+      let opts = @[
+        "--shared",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libZ")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

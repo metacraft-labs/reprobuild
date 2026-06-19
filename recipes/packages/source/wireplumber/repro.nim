@@ -112,6 +112,8 @@
 ##                                    the sibling from-source recipes.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -190,24 +192,9 @@ package wireplumberSource:
     ## integration with the user-session systemd unit.
     "systemd >=240"
 
-  mesonOptions:
-    ## Flag set per the task brief. Order is load-bearing: meson
-    ## evaluates options left-to-right and the ``--buildtype=release``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## debug-build variant) can append ``--buildtype=debug`` later
-    ## without re-ordering this block.
-    ##
-    ## ``documentation=disabled`` skips the documentation build.
-    ## ``introspection=disabled`` skips GObject Introspection.
-    ## ``system-lua=true`` uses system Lua instead of the vendored
-    ## sub-project.
-    ## ``tests=false`` skips the upstream test suite.
-    "-Ddocumentation=disabled"
-    "-Dintrospection=disabled"
-    "-Dsystem-lua=true"
-    "-Dtests=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   executable wireplumber:
     ## ``/usr/bin/wireplumber`` — the session manager daemon that runs
     ## alongside pipewire and owns the Lua-scripted policy layer.
@@ -228,6 +215,23 @@ package wireplumberSource:
     ## libPipewire / libGlib2 precedent of stripping version
     ## suffixes). v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("wireplumberSource")
+    try:
+      let opts = @[
+        "-Ddocumentation=disabled",
+        "-Dintrospection=disabled",
+        "-Dsystem-lua=true",
+        "-Dtests=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("wireplumber")
+      discard pkg.library("libWireplumber")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

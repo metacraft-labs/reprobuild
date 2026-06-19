@@ -101,6 +101,8 @@
 ##                              python3-audit lands).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -177,26 +179,9 @@ package libcapNgSource:
     ## ``uses:`` entry pins the probe-time availability).
     "swig"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-python3``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## Python-edition variant) can append ``--with-python3`` later
-    ## without re-ordering this block. The two consecutive
-    ## ``--without-python*`` flags pin the per-channel handling of
-    ## near-duplicate flag names (a regression that collapsed them via
-    ## prefix-matching would surface as a flag-count mismatch).
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--without-python`` skips the Python 2 bindings (Python 2 EOL).
-    ## ``--without-python3`` skips the Python 3 bindings (heavy
-    ##                        interpreter dependency; v1 consumers use
-    ##                        the C ABI directly).
-    "--disable-static"
-    "--without-python"
-    "--without-python3"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libCapNg:
     ## ``libcap-ng.so`` — the simplified-API POSIX capabilities C
     ## library consumed by auditd's capability-bounding-set
@@ -207,6 +192,20 @@ package libcapNgSource:
     ## per-artifact build body lands in M9.L when the convention's
     ## make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("libcapNgSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-python",
+        "--without-python3",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libCapNg")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -123,6 +123,8 @@
 ## flips ``introspection=enabled`` for GNOME-shell developer bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -194,31 +196,9 @@ package glib2Source:
     ## and by GResource's optional compression layer.
     "zlib"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``tests=false`` skips the upstream test suite (heaviest portion
-    ## of the build, not needed at runtime).
-    ## ``documentation=false`` skips the documentation build.
-    ## ``man-pages=disabled`` skips man-page generation.
-    ## ``introspection=disabled`` skips GObject Introspection (drops
-    ## the g-ir-scanner toolchain dep).
-    ## ``nls=disabled`` skips the native-language-support translation
-    ## build.
-    ## ``xattr=false`` skips extended-attribute support.
-    "-Dtests=false"
-    "-Ddocumentation=false"
-    "-Dman-pages=disabled"
-    "-Dintrospection=disabled"
-    "-Dnls=disabled"
-    "-Dxattr=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libGlib2:
     ## ``libglib-2.0.so`` — the core C utilities library (data
     ## structures, main-loop, threading primitives, character-set
@@ -247,6 +227,27 @@ package glib2Source:
     ## itself for dlopen-style module loading. v1 records the
     ## artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("glib2Source")
+    try:
+      let opts = @[
+        "-Dtests=false",
+        "-Ddocumentation=false",
+        "-Dman-pages=disabled",
+        "-Dintrospection=disabled",
+        "-Dnls=disabled",
+        "-Dxattr=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libGlib2")
+      discard pkg.library("libGObject")
+      discard pkg.library("libGio")
+      discard pkg.library("libGModule")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

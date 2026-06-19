@@ -116,6 +116,8 @@
 ##                                    precedent).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -194,26 +196,9 @@ package dbusSource:
     ## ``expatSource`` recipe pins ``>=2.6``.
     "expat >=2.6"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--disable-xml-docs``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## developer-edition variant) can append ``--enable-xml-docs``
-    ## later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive (not used by the
-    ## v1 desktop story).
-    ## ``--disable-tests`` skips the upstream test suite.
-    ## ``--without-x`` skips the legacy ``dbus-launch`` X11 helper.
-    ## ``--disable-doxygen-docs`` skips the Doxygen API documentation.
-    ## ``--disable-xml-docs`` skips the DocBook XML manpage build.
-    "--disable-static"
-    "--disable-tests"
-    "--without-x"
-    "--disable-doxygen-docs"
-    "--disable-xml-docs"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable dbusDaemon:
     ## ``/usr/bin/dbus-daemon`` — the core reference message-bus daemon
     ## the NDE0-D ``dbus.service`` unit invokes when
@@ -232,6 +217,23 @@ package dbusSource:
     ## suffix separator while preserving the canonical ``lib`` prefix.
     ## v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("dbusSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-tests",
+        "--without-x",
+        "--disable-doxygen-docs",
+        "--disable-xml-docs",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("dbusDaemon")
+      discard pkg.library("libDbus1")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

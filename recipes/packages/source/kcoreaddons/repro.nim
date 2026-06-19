@@ -109,6 +109,8 @@
 ## flips ``BUILD_TESTING=ON`` for CI bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -181,22 +183,9 @@ package kcoreaddonsSource:
     ## probes for the tool at configure time).
     "qt6-tools >=6.6"
 
-  cmakeFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: CMake evaluates ``-D`` overrides
-    ## left-to-right and the ``CMAKE_BUILD_TYPE=Release`` sentinel
-    ## lives at the tail so any override (e.g. a future debug-build
-    ## variant) can append ``-DCMAKE_BUILD_TYPE=Debug`` later without
-    ## re-ordering this block.
-    ##
-    ## ``BUILD_TESTING=OFF`` skips the upstream test suite.
-    ## ``BUILD_QCH=OFF`` skips the Qt Compressed Help API documentation.
-    ## ``BUILD_PYTHON_BINDINGS=OFF`` skips the PyKF6 bindings.
-    "-DBUILD_TESTING=OFF"
-    "-DBUILD_QCH=OFF"
-    "-DBUILD_PYTHON_BINDINGS=OFF"
-    "-DCMAKE_BUILD_TYPE=Release"
-
+  config:
+    ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
+    discard
   library libKF6CoreAddons:
     ## ``libKF6CoreAddons.so`` — the cross-cutting KF6 helpers library
     ## every other KF6 module + every Plasma component links against
@@ -206,6 +195,21 @@ package kcoreaddonsSource:
     ## body lands in M9.L when the convention's ninja-spawn +
     ## install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
+    setCurrentOwningPackageOverride("kcoreaddonsSource")
+    try:
+      let opts = @[
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_QCH=OFF",
+        "-DBUILD_PYTHON_BINDINGS=OFF",
+        "-DCMAKE_BUILD_TYPE=Release",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      discard pkg.library("libKF6CoreAddons")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -132,6 +132,8 @@
 ## bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -201,23 +203,9 @@ package sddmSource:
     ## to authenticate logins against ``/etc/pam.d/sddm``.
     "pam >=1.5"
 
-  cmakeFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: CMake evaluates ``-D`` overrides
-    ## left-to-right and the ``CMAKE_BUILD_TYPE=Release`` sentinel
-    ## lives at the tail so any override (e.g. a future debug-build
-    ## variant) can append ``-DCMAKE_BUILD_TYPE=Debug`` later without
-    ## re-ordering this block.
-    ##
-    ## ``BUILD_TESTING=OFF`` skips the upstream test suite.
-    ## ``BUILD_MAN_PAGES=OFF`` skips man-page generation.
-    ## ``ENABLE_JOURNALD=OFF`` drops the systemd-journal logging
-    ## integration.
-    "-DBUILD_TESTING=OFF"
-    "-DBUILD_MAN_PAGES=OFF"
-    "-DENABLE_JOURNALD=OFF"
-    "-DCMAKE_BUILD_TYPE=Release"
-
+  config:
+    ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
+    discard
   executable sddm:
     ## ``/usr/bin/sddm`` — the long-running display-manager daemon
     ## owning the login VT. NDE-K1's ``sddm.service`` unit
@@ -245,6 +233,23 @@ package sddmSource:
     ## match the kwin/libKWin precedent of brand-conventional casing
     ## in artifact identifiers.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
+    setCurrentOwningPackageOverride("sddmSource")
+    try:
+      let opts = @[
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_MAN_PAGES=OFF",
+        "-DENABLE_JOURNALD=OFF",
+        "-DCMAKE_BUILD_TYPE=Release",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      discard pkg.executable("sddm")
+      discard pkg.executable("sddmGreeter")
+      discard pkg.library("libSddmCommon")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

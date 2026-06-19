@@ -107,6 +107,8 @@
 ## flips introspection on for GNOME-shell developer bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -178,32 +180,31 @@ package gdkPixbufSource:
     ## consumes to dispatch loaders by MIME type.
     "shared-mime-info >=2.0"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``tests=false`` skips the upstream test suite to keep the
-    ## build hermetic + fast.
-    ## ``man=false`` skips man-page generation.
-    ## ``gtk_doc=false`` skips gtk-doc HTML generation.
-    ## ``introspection=disabled`` skips GObject Introspection (drops
-    ## the g-ir-scanner toolchain dep).
-    "-Dtests=false"
-    "-Dman=false"
-    "-Dgtk_doc=false"
-    "-Dintrospection=disabled"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libgdkPixbuf:
     ## ``libgdk_pixbuf-2.0.so`` — the image-loading + pixel-buffer
     ## library consumed by GTK / GNOME shell / swaybg. v1 records
     ## the artifact only; the per-artifact build body lands in M9.L
     ## when the convention's ninja-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("gdkPixbufSource")
+    try:
+      let opts = @[
+        "-Dtests=false",
+        "-Dman=false",
+        "-Dgtk_doc=false",
+        "-Dintrospection=disabled",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libgdkPixbuf")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -134,6 +134,8 @@
 ## adds ``no-deprecated`` to drop 1.x-era compatibility shims).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -204,30 +206,9 @@ package opensslSource:
     ## vendors a compatible version.
     "zlib >=1.2.11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. openssl's custom Perl ``./Configure`` accepts a quite
-    ## different flag grammar than autotools: positional target triplet
-    ## first (``linux-x86_64``) FOLLOWED by feature toggles of the form
-    ## ``no-<feature>`` / ``enable-<feature>``.
-    ##
-    ## Order is load-bearing: the target triplet ``linux-x86_64`` MUST
-    ## come first (it's parsed positionally by the Configure script;
-    ## putting a feature toggle ahead of it confuses the script into
-    ## thinking the feature name is the target).
-    ##
-    ## ``linux-x86_64`` is the explicit target triplet (skips the
-    ## auto-detection ``./config`` shim for deterministic builds).
-    ## ``shared`` builds the shared library variant.
-    ## ``no-tests`` skips the upstream test suite.
-    ## ``no-docs`` skips the manpage / pod2man build.
-    ## ``--release`` enables release-mode optimisation.
-    "linux-x86_64"
-    "shared"
-    "no-tests"
-    "no-docs"
-    "--release"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libCrypto:
     ## ``libcrypto.so`` — the cryptography primitive library
     ## (symmetric ciphers, asymmetric ciphers, hash functions, random
@@ -247,6 +228,23 @@ package opensslSource:
     ## SONAME ``ssl`` is PascalCased to ``libSsl`` per the libGlib2 /
     ## libExpat precedent. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("opensslSource")
+    try:
+      let opts = @[
+        "linux-x86_64",
+        "shared",
+        "no-tests",
+        "no-docs",
+        "--release",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libCrypto")
+      discard pkg.library("libSsl")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

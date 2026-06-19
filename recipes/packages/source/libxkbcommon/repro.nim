@@ -126,6 +126,8 @@
 ## ``enable-docs=true`` for upstream contributions).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -195,29 +197,9 @@ package libxkbcommonSource:
     ## the dependency surface stays explicit.
     "wayland-protocols >=1.31"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``enable-docs=false`` skips doxygen + sphinx documentation
-    ## generation (heaviest portion of the build, not needed at
-    ## runtime).
-    ## ``enable-x11=false`` skips the X11 codepath
-    ## (``libxkbcommon-x11.so``) — Wayland-only baseline keeps the
-    ## dependency surface tight.
-    ## ``enable-wayland=true`` builds the Wayland interactive demo
-    ## linked into the xkbcli umbrella tool.
-    ## ``enable-tools=true`` builds the xkbcli command-line tool.
-    "-Denable-docs=false"
-    "-Denable-x11=false"
-    "-Denable-wayland=true"
-    "-Denable-tools=true"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libxkbcommon:
     ## ``libxkbcommon.so`` — the core keyboard-keymap library, linked
     ## by every Wayland compositor (wlroots / Mutter / KWin) and many
@@ -233,6 +215,23 @@ package libxkbcommonSource:
     ## ``interactive-wayland``, ``list-models``) used by users +
     ## tooling to debug keymaps. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("libxkbcommonSource")
+    try:
+      let opts = @[
+        "-Denable-docs=false",
+        "-Denable-x11=false",
+        "-Denable-wayland=true",
+        "-Denable-tools=true",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libxkbcommon")
+      discard pkg.executable("xkbcli")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

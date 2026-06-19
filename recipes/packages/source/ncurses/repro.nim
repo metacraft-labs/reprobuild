@@ -129,6 +129,8 @@
 ##                              surface.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -197,27 +199,9 @@ package ncursesSource:
     ## gcc is the host C toolchain — ncurses is C99 + GNU extensions.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--with-termlib``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## merged-ABI variant) can append ``--without-termlib`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--with-shared`` builds the shared ``.so`` libraries.
-    ## ``--without-debug`` skips the libncurses_g.a debug library.
-    ## ``--without-ada`` skips the Ada bindings.
-    ## ``--enable-widec`` builds the wide-character (``w``-suffixed) ABI.
-    ## ``--with-termlib`` splits terminfo into a separate ``libtinfow.so``.
-    "--disable-static"
-    "--with-shared"
-    "--without-debug"
-    "--without-ada"
-    "--enable-widec"
-    "--with-termlib"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libNcursesw:
     ## ``libncursesw.so`` — the wide-character curses windowing library
     ## consumed by top + htop + vim + tmux + mc + ncdu + every full-
@@ -257,6 +241,26 @@ package ncursesSource:
     ## inspect the cup / setaf / smkx grammar of a TERM entry). v1
     ## records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("ncursesSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--with-shared",
+        "--without-debug",
+        "--without-ada",
+        "--enable-widec",
+        "--with-termlib",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libNcursesw")
+      discard pkg.library("libTinfow")
+      discard pkg.executable("tic")
+      discard pkg.executable("infocmp")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

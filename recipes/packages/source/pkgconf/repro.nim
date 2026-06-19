@@ -88,6 +88,8 @@
 ##                                                   system.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -139,19 +141,9 @@ package pkgconfSource:
     ## gcc is the host C toolchain — pkgconf is C99.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set per the task brief. Order is load-bearing: the
-    ## ``./configure`` script evaluates options left-to-right.
-    ##
-    ## ``--disable-static`` skips the static archive of libpkgconf.
-    ## ``--with-system-libdir=/lib:/usr/lib`` sets the default system
-    ##  library search path.
-    ## ``--with-system-includedir=/usr/include`` sets the default
-    ##  system include search path.
-    "--disable-static"
-    "--with-system-libdir=/lib:/usr/lib"
-    "--with-system-includedir=/usr/include"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable pkgconf:
     ## ``$PREFIX/bin/pkgconf`` — the CLI driver every configure /
     ## meson / cmake build system invokes. A ``pkg-config`` symlink
@@ -166,6 +158,21 @@ package pkgconfSource:
     ## without shelling out to the CLI. v1 records the artifact
     ## only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("pkgconfSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--with-system-libdir=/lib:/usr/lib",
+        "--with-system-includedir=/usr/include",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("pkgconf")
+      discard pkg.library("libpkgconf")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -105,6 +105,8 @@
 ## flips ``--with-tests`` for CI bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -173,24 +175,9 @@ package expatSource:
     ## use of autoconf macros.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-tests``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## CI-bundle variant) can append ``--with-tests`` later without
-    ## re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive (not used by the
-    ## v1 desktop story).
-    ## ``--without-docbook`` skips the DocBook documentation build.
-    ## ``--without-examples`` skips the bundled examples.
-    ## ``--without-tests`` skips the upstream test suite.
-    "--disable-static"
-    "--without-docbook"
-    "--without-examples"
-    "--without-tests"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libExpat:
     ## ``libexpat.so`` — the SAX/expat XML parser consumed by
     ## D-Bus's introspection XML layer, fontconfig's font-cache XML
@@ -199,6 +186,21 @@ package expatSource:
     ## artifact only; the per-artifact build body lands in M9.L when
     ## the convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("expatSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-docbook",
+        "--without-examples",
+        "--without-tests",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libExpat")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

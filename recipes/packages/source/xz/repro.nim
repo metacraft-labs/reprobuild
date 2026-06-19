@@ -109,6 +109,8 @@
 ##                              not via embedded RPATH).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -184,21 +186,9 @@ package xzSource:
     ## machinery xz's CLI uses for translated error messages.
     "gettext >=0.21"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--disable-rpath``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## relocatable-install variant) can append ``--enable-rpath`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-doc``    skips the texinfo / pdf manual build.
-    ## ``--disable-rpath``  skips the libtool RPATH embedding.
-    "--disable-static"
-    "--disable-doc"
-    "--disable-rpath"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable xz:
     ## ``/usr/bin/xz`` — the canonical LZMA2 compressor / decompressor
     ## CLI consumed by ``tar -xf`` for ``.tar.xz`` payloads + every
@@ -216,6 +206,21 @@ package xzSource:
     ## ``lib`` prefix while PascalCasing the SONAME body. v1 records
     ## the artifact only; the per-artifact build body lands in M9.L.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("xzSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-doc",
+        "--disable-rpath",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("xz")
+      discard pkg.library("libLzma")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

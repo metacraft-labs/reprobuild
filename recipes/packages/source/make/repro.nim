@@ -92,6 +92,8 @@
 ##                          catalogs to consume).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -134,16 +136,25 @@ package makeSource:
     ## of code-generation passes under ``doc/``.
     "perl >=5.32"
 
-  configureFlags:
-    ## Modern-desktop baseline. ``--disable-nls`` skips the gettext
-    ## native-language support pass (no per-locale message catalogs
-    ## on a reproducible-build host).
-    "--disable-nls"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable make:
     ## ``$PREFIX/bin/make`` — the canonical build-system driver. v1
     ## records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("makeSource")
+    try:
+      let opts = @[
+        "--disable-nls",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("make")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

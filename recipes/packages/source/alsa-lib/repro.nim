@@ -106,6 +106,8 @@
 ##                              native C ABI.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -173,15 +175,9 @@ package alsaLibSource:
     ## of GNU extensions for inline assembly + thread-local storage.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set per the task brief.
-    ##
-    ## ``--disable-static`` skips the static archive (not used by the
-    ## v1 desktop story; pipewire + wireplumber link dynamically).
-    ## ``--disable-python`` skips the optional pyalsa Python bindings.
-    "--disable-static"
-    "--disable-python"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libAsound:
     ## ``libasound.so`` — the C library every audio middleware
     ## (pipewire / wireplumber / pulseaudio / GStreamer-alsa) links
@@ -193,6 +189,19 @@ package alsaLibSource:
     ## lands in M9.L when the convention's make-spawn + install-glue
     ## closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("alsaLibSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-python",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libAsound")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

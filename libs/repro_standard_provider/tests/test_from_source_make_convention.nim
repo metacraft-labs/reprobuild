@@ -50,6 +50,29 @@ import repro_standard_provider/conventions/from_source_make as
 import "../../../recipes/packages/source/libcap/repro"
 import "../../../recipes/packages/source/kernel/repro"
 
+# M9.R.5b cleanup: the production recipes no longer register
+# ``makeFlags:`` (the blocks were retired by the sweep in favour of
+# explicit ``build:`` blocks calling ``autotools_package(...)``). The
+# convention's ``recognize`` gate still uses the legacy
+# ``registeredBuildFlags(..., "make")`` channel as its discriminator
+# (M9.R.6.1 narrowing pending). Re-register the canonical production
+# flag sets into the legacy channel so the convention test exercises
+# the documented pre-narrowing recognise + emitFragment contract end-
+# to-end. The sets mirror the libcap + kernel recipes' pre-sweep
+# ``makeFlags:`` blocks.
+registerBuildFlag("libcapSource", "", "make", "BUILD_CC=gcc")
+registerBuildFlag("libcapSource", "", "make", "RAISE_SETFCAP=no")
+registerBuildFlag("libcapSource", "", "make", "lib=lib")
+registerBuildFlag("libcapSource", "", "make", "prefix=/usr")
+registerBuildFlag("libcapSource", "", "make", "GOLANG=no")
+registerBuildFlag("kernelSource", "", "make", "ARCH=x86_64")
+registerBuildFlag("kernelSource", "", "make", "LOCALVERSION=")
+registerBuildFlag("kernelSource", "", "make", "KBUILD_BUILD_USER=reprobuild")
+registerBuildFlag("kernelSource", "", "make", "KBUILD_BUILD_HOST=reprobuild")
+registerBuildFlag("kernelSource", "", "make",
+                  "KBUILD_BUILD_TIMESTAMP=@1577836800")
+registerBuildFlag("kernelSource", "", "make", "-j1")
+
 const
   ## parentDir four times from
   ## ``libs/repro_standard_provider/tests/test_from_source_make_convention.nim``

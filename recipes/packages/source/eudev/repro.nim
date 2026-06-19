@@ -145,6 +145,8 @@
 ## elsewhere).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -228,25 +230,9 @@ package eudevSource:
     ## binary (when ``--enable-hwdb`` is passed).
     "gperf >=3.1"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-hwdb``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## minimal-variant that flips ``--disable-hwdb``) can append
-    ## later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-blkid`` skips the libblkid link dependency at
-    ##                      configure time (breaks a circular link
-    ##                      edge with util-linux).
-    ## ``--disable-manpages`` skips the manpage build.
-    ## ``--enable-hwdb`` builds the hardware-database compiler.
-    "--disable-static"
-    "--disable-blkid"
-    "--disable-manpages"
-    "--enable-hwdb"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable udevd:
     ## ``/lib/systemd/systemd-udevd`` — the user-space hot-plug
     ## daemon that watches the kernel uevent netlink socket and runs
@@ -282,6 +268,23 @@ package eudevSource:
     ## the registry.
     ## v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("eudevSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-blkid",
+        "--disable-manpages",
+        "--enable-hwdb",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("udevd")
+      discard pkg.executable("udevadm")
+      discard pkg.library("libUdev")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

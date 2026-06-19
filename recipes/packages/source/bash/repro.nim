@@ -104,6 +104,8 @@
 ##                                   session relies on this).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -170,27 +172,9 @@ package bashSource:
     ## ``y.tab.c`` is stripped by a downstream patch).
     "bison"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-job-control``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## non-interactive-only variant) can append
-    ## ``--disable-job-control`` later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--without-bash-malloc`` uses the system malloc (glibc ptmalloc2).
-    ## ``--enable-readline`` links against system libreadline.
-    ## ``--enable-history`` keeps ``~/.bash_history`` + the ``history``
-    ##                       builtin wired up.
-    ## ``--enable-job-control`` keeps the ``fg`` / ``bg`` / ``jobs``
-    ##                           builtins + SIGCHLD handling wired up.
-    "--disable-static"
-    "--without-bash-malloc"
-    "--enable-readline"
-    "--enable-history"
-    "--enable-job-control"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable bash:
     ## ``/bin/bash`` — the POSIX shell interpreter. Login shell on
     ## every major Linux distribution; shebang target for every
@@ -200,6 +184,22 @@ package bashSource:
     ## artifact build body lands in M9.L when the convention's make-
     ## spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("bashSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-bash-malloc",
+        "--enable-readline",
+        "--enable-history",
+        "--enable-job-control",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("bash")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

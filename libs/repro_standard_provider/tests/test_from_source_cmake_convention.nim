@@ -36,6 +36,23 @@ import repro_standard_provider/conventions/from_source_cmake as
 # reprobuild repo root, and ``recipes/...`` from there.
 import "../../../recipes/packages/source/kcoreaddons/repro"
 
+# M9.R.5b cleanup: the production recipe no longer registers
+# ``cmakeFlags:`` (the block was retired by the sweep in favour of an
+# explicit ``build:`` block calling ``cmake_package(...)``). The
+# convention's ``recognize`` gate still uses the legacy
+# ``registeredBuildFlags(..., "cmake")`` channel as its discriminator
+# (M9.R.6.1 narrowing pending). Re-register the canonical production
+# flag set into the legacy channel so the convention test exercises
+# the documented pre-narrowing recognise + emitFragment contract end-
+# to-end. The set mirrors the kcoreaddons recipe's pre-sweep
+# ``cmakeFlags:`` block.
+registerBuildFlag("kcoreaddonsSource", "", "cmake", "-DBUILD_TESTING=OFF")
+registerBuildFlag("kcoreaddonsSource", "", "cmake", "-DBUILD_QCH=OFF")
+registerBuildFlag("kcoreaddonsSource", "", "cmake",
+                  "-DBUILD_PYTHON_BINDINGS=OFF")
+registerBuildFlag("kcoreaddonsSource", "", "cmake",
+                  "-DCMAKE_BUILD_TYPE=Release")
+
 const
   ## parentDir four times from
   ## ``libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim``
@@ -219,11 +236,10 @@ suite "from-source-cmake convention M9.L.1 — kcoreaddons":
     check argvJoined.contains("-G Ninja")
     check argvJoined.contains("-DCMAKE_BUILD_TYPE=Release")
 
-    # M9.I-registered cmakeFlags from the kcoreaddons recipe — every
-    # production flag must round-trip into the configure argv. Order is
-    # not asserted here (the in-tree c_cpp_cmake tests already pin
-    # declaration-order preservation against the same registry); the
-    # presence check is sufficient at this layer.
+    # M9.I-registered cmakeFlags from the kcoreaddons recipe
+    # (re-registered at this test module's init time per the M9.R.5b
+    # sweep cleanup — see top of file). Every production flag must
+    # round-trip into the configure argv.
     check argvJoined.contains("-DBUILD_TESTING=OFF")
     check argvJoined.contains("-DBUILD_QCH=OFF")
     check argvJoined.contains("-DBUILD_PYTHON_BINDINGS=OFF")

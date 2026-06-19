@@ -93,6 +93,8 @@
 ##                                  shell rcfiles.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -155,15 +157,9 @@ package grepSource:
     ## gcc is the host C toolchain — grep is C99 + GNU extensions.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set per the task brief.
-    ##
-    ## ``--disable-perl-regexp`` skips the Perl-compatible regex engine
-    ##                            (libpcre2 dependency). The v1 desktop
-    ##                            story only uses the POSIX BRE / ERE
-    ##                            engines.
-    "--disable-perl-regexp"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable grep:
     ## ``/usr/bin/grep`` — the canonical line-matching CLI consumed
     ## by every shell pipeline + every log scanner + every config-
@@ -172,6 +168,18 @@ package grepSource:
     ## in M9.L when the convention's make-spawn + install-glue
     ## closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("grepSource")
+    try:
+      let opts = @[
+        "--disable-perl-regexp",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("grep")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

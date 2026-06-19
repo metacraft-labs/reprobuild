@@ -94,6 +94,8 @@
 ##                                      it).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -174,28 +176,9 @@ package libgcryptSource:
     ## until the v1 desktop story closes that gap.)
     "libgpg-error"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the
-    ## ``--disable-padlock-support`` sentinel lives at the tail so
-    ## any override (e.g. a future VIA-CPU variant) can append
-    ## ``--enable-padlock-support`` later without re-ordering this
-    ## block. Three consecutive ``--disable-*`` flags also pin the
-    ## per-channel handling of common-prefix flag names — a regression
-    ## that collapsed them via prefix-matching would surface in the
-    ## flag-count check below.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-doc`` skips the texinfo / pdf manual build.
-    ## ``--disable-padlock-support`` disables the VIA PadLock AES
-    ##                                 hardware acceleration code path
-    ##                                 (dead-code on every supported
-    ##                                 v1 desktop host).
-    "--disable-static"
-    "--disable-doc"
-    "--disable-padlock-support"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libGcrypt:
     ## ``libgcrypt.so`` — the GnuPG project's higher-level cryptography
     ## library bundling the cipher + MAC + KDF + entropy + asymmetric
@@ -208,6 +191,20 @@ package libgcryptSource:
     ## only; the per-artifact build body lands in M9.L when the
     ## convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("libgcryptSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-doc",
+        "--disable-padlock-support",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libGcrypt")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

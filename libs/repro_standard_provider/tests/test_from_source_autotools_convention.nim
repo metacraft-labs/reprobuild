@@ -40,6 +40,22 @@ import repro_standard_provider/conventions/from_source_autotools as
 # root, and ``recipes/...`` from there.
 import "../../../recipes/packages/source/expat/repro"
 
+# M9.R.5b cleanup: the production recipe no longer registers
+# ``configureFlags:`` (the block was retired by the sweep in favour of
+# an explicit ``build:`` block calling ``autotools_package(...)``). The
+# convention's ``recognize`` gate still uses the legacy
+# ``registeredBuildFlags(..., "configure")`` channel as its
+# discriminator (M9.R.6.1 narrowing pending). Re-register the canonical
+# production flag set into the legacy channel here so the convention
+# test exercises the documented pre-narrowing recognise + emitFragment
+# contract end-to-end. The set mirrors the expat recipe's pre-sweep
+# ``configureFlags:`` block.
+registerBuildFlag("expatSource", "", "configure", "--prefix=/usr")
+registerBuildFlag("expatSource", "", "configure", "--disable-static")
+registerBuildFlag("expatSource", "", "configure", "--without-docbook")
+registerBuildFlag("expatSource", "", "configure", "--without-examples")
+registerBuildFlag("expatSource", "", "configure", "--without-tests")
+
 const
   ## parentDir four times from
   ## ``libs/repro_standard_provider/tests/test_from_source_autotools_convention.nim``

@@ -107,6 +107,8 @@
 ##                                  acceptable for v1.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -169,20 +171,9 @@ package gawkSource:
     ## gcc is the host C toolchain — gawk is C99 + GNU extensions.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set per the task brief.
-    ##
-    ## ``--disable-extensions`` skips the dynamic-loading extension
-    ##                          modules (``filefuncs`` / ``fnmatch`` /
-    ##                          ``ordchr`` / ...).
-    ## ``--disable-mpfr`` skips the libgmp + libmpfr arbitrary-
-    ##                    precision-arithmetic dependency.
-    ## ``--disable-libsigsegv`` skips the libsigsegv stack-overflow
-    ##                          detection dependency.
-    "--disable-extensions"
-    "--disable-mpfr"
-    "--disable-libsigsegv"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable awk:
     ## ``/usr/bin/awk`` — the canonical AWK interpreter CLI consumed
     ## by every shell pipeline + every Makefile field-extract rule +
@@ -192,6 +183,20 @@ package gawkSource:
     ## ``awk`` per the task brief (the install-glue is the M9.L
     ## responsibility once the convention's make-spawn closes).
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("gawkSource")
+    try:
+      let opts = @[
+        "--disable-extensions",
+        "--disable-mpfr",
+        "--disable-libsigsegv",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("awk")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

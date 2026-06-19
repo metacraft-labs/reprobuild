@@ -107,6 +107,8 @@
 ## flips to ``--disable-libxml2`` for legacy bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -187,21 +189,9 @@ package fontconfigSource:
     ## it.)
     "libxml2 >=2.9"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-libxml2``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## expat-XML variant) can append ``--disable-libxml2`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-docs`` skips the docbook2x / xsltproc-driven docs.
-    ## ``--enable-libxml2`` uses libxml2 instead of expat for XML.
-    "--disable-static"
-    "--disable-docs"
-    "--enable-libxml2"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libFontconfig:
     ## ``libfontconfig.so`` — the font-discovery + matching engine +
     ## XML-config parser + FreeType-backed font-property scanner.
@@ -210,6 +200,20 @@ package fontconfigSource:
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("fontconfigSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-docs",
+        "--enable-libxml2",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libFontconfig")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

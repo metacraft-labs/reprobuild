@@ -116,6 +116,8 @@
 ## for legacy desktop bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -188,25 +190,9 @@ package cairoSource:
     ## libpng is required for the image backend's PNG IO.
     "libpng >=1.6"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``tests=disabled`` skips the upstream test suite (heaviest
-    ## portion of the build, not needed at runtime).
-    ## ``xlib=disabled`` skips the X11 native backend (Wayland-only
-    ## baseline keeps the dependency surface tight).
-    ## ``xcb=disabled`` skips the XCB native backend for the same
-    ## reason as xlib.
-    "-Dtests=disabled"
-    "-Dxlib=disabled"
-    "-Dxcb=disabled"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libcairo:
     ## ``libcairo.so`` — the 2D vector-graphics library used by GTK,
     ## sway helpers (swaybar / swaybg), and pango's surface backends.
@@ -214,6 +200,21 @@ package cairoSource:
     ## lands in M9.L when the convention's ninja-spawn + install-glue
     ## closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("cairoSource")
+    try:
+      let opts = @[
+        "-Dtests=disabled",
+        "-Dxlib=disabled",
+        "-Dxcb=disabled",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libcairo")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /
