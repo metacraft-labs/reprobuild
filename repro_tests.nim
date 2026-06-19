@@ -6876,6 +6876,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.7: engine-side ``targetTriple``-variant binary-cache
+  # namespacing. Pins ``buildPlatformTriple()`` /
+  # ``resolvedTargetTriple()`` / ``cachePlatformTagFor(kind, ...)`` +
+  # the per-DepKind routing through the ``ToolIdentityResolver`` seam
+  # + the cache-key hex fold-in via the ``CachePlatformTagOptionKey``
+  # synthetic option. Passive on native (collapses everything to
+  # ``"native"``). Added by hand for the same generator-wipe reason
+  # as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r7_target_triple_cache_namespacing.nim",
+    binary: "build/test-bin/t_m9r7_target_triple_cache_namespacing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",

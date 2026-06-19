@@ -83,8 +83,13 @@ proc makeResolver(table: Table[string, ResolvedToolIdentity]):
   ## Wrap an in-memory lookup table into the resolver closure shape.
   ## Refs absent from the table resolve to ``none`` — the engine's
   ## "leave PATH alone for this ref" branch.
+  ##
+  ## M9.R.7: the resolver receives a per-ref ``DepKind`` to route the
+  ## materialization cache lookup against the correct platform-tagged
+  ## cache key. This test ignores the kind — the env-plumbing
+  ## contract under test is invariant across kinds.
   let captured = table
-  result = proc(name: string): Option[ResolvedToolIdentity]
+  result = proc(name: string; kind: DepKind): Option[ResolvedToolIdentity]
       {.gcsafe, closure.} =
     if captured.hasKey(name):
       some(captured[name])

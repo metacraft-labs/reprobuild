@@ -3464,10 +3464,20 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
   ## untouched and the action's bare-name argv falls through to the
   ## host's existing PATH.
   let snapshot = identity
-  result = proc(name: string): Option[ResolvedToolIdentity]
+  result = proc(name: string; kind: DepKind): Option[ResolvedToolIdentity]
       {.gcsafe, closure.} =
     if name.len == 0:
       return none(ResolvedToolIdentity)
+    # DSL-port M9.R.7. Pick the materialization-cache namespace tag
+    # based on the dep kind. The path-only build identity is BUILD-
+    # platform-only (the catalog resolves against the host's
+    # installed binaries), so for now the resolver hands back the
+    # same ``binDirs`` regardless of kind — but it STAMPS the tag
+    # field with the platform that would be consulted under a
+    # cross-build so ``repro why`` and tests can see the routing
+    # decision. The native-build case (``cachePlatformTagFor`` ==
+    # ``"native"``) is byte-identical to pre-M9.R.7.
+    let cacheTag = cachePlatformTagFor(kind, nil)
     for actionIdy in snapshot.actionIdentities:
       let matchByName = actionIdy.executableName == name
       let bareSelector = block:
@@ -3496,7 +3506,8 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
         return none(ResolvedToolIdentity)
       return some(ResolvedToolIdentity(
         binDirs: binDirs,
-        resolvedExecutablePath: actionIdy.resolvedExecutablePath))
+        resolvedExecutablePath: actionIdy.resolvedExecutablePath,
+        cachePlatformTag: cacheTag))
     none(ResolvedToolIdentity)
 
 proc runQuotaSocketDiagnostic(): string =

@@ -23,6 +23,19 @@ import repro_runquota
 # heavier client modules.
 import repro_binary_cache_client/cache_key
 
+# DSL-port M9.R.7 — engine-side platform tagging for binary-cache
+# namespacing. The sub-module defines ``DepKind`` (which dep-list a
+# tool ref came from), ``TargetTripleResolver`` (the CLI-wired closure
+# that hands back the resolved ``targetTriple`` variant value),
+# ``buildPlatformTriple()`` / ``resolvedTargetTriple()`` /
+# ``cachePlatformTagFor()`` (the namespacing primitives), and
+# ``CachePlatformTagOptionKey`` (the synthetic selectedOptions key
+# used to fold the tag into ``CacheEntryIdentity`` derivation). On a
+# native build everything collapses to the ``"native"`` sentinel —
+# cache keys stay byte-identical to pre-M9.R.7.
+import repro_build_engine/platform
+export platform
+
 type
   BuildEngineError* = object of CatchableError
 
@@ -154,6 +167,39 @@ type
       ## env at fork time. Empty (the default) keeps legacy
       ## behaviour where ``argv[0]`` must be absolute or the host
       ## PATH must already carry the binary.
+    toolIdentityRefKinds*: seq[DepKind]
+      ## DSL-port M9.R.7. Parallel array of dep-list kinds for each
+      ## ``toolIdentityRefs`` entry. The DSL doesn't yet emit this
+      ## (no codec change in M9.R.7 — see the commit body); the
+      ## engine treats an EMPTY ``toolIdentityRefKinds`` (the
+      ## default) as "every ref is ``dkBuild``", which matches the
+      ## legacy ``uses:`` semantics — the resolver namespaces the
+      ## materialization lookup against the HOST-platform cache
+      ## key. When non-empty, the seq MUST have the same length as
+      ## ``toolIdentityRefs`` and each entry tags the corresponding
+      ## ref with ``dkNative`` / ``dkBuild`` / ``dkRuntime``.
+      ##
+      ## The kind controls which platform-tagged cache key the
+      ## resolver consults at materialization time:
+      ##   * ``dkNative``  → ``buildPlatformTriple()``  (BUILD)
+      ##   * ``dkBuild``   → ``resolvedTargetTriple()`` (HOST)
+      ##   * ``dkRuntime`` → ``resolvedTargetTriple()`` (HOST)
+      ## On a native build (``resolvedTargetTriple() == "native"``)
+      ## both routes collapse to the same key, so existing recipes
+      ## get byte-identical materialization cache behaviour to
+      ## pre-M9.R.7.
+    cachePlatformTag*: string
+      ## DSL-port M9.R.7. Cache-platform namespace tag folded into
+      ## ``cacheEntryIdentity`` derivation via the
+      ## ``CachePlatformTagOptionKey`` synthetic option. Default
+      ## ``""`` is normalised to ``NativeTriple`` (``"native"``) at
+      ## fold-in time, so existing actions get byte-identical cache
+      ## keys to pre-M9.R.7. When the convention layer wants to
+      ## route a per-package install action against a HOST-platform
+      ## cache key, it sets this to the resolved ``targetTriple``
+      ## value; the engine then mixes it into the canonical key
+      ## bytes so two ``targetTriple`` resolutions produce two
+      ## distinct entry-key hexes for the same recipe.
 
   BuildPool* = object
     name*: string
@@ -252,6 +298,21 @@ type
       ## tool installed. ``nil`` keeps the engine ignorant of the
       ## catalog (legacy behaviour); the action's argv must then
       ## reference absolute paths.
+    targetTripleResolver*: TargetTripleResolver
+      ## DSL-port M9.R.7. Optional ``targetTriple`` variant
+      ## resolver closure. When non-nil, the engine consults it
+      ## to derive the HOST-platform cache-key namespace tag for
+      ## actions and ``dkBuild`` / ``dkRuntime`` tool refs. The
+      ## CLI driver wires a closure that reads
+      ## ``configurables.lastSolverSolution().variants.
+      ## getOrDefault("targetTriple", "native")`` and hands the
+      ## string back. ``nil`` is the explicit "no variant resolver
+      ## configured" signal — the engine then treats the build as
+      ## native (returns ``"native"``) and the namespacing
+      ## collapses to the legacy single-key behaviour. Test
+      ## fixtures that construct a ``BuildEngineConfig`` via
+      ## ``defaultBuildEngineConfig`` get a ``nil`` resolver, which
+      ## is the desired pre-M9.R.7-equivalent behaviour.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -442,19 +503,48 @@ type
     ##     diagnostics. Not used by the env-plumbing path itself.
     binDirs*: seq[string]
     resolvedExecutablePath*: string
+    cachePlatformTag*: string
+      ## DSL-port M9.R.7. The platform-tag the materialization cache
+      ## lookup keyed against (``"native"`` on a native build;
+      ## ``buildPlatformTriple()`` for a ``dkNative`` ref under a
+      ## cross-build; ``resolvedTargetTriple()`` for ``dkBuild`` /
+      ## ``dkRuntime`` under a cross-build). The engine doesn't
+      ## consume this field at PATH-prepend time — it's an
+      ## observability surface for tests and for ``repro why`` to
+      ## explain WHICH cache namespace the tool came from. Defaults
+      ## to ``"native"`` (the legacy pre-M9.R.7 namespace) when the
+      ## resolver doesn't set it.
 
-  ToolIdentityResolver* = proc(name: string): Option[ResolvedToolIdentity]
-    {.gcsafe, closure.}
-    ## M9.N Batch B. The engine's seam to the tool catalog. When non-
-    ## nil AND ``BuildAction.toolIdentityRefs.len > 0``, the engine
-    ## calls the resolver once per ref at fork time and prepends each
-    ## returned ``binDirs`` entry to the action's ``PATH``. ``none``
-    ## is the fail-soft signal that the ref doesn't resolve (e.g. the
-    ## tool isn't declared by the recipe or the catalog substituted a
-    ## bare host-PATH lookup) — the engine then leaves PATH unaltered
-    ## for that ref. ``nil`` keeps the engine ignorant of catalog
-    ## state (legacy behaviour); the action's argv must reference
-    ## absolute paths or the host PATH must already carry the binary.
+  ToolIdentityResolver* = proc(name: string; kind: DepKind):
+    Option[ResolvedToolIdentity] {.gcsafe, closure.}
+    ## M9.N Batch B + DSL-port M9.R.7. The engine's seam to the tool
+    ## catalog. When non-nil AND ``BuildAction.toolIdentityRefs.len >
+    ## 0``, the engine calls the resolver once per ref at fork time
+    ## and prepends each returned ``binDirs`` entry to the action's
+    ## ``PATH``.
+    ##
+    ## ``kind`` (M9.R.7) tells the resolver which platform-tagged
+    ## cache key to look the materialization up against:
+    ##   * ``dkNative``  → BUILD-platform cache
+    ##     (``buildPlatformTriple()``)
+    ##   * ``dkBuild``   → HOST-platform cache
+    ##     (``resolvedTargetTriple()``)
+    ##   * ``dkRuntime`` → HOST-platform cache
+    ##     (``resolvedTargetTriple()``)
+    ## On a native build (``resolvedTargetTriple() == "native"``)
+    ## both routes resolve to the same ``"native"`` tag and the
+    ## materialization cache lookup is byte-identical to pre-
+    ## M9.R.7. The engine passes ``dkBuild`` as the default when
+    ## ``BuildAction.toolIdentityRefKinds`` is empty — preserving
+    ## the legacy ``uses:`` semantics.
+    ##
+    ## ``none`` is the fail-soft signal that the ref doesn't resolve
+    ## (e.g. the tool isn't declared by the recipe or the catalog
+    ## substituted a bare host-PATH lookup) — the engine then leaves
+    ## PATH unaltered for that ref. ``nil`` keeps the engine
+    ## ignorant of catalog state (legacy behaviour); the action's
+    ## argv must reference absolute paths or the host PATH must
+    ## already carry the binary.
 
   RunningProcessKind = enum
     rpkHelperProcess
@@ -508,6 +598,37 @@ const
     dgRecognizedFormatValidatedByMonitor,
     dgPostBuildConverterValidatedByMonitor
   }
+
+proc applyCachePlatformTag*(idy: CacheEntryIdentity; tag: string):
+    CacheEntryIdentity =
+  ## DSL-port M9.R.7. Return a copy of ``idy`` with the
+  ## ``CachePlatformTagOptionKey`` synthetic option set to
+  ## ``tag`` (normalising the empty string to ``NativeTriple``).
+  ## Centralises the fold-in shape so both the publisher hook and the
+  ## test surface go through the same code path — no drift between
+  ## what gets published and what tests pin.
+  result = idy
+  let foldedTag = if tag.len == 0: NativeTriple else: tag
+  result.addOption(CachePlatformTagOptionKey, foldedTag)
+
+proc deriveActionCacheKeyHex*(action: BuildAction): string =
+  ## DSL-port M9.R.7. Helper that mirrors the publisher hook's
+  ## fold-in: takes the action's ``cacheEntryIdentity`` + folds in
+  ## ``cachePlatformTag`` via ``CachePlatformTagOptionKey``, then
+  ## returns the canonical 64-char lowercase hex of the
+  ## ``CacheEntryKey``. Returns ``""`` when the action carries no
+  ## identity (no cache key to derive).
+  ##
+  ## Tests use this to assert that two ``cachePlatformTag`` values
+  ## produce two distinct hex keys for the same recipe; production
+  ## code goes through the publisher hook which folds the tag in
+  ## via ``applyCachePlatformTag`` before forwarding to the
+  ## ``BinaryCachePublisher`` closure.
+  if action.cacheEntryIdentity.isNone:
+    return ""
+  let folded = applyCachePlatformTag(
+    action.cacheEntryIdentity.get(), action.cachePlatformTag)
+  deriveCacheEntryKeyHex(folded)
 
 proc defaultBuildEngineConfig*(cacheRoot: string;
                                actionCacheRoot: string = ""): BuildEngineConfig =
@@ -1526,9 +1647,23 @@ proc prependPathDirs(table: StringTableRef; binDirs: openArray[string]) =
     table.del(key)
   table["PATH"] = combined
 
+proc kindForRef(action: BuildAction; index: int): DepKind {.inline.} =
+  ## DSL-port M9.R.7. Per-ref dep-kind lookup. When the action carries
+  ## a parallel ``toolIdentityRefKinds`` array of the same length as
+  ## ``toolIdentityRefs``, returns the corresponding entry; otherwise
+  ## defaults to ``dkBuild`` — the legacy ``uses:`` semantics where
+  ## every ref is routed against the HOST-platform cache key (which
+  ## collapses to ``"native"`` on a native build).
+  if action.toolIdentityRefKinds.len == action.toolIdentityRefs.len and
+      index >= 0 and index < action.toolIdentityRefKinds.len:
+    action.toolIdentityRefKinds[index]
+  else:
+    dkBuild
+
 proc resolvedToolBinDirs(action: BuildAction;
                          resolver: ToolIdentityResolver): seq[string] =
-  ## M9.N Batch B. Walk ``action.toolIdentityRefs`` through the engine's
+  ## M9.N Batch B + DSL-port M9.R.7. Walk
+  ## ``action.toolIdentityRefs`` through the engine's
   ## ``ToolIdentityResolver`` and return the in-order list of binary
   ## directories to prepend to the action's ``PATH``. The first ref's
   ## first ``binDir`` ends up leftmost in PATH so a ref order of
@@ -1538,6 +1673,12 @@ proc resolvedToolBinDirs(action: BuildAction;
   ## the catalog signals "no contribution for this ref" by returning
   ## ``none`` and the engine then leaves PATH untouched for that ref.
   ##
+  ## M9.R.7: the resolver receives a per-ref ``DepKind`` so it can
+  ## route the materialization cache lookup against the correct
+  ## platform-tagged cache key. On a native build the choice is
+  ## inert — both platforms collapse to ``"native"`` — so existing
+  ## recipes get byte-identical PATH ordering.
+  ##
   ## Returns an empty seq when the action carries no refs OR when the
   ## resolver is nil — both paths skip the PATH-override layer below
   ## so legacy actions and unconfigured engines behave byte-for-byte
@@ -1545,8 +1686,9 @@ proc resolvedToolBinDirs(action: BuildAction;
   if action.toolIdentityRefs.len == 0 or resolver == nil:
     return @[]
   result = @[]
-  for refName in action.toolIdentityRefs:
-    let resolved = resolver(refName)
+  for i, refName in action.toolIdentityRefs:
+    let kind = kindForRef(action, i)
+    let resolved = resolver(refName, kind)
     if resolved.isNone:
       continue
     for binDir in resolved.get().binDirs:
@@ -2364,10 +2506,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var recordOutputs: seq[string] = @[]
     for output in record.outputs:
       recordOutputs.add(output.path)
+    # DSL-port M9.R.7. Fold the action's cache-platform tag into the
+    # identity's ``selectedOptions`` channel as
+    # ``CachePlatformTagOptionKey``. On a native build the tag is the
+    # ``"native"`` sentinel — the canonical key derivation includes it
+    # uniformly so two distinct ``targetTriple`` resolutions produce
+    # two distinct entry-key hexes for the same recipe (and a
+    # ``"native"``-tagged action produces a stable hex across recipes
+    # that don't declare ``targetTriple`` at all).
+    var folded = action.cacheEntryIdentity.get()
+    let foldedTag =
+      if action.cachePlatformTag.len == 0: NativeTriple
+      else: action.cachePlatformTag
+    folded.addOption(CachePlatformTagOptionKey, foldedTag)
     let req = BinaryCachePublishRequest(
       actionId: action.id,
       weakFingerprint: action.weakFingerprint,
-      identity: action.cacheEntryIdentity.get(),
+      identity: folded,
       cwd: action.cwd,
       declaredOutputs: action.outputs,
       recordOutputs: recordOutputs)
