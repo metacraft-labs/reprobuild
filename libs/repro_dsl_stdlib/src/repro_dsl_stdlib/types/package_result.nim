@@ -31,6 +31,20 @@ import repro_project_dsl
 import ./library
 import ./executable
 
+# DSL-port M9.R.2c — re-export the typed ``Library`` / ``Executable``
+# records so the 79 from-source recipes that import
+# ``repro_dsl_stdlib/types/package_result`` (for the
+# ``MesonPackageResult`` / ``CmakePackageResult`` /
+# ``AutotoolsPackageResult`` slicing surface) automatically pull the
+# typed-value layer into scope. The package macro's M9.R.2c artifact
+# slot injection (``var <n>: Library`` / ``var <n>: Executable``)
+# references the types by bare ident; this re-export lets it resolve
+# in every recipe without a second import line. The 5 outlier recipes
+# without this import path get an explicit
+# ``import repro_dsl_stdlib/types`` instead.
+export library
+export executable
+
 type
   PackageResultBase = object of RootObj
     ## Shared fields across ``MesonPackageResult`` /

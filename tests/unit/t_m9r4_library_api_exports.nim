@@ -35,6 +35,9 @@
 import std/[strutils, unittest]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Library`` into scope for the typed slot
+# var the ``package`` macro injects for ``library <n>:`` declarations.
+import repro_dsl_stdlib/types
 
 # ---------------------------------------------------------------------------
 # Fixture 1 — full exports: sub-block with three procs + opaque types.

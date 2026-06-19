@@ -64,6 +64,9 @@
 ## job (deferred).
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Executable`` into scope for the typed
+# slot var injected for the executable artifact below.
+import repro_dsl_stdlib/types/executable
 
 # The stdlib impl module that owns the log primitives + serialiser.
 # Imported here so it is in scope for downstream tooling that

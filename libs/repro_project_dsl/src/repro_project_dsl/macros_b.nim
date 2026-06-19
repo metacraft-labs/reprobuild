@@ -812,37 +812,99 @@ proc m3KindLit(ownership: SectionOwnership): NimNode =
     # Defensive — caller filters by ownership before calling here.
     ident("dakExecutable")
 
+proc emitM9R2cArtifactSlots(packageName: string;
+                            classified: seq[ClassifiedSection]): NimNode =
+  ## DSL-port M9.R.2c — emit ONLY the per-kind typed slot ``var``
+  ## declarations for every ident-form artifact in ``classified``.
+  ##
+  ## Pulled out of ``emitM3Artifacts`` so the slot declarations can be
+  ## appended to the package macro's expansion BEFORE ``buildCode``
+  ## emits the ``build<Pkg>*()`` proc whose body references the slot
+  ## by name. If the slot ``var`` were emitted AFTER the proc, Nim's
+  ## semcheck would see the proc body's identifier use before the
+  ## module-level binding declaration and reject the assignment as
+  ## ``undeclared identifier``. The two emitters operate on the SAME
+  ## classified seq with the SAME collision rules so the var emission
+  ## and the registry append stay in lockstep.
+  ##
+  ## Per-kind slot type:
+  ##   * ``library <n>:``    -> ``var <n>: Library``
+  ##   * ``executable <n>:`` -> ``var <n>: Executable``
+  ##   * ``files <n>``       -> ``var <n>: BuildActionDef``
+  ##
+  ## ``Library`` / ``Executable`` live in
+  ## ``repro_dsl_stdlib/types/{library,executable}.nim``; recipes that
+  ## declare a ``library`` / ``executable`` artifact need to import the
+  ## typed-value layer. Most recipes already do this via
+  ## ``import repro_dsl_stdlib/types/package_result`` (which re-exports
+  ## ``library`` + ``executable`` since M9.R.2c). ``BuildActionDef``
+  ## lives in ``repro_project_dsl`` and is always in scope.
+  let pkgValueIdent = packageValueIdent(packageName)
+  result = newStmtList()
+  for entry in classified:
+    if entry.ownership notin {soM3ExecutableArtifact,
+                              soM3LibraryArtifact,
+                              soM3FilesArtifact}:
+      continue
+    let parsed = m3ArtifactEntryAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    let artifactValueIdent =
+      if parsed.isIdentForm: packageValueIdent(parsed.artifactName)
+      else: ""
+    let wouldCollideWithLegacyConst =
+      parsed.isIdentForm and artifactValueIdent == pkgValueIdent
+    if parsed.isIdentForm and parsed.identNode != nil and
+       parsed.identNode.kind in {nnkIdent, nnkAccQuoted} and
+       not wouldCollideWithLegacyConst:
+      let identNode = parsed.identNode.copyNimTree()
+      let slotTypeNode = case entry.ownership
+        of soM3LibraryArtifact:    ident("Library")
+        of soM3ExecutableArtifact: ident("Executable")
+        of soM3FilesArtifact:      ident("BuildActionDef")
+        else:                      ident("BuildActionDef")
+      let varSection = nnkVarSection.newTree(
+        nnkIdentDefs.newTree(
+          nnkPragmaExpr.newTree(
+            identNode,
+            nnkPragma.newTree(ident("inject"), ident("used"))),
+          slotTypeNode,
+          newEmptyNode()))
+      result.add(varSection)
+
 proc emitM3Artifacts(packageName: string;
                      classified: seq[ClassifiedSection]): NimNode =
   ## Walk the classified section list; for every entry whose ownership
   ## tag claims an M3 artifact, emit one ``registerArtifact(...)`` call
   ## with the artifact's name, kind, and body repr.
   ##
-  ## Ident-form injection: ``executable myTool: ...`` additionally
-  ## emits ``let myTool {.inject, used.}: DslArtifact = DslArtifact(...)``
-  ## so the binding is referenceable from downstream code in the same
-  ## scope — mirroring v8's ``Executable[name]`` value-handle return.
-  ## The injected handle is the metadata record, NOT the v8
-  ## ``Executable[name]`` typed value (which M4+ wires up alongside the
-  ## ``cli:`` lowering).
+  ## String-form recovery: ``executable "myTool": ...`` records the
+  ## verbatim string into the registry; ident-form
+  ## ``executable myTool:`` records ``myTool`` as the artifact name AND
+  ## (via ``emitM9R2cArtifactSlots``, NOT this proc) gets a typed
+  ## module-level ``var myTool: Executable`` injection so author code
+  ## can refer to ``myTool`` lexically AND assign to it from a
+  ## ``build:`` block.
   ##
-  ## String-form recovery: ``executable "myTool": ...`` does NOT
-  ## inject a binding (there is no Nim identifier to inject); the
-  ## registry append is the sole emission.
-  ##
-  ## Collision guard: ``wrapperCode`` ALWAYS emits
+  ## Collision guard (relevant for ``emitM9R2cArtifactSlots`` —
+  ## documented here because the same rule applies to the var
+  ## emission): ``wrapperCode`` ALWAYS emits
   ## ``const <packageValueIdent>* = <Title>Package()`` at module top
   ## level (see ``macros_a.nim:wrapperCode``). When the artifact ident
   ## matches that const's name — common in stdlib packages where
-  ## ``package gcc:`` contains ``executable gcc:`` — the M3 injection
-  ## would shadow / redefine the legacy const and fail compilation.
-  ## We skip the injection in that case (the runtime registry still
-  ## records the artifact; only the per-binding let is suppressed).
-  ## M4+ may pivot the legacy const to a typed-tool value, eliminating
-  ## the conflict; until then the skip preserves backward compatibility
-  ## with every NDE recipe + ``examples/hello-world-c/repro.nim`` +
-  ## ``examples/hello-world-multi-output/repro.nim``.
-  let pkgValueIdent = packageValueIdent(packageName)
+  ## ``package gcc:`` contains ``executable gcc:`` — the slot var
+  ## injection would shadow / redefine the legacy const and fail
+  ## compilation. ``emitM9R2cArtifactSlots`` skips the var injection
+  ## in that case (the runtime registry still records the artifact;
+  ## only the per-binding var is suppressed). The registry append
+  ## itself is UNCONDITIONAL — every ident-form / string-form
+  ## artifact ends up in ``registeredArtifacts``.
+  ##
+  ## DSL-port M9.R.2c: the per-kind typed slot ``var`` declarations
+  ## moved to ``emitM9R2cArtifactSlots`` (called BEFORE ``buildCode``
+  ## in the package macro so the slot binding precedes the generated
+  ## ``build<Pkg>*()`` proc whose body may assign to it). This emitter
+  ## now handles only the ``registerArtifact`` runtime calls.
   result = newStmtList()
   for entry in classified:
     if entry.ownership notin {soM3ExecutableArtifact,
@@ -867,39 +929,20 @@ proc emitM3Artifacts(packageName: string;
         artifactName: `nameLit`,
         kind: `kindLit`,
         bodyRepr: `bodyLit`))
-    let artifactValueIdent =
-      if parsed.isIdentForm: packageValueIdent(parsed.artifactName)
-      else: ""
-    let wouldCollideWithLegacyConst =
-      parsed.isIdentForm and artifactValueIdent == pkgValueIdent
-    if parsed.isIdentForm and parsed.identNode != nil and
-       parsed.identNode.kind in {nnkIdent, nnkAccQuoted} and
-       not wouldCollideWithLegacyConst:
-      # Ident-form injection. Inject a ``let`` binding so the author
-      # can refer to ``myTool`` lexically after the declaration. The
-      # ``{.inject, used.}`` pragma pair is the same shape v8's
-      # ``transformPackageBody`` uses for library / files ident-form
-      # (see ``tools/prototypes/v8/intended/reprobuild.nim`` line
-      # ~907). We give the binding the ``DslArtifact`` type so M4+
-      # can widen it (e.g. to ``Executable[name]``) without renaming
-      # the symbol.
-      #
-      # We only attempt injection when the ident shape is something
-      # we can plausibly redeclare at module top level. ``nnkSym``
-      # entries (already-resolved symbols) are rejected — that
-      # shouldn't normally happen inside an ``untyped`` macro body
-      # but defensive-skip avoids a ``redefinition`` error if the
-      # caller hand-quotes a Sym.
-      let identNode = parsed.identNode.copyNimTree()
-      result.add(quote do:
-        `registerCall`
-        let `identNode` {.inject, used.}: DslArtifact = DslArtifact(
-          packageName: `pkgLit`,
-          artifactName: `nameLit`,
-          kind: `kindLit`,
-          bodyRepr: `bodyLit`))
-    else:
-      result.add(registerCall)
+    # DSL-port M9.R.2c — the per-kind typed slot ``var`` declarations
+    # are emitted by ``emitM9R2cArtifactSlots`` BEFORE ``buildCode`` in
+    # the package macro so the slot binding precedes the generated
+    # ``build<Pkg>*()`` proc body that may assign to it via the
+    # assignment-binding pattern (``libfoo = c_library(...)``). This
+    # emitter only handles the ``registerArtifact`` runtime call,
+    # preserving M3's sidecar-registry semantics.
+    #
+    # The collision guard + ident-form check live in
+    # ``emitM9R2cArtifactSlots`` (same rules); the registerArtifact
+    # call is unconditional (always emitted) so even artifacts that
+    # collide with the legacy ``packageValueIdent`` const still appear
+    # in ``registeredArtifacts`` for diagnostic queries.
+    result.add(registerCall)
 
 # ---------------------------------------------------------------------------
 # DSL-port M4 — ``build:`` block lowerers (package-level + artifact-scoped).
@@ -2995,6 +3038,17 @@ macro package*(name: untyped; body: untyped): untyped =
                                                  legacyTypeIdent))
     result.add(generatedCrossProjectAccessors(packageName,
                                               crossProjectBindings))
+  # ── DSL-port M9.R.2c: per-kind typed artifact slot ``var`` decls.
+  # MUST sit BEFORE ``buildCode`` so the slot bindings precede the
+  # generated ``build<Pkg>*()`` proc whose body may assign to them
+  # via the assignment-binding pattern documented in
+  # ``From-Source-Build-Recipes.md`` §"Artifact binding by assignment".
+  # The companion ``registerArtifact`` calls still ride on
+  # ``emitM3Artifacts`` further below — they don't need to precede
+  # ``buildCode`` since the build body never references them.
+  let m9r2cArtifactSlotEmission =
+    emitM9R2cArtifactSlots(packageName, classifiedSections)
+  result.add(m9r2cArtifactSlotEmission)
   # ── existing builder emission (now feeding instrumented body) ────
   result.add(buildCode(pkg, bodyForBuild))
   # ── DSL-port M1: preserved Nim statements (the v8 "verbatim" branch).

@@ -9,6 +9,8 @@
 import std/[unittest]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — Library/Executable in scope for typed artifact slot vars.
+import repro_dsl_stdlib/types
 
 # Stub the framework-specific type that the typed outputs statement
 # references. ``object`` is enough; the test asserts via

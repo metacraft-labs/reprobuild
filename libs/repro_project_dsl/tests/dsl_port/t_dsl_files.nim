@@ -7,12 +7,18 @@
 ## Same sidecar / injection semantics as ``executable`` and ``library``
 ## (see ``t_dsl_executable_ident_form.nim``); the discriminator is
 ## ``dakFiles``.
+##
+## DSL-port M9.R.2c update: ``files`` declarations now inject a ``var
+## <n>: BuildActionDef`` slot (was ``let <n>: DslArtifact``). The
+## ``Library`` / ``Executable`` typed-value layer doesn't apply to
+## ``files`` since file-set artifacts have no typed-interface block;
+## ``BuildActionDef`` stays the slot type.
 
 import std/[unittest]
 
 import repro_project_dsl
 
-# Ident-form files — registers + injects ``let myFiles: DslArtifact``.
+# Ident-form files — registers + injects ``var myFiles: BuildActionDef``.
 package filesPkg:
   files myFiles:
     discard
@@ -39,10 +45,12 @@ suite "DSL-port M3 — files template":
     let arts = registeredArtifacts("filesPkg")
     check arts[0].kind == dakFiles
 
-  test "ident-form injects let with the DslArtifact handle":
-    check myFiles.artifactName == "myFiles"
-    check myFiles.kind == dakFiles
-    check myFiles.packageName == "filesPkg"
+  test "ident-form injects var BuildActionDef slot referenceable lexically":
+    # M9.R.2c: the slot is typed ``BuildActionDef`` and default-init.
+    # If the injection failed, this expression would not compile
+    # (undeclared identifier ``myFiles``).
+    check myFiles.id == ""
+    check myFiles.outputs.len == 0
 
   test "multiple files entries preserve declaration order":
     let arts = registeredArtifacts("multiFilesPkg")
@@ -51,3 +59,6 @@ suite "DSL-port M3 — files template":
     check arts[1].artifactName == "secondSet"
     check arts[0].kind == dakFiles
     check arts[1].kind == dakFiles
+    # Both slot vars must be defaulted BuildActionDef values.
+    check firstSet.id == ""
+    check secondSet.id == ""

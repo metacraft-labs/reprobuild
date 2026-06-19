@@ -6,12 +6,22 @@
 ## ``DslArtifactKind`` discriminator (``dakLibrary`` vs
 ## ``dakExecutable``) and that the legacy ``parsePackageDef`` walker
 ## populates ``pkg.libraries`` instead of ``pkg.executables``.
+##
+## DSL-port M9.R.2c update: the slot variable injected for the
+## ident-form is now typed ``Library`` (was ``DslArtifact``). The
+## per-package registry sidecar still records the artifact metadata
+## the same way; this test reads the registry to verify the
+## kind/name/packageName attribution. The slot binding itself is now
+## a default-initialised ``Library`` (declared = false) until the
+## recipe assigns a constructor result to it from the ``build:``
+## block.
 
 import std/[unittest]
 
 import repro_project_dsl
+import repro_dsl_stdlib/types
 
-# Ident-form library — registers + injects ``let myLib: DslArtifact``.
+# Ident-form library — registers + injects ``var myLib: Library``.
 package libPkg:
   library myLib:
     discard
@@ -36,12 +46,13 @@ suite "DSL-port M3 — library template":
     let arts = registeredArtifacts("libPkg")
     check arts[0].kind == dakLibrary
 
-  test "ident-form injects let with the DslArtifact handle":
-    # Mirrors the ident-form executable injection: ``myLib`` is
-    # referenceable as a ``DslArtifact`` value after the declaration.
-    check myLib.artifactName == "myLib"
-    check myLib.kind == dakLibrary
-    check myLib.packageName == "libPkg"
+  test "ident-form injects var Library slot referenceable lexically":
+    # M9.R.2c: the slot is now typed ``Library`` and default-init
+    # (``api.declared == false``). Reading the slot must compile;
+    # the registry above carries the kind/name/packageName attribution.
+    check myLib.api.declared == false
+    check myLib.soname == ""
+    check myLib.linkKind == llkUnset
 
   test "string-form library records verbatim name without injection":
     let arts = registeredArtifacts("libStringPkg")

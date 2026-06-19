@@ -13,6 +13,8 @@
 import std/[unittest]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — Library/Executable in scope for typed artifact slot vars.
+import repro_dsl_stdlib/types
 
 # Typed-Outputs M1 update: the wrapper now binds the typed field via
 # ``<FieldType>(path: <pathExpr>)``, so we need a non-primitive type

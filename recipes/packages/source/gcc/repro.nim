@@ -150,6 +150,11 @@
 ##                                    them up at configure time.
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Library`` / ``Executable`` into scope for
+# the typed artifact slot vars the ``package`` macro injects. (This
+# recipe doesn't import ``repro_dsl_stdlib/constructors`` so the
+# implicit re-export through ``types/package_result`` doesn't apply.)
+import repro_dsl_stdlib/types
 
 # ---------------------------------------------------------------------------
 # Package declaration

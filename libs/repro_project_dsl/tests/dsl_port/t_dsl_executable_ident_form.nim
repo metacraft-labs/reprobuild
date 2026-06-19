@@ -4,21 +4,22 @@
 ## ident-form spelling. Two new behaviours over string-form:
 ##
 ##   1. The ident's text becomes the artifact name (no kebab
-##      translation — M4+ may widen this when the typed
-##      ``Executable[name]`` surface lands, but M3 keeps the
-##      source-level spelling).
-##   2. The macro additionally emits ``let <ident> {.inject, used.}:
-##      DslArtifact = DslArtifact(...)`` so downstream code in the
-##      same module can reference ``<ident>`` lexically. M4+ may widen
-##      the injected type from ``DslArtifact`` to v8's typed
-##      ``Executable[name]`` without renaming the symbol.
+##      translation — M9.R.2c keeps the source-level spelling now
+##      that the typed ``Executable`` slot surface has landed).
+##   2. The macro additionally emits ``var <ident> {.inject, used.}:
+##      Executable`` (M9.R.2c — was ``let <ident>: DslArtifact``) so
+##      downstream code in the same module can reference ``<ident>``
+##      lexically AND assign a constructor result to it from the
+##      package's ``build:`` block (see ``From-Source-Build-Recipes.md``
+##      §"Artifact binding by assignment").
 
 import std/[unittest]
 
 import repro_project_dsl
+import repro_dsl_stdlib/types
 
 # Ident-form ``executable myTool: ...`` — registers as artifact +
-# injects ``let myTool {.inject, used.}: DslArtifact = ...``.
+# injects ``var myTool {.inject, used.}: Executable``.
 package execIdentPkg:
   executable myTool:
     discard
@@ -46,11 +47,10 @@ suite "DSL-port M3 — executable ident-form":
     let arts = registeredArtifacts("execIdentPkg")
     check arts[0].kind == dakExecutable
 
-  test "ident-form injects let so the binding is referenceable":
-    # The package macro emits
-    #   let refTool {.inject, used.}: DslArtifact = DslArtifact(...)
-    # at module scope. If the injection failed, this expression would
-    # not compile (undeclared identifier ``refTool``).
-    check refTool.artifactName == "refTool"
-    check refTool.kind == dakExecutable
-    check refTool.packageName == "execRefPkg"
+  test "ident-form injects var Executable slot referenceable lexically":
+    # M9.R.2c: the slot is now typed ``Executable`` and default-init.
+    # If the injection failed, this expression would not compile
+    # (undeclared identifier ``refTool``). The registry above carries
+    # the kind/name/packageName attribution.
+    check refTool.cli.executableName == ""
+    check refTool.installPrefix == ""

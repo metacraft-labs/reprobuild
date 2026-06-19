@@ -114,6 +114,9 @@
 ## bootstrap action without needing a flag channel.
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Library`` / ``Executable`` into scope for
+# the typed artifact slot vars the ``package`` macro injects.
+import repro_dsl_stdlib/types
 
 # ---------------------------------------------------------------------------
 # Package declaration
