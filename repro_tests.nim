@@ -7000,6 +7000,33 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.9 — auto-recurse + stdlib fall-through.
+  #
+  # Closes the M9.R.8 "sibling source recipe has not produced an
+  # artefact" hard-fail surfaced by the Gap A wayland smoke. Pins:
+  #
+  #   * ``tryResolveFromSourceTool`` returns a discriminated outcome
+  #     (``rrResolved`` / ``rrNeedsBuild`` / ``rrSiblingMissing``) the
+  #     dispatcher pattern-matches on for auto-recurse + fall-through;
+  #   * ``toolProfileFor(tpmFromSource, ...)`` falls through to nix /
+  #     scoop / tarball provisioning declared on the ``useDef`` when
+  #     no sibling source recipe exists (Part 2 — meson's python3 dep
+  #     was the trigger);
+  #   * the dispatcher-side guards (cycle detection, depth ceiling,
+  #     per-process resolution cache) are addressable from outside
+  #     ``executeBuildTarget`` so a future ``repro why`` integration
+  #     can inspect them;
+  #   * the hard-fail diagnostic when both the sibling recipe AND the
+  #     stdlib provisioning are absent lists both remediation paths.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r9_auto_recurse.nim",
+    binary: "build/test-bin/t_m9r9_auto_recurse",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
   #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
   #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block

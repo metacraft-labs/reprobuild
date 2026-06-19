@@ -3265,18 +3265,51 @@ proc fromSourceArtifactCandidate*(recipeRoot, packageName,
   result = recipeRoot / packageName / ".repro" / "output" /
     executableName / executableName
 
-proc resolveFromSourceTool*(useDef: InterfaceToolUse;
-                            recipeRoot = ""): PathOnlyToolProfile =
-  ## M9.Q resolver entry point. ``useDef.executableName`` drives the
-  ## sibling recipe lookup: the convention is that a tool ``foo`` is
-  ## built from ``recipes/packages/source/foo/`` and the resulting
-  ## binary is at ``.repro/output/foo/foo``.
+type
+  FromSourceResolveKind* = enum
+    ## DSL-port M9.R.9 — discriminated outcome for from-source
+    ## resolution. ``rrResolved`` carries a finished profile;
+    ## ``rrNeedsBuild`` flags a present sibling recipe with a missing
+    ## artefact (the caller schedules a recursive sub-build);
+    ## ``rrSiblingMissing`` flags the absence of any sibling recipe
+    ## (the caller falls through to stdlib provisioning channels).
+    rrResolved
+    rrNeedsBuild
+    rrSiblingMissing
+
+  FromSourceResolveResult* = object
+    case kind*: FromSourceResolveKind
+    of rrResolved:
+      profile*: PathOnlyToolProfile
+    of rrNeedsBuild:
+      recipeDir*: string
+      expectedArtifact*: string
+      toolName*: string
+    of rrSiblingMissing:
+      attemptedRecipeManifest*: string
+      missingToolName*: string
+
+proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
+                               recipeRoot = ""): FromSourceResolveResult =
+  ## DSL-port M9.R.9 — non-raising variant of ``resolveFromSourceTool``.
+  ## Returns a discriminated outcome the caller pattern-matches on:
   ##
-  ## The recipe package is conventionally named ``<name>Source`` (e.g.
-  ## ``mesonSource``), but the from-source-custom convention's
-  ## stage-copy step is keyed off the ``executable <name>:`` member,
-  ## NOT the package name — so the resolver uses ``executableName``
-  ## (e.g. ``meson``) for the directory layout too.
+  ##   * ``rrResolved``       — the sibling recipe exists AND its
+  ##                            artefact is on disk; ``profile`` carries
+  ##                            the resolved ``PathOnlyToolProfile``.
+  ##   * ``rrNeedsBuild``     — the sibling recipe exists but its
+  ##                            artefact is missing. ``recipeDir`` +
+  ##                            ``expectedArtifact`` give the dispatcher
+  ##                            the data it needs to schedule a recursive
+  ##                            sub-build.
+  ##   * ``rrSiblingMissing`` — no ``repro.nim`` at the conventional
+  ##                            location; the caller MAY fall through to
+  ##                            stdlib provisioning channels declared on
+  ##                            the ``useDef`` itself.
+  ##
+  ## An empty ``executableName`` is still a hard error (the resolver has
+  ## no way to derive a recipe dir without it) — that path raises just
+  ## like the legacy entry point.
   let root =
     if recipeRoot.len > 0: recipeRoot
     else: fromSourceRecipeRoot()
@@ -3289,12 +3322,9 @@ proc resolveFromSourceTool*(useDef: InterfaceToolUse;
   let recipeDir = root / name
   let recipeManifest = recipeDir / "repro.nim"
   if not fileExists(extendedPath(recipeManifest)):
-    raise newException(OSError,
-      "tool-resolution failed: --tool-provisioning=from-source requested " &
-      "for \"" & name & "\" (package \"" & useDef.packageSelector &
-      "\") but no sibling recipe at " & recipeManifest &
-      ". Provide a from-source recipe or pick a different " &
-      "--tool-provisioning mode (path|nix|tarball|scoop).")
+    return FromSourceResolveResult(kind: rrSiblingMissing,
+      attemptedRecipeManifest: recipeManifest,
+      missingToolName: name)
 
   # Probe both the bare and ``.exe``-suffixed forms — the
   # from-source-custom convention's stage-copy preserves the source's
@@ -3322,15 +3352,13 @@ proc resolveFromSourceTool*(useDef: InterfaceToolUse;
           resolved = candidate
           break
   if resolved.len == 0:
-    raise newException(OSError,
-      "tool-resolution failed: --tool-provisioning=from-source requested " &
-      "for \"" & name & "\" but its sibling recipe at " & recipeDir &
-      " has not produced an artefact at " & baseCandidate &
-      " (or .exe). Build the recipe first: `repro build " &
-      recipeDir & " --no-runquota` (M9.Q.1 follow-up will auto-recurse).")
+    return FromSourceResolveResult(kind: rrNeedsBuild,
+      recipeDir: recipeDir,
+      expectedArtifact: baseCandidate,
+      toolName: name)
 
   let absolute = absolutePath(resolved)
-  result = PathOnlyToolProfile(
+  var profile = PathOnlyToolProfile(
     installMethod: "from-source",
     packageSelector: useDef.packageSelector,
     packageId:
@@ -3348,9 +3376,50 @@ proc resolveFromSourceTool*(useDef: InterfaceToolUse;
     cachePortability: cpLocalOnly,
     practicalHardening: phNone)
 
-  result.probes = collectConfiguredProbes(absolute,
+  profile.probes = collectConfiguredProbes(absolute,
     useDef.packageSelector, useDef.executableName)
-  result.profileFingerprint = profileFingerprintFor(result)
+  profile.profileFingerprint = profileFingerprintFor(profile)
+  FromSourceResolveResult(kind: rrResolved, profile: profile)
+
+proc resolveFromSourceTool*(useDef: InterfaceToolUse;
+                            recipeRoot = ""): PathOnlyToolProfile =
+  ## M9.Q resolver entry point. ``useDef.executableName`` drives the
+  ## sibling recipe lookup: the convention is that a tool ``foo`` is
+  ## built from ``recipes/packages/source/foo/`` and the resulting
+  ## binary is at ``.repro/output/foo/foo``.
+  ##
+  ## The recipe package is conventionally named ``<name>Source`` (e.g.
+  ## ``mesonSource``), but the from-source-custom convention's
+  ## stage-copy step is keyed off the ``executable <name>:`` member,
+  ## NOT the package name — so the resolver uses ``executableName``
+  ## (e.g. ``meson``) for the directory layout too.
+  ##
+  ## DSL-port M9.R.9 — this entry point now delegates to
+  ## ``tryResolveFromSourceTool`` and raises ``OSError`` for the
+  ## ``rrNeedsBuild`` / ``rrSiblingMissing`` outcomes so existing
+  ## call-sites (and the M9.Q acceptance test) keep their raise
+  ## contract. New dispatchers that want auto-recurse + stdlib
+  ## fall-through should call ``tryResolveFromSourceTool`` directly.
+  let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
+  case outcome.kind
+  of rrResolved:
+    result = outcome.profile
+  of rrSiblingMissing:
+    raise newException(OSError,
+      "tool-resolution failed: --tool-provisioning=from-source requested " &
+      "for \"" & outcome.missingToolName & "\" (package \"" &
+      useDef.packageSelector & "\") but no sibling recipe at " &
+      outcome.attemptedRecipeManifest &
+      ". Provide a from-source recipe or pick a different " &
+      "--tool-provisioning mode (path|nix|tarball|scoop).")
+  of rrNeedsBuild:
+    raise newException(OSError,
+      "tool-resolution failed: --tool-provisioning=from-source requested " &
+      "for \"" & outcome.toolName & "\" but its sibling recipe at " &
+      outcome.recipeDir &
+      " has not produced an artefact at " & outcome.expectedArtifact &
+      " (or .exe). Build the recipe first: `repro build " &
+      outcome.recipeDir & " --no-runquota` (M9.Q.1 follow-up will auto-recurse).")
 
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string): PathOnlyToolProfile =
@@ -3384,9 +3453,54 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # M9.Q: principled from-source provisioning. The resolver maps the
     # tool's ``executableName`` to a sibling recipe at
     # ``recipes/packages/source/<name>/`` and threads the artefact dir
-    # into ``pathSearchList``. v1 is hard-fail on missing artefact;
-    # M9.Q.1 follow-up will auto-recurse.
-    result = resolveFromSourceTool(useDef)
+    # into ``pathSearchList``.
+    #
+    # DSL-port M9.R.9 Part 2 — stdlib fall-through. When no sibling
+    # source recipe exists, fall back to whatever provisioning channels
+    # the ``useDef`` carries from the stdlib ``package <name>:`` block.
+    # Order on each host: nix on Nix-capable hosts (Linux / macOS); then
+    # scoop on Windows; then tarball anywhere. This makes
+    # ``tpmFromSource`` pragmatic — "from-source for things we have
+    # source recipes for; fall back to whatever the stdlib package
+    # declares for things we don't" — so recipes that depend on tools
+    # like python3 (no source recipe yet) still build under
+    # ``--tool-provisioning=from-source``. The dispatcher upstream
+    # handles the ``rrNeedsBuild`` outcome via recursive sub-build
+    # before reaching this entry point, so we never observe it here
+    # in the normal path (and surface a clean OSError if we do, with
+    # the M9.Q operator hint preserved).
+    let outcome = tryResolveFromSourceTool(useDef)
+    case outcome.kind
+    of rrResolved:
+      result = outcome.profile
+    of rrNeedsBuild:
+      raise newException(OSError,
+        "tool-resolution failed: --tool-provisioning=from-source requested " &
+        "for \"" & outcome.toolName & "\" but its sibling recipe at " &
+        outcome.recipeDir &
+        " has not produced an artefact at " & outcome.expectedArtifact &
+        " (or .exe). Build the recipe first: `repro build " &
+        outcome.recipeDir & " --no-runquota` (M9.R.9 auto-recurse " &
+        "did not pre-build it — recursion may be guarded against a cycle).")
+    of rrSiblingMissing:
+      const isNixHost = defined(linux) or defined(macosx)
+      if isNixHost and useDef.nixProvisioning.len > 0:
+        result = resolveNixTool(useDef, storeRoot)
+      elif defined(windows) and useDef.scoopProvisioning.len > 0:
+        result = resolveScoopTool(useDef, storeRoot)
+      elif useDef.tarballProvisioning.len > 0:
+        result = resolveTarballTool(useDef, storeRoot)
+      else:
+        raise newException(OSError,
+          "tool-resolution failed: --tool-provisioning=from-source requested " &
+          "for \"" & outcome.missingToolName & "\" (package \"" &
+          useDef.packageSelector & "\") but no sibling recipe at " &
+          outcome.attemptedRecipeManifest &
+          " and no stdlib provisioning channel (nix / scoop / tarball) " &
+          "declared on the tool use. Either add a recipe at " &
+          "recipes/packages/source/" & outcome.missingToolName &
+          "/ or declare a provisioning block in the stdlib package " &
+          "definition.")
   else:
     raise newException(ValueError, "tool provisioning mode is not resolved")
 

@@ -2476,6 +2476,29 @@ var warmToolIdentities = initTable[string, WarmToolIdentity]()
 var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
 var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
 
+# DSL-port M9.R.9 — auto-recurse guards for from-source provisioning.
+# When ``--tool-provisioning=from-source`` is active, the dispatcher
+# (``ensureFromSourceArtifacts`` below) probes each tool use and may
+# schedule a recursive sub-build for any sibling recipe whose artefact
+# is missing. The guards cap the call depth, detect cycles, and dedupe
+# repeat resolutions across a single build session.
+const FromSourceMaxRecursionDepth* = 32
+  ## DSL-port M9.R.9 — sanity ceiling for recursive from-source
+  ## sub-builds. A 33-recipe chain trips the depth bound diagnostic; in
+  ## practice production graphs reach single-digit depth.
+var fromSourceBuildStack*: seq[string] = @[]
+  ## DSL-port M9.R.9 — active recursion stack (absolute recipe dirs).
+  ## A cycle is detected when the dispatcher would push a recipe dir
+  ## already present in the stack. Exported for test introspection +
+  ## ``repro why`` diagnostics; not intended for external mutation.
+var fromSourceResolvedRecipes*: HashSet[string] = initHashSet[string]()
+  ## DSL-port M9.R.9 — per-process cache. Once a sibling recipe has
+  ## been successfully built once in a session, repeat probes return
+  ## immediately (the artefact is now on disk so
+  ## ``tryResolveFromSourceTool`` would resolve, but the dedup avoids
+  ## even re-walking the candidate list). Exported for test
+  ## introspection + ``repro why`` diagnostics.
+
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
     if not fileExists(extendedPath(path)):
@@ -5079,6 +5102,85 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
+
+  # DSL-port M9.R.9 — auto-recurse pass for from-source provisioning.
+  # When the active mode is ``tpmFromSource`` we probe every tool use
+  # against the sibling-recipe layout BEFORE the identity resolver runs.
+  # Any ``rrNeedsBuild`` outcome (sibling recipe present but artefact
+  # missing) triggers a recursive ``executeBuildTarget`` call for the
+  # sibling, threaded through the same provider-compile + lowered-graph
+  # + engine pipeline (NOT a ``repro build`` subprocess). After every
+  # sibling resolves the outer build proceeds with the resolver pass,
+  # which now finds the artefacts on disk.
+  #
+  # Guards (in order of consultation):
+  #   1. ``fromSourceResolvedRecipes`` — per-process dedup, so a single
+  #      sibling shared across many tool uses is built once.
+  #   2. ``fromSourceBuildStack`` — cycle detection: pushing a recipe
+  #      dir that's already on the stack raises with the full cycle
+  #      path so the operator can edit one of the recipes' uses lists.
+  #   3. ``FromSourceMaxRecursionDepth`` — sanity ceiling. Production
+  #      recipe chains stay below 10; the ceiling exists to crash
+  #      cleanly on a runaway pattern rather than blow the stack.
+  if effectiveMode == tpmFromSource:
+    for useDef in artifact.projectInterface.toolUses:
+      let outcome = tryResolveFromSourceTool(useDef)
+      if outcome.kind != rrNeedsBuild:
+        continue
+      let siblingRecipeDir = absolutePath(outcome.recipeDir)
+      if siblingRecipeDir in fromSourceResolvedRecipes:
+        continue
+      if siblingRecipeDir in fromSourceBuildStack:
+        var cycle = fromSourceBuildStack
+        cycle.add(siblingRecipeDir)
+        raise newException(ValueError,
+          "tool-resolution failed: from-source recursion cycle detected — " &
+          "recipe \"" & outcome.toolName & "\" at " & siblingRecipeDir &
+          " is already being built earlier in the call chain. Cycle: " &
+          cycle.join(" -> ") & ". Edit one of the recipes' tool uses " &
+          "lists to break the cycle.")
+      if fromSourceBuildStack.len >= FromSourceMaxRecursionDepth:
+        raise newException(ValueError,
+          "tool-resolution failed: from-source recursion depth bound " &
+          "exceeded (" & $FromSourceMaxRecursionDepth & ") while resolving \"" &
+          outcome.toolName & "\" at " & siblingRecipeDir &
+          ". Active stack: " & fromSourceBuildStack.join(" -> ") &
+          ". This is a sanity ceiling — production recipe chains should " &
+          "stay well below it; investigate the call chain for an " &
+          "accidental fan-out.")
+      let siblingManifest = siblingRecipeDir / "repro.nim"
+      logSummary("from-source auto-recurse: building \"" & outcome.toolName &
+        "\" at " & siblingRecipeDir)
+      fromSourceBuildStack.add(siblingRecipeDir)
+      try:
+        let siblingOutcome = executeBuildTarget(siblingManifest, effectiveMode,
+          publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = progressMode,
+          progressBarStyle = progressBarStyle,
+          statsMode = statsMode,
+          reportMode = reportMode,
+          logMode = logMode,
+          diagnosticsPath = "",
+          prepareOnly = prepareOnly,
+          dryRun = dryRun,
+          forceRebuild = forceRebuild,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if siblingOutcome.exitCode != 0:
+          raise newException(OSError,
+            "tool-resolution failed: from-source auto-recurse sub-build of " &
+            siblingRecipeDir & " (tool \"" & outcome.toolName &
+            "\") exited with status " & $siblingOutcome.exitCode &
+            ". See the sub-build's diagnostics for the underlying failure.")
+      finally:
+        if fromSourceBuildStack.len > 0 and
+            fromSourceBuildStack[^1] == siblingRecipeDir:
+          discard fromSourceBuildStack.pop()
+      fromSourceResolvedRecipes.incl(siblingRecipeDir)
 
   # Tier 2b fast path: a package whose DSL body declared no ``build:``
   # block is eligible for the pre-built ``repro-standard-provider``

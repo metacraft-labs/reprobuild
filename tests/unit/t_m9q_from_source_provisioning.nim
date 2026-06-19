@@ -1,5 +1,15 @@
 ## M9.Q — From-source provisioning resolver tests.
 ##
+## DSL-port M9.R.9 note: this test pins the LOW-LEVEL raising entry
+## point ``resolveFromSourceTool``. M9.R.9 added a non-raising twin
+## (``tryResolveFromSourceTool`` returning ``FromSourceResolveResult``)
+## and an auto-recurse dispatcher pass on top of it, plus a stdlib
+## fall-through in ``toolProfileFor`` (see
+## ``t_m9r9_auto_recurse.nim``). The raising shim's contract is
+## preserved so existing M9.Q assertions hold: callers that bypass the
+## dispatcher (e.g. unit tests, ``repro why`` introspection paths) keep
+## the same hard-fail diagnostic shape.
+##
 ## Covers the new ``tpmFromSource`` mode end-to-end at the resolver
 ## layer (no engine / no recipe compile):
 ##
