@@ -78,6 +78,7 @@ jobs:
 
       - name: Compare pull request benchmarks
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         uses: benchmark-action/github-action-benchmark@v1
         with:
           tool: customSmallerIsBetter
@@ -85,6 +86,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: false
           save-data-file: false
+          skip-fetch-gh-pages: true
           comment-always: true
           alert-threshold: '120%'
 
