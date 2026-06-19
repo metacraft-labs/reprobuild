@@ -7027,6 +7027,26 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.10b — default-build synthesis wiring. Pins the
+  # package macro's M9.R.6 default-synthesis dispatch path:
+  #   * a recipe with ``fetch:`` + a recognised convention tool but no
+  #     explicit ``build:`` body registers a synthesised
+  #     ``default-build-synthesis (M9.R.10b)`` build action via the
+  #     ``emitM9R10bDefaultBuildSynthesis`` emitter in macros_b.nim;
+  #   * a recipe with an explicit ``build:`` block opts out — the
+  #     compile-time gate suppresses the synthesis emission entirely;
+  #   * ``raiseCustomBuildRequired`` has a stable error-message shape
+  #     (recipe name + ``build:`` token + ``shell(`` token) so authors
+  #     of custom-convention recipes get an actionable diagnostic.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r10b_synthesis_wiring.nim",
+    binary: "build/test-bin/t_m9r10b_synthesis_wiring",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
   #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
   #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block

@@ -2391,6 +2391,192 @@ proc emitM9HFetch*(packageName: string;
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# DSL-port M9.R.10b — default ``build:`` synthesis emission.
+#
+# Closes M9.R.6's deferred wiring. When a recipe declares a ``fetch:``
+# block AND no explicit ``build:`` block AND its ``nativeBuildDeps:``
+# name a recognised convention tool (meson / cmake / autoconf-automake-
+# libtool / make), the package macro emits a synthesised module-init
+# block that calls the matching stdlib synthesiser
+# (``synthesizeMesonPackage`` / ``synthesizeCmakePackage`` /
+# ``synthesizeAutotoolsPackage``) and slices the result into the
+# artifact slots declared by the recipe's ``executable`` / ``library``
+# / ``files`` sections.
+#
+# Two runtime-time gates fire inside the emitted block:
+#
+#   * ``shouldSynthesizeDefaultBuild`` — the M9.R.6 gate that consults
+#     ``registeredNativeBuildDeps(packageName)``. Returns ``false`` when
+#     the recipe declared no recognised convention tool, or declared a
+#     custom-shell driver (sh / perl / python) with no canonical
+#     pipeline.
+#   * ``raiseCustomBuildRequired`` — fires AT MODULE INIT when the
+#     recipe's ``nativeBuildDeps:`` resolve to the custom convention
+#     (sh / perl / python) but the recipe authored no ``build:`` block.
+#     The runtime raise documents the recipe name + the actionable
+#     remediation (add a ``build:`` block calling ``shell(...)`` per
+#     upstream step).
+#
+# Compile-time skip path: ``shouldSynthesizeDefaultBuild`` /
+# ``defaultBuildConventionFor`` / ``synthesizeMesonPackage`` etc. live
+# in ``repro_dsl_stdlib/synthesis``, which depends on
+# ``repro_project_dsl``. Recipes that need synthesis import the
+# stdlib's ``synthesis`` aggregator explicitly. The emitted block is
+# gated on ``when compiles(defaultBuildConventionFor("<pkg>")):`` so
+# recipes that did NOT import the synthesis surface produce no
+# emission at all (the recipe simply has no automatic build pipeline;
+# the convention layer's fetch + sentinel actions still emit). A
+# recipe that declares ``fetch:`` + a recognised tool but forgot to
+# import ``repro_dsl_stdlib/synthesis`` is observable via the absence
+# of any auto-registered build action; downstream consumers can
+# diagnose by checking ``registeredBuildActions(packageName)``.
+#
+# Artifact-slot assignment: the emitter walks the classified section
+# list for ``soM3ExecutableArtifact`` / ``soM3LibraryArtifact`` /
+# ``soM3FilesArtifact`` entries and emits one slot assignment per
+# ident-form artifact (string-form artifacts produce no slot — they
+# match the ``emitM9R2cArtifactSlots`` behaviour). The assignment uses
+# the typed constructor result's ``.executable(name)`` /
+# ``.library(name)`` / ``.files(name)`` slicing methods.
+# ---------------------------------------------------------------------------
+
+proc hasClassifiedOwnership(classified: seq[ClassifiedSection];
+                            ownership: SectionOwnership): bool =
+  for entry in classified:
+    if entry.ownership == ownership:
+      return true
+  false
+
+proc emitM9R10bDefaultBuildSynthesis*(packageName: string;
+                                      classified: seq[ClassifiedSection]):
+                                        NimNode =
+  ## Emit a default-build synthesis dispatch block when the package
+  ## macro detects ``fetch:`` AND no explicit ``build:`` AND a
+  ## recognised convention tool in ``nativeBuildDeps:``. See the module
+  ## comment above for the dispatch matrix + gating rationale.
+  ##
+  ## Returns an empty ``StmtList`` when synthesis does not apply at
+  ## compile-time (either the recipe declared a ``build:`` block or it
+  ## declared no ``fetch:`` block). The runtime gate
+  ## (``shouldSynthesizeDefaultBuild``) handles the case where the
+  ## recipe declared ``fetch:`` but its ``nativeBuildDeps:`` don't
+  ## match any recognised convention (no-op fall-through) and the case
+  ## where the convention resolves to ``custom`` (raises a documented
+  ## ``ValueError`` at module-init).
+  result = newStmtList()
+  let hasExplicitBuild = hasClassifiedOwnership(classified, soM4Build)
+  if hasExplicitBuild:
+    return
+  let hasFetchBlock = hasClassifiedOwnership(classified, soM9HFetch)
+  if not hasFetchBlock:
+    return
+  # Collect ident-form artifacts so the synthesised block can slice
+  # them out of the constructor result via the typed slicing methods.
+  type ArtifactSlot = object
+    name: string
+    identNode: NimNode
+    ownership: SectionOwnership
+  var slots: seq[ArtifactSlot] = @[]
+  for entry in classified:
+    if entry.ownership notin {soM3ExecutableArtifact,
+                              soM3LibraryArtifact,
+                              soM3FilesArtifact}:
+      continue
+    let parsed = m3ArtifactEntryAst(entry.stmt)
+    if not parsed.matched:
+      continue
+    if not parsed.isIdentForm:
+      continue
+    if parsed.identNode == nil or
+       parsed.identNode.kind notin {nnkIdent, nnkAccQuoted}:
+      continue
+    # Skip slots that ``emitM9R2cArtifactSlots`` would have skipped:
+    # an artifact whose name collides with the legacy package const.
+    let pkgValueIdent = packageValueIdent(packageName)
+    let artifactValueIdent = packageValueIdent(parsed.artifactName)
+    if artifactValueIdent == pkgValueIdent:
+      continue
+    slots.add(ArtifactSlot(
+      name: parsed.artifactName,
+      identNode: parsed.identNode.copyNimTree(),
+      ownership: entry.ownership))
+  let pkgLit = newLit(packageName)
+  let artifactLit = newLit("")
+  let bodyReprLit = newLit("default-build-synthesis (M9.R.10b)")
+  # Build the per-convention dispatch arms. Each arm calls the matching
+  # ``synthesize<X>Package`` entry point, stores the multi-artifact
+  # result in ``synthPkg``, and assigns the typed slot vars from the
+  # result's slicing methods.
+  let synthPkgIdent = ident("synthPkg")
+  let srcDirIdent = ident("srcDir")
+  proc buildAssignments(slots: seq[ArtifactSlot]): NimNode =
+    result = newStmtList()
+    for slot in slots:
+      let nameLit = newLit(slot.name)
+      let slotIdent = slot.identNode.copyNimTree()
+      case slot.ownership
+      of soM3ExecutableArtifact:
+        result.add(quote do:
+          `slotIdent` = `synthPkgIdent`.executable(`nameLit`))
+      of soM3LibraryArtifact:
+        result.add(quote do:
+          `slotIdent` = `synthPkgIdent`.library(`nameLit`))
+      of soM3FilesArtifact:
+        result.add(quote do:
+          `slotIdent` = `synthPkgIdent`.files(`nameLit`))
+      else:
+        discard
+  let mesonAssignments = buildAssignments(slots)
+  let cmakeAssignments = buildAssignments(slots)
+  let autotoolsAssignments = buildAssignments(slots)
+  let dispatchBlock = quote do:
+    let conv = defaultBuildConventionFor(`pkgLit`)
+    if shouldSynthesizeDefaultBuild(`pkgLit`,
+                                    hasExplicitBuild = false,
+                                    hasFetchBlock = true):
+      let `srcDirIdent` = "./src"
+      case conv
+      of ConventionMeson:
+        let `synthPkgIdent` = synthesizeMesonPackage(`pkgLit`, `srcDirIdent`)
+        `mesonAssignments`
+      of ConventionCmake:
+        let `synthPkgIdent` = synthesizeCmakePackage(`pkgLit`, `srcDirIdent`)
+        `cmakeAssignments`
+      of ConventionAutotools, ConventionMake:
+        let `synthPkgIdent` = synthesizeAutotoolsPackage(`pkgLit`,
+          `srcDirIdent`)
+        `autotoolsAssignments`
+      else:
+        discard
+    elif conv == ConventionCustom:
+      # Custom-shell driver toolset with no ``build:`` body — raise an
+      # actionable error at module init.
+      raiseCustomBuildRequired(`pkgLit`)
+  # Wrap the dispatch in the same begin/end-build-context bookkeeping
+  # ``emitM4BuildActions`` uses so the registry surface sees the synth
+  # block as an attributable build action. The verbatim body splice is
+  # gated on ``when not defined(reproProviderMode)`` to match the
+  # provider-mode disjointness rule (the legacy
+  # ``buildXxxPackage*()`` chain re-runs the same body under
+  # ``runPackageProvider`` + ``isMainModule``). The block is further
+  # gated on ``when compiles(defaultBuildConventionFor(...)):`` so
+  # recipes that did NOT import ``repro_dsl_stdlib/synthesis`` produce
+  # no emission at all — the convention layer's fetch + sentinel
+  # actions still emit.
+  let synthBlock = quote do:
+    when compiles(defaultBuildConventionFor(`pkgLit`)):
+      block:
+        registerBuildAction(`pkgLit`, `artifactLit`, `bodyReprLit`)
+        beginBuildContext(`pkgLit`, `artifactLit`)
+        try:
+          when not defined(reproProviderMode) and
+              not defined(reproInterfaceMode):
+            `dispatchBlock`
+        finally:
+          endBuildContext()
+  result.add(synthBlock)
+
+# ---------------------------------------------------------------------------
 # DSL-port M9.R.3 — ``library <name>: api:`` block emission.
 #
 # Walks the classified section list looking for ``soM3LibraryArtifact``
@@ -3161,6 +3347,18 @@ macro package*(name: untyped; body: untyped): untyped =
   # verify + extract) is a separate milestone (M9.K).
   let m9hFetchEmission = emitM9HFetch(packageName, classifiedSections)
   result.add(m9hFetchEmission)
+  # ── DSL-port M9.R.10b: default ``build:`` synthesis. When a recipe
+  # declares ``fetch:`` AND no explicit ``build:`` block, dispatch to
+  # the ``synthesizeMesonPackage`` / ``synthesizeCmakePackage`` /
+  # ``synthesizeAutotoolsPackage`` stdlib entry points based on the
+  # recipe's recognised ``nativeBuildDeps:`` tool. The dispatch is
+  # ``when compiles(...)``-gated so recipes that did NOT import
+  # ``repro_dsl_stdlib/synthesis`` produce no emission. See the
+  # ``emitM9R10bDefaultBuildSynthesis`` doc comment for the full
+  # dispatch matrix + gating rationale.
+  let m9r10bSynthesisEmission =
+    emitM9R10bDefaultBuildSynthesis(packageName, classifiedSections)
+  result.add(m9r10bSynthesisEmission)
   # ── DSL-port M9.R.6.1: the M9.I block emitter is GONE. Recipes
   # spell per-tool options via an explicit ``build:`` body calling
   # one of the M9.R.2b Layer-1 typed constructors
