@@ -23,3 +23,14 @@ package nimble:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:nim@2.2.10:sha256:fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
+    # Linux x86_64: same upstream nim-lang.org tar.xz as nim.nim — the
+    # archive ships both binaries, so executablePath selects nimble.
+    tarball url = "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz",
+      sha256 = "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/nimble",
+      packageId = "nim@2.2.10",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:nim@2.2.10:linux:sha256:0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
