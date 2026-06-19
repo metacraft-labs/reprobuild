@@ -6836,6 +6836,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.2: stdlib typed Layer-3 ``executable <tool>: cli:``
+  # blocks for meson / cmake / ninja / make / autoconf / binutils /
+  # gcc. Added by hand for the same generator-wipe reason as M9.R.1
+  # above.
+  TestSpec(
+    source: "tests/unit/t_m9r2_typed_cli_surfaces.nim",
+    binary: "build/test-bin/t_m9r2_typed_cli_surfaces",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.3: optional ``library api:`` block — pkgConfig /
   # headers / links / defines / soname / sover / linkKind +
   # PUBLIC/PRIVATE visibility-keyed fields. Added by hand for the

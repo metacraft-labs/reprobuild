@@ -76,6 +76,85 @@ package meson:
       os = "any",
       lockIdentity = "tarball:meson@1.6.1:sha256:1eca49eb6c26d58bbee67fd3337d8ef557c0804e30a6d16bfdf269db997464de"
 
+  # -------------------------------------------------------------------
+  # DSL-port M9.R.2 — typed Layer-3 CLI surface for ``meson``.
+  #
+  # Recipes can now write ``meson.setup(srcDir = ..., buildDir = ...,
+  # prefix = ...)`` / ``meson.compile(buildDir = ...)`` /
+  # ``meson.install(buildDir = ..., destdir = ...)`` instead of inline
+  # ``sh.call(["meson", "setup", ...])``. The typed wrapper records a
+  # ``BuildActionDef`` whose ``call.arguments`` carry the role-tagged
+  # flag + positional values; the engine + action-cache use those for
+  # input/output fingerprinting.
+  #
+  # Positional order matches the meson CLI: ``meson setup <buildDir>
+  # <srcDir>`` — the build directory comes first, source directory
+  # second. (See https://mesonbuild.com/Commands.html#setup.) ``compile``
+  # / ``install`` / ``dist`` take ``-C <buildDir>`` only.
+  # -------------------------------------------------------------------
+  executable mesonBin:
+    cli:
+      dependencyPolicy automaticMonitor
+
+      subcmd "setup":
+        flag prefix is string,
+          alias = "--prefix=",
+          format = concat
+        flag buildtype is string,
+          alias = "--buildtype=",
+          format = concat
+        flag options is seq[string],
+          alias = "-D",
+          format = concat,
+          repeated = true
+        flag crossFile is string,
+          alias = "--cross-file=",
+          format = concat
+        flag nativeFile is string,
+          alias = "--native-file=",
+          format = concat
+        pos buildDir is string,
+          position = 0,
+          role = output
+        pos srcDir is string,
+          position = 1,
+          role = input
+
+        outputs buildDir
+
+      subcmd "compile":
+        flag workDir is string,
+          alias = "-C",
+          format = separate,
+          role = input
+        flag jobs is int,
+          alias = "-j",
+          format = separate
+
+      subcmd "install":
+        flag workDir is string,
+          alias = "-C",
+          format = separate,
+          role = input
+        flag destdir is string,
+          alias = "--destdir=",
+          format = concat,
+          role = output
+        flag tags is seq[string],
+          alias = "--tags=",
+          format = concat,
+          repeated = true
+
+      subcmd "dist":
+        flag workDir is string,
+          alias = "-C",
+          format = separate,
+          role = input
+        flag formats is seq[string],
+          alias = "--formats=",
+          format = concat,
+          repeated = true
+
 let mesonCatalog* = @[
   VersionedProvisioning(
     version: "1.11.0",

@@ -69,14 +69,60 @@ package gcc:
     cli:
       dependencyPolicy automaticMonitor
 
+      # DSL-port M9.R.2 audit: extended the gcc driver call to cover the
+      # common compile / link / preprocess / make-dep flag families.
+      # Driver invocations the recipe layer now expresses typed-style:
+      #
+      #   * Compile:    gcc -c -o out.o src.c
+      #   * Link-shared: gcc -shared -o libfoo.so objs... -lbar
+      #   * Preprocess: gcc -E src.c
+      #   * Make-deps:  gcc -M src.c  /  gcc -MMD -MF dep.d -c src.c
+      #
+      # The flag set mirrors the canonical gcc(1) options. ``-I`` /
+      # ``-L`` / ``-l`` / ``-D`` use the concat format so the wrapper
+      # emits ``-Iinclude/foo`` etc. as single argv entries (gcc accepts
+      # both ``-I include/foo`` and ``-Iinclude/foo``; concat matches
+      # the lossless ``-c -o out.o src.c`` byte-equivalent shape this
+      # repo's reproducibility tests already assert).
       call:
         boolFlag pic is bool, alias = "-fPIC"
         boolFlag debug3 is bool, alias = "-g3"
         boolFlag compileOnly is bool, alias = "-c"
+        boolFlag preprocessOnly is bool, alias = "-E"
+        boolFlag makeDeps is bool, alias = "-M"
+        boolFlag makeDepsMMD is bool, alias = "-MMD"
+        boolFlag shared is bool, alias = "-shared"
+        boolFlag staticLink is bool, alias = "-static"
+        flag depfileOut is string,
+          alias = "-MF",
+          format = separate,
+          role = output
         flag includes is seq[string],
           alias = "-include",
           role = input,
           repeated = true
+        flag includeDirs is seq[string],
+          alias = "-I",
+          format = concat,
+          repeated = true
+        flag libDirs is seq[string],
+          alias = "-L",
+          format = concat,
+          repeated = true
+        flag libs is seq[string],
+          alias = "-l",
+          format = concat,
+          repeated = true
+        flag defines is seq[string],
+          alias = "-D",
+          format = concat,
+          repeated = true
+        flag optimization is string,
+          alias = "-O",
+          format = concat
+        flag standard is string,
+          alias = "-std=",
+          format = concat
         flag output is string,
           alias = "-o",
           role = output,

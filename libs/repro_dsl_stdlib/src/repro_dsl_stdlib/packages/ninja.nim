@@ -67,6 +67,40 @@ package ninja:
       os = "linux",
       lockIdentity = "tarball:ninja@1.12.1-linux:sha256:6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255"
 
+  # -------------------------------------------------------------------
+  # DSL-port M9.R.2 — typed Layer-3 CLI surface for ``ninja``.
+  #
+  # Recipes write ``ninja.call(workDir = "./b", target = "all")`` instead
+  # of an inline ``sh.call(["ninja", "-C", "./b", "all"])``. Ninja has
+  # no subcommands (it's a single-mode build driver); the typed call
+  # block uses the ``call:`` (no-subcmd) shape — same convention as
+  # ``gcc.call(...)``. Positional targets are passed via ``targets:
+  # seq[string]``.
+  # -------------------------------------------------------------------
+  executable ninjaBin:
+    cli:
+      dependencyPolicy automaticMonitor
+
+      call:
+        flag workDir is string,
+          alias = "-C",
+          format = separate,
+          role = input
+        flag file is string,
+          alias = "-f",
+          format = separate,
+          role = input
+        flag jobs is int,
+          alias = "-j",
+          format = separate
+        flag tool is string,
+          alias = "-t",
+          format = separate
+        pos targets is seq[string],
+          position = 0,
+          role = input,
+          repeated = true
+
 let ninjaCatalog* = @[
   VersionedProvisioning(
     version: "1.13.2",
