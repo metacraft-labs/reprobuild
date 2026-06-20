@@ -52,6 +52,7 @@ import ./shared_mime_info
 import ./wayland_protocols
 import ./linux_headers
 import ./python3
+import ./runquotad
 
 export bc
 export bison
@@ -84,3 +85,4 @@ export shared_mime_info
 export wayland_protocols
 export linux_headers
 export python3
+export runquotad
