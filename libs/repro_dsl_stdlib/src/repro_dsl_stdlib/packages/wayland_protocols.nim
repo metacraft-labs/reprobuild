@@ -17,6 +17,12 @@ import repro_project_dsl
 
 package `wayland-protocols`:
   provisioning:
-    nixPackage "nixpkgs#wayland-protocols", executablePath = "share/wayland-protocols/wayland-protocols.pc",
+    # M9.R.14d.8 — the actual nixpkgs installed layout is
+    # ``share/pkgconfig/wayland-protocols.pc``, NOT
+    # ``share/wayland-protocols/wayland-protocols.pc``.
+    # The latter path is what other distros (Debian / Fedora) use;
+    # nixpkgs flattens via the meson `--datadir`-based install of the
+    # upstream meson.build's `pkgconfig` install target.
+    nixPackage "nixpkgs#wayland-protocols", executablePath = "share/pkgconfig/wayland-protocols.pc",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
