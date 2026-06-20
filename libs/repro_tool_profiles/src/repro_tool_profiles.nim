@@ -3735,8 +3735,37 @@ proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
       if cand.resolvedPath.len > 0:
         resolvedIdx = i
         inc resolvedCount
+    # M9.R.15f.4 — multi-artifact recipe-as-tool fallback. The pre-
+    # M9.R.15f rule was "if exactly ONE candidate has a resolved file,
+    # return it". qt6-base is a six-library umbrella recipe (libQt6Core /
+    # libQt6Gui / libQt6Widgets / libQt6Network / libQt6DBus / libQt6Sql)
+    # whose dep selector ``qt6-base`` doesn't canonically match any of
+    # the six library names — sole-artifact fallback can't fire because
+    # there are SIX resolved candidates, not one. Every KF6 module +
+    # qt6-tools declares ``qt6-base >=6.6`` as a buildDep, so the
+    # resolver dead-ends and the whole KDE cascade can't publish.
+    #
+    # Multi-artifact fallback: when at least one candidate has a
+    # resolved on-disk file, return the FIRST candidate by stable iter
+    # order. The dep selector already pinned the recipe (only siblings
+    # whose recipe.nim ships a matching ``package`` block are reachable
+    # here), so picking any artifact of the recipe satisfies the
+    # "library is on disk" semantic — the from-source convention's
+    # downstream link path then uses the install-mirror's full lib*/
+    # tree to actually link against. The fallback is conservative: it
+    # only fires when the canonicalization tiers above all failed AND
+    # at least one candidate is staged.
     if resolvedCount == 1:
       result = resolvedIdx
+    elif resolvedCount > 1:
+      # Pick the first resolved candidate; the iteration order over
+      # ``walkDir`` is OS-defined but stable within a process, and the
+      # consumer's actual link uses the install-mirror tree, not the
+      # per-artifact stage tree.
+      for i, cand in candidates:
+        if cand.resolvedPath.len > 0:
+          result = i
+          break
 
 proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
   ## DSL-port M9.R.14h.1 — install-mirror fast-path probe.

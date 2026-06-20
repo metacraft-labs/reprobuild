@@ -287,3 +287,50 @@ suite "DSL-port M9.R.14d.1 — library-use-kind resolution":
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     check outcome.kind == rrResolved
     check outcome.profile.resolvedExecutablePath == absolutePath(artefact)
+
+  test "multi_artifact_umbrella_fallback_picks_first_resolved_candidate":
+    # DSL-port M9.R.15f.4 — qt6-base canary. The qt6-base recipe ships
+    # six libraries (libQt6Core / libQt6Gui / libQt6Widgets /
+    # libQt6Network / libQt6DBus / libQt6Sql). The dep selector
+    # ``qt6-base`` doesn't canonically match any of the six names
+    # (canonical forms ``qt6base`` vs ``qt6core``/``qt6gui``/... are
+    # not equal and not a prefix of each other). Sole-artifact
+    # fallback can't fire because there are SIX resolved candidates,
+    # not one — the umbrella fallback added in M9.R.15f.4 picks the
+    # first resolved candidate so every KF6 module's
+    # ``qt6-base >=6.6`` buildDep can resolve.
+    let scratch = createTempDir("repro-m9r14d-umbrella-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "qt6-base")
+    let coreArt = makeLibraryArtefact(scratch, "qt6-base", "libQt6Core")
+    discard makeLibraryArtefact(scratch, "qt6-base", "libQt6Gui")
+    discard makeLibraryArtefact(scratch, "qt6-base", "libQt6Widgets")
+    discard makeLibraryArtefact(scratch, "qt6-base", "libQt6Network")
+    discard makeLibraryArtefact(scratch, "qt6-base", "libQt6DBus")
+    discard makeLibraryArtefact(scratch, "qt6-base", "libQt6Sql")
+    writeSyntheticInterface(scratch, "qt6-base",
+      executables = @[],
+      libraries = @["libQt6Core", "libQt6Gui", "libQt6Widgets",
+                    "libQt6Network", "libQt6DBus", "libQt6Sql"])
+
+    # Dep selector "qt6-base" matches the recipe basename; the six
+    # library artifacts canonicalize to "qt6core"/"qt6gui"/... which
+    # do NOT start with the dep canonical "qt6base" (and vice versa).
+    # Tier 0/1/2/3 all miss. Umbrella fallback picks the first
+    # resolved candidate — whatever walkDir order returns.
+    let useDef = syntheticUseDef("qt6-base")
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    # The resolved path MUST be one of the six staged libraries — the
+    # exact one depends on walkDir's OS-dependent order but every one
+    # is a legitimate qt6-base artifact.
+    let resolvedName = lastPathPart(parentDir(
+      outcome.profile.resolvedExecutablePath))
+    check resolvedName in ["libQt6Core", "libQt6Gui", "libQt6Widgets",
+                           "libQt6Network", "libQt6DBus", "libQt6Sql"]
+    # Sanity: at least one of the six is the one we got (coreArt is
+    # the path used to validate the absolutePath construction; the
+    # umbrella fallback may pick any of the six).
+    check outcome.profile.resolvedExecutablePath.len > 0
+    # Reference touch — silence "unused" hint by mentioning coreArt.
+    discard coreArt
