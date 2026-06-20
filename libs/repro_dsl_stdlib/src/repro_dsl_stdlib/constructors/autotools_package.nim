@@ -345,6 +345,26 @@ proc autotools_package*(srcDir: string;
     vars = installVars,
     after = @[configureEdge, buildEdge],
     extraEnv = installEnv)
+  # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
+  # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
+  # from-source search-path channels reach the action env at fork time.
+  # Mirrors the same pattern in ``meson_package.nim``. The local helper
+  # is duplicated rather than imported because the two constructor
+  # modules have no shared parent module beyond the typed-tool surface.
+  proc stripConstraint(value: string): string =
+    for i, ch in value:
+      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+          ch == '~' or ch == '^':
+        return value[0 ..< i]
+    return value
+  var depRefs: seq[string] = @[]
+  for raw in registeredNativeBuildDeps(pkgName):
+    depRefs.add(stripConstraint(raw))
+  for raw in registeredBuildDeps(pkgName):
+    depRefs.add(stripConstraint(raw))
+  appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
+  appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
+  appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,

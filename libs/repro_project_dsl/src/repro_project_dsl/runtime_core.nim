@@ -1301,6 +1301,36 @@ proc setRegisteredActionTargetNames*(actionId: string;
       buildActionRegistry[i].targetNames = @names
       return
 
+proc appendRegisteredActionToolIdentityRefs*(actionId: string;
+                                             refs: openArray[string]) {.dynOrStatic.} =
+  ## DSL-port M9.R.14e.5 — append the given ``refs`` to the registry
+  ## entry's ``toolIdentityRefs`` seq, in source-declaration order,
+  ## deduping against the existing entries. Used by
+  ## ``meson_package`` / ``autotools_package`` / ``cmake_package``
+  ## constructors to fold the recipe's ``nativeBuildDeps`` +
+  ## ``buildDeps`` into the typed-tool setup/configure/install action's
+  ## ``toolIdentityRefs`` AFTER the typed-tool wrapper has already
+  ## registered the action with the legacy ``toolIdentityRefs = @[]``.
+  ##
+  ## Without this, the M9.R.14e.1 from-source resolver's
+  ## ``pkgConfigSearchList`` etc. never make it into the meson/cmake/
+  ## autotools action's env at fork time because the typed-tool wrapper
+  ## doesn't auto-add the recipe's deps to the action's refs. No-op
+  ## when the id is not present (defensive — same shape as
+  ## ``setRegisteredActionTargetNames``).
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      for refName in refs:
+        if refName.len == 0: continue
+        var found = false
+        for existing in buildActionRegistry[i].toolIdentityRefs:
+          if existing == refName:
+            found = true
+            break
+        if not found:
+          buildActionRegistry[i].toolIdentityRefs.add(refName)
+      return
+
 proc appendRegisteredActionTypedOutput*(actionId: string;
                                         fieldName: string;
                                         types: openArray[string];

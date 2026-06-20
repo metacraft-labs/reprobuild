@@ -126,6 +126,25 @@ proc cmake_package*(srcDir: string;
   let installEdge = cmake.install(
     buildDir = buildDir,
     prefix = destdir & prefix)
+  # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
+  # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
+  # from-source search-path channels reach the action env at fork time.
+  # Mirrors the same pattern in ``meson_package.nim`` /
+  # ``autotools_package.nim``.
+  proc stripConstraint(value: string): string =
+    for i, ch in value:
+      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+          ch == '~' or ch == '^':
+        return value[0 ..< i]
+    return value
+  var depRefs: seq[string] = @[]
+  for raw in registeredNativeBuildDeps(pkgName):
+    depRefs.add(stripConstraint(raw))
+  for raw in registeredBuildDeps(pkgName):
+    depRefs.add(stripConstraint(raw))
+  appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
+  appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
+  appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
   CmakePackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,

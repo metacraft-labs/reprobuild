@@ -122,6 +122,40 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
 # Constructor
 # ---------------------------------------------------------------------------
 
+proc m9r14eStripConstraint(value: string): string =
+  ## Strip the version-constraint suffix off a raw constraint string so
+  ## ``"wayland >=1.22"`` → ``"wayland"``. The ref-name matching in
+  ## ``mkToolIdentityResolver`` does the same trim via a
+  ## prefix-with-space-or-comparator probe; we strip here for
+  ## cleanliness + so the lowered-graph snapshot reads as a list of
+  ## names rather than constraints.
+  for i, ch in value:
+    if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+        ch == '~' or ch == '^':
+      return value[0 ..< i]
+  return value
+
+proc m9r14eThreadRecipeDepsAsToolRefs(actionId, pkgName: string) =
+  ## DSL-port M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps``
+  ## + ``buildDeps`` constraint strings (e.g. ``"wayland >=1.22"``,
+  ## ``"libxml2 >=2.9"``) into the registry's ``toolIdentityRefs`` seq
+  ## for the action identified by ``actionId``, so the engine's
+  ## env-prepend pass at fork time threads each dep's
+  ## ``pkgConfigSearchList`` / ``cmakePrefixList`` / ``cpathList`` /
+  ## ``libraryPathList`` onto the meson action's env.
+  ##
+  ## Why mutate the registry (not the local value the typed-tool wrapper
+  ## returned): ``buildActionRegistry.add(...)`` stores a copy by value;
+  ## mutating the wrapper's return value doesn't affect the registry
+  ## entry the engine sees later. ``appendRegisteredActionToolIdentityRefs``
+  ## (in ``repro_project_dsl``) updates the registry in place.
+  var refs: seq[string] = @[]
+  for raw in registeredNativeBuildDeps(pkgName):
+    refs.add(m9r14eStripConstraint(raw))
+  for raw in registeredBuildDeps(pkgName):
+    refs.add(m9r14eStripConstraint(raw))
+  appendRegisteredActionToolIdentityRefs(actionId, refs)
+
 proc meson_package*(srcDir: string;
                     buildDir = "build";
                     destdir = "out";
@@ -156,7 +190,17 @@ proc meson_package*(srcDir: string;
     crossFile = crossFile,
     nativeFile = nativeFile,
     after = setupAfter)
+  # M9.R.14e.5 — thread every nativeBuildDeps + buildDeps name onto the
+  # setup action's ``toolIdentityRefs`` so the M9.R.14e.1 env-prepend
+  # pass at fork time threads each from-source dep's
+  # ``pkgConfigSearchList`` etc. onto ``PKG_CONFIG_PATH`` /
+  # ``CMAKE_PREFIX_PATH`` / ``CPATH`` / ``LIBRARY_PATH`` /
+  # ``LD_LIBRARY_PATH``. Without this the meson.setup typed-tool action
+  # carries no refs and the from-source resolver's search-path channels
+  # never make it into the action env.
+  m9r14eThreadRecipeDepsAsToolRefs(setup.id, pkgName)
   let compileEdge = meson.compile(workDir = buildDir)
+  m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
   # M9.R.14d.7 — meson rejects relative ``--destdir`` (it tries to
   # resolve `wayland/out` under the action's cwd at install time and
   # fails with `No such file or directory`). In provider mode pass the
@@ -175,6 +219,7 @@ proc meson_package*(srcDir: string;
     workDir = buildDir,
     destdir = effectiveDestdir,
     tags = @[])
+  m9r14eThreadRecipeDepsAsToolRefs(installEdge.id, pkgName)
   MesonPackageResult(
     buildEdge: setup,
     compileEdge: compileEdge,
