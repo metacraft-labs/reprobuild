@@ -182,6 +182,12 @@ package glib2Source:
     ## gcc is the host C toolchain — glib2 is C99 with light use of
     ## GLib-style autoconf macros via meson's gnome module.
     "gcc >=11"
+    ## python3 is invoked at build time by meson's ``tools/
+    ## gen-visibility-macros.py`` to generate the visibility-header
+    ## stubs (gversionmacros.h, glib-visibility.h, etc.). The
+    ## ``meson`` cycle-broken bootstrap floor routes python3 through
+    ## stdlib provisioning.
+    "python3"
 
   buildDeps:
     ## pcre2 is the regex engine glib's GRegex API delegates to.
