@@ -142,7 +142,18 @@ proc cmake_package*(srcDir: string;
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
-  var buildArgv = @["cmake", "--build", buildDir]
+  #
+  # M9.R.15f.3 — add ``--parallel`` so cmake auto-detects job count
+  # and runs the underlying generator (typically make / ninja) with
+  # full host parallelism. Without this flag cmake falls back to
+  # the generator's default which for ``make`` is ``-j1``; qt6-base
+  # is hundreds of compile units, so the serial default turns a
+  # ~5 minute compile into an hour. cmake's ``--parallel`` without a
+  # number defers job-count to the CMAKE_BUILD_PARALLEL_LEVEL env
+  # var, falling back to the build engine's pool budget. The
+  # build-engine's compile pool already caps parallelism so we get
+  # deterministic scheduling.
+  var buildArgv = @["cmake", "--build", buildDir, "--parallel"]
   if target.len > 0:
     buildArgv.add("--target")
     buildArgv.add(target)
