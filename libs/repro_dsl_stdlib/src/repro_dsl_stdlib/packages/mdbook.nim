@@ -29,3 +29,14 @@ package mdbook:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:mdbook@0.5.3:linux:sha256:dfb86d8e20a3fed91bf549aa450b9d7f46a275b700292e050cdfd3171732e7fd"
+    # macOS aarch64: rust-lang/mdBook GitHub Releases. Native Apple
+    # Silicon binary; archive ships `mdbook` flat at the root (same
+    # shape as the Linux entry).
+    tarball url = "https://github.com/rust-lang/mdBook/releases/download/v0.5.3/mdbook-v0.5.3-aarch64-apple-darwin.tar.gz",
+      sha256 = "2aaa197d85eb8c44903f0aa9f571612662e2d5314471697f3adb353e9e2a0007",
+      archiveType = "tar.gz",
+      executablePath = "mdbook",
+      packageId = "mdbook@0.5.3",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:mdbook@0.5.3:macos-aarch64:sha256:2aaa197d85eb8c44903f0aa9f571612662e2d5314471697f3adb353e9e2a0007"

@@ -48,3 +48,16 @@ package uv:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:uv@0.7.12:linux:sha256:735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a"
+    # macOS aarch64: astral-sh/uv ships a native Apple Silicon tarball
+    # that contains `uv` + `uvx` under a single `uv-aarch64-apple-darwin/`
+    # top-level directory. stripComponents=1 flattens to the prefix
+    # root so the binaries sit at `<prefix>/uv` and `<prefix>/uvx`.
+    tarball url = "https://github.com/astral-sh/uv/releases/download/0.7.12/uv-aarch64-apple-darwin.tar.gz",
+      sha256 = "189108cd026c25d40fb086eaaf320aac52c3f7aab63e185bac51305a1576fc7e",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "uv",
+      packageId = "uv@0.7.12",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:uv@0.7.12:macos-aarch64:sha256:189108cd026c25d40fb086eaaf320aac52c3f7aab63e185bac51305a1576fc7e"

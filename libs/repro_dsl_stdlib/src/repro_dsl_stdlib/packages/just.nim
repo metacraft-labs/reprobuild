@@ -54,6 +54,17 @@ package just:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:just@1.51.0:linux:sha256:c8f085ca3e885723c341d06243fc291b5abfdc8bbe3b2c076b117de490387b59"
+    # macOS aarch64: native Apple Silicon binary from GitHub Releases.
+    # Same flat archive shape as the Linux/Windows entries (the `just`
+    # binary sits at the archive root, no enclosing directory).
+    tarball url = "https://github.com/casey/just/releases/download/1.51.0/just-1.51.0-aarch64-apple-darwin.tar.gz",
+      sha256 = "61e3f1b8a545ff064b091eab4b6e14f8cc743ff15549be293b1e92f5b1467002",
+      archiveType = "tar.gz",
+      executablePath = "just",
+      packageId = "just@1.51.0",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:just@1.51.0:macos-aarch64:sha256:61e3f1b8a545ff064b091eab4b6e14f8cc743ff15549be293b1e92f5b1467002"
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

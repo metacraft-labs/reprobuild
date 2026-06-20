@@ -35,3 +35,16 @@ package npx:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:node@24.16.0:linux:sha256:d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9"
+    # macOS aarch64: same Node.js distribution as `node.nim` — the
+    # darwin-arm64 tar.xz ships `npx` as a POSIX symlink at `bin/npx`
+    # (pointing at the npm-cli script). stripComponents=1 flattens the
+    # outer `node-v24.16.0-darwin-arm64/` dir.
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.xz",
+      sha256 = "e28ad5531b2aafe0ea555a51b2412c42fdc0f91a6a53fbd03ac93e3847e91389",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/npx",
+      packageId = "node@24.16.0",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:node@24.16.0:macos-aarch64:sha256:e28ad5531b2aafe0ea555a51b2412c42fdc0f91a6a53fbd03ac93e3847e91389"
