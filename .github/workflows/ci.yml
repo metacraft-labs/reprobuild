@@ -23,7 +23,7 @@ on:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, nixos]
     steps:
       - uses: actions/checkout@v4
       # Mint a GitHub App installation token via the CI Token Provider
@@ -154,7 +154,7 @@ jobs:
 
   nix-build:
     name: Nix Build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, nixos]
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
