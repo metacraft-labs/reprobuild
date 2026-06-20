@@ -324,6 +324,22 @@ package qt6BaseSource:
         # milestone landing mesa-from-source will flip this back on.
         "INPUT_opengl=no",
         "FEATURE_opengl=OFF",
+        # M9.R.15c.2 — pcre2 is not yet vendored from-source, so fall
+        # back to qtbase's bundled copy under src/3rdparty/pcre2. Qt's
+        # default auto-FORCES ``system_pcre2=ON`` once a system pcre2
+        # is probed for, and the configure aborts when WrapSystemPCRE2
+        # comes back unfound. Explicitly disabling the system path
+        # picks the bundled copy without operator action; a future
+        # milestone landing pcre2-from-source flips this back on.
+        "FEATURE_system_pcre2=OFF",
+        # M9.R.15c.2 — clock_gettime auto-FORCEs to ON on UNIX hosts but
+        # its second condition (WrapRt_FOUND) probes for ``-lrt`` via
+        # a stand-alone CMake test. The nix-shell glibc implements
+        # ``clock_gettime`` in libc itself (no separate librt), so the
+        # WrapRt probe fails and the auto-FORCE-ON aborts configure.
+        # Disabling the explicit feature lets Qt fall back to libc's
+        # built-in ``clock_gettime`` symbol resolution.
+        "FEATURE_clock_gettime=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")
