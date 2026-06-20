@@ -166,6 +166,10 @@ package pangoSource:
     ## gcc is the host C toolchain — pango is plain C99 with light
     ## use of GLib-style autoconf macros via meson's gnome module.
     "gcc >=7"
+    ## python3 runs at meson-setup time for pango's various scriptlet
+    ## helpers (glib's gnome module invokes python). Same pattern as
+    ## glib2 / harfbuzz / cairo.
+    "python3"
 
   buildDeps:
     ## glib2 provides GObject + GIO that pango's text-layout objects

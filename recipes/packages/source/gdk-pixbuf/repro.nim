@@ -164,6 +164,10 @@ package gdkPixbufSource:
     ## light use of GLib-style autoconf macros via meson's gnome
     ## module.
     "gcc >=7"
+    ## python3 runs at meson-setup time for various scriptlet helpers
+    ## (gnome module + custom format-stub generation). Same pattern as
+    ## glib2 / harfbuzz / cairo / pango.
+    "python3"
 
   buildDeps:
     ## glib2 provides GObject + GIO that gdk-pixbuf's loader objects

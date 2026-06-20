@@ -173,6 +173,11 @@ package cairoSource:
     ## gcc is the host C toolchain — cairo is C99 with light C++ in
     ## the test harness (skipped via ``-Dtests=disabled``).
     "gcc >=7"
+    ## python3 runs cairo's various pre-process / version-stamp helpers
+    ## at meson-setup + compile time; without it, setup or compile
+    ## fails with exit 127. Same fix shape as glib2 / harfbuzz /
+    ## fontconfig.
+    "python3"
 
   buildDeps:
     ## pixman is cairo's per-pixel software-rasteriser backend; the
