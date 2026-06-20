@@ -65,6 +65,13 @@ import ./wayland_protocols
 import ./linux_headers
 import ./python3
 import ./runquotad
+# M9.R.15b.5 — gtk-update-icon-cache is referenced by adwaita-icon-theme
+# (and any other icon-theme recipe) as a native build dep at meson-setup
+# time. Routed through gtk3's bin/ for v1 (gtk4 not yet from-source).
+import ./gtk_update_icon_cache
+# M9.R.15b.2 — sassc is referenced by gtk4's nativeBuildDeps for Sass
+# stylesheet compilation of the Adwaita default theme.
+import ./sassc
 
 export bc
 export bison
@@ -102,3 +109,5 @@ export wayland_protocols
 export linux_headers
 export python3
 export runquotad
+export gtk_update_icon_cache
+export sassc
