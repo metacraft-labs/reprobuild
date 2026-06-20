@@ -31,7 +31,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/dbus/vendor/dbus-1.16.0.tar.xz"
+  "https://dbus.freedesktop.org/releases/dbus/dbus-1.16.0.tar.xz"
 
 const ExpectedHash =
   "9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
