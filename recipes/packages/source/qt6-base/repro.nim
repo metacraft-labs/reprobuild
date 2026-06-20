@@ -363,6 +363,16 @@ package qt6BaseSource:
         # dependency. A future milestone landing zstd-from-source
         # flips this back on.
         "FEATURE_zstd=OFF",
+        # M9.R.15h.1.3 — brotli + gssapi (Kerberos) are not in the v1
+        # from-source closure. QtNetwork's configure auto-detects them
+        # from the host nix-shell glibc / system libs and link-edges
+        # them into libQt6Network.so. Downstream consumers (qt6-tools'
+        # qtdiag, KF6 kio, etc.) then can't link because the symbols
+        # ``BrotliDecoder*`` + ``gss_*@gssapi_krb5_2_MIT`` are
+        # transitive-undef. Disabling at qt6-base level keeps the v1
+        # network library symbol surface clean.
+        "FEATURE_brotli=OFF",
+        "FEATURE_gssapi=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")
