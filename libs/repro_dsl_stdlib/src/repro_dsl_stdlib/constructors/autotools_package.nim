@@ -258,11 +258,20 @@ proc autotools_package*(srcDir: string;
   # generator emits on every typed-tool call site.
   let buildEdge = make(workDir = buildDir, vars = @[], targets = @[],
     after = @[configureEdge])
+  # M9.R.14b.3b: install must wait for compile to finish; the prior
+  # ``after = @[configureEdge]`` form let the engine schedule install
+  # in parallel with compile (both only depended on configure), and
+  # install raced ahead expecting object files that compile had not
+  # yet emitted. Threading ``buildEdge`` (compile) onto install's
+  # ``after`` list is the natural sequencing: configure -> compile ->
+  # install. The configure dep is still implied through compile so we
+  # don't need to keep it explicitly, but the chain is more readable
+  # spelt out.
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],
     vars = @["DESTDIR=" & destdir],
-    after = @[configureEdge])
+    after = @[configureEdge, buildEdge])
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
