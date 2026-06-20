@@ -447,9 +447,28 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     "/share/pkgconfig\"; do ")
   script.add("if [ -d \"$pcdir\" ]; then ")
   script.add("for pc in \"$pcdir\"/*.pc; do ")
-  script.add("[ -f \"$pc\" ] && sed -i ")
-  script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedDstUsr & "|; }' ")
+  script.add("if [ -f \"$pc\" ]; then ")
+  # M9.R.14f.8 — rewrite ALL of prefix / exec_prefix / libdir /
+  # includedir / datadir / sharedstatedir lines that point at an
+  # absolute ``/usr...`` path baked in at build time. Some
+  # autotools-generated pc files (e.g. freetype's freetype2.pc)
+  # expand ``${prefix}/include`` to ``/usr/include`` at install
+  # time, so the M9.R.14e.8 prefix-only rewrite leaves consumers
+  # pointed at the host's /usr/include (or a non-existent dir
+  # under the install mirror) instead of the mirror's own include
+  # tree. Rewrite each of the standard variable lines that begins
+  # with ``/usr`` to start with the mirror's ``<dstUsr>`` instead.
+  script.add("sed -i ")
+  script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedDstUsr & "|; } ")
+  script.add("; s|^exec_prefix=/usr|exec_prefix=" & escapedDstUsr & "| ")
+  script.add("; s|^libdir=/usr/lib64|libdir=" & escapedDstUsr & "/lib64| ")
+  script.add("; s|^libdir=/usr/lib|libdir=" & escapedDstUsr & "/lib| ")
+  script.add("; s|^includedir=/usr/include|includedir=" & escapedDstUsr & "/include| ")
+  script.add("; s|^datadir=/usr/share|datadir=" & escapedDstUsr & "/share| ")
+  script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedDstUsr & "/share| ")
+  script.add("; s|^sharedstatedir=/usr/com|sharedstatedir=" & escapedDstUsr & "/com|' ")
   script.add("\"$pc\"; ")
+  script.add("fi; ")
   script.add("done; fi; done; ")
   # M9.R.14f.2 — patch RPATH on every ELF under the mirror's lib/lib64/bin
   # dirs so the resulting binaries can find their transitive deps without
