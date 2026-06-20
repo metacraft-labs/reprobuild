@@ -119,12 +119,15 @@ package gtk4Source:
     ## sassc compiles the Sass stylesheets bundled with the default
     ## theme (Adwaita-dark / Adwaita-light / HighContrast).
     "sassc"
-    ## gobject-introspection's g-ir-scanner is consumed at build
-    ## time by gtk4's ``gnome.generate_gir()`` calls even when
-    ## ``introspection=disabled`` (the meson helper probes for the
-    ## scanner unconditionally; the actual .gir emission is gated
-    ## on the option).
-    "gobject-introspection"
+    ## M9.R.15b — gobject-introspection's g-ir-scanner is referenced
+    ## by gtk4's ``gnome.generate_gir()`` calls but the calls are
+    ## gated on ``-Dintrospection=enabled`` at the meson layer; with
+    ## ``introspection=disabled`` (our v1 pin) the dep edge is dead
+    ## at compile time. Dropping the nativeBuildDep from this recipe
+    ## keeps gtk4's auto-recurse closure from pulling
+    ## gobject-introspection (whose from-source build needs
+    ## python3-with-setuptools — not yet provisioned). The gtk4
+    ## recipe surfaces this exact gap as the M9.R.15c handoff.
     ## libxml2 ships xmllint, consumed by gtk4's GResource compile
     ## step to validate the XML bundle manifests.
     "libxml2"
