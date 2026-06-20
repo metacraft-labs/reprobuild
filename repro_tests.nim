@@ -6014,6 +6014,21 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.R.13c.1 — deterministic stale-pipe recovery for the canonical
+  # Windows runquota named pipe. Pre-M9.R.13c the operator had to
+  # ``Stop-Process runquotad.exe`` between every from-source build
+  # whenever the prior daemon had been killed without releasing its
+  # NPFS handle; M9.R.13c.1 closes the gap by adding a client-side
+  # owner-liveness probe + auto-recovery. The test pins the probe
+  # classifier + the no-op idempotence of the recovery helper.
+  TestSpec(
+    source: "tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim",
+    binary: "build/test-bin/t_m9r13c_1_runquota_stale_pipe_recovery",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",

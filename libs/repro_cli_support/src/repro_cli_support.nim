@@ -9037,6 +9037,33 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
   # is genuinely accepting connections.
   if isRunQuotaDaemonReachable():
     return nil
+  # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
+  # blocked every M9.R.13b iter past iter 11 (and forced the operator
+  # to manually ``Stop-Process`` ``runquotad.exe`` between every build)
+  # is now closed at the client side: when the pipe exists in NPFS but
+  # ``probeWindowsPipeOwner`` reports its owner as dead / inaccessible
+  # / unknown, we terminate the dead owner so the kernel reclaims the
+  # NPFS object and then fall through to the fresh-spawn block below.
+  # The killer-of-last-resort path is conservative — we only terminate
+  # processes we can prove are the canonical pipe's server, never a
+  # generic Stop-Process equivalent.
+  when defined(windows):
+    let canonicalPipe = defaultRunQuotaWindowsPipePath()
+    if canonicalPipe.len > 0:
+      let probe = probeWindowsPipeOwner(canonicalPipe)
+      if probe.status == wpsStale:
+        # Owner is dead or inaccessible — drop it so NPFS releases the
+        # name. ``terminateStalePipeOwner`` is a no-op when the owner
+        # has already exited (the kernel may take milliseconds to reap
+        # the handle after process exit).
+        discard terminateStalePipeOwner(probe.serverPid)
+        # Give NPFS a tick to clear the handle then re-probe so the
+        # subsequent ``isRunQuotaDaemonReachable`` block in the spawn
+        # loop sees a healthy daemon.
+        for _ in 0 ..< 10:
+          if probeWindowsPipeOwner(canonicalPipe).status == wpsAbsent:
+            break
+          sleep(50)
   let runquotad = findRunQuotaDaemonBin()
   if runquotad.len == 0:
     # No daemon binary discovered. Return nil silently — downstream

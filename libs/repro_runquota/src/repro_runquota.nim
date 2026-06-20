@@ -252,23 +252,213 @@ proc helperCliArgs*(request: ReproResourceRequest;
   result.add(command.argv)
 
 when defined(windows):
+  import std/winlean
+
   proc waitNamedPipeW(name: WideCString; ms: uint32): int32 {.
     stdcall, dynlib: "kernel32", importc: "WaitNamedPipeW".}
+
+  proc getNamedPipeServerProcessIdW(handle: Handle;
+                                    serverPid: ptr int32): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "GetNamedPipeServerProcessId".}
+
+  proc openProcessHandle(access: int32; inheritHandle: WINBOOL;
+                         processId: int32): Handle {.
+    stdcall, dynlib: "kernel32", importc: "OpenProcess".}
+
+  proc terminateProcessHandle(handle: Handle; exitCode: int32): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "TerminateProcess".}
+
+  proc getExitCodeProcessW(handle: Handle; exitCode: ptr int32): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "GetExitCodeProcess".}
+
+  proc closeHandleLocal(handle: Handle): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "CloseHandle".}
+
+  proc createFileWLocal(name: WideCString; access: int32; share: int32;
+                        security: pointer; disposition: int32;
+                        flags: int32; templ: Handle): Handle {.
+    stdcall, dynlib: "kernel32", importc: "CreateFileW".}
+
+  const
+    rqWinGenericRead = 0x80000000'i32
+    rqWinGenericWrite = 0x40000000'i32
+    rqWinOpenExisting = 3'i32
+    rqWinProcessQueryLimitedInfo = 0x1000'i32
+    rqWinProcessTerminate = 0x0001'i32
+    rqWinStillActive = 259'i32
+    rqWinInvalidHandle = cast[Handle](-1)
+
+  type
+    WindowsPipeStatus* = enum
+      ## Result of probing the canonical Windows runquota named pipe.
+      ##
+      ## ``wpsAbsent`` — pipe does not exist in NPFS.
+      ## ``wpsHealthy`` — pipe exists AND owner process is alive (caller
+      ##   should attempt the Hello/HelloOk round-trip).
+      ## ``wpsStale`` — pipe exists but owner is unknown, dead, or
+      ##   inaccessible. Caller should attempt stale-pipe recovery.
+      wpsAbsent
+      wpsHealthy
+      wpsStale
+
+    WindowsPipeProbe* = object
+      ## Diagnostic record returned by ``probeWindowsPipeOwner``. The
+      ## status enum drives client-side flow; the ``serverPid`` field
+      ## is non-zero when the kernel reported a valid owner, even if
+      ## the process has since exited. ``ownerAlive`` is the freshly
+      ## measured liveness; ``failureReason`` is human-readable
+      ## diagnostic copy threaded into ``ReproRunQuotaError``.
+      status*: WindowsPipeStatus
+      serverPid*: int32
+      ownerAlive*: bool
+      failureReason*: string
+
+  proc probeWindowsPipeOwner*(pipePath: string): WindowsPipeProbe =
+    ## **Stale-pipe detection** (M9.R.13c.1). Probes the canonical
+    ## runquota named pipe and classifies it as absent / healthy / stale.
+    ##
+    ## The stale case (pipe exists in NPFS, no live server process owns
+    ## it) is what made every from-source build wedge indefinitely on
+    ## the M9.R.13b agent's iter 12 → 14 sequence. Before this milestone
+    ## the operator had to manually kill the dead ``runquotad.exe``
+    ## (typically a crashed instance from a prior interrupted build);
+    ## after this milestone the client detects the dead owner and the
+    ## caller (``startAutoRunQuotaIfNeeded``) recovers automatically.
+    ##
+    ## ``WaitNamedPipeW(0)`` returns instantly with a hint about
+    ## existence (we use 50ms timeout for a fast probe). When the pipe
+    ## exists we open it with ``CreateFileW`` (no IPC traffic — just a
+    ## handle for ``GetNamedPipeServerProcessId``). If the kernel
+    ## reports a server PID we additionally probe its liveness via
+    ## ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) +
+    ## GetExitCodeProcess`` — a non-``STILL_ACTIVE`` exit code or an
+    ## inaccessible process => stale.
+    result = WindowsPipeProbe(status: wpsAbsent)
+    let wide = newWideCString(pipePath)
+    if waitNamedPipeW(wide, 50'u32) == 0:
+      result.failureReason = "WaitNamedPipeW reported pipe absent"
+      return result
+    # Pipe exists — open a transient handle so we can query the owner.
+    let handle = createFileWLocal(
+      wide,
+      rqWinGenericRead or rqWinGenericWrite,
+      0'i32,
+      nil,
+      rqWinOpenExisting,
+      0'i32,
+      0
+    )
+    if handle == rqWinInvalidHandle:
+      # Pipe exists per WaitNamedPipeW but we can't open it — treat as
+      # stale (the caller will attempt recovery). The most common cause
+      # is ERROR_PIPE_BUSY with every instance already wedged on dead
+      # workers; the recovery path terminates the owner regardless.
+      result.status = wpsStale
+      result.failureReason = "CreateFileW probe failed: error " &
+        $osLastError().int32
+      return result
+    var serverPid: int32 = 0
+    let pidOk = getNamedPipeServerProcessIdW(handle, addr serverPid)
+    discard closeHandleLocal(handle)
+    if pidOk == 0 or serverPid == 0:
+      result.status = wpsStale
+      result.failureReason =
+        "GetNamedPipeServerProcessId returned no owner PID"
+      return result
+    result.serverPid = serverPid
+    # Owner PID known — probe liveness via GetExitCodeProcess. If we
+    # can't open the process (access denied or PID reused after exit)
+    # we treat the pipe as stale; the recovery path will fall back to a
+    # fresh spawn either way.
+    let owner = openProcessHandle(
+      rqWinProcessQueryLimitedInfo, WINBOOL(0), serverPid)
+    if owner == 0:
+      result.status = wpsStale
+      result.failureReason =
+        "OpenProcess on owner PID " & $serverPid & " failed: error " &
+        $osLastError().int32
+      return result
+    var exitCode: int32 = 0
+    let exitOk = getExitCodeProcessW(owner, addr exitCode)
+    discard closeHandleLocal(owner)
+    if exitOk == 0:
+      result.status = wpsStale
+      result.failureReason =
+        "GetExitCodeProcess on owner PID " & $serverPid &
+        " failed: error " & $osLastError().int32
+      return result
+    if exitCode != rqWinStillActive:
+      result.status = wpsStale
+      result.ownerAlive = false
+      result.failureReason =
+        "owner PID " & $serverPid & " has exited (exit code " &
+        $exitCode & ") but pipe persists in NPFS"
+      return result
+    result.status = wpsHealthy
+    result.ownerAlive = true
+
+  proc terminateStalePipeOwner*(pid: int32): bool =
+    ## Terminate the (possibly wedged) owner of a stale runquota pipe so
+    ## the kernel reclaims the NPFS object. Returns true on success or
+    ## when the owner is already dead. The caller's job is to then spawn
+    ## a fresh ``runquotad`` — the recovery path in
+    ## ``startAutoRunQuotaIfNeeded`` does both atomically.
+    if pid <= 0:
+      return true
+    let handle = openProcessHandle(
+      rqWinProcessTerminate or rqWinProcessQueryLimitedInfo,
+      WINBOOL(0), pid)
+    if handle == 0:
+      # Likely the process already exited between probe and terminate —
+      # treat as success so the caller spawns a fresh daemon.
+      return true
+    defer: discard closeHandleLocal(handle)
+    var exitCode: int32 = 0
+    if getExitCodeProcessW(handle, addr exitCode) != 0 and
+       exitCode != rqWinStillActive:
+      # Already exited; nothing to terminate.
+      return true
+    result = terminateProcessHandle(handle, 1'i32) != 0
+    # Poll briefly so the kernel has time to reap the process and free
+    # the NPFS handle. 500ms is enough for a clean Job-Object teardown.
+    for _ in 0 ..< 50:
+      var ec: int32 = 0
+      if getExitCodeProcessW(handle, addr ec) != 0 and
+         ec != rqWinStillActive:
+        return true
+      sleep(10)
+
+  proc defaultRunQuotaWindowsPipePath*(): string =
+    ## Canonical per-user runquota pipe path. Mirrors
+    ## ``runquota_ipc.defaultEndpoint`` for the Windows branch so callers
+    ## that need the literal pipe string (the stale-pipe recovery flow)
+    ## don't have to crack the ``Endpoint`` object.
+    let endpoint = defaultEndpoint()
+    if endpoint.kind == endpointNamedPipe:
+      endpoint.path
+    else:
+      ""
 
 proc isRunQuotaDaemonReachable*(): bool =
   ## Cheap probe used by the CLI to decide whether to fall back to the
   ## path-mode bypass. On Windows we first do a fast WaitNamedPipeW
-  ## existence check so an absent daemon fails in milliseconds. If the
-  ## pipe exists we still do the synchronous Hello/HelloOk round-trip
-  ## (no client-side timeout); a wedged daemon will require the
-  ## operator to kill ``runquotad`` and retry — see the
-  ## project_runquotad_stale_daemon_wedge memory.
+  ## existence check so an absent daemon fails in milliseconds. M9.R.13c
+  ## extends this with a stale-pipe classifier (``probeWindowsPipeOwner``):
+  ## a pipe whose server process has exited would previously hang the
+  ## Hello round-trip indefinitely, but we now classify it as
+  ## unreachable so ``startAutoRunQuotaIfNeeded`` can terminate the dead
+  ## owner and spawn fresh. The Hello/HelloOk round-trip still runs for
+  ## the healthy case; a healthy classifier means the round-trip will
+  ## complete in milliseconds.
   when defined(windows):
     let endpoint = defaultEndpoint()
     if endpoint.kind == endpointNamedPipe:
-      let wide = newWideCString(endpoint.path)
-      if waitNamedPipeW(wide, 100'u32) == 0:
+      let probe = probeWindowsPipeOwner(endpoint.path)
+      case probe.status
+      of wpsAbsent, wpsStale:
         return false
+      of wpsHealthy:
+        discard
   try:
     var client = connectDefault()
     client.close()
