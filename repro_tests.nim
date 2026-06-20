@@ -5894,6 +5894,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
+    binary: "build/test-bin/t_m9r12_4_autotools_emits_fetch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim",
     binary: "build/test-bin/t_m9r12_sh_inline_exec_and_typed_tool_fallback",
     defines: @[],
