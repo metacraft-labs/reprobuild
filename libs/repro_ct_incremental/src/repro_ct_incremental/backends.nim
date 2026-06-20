@@ -61,6 +61,24 @@ type
       ## distinct from the two above (Nim can be recorded either way; this slot
       ## holds the dedicated instrumented variant when it lands). Not yet
       ## implemented — routes to a fail-safe re-run.
+    tbSourceCtfs
+      ## Modern CTFS `.ct` bundle from an INTERPRETED-language recorder (M12). The
+      ## bundle carries `function`/`call` records (read via the CTFS reader /
+      ## `ct-print`), so the executed-function set comes from CTFS — but a
+      ## function's identity is still its *source text* (it is an interpreted
+      ## language), so this backend pairs CTFS dependency discovery with the
+      ## SAME source-text shallow hasher the `tbSourceInterpreted` path uses.
+      ##
+      ## # Why a distinct backend (and why it does not break `tbNativeDwarf`)
+      ##
+      ## A `.ct` container's mere PRESENCE is, by `structuralBackend`, a NATIVE
+      ## signal (the native recorders emit CTFS), so a bare `.ct` dir still
+      ## detects as `tbNativeDwarf` (instruction-byte hashing) — unchanged from
+      ## M6/M8. An INTERPRETED CTFS bundle is distinguished by an EXPLICIT
+      ## `recorder_backend: "ctfs-interpreted"` metadata signal, which selects
+      ## this backend (CTFS discovery + source hashing). So the existing native
+      ## `.ct` path is untouched; the interpreted-CTFS path is opt-in via explicit
+      ## metadata.
 
   # The two seams. Each is a small object of procs so a backend can be added by
   # supplying a new pair without touching the engine's decide/record logic. A
@@ -122,7 +140,10 @@ func backendOfRecorderField(value: string): Result[TraceBackend, string] =
   ## Recognised values (case-insensitive) mirror the recorder identifiers used
   ## across the CodeTracer recorders:
   ##   * ``rr`` / ``mcr`` / ``ttd``      ⇒ native (instruction-byte) path.
-  ##   * ``interpreter``                 ⇒ source/interpreted path.
+  ##   * ``interpreter``                 ⇒ source/interpreted path (legacy JSON).
+  ##   * ``ctfs-interpreted``            ⇒ modern CTFS bundle from an interpreted
+  ##                                       recorder (M12): CTFS discovery + source
+  ##                                       text hashing.
   ##   * ``nim-instrumented``            ⇒ the reserved Nim instrumented path.
   ## An unrecognised value is an `Err` so a typo/forward-incompatible recorder
   ## name fails safe (the engine re-runs) rather than guessing a path.
@@ -131,6 +152,8 @@ func backendOfRecorderField(value: string): Result[TraceBackend, string] =
     ok(tbNativeDwarf)
   of "interpreter", "interpreted", "source", "source-interpreted":
     ok(tbSourceInterpreted)
+  of "ctfs-interpreted", "ctfs_interpreted", "ctfs-source", "interpreted-ctfs":
+    ok(tbSourceCtfs)
   of "nim-instrumented", "nim_instrumented", "instrumented":
     ok(tbNimInstrumented)
   else:
@@ -228,8 +251,9 @@ proc detectBackend*(traceDir: string): Result[TraceBackend, string] =
   ##   1. EXPLICIT metadata wins: if either `trace_metadata.json` or
   ##      `trace_db_metadata.json` carries a `recorder_backend` string field, that
   ##      value selects the backend (recognised values: `rr`/`mcr`/`ttd` ⇒ native,
-  ##      `interpreter` ⇒ source, `nim-instrumented` ⇒ the reserved Nim path).
-  ##      An explicit-but-unrecognised value is an `Err` (fail safe).
+  ##      `interpreter` ⇒ source (legacy JSON), `ctfs-interpreted` ⇒ modern CTFS
+  ##      from an interpreted recorder, `nim-instrumented` ⇒ the reserved Nim
+  ##      path). An explicit-but-unrecognised value is an `Err` (fail safe).
   ##   2. STRUCTURE otherwise: a canonical `trace.json` ⇒ source/interpreted; an
   ##      `rr/` subdir, a `*.ct` CTFS container, or a `trace_db_metadata.json`
   ##      sidecar ⇒ native.

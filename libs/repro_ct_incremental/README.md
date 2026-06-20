@@ -21,6 +21,42 @@ milestones).
 The confirmed JSON trace schema (and the real recording it was modeled on) is
 documented in `tests/fixtures/m0_three_funcs/README.md`.
 
+## M12 — modern CTFS `.ct` ingestion
+
+`readExecutedFunctionsCtfs(traceDirOrCtFile)` (in `ctfs_trace.nim`) reads the
+executed-function set from a **modern CTFS `.ct` bundle** — the binary container
+the native recorders emit — rather than the legacy 3-file JSON. It runs
+`ct-print --json-events <bundle>` (from `codetracer-trace-format-nim`) and parses
+the resulting `type`-tagged event array (`path`/`function`/`call`/`step`),
+mapping `call.function_id → function.name` for the executed set and resolving
+each function's source `file`/`defLine` best-effort from the call's `entry_step`.
+
+Two correctness-critical details:
+
+- **Tolerant parsing of non-UTF-8 bytes.** `--json-events` embeds recorded
+  `value` payloads as a `data` string that can carry **raw non-UTF-8 bytes**
+  (CBOR), so the whole dump is not valid UTF-8. The reader sanitizes invalid
+  bytes to U+FFFD before `std/json` parses it; the structural records it reads
+  are pure ASCII, so they are never corrupted.
+- **A read error can NEVER yield a skip.** `ct-print` unavailable, an
+  unresolvable/corrupt bundle, a non-zero subprocess exit, or malformed output
+  all produce an `Err`. The engine turns any `Err` into a re-run.
+
+**Backend wiring.** An interpreted-language `.ct` bundle is selected by the new
+`tbSourceCtfs` backend via an explicit `recorder_backend: "ctfs-interpreted"`
+metadata signal — it pairs **CTFS dependency discovery** with the **same
+source-text shallow hasher** the legacy `tbSourceInterpreted` path uses (the
+bundle is from an interpreted recorder, so a function's identity is its source
+text). A bare `.ct` container with no explicit metadata still detects as
+`tbNativeDwarf` (instruction-byte hashing), so the existing native and
+source-JSON paths are untouched.
+
+The `ct-print` resolution order is `CT_PRINT` env → `PATH` → the known build path
+`/tmp/ctprint_build/ct-print`. The prototype reads CTFS via this subprocess; the
+**production path** is to link `codetracer-trace-format-nim`'s reader directly
+(no subprocess). The M12 fixture (`tests/fixtures/m12_ctfs/`) is a **real** `.ct`
+bundle recorded from `live_demo.rb` by the native Ruby recorder.
+
 ## Supported languages (M10 — the full matrix)
 
 CodeTracer has exactly **two** incremental-testing mechanisms (spec §16.7),

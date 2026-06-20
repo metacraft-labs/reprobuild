@@ -62,12 +62,14 @@ import extractors
 import backends
 import native_trace
 import native_hash
+import ctfs_trace
 
 export trace_reader
 export extractors
 export backends
 export native_trace
 export native_hash
+export ctfs_trace
 
 type
   IncrementalDecisionKind* = enum
@@ -306,6 +308,18 @@ let
     discovery: newDependencyDiscovery(readExecutedFunctionsNative),
     hasher: newShallowHasher(shallowHashOfDepNative))
 
+  sourceCtfsStrategies = BackendStrategies(
+    backend: tbSourceCtfs,
+    # M12: dependency discovery reads the executed-function set from a MODERN
+    # CTFS `.ct` bundle (via `ct-print --json-events`, tolerant of non-UTF-8
+    # value bytes); shallow hashing reuses the SAME source-text hasher the
+    # `tbSourceInterpreted` path uses (the bundle is from an INTERPRETED
+    # recorder, so a function's identity is its source text). The CTFS reader
+    # populates each dep's `file`/`defLine` from the call's entry step, so the
+    # existing source extractor + `{deepHash, deps}` cache shape work unchanged.
+    discovery: newDependencyDiscovery(readExecutedFunctionsCtfs),
+    hasher: newShallowHasher(shallowHashOfDepSource))
+
 proc backendStrategies*(backend: TraceBackend): BackendStrategies =
   ## Select the `(DependencyDiscovery, ShallowHasher)` pair for a backend.
   ## `tbSourceInterpreted` (Phase 1) and `tbNativeDwarf` (M8) are both wired; the
@@ -317,6 +331,8 @@ proc backendStrategies*(backend: TraceBackend): BackendStrategies =
     sourceInterpretedStrategies
   of tbNativeDwarf:
     nativeDwarfStrategies
+  of tbSourceCtfs:
+    sourceCtfsStrategies
   of tbNimInstrumented:
     # Reserved: discovery/hasher are nil until the Nim instrumented impl lands.
     BackendStrategies(backend: backend)
@@ -613,16 +629,37 @@ proc nativeTraceDirReadable(traceDir: string): Result[void, string] =
     return err("unreadable native trace file " & p & ": " & e.msg)
   ok()
 
+proc ctfsTraceDirReadable(traceDir: string): Result[void, string] =
+  ## The CTFS-backend readability probe (M12 fail-safe). A CTFS trace dir must
+  ## exist and contain a resolvable `.ct` bundle, and `ct-print` must be
+  ## resolvable — otherwise we cannot read the executed-function set and MUST
+  ## re-run rather than risk a skip against a bundle we cannot see. (Whether the
+  ## bundle's CONTENTS parse is checked later, by the discovery seam, which also
+  ## Errs ⇒ re-run.)
+  if not dirExists(traceDir) and
+      not (fileExists(traceDir) and traceDir.toLowerAscii().endsWith(".ct")):
+    return err("missing CTFS trace dir/bundle: " & traceDir)
+  let bundleRes = resolveCtBundle(traceDir)
+  if bundleRes.isErr:
+    return err(bundleRes.error)
+  let ctPrintRes = resolveCtPrint()
+  if ctPrintRes.isErr:
+    return err(ctPrintRes.error)
+  ok()
+
 proc traceDirReadable(traceDir: string; backend: TraceBackend):
     Result[void, string] =
   ## Backend-dispatched readability probe. Each backend has its own required
   ## trace files (source: `trace.json`+`trace_paths.json`; native:
-  ## `native_calltrace.json`), so the probe must run AFTER backend detection.
+  ## `native_calltrace.json`; CTFS: a resolvable `.ct` bundle + `ct-print`), so
+  ## the probe must run AFTER backend detection.
   case backend
   of tbSourceInterpreted:
     sourceTraceDirReadable(traceDir)
   of tbNativeDwarf:
     nativeTraceDirReadable(traceDir)
+  of tbSourceCtfs:
+    ctfsTraceDirReadable(traceDir)
   of tbNimInstrumented:
     # The reserved Nim instrumented backend has no wired strategies; the
     # caller's `strategiesImplemented` guard fail-safes before this is reached.
@@ -646,7 +683,10 @@ proc currentDepLocations(deps: seq[CachedDep]; traceDir: string;
   ##     path so the current hash becomes the `"missing"` sentinel ⇒ a re-run,
   ##     never a skip.
   case backend
-  of tbSourceInterpreted, tbNimInstrumented:
+  of tbSourceInterpreted, tbSourceCtfs, tbNimInstrumented:
+    # CTFS-interpreted deps carry a source path + defLine (resolved from the
+    # call's entry step) that the source hasher resolves under the CURRENT
+    # `sourceRoot`, exactly like the legacy source path — so no rebind is needed.
     ok(deps)
   of tbNativeDwarf:
     let binRes = nativeTraceBinary(traceDir)
