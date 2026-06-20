@@ -1,6 +1,10 @@
 import std/[algorithm, json, os, osproc, strutils, tempfiles, times, unittest]
+when defined(posix):
+  import std/posix
 
 import repro_build_engine
+import repro_core
+import repro_depfile
 import repro_hash
 import repro_local_store
 import repro_monitor_depfile
@@ -100,18 +104,47 @@ proc fixtureMain(args: seq[string]) =
     fixtureWrite(args[4], "depfile output\n")
     fixtureWrite(args[5], args[4] & ": " & args[2] & " " & args[3] & "\n")
   of "monitor":
-    if args.len != 5:
+    # dgDeclaredOnly removal: ``monitor-action`` no longer hand-writes a
+    # synthetic RMDF for the engine to read back. The default automatic
+    # monitor policy now wraps this process under real ``repro-fs-snoop``,
+    # so the action must perform the file operations it wants reflected in
+    # the monitor evidence. Argv layout is now:
+    #   "monitor" <input-path> <output-path>
+    # - read <input-path>      -> monitorReads
+    # - write <output-path>    -> monitorWrites
+    # - stat a non-existent    -> monitorProbes (prAbsent)
+    #
+    # The operations use RAW POSIX open/read/write/stat (not Nim's buffered
+    # readFile/writeFile): the LD_PRELOAD monitor shim interposes the public
+    # libc open/read/write/stat symbols, but glibc stdio (fopen/fread) makes
+    # its internal open/read calls without going through the PLT, so a
+    # buffered read/write would be invisible to the monitor.
+    if args.len != 4:
       quit 64
-    fixtureWrite(args[3], "monitor output\n")
-    writeCanonical(args[4], [
-      MonitorRecord(kind: mrFileRead, observationKind: moFileRead, seq: 4,
-        osPid: 100, threadId: 1, path: args[2]),
-      MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite, seq: 5,
-        osPid: 100, threadId: 1, path: args[3]),
-      MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe, seq: 6,
-        osPid: 100, threadId: 1, probeResult: prAbsent,
-        path: args[2] & ".missing")
-    ])
+    let monitorInput = args[2]
+    let monitorOutput = args[3]
+    when defined(posix):
+      createDir(monitorOutput.splitPath.head)
+      let inFd = posix.open(monitorInput.cstring, O_RDONLY)
+      if inFd < 0:
+        quit 70
+      var buf {.noinit.}: array[4096, char]
+      discard posix.read(inFd, addr buf[0], buf.len)
+      discard posix.close(inFd)
+      let outFd = posix.open(monitorOutput.cstring,
+        O_WRONLY or O_CREAT or O_TRUNC, Mode(0o644))
+      if outFd < 0:
+        quit 71
+      const monitorPayload = "monitor output\n"
+      discard posix.write(outFd, monitorPayload.cstring, monitorPayload.len)
+      discard posix.close(outFd)
+      # Probe a deliberately absent sibling so the monitor records an absent
+      # path-probe (the linux/macos shim hooks stat -> moPathProbe).
+      var probeStat: Stat
+      discard posix.stat((monitorInput & ".missing").cstring, probeStat)
+    else:
+      fixtureWrite(monitorOutput, "monitor output\n")
+      discard fileExists(monitorInput & ".missing")
   of "emit-dyndep":
     # M25: copy a prepared dyndep fragment from <source-path> to
     # <fragment-output-path>. The source file is staged by the test ahead
@@ -126,6 +159,45 @@ proc fixtureMain(args: seq[string]) =
 
 proc weak(name: string): ContentDigest =
   weakFingerprintFromText("m12.integration." & name)
+
+proc reportPolicy(kind: DependencyGatheringKind;
+                  reportPath: string): DependencyGatheringPolicy =
+  ## dgDeclaredOnly removal: actions that used to carry the legacy
+  ## ``depfile``/``monitorDepfile`` convenience fields now declare an explicit
+  ## dependency-gathering policy. ``dgRecognizedFormat`` parses a Make-format
+  ## ``.d`` sidecar (the same shape ``fixtureMain``'s ``depfile`` mode emits)
+  ## as the action's recognized dependency report. Mirrors the helper in
+  ## ``t_integration_scheduler_dependency_gathering_policies.nim``.
+  DependencyGatheringPolicy(
+    kind: kind,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(MakeDepfileFormatName),
+        outputs: @[ExpectedDependencyFile(
+          logicalName: "deps",
+          path: reportPath,
+          required: true)],
+        completeness: decComplete)
+    ])
+
+when defined(macosx) or defined(linux):
+  # dgDeclaredOnly removal: the default policy is now ``dgAutomaticMonitor``,
+  # so every default-policy process action is wrapped under real
+  # ``repro-fs-snoop`` (the test must provide a monitor driver, never a stub).
+  # The fs-snoop wrapper and shim are expensive to build, so compile/resolve
+  # them once per process and reuse across the suite's cases (the shim is
+  # exported via the env var so engine-launched fs-snoop children inherit it).
+  var cachedMonitorTools: MonitorTools
+  var cachedMonitorToolsReady = false
+
+  proc monitorTools(repoRoot: string): MonitorTools =
+    if not cachedMonitorToolsReady:
+      cachedMonitorTools = prepareMonitorTools(repoRoot,
+        repoRoot / "build" / "test-monitor-bea", "bea-monitor")
+      putEnv("REPRO_MONITOR_SHIM_LIB", cachedMonitorTools.shim)
+      cachedMonitorToolsReady = true
+    cachedMonitorTools
 
 proc prepopulateCache(cacheRoot, workRoot, markerPath, outputPath: string) =
   let inputPath = workRoot / "cache" / "input.txt"
@@ -188,6 +260,7 @@ suite "integration_build_engine_api_ready_queue":
         discard runBuild(buildGraph, defaultBuildEngineConfig(tempRoot))
 
     test "runBuild emits progress callbacks for process action lifecycle":
+      let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-progress-api", "")
       defer: removeDir(tempRoot)
 
@@ -203,6 +276,7 @@ suite "integration_build_engine_api_ready_queue":
       var config = BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 1'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -262,6 +336,7 @@ suite "integration_build_engine_api_ready_queue":
       check sawCompleted
 
     test "runBuild fast no-op cache hit skips process launch and RunQuota probe":
+      let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-fast-noop-api", "")
       defer: removeDir(tempRoot)
 
@@ -281,6 +356,7 @@ suite "integration_build_engine_api_ready_queue":
       var config = BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 1'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -432,6 +508,7 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -541,6 +618,7 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
@@ -598,6 +676,7 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
@@ -655,6 +734,7 @@ suite "integration_build_engine_api_ready_queue":
       #   3. schedule ``synth-copy`` so its output exists before the
       #      consumer launches,
       #   4. surface ``synth-copy``'s result in ``buildResult.results``.
+      let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m25-action-create", "")
       defer: removeDir(tempRoot)
 
@@ -701,6 +781,7 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -853,6 +934,7 @@ suite "integration_build_engine_api_ready_queue":
       # creates two new actions A and B and declares B depends on A. The
       # scheduler must materialise both, run A before B, then run the
       # consumer (which depends on B via a dep edge in the same fragment).
+      let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m25-two-create", "")
       defer: removeDir(tempRoot)
 
@@ -897,6 +979,7 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -928,6 +1011,7 @@ suite "integration_build_engine_api_ready_queue":
         traceIndex("stage-b", "asSucceeded")
 
     test "cache hit skips CAS verification only when outputs are present":
+      let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-cache-hit-present-output", "")
       defer: removeDir(tempRoot)
 
@@ -969,6 +1053,7 @@ suite "integration_build_engine_api_ready_queue":
         let buildResult = runBuild(graph([buildAction]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
+          monitorCliPath: monitorTools(repoRoot).fsSnoop,
           maxParallelism: 1'u32,
           stdoutLimit: 256 * 1024,
           stderrLimit: 256 * 1024,
@@ -1140,22 +1225,35 @@ suite "integration_build_engine_api_ready_queue":
         cwd = workRoot, deps = ["will-fail"], outputs = ["failure/blocked.txt"],
         commandStatsId = "blocked-child")
 
+      # dgDeclaredOnly removal: the legacy ``depfile`` convenience field is
+      # gone. Declare an explicit ``dgRecognizedFormat`` policy whose Make-format
+      # ``.d`` report (the file the fixture's ``depfile`` mode emits) supplies
+      # the parsed ``depfileInputs`` evidence asserted below.
       let depfilePath = workRoot / "deps" / "action.d"
       actions.add action("depfile-action", [app, "fixture-action", "depfile",
         depInputA, depInputB, workRoot / "deps" / "out.txt", depfilePath],
         cwd = workRoot, inputs = [depInputA], outputs = ["deps/out.txt"],
-        depfile = depfilePath, commandStatsId = "depfile-action")
+        dependencyPolicy = reportPolicy(dgRecognizedFormat, "deps/action.d"),
+        commandStatsId = "depfile-action")
 
-      let monitorDepfilePath = workRoot / "monitor" / "action.rmdf"
+      # dgDeclaredOnly removal: the legacy ``monitorDepfile`` field (which made
+      # the engine read a hand-written RMDF) is gone. Under the default
+      # automatic-monitor policy the engine wraps this process in real
+      # ``repro-fs-snoop`` and records the syscalls the fixture actually makes:
+      # the read of ``monitorInput`` (monitorReads), the write of ``out.txt``
+      # (monitorWrites) and the absent path-probe of ``monitorInput & ".missing"``
+      # (monitorProbes) asserted below.
       actions.add action("monitor-action", [app, "fixture-action", "monitor",
-        monitorInput, workRoot / "monitor" / "out.txt", monitorDepfilePath],
+        monitorInput, workRoot / "monitor" / "out.txt"],
         cwd = workRoot, inputs = [monitorInput], outputs = ["monitor/out.txt"],
-        monitorDepfile = monitorDepfilePath, commandStatsId = "monitor-action")
+        dependencyPolicy = automaticMonitorGatheringPolicy(),
+        commandStatsId = "monitor-action")
 
       let buildGraph = graph(actions, [pool("link", 2'u32)])
       let buildResult = runBuild(buildGraph, BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
+        monitorCliPath: monitorTools(repoRoot).fsSnoop,
         maxParallelism: 16'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
