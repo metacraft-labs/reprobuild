@@ -34,7 +34,11 @@ package kbookmarksSource:
     "kcoreaddons >=6.0"
     "kconfig >=6.0"
     "kwidgetsaddons >=6.0"
-    "kxmlgui >=6.0"
+    # NOTE: kbookmarks's CMakeLists also probes for KF6IconThemes +
+    # KF6CodecsView at configure but BUILD_TESTING=OFF skips the
+    # consumers; the runtime artifact only needs Config + Widgets +
+    # CoreAddons. Avoid declaring kxmlgui here because kxmlgui consumes
+    # kio which consumes kbookmarks (cyclic).
 
   config:
     discard
