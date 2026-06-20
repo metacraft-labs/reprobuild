@@ -9065,11 +9065,29 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
   # domain sockets need a concrete filesystem path, the PID guards
   # against collisions between concurrent daemons, and the
   # filesystem reclaims the inode when the daemon exits.
+  # M9.R.12.3 — declare the standard named pools the convention layer
+  # registers (``compile`` + ``fetch``). Without these flags the daemon
+  # initialises ``namedPoolCaps`` empty, so every action that requests
+  # a non-empty ``pool`` (which the M9.R.6.1 convention sentinel +
+  # M9.R.12.1 autotools_package configure action + every from-source-*
+  # convention does) hits the
+  # ``lease request exceeds named-pool budget: <name>`` denial and the
+  # ``automaticMonitor`` retry loop spins until exhaustion.
+  #
+  # Caps mirror what the standard provider's convention bodies declare
+  # at ``buildPool("compile", 8'u32)`` / ``buildPool("fetch", 2'u32)``
+  # — the engine-side ``poolCapacity`` table already pins these values
+  # for in-process gating; the daemon now sees the matching budget.
+  let standardPoolArgs = @[
+    "--pool", "compile=8",
+    "--pool", "fetch=2"
+  ]
   when defined(windows):
-    let args = @[
+    var args = @[
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
       "--memory-bytes", "17179869184"
     ]
+    args.add(standardPoolArgs)
     # Clear any stale value so the client side falls through to
     # ``defaultEndpoint`` and meets the daemon on the per-user pipe.
     putEnv("RUNQUOTA_SOCKET", "")
@@ -9079,11 +9097,12 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
       $getCurrentProcessId() & ".sock")
     if fileExists(socket):
       removeFile(socket)
-    let args = @[
+    var args = @[
       "--socket", socket,
       "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
       "--memory-bytes", "17179869184"
     ]
+    args.add(standardPoolArgs)
     putEnv("RUNQUOTA_SOCKET", socket)
   result = startProcess(runquotad, args = args, options = {poUsePath})
   for _ in 0 ..< 300:
