@@ -3265,6 +3265,50 @@ var fromSourceCycleBrokenTools*: HashSet[string] = initHashSet[string]()
   ## Windows, tarball anywhere); the rest of the chain still builds from
   ## source. Exported for test introspection.
 
+const BootstrapCycleBreakTools* = @[
+  ## M9.R.14c.2 — pre-seeded cycle-break taxonomy for the bootstrap
+  ## tool chain. The dispatcher's reactive cycle break (M9.R.10a) only
+  ## fires on the closing edge of a recursion cycle, so the
+  ## ``gcc → binutils → gcc`` cycle adds ``gcc`` to the set but leaves
+  ## ``binutils`` (and its sub-binaries) untouched. That left the
+  ## binutils-from-source compile in the autotools smoke loop — ~15
+  ## minutes per iteration even when binutils is just an implementation
+  ## detail of the bootstrap layer.
+  ##
+  ## The proactive seed treats the GNU bootstrap layer as a
+  ## stdlib-provisioned floor: ``gcc``, ``make``, and ``binutils``
+  ## (plus its 11 sub-binaries) come from nix on Linux/macOS, scoop on
+  ## Windows, tarball anywhere — the upper layers (autoconf / automake
+  ## / libtool / etc.) still build from source. This makes
+  ## ``--tool-provisioning=from-source`` pragmatic without sacrificing
+  ## the from-source guarantee for actual application recipes.
+  ##
+  ## Binutils sub-binaries enumerated to match
+  ## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/binutils.nim``
+  ## (the stdlib package layout shipping 8 separate package blocks per
+  ## the macro layer's "one executable per package" restriction). The
+  ## remaining 3 binaries (``readelf`` / ``size`` / ``strings``) are
+  ## listed here so the recipe corpus can cycle-break them when
+  ## consumed even though the stdlib doesn't ship typed wrappers yet.
+  "gcc", "g++", "cc", "c++",
+  "make", "gmake",
+  "binutils",
+  "ld", "ar", "ranlib", "strip", "nm", "objdump", "objcopy", "as",
+  "readelf", "size", "strings",
+]
+  ## Exported so tests + the dispatcher init code can audit + seed the
+  ## list without re-declaring it.
+
+proc seedBootstrapCycleBreakTools*() =
+  ## M9.R.14c.2 — populate ``fromSourceCycleBrokenTools`` with the
+  ## bootstrap tool chain. Idempotent: re-running is a no-op. The CLI
+  ## calls this once during ``--tool-provisioning=from-source`` setup
+  ## so the resolver short-circuits binutils + gcc + make to stdlib
+  ## provisioning from the first probe pass on, instead of waiting for
+  ## the dispatcher to discover the cycle reactively.
+  for tool in BootstrapCycleBreakTools:
+    fromSourceCycleBrokenTools.incl(tool)
+
 proc fromSourceRecipeRoot*(): string =
   ## Resolve the from-source recipe anchor. Honours
   ## ``REPRO_FROM_SOURCE_ROOT`` first; falls back to

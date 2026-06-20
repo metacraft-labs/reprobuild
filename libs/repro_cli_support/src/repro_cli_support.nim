@@ -5140,6 +5140,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   #      recipe chains stay below 10; the ceiling exists to crash
   #      cleanly on a runaway pattern rather than blow the stack.
   if effectiveMode == tpmFromSource:
+    # M9.R.14c.2 — proactively seed the bootstrap tool chain so the
+    # auto-recurse loop short-circuits gcc / make / binutils (and
+    # binutils sub-binaries: ld, ar, ranlib, strip, nm, objdump,
+    # objcopy, as, readelf, size, strings) to stdlib provisioning from
+    # the first probe pass on. Without this seed the reactive cycle
+    # break (M9.R.10a) only fires on the closing edge of an observed
+    # recursion cycle: e.g. ``gcc → binutils → gcc`` adds ``gcc`` but
+    # leaves ``binutils`` to recurse into a 15-minute from-source
+    # build. The bootstrap layer is treated as a stdlib-provisioned
+    # floor; the upper layers (autoconf / automake / expat / libffi /
+    # etc.) still build from source.
+    seedBootstrapCycleBreakTools()
     for useDef in artifact.projectInterface.toolUses:
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind != rrNeedsBuild:
