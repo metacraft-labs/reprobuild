@@ -25,7 +25,7 @@
 ## See [[file:Reprobuild-Standard-Library.md][Reprobuild-Standard-Library]]
 ## §"Multi-artifact result types" for the cross-tool contract.
 
-import std/tables
+import std/[os, strutils, tables]
 
 import repro_project_dsl
 import ./library
@@ -172,16 +172,118 @@ proc files*(r: CmakePackageResult; name: string): BuildActionDef =
   r.installEdge
 
 # ---------------------------------------------------------------------------
+# Stage-copy emission (M9.R.14c.5)
+# ---------------------------------------------------------------------------
+#
+# The from-source-* tool resolver looks for the recipe's artefacts at
+# the canonical ``<recipeRoot>/.repro/output/<name>/<name>`` path
+# (per ``fromSourceArtifactCandidate`` in repro_tool_profiles). The
+# autotools_package install action writes to a DESTDIR-style tree
+# under ``destdir/usr/bin/<name>`` / ``destdir/usr/lib/<lib>.so``,
+# so we need a stage-copy action that bridges the two layouts.
+#
+# The from-source-custom convention already ships an equivalent
+# ``emitStageCopyAction`` helper for shell-action recipes (per the
+# DslShellAction surface). v1 of the slicing-method stage emission
+# duplicates that pattern inline so the autotools_package /
+# meson_package / cmake_package slicing surface gains the same
+# install-glue without a cross-module refactor.
+
+import std/sets
+
+var stageCopyEmitted {.threadvar.}: HashSet[string]
+
+proc stageCopyEmittedKey(packageName, kind, name: string): string =
+  packageName & "." & kind & "." & name
+
+proc sanitizeStageCopyName(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "x"
+
+proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
+                            destdir, packageName, kind, name: string) =
+  ## Emit a single stage-copy action that copies the installed
+  ## artefact at ``destdir/usr/{bin,lib}/<name>`` into the canonical
+  ## ``<projectRoot>/.repro/output/<name>/<name>`` location so the
+  ## from-source resolver can find it. Idempotent — guarded by the
+  ## ``autotoolsStageCopyEmitted`` flag so a recipe that calls
+  ## ``pkg.executable("autoconf")`` multiple times only emits the
+  ## stage-copy once.
+  let projectRoot = activeProviderProjectRoot()
+  if projectRoot.len == 0:
+    # Unit-test mode: no provider project root means no on-disk path
+    # to stage into. Defer to the legacy "thin handle only" behaviour.
+    return
+  let flagKey = stageCopyEmittedKey(packageName, kind, name)
+  if stageCopyEmitted.len == 0:
+    stageCopyEmitted = initHashSet[string]()
+  if flagKey in stageCopyEmitted:
+    return
+  stageCopyEmitted.incl(flagKey)
+  let outputDir = projectRoot / ".repro" / "output" / name
+  createDir(outputDir)
+  let outputPath = outputDir / name
+  let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")
+  let escapedOutDir = outputDir.replace("\\", "/").replace("\"", "\\\"")
+  let installPrefix = destdir & "/usr/" & (if kind == "library": "lib" else: "bin")
+  let escapedSrcDir = installPrefix.replace("\\", "/").replace("\"", "\\\"")
+  let escapedName = name.replace("\"", "\\\"")
+  # Probe order: <prefix>/<name>, <prefix>/<name>.exe (cross-build
+  # safety), <prefix>/lib<name>.so (library shape).
+  var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
+  if kind == "library":
+    # Library: probe lib<name>.so, lib<name>.a
+    script.add("if [ -f \"" & escapedSrcDir & "/lib" & escapedName & ".so\" ]; then ")
+    script.add("cp -fL \"" & escapedSrcDir & "/lib" & escapedName & ".so\" \"" & escapedOut & "\"; ")
+    script.add("elif [ -f \"" & escapedSrcDir & "/lib" & escapedName & ".a\" ]; then ")
+    script.add("cp -fL \"" & escapedSrcDir & "/lib" & escapedName & ".a\" \"" & escapedOut & "\"; ")
+    script.add("else echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
+  else:
+    # Executable: probe bare name; also try .exe for cross-builds.
+    script.add("if [ -f \"" & escapedSrcDir & "/" & escapedName & "\" ]; then ")
+    script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedName & ".exe\" ]; then ")
+    script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
+  let argv = @["sh", "-c", script]
+  let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
+    "-" & sanitizeStageCopyName(name)
+  discard buildAction(
+    id = stageId,
+    call = inlineExecCall(argv),
+    deps = @[installEdge.id],
+    inputs = installEdge.outputs,
+    outputs = @[outputPath],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "autotools_package.stage." & kind,
+    toolIdentityRefs = @["sh"])
+
+# ---------------------------------------------------------------------------
 # Slicing methods — AutotoolsPackageResult
 # ---------------------------------------------------------------------------
 
 proc executable*(r: AutotoolsPackageResult; name: string): Executable =
+  # M9.R.14c.5 — emit a stage-copy action that bridges the autotools
+  # DESTDIR install tree (``destdir/usr/bin/<name>``) onto the
+  # canonical from-source resolver path (``.repro/output/<name>/<name>``)
+  # so consumers of the recipe can resolve the artefact at the
+  # location the resolver looks for it.
+  emitAutotoolsStageCopy(r.installEdge, r.destdir, currentOwningPackage(),
+    "executable", name)
   newExecutable(
     install = r.installEdge,
     executableName = name,
     installPrefix = componentPath(r.components, "runtime"))
 
 proc library*(r: AutotoolsPackageResult; name: string): Library =
+  emitAutotoolsStageCopy(r.installEdge, r.destdir, currentOwningPackage(),
+    "library", name)
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
