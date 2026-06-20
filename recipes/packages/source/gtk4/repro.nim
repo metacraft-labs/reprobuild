@@ -213,8 +213,22 @@ package gtk4Source:
         "build-testsuite=false",
         "build-examples=false",
         "build-demos=false",
+        # M9.R.15b.9 — disable wayland-backend in v1 because gtk4's
+        # gdk/wayland/gdkdisplay-wayland.h unconditionally
+        # ``#include <epoxy/egl.h>`` and our v1 libepoxy is built
+        # with egl=no (the v1 closure does not yet build mesa from
+        # source, so EGL/eglplatform.h is not on the include search
+        # path; see libepoxy/repro.nim's M9.R.15b.3 deferral note).
+        # Without EGL headers libepoxy does not emit epoxy/egl.h
+        # either, so gtk4's wayland backend short-fails compile at
+        # gdkprimary-wayland.c with
+        #   fatal error: epoxy/egl.h: No such file or directory
+        # Until M9.R.15c lifts libepoxy's egl back to yes (after a
+        # from-source mesa / libegl-headers recipe lands), gtk4 ships
+        # with broadway-only — the Wayland session can still load
+        # gtk4 apps via broadway-over-HTML for v1 validation.
         "broadway-backend=true",
-        "wayland-backend=true",
+        "wayland-backend=false",
         "x11-backend=false",
         "vulkan=disabled",
         "print-cups=disabled",
