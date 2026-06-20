@@ -3349,6 +3349,226 @@ proc fromSourceArtifactCandidate*(recipeRoot, packageName,
   result = recipeRoot / packageName / ".repro" / "output" /
     executableName / executableName
 
+# ---------------------------------------------------------------------------
+# M9.R.14d.1 — library vs executable artefact discovery for from-source deps
+# ---------------------------------------------------------------------------
+
+proc m9r14dCanonicalizeName*(name: string): string =
+  ## Canonical form used to match a `nativeBuildDeps`/`buildDeps`
+  ## selector against the sibling recipe's artifact name. Lowercase the
+  ## name and drop a leading ``lib`` prefix so ``libZ`` collapses onto
+  ## ``z`` and ``zlib`` collapses onto ``zlib``. Callers compare BOTH the
+  ## raw lower-cased name AND the stripped form to catch the common
+  ## "package zlib provides library libz" inversion: the dep selector is
+  ## ``zlib`` (lower=``zlib``, stripped=``zlib``) but the artifact name
+  ## is ``libZ`` (lower=``libz``, stripped=``z``) — a match requires
+  ## either pair to coincide.
+  result = name.toLowerAscii
+  if result.startsWith("lib"):
+    result = result[3 .. ^1]
+
+proc m9r14dDepMatchesArtifact*(depName, artifactName: string): bool =
+  ## Match-rule M9.R.14d.1: a dep selector matches an artifact name when
+  ## any of three relations hold (most-specific first):
+  ##   1. Case-insensitive exact match (``zlib`` vs ``zlib``).
+  ##   2. Lowercase match (``Make`` vs ``make``).
+  ##   3. Canonicalized match: lowercase-and-strip-lib equivalence on
+  ##      either side. Because the package-vs-soname inversion can go
+  ##      either way (recipe declares ``libZ`` for package ``zlib``;
+  ##      recipe declares ``zlib`` for package ``libz``), we check both
+  ##      stripping directions and allow a match when either pair of
+  ##      canonical forms coincide.
+  if depName.cmpIgnoreCase(artifactName) == 0: return true
+  let depLower = depName.toLowerAscii
+  let artLower = artifactName.toLowerAscii
+  if depLower == artLower: return true
+  let depCanon = m9r14dCanonicalizeName(depName)
+  let artCanon = m9r14dCanonicalizeName(artifactName)
+  if depCanon == artCanon: return true
+  # Asymmetric forms: dep "zlib" vs artifact "libZ" ⇒ depCanon=zlib,
+  # artCanon=z; depLower=zlib, artLower=libz. Compare each raw lower
+  # form against the OTHER side's canonical form.
+  if depLower == artCanon: return true
+  if artLower == depCanon: return true
+  false
+
+proc m9r14dPlatformLibrarySuffixes(): seq[string] =
+  ## Probe-order list of shared-library file extensions on the current
+  ## platform. The bare-name form (`""`) is included LAST so the
+  ## stage-copy's pre-M9.R.14d layout (`.repro/output/<name>/<name>`
+  ## with no extension) keeps working until every recipe re-stages.
+  when defined(windows):
+    result = @[".dll", ""]
+  elif defined(macosx):
+    result = @[".dylib", ".so", ""]
+  else:
+    result = @[".so", ""]
+
+type
+  M9R14dArtifactKind* = enum
+    makUnknown
+    makExecutable
+    makLibrary
+    makFiles
+
+  M9R14dArtifactCandidate* = object
+    ## DSL-port M9.R.14d.1 — one candidate the resolver considers when
+    ## probing a sibling recipe for a tool dep. The resolver enumerates
+    ## the recipe's `.repro/output/<artifactName>/` directories AND the
+    ## recipe's project-interface.rbsz (when available) to populate the
+    ## seq, then picks the best match per `m9r14dDepMatchesArtifact`.
+    artifactName*: string
+    kind*: M9R14dArtifactKind
+    resolvedPath*: string
+      ## Absolute path to the on-disk artefact file (empty when nothing
+      ## has been staged yet — the dispatcher then triggers a sub-build).
+
+proc m9r14dLoadInterfaceKinds*(recipeDir: string):
+    Table[string, M9R14dArtifactKind] =
+  ## Read the sibling recipe's project-interface.rbsz, when it exists,
+  ## and return a table mapping artifact name to ``M9R14dArtifactKind``.
+  ## Returns an empty table when the recipe has not been built yet or
+  ## the artefact is unreadable for any reason — the caller then falls
+  ## back to filesystem-only inference (``makUnknown`` per artefact).
+  let interfacePath = recipeDir / ".repro" / "build" / "repro" /
+    "project-interface.rbsz"
+  if not fileExists(extendedPath(interfacePath)):
+    return
+  try:
+    let artifact = readInterfaceArtifact(interfacePath)
+    for exe in artifact.projectInterface.publicExecutables:
+      let name = if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+      if name.len > 0:
+        result[name] = makExecutable
+    for lib in artifact.projectInterface.publicLibraries:
+      if lib.name.len > 0:
+        result[lib.name] = makLibrary
+  except CatchableError:
+    discard
+
+proc m9r14dProbeArtifactFile*(outputDir, artifactName: string;
+                              kind: M9R14dArtifactKind): string =
+  ## Probe the on-disk layout the from-source stage-copy emits for a
+  ## single artifact. Returns the absolute path when one of the
+  ## platform-shaped candidates exists, "" otherwise.
+  ##
+  ## Probe order:
+  ##   * dakLibrary:    <artifactName>.so, <artifactName>.dll,
+  ##                    <artifactName>.dylib, then bare <artifactName>
+  ##                    (the pre-M9.R.14d stage-copy layout).
+  ##   * dakExecutable: bare <artifactName>, then <artifactName>.exe
+  ##                    (Windows or cross-compiled).
+  ##   * dakFiles:      <outputDir> itself when the directory exists.
+  ##   * makUnknown:    union of library and executable shapes — used
+  ##                    when the interface artefact isn't available yet.
+  let bareCandidate = outputDir / artifactName
+  case kind
+  of makLibrary:
+    for suffix in m9r14dPlatformLibrarySuffixes():
+      let candidate = bareCandidate & suffix
+      if fileExists(extendedPath(candidate)):
+        return absolutePath(candidate)
+  of makExecutable:
+    if fileExists(extendedPath(bareCandidate)):
+      when not defined(windows):
+        if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+            it in getFilePermissions(extendedPath(bareCandidate))):
+          return absolutePath(bareCandidate)
+      else:
+        return absolutePath(bareCandidate)
+    let exeCandidate = bareCandidate & ".exe"
+    if fileExists(extendedPath(exeCandidate)):
+      return absolutePath(exeCandidate)
+  of makFiles:
+    if dirExists(extendedPath(outputDir)):
+      return absolutePath(outputDir)
+  of makUnknown:
+    # Try library-shape first (the M9.R.14d motivating case), then
+    # executable-shape. The bare-name probe collapsed into the library
+    # suffix list so we don't double-check it for executables.
+    for suffix in m9r14dPlatformLibrarySuffixes():
+      let candidate = bareCandidate & suffix
+      if fileExists(extendedPath(candidate)):
+        when not defined(windows):
+          if suffix.len > 0:
+            return absolutePath(candidate)
+          if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+              it in getFilePermissions(extendedPath(candidate))):
+            return absolutePath(candidate)
+        else:
+          return absolutePath(candidate)
+    let exeCandidate = bareCandidate & ".exe"
+    if fileExists(extendedPath(exeCandidate)):
+      return absolutePath(exeCandidate)
+  return ""
+
+proc m9r14dEnumerateArtifacts*(recipeDir: string):
+    seq[M9R14dArtifactCandidate] =
+  ## Enumerate the artifacts a sibling recipe has produced. Walks the
+  ## recipe's ``.repro/output/`` directory (each subdir name is an
+  ## artifact name) and pairs it with the project-interface.rbsz kind
+  ## when available. Returns the empty seq when nothing has been staged.
+  let outputRoot = recipeDir / ".repro" / "output"
+  if not dirExists(extendedPath(outputRoot)):
+    return
+  let kinds = m9r14dLoadInterfaceKinds(recipeDir)
+  for kindPc, name in walkDir(extendedPath(outputRoot)):
+    if kindPc != pcDir and kindPc != pcLinkToDir:
+      continue
+    let artifactName = lastPathPart(name)
+    if artifactName.len == 0: continue
+    let outDir = outputRoot / artifactName
+    let artKind = kinds.getOrDefault(artifactName, makUnknown)
+    let resolved = m9r14dProbeArtifactFile(outDir, artifactName, artKind)
+    result.add(M9R14dArtifactCandidate(
+      artifactName: artifactName,
+      kind: artKind,
+      resolvedPath: resolved))
+
+proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
+                          depName: string): int =
+  ## Pick the candidate index that best matches ``depName`` per the
+  ## ``m9r14dDepMatchesArtifact`` rule. Returns -1 when nothing matches.
+  ##
+  ## Match priority (most-specific first):
+  ##   1. Exact case-insensitive match on artifact name.
+  ##   2. Lowercased match.
+  ##   3. Canonicalized lib-stripped match (either direction).
+  ##   4. Sole-artifact fallback: if exactly ONE candidate has a
+  ##      resolved on-disk file, return it (the dep selector already
+  ##      identified the recipe).
+  ##
+  ## Within each tier, prefer the candidate whose ``resolvedPath`` is
+  ## non-empty — an artifact named in the interface but not yet staged
+  ## still matches by name, but a staged sibling under a less-specific
+  ## tier wins because the resolver needs an on-disk file.
+  result = -1
+  var bestTier = high(int)
+  for i, cand in candidates:
+    var tier = high(int)
+    if depName.cmpIgnoreCase(cand.artifactName) == 0:
+      tier = 0
+    elif depName.toLowerAscii == cand.artifactName.toLowerAscii:
+      tier = 1
+    elif m9r14dDepMatchesArtifact(depName, cand.artifactName):
+      tier = 2
+    if tier < bestTier:
+      bestTier = tier
+      result = i
+    elif tier == bestTier and result >= 0 and
+        candidates[result].resolvedPath.len == 0 and
+        cand.resolvedPath.len > 0:
+      result = i
+  if result < 0:
+    var resolvedIdx = -1
+    var resolvedCount = 0
+    for i, cand in candidates:
+      if cand.resolvedPath.len > 0:
+        resolvedIdx = i
+        inc resolvedCount
+    if resolvedCount == 1:
+      result = resolvedIdx
+
 type
   FromSourceResolveKind* = enum
     ## DSL-port M9.R.9 — discriminated outcome for from-source
@@ -3410,31 +3630,43 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
       attemptedRecipeManifest: recipeManifest,
       missingToolName: name)
 
-  # Probe both the bare and ``.exe``-suffixed forms — the
-  # from-source-custom convention's stage-copy preserves the source's
-  # extension, so on Windows the binary lands as either ``meson``
-  # (script wrapper) or ``meson.exe`` (PE) depending on the recipe.
+  # M9.R.14d.1 — enumerate every artifact the sibling recipe has
+  # staged AND every artifact it declared in its interface. Match the
+  # dep's `executableName` (which is just the package selector for
+  # ``nativeBuildDeps: "zlib"``-style deps) against the artifact names
+  # with library-vs-executable + canonicalization awareness.
+  #
+  # Falls back to the pre-M9.R.14d "name-as-artifact" probe when no
+  # candidates can be enumerated (the recipe's `.repro/output/` tree
+  # is empty / missing) so existing tests + the executable-style probe
+  # for tools like ``meson`` keep working unchanged.
   let baseCandidate = fromSourceArtifactCandidate(root, name, name)
-  var candidates: seq[string] = @[baseCandidate]
-  when defined(windows):
-    candidates.add(baseCandidate & ".exe")
-  else:
-    # Source recipes may still emit a ``.exe`` (e.g. cross-compiled
-    # Windows builds on Linux); try both even off Windows.
-    candidates.add(baseCandidate & ".exe")
+  var candidates = m9r14dEnumerateArtifacts(recipeDir)
   var resolved = ""
-  for candidate in candidates:
-    if fileExists(extendedPath(candidate)):
-      # Require execute permission on Unix; on Windows ``fileExists``
-      # is sufficient (the OS infers executability from extension).
-      when defined(windows):
-        resolved = candidate
-        break
-      else:
-        if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-            it in getFilePermissions(extendedPath(candidate))):
+  if candidates.len > 0:
+    let pickIdx = m9r14dPickBestMatch(candidates, name)
+    if pickIdx >= 0 and candidates[pickIdx].resolvedPath.len > 0:
+      resolved = candidates[pickIdx].resolvedPath
+  if resolved.len == 0:
+    # Pre-M9.R.14d fallback: name-as-artifact probe. Covers the case
+    # where the recipe stages under the dep's exact name (e.g. meson
+    # → `.repro/output/meson/meson`) and never declared a library
+    # block.
+    var legacyCandidates: seq[string] = @[baseCandidate]
+    when defined(windows):
+      legacyCandidates.add(baseCandidate & ".exe")
+    else:
+      legacyCandidates.add(baseCandidate & ".exe")
+    for candidate in legacyCandidates:
+      if fileExists(extendedPath(candidate)):
+        when defined(windows):
           resolved = candidate
           break
+        else:
+          if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+              it in getFilePermissions(extendedPath(candidate))):
+            resolved = candidate
+            break
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
