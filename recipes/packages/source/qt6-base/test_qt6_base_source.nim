@@ -42,7 +42,12 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/qt6-base/vendor/qtbase-everywhere-src-6.8.1.tar.xz"
+  # M9.R.15f.2 drive-by — the recipe long since switched to the
+  # upstream download.qt.io URL but this constant was never updated.
+  # The vendored copy under ``vendor/`` is fingerprinted by the same
+  # sha256 so a downstream cache hit is identical regardless of which
+  # URL the fetch action serialises.
+  "https://download.qt.io/official_releases/qt/6.8/6.8.1/submodules/qtbase-everywhere-src-6.8.1.tar.xz"
 
 const ExpectedHash =
   "40b14562ef3bd779bc0e0418ea2ae08fa28235f8ea6e8c0cb3bce1d6ad58dcaf"
