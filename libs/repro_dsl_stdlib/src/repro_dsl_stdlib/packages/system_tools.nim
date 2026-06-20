@@ -121,6 +121,11 @@ import ./json_glib
 # ``src/docs/meson.build:1`` runs ``find_program('itstool')`` and
 # fails the configure when missing.
 import ./itstool
+# M9.R.15g.2 — libsystemd is gdm 47.x's logind-provider client library
+# (``src/common/gdm-common.c`` includes ``systemd/sd-login.h``).
+# Pinned via nixpkgs#systemdMinimal.dev so the include path picks up
+# ``systemd/sd-login.h`` + the rest of the ``sd-*`` headers.
+import ./libsystemd
 
 export bc
 export bison
@@ -176,3 +181,4 @@ export cvt
 export accountsservice
 export json_glib
 export itstool
+export libsystemd

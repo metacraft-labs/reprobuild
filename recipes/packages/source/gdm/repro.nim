@@ -232,6 +232,13 @@ package gdmSource:
     ## ``-Dintrospection=disabled`` option to gate it. Backed by the
     ## sibling gobjectIntrospectionSource recipe.
     "gobject-introspection"
+    ## M9.R.15g.2 — libsystemd ships ``systemd/sd-login.h`` which
+    ## ``src/common/gdm-common.c`` + ``src/libgdm/gdm-sessions.c``
+    ## include unconditionally for the logind-provider integration.
+    ## gdm 47.x's meson option ``logind-provider`` defaults to
+    ## ``systemd`` and there is no header-disable opt-out. Routed via
+    ## nixpkgs#systemdMinimal.dev.
+    "libsystemd"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
