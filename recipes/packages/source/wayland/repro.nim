@@ -176,6 +176,10 @@ package waylandSource:
     ## the dependency surface stays explicit if a future variant
     ## flips ``tests=true`` or ``dtd_validation=true``.
     "libxml2 >=2.9"
+    ## libffi is hard-required by wayland's ``libwayland-server.so``
+    ## (the protocol-dispatch tables go through ffi). meson's
+    ## ``src/meson.build:85`` refuses to configure without it.
+    "libffi >=3.0"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
