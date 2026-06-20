@@ -3314,6 +3314,16 @@ const BootstrapCycleBreakTools* = @[
   "libtool", "libtoolize",
   "m4",
   "perl",
+  # M9.R.14d.5 — meson/ninja/python3/pkg-config bootstrap floor.
+  # These are build-system drivers, not C/C++ code that needs to be
+  # compiled from source. Their from-source recipes either need
+  # cross-language toolchains (meson is python, python3 is itself an
+  # entire bootstrap problem) or don't produce a standard executable
+  # artifact under the from-source-custom convention (meson lands
+  # under .repro/build/from-source-custom/<pkg>/, not under
+  # .repro/output/<artifactName>/). Routing them through the stdlib
+  # provisioning skips the unproductive recursion.
+  "meson", "ninja", "python3", "python", "pkg-config", "pkgconf",
 ]
   ## Exported so tests + the dispatcher init code can audit + seed the
   ## list without re-declaring it.
