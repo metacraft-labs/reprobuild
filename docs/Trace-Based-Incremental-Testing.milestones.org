@@ -1,9 +1,21 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 3 complete (M11-M13) — campaign complete
+#+STATUS: Phase 4 in progress (M14-M19) — spec-faithful native discovery, dedicated call stream, ct test integration
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
 #   native / Multi-Core-Recorder (MCR) path and Nim's dual recording path.
+# Phase 3 (M11-M13): symBodyHash, modern CTFS consumption, live-recording tests.
+# Phase 4 (M14-M19): close the gap between the prototype and the spec for native
+#   targets and ship the user-facing docs. The prototype's native path used a
+#   hand-crafted `native_calltrace.json` and instruction-byte shallow hashing; the
+#   spec (Nim-Parallel-Test-Framework §16.7) calls for runtime dependency discovery
+#   from a REAL native call trace — Intel PT via RR, OR compile-time instrumentation
+#   — and the trace-format spec (codetracer-trace-format-spec/trace-events.md) calls
+#   for splitting the call stream (`calls.dat`) from the line-step stream (`steps.dat`)
+#   in materialized `.ct` files. Phase 4 implements the testable-here path first
+#   (compile-time instrumentation, M14-M15), then the Linux-gated PT/MCR path (M16),
+#   the dedicated call stream (M17), the standalone `ct test` integration (M18), and
+#   the documentation (M19).
 
 * Overview
 
@@ -1057,3 +1069,203 @@
   from the column-aware-tracing rollout, native = recorder CI red on main+dev plus
   Linux-only RR — each printing the EXACT observed failure, not a misdiagnosed
   "dev shell won't build".)
+
+# =============================================================================
+# Phase 4 — Spec-faithful native discovery, dedicated call stream, ct integration
+# =============================================================================
+#
+# Context (verified against the code, 2026-06):
+#   * Materialized `.ct` writer (codetracer-trace-format/codetracer_trace_writer/
+#     src/ctfs_writer.rs) emits a SINGLE combined `events.log` stream (+ `events.fmt`
+#     format marker, `meta.dat` v3 with a feature-flag bitfield). The `calls.dat`/
+#     `steps.dat` split from trace-events.md is NOT emitted. ct-print
+#     (codetracer-trace-format-nim) already carries DORMANT V4 `call_stream` /
+#     `step_encoding` readers — the split was started reader-side, not writer-side.
+#   * Native call data: on Linux, `ct-mcr` produces a real call tree via the
+#     EMULATOR (ct_emulator/calltrace.nim → CallNode{functionName,sourceFile,...}),
+#     resolved through DWARF. Intel PT decoding exists in the RR fork
+#     (ProcessorTraceDecoder) but is used ONLY for divergence detection, gated
+#     behind the INTEL_PT_DECODING build flag, x86/Linux-only. On arm64-macOS the
+#     MCR has no emulator, so the `.ct` carries no call data (why ct-print showed
+#     only a `path` record). Compile-time instrumentation (the spec's alternative,
+#     MCR-Calltrace-Design §22d shadow stack) is SPECIFIED but UNIMPLEMENTED — and
+#     is the only native call-trace source that works on arm64-macOS.
+#   * The prototype's native path (native_trace.nim) reads a hand-crafted
+#     `native_calltrace.json` projection of the MCR CallTree; native shallow hash
+#     (native_hash.nim, M7) hashes compiled instruction bytes (spec-correct).
+#   * `ct test` (codetracer/src/ct) is a stub: a reprobuild-HCR e2e wrapper only.
+#     No test discovery, baseline recording, executed-function extraction, or
+#     incremental selection (the whole §16.7 feature) exists there yet.
+#
+# Sequencing rationale: M14-M15 (compile-time instrumentation) are fully testable
+# on arm64-macOS and close the native end-to-end gap here. M16 (PT/MCR) is the
+# Linux-gated spec-primary path — unit-tested, live-gated honestly. M17 (calls.dat)
+# is the first compat-preserving step of the trace-events.md "Event Stream Redesign".
+# M18 ports the engine into `ct test`. M19 ships docs.
+
+* M14 — Native call trace via compile-time instrumentation (cross-platform)
+  :STATUS: planned
+
+  Goal: implement the spec's "compile-time instrumentation that produces the call
+  trace" alternative (Nim-Parallel-Test-Framework §16.7; MCR-Calltrace-Design §22d
+  shadow stack) for native targets, so native runtime dependency discovery works
+  WITHOUT Intel PT / RR / the MCR emulator — and is testable on arm64-macOS.
+
+  Deliverables:
+  - [ ] A tiny C call-recorder runtime using the `-finstrument-functions` ABI
+    (`__cyg_profile_func_enter` / `__cyg_profile_func_exit`) that records the set
+    of entered function addresses (PCs) into a file in the trace dir. Thread-safe,
+    bounded, no heap churn on the hot path; the file format is documented.
+  - [ ] A build/run helper that compiles+links a native test fixture with
+    `-finstrument-functions` against the runtime, runs it, and produces the PC log.
+  - [ ] PC → function-name resolution via the binary symbol table (reuse
+    native_hash.nim's `nm`-based parsing; Mach-O + ELF), yielding the
+    de-duplicated executed-function set (`seq[ExecutedFunction]`).
+  - [ ] Fail-safe: any resolution/read error ⇒ `Err` (engine re-runs, never a
+    false skip).
+
+  Automated tests:
+  - [ ] A real 4-function C program is compiled with instrumentation, run, and the
+    executed set asserts to {used_a, used_b, main} with `unused_c` ABSENT — on
+    arm64-macOS (no skip, no gate).
+  - [ ] Malformed / missing PC-log and unresolved-symbol cases return `Err`.
+
+  Acceptance: the native executed-function set is derived from a GENUINE
+  compile-time-instrumentation run on this host, deterministically.
+
+* M15 — Engine consumes the real native call trace (retire native_calltrace.json)
+  :STATUS: planned
+
+  Goal: wire M14's instrumentation-produced call trace into the engine's native
+  backend so the native incremental decision (skip / re-run) runs end-to-end on
+  arm64-macOS. Keep the M7 instruction-byte shallow hash. The hand-crafted
+  `native_calltrace.json` reader is retired in favour of the real artifact (kept
+  only as an explicitly-labelled legacy fixture path if still needed by old tests).
+
+  Deliverables:
+  - [ ] `native_trace.nim` reads the instrumentation call trace as the native
+    dependency-discovery source; `detectBackend` routes an instrumentation-native
+    trace dir to `tbNativeDwarf` discovery + native shallow hashing.
+  - [ ] `tests/t_live_native.nim` flips from the platform gate to a GENUINE live
+    native decision on macOS: record via instrumentation, assert the executed set,
+    then a correct SKIP (unchanged), a correct RE-RUN (edit an executed function),
+    and a correct SKIP (edit an unexecuted function) — mirroring the live Ruby/
+    Python/JS tests.
+
+  Automated tests:
+  - [ ] End-to-end native skip/re-run over a real C binary, on arm64-macOS.
+  - [ ] Full live suite stays green.
+
+  Acceptance: native is LIVE end-to-end on this host via instrumentation — the
+  native row in the README/matrix moves from gated to live.
+
+* M16 — Intel PT / MCR-emulator native discovery (Linux spec-primary; honest gate)
+  :STATUS: planned
+
+  Goal: the spec-primary native path — derive the executed-function set from a REAL
+  CodeTracer native recording: the Linux `ct-mcr` emulator's CallTree
+  (ct_emulator/calltrace.nim → CallNode), and/or an Intel-PT decode of the RR
+  recording (ProcessorTraceDecoder, INTEL_PT_DECODING). Replaces the hand-crafted
+  JSON projection with consumption of the real recorder artifact.
+
+  Deliverables:
+  - [ ] A reader that consumes the real MCR call-tree artifact (function names +
+    call PCs) into `seq[ExecutedFunction]`.
+  - [ ] (If feasible) a PT-decode path: RR PT stream → executed instruction
+    ranges → functions via DWARF; behind the recorder's PT capability.
+  - [ ] Honest platform gate: on a host without a Linux MCR / PT recording, the
+    test prints the VERIFIED reason and asserts a documented gate — never a skip,
+    never a misdiagnosis. (On arm64-macOS, M14/M15 instrumentation is the live
+    native path; this milestone's live assertions run on Linux MCR.)
+
+  Automated tests:
+  - [ ] Unit tests for the call-tree / PT parse logic over committed fixtures
+    (run everywhere).
+  - [ ] Live end-to-end native decision asserted where a Linux MCR recording is
+    available; honest gate otherwise.
+
+  Acceptance: the spec-primary native source is consumed where available, with the
+  parse logic unit-tested everywhere and the live path honestly gated.
+
+* M17 — Dedicated `calls.dat` call stream in materialized `.ct` (additive, compat)
+  :STATUS: planned
+
+  Goal: implement the first, backward-compatible step of trace-events.md's "Event
+  Stream Redesign" — emit a DEDICATED `calls.dat` call stream alongside the existing
+  combined `events.log`, gated by a new `meta.dat` capability flag, so the call
+  trace can be read without scanning the step/value events; activate ct-print's
+  dormant `call_stream` reader; and have the engine prefer `calls.dat` when present.
+  (The full multi-stream migration — `steps.dat`/value/`events.dat`/varint interning
+  — is a larger trace-format initiative beyond this campaign; this milestone lands
+  ONLY the call-stream split, additively, breaking nothing.)
+
+  Deliverables:
+  - [ ] Writer (codetracer-trace-format/codetracer_trace_writer): emit `calls.dat`
+    call records per trace-events.md §"Call Stream Records", in addition to
+    `events.log`, behind a new `meta.dat` flag bit (e.g. has_call_stream). Old
+    readers ignore the extra file; the combined stream is unchanged.
+  - [ ] ct-print (codetracer-trace-format-nim): when the flag is set, read calls
+    from `calls.dat` via the existing dormant `call_stream` reader; otherwise the
+    legacy path. `--json-events` output is unchanged for consumers.
+  - [ ] Engine (reprobuild ctfs_trace.nim): prefer `calls.dat` for executed-
+    function discovery when present (cheaper than the unified stream); identical
+    results either way.
+  - [ ] No regressions in the GUI/db-backend reader (it consumes `Vec<Event>` and
+    is format-agnostic — verify it still reads split bundles).
+
+  Automated tests:
+  - [ ] Round-trip: writer emits `calls.dat`, the Rust reader + ct-print read it
+    back, call records match the combined stream.
+  - [ ] Engine extracts the SAME executed set from a split bundle and a legacy
+    bundle.
+  - [ ] Backward compat: a legacy (no calls.dat) `.ct` still reads.
+
+  Acceptance: materialized `.ct` carries a dedicated, spec-shaped `calls.dat`
+  stream, read end-to-end, with zero breakage to existing readers.
+
+* M18 — `ct test --incremental` standalone integration (codetracer)
+  :STATUS: planned
+
+  Goal: bring runtime-dependency test selection into CodeTracer's `ct test` (§16.7)
+  so it works WITHOUT reprobuild — discovery + baseline recording + executed-
+  function extraction + skip/re-run — reusing the same algorithm the prototype
+  proved. (Large; will be staged into sub-milestones during execution.)
+
+  Deliverables:
+  - [ ] The engine algorithm (dependency discovery + shallow/deep hash + decide/
+    record/cache) available to `ct test` (shared library or ported core).
+  - [ ] `ct test --incremental`: discover tests, record a baseline trace per test
+    via the appropriate recorder, extract executed functions, and on a subsequent
+    run skip tests whose executed functions are unchanged / re-run the rest.
+  - [ ] Honest per-language support matching the recorder availability.
+
+  Automated tests:
+  - [ ] An end-to-end `ct test --incremental` run over a small multi-test fixture
+    asserts skip/re-run decisions (at least one interpreted language live).
+  - [ ] No regression to the existing `ct test` surface.
+
+  Acceptance: `ct test` performs trace-based incremental selection standalone,
+  validated end-to-end for at least one language.
+
+* M19 — Documentation (codetracer book + reprobuild user guide + spec alignment)
+  :STATUS: planned
+
+  Goal: ship the user-facing documentation and correct the campaign docs to the
+  spec-accurate framing.
+
+  Deliverables:
+  - [ ] codetracer book: a `usage_guide/incremental-testing.md` page for
+    `ct test --incremental` (the standalone, productized feature), added to the
+    book `SUMMARY.md` TOC.
+  - [ ] reprobuild user guide (docs/user-guide/incremental-testing.md): update the
+    native row to LIVE-via-instrumentation, note the Intel-PT/MCR Linux path, and
+    correct the support matrix.
+  - [ ] This milestones file + the engine README: correct any residual stale
+    "native = recorder CI red on main+dev" / "Linux-only RR" gate language to the
+    verified spec-accurate framing (instrumentation / PT / MCR / calls.dat).
+
+  Automated tests:
+  - [ ] Docs build / link-check where the repos provide one (book `mdbook build`).
+
+  Acceptance: a user can read how to use the feature both standalone (`ct test`)
+  and under reprobuild, and the campaign docs match the implemented reality.
