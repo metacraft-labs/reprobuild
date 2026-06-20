@@ -649,6 +649,19 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     if strippedName != name:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14g.8 — letters-only glob. ``libGlib2`` -> ``glib`` (strip
+    # ``lib`` + drop trailing digits) -> glob ``libglib-*.so`` matches
+    # upstream ``libglib-2.0.so`` where the soversion ``2.0`` contains a
+    # ``.`` that simple kebab-digit conversion can't represent.
+    proc lettersOnlyLower(value: string): string =
+      for ch in value:
+        if ch in {'a' .. 'z'}:
+          result.add(ch)
+        elif ch in {'A' .. 'Z'}:
+          result.add(chr(ord(ch) - ord('A') + ord('a')))
+    let lettersOnly = lettersOnlyLower(stripLibPrefix(name))
+    if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
     # upstream library lives under ``lib/x86_64-linux-gnu/`` or
