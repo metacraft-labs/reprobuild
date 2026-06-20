@@ -144,7 +144,7 @@ package libffiSource:
     ## sha256 was computed over the vendored 1,391,684-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libffi/vendor/libffi-3.4.6.tar.gz"
+    url: "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz"
     sha256: "b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"
     extractStrip: 1
 
