@@ -216,9 +216,12 @@ package pangoSource:
     setCurrentOwningPackageOverride("pangoSource")
     try:
       let opts = @[
+        # M9.R.14h.4 — pango 1.54 renamed ``gtk_doc`` to ``documentation``
+        # and dropped ``man-pages`` entirely (the man pages now live in
+        # the documentation pipeline). Use the new option name; the
+        # broader ``build-testsuite=false`` keeps the build minimal.
         "introspection=disabled",
-        "gtk_doc=false",
-        "man-pages=false",
+        "documentation=false",
         "build-testsuite=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
