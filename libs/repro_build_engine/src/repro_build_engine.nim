@@ -1514,6 +1514,40 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
     result.action.monitorDepfile = depfile
     result.action.argv = @[monitorCli] & config.monitorCliArgs &
       @["--depfile", depfile, "--"] & action.argv
+    # M9.R.13c.2 — **shim-library env seed**. ``repro internal fs-snoop``
+    # is invoked as a subprocess of the daemon-hosted build executor.
+    # The daemon was launched by launchd (macOS), systemd-user (Linux),
+    # or a self-spawned ``runquotad.exe`` (Windows) WITHOUT inheriting
+    # the user's shell environment, so it does not naturally see the
+    # absolute path of ``librepro_monitor_shim.{dll,so,dylib}``. The
+    # ``fs-snoop`` driver's own ``candidateShimLibraries()`` fall-through
+    # logic CAN still find the shim when ``getAppDir() / "../lib/"``
+    # matches the canonical build layout, BUT that fall-through requires
+    # the ``fs-snoop`` subprocess's ``getAppDir()`` to point at the same
+    # ancestor as the user-facing ``repro.exe``. When the daemon
+    # executable lives in a different prefix (e.g. a system install
+    # under ``/usr/bin``) the fall-through misses and the fs-snoop
+    # subprocess fails with ``cannot find librepro_monitor_shim.dll``.
+    #
+    # Seed the env var at wrap-time so the fs-snoop subprocess
+    # deterministically locates the shim. The seed uses
+    # ``findShimLibrary()`` from ``repro_monitor_depfile`` (exported
+    # public for this seam); when no shim is locatable from the engine
+    # process the seed is skipped so the existing fall-through still
+    # fires from the fs-snoop subprocess's environment. An explicit
+    # action env entry (a recipe override) wins over the seed because
+    # ``envTableFromArgvStyle`` layers action env over the inherited
+    # env in declared order — the seed is prepended so any later
+    # ``REPRO_MONITOR_SHIM_LIB=...`` action entry overrides it.
+    let shimLib = findShimLibrary()
+    if shimLib.len > 0:
+      var hasOverride = false
+      for entry in result.action.env:
+        if entry.startsWith("REPRO_MONITOR_SHIM_LIB="):
+          hasOverride = true
+          break
+      if not hasOverride:
+        result.action.env.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
 
 proc envTableFromArgvStyle(env: openArray[string]): StringTableRef =
   ## Convert the ``"NAME=VALUE"`` argv-style env (carried on BuildAction.env)

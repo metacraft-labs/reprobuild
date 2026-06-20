@@ -6029,6 +6029,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.R.13c.2 — monitor-shim DLL discovery for the daemon-hosted
+  # ``repro internal fs-snoop`` subprocess. The build engine's
+  # ``monitoredAction`` now seeds ``REPRO_MONITOR_SHIM_LIB`` on the
+  # action env so the subprocess deterministically locates
+  # ``librepro_monitor_shim.{dll,so,dylib}`` regardless of which prefix
+  # the daemon's executable lives under. The test pins the public
+  # ``findShimLibrary`` lookup priority + total-function contract that
+  # the seed depends on.
+  TestSpec(
+    source: "tests/unit/t_m9r13c_2_shim_lib_resolution.nim",
+    binary: "build/test-bin/t_m9r13c_2_shim_lib_resolution",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",

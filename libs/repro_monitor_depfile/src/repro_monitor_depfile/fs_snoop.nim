@@ -341,7 +341,23 @@ proc candidateShimLibraries(): seq[string] =
       getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.dylib"
     ]
 
-proc findShimLibrary(): string =
+proc findShimLibrary*(): string =
+  ## **Public since M9.R.13c.2** — the build engine's ``monitoredAction``
+  ## now seeds ``REPRO_MONITOR_SHIM_LIB`` on the action's env at wrap
+  ## time, so the daemon-spawned ``repro internal fs-snoop`` subprocess
+  ## resolves the shim without inheriting the user's shell environment.
+  ##
+  ## Lookup order (see ``candidateShimLibraries``):
+  ##   1. ``$REPRO_MONITOR_SHIM_LIB`` env override (operator pin).
+  ##   2. ``<appDir>/../lib/librepro_monitor_shim.{dll,so,dylib}``
+  ##      (canonical build layout — what ``just build`` produces).
+  ##   3. ``<appDir>/librepro_monitor_shim.{dll,so}`` (Windows-only
+  ##      side-by-side install layout).
+  ##   4. ``<cwd>/build/lib/librepro_monitor_shim.{dll,so,dylib}``
+  ##      (running from the repo root with a freshly built tree).
+  ##
+  ## Returns the absolute path of the first existing candidate, or the
+  ## empty string when no candidate exists.
   for candidate in candidateShimLibraries():
     if candidate.len > 0 and fileExists(extendedPath(candidate)):
       return absolutePath(candidate)
