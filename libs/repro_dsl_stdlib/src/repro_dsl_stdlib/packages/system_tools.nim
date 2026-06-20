@@ -108,6 +108,11 @@ import ./udev
 # VESA video-timings calculator) at compile time to generate the
 # default-modes header. Routed through nixpkgs#libxcvt's bin/cvt.
 import ./cvt
+# M9.R.15e.10 — accountsservice is gdm 47.x's user-account D-Bus
+# daemon dep (meson.build:69). Pure-runtime dep; routed via the
+# nixpkgs prebuilt rather than a from-source recipe (the upstream
+# build needs polkit + vala + dbus-daemon at configure-time).
+import ./accountsservice
 
 export bc
 export bison
@@ -160,3 +165,4 @@ export libgbm
 export libgudev
 export udev
 export cvt
+export accountsservice
