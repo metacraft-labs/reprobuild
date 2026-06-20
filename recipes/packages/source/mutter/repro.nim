@@ -228,6 +228,23 @@ package mutterSource:
     ## gdk-pixbuf is the image-loader library mutter uses for window
     ## icon decoding + background image loading.
     "gdk-pixbuf >=2.40"
+    ## graphene is the math-primitives library (vec/mat/quat) mutter
+    ## consumes for its scene-graph layer. Mutter's
+    ## ``src/meson.build:109`` declares ``graphene-gobject-1.0`` and
+    ## short-fails meson setup with
+    ## ``ERROR: Dependency "graphene-gobject-1.0" not found`` when the
+    ## graphene .pc is not on PKG_CONFIG_PATH. The sibling
+    ## ``grapheneSource`` recipe (M9.R.15b.2) vendors 1.10.8 to match.
+    "graphene >=1.10"
+    ## harfbuzz is the OpenType shaper mutter's clutter+cogl layers
+    ## consume directly (independent of pango).
+    "harfbuzz >=2.6"
+    ## fribidi is required for bidirectional text layout in mutter's
+    ## window-title rendering path.
+    "fribidi"
+    ## libxml2 ships xmllint, consumed by mutter's GResource compile
+    ## step + GSettings schema validation.
+    "libxml2"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
