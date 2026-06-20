@@ -1179,25 +1179,31 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     adapterStrength: asStrong,
     cachePortability: cpPortable)
 
-  # M9.R.14e.7 — populate the same four auxiliary search-path channels
-  # the from-source resolver populates, but anchored at the nix store
-  # output. Many nix packages (e.g. wayland-protocols, libxml2-dev) ship
-  # ``.pc`` files at ``<store>/share/pkgconfig/`` and headers at
-  # ``<store>/include/``; the engine threads these onto
-  # ``PKG_CONFIG_PATH`` / ``CMAKE_PREFIX_PATH`` / ``CPATH`` /
-  # ``LIBRARY_PATH`` at fork time so a meson/cmake recipe consuming
-  # the dep finds its pc files / headers without having to declare a
-  # special-case ``env:`` block.
-  addUniquePath(result.cmakePrefixList, selectedStorePath)
-  addUniquePath(result.pkgConfigSearchList,
-    selectedStorePath / "lib" / "pkgconfig")
-  addUniquePath(result.pkgConfigSearchList,
-    selectedStorePath / "lib64" / "pkgconfig")
-  addUniquePath(result.pkgConfigSearchList,
-    selectedStorePath / "share" / "pkgconfig")
-  addUniquePath(result.cpathList, selectedStorePath / "include")
-  addUniquePath(result.libraryPathList, selectedStorePath / "lib")
-  addUniquePath(result.libraryPathList, selectedStorePath / "lib64")
+  # M9.R.14e.7 + M9.R.14f.10 — populate the same four auxiliary
+  # search-path channels the from-source resolver populates, but
+  # anchored at the nix store output. Many nix packages (e.g.
+  # wayland-protocols, libxml2-dev) ship ``.pc`` files at
+  # ``<store>/share/pkgconfig/`` and headers at ``<store>/include/``;
+  # the engine threads these onto ``PKG_CONFIG_PATH`` /
+  # ``CMAKE_PREFIX_PATH`` / ``CPATH`` / ``LIBRARY_PATH`` at fork time
+  # so a meson/cmake recipe consuming the dep finds its pc files /
+  # headers without having to declare a special-case ``env:`` block.
+  #
+  # M9.R.14f.10: multi-output nix packages ship the .pc / headers /
+  # libraries in DIFFERENT outputs. systemd's libudev.pc lives in the
+  # ``dev`` output, not ``out``. Walk every realized store path so
+  # consumers find them.
+  for storePath in realized:
+    addUniquePath(result.cmakePrefixList, storePath)
+    addUniquePath(result.pkgConfigSearchList,
+      storePath / "lib" / "pkgconfig")
+    addUniquePath(result.pkgConfigSearchList,
+      storePath / "lib64" / "pkgconfig")
+    addUniquePath(result.pkgConfigSearchList,
+      storePath / "share" / "pkgconfig")
+    addUniquePath(result.cpathList, storePath / "include")
+    addUniquePath(result.libraryPathList, storePath / "lib")
+    addUniquePath(result.libraryPathList, storePath / "lib64")
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
