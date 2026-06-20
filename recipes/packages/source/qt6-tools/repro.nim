@@ -194,6 +194,16 @@ package qt6ToolsSource:
         "CMAKE_BUILD_TYPE=Release",
         "QT_BUILD_TESTS=OFF",
         "QT_BUILD_EXAMPLES=OFF",
+        # M9.R.15h.1 — disable FEATURE_clang to skip qdoc + libclang
+        # dependency. Without this, the configure step probes for
+        # libclang via the host CMAKE_PREFIX_PATH, which on cross-mounted
+        # WSL builds picks up Windows MSYS2's mingw64 ClangConfig.cmake
+        # at ``/mnt/d/metacraft-dev-deps/msys2/...`` and fails with
+        # "Could not find a package configuration file provided by LLVM".
+        # qdoc is only the API-documentation generator (Doxygen-style);
+        # the v1 KF6 cascade only needs qhelpgenerator + lupdate +
+        # lrelease, none of which depend on FEATURE_clang.
+        "FEATURE_clang=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.executable("qhelpgenerator")
