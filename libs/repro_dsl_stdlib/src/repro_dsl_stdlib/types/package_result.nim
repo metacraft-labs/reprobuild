@@ -139,11 +139,30 @@ proc componentPath(components: Table[string, string]; name: string): string =
     return components[name]
   name
 
+# Forward declaration — ``emitAutotoolsStageCopy`` is defined below in
+# the stage-copy helpers section but is referenced by the meson
+# slicing methods above. Forward-declaring (rather than reordering)
+# keeps the related stage-copy logic in one block at the bottom of
+# the module where the autotools slicing methods consume it too.
+proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
+                            buildDir, destdir, packageName, kind, name: string)
+
 proc executable*(r: MesonPackageResult; name: string): Executable =
   ## Slice the meson install edge into an executable artifact. The
   ## ``installPrefix`` is the resolved component path (typically
   ## ``"usr/bin"``); recipe authors join it with the package's
   ## destdir to get the on-disk binary location.
+  ##
+  ## M9.R.14d.7 — emit a stage-copy action that bridges the meson
+  ## install tree (`<destdir>/usr/bin/<name>`) onto the canonical
+  ## from-source resolver path (`.repro/output/<name>/<name>`).
+  ## ``r.destdir`` is the absolute path the meson_package constructor
+  ## resolved at provider-compile time (see M9.R.14d.7); we pass it
+  ## with an EMPTY ``buildDir`` so ``emitAutotoolsStageCopy`` treats
+  ## it as the install-root verbatim rather than prepending another
+  ## relative segment.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -151,6 +170,15 @@ proc executable*(r: MesonPackageResult; name: string): Executable =
 
 proc library*(r: MesonPackageResult; name: string): Library =
   ## Slice the meson install edge into a library artifact.
+  ##
+  ## M9.R.14d.7 — emit a stage-copy action mirroring the executable
+  ## slicing's pattern. Library-kind probing handles the wayland
+  ## naming convention where the recipe declares ``library libwayland
+  ## Client`` but meson installs ``libwayland-client.so`` — the probe
+  ## walks the autotools naming taxonomy and matches the file the
+  ## meson build actually emitted.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "library", name)
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
