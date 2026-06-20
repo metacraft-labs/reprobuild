@@ -3239,7 +3239,27 @@ macro package*(name: untyped; body: untyped): untyped =
       import repro_dsl_stdlib/types)
   result.add(m9r2cArtifactSlotEmission)
   # ── existing builder emission (now feeding instrumented body) ────
-  result.add(buildCode(pkg, bodyForBuild))
+  # M9.R.13b.3 — DEFERRED: `buildCode` emits
+  # ``when defined(reproProviderMode) and isMainModule: quit
+  # runPackageProvider(...)`` at module top level, which exits the
+  # process during ``NimMainModule`` BEFORE any subsequent top-level
+  # registration call (``registerFetchSpec`` from M9.H,
+  # ``registerVersion`` from M2, ``registerArtifact`` from M3,
+  # ``registerLibraryApi`` from M9.R.3, etc.) runs. The runtime
+  # registries that the build body queries (``registeredFetchSpec``
+  # inside the ``autotools_package`` / ``cmake_package`` /
+  # ``meson_package`` constructors, for example) therefore see empty
+  # tables and the auto-emitted fetch action never makes it into the
+  # graph -- ``./src/configure`` fails ``exit 127`` because the
+  # source tree was never extracted. Deferring ``buildCode``'s
+  # emission to AFTER every other ``register*`` emission below moves
+  # the ``quit`` past those registrations so they all run during
+  # ``NimMainModule`` before the process exits. The buildCode-after
+  # ordering is structurally equivalent to the prior layout for
+  # non-provider-mode builds (where no ``quit`` is emitted at all)
+  # and only changes the execution order under
+  # ``reproProviderMode + isMainModule``.
+  let buildCodeEmission = buildCode(pkg, bodyForBuild)
   # ── DSL-port M1: preserved Nim statements (the v8 "verbatim" branch).
   # Computed once at the top of the macro via ``partitionPackageBody``;
   # emitted here at module top level so the author's intent runs at
@@ -3413,6 +3433,16 @@ macro package*(name: untyped; body: untyped): untyped =
   # no overlap with M9.R.3's so the two reset calls are independent).
   let m9r3LibraryApiEmission = emitM9R3LibraryApis(packageName, classifiedSections)
   result.add(m9r3LibraryApiEmission)
+  # M9.R.13b.3 — emit ``buildCode`` LAST so its
+  # ``when defined(reproProviderMode) and isMainModule: quit
+  # runPackageProvider(...)`` exit point runs AFTER every other
+  # register-* top-level statement above. The quit is what made the
+  # M9.H ``registerFetchSpec`` (and every other registration emitted
+  # below it in the prior layout) unreachable under
+  # ``reproProviderMode``; moving buildCode to the end restores the
+  # invariant the runtime relies on (all module-init registrations
+  # run before the provider protocol takes over the process).
+  result.add(buildCodeEmission)
 
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.
