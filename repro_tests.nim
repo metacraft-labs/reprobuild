@@ -5965,6 +5965,39 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.13a -- provider-compile cache sharing across recipes.
+  # Pins:
+  #   * sharedProviderNimcacheKey is independent of recipe modulePath /
+  #     outputBinaryPath (the structural property that lets recipe A and
+  #     recipe B share a nimcache directory at all);
+  #   * the cache key is driven by $REPRO_PROVIDER_NIMCACHE_SESSION
+  #     instead of getCurrentProcessId(), so all 84 from-source recipes
+  #     auto-recurse fires for one `repro build` invocation share one
+  #     nimcache (every subprocess inherits the env var via the build
+  #     engine's envTableFromArgvStyle env-table layering);
+  #   * independent concurrent ``repro`` sessions still get distinct
+  #     session tokens (the M9.R.12 ENOTEMPTY-collision safety property
+  #     is preserved unchanged);
+  #   * Nim's .sha1-based incremental compilation reuses the cached .o
+  #     files across two compiles into the same nimcache (the warm
+  #     recompile is at least 2x faster than the cold compile and the
+  #     shared .o files survive a source-file swap byte-for-byte);
+  #   * ensureProviderNimcacheSession seeds the env var iff it is
+  #     currently unset, so the root ``repro`` process at runThinApp
+  #     entry sets the token and every nested subprocess inherits it.
+  # Closes the wayland from-source smoke's hours-to-days wall-time gap
+  # (each per-recipe provider compile dropped from ~5 min cold to ~30 s
+  # warm; the 84-recipe campaign is now O(minutes) instead of
+  # O(hours-days)).
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r13a_provider_compile_sharing.nim",
+    binary: "build/test-bin/t_m9r13a_provider_compile_sharing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",

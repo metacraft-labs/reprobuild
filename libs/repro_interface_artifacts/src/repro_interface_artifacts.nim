@@ -2572,29 +2572,77 @@ proc providerNimcacheKey(outputBinaryPath: string): string =
   ## Retained for opt-in isolation via `REPRO_PROVIDER_NIMCACHE_MODE=per-binary`.
   fnvHex64([absolutePath(outputBinaryPath)])
 
-proc sharedProviderNimcacheKey(workDir: string;
-                               hostFlags, libFlags: openArray[string]): string =
+const ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
+  ## Environment variable carrying the per-`repro`-invocation nimcache
+  ## session token. The root `repro` process seeds this env var to its
+  ## own pid (see `ensureProviderNimcacheSession`) and every child
+  ## process spawned by the build engine -- in particular the per-recipe
+  ## `repro __repro-compile-provider` invocations that auto-recurse fires
+  ## for each from-source recipe -- inherits it through the engine's
+  ## `envTableFromArgvStyle` env copy. All children of one root `repro`
+  ## therefore land in the same shared provider nimcache and reuse Nim's
+  ## `.sha1` incremental compilation across recipes. Independent
+  ## concurrent `repro` sessions get distinct tokens (the env var is not
+  ## inherited from outside `repro` because no outside caller sets it),
+  ## so the M9.R.12 ENOTEMPTY concurrency-safety property is preserved.
+
+proc ensureProviderNimcacheSession*() =
+  ## Seed `REPRO_PROVIDER_NIMCACHE_SESSION` to the current process's pid
+  ## if (and only if) the env var is not already set. Called at the top
+  ## of `runThinApp` so every `repro` entry point participates; nested
+  ## `repro` subprocesses (the build engine's `__repro-compile-provider`
+  ## helpers, the recursive `executeBuildTarget` calls auto-recurse
+  ## triggers) inherit the parent's value and therefore share the
+  ## per-process provider nimcache key with their root invocation.
+  if getEnv(ProviderNimcacheSessionEnv).len == 0:
+    putEnv(ProviderNimcacheSessionEnv, "pid-" & $getCurrentProcessId())
+
+proc providerNimcacheSessionToken(): string =
+  ## Returns the session token to fold into the shared nimcache key.
+  ## Prefers the inherited `REPRO_PROVIDER_NIMCACHE_SESSION` so every
+  ## subprocess spawned by one root `repro` lands in the same shared
+  ## cache; falls back to the current pid for callers that did not go
+  ## through `ensureProviderNimcacheSession` (test fixtures, embedding
+  ## libraries that call into `providerCompileCommand` directly).
+  let inherited = getEnv(ProviderNimcacheSessionEnv)
+  if inherited.len > 0:
+    inherited
+  else:
+    "pid-" & $getCurrentProcessId()
+
+proc sharedProviderNimcacheKey*(workDir: string;
+                                hostFlags, libFlags: openArray[string]): string =
   ## Toolchain-stable nimcache key shared across every provider compile that
   ## targets the same Nim compiler + host C compiler + library set, anchored
   ## at the same `workDir`. Provider compiles invoked from a single CMake
-  ## configure (the parent project plus every `try_compile`) land in the
+  ## configure (the parent project plus every `try_compile`), and provider
+  ## compiles fired by auto-recurse for from-source recipes, all land in the
   ## same nimcache so unchanged library modules are reused across them --
   ## the dominant slice of each provider compile.
   ##
-  ## Concurrent-process hazard: the key is also process-scoped via
-  ## `getCurrentProcessId()`. Multiple `repro` sessions (separate processes)
-  ## can run provider/interface compiles at the same time -- e.g. several
-  ## concurrent dev-env sessions sharing one project tree. Nim's incremental
-  ## compiler renames/removes temporary entries inside the nimcache while it
+  ## Concurrent-process hazard: the key is session-scoped via
+  ## `REPRO_PROVIDER_NIMCACHE_SESSION` (see `providerNimcacheSessionToken`).
+  ## Multiple `repro` sessions (separate processes) can run provider/
+  ## interface compiles at the same time -- e.g. several concurrent
+  ## dev-env sessions sharing one project tree. Nim's incremental compiler
+  ## renames/removes temporary entries inside the nimcache while it
   ## builds; if a sibling process is concurrently populating the *same*
-  ## directory, that cleanup hits `ENOTEMPTY` ("Directory not empty") and the
-  ## compile aborts. Folding the process id into the key gives each process
-  ## its own nimcache directory, so concurrent sessions never collide, while
-  ## every compile *within* one process still reuses the same cache and keeps
-  ## Nim's `.sha1` incremental benefit (the parent-project compile plus every
-  ## `try_compile` in a single CMake configure all run in one process).
+  ## directory, that cleanup hits `ENOTEMPTY` ("Directory not empty") and
+  ## the compile aborts. The session token gives each root `repro`
+  ## invocation its own nimcache directory, so concurrent sessions never
+  ## collide. Crucially -- and unlike the prior pid-scoped key -- every
+  ## subprocess spawned by ONE root `repro` (build-engine action helpers,
+  ## including the `__repro-compile-provider` invocations the build engine
+  ## emits for each per-recipe provider compile, plus recursive
+  ## `executeBuildTarget` calls auto-recurse fires for from-source recipes)
+  ## inherits the root's session token via the standard env-var inheritance
+  ## the engine's `envTableFromArgvStyle` performs, so all 84 from-source
+  ## recipes in one `repro build` cooperate on a single shared cache and
+  ## keep Nim's `.sha1` incremental benefit. M9.R.13a closed the per-pid
+  ## divergence that made each subprocess pay the full ~5 min provider
+  ## compile from scratch.
   var parts = @[nimCompilerPath(), absolutePath(workDir),
-                "pid=" & $getCurrentProcessId()]
+                "session=" & providerNimcacheSessionToken()]
   for f in hostFlags:
     parts.add(f)
   for f in libFlags:
@@ -2845,16 +2893,20 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # uses.
   #
   # The key is shared across every provider compile that targets the same
-  # toolchain + library set *within one process*
+  # toolchain + library set *within one `repro` session*
   # (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
   # Each CMake configure pays for one cold provider compile; subsequent
   # try_compile providers reuse all unchanged library object files via
-  # Nim's `.sha1`-based incremental compilation. Within a single CMake
-  # configure the provider compiles are sequential, so the shared cache is
-  # safe. Across processes the key is additionally scoped by process id (see
-  # `sharedProviderNimcacheKey`) so concurrent `repro` sessions building from
-  # the same project tree never share a nimcache directory and never race
-  # Nim's incremental rename/rmdir cleanup into an `ENOTEMPTY` abort.
+  # Nim's `.sha1`-based incremental compilation. The same caching extends
+  # across all 84 from-source recipes auto-recurse fires for a
+  # `--tool-provisioning=from-source` build: cold compile of the first
+  # recipe's provider populates the shared cache, every later recipe's
+  # provider compile reuses ~99 % of those `.o` files. Across `repro`
+  # sessions the key is additionally scoped by a per-session token
+  # (`REPRO_PROVIDER_NIMCACHE_SESSION`, see `sharedProviderNimcacheKey`)
+  # so concurrent independent `repro` sessions building from the same
+  # project tree never share a nimcache directory and never race Nim's
+  # incremental rename/rmdir cleanup into an `ENOTEMPTY` abort.
   # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` restores the legacy
   # per-output isolation.
   let hostFlags = hostCCompilerFlags()

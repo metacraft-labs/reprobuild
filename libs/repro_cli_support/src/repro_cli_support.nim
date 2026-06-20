@@ -22577,6 +22577,17 @@ proc normalizeInternalArgs(args: seq[string]): seq[string] =
     result = args
 
 proc runThinApp*(programName: string): int =
+  # M9.R.13a — seed the provider-nimcache session token before any
+  # subcommand routing, so every nested subprocess spawned downstream
+  # (the build engine's per-recipe `__repro-compile-provider` helpers,
+  # the recursive `executeBuildTarget` calls auto-recurse fires for
+  # from-source recipes) inherits a stable per-`repro`-session token
+  # and lands in one shared provider nimcache. Without this seed each
+  # of the ~84 from-source recipes paid a full cold provider compile
+  # (~5 min on Windows) because every helper subprocess had a distinct
+  # pid -- the M9.R.12 pid-scoped key collapsed cross-recipe sharing.
+  # See `sharedProviderNimcacheKey` for the full rationale.
+  ensureProviderNimcacheSession()
   let args = normalizeInternalArgs(commandLineParams())
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and
