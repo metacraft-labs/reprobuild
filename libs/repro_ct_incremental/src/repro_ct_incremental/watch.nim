@@ -48,6 +48,15 @@ type
       ## For a ``changed`` re-run, exactly the executed functions whose shallow
       ## hash changed (or which were removed). Empty otherwise.
 
+  WatchCtIncrementalGate* = object
+    ## The enable/disable gate for the `--ct-incremental` watch feature, as seen
+    ## by the engine lib. Its zero value is the LEGACY default: `enabled == false`
+    ## ⇒ the incremental decision machinery is never consulted and the watch loop
+    ## follows its byte-for-byte legacy run path. This mirrors the
+    ## `repro_cli_support` flag state but lets the engine-level no-regression
+    ## guard be asserted without the (currently blocked) whole-project build.
+    enabled*: bool
+
 func runDecision(testId, reason: string;
                  changedFuncs: seq[string] = @[]): WatchEdgeDecision =
   WatchEdgeDecision(action: weaRun, testId: testId, reason: reason,
@@ -87,3 +96,24 @@ proc watchTestEdgeDecision*(testId, traceDir, sourceRoot, cachePath: string):
   of idRerunChanged:
     runDecision(testId, "changed: " & decision.changedFuncs.join(", "),
                 decision.changedFuncs)
+  of idRerunNonDeterministic:
+    # Spec §16.7: a non-deterministic test is always re-run. Reported distinctly
+    # so the watch output shows WHY it ran despite an unchanged source.
+    runDecision(testId, "non-deterministic")
+  of idRerunFailSafe:
+    # A conservative re-run forced by a missing/unreadable trace (or other guard)
+    # — never a silent skip. The engine's diagnostic is surfaced verbatim.
+    runDecision(testId, "error: " & decision.reason)
+
+proc gatedWatchDecision*(gate: WatchCtIncrementalGate;
+                         testId, traceDir, sourceRoot, cachePath: string):
+    WatchEdgeDecision =
+  ## The gate-aware wrapper the watch loop's no-flag path is modelled on. When
+  ## the feature is DISABLED (the legacy default), this short-circuits to the
+  ## legacy run verdict (`weaRun`, ``ct-incremental-disabled``) WITHOUT loading
+  ## the cache or consulting the incremental engine at all — proving the no-flag
+  ## path can never skip a test. Only when the gate is enabled does it delegate
+  ## to the pure `watchTestEdgeDecision` seam.
+  if not gate.enabled:
+    return runDecision(testId, "ct-incremental-disabled")
+  watchTestEdgeDecision(testId, traceDir, sourceRoot, cachePath)

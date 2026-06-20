@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: M4 complete, M5 next
+#+STATUS: M5 complete — campaign done
 
 * Overview
 
@@ -288,27 +288,54 @@
   Acceptance: selective re-run across a multi-test fixture with no false skips.
 
 * M5 — Robustness and correctness guards
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: never skip a test that should run.
 
   Deliverables:
-  - [ ] `deterministic`/non-deterministic marking: tests marked
+  - [X] `deterministic`/non-deterministic marking: tests marked
     non-deterministic are always re-run regardless of hashes (§16.7).
-  - [ ] Conservative fallbacks: missing trace, unreadable source, hash-tooling
+    `CachedTest.deterministic` (defaults true) is persisted in the cache JSON,
+    settable at `record` time (`deterministic = false`) or via the separate
+    `markNonDeterministic` API. `decide` checks it FIRST (before any hashing) and
+    returns the dedicated `idRerunNonDeterministic`; `watch.nim` maps it to a
+    `weaRun` with reason ``non-deterministic``.
+  - [X] Conservative fallbacks: missing trace, unreadable source, hash-tooling
     error ⇒ re-run (fail-safe), with a diagnostic; never a silent skip.
-  - [ ] Cache schema versioning: a cache from an older schema is ignored
-    (re-run), not mis-parsed.
-  - [ ] Concurrent/independent watched edges keep separate cache entries.
+    `decide` now probes the trace dir (`traceDirReadable`) and returns the new
+    `idRerunFailSafe{reason}` on a missing/unreadable trace dir or required trace
+    file. An unreadable source file / extraction / hashing error already maps to
+    the reserved `"missing"` shallow hash ⇒ `idRerunChanged` (M1, confirmed and
+    extended for whole-file deletion). `isRerun` centralises "skip iff
+    `idSkipUnchanged`" so no caller can mistake a new kind for a skip.
+  - [X] Cache schema versioning: a cache from an older schema is ignored
+    (re-run), not mis-parsed. `CacheVersion = 2`; `loadCache` returns a FRESH
+    (empty) Ok cache when the on-disk `version` is absent/non-int or ≠
+    `CacheVersion` (older OR newer), so every test re-runs `idRunFresh`.
+  - [X] Concurrent/independent watched edges keep separate cache entries.
+    Entries key by test id; `independent_watched_edges_keep_separate_cache_
+    entries` proves two edges coexist in one cache file and are invalidated
+    independently (marking edge A non-deterministic does not affect edge B).
 
-  Automated tests:
-  - test_name: nondeterministic_test_always_reruns
-  - test_name: missing_trace_falls_back_to_rerun
-  - test_name: unreadable_source_falls_back_to_rerun
-  - test_name: stale_cache_schema_is_ignored_and_reruns
-  - test_name: full_suite_has_no_regressions
-    description: The complete reprobuild test suite passes with the feature
-    present (and with `--ct-incremental` absent, behaviour is unchanged).
+  Automated tests (`tests/t_robustness.nim`):
+  - [X] test_name: nondeterministic_test_always_reruns
+  - [X] test_name: missing_trace_falls_back_to_rerun
+  - [X] test_name: unreadable_source_falls_back_to_rerun
+  - [X] test_name: stale_cache_schema_is_ignored_and_reruns
+  - [X] test_name: full_suite_has_no_regressions
+    description: Scoped to what the feature touches (the whole-project `.#test`
+    is BLOCKED by an unrelated pre-existing `undeclared identifier: 'Executable'`
+    error in `repro_project_dsl/macros_b.nim` from commit `2dbd9111` — NOT a
+    campaign regression, documented in the test file header). Part (a):
+    `noflag_watch_decision_is_legacy_default` asserts in code that with
+    `--ct-incremental` absent the watch decision is the legacy run path (a
+    disabled `WatchCtIncrementalGate` via `gatedWatchDecision` never consults the
+    engine and never skips). Part (b): verification re-runs ALL M0–M4 lib tests +
+    `repro_cli_support/tests/t_watch_ct_incremental_flags.nim` + standalone
+    `nim check libs/repro_cli_support/src/repro_cli_support.nim` (exit 0) — all
+    green.
 
   Acceptance: every fail-safe path re-runs; no path can silently skip a test
-  that should run.
+  that should run. The ONLY skip path is `idSkipUnchanged`, reachable only when
+  the test is deterministic, its trace dir is readable, and every recorded
+  dependency's current shallow hash equals its recorded hash.

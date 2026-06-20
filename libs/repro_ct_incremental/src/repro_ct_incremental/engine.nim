@@ -65,19 +65,29 @@ export extractors
 
 type
   IncrementalDecisionKind* = enum
-    idRunFresh        ## No cache entry for this test — run it and record.
-    idSkipUnchanged   ## Deep hash unchanged — the test may be skipped.
-    idRerunChanged    ## At least one executed function changed/was removed.
+    idRunFresh                ## No cache entry for this test — run it and record.
+    idSkipUnchanged           ## Deep hash unchanged — the test may be skipped.
+    idRerunChanged            ## At least one executed function changed/was removed.
+    idRerunNonDeterministic   ## Test marked non-deterministic — always re-run.
+    idRerunFailSafe           ## A guard (missing trace, unreadable source/cache,
+                              ## hashing/extraction error) forced a conservative
+                              ## re-run rather than risk a silent skip (M5).
 
   IncrementalDecision* = object
     ## The skip/re-run verdict for a single test.
     case kind*: IncrementalDecisionKind
-    of idRunFresh, idSkipUnchanged:
+    of idRunFresh, idSkipUnchanged, idRerunNonDeterministic:
       discard
     of idRerunChanged:
       changedFuncs*: seq[string]
         ## Names of executed functions whose shallow hash changed (or which are
         ## now missing from the source) since the cache was recorded.
+    of idRerunFailSafe:
+      reason*: string
+        ## A human-readable diagnostic for *why* the fail-safe re-run was forced
+        ## (e.g. ``missing trace dir: …``). The decision is ALWAYS re-run; the
+        ## reason exists so the watch report can distinguish fail-safe re-runs
+        ## from ordinary changed-function re-runs (M5 §16.7).
 
   CachedDep* = object
     ## A single recorded dependency: the executed function plus the shallow
@@ -93,6 +103,12 @@ type
     ## shallow hash.
     deepHash*: string
     deps*: seq[CachedDep]
+    deterministic*: bool
+      ## Whether this test is deterministic. Defaults to ``true``. A test marked
+      ## non-deterministic (``false``) is ALWAYS re-run by `decide`, regardless of
+      ## whether any executed function's hash changed (spec §16.7: non-deterministic
+      ## tests are always re-run). Persisted in the cache JSON so the marking
+      ## survives a process restart.
 
   IncrementalCache* = object
     ## In-memory map of `testId -> CachedTest`, with JSON persistence.
@@ -102,6 +118,13 @@ type
 const
   DefaultCacheDir* = ".repro-ct-incremental"
   DefaultCacheFile* = "cache.json"
+  CacheVersion* = 2
+    ## Current on-disk cache schema version (M5). A cache file written with a
+    ## DIFFERENT version (older or newer) is IGNORED by `loadCache` — treated as
+    ## an empty/fresh cache so every test re-runs — rather than mis-parsed or
+    ## partially trusted. Bumped from 1 to 2 in M5 when the per-test
+    ## ``deterministic`` field was introduced; a v1 file lacks that field and any
+    ## fields the next schema adds, so trusting it could silently skip a test.
 
 # ---------------------------------------------------------------------------
 # Decision constructors
@@ -115,6 +138,19 @@ func skipUnchanged*(): IncrementalDecision =
 
 func rerunChanged*(changedFuncs: seq[string]): IncrementalDecision =
   IncrementalDecision(kind: idRerunChanged, changedFuncs: changedFuncs)
+
+func rerunNonDeterministic*(): IncrementalDecision =
+  IncrementalDecision(kind: idRerunNonDeterministic)
+
+func rerunFailSafe*(reason: string): IncrementalDecision =
+  IncrementalDecision(kind: idRerunFailSafe, reason: reason)
+
+func isRerun*(d: IncrementalDecision): bool =
+  ## True for every decision kind that means "the test must run". Only
+  ## `idSkipUnchanged` is a skip; ALL other kinds (fresh, changed,
+  ## non-deterministic, fail-safe) re-run. Centralising this keeps callers from
+  ## accidentally treating a new fail-safe kind as a skip.
+  d.kind != idSkipUnchanged
 
 # ---------------------------------------------------------------------------
 # Source extraction + shallow hash (§16.7.1)
@@ -247,6 +283,17 @@ func initCache*(path = defaultCachePath()): IncrementalCache =
 proc loadCache*(path = defaultCachePath()): Result[IncrementalCache, string] =
   ## Load a cache from JSON at `path`. A missing file yields an empty cache
   ## (first run). Malformed JSON is an Err — never a crash.
+  ##
+  ## # Schema versioning (M5)
+  ##
+  ## A cache file whose top-level ``version`` is absent or does NOT equal the
+  ## current `CacheVersion` is treated as if it were empty: the returned cache is
+  ## fresh (no entries) and bound to `path`, so EVERY test decides `idRunFresh`
+  ## and re-runs. We never partially trust a foreign-schema file — an older
+  ## schema may be missing fields a present-day `decide` relies on (e.g. the
+  ## ``deterministic`` flag), and silently trusting it could skip a test that
+  ## should run. This is an Ok (fresh cache), NOT an Err: a stale schema is a
+  ## normal, expected condition (a tool upgrade), not a corruption.
   var cache = initCache(path)
   if not fileExists(path):
     return ok(cache)
@@ -260,7 +307,14 @@ proc loadCache*(path = defaultCachePath()): Result[IncrementalCache, string] =
     root = parseJson(raw)
   except CatchableError as e:
     return err("malformed cache JSON in " & path & ": " & e.msg)
-  if root.kind != JObject or not root.hasKey("tests"):
+  if root.kind != JObject:
+    return err("cache JSON root must be an object")
+  # Reject a foreign/old schema version up front: return a FRESH (empty) cache so
+  # everything re-runs, instead of mis-parsing a file written by another schema.
+  if not root.hasKey("version") or root["version"].kind != JInt or
+      int(root["version"].getBiggestInt()) != CacheVersion:
+    return ok(cache)
+  if not root.hasKey("tests"):
     return err("cache JSON missing 'tests' object")
   let tests = root["tests"]
   if tests.kind != JObject:
@@ -269,7 +323,16 @@ proc loadCache*(path = defaultCachePath()): Result[IncrementalCache, string] =
     if entry.kind != JObject or not entry.hasKey("deepHash") or
         not entry.hasKey("deps"):
       return err("cache entry '" & testId & "' is malformed")
-    var ct = CachedTest(deepHash: entry["deepHash"].getStr())
+    var ct = CachedTest(deepHash: entry["deepHash"].getStr(), deterministic: true)
+    # `deterministic` defaults to true when absent (a v2 file is always written
+    # WITH the field by `toJson`; tolerating its absence keeps us robust to a
+    # hand-edited cache without ever defaulting to the unsafe direction —
+    # "deterministic: true" only ENABLES skipping, and the per-dep hashes still
+    # gate that skip, so the conservative invariant holds).
+    if entry.hasKey("deterministic"):
+      if entry["deterministic"].kind != JBool:
+        return err("cache entry '" & testId & "' deterministic must be a bool")
+      ct.deterministic = entry["deterministic"].getBool()
     if entry["deps"].kind != JArray:
       return err("cache entry '" & testId & "' deps must be an array")
     for dep in entry["deps"].elems:
@@ -304,10 +367,11 @@ proc toJson(cache: IncrementalCache): JsonNode =
       deps.add d
     var entry = newJObject()
     entry["deepHash"] = newJString(ct.deepHash)
+    entry["deterministic"] = newJBool(ct.deterministic)
     entry["deps"] = deps
     tests[id] = entry
   result = newJObject()
-  result["version"] = newJInt(1)
+  result["version"] = newJInt(CacheVersion)
   result["tests"] = tests
 
 proc saveCache*(cache: IncrementalCache): Result[void, string] =
@@ -372,19 +436,58 @@ proc pruneCache*(cache: var IncrementalCache;
 # record / decide (§16.7.4)
 # ---------------------------------------------------------------------------
 
-proc record*(cache: var IncrementalCache; testId, traceDir, sourceRoot: string):
-    Result[void, string] =
+proc record*(cache: var IncrementalCache; testId, traceDir, sourceRoot: string;
+             deterministic = true): Result[void, string] =
   ## Record a fresh run: read the trace's executed functions, compute each
   ## one's shallow hash from the CURRENT source under `sourceRoot`, combine into
-  ## the deep hash, and store `{deepHash, deps}` for `testId`. Called after a
-  ## test is actually executed and re-traced (§16.7.4 step 4).
+  ## the deep hash, and store `{deepHash, deps, deterministic}` for `testId`.
+  ## Called after a test is actually executed and re-traced (§16.7.4 step 4).
+  ##
+  ## `deterministic` marks whether the test is reproducible. Pass `false` for a
+  ## test known to be non-deterministic: it is persisted in the cache and makes
+  ## every future `decide` re-run the test regardless of hashes (§16.7).
   let execRes = readExecutedFunctions(traceDir)
   if execRes.isErr:
     return err(execRes.error)
   let deps = currentDeps(execRes.value, sourceRoot)
   cache.entries[testId] = CachedTest(
     deepHash: deepHashOfCachedDeps(deps),
-    deps: deps)
+    deps: deps,
+    deterministic: deterministic)
+  ok()
+
+proc markNonDeterministic*(cache: var IncrementalCache; testId: string;
+                           deterministic = false): Result[void, string] =
+  ## Separate API to (re)mark an already-recorded test's determinism without
+  ## re-recording its dependency set. Returns an Err if there is no cache entry
+  ## for `testId` (you cannot mark a test that has never been recorded). Pass
+  ## ``deterministic = true`` to clear a prior non-deterministic marking.
+  ##
+  ## A test marked non-deterministic (the default) is ALWAYS re-run by `decide`
+  ## regardless of source hashes — spec §16.7: non-deterministic tests are
+  ## always re-run.
+  if not cache.entries.hasKey(testId):
+    return err("cannot mark unknown test as non-deterministic: " & testId)
+  cache.entries[testId].deterministic = deterministic
+  ok()
+
+proc traceDirReadable(traceDir: string): Result[void, string] =
+  ## A conservative readability probe for a test's trace directory (M5
+  ## fail-safe). The directory must exist AND its two required JSON files
+  ## (`trace.json`, `trace_paths.json`) must be present and readable. We do NOT
+  ## fully parse them here — `record` does that — but a missing dir or file, or
+  ## a file we cannot open, is reported so `decide` re-runs rather than risk a
+  ## skip against a trace it cannot even see.
+  if not dirExists(traceDir):
+    return err("missing trace dir: " & traceDir)
+  for required in [TraceEventsFile, TracePathsFile]:
+    let p = traceDir / required
+    if not fileExists(p):
+      return err("missing trace file: " & p)
+    try:
+      discard readFile(p)
+    except CatchableError as e:
+      return err("unreadable trace file " & p & ": " & e.msg)
   ok()
 
 proc decide*(testId, traceDir, sourceRoot: string;
@@ -392,6 +495,14 @@ proc decide*(testId, traceDir, sourceRoot: string;
   ## Decide skip vs re-run for `testId` (§16.7.4 step 3).
   ##
   ## * If `testId` is absent from the cache ⇒ `idRunFresh`.
+  ## * If the cache entry is marked non-deterministic ⇒ `idRerunNonDeterministic`
+  ##   (spec §16.7: a non-deterministic test is ALWAYS re-run, regardless of
+  ##   hashes — checked before any source/trace inspection so it can never be
+  ##   shadowed by an `idSkipUnchanged`).
+  ## * If the trace dir referenced for the test is missing/unreadable ⇒
+  ##   `idRerunFailSafe` (we re-run rather than trust a stale decision against a
+  ##   trace we cannot see). This guard intentionally fires only for a cached
+  ##   test: a never-recorded test already runs fresh.
   ## * Otherwise recompute each CACHED dependency's shallow hash from the
   ##   CURRENT source (NOT a fresh trace) and compare it to the per-dep shallow
   ##   hash recorded at `record` time. If every dep is unchanged ⇒
@@ -399,19 +510,33 @@ proc decide*(testId, traceDir, sourceRoot: string;
   ##   `idRerunChanged` listing exactly the executed functions whose shallow
   ##   hash changed or which are now missing (function-level precision).
   ##
-  ## `traceDir` is accepted for API symmetry with `record` and for callers that
-  ## want to pass the test's trace location uniformly; the decision itself uses
-  ## only the cached deps + current source, exactly as §16.7.4 specifies.
-  discard traceDir  # accepted for API symmetry; the decision uses cached deps.
+  ## # The conservative invariant (M5)
+  ##
+  ## The ONLY decision kind that skips is `idSkipUnchanged`, and it is reached
+  ## only when (a) the test is deterministic, (b) its trace dir is readable, and
+  ## (c) every recorded dependency's CURRENT shallow hash equals its recorded
+  ## hash. An unreadable source file or an extraction/hashing failure yields the
+  ## reserved `"missing"` shallow hash (see `shallowHashOfDep`), which differs
+  ## from any real recorded hash and therefore routes to `idRerunChanged` — so a
+  ## hashing/extraction error is itself a re-run, never a skip. No error or
+  ## non-deterministic condition can reach the skip branch.
   if not cache.entries.hasKey(testId):
     return runFresh()
   let cached = cache.entries[testId]
+  # Guard 1: a non-deterministic test is always re-run, before any hashing.
+  if not cached.deterministic:
+    return rerunNonDeterministic()
+  # Guard 2: the trace dir referenced for this test must be readable. If it is
+  # gone or unreadable, fail safe to a re-run with a diagnostic.
+  let traceRes = traceDirReadable(traceDir)
+  if traceRes.isErr:
+    return rerunFailSafe(traceRes.error)
   # Recompute each dependency's CURRENT shallow hash against the current source
   # and compare to the per-dep shallow hash recorded at `record` time. A dep is
   # "changed" if its current shallow hash differs from the recorded one — this
-  # includes the case where the function was removed (current hash == the
-  # `"missing"` sentinel), which is therefore reported as changed and never
-  # silently skipped.
+  # includes the case where the function was removed OR its source is unreadable
+  # (current hash == the `"missing"` sentinel), which is therefore reported as
+  # changed and never silently skipped.
   var changed: seq[string]
   for dep in cached.deps:
     let current = shallowHashOfDep(dep.fn, sourceRoot)
