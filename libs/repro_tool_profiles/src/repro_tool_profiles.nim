@@ -757,11 +757,29 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   if rejectSymlinks and pathContainsSymlink(storePath, declaredExecutablePath):
     return ""
   let candidate = storePath / declaredExecutablePath
-  if fileExists(extendedPath(candidate)) and {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
+  if not fileExists(extendedPath(candidate)):
+    return ""
+  # M9.R.14d.8b — data-file declarations (e.g. wayland-protocols's
+  # ``share/pkgconfig/wayland-protocols.pc``) point at non-executable
+  # files that exist only to verify the realization completed. Detect
+  # these by extension and accept them without the +x permission
+  # requirement; the consumer threads the parent prefix into
+  # PKG_CONFIG_PATH at build time rather than spawning the file
+  # directly.
+  let dataExts = [".pc", ".so", ".a", ".h", ".hpp", ".cmake", ".json",
+    ".xml", ".txt"]
+  let lower = declaredExecutablePath.toLowerAscii
+  var isDataDecl = false
+  for ext in dataExts:
+    if lower.endsWith(ext) or lower.contains(ext & "."):
+      isDataDecl = true
+      break
+  if isDataDecl:
+    return absolutePath(candidate)
+  if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
       it in getFilePermissions(extendedPath(candidate))):
-    absolutePath(candidate)
-  else:
-    ""
+    return absolutePath(candidate)
+  return ""
 
 proc safeStoreSegment(value, fallback: string): string =
   for ch in value:
