@@ -1704,11 +1704,25 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       env = mergedEnv)
 
+  # M9.R.12.2 — fall back to ``packageName`` alone when the recipe's
+  # ``nativeBuildDeps:`` declares the tool by its package selector
+  # (e.g. ``"make"``) but the typed-tool wrapper records the action
+  # under the package's inner executable name (e.g. ``"makeBin"`` from
+  # the ``executable makeBin:`` block inside ``package make:``). The
+  # profile registry only indexes by ``packageSelector & "|" &
+  # executableName`` and ``executableName``, so the lookup misses both
+  # keys despite the recipe carrying a valid ``make`` use. The third
+  # fallback by ``packageName`` closes the gap deterministically for
+  # every typed-tool surface in the stdlib (``cmake.call`` →
+  # ``cmakeBin``, ``meson.call`` → ``mesonBin``, ``ninja.call`` →
+  # ``ninjaBin``, ``make.call`` → ``makeBin``).
   let profile =
     if profiles.hasKey(exactKey):
       profiles[exactKey]
     elif profiles.hasKey(executableName):
       profiles[executableName]
+    elif packageName.len > 0 and profiles.hasKey(packageName):
+      profiles[packageName]
     else:
       raise newException(ValueError,
         "tool-resolution failed: action " & payload.id &
