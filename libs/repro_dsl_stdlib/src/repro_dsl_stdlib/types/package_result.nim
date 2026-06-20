@@ -662,6 +662,14 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let lettersOnly = lettersOnlyLower(stripLibPrefix(name))
     if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14h.7 — snake-case version-suffix glob for libraries like
+    # ``libgdk_pixbuf-2.0.so`` whose upstream SONAME uses an underscore
+    # between the project segments while the DSL writes the artifact as
+    # ``libgdkPixbuf``.  Without this probe the version-suffix walk
+    # only tries ``libgdkPixbuf-*.so`` / ``libgdkpixbuf-*.so`` and
+    # misses ``libgdk_pixbuf-2.0.so`` outright.
+    if strippedSnake.len > 0 and strippedSnake != strippedLowerName:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
     # upstream library lives under ``lib/x86_64-linux-gnu/`` or
