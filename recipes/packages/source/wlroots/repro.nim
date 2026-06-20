@@ -209,6 +209,16 @@ package wlrootsSource:
     ## libinput is the input-device abstraction library wlroots'
     ## libinput backend wraps for evdev / touchpad / tablet support.
     "libinput >=1.14"
+    ## wayland-protocols ships the protocol-XML files (xdg-shell,
+    ## linux-dmabuf, pointer-constraints, ...) that wlroots' build
+    ## consumes at compile time to emit protocol-stub C bindings.
+    ## Distributed as a separate upstream package from libwayland;
+    ## the stdlib shim ``wayland_protocols.nim`` exposes the nixpkgs
+    ## provisioning. Without this dep, wlroots' meson setup fails at
+    ## ``src/protocol/meson.build:1:17`` because wlroots tries to
+    ## fall back to a subproject clone when the pkg-config probe
+    ## misses and wrap-based downloads are disabled.
+    "wayland-protocols"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
