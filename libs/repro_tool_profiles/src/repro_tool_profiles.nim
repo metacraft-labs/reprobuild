@@ -1112,6 +1112,11 @@ proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
 
+proc addUniquePath*(dst: var seq[string]; value: string)
+  ## Forward declaration — defined alongside the from-source populator
+  ## further down. Resolved here so ``resolveNixTool`` can reuse the
+  ## same dedup/exists-probe helper for nix-store aux-path population.
+
 proc resolveNixTool*(useDef: InterfaceToolUse;
                      storeRoot = "";
                      writerMode = "direct"): PathOnlyToolProfile =
@@ -1173,6 +1178,26 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     resolvedExecutablePath: resolved,
     adapterStrength: asStrong,
     cachePortability: cpPortable)
+
+  # M9.R.14e.7 — populate the same four auxiliary search-path channels
+  # the from-source resolver populates, but anchored at the nix store
+  # output. Many nix packages (e.g. wayland-protocols, libxml2-dev) ship
+  # ``.pc`` files at ``<store>/share/pkgconfig/`` and headers at
+  # ``<store>/include/``; the engine threads these onto
+  # ``PKG_CONFIG_PATH`` / ``CMAKE_PREFIX_PATH`` / ``CPATH`` /
+  # ``LIBRARY_PATH`` at fork time so a meson/cmake recipe consuming
+  # the dep finds its pc files / headers without having to declare a
+  # special-case ``env:`` block.
+  addUniquePath(result.cmakePrefixList, selectedStorePath)
+  addUniquePath(result.pkgConfigSearchList,
+    selectedStorePath / "lib" / "pkgconfig")
+  addUniquePath(result.pkgConfigSearchList,
+    selectedStorePath / "lib64" / "pkgconfig")
+  addUniquePath(result.pkgConfigSearchList,
+    selectedStorePath / "share" / "pkgconfig")
+  addUniquePath(result.cpathList, selectedStorePath / "include")
+  addUniquePath(result.libraryPathList, selectedStorePath / "lib")
+  addUniquePath(result.libraryPathList, selectedStorePath / "lib64")
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
@@ -1944,6 +1969,21 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     resolvedExecutablePath: resolved,
     adapterStrength: asStrong,
     cachePortability: cpPortable)
+
+  # M9.R.14e.7 — auxiliary search-path channels for the tarball-resolved
+  # prefix. Mirrors the nix-resolved population so tarball-shipped libs
+  # contribute to the consumer recipe's PKG_CONFIG_PATH /
+  # CMAKE_PREFIX_PATH / CPATH / LIBRARY_PATH at action fork time.
+  addUniquePath(result.cmakePrefixList, materialized.prefix)
+  addUniquePath(result.pkgConfigSearchList,
+    materialized.prefix / "lib" / "pkgconfig")
+  addUniquePath(result.pkgConfigSearchList,
+    materialized.prefix / "lib64" / "pkgconfig")
+  addUniquePath(result.pkgConfigSearchList,
+    materialized.prefix / "share" / "pkgconfig")
+  addUniquePath(result.cpathList, materialized.prefix / "include")
+  addUniquePath(result.libraryPathList, materialized.prefix / "lib")
+  addUniquePath(result.libraryPathList, materialized.prefix / "lib64")
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
