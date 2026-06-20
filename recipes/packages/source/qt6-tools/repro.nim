@@ -195,15 +195,28 @@ package qt6ToolsSource:
         "QT_BUILD_TESTS=OFF",
         "QT_BUILD_EXAMPLES=OFF",
         # M9.R.15h.1 — disable FEATURE_clang to skip qdoc + libclang
-        # dependency. Without this, the configure step probes for
-        # libclang via the host CMAKE_PREFIX_PATH, which on cross-mounted
-        # WSL builds picks up Windows MSYS2's mingw64 ClangConfig.cmake
-        # at ``/mnt/d/metacraft-dev-deps/msys2/...`` and fails with
-        # "Could not find a package configuration file provided by LLVM".
+        # dependency. The qt6-tools configure.cmake unconditionally
+        # probes ``WrapLibClang`` (line 20, BEFORE any feature gate);
+        # its FindWrapLibClang.cmake delegates to ``find_package(Clang
+        # CONFIG)`` which on cross-mounted WSL builds latches onto
+        # Windows MSYS2's mingw64 ClangConfig.cmake at
+        # ``/mnt/d/metacraft-dev-deps/msys2/...``. That config then
+        # tries to load LLVMConfig.cmake (22.1.4) which the MSYS2
+        # install doesn't have, hard-failing the configure.
+        #
+        # ``CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE`` makes
+        # ``find_package(Clang CONFIG)`` short-circuit to NOT FOUND
+        # (Clang is the package the FindWrapLibClang.cmake delegate
+        # actually fails on). FEATURE_clang=OFF is the matching
+        # high-level gate so the rest of the configure tree records
+        # the disable cleanly.
+        #
         # qdoc is only the API-documentation generator (Doxygen-style);
         # the v1 KF6 cascade only needs qhelpgenerator + lupdate +
         # lrelease, none of which depend on FEATURE_clang.
         "FEATURE_clang=OFF",
+        "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
+        "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.executable("qhelpgenerator")
