@@ -5870,6 +5870,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r11_runquota_daemon_recovery.nim",
+    binary: "build/test-bin/t_m9r11_runquota_daemon_recovery",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r11_stub_provisioning_widening.nim",
+    binary: "build/test-bin/t_m9r11_stub_provisioning_widening",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r1_deps_package_level.nim",
     binary: "build/test-bin/t_m9r1_deps_package_level",
     defines: @[],
