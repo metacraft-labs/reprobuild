@@ -149,6 +149,9 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string)
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName: string)
+proc emitStageCopyAlias(installEdge: BuildActionDef;
+                        buildDir, destdir, packageName, aliasName,
+                        sourceName: string)
 
 proc executable*(r: MesonPackageResult; name: string): Executable =
   ## Slice the meson install edge into an executable artifact. The
@@ -194,6 +197,38 @@ proc library*(r: MesonPackageResult; name: string): Library =
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
+
+proc executableAlias*(r: MesonPackageResult; aliasName, sourceName: string):
+    Executable =
+  ## M9.R.15g.1 — emit a stage-copy that copies the installed binary
+  ## ``<destdir>/usr/bin/<sourceName>`` onto the canonical from-source
+  ## resolver path ``.repro/output/<aliasName>/<aliasName>`` so a dep
+  ## selector that doesn't match any of the package's own binary names
+  ## resolves to one of them by alias.
+  ##
+  ## Motivating case: ``gobject-introspection`` (the upstream package +
+  ## the dep selector consumers write) installs binaries ``g-ir-scanner``,
+  ## ``g-ir-compiler``, ``g-ir-generate``, ... — none of which canonicalise
+  ## to the package name. The M9.R.14d resolver's canonical-prefix tier
+  ## therefore can't pick one. ``executableAlias("gobject-introspection",
+  ## sourceName = "g-ir-scanner")`` stages ``g-ir-scanner`` at
+  ## ``.repro/output/gobject-introspection/gobject-introspection`` so the
+  ## resolver's tier-0 exact match fires.
+  ##
+  ## Same DESTDIR / destdir handling as ``executable()``. The
+  ## ``Executable`` record returned points at the alias's stage-copy
+  ## output so callers consuming the slice see the same shape as a
+  ## regular ``pkg.executable(name)`` call.
+  emitStageCopyAlias(r.installEdge, "", r.destdir,
+    currentOwningPackage(), aliasName, sourceName)
+  # The install-tree mirror is already emitted by the recipe's other
+  # executable / library slices; no need to repeat it here. Aliases
+  # never participate in the mirror because they're synthetic
+  # rename-only artefacts.
+  newExecutable(
+    install = r.installEdge,
+    executableName = aliasName,
+    installPrefix = componentPath(r.components, "runtime"))
 
 proc files*(r: MesonPackageResult; name: string): BuildActionDef =
   ## Return the install edge for ``name``-shaped files (man pages,
@@ -897,6 +932,61 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.stage." & kind,
+    toolIdentityRefs = @["sh"])
+
+proc emitStageCopyAlias(installEdge: BuildActionDef;
+                        buildDir, destdir, packageName, aliasName,
+                        sourceName: string) =
+  ## M9.R.15g.1 — emit a stage-copy that copies the installed binary
+  ## ``<destdir>/usr/bin/<sourceName>`` into the canonical from-source
+  ## resolver path ``.repro/output/<aliasName>/<aliasName>`` so a dep
+  ## selector that doesn't match any of the package's own binary names
+  ## resolves to one of them by alias.
+  ##
+  ## Mirrors ``emitAutotoolsStageCopy`` for the executable kind but
+  ## uses ``sourceName`` for the probe source and ``aliasName`` for the
+  ## destination so the same upstream binary can be staged under
+  ## multiple names. Idempotent — keyed by ``(packageName, "executable",
+  ## aliasName)`` so repeated declarations only emit one action.
+  let projectRoot = activeProviderProjectRoot()
+  if projectRoot.len == 0:
+    return
+  let flagKey = stageCopyEmittedKey(packageName, "executable", aliasName)
+  if stageCopyEmitted.len == 0:
+    stageCopyEmitted = initHashSet[string]()
+  if flagKey in stageCopyEmitted:
+    return
+  stageCopyEmitted.incl(flagKey)
+  let outputDir = projectRoot / ".repro" / "output" / aliasName
+  createDir(outputDir)
+  let outputPath = outputDir / aliasName
+  let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")
+  let escapedOutDir = outputDir.replace("\\", "/").replace("\"", "\\\"")
+  let effectiveDestRoot =
+    if buildDir.len > 0: buildDir & "/" & destdir
+    else: destdir
+  let installPrefix = effectiveDestRoot & "/usr/bin"
+  let escapedSrcDir = installPrefix.replace("\\", "/").replace("\"", "\\\"")
+  let escapedSrc = sourceName.replace("\"", "\\\"")
+  var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
+  # Probe the requested source name, plus the .exe shape for cross-builds.
+  script.add("if [ -f \"" & escapedSrcDir & "/" & escapedSrc & "\" ]; then ")
+  script.add("cp -fL \"" & escapedSrcDir & "/" & escapedSrc & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+  script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedSrc & ".exe\" ]; then ")
+  script.add("cp -fL \"" & escapedSrcDir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
+  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
+  let argv = @["sh", "-c", script]
+  let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
+    "-" & sanitizeStageCopyName(aliasName)
+  discard buildAction(
+    id = stageId,
+    call = inlineExecCall(argv),
+    deps = @[installEdge.id],
+    inputs = installEdge.outputs,
+    outputs = @[outputPath],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "autotools_package.stage.executable_alias",
     toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------

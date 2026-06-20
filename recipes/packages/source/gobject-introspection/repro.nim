@@ -148,6 +148,19 @@ package gobjectIntrospectionSource:
     ## ``/usr/bin/g-ir-compiler`` — .gir to .typelib compiler.
     discard
 
+  executable gobjectIntrospection:
+    ## M9.R.15g.1 — alias artefact so the from-source resolver matches
+    ## the dep selector ``"gobject-introspection"`` to this recipe
+    ## without the canonical-prefix tier needing to reason about the
+    ## ``g-ir-*`` binary naming convention. The build block stages
+    ## ``g-ir-scanner`` at ``.repro/output/gobject-introspection/
+    ## gobject-introspection`` via ``pkg.executableAlias(...)``; the
+    ## actual entry-point is still ``g-ir-scanner`` (consumers walk
+    ## the install-mirror's ``usr/bin/`` directly when invoking the
+    ## scanner — the alias only serves the resolver's name-match).
+    name: "gobject-introspection"
+    discard
+
   build:
     setCurrentOwningPackageOverride("gobjectIntrospectionSource")
     try:
@@ -161,6 +174,11 @@ package gobjectIntrospectionSource:
       discard pkg.library("libGirepository")
       discard pkg.executable("gIrScanner")
       discard pkg.executable("gIrCompiler")
+      # M9.R.15g.1 — alias ``gobject-introspection`` to ``g-ir-scanner``
+      # so consumers writing ``nativeBuildDeps: "gobject-introspection"``
+      # match this recipe at the resolver's tier-0 exact-match level.
+      discard pkg.executableAlias("gobject-introspection",
+        sourceName = "g-ir-scanner")
     finally:
       clearCurrentOwningPackageOverride()
 
