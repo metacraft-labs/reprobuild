@@ -505,6 +505,22 @@ proc m9r14dPascalToKebab*(value: string): string =
     else:
       result.add(ch)
 
+proc m9r14fPascalToSnake*(value: string): string =
+  ## DSL-port M9.R.14f.9 — convert ``libdrmAmdgpu`` → ``libdrm_amdgpu``.
+  ## libdrm / mesa-style libraries use snake_case for the SONAME suffix
+  ## (``libdrm_amdgpu.so`` / ``libdrm_nouveau.so``) while recipes
+  ## commonly declare them in PascalCase. Mirrors
+  ## ``m9r14dPascalToKebab`` but inserts ``_`` instead of ``-``.
+  result = ""
+  for i, ch in value:
+    if ch in {'A' .. 'Z'} and i > 0 and value[i - 1] notin {'-', '_'}:
+      result.add('_')
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    elif ch in {'A' .. 'Z'}:
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    else:
+      result.add(ch)
+
 proc m9r14dPascalToKebabWithDigits*(value: string): string =
   ## DSL-port M9.R.14d.7d — extension of `m9r14dPascalToKebab` that
   ## also inserts ``-`` at letter-↔-digit transitions. Pixman names its
@@ -582,11 +598,15 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
     let kebabDigitsName =
       m9r14dPascalToKebabWithDigits(name).replace("\"", "\\\"")
+    # M9.R.14f.9 — snake_case probe for libdrm / mesa-style naming
+    # where ``libdrmAmdgpu`` maps to ``libdrm_amdgpu.so``.
+    let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
     script.add("for candidate in ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/" & snakeName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
