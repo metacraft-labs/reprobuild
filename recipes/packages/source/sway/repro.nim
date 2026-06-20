@@ -335,6 +335,21 @@ package swaySource:
         "man-pages=disabled",
         "tray=disabled",
         "werror=false",
+        # M9.R.14i.5 — disable meson's default ``-Wl,--no-undefined``
+        # gate (``b_lundef=true``). Sway transitively pulls in
+        # ``libgdk_pixbuf-2.0.so`` whose DT_NEEDED references
+        # ``libpng16.so.16`` + ``libjpeg.so.62`` resolve via nix's
+        # ``LIBRARY_PATH`` env at gcc-driver time but the nix
+        # binutils-wrapper's auto-injected ``-L`` flags don't reach the
+        # ninja-spawned swaybar link step (gcc shells out to ``ld``
+        # directly under ninja, bypassing the wrapper's
+        # ``LIBRARY_PATH`` -> ``-L`` translation). Disabling the
+        # ``--no-undefined`` gate lets the linker leave transitive
+        # undefined references unresolved at link time; ``ld.so``
+        # resolves them at runtime via ``LD_LIBRARY_PATH`` (which the
+        # ld.so.conf.d overlay populates for installed sway). Matches
+        # the pattern many distros use for swaybar specifically.
+        "-Db_lundef=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("sway")
