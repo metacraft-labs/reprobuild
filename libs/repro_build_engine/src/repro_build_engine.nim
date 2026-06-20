@@ -503,6 +503,23 @@ type
     ##     diagnostics. Not used by the env-plumbing path itself.
     binDirs*: seq[string]
     resolvedExecutablePath*: string
+    # M9.R.14e.3 — auxiliary search-path channels. The engine threads
+    # each list onto a dedicated env var at action-launch time (see
+    # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
+    #
+    #   * ``pkgConfigDirs``  → ``PKG_CONFIG_PATH``
+    #   * ``cmakePrefixDirs`` → ``CMAKE_PREFIX_PATH``
+    #   * ``includeDirs``    → ``CPATH``
+    #   * ``libDirs``        → ``LIBRARY_PATH`` AND ``LD_LIBRARY_PATH``
+    #
+    # The from-source resolver populates these per-ref from the sibling
+    # recipe's staged install tree; the path/nix/tarball/scoop resolvers
+    # leave them empty (their store paths already work through PATH +
+    # the standard FHS layout).
+    pkgConfigDirs*: seq[string]
+    cmakePrefixDirs*: seq[string]
+    includeDirs*: seq[string]
+    libDirs*: seq[string]
     cachePlatformTag*: string
       ## DSL-port M9.R.7. The platform-tag the materialization cache
       ## lookup keyed against (``"native"`` on a native build;
@@ -1686,6 +1703,76 @@ proc prependPathDirs(table: StringTableRef; binDirs: openArray[string]) =
     table.del(key)
   table["PATH"] = combined
 
+proc prependEnvDirs*(table: StringTableRef; varName: string;
+                     dirs: openArray[string]) =
+  ## DSL-port M9.R.14e.3 — generalisation of ``prependPathDirs`` for the
+  ## per-tool auxiliary search-path channels (``PKG_CONFIG_PATH``,
+  ## ``CMAKE_PREFIX_PATH``, ``CPATH``, ``LIBRARY_PATH``,
+  ## ``LD_LIBRARY_PATH``). Unlike ``prependPathDirs``, this MUST honour
+  ## the case-EXACT key name (Linux env vars are case-sensitive; Windows
+  ## doesn't carry these vars natively). When the table already has the
+  ## var, prepend with the platform path separator; otherwise inherit
+  ## from the process env so a downstream tool that consults the var
+  ## still sees the host's existing value as a fallback.
+  if table == nil or dirs.len == 0:
+    return
+  let sep =
+    when defined(windows): ";"
+    else: ":"
+  var parts: seq[string] = @[]
+  for d in dirs:
+    if d.len > 0:
+      parts.add(d)
+  if parts.len == 0:
+    return
+  let existing =
+    if table.hasKey(varName): table[varName]
+    else: getEnv(varName)
+  if existing.len > 0:
+    parts.add(existing)
+  table[varName] = parts.join(sep)
+
+proc prependEnvDirsToArgvEnv*(env: seq[string]; varName: string;
+                              dirs: openArray[string]): seq[string] =
+  ## Argv-style counterpart of ``prependEnvDirs``. Walks an argv-style
+  ## ``KEY=VALUE`` env list, dedupes any existing entries for
+  ## ``varName``, and prepends ``dirs`` to the resulting value. Mirrors
+  ## ``prependPathDirsToArgvEnv``'s last-write-wins semantics.
+  if dirs.len == 0:
+    return env
+  let sep =
+    when defined(windows): ";"
+    else: ":"
+  var existing = ""
+  var seen = false
+  result = newSeqOfCap[string](env.len + 1)
+  for entry in env:
+    let eq = entry.find('=')
+    if eq <= 0:
+      result.add(entry)
+      continue
+    let key = entry[0 ..< eq]
+    if key == varName:
+      existing = entry[eq + 1 .. ^1]
+      seen = true
+    else:
+      result.add(entry)
+  var parts: seq[string] = @[]
+  for d in dirs:
+    if d.len > 0:
+      parts.add(d)
+  if parts.len == 0:
+    if seen:
+      result.add(varName & "=" & existing)
+    return result
+  if seen and existing.len > 0:
+    parts.add(existing)
+  elif not seen:
+    let inherited = getEnv(varName)
+    if inherited.len > 0:
+      parts.add(inherited)
+  result.add(varName & "=" & parts.join(sep))
+
 proc kindForRef(action: BuildAction; index: int): DepKind {.inline.} =
   ## DSL-port M9.R.7. Per-ref dep-kind lookup. When the action carries
   ## a parallel ``toolIdentityRefKinds`` array of the same length as
@@ -1733,6 +1820,69 @@ proc resolvedToolBinDirs(action: BuildAction;
     for binDir in resolved.get().binDirs:
       if binDir.len > 0:
         result.add(binDir)
+
+type
+  ResolvedAuxPaths* = object
+    ## DSL-port M9.R.14e.3 — accumulated per-action auxiliary search
+    ## paths gathered from every ref's ``ResolvedToolIdentity``. The
+    ## engine threads each list onto a dedicated env var at fork time
+    ## (see ``applyResolvedAuxPathsTable`` /
+    ## ``applyResolvedAuxPathsArgv``). Defaults to empty (no refs / nil
+    ## resolver / non-from-source profiles) — the env-prepend pass is
+    ## then a no-op.
+    pkgConfigDirs*: seq[string]
+    cmakePrefixDirs*: seq[string]
+    includeDirs*: seq[string]
+    libDirs*: seq[string]
+
+proc collectResolvedAuxPaths(action: BuildAction;
+                             resolver: ToolIdentityResolver):
+    ResolvedAuxPaths =
+  ## Walk every ``toolIdentityRefs`` entry through the resolver and
+  ## accumulate the in-order union of each ref's aux-path lists. Same
+  ## semantics as ``resolvedToolBinDirs`` but for the four extra search-
+  ## path channels.
+  if action.toolIdentityRefs.len == 0 or resolver == nil:
+    return
+  for i, refName in action.toolIdentityRefs:
+    let kind = kindForRef(action, i)
+    let resolved = resolver(refName, kind)
+    if resolved.isNone:
+      continue
+    let r = resolved.get()
+    for d in r.pkgConfigDirs:
+      if d.len > 0: result.pkgConfigDirs.add(d)
+    for d in r.cmakePrefixDirs:
+      if d.len > 0: result.cmakePrefixDirs.add(d)
+    for d in r.includeDirs:
+      if d.len > 0: result.includeDirs.add(d)
+    for d in r.libDirs:
+      if d.len > 0: result.libDirs.add(d)
+
+proc applyResolvedAuxPathsTable*(env: StringTableRef;
+                                 paths: ResolvedAuxPaths) =
+  ## StringTable-style env mutator. Used by the bypass-spawn path. Each
+  ## env var is prepended in-place via ``prependEnvDirs``.
+  if env == nil:
+    return
+  prependEnvDirs(env, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  prependEnvDirs(env, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
+  prependEnvDirs(env, "CPATH", paths.includeDirs)
+  prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
+  # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
+  # link-time. Same set of dirs feeds both.
+  prependEnvDirs(env, "LD_LIBRARY_PATH", paths.libDirs)
+
+proc applyResolvedAuxPathsArgv*(env: seq[string];
+                                paths: ResolvedAuxPaths): seq[string] =
+  ## Argv-style env mutator. Used by the RunQuota-helper-spawn +
+  ## inline-runquota paths.
+  result = env
+  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  result = prependEnvDirsToArgvEnv(result, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
+  result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
+  result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
+  result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", paths.libDirs)
 
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
@@ -1871,12 +2021,18 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # key matching on Windows (``Path`` vs ``PATH``) so the resolved
   # dirs win regardless of which casing the upstream merge produced.
   let binDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
-  if binDirs.len > 0:
+  let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
+  let hasAuxPaths = auxPaths.pkgConfigDirs.len + auxPaths.cmakePrefixDirs.len +
+    auxPaths.includeDirs.len + auxPaths.libDirs.len > 0
+  if binDirs.len > 0 or hasAuxPaths:
     if env == nil:
       env = newStringTable(modeCaseSensitive)
       for key, value in envPairs():
         env[key] = value
-    prependPathDirs(env, binDirs)
+    if binDirs.len > 0:
+      prependPathDirs(env, binDirs)
+    if hasAuxPaths:
+      applyResolvedAuxPathsTable(env, auxPaths)
   let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()
   let stdoutLog = bypassActionStdoutLogPath(cacheRoot, action.id)
   let stderrLog = bypassActionStderrLogPath(cacheRoot, action.id)
@@ -1935,10 +2091,13 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   # and when VS Build Tools is not installed.
   let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
+  let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
+  var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
+  threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
   let command = ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: prependPathDirsToArgvEnv(mergedEnv, toolBinDirs),
+    env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
@@ -1962,10 +2121,13 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   # shape. The action's own ``env`` entries override on key collision.
   let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
+  let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
+  var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
+  threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
   ReproCommandSpec(
     argv: action.argv,
     cwd: action.cwd,
-    env: prependPathDirsToArgvEnv(mergedEnv, toolBinDirs),
+    env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 

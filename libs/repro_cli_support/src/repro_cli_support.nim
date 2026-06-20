@@ -3585,11 +3585,25 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
       for searchDir in actionIdy.pathSearchList:
         if searchDir.len > 0 and searchDir notin binDirs:
           binDirs.add(searchDir)
-      if binDirs.len == 0:
+      let hasAuxLists = actionIdy.pkgConfigSearchList.len +
+        actionIdy.cmakePrefixList.len + actionIdy.cpathList.len +
+        actionIdy.libraryPathList.len > 0
+      if binDirs.len == 0 and not hasAuxLists:
         return none(ResolvedToolIdentity)
+      # M9.R.14e.3 — project the from-source resolver's auxiliary
+      # search-path channels into the engine's ``ResolvedToolIdentity``
+      # so the env-prepend pass at action-launch time threads them onto
+      # ``PKG_CONFIG_PATH`` / ``CMAKE_PREFIX_PATH`` / ``CPATH`` /
+      # ``LIBRARY_PATH`` / ``LD_LIBRARY_PATH``. Empty for non-from-
+      # source profiles (they leave the seqs empty), so this is a
+      # zero-impact passthrough on existing recipe graphs.
       return some(ResolvedToolIdentity(
         binDirs: binDirs,
         resolvedExecutablePath: actionIdy.resolvedExecutablePath,
+        pkgConfigDirs: actionIdy.pkgConfigSearchList,
+        cmakePrefixDirs: actionIdy.cmakePrefixList,
+        includeDirs: actionIdy.cpathList,
+        libDirs: actionIdy.libraryPathList,
         cachePlatformTag: cacheTag))
     none(ResolvedToolIdentity)
 

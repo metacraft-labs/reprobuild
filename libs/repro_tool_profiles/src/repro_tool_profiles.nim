@@ -100,6 +100,37 @@ type
     executableName*: string
     pathSearchList*: seq[string]
     resolvedExecutablePath*: string
+    # M9.R.14e.1 — additional search-path channels populated by the
+    # from-source resolver when the sibling recipe's install tree carries
+    # the relevant artefacts. The engine threads each list onto a
+    # dedicated env var at action fork time:
+    #
+    #   * ``pkgConfigSearchList``  → ``PKG_CONFIG_PATH``
+    #     points at ``lib/pkgconfig`` + ``share/pkgconfig`` dirs in the
+    #     staged install tree, so a recipe depending on ``wayland`` finds
+    #     ``wayland-client.pc`` without having to set the env var by hand.
+    #   * ``cmakePrefixList``      → ``CMAKE_PREFIX_PATH``
+    #     points at the install-prefix root (e.g. ``build/out/usr``) so
+    #     cmake-based recipes use ``find_package`` against from-source
+    #     siblings.
+    #   * ``cpathList``            → ``CPATH``
+    #     points at ``include/`` dirs so the compiler picks up headers
+    #     a recipe staged from source.
+    #   * ``libraryPathList``      → ``LIBRARY_PATH`` and
+    #                                ``LD_LIBRARY_PATH``
+    #     points at ``lib/`` dirs so the linker resolves ``-lwayland-client``
+    #     at link time AND the test executor at run time.
+    #
+    # Each list is empty for non-from-source profiles (path/nix/tarball/
+    # scoop) — those adapters already deliver a single store path whose
+    # standard FHS layout works through their existing PATH plumbing.
+    # The from-source profile populates them per-recipe so a Wayland
+    # consumer (libxkbcommon, wlroots, sway, ...) finds the right
+    # ``wayland-client.pc`` without any per-recipe scripting.
+    pkgConfigSearchList*: seq[string]
+    cmakePrefixList*: seq[string]
+    cpathList*: seq[string]
+    libraryPathList*: seq[string]
     probes*: seq[ToolProbeResult]
     adapterStrength*: AdapterStrength
     cachePortability*: CachePortability
@@ -139,6 +170,15 @@ type
     subcommand*: string
     pathSearchList*: seq[string]
     resolvedExecutablePath*: string
+    # M9.R.14e.1 — mirror of ``PathOnlyToolProfile``'s extra search-path
+    # channels. The provider-compile pass copies these fields out of the
+    # resolved profile and into the per-action identity so the CLI's
+    # ``mkToolIdentityResolver`` projection can hand them to the engine
+    # at action-launch time.
+    pkgConfigSearchList*: seq[string]
+    cmakePrefixList*: seq[string]
+    cpathList*: seq[string]
+    libraryPathList*: seq[string]
     probes*: seq[ToolProbeResult]
     actionFingerprint*: ContentDigest
     adapterStrength*: AdapterStrength
@@ -197,7 +237,11 @@ type
 
 const
   ArtifactMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')), byte(ord('P'))]
-  ArtifactVersion = 6'u16
+  # v7 — M9.R.14e.1 added the from-source search-path channels
+  # (``pkgConfigSearchList`` / ``cmakePrefixList`` / ``cpathList`` /
+  # ``libraryPathList``) to ``PathOnlyToolProfile`` + ``ToolActionIdentity``
+  # so the engine can thread them onto per-action env vars at fork time.
+  ArtifactVersion = 7'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 1'u16
 
@@ -418,7 +462,13 @@ proc collectConfiguredProbes(executablePath, packageSelector,
 
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.toolProfile.v5")
+  # v6 — M9.R.14e.1 folded the four extra search-path channels into the
+  # profile fingerprint so two from-source recipes that stage different
+  # ``pkgconfig`` / ``include`` / ``lib`` dirs hash to distinct cache
+  # keys. The old domain tag was ``v5``; bumping mechanically invalidates
+  # already-cached profiles from before the search-path extension so the
+  # engine refuses to re-use a profile that lacks the new channels.
+  payload.writeString("reprobuild.toolProfile.v6")
   payload.writeString(profile.installMethod)
   payload.writeString(profile.packageSelector)
   payload.writeString(profile.packageId)
@@ -438,6 +488,10 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   payload.writeString(profile.executableName)
   payload.writeStringSeq(profile.pathSearchList)
   payload.writeString(profile.resolvedExecutablePath)
+  payload.writeStringSeq(profile.pkgConfigSearchList)
+  payload.writeStringSeq(profile.cmakePrefixList)
+  payload.writeStringSeq(profile.cpathList)
+  payload.writeStringSeq(profile.libraryPathList)
   for probe in profile.probes:
     payload.writeByte(byte(ord(probe.spec.kind)))
     payload.writeString(probe.spec.name)
@@ -462,7 +516,11 @@ proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
 
 proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.toolAction.v5")
+  # See ``profileFingerprintFor`` — v5 → v6 bump for the M9.R.14e.1
+  # search-path channels. Two from-source siblings with different staged
+  # install trees produce two distinct action fingerprints so the
+  # engine never reuses a stale identity across staged-tree variations.
+  payload.writeString("reprobuild.toolAction.v6")
   payload.writeString(identity.providerEntrypointId)
   payload.writeString(identity.installMethod)
   payload.writeString(identity.packageSelector)
@@ -484,6 +542,10 @@ proc actionFingerprintFor(identity: ToolActionIdentity): ContentDigest =
   payload.writeString(identity.subcommand)
   payload.writeStringSeq(identity.pathSearchList)
   payload.writeString(identity.resolvedExecutablePath)
+  payload.writeStringSeq(identity.pkgConfigSearchList)
+  payload.writeStringSeq(identity.cmakePrefixList)
+  payload.writeStringSeq(identity.cpathList)
+  payload.writeStringSeq(identity.libraryPathList)
   for probe in identity.probes:
     payload.writeByte(byte(ord(probe.spec.kind)))
     payload.writeString(probe.spec.name)
@@ -3631,6 +3693,66 @@ type
       attemptedRecipeManifest*: string
       missingToolName*: string
 
+# ---------------------------------------------------------------------------
+# M9.R.14e.1 — from-source install-tree search-path discovery
+# ---------------------------------------------------------------------------
+
+const FromSourceInstallTreeRoots* = @[
+  # M9.R.14e.1 — installation tree probe roots for a from-source
+  # recipe's sibling install tree. Ordered most-specific first so the
+  # populator emits the M9.R.14e.2 staged-tree first when both layouts
+  # are present.
+  ".repro/output/install/usr",
+  ".repro/output/install",
+  "build/out/usr",
+]
+
+proc addUniquePath*(dst: var seq[string]; value: string) =
+  ## Append ``value`` to ``dst`` when it isn't already present AND when
+  ## the directory exists on disk. Centralised so the populator below
+  ## stays free of fileExists / dedup boilerplate.
+  if value.len == 0: return
+  if not dirExists(extendedPath(value)): return
+  let abs = absolutePath(value)
+  for entry in dst:
+    if entry == abs:
+      return
+  dst.add(abs)
+
+proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
+                                    recipeDir: string) =
+  ## DSL-port M9.R.14e.1 — fill the four extra search-path channels on
+  ## ``profile`` by probing the sibling recipe's install tree(s). The
+  ## probe walks ``FromSourceInstallTreeRoots`` for each known FHS
+  ## subdir (``lib``, ``lib/pkgconfig``, ``include``, ``share/pkgconfig``)
+  ## and adds the dirs that exist on disk to the corresponding list.
+  ##
+  ## The autotools_package / meson_package constructors stage the
+  ## upstream's ``make install DESTDIR=<recipe>/build/out`` (or
+  ## ``meson install --destdir=...``) tree under ``build/out/usr/`` so
+  ## the resolver finds the upstream's full install layout there
+  ## directly — no extra stage-copy needed for Part 1 to work end-to-
+  ## end on existing recipes.
+  ##
+  ## Idempotent + deterministic: same inputs → same lists (order from
+  ## ``FromSourceInstallTreeRoots`` × `FHS dirs`).
+  for root in FromSourceInstallTreeRoots:
+    let prefixRoot = recipeDir / root
+    if not dirExists(extendedPath(prefixRoot)):
+      continue
+    # CMAKE_PREFIX_PATH — points at the install-prefix root.
+    addUniquePath(profile.cmakePrefixList, prefixRoot)
+    # PKG_CONFIG_PATH — lib/pkgconfig + share/pkgconfig.
+    addUniquePath(profile.pkgConfigSearchList, prefixRoot / "lib" / "pkgconfig")
+    addUniquePath(profile.pkgConfigSearchList, prefixRoot / "lib64" / "pkgconfig")
+    addUniquePath(profile.pkgConfigSearchList, prefixRoot / "share" / "pkgconfig")
+    # CPATH — include/ dir.
+    addUniquePath(profile.cpathList, prefixRoot / "include")
+    # LIBRARY_PATH / LD_LIBRARY_PATH — lib/ dir (+ lib64 on multilib
+    # distros).
+    addUniquePath(profile.libraryPathList, prefixRoot / "lib")
+    addUniquePath(profile.libraryPathList, prefixRoot / "lib64")
+
 proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                                recipeRoot = ""): FromSourceResolveResult =
   ## DSL-port M9.R.9 — non-raising variant of ``resolveFromSourceTool``.
@@ -3729,6 +3851,23 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     adapterStrength: asStrong,
     cachePortability: cpLocalOnly,
     practicalHardening: phNone)
+
+  # M9.R.14e.1 — populate the four extra search-path channels by
+  # probing the sibling recipe's install tree. We support TWO layouts:
+  #
+  #   1. ``<recipeDir>/build/out/usr/`` — the autotools_package /
+  #      meson_package staging tree (DESTDIR for ``make install``,
+  #      ``--destdir`` for ``meson install``). Already populated by
+  #      every recipe that uses the new constructors.
+  #   2. ``<recipeDir>/.repro/output/install/usr/`` — the M9.R.14e.2
+  #      full-tree stage-copy layout. Reserved for the next milestone
+  #      step; the resolver probes it now so the data structure works
+  #      end-to-end once stage-copy starts populating it.
+  #
+  # Each list is deduplicated and only populated with directories that
+  # actually exist on disk so the engine doesn't add bogus entries to
+  # the action's env vars.
+  populateFromSourceSearchPaths(profile, recipeDir)
 
   profile.probes = collectConfiguredProbes(absolute,
     useDef.packageSelector, useDef.executableName)
@@ -3959,7 +4098,16 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     scoopManifestChecksum: profile.scoopManifestChecksum,
     scoopExecutionProfileChecksum: profile.scoopExecutionProfileChecksum,
     scoopRoot: profile.scoopRoot,
-    scoopJunctionTarget: profile.scoopJunctionTarget)
+    scoopJunctionTarget: profile.scoopJunctionTarget,
+    # M9.R.14e.1 — carry the from-source resolver's search-path channels
+    # through to the per-action identity so the CLI's tool-identity
+    # resolver projection can hand them to the engine at action-launch
+    # time. Inert for non-from-source profiles (they leave the seqs
+    # empty).
+    pkgConfigSearchList: profile.pkgConfigSearchList,
+    cmakePrefixList: profile.cmakePrefixList,
+    cpathList: profile.cpathList,
+    libraryPathList: profile.libraryPathList)
   result.actionFingerprint = actionFingerprintFor(result)
 
 proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
@@ -4066,6 +4214,13 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeByte(byte(ord(profile.scoopRequiresExecutionProfile)))
   outp.writeString(profile.scoopRoot)
   outp.writeString(profile.scoopJunctionTarget)
+  # M9.R.14e.1 — search-path channels (v7+). Emitted AFTER the v6
+  # scoop block so older readers (which stop at the scoop tail) still
+  # parse the artifact's prefix unchanged.
+  outp.writeStringSeq(profile.pkgConfigSearchList)
+  outp.writeStringSeq(profile.cmakePrefixList)
+  outp.writeStringSeq(profile.cpathList)
+  outp.writeStringSeq(profile.libraryPathList)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -4122,6 +4277,14 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.scoopRequiresExecutionProfile = readByte(bytes, pos) != 0
     result.scoopRoot = readString(bytes, pos)
     result.scoopJunctionTarget = readString(bytes, pos)
+  if version >= 7'u16:
+    # M9.R.14e.1 — search-path channels. Older artifacts (v < 7) leave
+    # the four seqs empty, which is the correct "no contribution" signal
+    # for the engine's env-thread pass downstream.
+    result.pkgConfigSearchList = readStringSeq(bytes, pos)
+    result.cmakePrefixList = readStringSeq(bytes, pos)
+    result.cpathList = readStringSeq(bytes, pos)
+    result.libraryPathList = readStringSeq(bytes, pos)
   result.profileFingerprint = readDigest(bytes, pos)
 
 proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
@@ -4160,6 +4323,14 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeString(identity.scoopExecutionProfileChecksum)
   outp.writeString(identity.scoopRoot)
   outp.writeString(identity.scoopJunctionTarget)
+  # M9.R.14e.1 — search-path channels (v7+). Same trailing-extension
+  # discipline as ``writeProfile`` — older readers stop at the v6
+  # scoop tail and miss the new seqs, but their parse of the prefix is
+  # unaffected.
+  outp.writeStringSeq(identity.pkgConfigSearchList)
+  outp.writeStringSeq(identity.cmakePrefixList)
+  outp.writeStringSeq(identity.cpathList)
+  outp.writeStringSeq(identity.libraryPathList)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -4222,6 +4393,13 @@ proc readActionIdentity(bytes: openArray[byte];
     result.scoopExecutionProfileChecksum = readString(bytes, pos)
     result.scoopRoot = readString(bytes, pos)
     result.scoopJunctionTarget = readString(bytes, pos)
+  if version >= 7'u16:
+    # M9.R.14e.1 — search-path channels. Older artifacts (v < 7) leave
+    # the four seqs empty.
+    result.pkgConfigSearchList = readStringSeq(bytes, pos)
+    result.cmakePrefixList = readStringSeq(bytes, pos)
+    result.cpathList = readStringSeq(bytes, pos)
+    result.libraryPathList = readStringSeq(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
@@ -4323,6 +4501,10 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "scoopRequiresExecutionProfile": profile.scoopRequiresExecutionProfile,
     "scoopRoot": profile.scoopRoot,
     "scoopJunctionTarget": profile.scoopJunctionTarget,
+    "pkgConfigSearchList": profile.pkgConfigSearchList,
+    "cmakePrefixList": profile.cmakePrefixList,
+    "cpathList": profile.cpathList,
+    "libraryPathList": profile.libraryPathList,
     "profileFingerprint": digestHex(profile.profileFingerprint)
   }
 
@@ -4365,6 +4547,10 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "scoopExecutionProfileChecksum": identity.scoopExecutionProfileChecksum,
     "scoopRoot": identity.scoopRoot,
     "scoopJunctionTarget": identity.scoopJunctionTarget,
+    "pkgConfigSearchList": identity.pkgConfigSearchList,
+    "cmakePrefixList": identity.cmakePrefixList,
+    "cpathList": identity.cpathList,
+    "libraryPathList": identity.libraryPathList,
     "actionFingerprint": digestHex(identity.actionFingerprint)
   }
 
