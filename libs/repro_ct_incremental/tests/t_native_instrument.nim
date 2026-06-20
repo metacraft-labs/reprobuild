@@ -1,12 +1,15 @@
 ## M14 tests — native call trace via compile-time instrumentation.
 ##
 ## These are REAL on this arm64-macOS host (no `unittest.skip`, no gate, no
-## hand-crafted substitute): each test compiles a genuine C program together with
-## the committed C call-recorder runtime (`csrc/ct_instrument_runtime.c`) using
-## the dev shell's `cc`, with `-finstrument-functions`, then RUNS it so the
-## `__cyg_profile_func_enter` ABI captures the actually-entered functions into a
-## log inside a temp trace dir. The reader (`readExecutedFunctionsInstrumented`)
-## reads that log back as the de-duplicated executed-function set.
+## hand-crafted substitute): each test compiles a genuine C program via the
+## EXISTING `ct_instrument` plugin's call-trace facet (in the sibling
+## `codetracer-native-recorder` repo, invoked through the build-siblings
+## strategy, `direnv exec codetracer-native-recorder ...`), with
+## `-finstrument-functions`, then RUNS it so the `__cyg_profile_func_enter` ABI
+## captures the actually-entered functions into a log inside a temp trace dir.
+## The reader (`readExecutedFunctionsInstrumented`) reads that log back as the
+## de-duplicated executed-function set. reprobuild does NOT carry its own
+## instrumentation runtime — the instrumentation lives in the native recorder.
 ##
 ## The load-bearing assertion: a 4-function program (`used_a`, `used_b`,
 ## `unused_c`, `main`, where `main` calls only `used_a` + `used_b`) yields the

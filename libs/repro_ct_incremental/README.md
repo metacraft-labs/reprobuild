@@ -75,33 +75,36 @@ EXACT captured failure); the per-language test then emits a LOUD, ASSERTED gate.
 
 ### Validated LIVE vs gated (this host: arm64 macOS)
 
-Three languages record **genuinely live** here (Ruby, Python and JavaScript); the
-native path is **platform-gated** (RR is Linux-only). None of the gates is a wrong
-dev shell or a missing package install — and the JS "upstream break" a prior
-revision claimed was a **stale-sibling misdiagnosis**, now corrected.
+Four paths record **genuinely live** here: Ruby, Python and JavaScript (the
+interpreted recorders), AND the **native path via compile-time instrumentation**
+(M15) — `-finstrument-functions` captures the executed-function set on arm64-macOS
+with no Intel PT / RR / MCR. The Linux MCR/RR spec-primary native path is M16's
+concern. None of the surviving gates is a wrong dev shell or a missing package
+install — and the JS "upstream break" a prior revision claimed was a
+**stale-sibling misdiagnosis**, now corrected.
 
 | language | status on this host | how |
 |----------|---------------------|-----|
 | **Ruby** | ✅ **LIVE, end-to-end** (required, passes) | native Rust-extension recorder; `just build` then `codetracer-ruby-recorder --out-dir <dir> prog.rb` |
 | **Python** | ✅ **LIVE, end-to-end** (required, passes) | maturin/PyO3 recorder; `just venv 3.13 dev` (build once) then `.venv/bin/python -m codetracer_python_recorder --out-dir <dir> prog.py`. Builds + records here after the recorder's **flake fix gating `cargo-llvm-cov` off darwin** (pushed upstream); the prior "dev shell won't build" gate used the WRONG entry (`just dev` + `uv`). |
 | **JavaScript** | ✅ **LIVE, end-to-end** (required, passes) | SWC instrumenter + napi-rs native runtime; `just build` then `node packages/cli/dist/index.js record --out-dir <dir> prog.js` (bundle nests under `<out-dir>/trace-N/`). Builds + records here once the workspace siblings `codetracer-trace-format` + `codetracer-trace-format-nim` are **synced to mainline**; the prior "napi addon won't compile / `enable_column_*_support` missing" gate was caused by STALE sibling checkouts (old writer API → build failure, then SIGSEGV at record time), NOT a genuine upstream break. |
-| **Native / Nim (MCR/RR)** | ⛔ **GATED** — platform/format limitation (build+record OK) | `ct-mcr` (from `ct_cli`) **builds clean** on arm64-macOS and **records a real `.ct`** (exit 0, ~200 events). The gate is downstream: the native `.ct` decodes via `ct-print --json-events` to only a `path` record (no `Function`/`Call` events here), and the engine's native backend still reads a legacy `native_calltrace.json` sidecar the modern CTFS recorder no longer writes. Full function-level native traces need a Linux MCR/RR host; wiring the native backend to the modern CTFS `.ct` is the documented follow-up. (The prior "recorder CI red on main+dev / license FFI can't load" gate was a misdiagnosis — corrected.) |
+| **Native (compile-time instrumentation)** | ✅ **LIVE, end-to-end** (M15, required, passes) | `-finstrument-functions` via the **existing `ct_instrument` plugin's call-trace facet** in the sibling `codetracer-native-recorder` repo (`ct_instrument/calltrace/ct_calltrace_sink.c` + `buildWithCalltrace`), invoked through the build-siblings strategy (`direnv exec codetracer-native-recorder …`), captures the executed-function set on this arm64-macOS host (`recordNativeInstrumentedLive`). reprobuild carries NO instrumentation runtime of its own. The engine then drives the native instruction-byte decision (M7 `shallowHashNative`) over a CLEAN, non-instrumented `recorded_prog` build of the same source. Executed set == {used_a, used_b, main}; the engine SKIPs an unchanged recompile, RE-RUNs an edit to the executed `used_a`, and SKIPs an edit to the unexecuted `unused_c`. |
+| **Native / Nim (MCR/RR — Linux spec-primary)** | ⛔ **GATED on macOS** (M16 concern) | `ct-mcr` (from `ct_cli`) **builds clean** on arm64-macOS and **records a real `.ct`** (exit 0, ~200 events), but the native `.ct` decodes via `ct-print --json-events` to only a `path` record here (no `Function`/`Call` events), so the spec-primary MCR/RR executed-function set needs a **Linux MCR host** (M16). On macOS the LIVE native path is the M15 compile-time-instrumentation row above; this row stays honestly gated for the Linux MCR/PT path. |
 
 The real, validated commands per recorder live in `tests/live_record.nim`
-(`recordRubyLive` / `recordPythonLive` / `recordJsLive` / `recordNativeLive`).
-**Ruby and Python are genuinely live** here: a real `.ct` is recorded at test
-time and the engine's skip/rerun decisions are made from that live bundle's
-executed set — Ruby ({`<top-level>`, `main`, `used_a`, `used_b`}), Python
-({`<__main__>`, `main`, `used_a`, `used_b`}); `unused_c` is never called and is
-absent from both. The JS and native gates are HONEST: each ATTEMPTS the real
-build/record, prints the underlying captured failure (the JS compiler error / the
-native license-FFI load failure), and asserts a documented gate that states the
-VERIFIED upstream-break root cause — never a hidden skip, never a hand-crafted
-substitute, never the old "dev shell won't build" misdiagnosis.
+(`recordRubyLive` / `recordPythonLive` / `recordJsLive` /
+`recordNativeInstrumentedLive` / `recordNativeLive`). **Ruby, Python, JavaScript
+and the native compile-time-instrumentation path are genuinely live** here: a real
+trace is recorded at test time and the engine's skip/rerun decisions are made from
+that live executed set — Ruby ({`<top-level>`, `main`, `used_a`, `used_b`}),
+Python ({`<__main__>`, `main`, `used_a`, `used_b`}), native ({`used_a`, `used_b`,
+`main`}); `unused_c` is never called and is absent from all. The only surviving
+gate is the **Linux MCR/RR spec-primary native path** (M16): on macOS it ATTEMPTS
+the real `ct-mcr` build/record, prints the captured downstream limitation, and
+asserts a documented gate — never a hidden skip, never a hand-crafted substitute.
 
-Tests: `t_live_ruby.nim` and `t_live_python.nim` (LIVE, must pass here),
-`t_live_js.nim`, `t_live_native.nim` (attempt-or-gate against verified CI-red
-upstream breaks), and `t_live_full_suite.nim`
+Tests: `t_live_ruby.nim`, `t_live_python.nim`, `t_live_js.nim` and
+`t_live_native.nim` (all LIVE, must pass here), and `t_live_full_suite.nim`
 (`full_suite_green_with_live_recordings` — compiles and runs every campaign test
 file and asserts all exit 0).
 
@@ -143,7 +146,7 @@ differing on both axes — dependency discovery AND shallow hashing:
 | mechanism             | dependency discovery                          | shallow hash               |
 | --------------------- | --------------------------------------------- | -------------------------- |
 | **source/interpreted** (`tbSourceInterpreted`) | canonical `Function`/`Call` records (`readExecutedFunctions`) | source body text (extractors) |
-| **native / MCR**      (`tbNativeDwarf`)         | native calltrace (`readExecutedFunctionsNative`)              | compiled instruction bytes (`shallowHashNative`) |
+| **native / MCR**      (`tbNativeDwarf`)         | native call trace — a GENUINE compile-time-instrumentation capture (M14/M15, `readExecutedFunctionsInstrumented`) preferred, else the legacy `native_calltrace.json` projection; dispatched by `readExecutedFunctionsNativeAny` | compiled instruction bytes (`shallowHashNative`, over a clean non-instrumented build) |
 
 `languageStrategy(lang)` (in `language_matrix.nim`, re-exported from the
 package) maps every language in the CodeTracer **Language-Support-Matrix**
@@ -163,7 +166,7 @@ guessed hash, never a silent skip).
 | TypeScript  | source/interpreted   | `tbSourceInterpreted`                        | source text | classified (traced via the JS recorder); table-only |
 | Lua         | source/interpreted   | `tbSourceInterpreted`                        | source text | table-only (classified) |
 | WASM        | source/interpreted   | `tbSourceInterpreted`                        | source text | table-only (classified) |
-| C           | native / MCR         | `tbNativeDwarf`                              | instruction bytes | HAND-CRAFTED calltrace + REAL compiled binary (m7/m8 fixtures) |
+| C           | native / MCR         | `tbNativeDwarf`                              | instruction bytes | **LIVE end-to-end on arm64-macOS** via compile-time instrumentation (M15, `t_live_native.nim`); plus REAL compiled binary + HAND-CRAFTED legacy calltrace (m7/m8 fixtures) |
 | C++         | native / MCR         | `tbNativeDwarf`                              | instruction bytes | table-only (classified) |
 | Rust        | native / MCR         | `tbNativeDwarf`                              | instruction bytes | table-only (classified) |
 | Go          | native / MCR         | `tbNativeDwarf`                              | instruction bytes | table-only (classified) |

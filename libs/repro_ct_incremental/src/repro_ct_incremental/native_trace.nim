@@ -94,7 +94,8 @@
 import std/[json, os, algorithm, tables]
 import results
 
-import trace_reader  # ExecutedFunction
+import trace_reader      # ExecutedFunction
+import native_instrument # instrumentation-flavour native discovery (M14/M15)
 
 export results
 
@@ -203,3 +204,153 @@ proc readExecutedFunctionsNative*(traceDir: string):
 
   resultSeq.sort(proc (a, b: ExecutedFunction): int = cmp(a.name, b.name))
   ok(resultSeq)
+
+# ---------------------------------------------------------------------------
+# Native flavour dispatch — calltrace.json (legacy) vs instrumentation (M15)
+# ---------------------------------------------------------------------------
+#
+# The native backend (`tbNativeDwarf`) now has TWO concrete trace flavours, both
+# producing the SAME `ExecutedFunction{name, file=binary, defLine=0}` shape and
+# both hashed by the M7 instruction-byte `shallowHashNative`:
+#
+#   * LEGACY:        a hand-crafted `native_calltrace.json` projection (M8). Kept
+#                    as an explicitly-labelled legacy fixture path so the M8 tests
+#                    keep working. The owning binary is the calltrace's `binary`
+#                    field.
+#   * INSTRUMENTED:  a GENUINE compile-time-instrumentation capture (M14/M15): a
+#                    `native_instrument_calls.log` names file plus the recorded
+#                    `instrumented_prog` binary, both in the trace dir. This is the
+#                    LIVE native path on arm64-macOS (no Intel PT / RR / MCR).
+#
+# The dispatch below selects the flavour by which artifact the trace dir carries.
+# The instrumentation flavour is preferred when BOTH are present (the live
+# artifact is the real capture; the legacy JSON is only a stand-in). Any
+# structural problem in the selected flavour ⇒ `Err` (the engine re-runs, never a
+# false skip).
+
+func instrumentLogPath(traceDir: string): string =
+  ## The instrumentation names-file path inside a trace dir.
+  traceDir / native_instrument.InstrumentOutFile
+
+func instrumentBinaryPath(traceDir: string): string =
+  ## The instrumented binary `instrumentAndRun` builds + runs to CAPTURE the
+  ## executed-function set (`<traceDir>/instrumented_prog`).
+  traceDir / "instrumented_prog"
+
+const RecordedBinaryName* = "recorded_prog"
+  ## The CLEAN (non-instrumented) binary the harness records alongside the
+  ## instrumented one, for SHALLOW HASHING. See `instrumentHashBinaryPath`.
+
+proc instrumentHashBinaryPath(traceDir: string): string =
+  ## The binary the native shallow hash reads each executed function's compiled
+  ## instruction bytes from, for an instrumentation trace.
+  ##
+  ## # Why a SEPARATE clean binary (not `instrumented_prog`)
+  ##
+  ## `-finstrument-functions` injects `__cyg_profile_func_enter/exit` calls into
+  ## EVERY instrumented function; those calls are pc-relative to the linked-in
+  ## recorder runtime. So ANY source edit that changes the total code size (e.g.
+  ## growing the UNEXECUTED `unused_c`) relocates the runtime relative to the
+  ## executed functions and changes their instrument-call operands — i.e. the
+  ## instrumented binary's per-function bytes are NOT relocation-stable for
+  ## unrelated edits (the M7 call-distance limitation, amplified to every
+  ## function). Hashing the instrumented binary would therefore re-hash the
+  ## executed functions on an unrelated edit ⇒ a conservative (but useless)
+  ## re-run, defeating function-level precision.
+  ##
+  ## The hash must reflect the REAL (production) program a user ships — a clean,
+  ## NON-instrumented build of the SAME source. The harness records that clean
+  ## binary as `<traceDir>/recorded_prog`; instrumentation is a DISCOVERY tool
+  ## only. When the clean binary is present it is the hashing input; otherwise we
+  ## fall back to the instrumented binary (still correct — a changed hash is a
+  ## safe re-run, never a false skip; only precision is reduced).
+  let clean = traceDir / RecordedBinaryName
+  if fileExists(clean): clean else: instrumentBinaryPath(traceDir)
+
+proc hasInstrumentTrace*(traceDir: string): bool =
+  ## True iff `traceDir` carries an instrumentation capture (the names log). The
+  ## binary is checked by the discovery/hash path; the log's presence is the
+  ## flavour signal (it is the artifact the legacy JSON path never produces).
+  fileExists(instrumentLogPath(traceDir))
+
+proc hasCalltraceTrace*(traceDir: string): bool =
+  ## True iff `traceDir` carries the legacy `native_calltrace.json` projection.
+  fileExists(traceDir / NativeCalltraceFile)
+
+proc readExecutedFunctionsNativeAny*(traceDir: string):
+    Result[seq[ExecutedFunction], string] =
+  ## Flavour-aware native `DependencyDiscovery`: read the executed-function set
+  ## from whichever native trace flavour `traceDir` carries — the genuine
+  ## instrumentation capture (M14/M15) preferred, else the legacy
+  ## `native_calltrace.json` projection (M8). Any structural problem ⇒ `Err`.
+  if not dirExists(traceDir):
+    return err("native trace dir not found: " & traceDir)
+  if hasInstrumentTrace(traceDir):
+    # M14 discovers the executed NAME set (and keys each dep's `.file` on the
+    # instrumented binary). For HASHING we must read the CLEAN recorded binary
+    # (see `instrumentHashBinaryPath`), so re-point every dep's `.file` onto it —
+    # the NAME (the dependency identity) is unchanged.
+    let discovered = readExecutedFunctionsInstrumented(traceDir)
+    if discovered.isErr:
+      return discovered
+    let hashBinary = instrumentHashBinaryPath(traceDir)
+    var rebound: seq[ExecutedFunction]
+    for fn in discovered.get():
+      rebound.add ExecutedFunction(
+        name: fn.name, file: hashBinary, defLine: fn.defLine)
+    return ok(rebound)
+  # Neither an instrumentation capture nor a legacy calltrace is present. Delegate
+  # to the legacy reader so its specific, backward-compatible diagnostic
+  # ("native calltrace file not found: …") surfaces — a native-shaped trace dir
+  # that carries no executed-set payload of EITHER flavour ⇒ Err (re-run).
+  readExecutedFunctionsNative(traceDir)
+
+proc nativeTraceBinaryAny*(traceDir: string): Result[string, string] =
+  ## Flavour-aware owning-binary resolution. The native shallow hasher reads each
+  ## function's instruction bytes from the trace's recorded binary; `decide`
+  ## rebinds cached native deps onto it (the analogue of the source path's
+  ## `sourceRoot` rebind). For the instrumentation flavour the binary is the
+  ## recorded `instrumented_prog`; for the legacy flavour it is the calltrace's
+  ## `binary` field. A missing/unresolvable binary ⇒ `Err` (the engine fail-safes
+  ## the dep hashes to "missing" ⇒ re-run, never a skip).
+  if not dirExists(traceDir):
+    return err("native trace dir not found: " & traceDir)
+  if hasInstrumentTrace(traceDir):
+    # The HASHING binary (clean `recorded_prog` if present, else the instrumented
+    # one) — `decide` rebinds cached native deps onto it, exactly as discovery
+    # keys fresh deps on it.
+    let binary = instrumentHashBinaryPath(traceDir)
+    if not fileExists(binary):
+      return err("native hash binary not found in instrumentation trace dir: " &
+        binary)
+    return ok(binary)
+  if hasCalltraceTrace(traceDir):
+    return nativeTraceBinary(traceDir)
+  err("native trace dir " & traceDir & " carries no native trace flavour")
+
+proc nativeTraceDirReadableAny*(traceDir: string): Result[void, string] =
+  ## Flavour-aware native readability probe (the M5/M8 fail-safe, extended for the
+  ## instrumentation flavour). A native trace dir must exist AND carry a readable
+  ## artifact of a recognised flavour. The recorded binary is probed later by the
+  ## shallow hasher (which fail-safes to a re-run if it is missing/unreadable), so
+  ## a missing binary is ALWAYS a re-run, never a skip.
+  if not dirExists(traceDir):
+    return err("missing trace dir: " & traceDir)
+  if hasInstrumentTrace(traceDir):
+    let p = instrumentLogPath(traceDir)
+    try:
+      discard readFile(p)
+    except CatchableError as e:
+      return err("unreadable native instrument log " & p & ": " & e.msg)
+    return ok()
+  # No instrumentation capture ⇒ require the legacy calltrace (its absence yields
+  # the backward-compatible "missing native trace file" diagnostic the engine's
+  # M8 fail-safe assertions pin).
+  let p = traceDir / NativeCalltraceFile
+  if not fileExists(p):
+    return err("missing native trace file: " & p)
+  try:
+    discard readFile(p)
+  except CatchableError as e:
+    return err("unreadable native trace file " & p & ": " & e.msg)
+  ok()

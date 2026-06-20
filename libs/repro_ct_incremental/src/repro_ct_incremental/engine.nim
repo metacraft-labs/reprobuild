@@ -315,13 +315,16 @@ let
 
   nativeDwarfStrategies = BackendStrategies(
     backend: tbNativeDwarf,
-    # M8: native dependency discovery reads the native calltrace; native shallow
+    # M8/M15: native dependency discovery reads whichever native trace flavour the
+    # dir carries — the GENUINE compile-time-instrumentation capture (M14/M15,
+    # `native_instrument_calls.log` + `instrumented_prog`) preferred, else the
+    # legacy hand-crafted `native_calltrace.json` projection (M8). Native shallow
     # hashing reads the function's compiled instruction bytes from the owning
     # binary carried in `dep.file` (sourceRoot is ignored — see
-    # `shallowHashOfDepNative`). Both seams are now real, so the native backend
+    # `shallowHashOfDepNative`). Both seams are real, so the native backend
     # participates in incremental skipping exactly like the source backend, with
     # the SAME `{deepHash, deps}` cache shape.
-    discovery: newDependencyDiscovery(readExecutedFunctionsNative),
+    discovery: newDependencyDiscovery(readExecutedFunctionsNativeAny),
     hasher: newShallowHasher(shallowHashOfDepNative))
 
   sourceCtfsStrategies = BackendStrategies(
@@ -678,22 +681,14 @@ proc sourceTraceDirReadable(traceDir: string): Result[void, string] =
   ok()
 
 proc nativeTraceDirReadable(traceDir: string): Result[void, string] =
-  ## The native-backend readability probe (M8 fail-safe). A native trace dir
-  ## must exist and carry a readable native calltrace
-  ## (`native_calltrace.json`). The binary referenced by the calltrace is
-  ## probed later, by the native shallow hasher, which fail-safes to a re-run if
-  ## the binary is missing/unreadable — so a missing binary is ALWAYS a re-run,
-  ## never a skip (see `shallowHashOfDepNative`).
-  if not dirExists(traceDir):
-    return err("missing trace dir: " & traceDir)
-  let p = traceDir / NativeCalltraceFile
-  if not fileExists(p):
-    return err("missing native trace file: " & p)
-  try:
-    discard readFile(p)
-  except CatchableError as e:
-    return err("unreadable native trace file " & p & ": " & e.msg)
-  ok()
+  ## The native-backend readability probe (M8/M15 fail-safe). A native trace dir
+  ## must exist and carry a readable native trace artifact of a recognised
+  ## flavour — the M14/M15 instrumentation capture
+  ## (`native_instrument_calls.log`) or the legacy `native_calltrace.json`. The
+  ## recorded binary is probed later, by the native shallow hasher, which
+  ## fail-safes to a re-run if the binary is missing/unreadable — so a missing
+  ## binary is ALWAYS a re-run, never a skip (see `shallowHashOfDepNative`).
+  nativeTraceDirReadableAny(traceDir)
 
 proc ctfsTraceDirReadable(traceDir: string): Result[void, string] =
   ## The CTFS-backend readability probe (M12 fail-safe). A CTFS trace dir must
@@ -755,7 +750,7 @@ proc currentDepLocations(deps: seq[CachedDep]; traceDir: string;
     # `sourceRoot`, exactly like the legacy source path — so no rebind is needed.
     ok(deps)
   of tbNativeDwarf:
-    let binRes = nativeTraceBinary(traceDir)
+    let binRes = nativeTraceBinaryAny(traceDir)
     # A missing/unreadable current binary path forces every dep's hash to
     # "missing" (re-run), rather than silently hashing a stale recorded binary.
     let currentBinary =

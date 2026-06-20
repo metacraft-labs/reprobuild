@@ -37,6 +37,8 @@
 
 import std/[os, osproc, strutils, times]
 
+import repro_ct_incremental  # M14 native instrumentation: instrumentAndRun, etc.
+
 const
   # Recorder sibling repos, resolved relative to this checkout's parent. The
   # reprobuild checkout and the recorder checkouts are siblings in the workspace
@@ -390,3 +392,78 @@ proc recordNativeLive*(programBinary: string): RecorderOutcome =
       diagnostic: "native ct-mcr recording produced no .ct bundle (exit " &
         $code & ") in " & outDir & ":\n" & output)
   RecorderOutcome(kind: roSuccess, traceDir: outDir, ctPath: bundle)
+
+# ---------------------------------------------------------------------------
+# Native LIVE recording via compile-time instrumentation (M15).
+#
+# Unlike ct-mcr (which needs a Linux MCR/RR host to emit a function-level call
+# stream — see `recordNativeLive`), the M14 compile-time-instrumentation path
+# produces a GENUINE native call trace on arm64-macOS with no Intel PT / RR /
+# MCR. This driver reuses M14's `native_instrument` module (it does NOT
+# duplicate the compile/run logic): it compiles a C `programSource` with
+# `-finstrument-functions` + the committed C recorder runtime, runs it with
+# `CT_INSTRUMENT_OUT` into a fresh trace dir, and stamps the dir with the
+# native-instrumented metadata marker so `detectBackend` routes it to the native
+# instruction-byte backend (`tbNativeDwarf`).
+#
+# The produced trace dir carries everything the engine's native backend reads:
+#   * the executed-function names log (`native_instrument_calls.log`),
+#   * the recorded binary (`instrumented_prog`) — the native shallow hash reads
+#     each function's compiled instruction bytes from it, and
+#   * `trace_db_metadata.json` (`recorder_backend: "native-instrumented"`).
+# ---------------------------------------------------------------------------
+
+proc markNativeInstrumented*(traceDir: string) =
+  ## Stamp a native compile-time-instrumentation trace dir with the explicit
+  ## `recorder_backend: "native-instrumented"` metadata signal, so
+  ## `detectBackend` routes it through the native instruction-byte backend
+  ## (`tbNativeDwarf`). The presence of `trace_db_metadata.json` is ALSO a native
+  ## structural signal, so this is belt-and-suspenders; the explicit field makes
+  ## the intent self-documenting and robust to future structural changes.
+  writeFile(traceDir / "trace_db_metadata.json",
+    """{"format":"native-instrument","recorder_backend":"native-instrumented"}""")
+
+proc recordNativeInstrumentedLive*(programSource: string): RecorderOutcome =
+  ## Record a native C `programSource` LIVE via compile-time instrumentation into
+  ## a fresh trace dir, producing the names log + the recorded binary + the
+  ## native-instrumented metadata marker the engine's native backend reads.
+  ##
+  ## On success returns `roSuccess{traceDir, ctPath}` where `ctPath` is the
+  ## RECORDED BINARY (`<traceDir>/instrumented_prog`) — the native shallow hash's
+  ## input (there is no `.ct` bundle on this path; the native flavour keys on the
+  ## binary, not a CTFS container). Any compile/run/read failure returns
+  ## `roGated{diagnostic}` (the honest gate); on arm64-macOS this path is
+  ## genuinely live, so a gate here is a real toolchain regression, not a platform
+  ## limitation.
+  let outDir = freshLiveDir("repro_ct_live_native_instr_")
+  let src = outDir / "prog.c"
+  try:
+    writeFile(src, programSource)
+  except CatchableError as e:
+    return RecorderOutcome(kind: roGated,
+      diagnostic: "could not write native instrumentation source " & src &
+        ": " & e.msg)
+  let runRes = instrumentAndRun(src, outDir)
+  if runRes.isErr:
+    return RecorderOutcome(kind: roGated,
+      diagnostic: "native instrumentation compile/run failed: " & runRes.error)
+
+  # Also build a CLEAN (non-instrumented) binary of the SAME source for SHALLOW
+  # HASHING. Instrumentation injects `__cyg_profile_func_*` calls that make every
+  # function's bytes relocation-sensitive to unrelated edits, so the hash must be
+  # over the real production binary (see `native_trace.instrumentHashBinaryPath`).
+  # Use the M7 stability flags so a function's bytes depend only on its own body.
+  let cleanBin = outDir / RecordedBinaryName
+  let cc = (let e = getEnv("CC"); if e.len > 0: e else: "cc")
+  let cleanCmd =
+    quoteShell(cc) & " -O0 -g -fno-stack-protector " &
+    "-fno-asynchronous-unwind-tables -o " & quoteShell(cleanBin) & " " &
+    quoteShell(src)
+  let (cleanOut, cleanCode) = execCmdEx(cleanCmd)
+  if cleanCode != 0 or not fileExists(cleanBin):
+    return RecorderOutcome(kind: roGated,
+      diagnostic: "clean (non-instrumented) recorded binary build failed (exit " &
+        $cleanCode & "):\n" & cleanOut)
+
+  markNativeInstrumented(outDir)
+  RecorderOutcome(kind: roSuccess, traceDir: outDir, ctPath: cleanBin)

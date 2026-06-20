@@ -1104,21 +1104,31 @@
 # M18 ports the engine into `ct test`. M19 ships docs.
 
 * M14 — Native call trace via compile-time instrumentation (cross-platform)
-  :STATUS: needs rework — must reuse the existing ct_instrument plugin (do NOT duplicate)
+  :STATUS: complete
 
-  REWORK NOTE (2026-06-21): the first M14 cut added a NEW
+  REWORK NOTE (2026-06-21, RESOLVED): the first M14 cut added a NEW
   `-finstrument-functions` C runtime (`csrc/ct_instrument_runtime.c`) + build
-  logic inside reprobuild. That DUPLICATES the existing compile-time
-  instrumentation plugin `codetracer-native-recorder/ct_instrument` — which
-  already provides `ct_gcc_wrapper.buildWithShadowStack` / `ct_clang_wrapper`,
-  the `shadow_stack/ct_shadow_stack.c` runtime, and GCC GIMPLE / LLVM IR passes
-  (`ct_rcb_gcc.cc`, `CtRcbPass.cpp`, pad/atomic passes). The reworked M14 MUST
-  instrument via that existing plugin (invoked through the build-siblings
-  strategy, `direnv exec codetracer-native-recorder ...`) and EXTEND it (e.g. an
-  executed-function sink on the shadow-stack runtime) to persist the executed
-  set — not maintain a parallel runtime in reprobuild. The committed reprobuild
-  runtime (e466d8f9) is to be reverted/repurposed. Instrumentation belongs in
-  the native recorder; reprobuild only CONSUMES the executed-function set.
+  logic inside reprobuild. That DUPLICATED the existing compile-time
+  instrumentation plugin `codetracer-native-recorder/ct_instrument`. The rework
+  REMOVED that duplicate (`csrc/ct_instrument_runtime.c` is deleted) and added a
+  cleanly-separated, independently-selectable CALL-TRACE FACET to ct_instrument
+  instead:
+    * `ct_instrument/src/ct_instrument/calltrace/ct_calltrace_sink.c` + `.h` —
+      the `-finstrument-functions` executed-function sink (resolves names via
+      `dladdr(...).dli_sname`, de-dups, appends each new name once to the file
+      named by `CT_CALLTRACE_OUT`). Hooks/helpers are `no_instrument_function`;
+      thread-safe; allocation-light; inert when the env var is unset.
+    * `ct_instrument/src/ct_instrument/ct_calltrace.nim` — `buildWithCalltrace`
+      (mirrors `ct_gcc_wrapper.buildWithShadowStack`: compile the sink without
+      instrumentation, compile the target with `-finstrument-functions`, link;
+      `-ldl` on Linux, none on macOS) + `runWithCalltrace`. Exported from
+      `ct_instrument.nim`. Test: `ct_instrument/tests/test_calltrace_sink.nim`.
+  This facet is DISTINCT from the shadow stack (which keeps a LIVE per-thread
+  call stack for the Call-Trace Pane) — it persists an executed-function SET, a
+  different problem — so the shadow-stack / tick / pad/atomic/rcb facets are all
+  UNCHANGED. reprobuild now CONSUMES the facet through the build-siblings
+  strategy (`direnv exec codetracer-native-recorder ...`); it carries no
+  instrumentation runtime of its own.
 
   Goal: implement the spec's "compile-time instrumentation that produces the call
   trace" alternative (Nim-Parallel-Test-Framework §16.7; MCR-Calltrace-Design §22d
@@ -1126,19 +1136,27 @@
   WITHOUT Intel PT / RR / the MCR emulator — and is testable on arm64-macOS.
 
   Deliverables:
-  - [X] A tiny C call-recorder runtime using the `-finstrument-functions` ABI
-    (`__cyg_profile_func_enter` / `__cyg_profile_func_exit`) that records the set
-    of entered functions into a file in the trace dir. Thread-safe, bounded, no
-    heap churn on the steady-state hot path; the file format is documented.
-    Implemented in `libs/repro_ct_incremental/csrc/ct_instrument_runtime.c`.
-    NOTE: name resolution is via `dladdr(this_fn,&info).dli_sname` (robust to
+  - [X] A call-trace facet on the EXISTING `ct_instrument` plugin using the
+    `-finstrument-functions` ABI (`__cyg_profile_func_enter` /
+    `__cyg_profile_func_exit`) that records the set of entered functions into the
+    file named by `CT_CALLTRACE_OUT`. Thread-safe, bounded, no heap churn on the
+    steady-state hot path; inert when the env var is unset; the file format is
+    documented. Implemented in
+    `codetracer-native-recorder/ct_instrument/src/ct_instrument/calltrace/ct_calltrace_sink.c`
+    (+ `.h`). Name resolution is via `dladdr(this_fn,&info).dli_sname` (robust to
     PIE/ASLR) rather than mapping raw runtime PCs back to static symbol
-    addresses — so the recorder records NAMES directly, one per line.
-  - [X] A build/run helper that compiles+links a native test fixture with
-    `-finstrument-functions` against the runtime, runs it with
-    `CT_INSTRUMENT_OUT` set into the trace dir, and produces the name log
-    (`native_instrument.nim`: `compileInstrumented` / `runInstrumented` /
-    `instrumentAndRun`). `dladdr` needs `-ldl` on Linux; handled per-host.
+    addresses — so the sink records NAMES directly, one per line. The facet is
+    SEPARATE from and does not entangle the existing shadow-stack runtime.
+  - [X] A Nim build/run helper that compiles+links a native test fixture with
+    `-finstrument-functions` against the sink, runs it with `CT_CALLTRACE_OUT`
+    set, and produces the name log — `ct_instrument/ct_calltrace.nim`'s
+    `buildWithCalltrace` (mirrors `ct_gcc_wrapper.buildWithShadowStack`) +
+    `runWithCalltrace`, exported from `ct_instrument.nim`. `dladdr` needs `-ldl`
+    on Linux, none on macOS; handled per-host. reprobuild's `native_instrument.nim`
+    (`compileInstrumented` / `runInstrumented` / `instrumentAndRun`) CONSUMES the
+    facet through the build-siblings strategy (`direnv exec
+    codetracer-native-recorder ...`), preserving its public proc names/signatures
+    so the engine + tests are unchanged.
   - [X] Function-name → executed-set resolution yielding the de-duplicated
     `seq[ExecutedFunction]` (`readExecutedFunctionsInstrumented`); best-effort
     pruning of names not in the binary's own symbol table reuses
@@ -1148,25 +1166,35 @@
     unresolvable capture ⇒ `Err` (engine re-runs, never a false skip).
 
   Automated tests:
-  - [X] A real 4-function C program is compiled with instrumentation, run, and the
-    executed set asserts to {used_a, used_b, main} with `unused_c` ABSENT — on
-    arm64-macOS (no skip, no gate). `tests/t_native_instrument.nim`.
+  - [X] ct_instrument facet: a real 4-function C program built with the
+    call-trace facet, run, asserts the executed set == {used_a, used_b, main}
+    with `unused_c` ABSENT, plus de-dup and inert-when-unset cases —
+    `codetracer-native-recorder/ct_instrument/tests/test_calltrace_sink.nim`
+    (passes in the native-recorder dev shell on arm64-macOS).
+  - [X] reprobuild side: the same 4-function executed-set assertion sourced from
+    the facet, on arm64-macOS (no skip, no gate). `tests/t_native_instrument.nim`.
   - [X] Missing-log, empty-log, unresolvable-capture, missing-source, and
     non-zero-exit cases all return `Err`.
 
   Acceptance: the native executed-function set is derived from a GENUINE
-  compile-time-instrumentation run on this host, deterministically.
+  compile-time-instrumentation run (via the existing ct_instrument plugin) on
+  this host, deterministically.
 
 * M15 — Engine consumes the real native call trace (retire native_calltrace.json)
-  :STATUS: needs rework — engine wiring is sound; instrumentation source must come from ct_instrument (M14)
+  :STATUS: complete
 
-  REWORK NOTE (2026-06-21): the engine wiring (backends.nim routing,
+  REWORK NOTE (2026-06-21, RESOLVED): the engine wiring (backends.nim routing,
   native-instrumented detection, the clean-binary instruction-byte hash, and the
-  live t_live_native skip/rerun/skip-unexecuted decision) is correct and worth
-  keeping. What changes with the M14 rework: the harness must obtain the
-  executed-function set from the existing `ct_instrument` plugin (shadow-stack
-  sink) rather than reprobuild's duplicated runtime. The end-to-end macOS-live
-  native decision stays the acceptance bar.
+  live t_live_native skip/rerun/skip-unexecuted decision) was correct and is
+  KEPT unchanged. The only change from the M14 rework: the harness now obtains
+  the executed-function set from the existing `ct_instrument` plugin's call-trace
+  facet (`buildWithCalltrace` / `CT_CALLTRACE_OUT`, via `direnv exec
+  codetracer-native-recorder ...`) rather than reprobuild's duplicated runtime —
+  `native_instrument.nim` was rewritten to drive that facet while preserving its
+  public procs. `recordNativeInstrumentedLive` is unchanged at the call sites; it
+  reuses the rewritten `instrumentAndRun`. The end-to-end macOS-live native
+  decision (`t_live_native.nim`) and the full live suite
+  (`t_live_full_suite.nim`) both pass green on this arm64-macOS host.
 
   Goal: wire M14's instrumentation-produced call trace into the engine's native
   backend so the native incremental decision (skip / re-run) runs end-to-end on
@@ -1289,9 +1317,23 @@
   - [ ] db-backend SEEKABLE reader (`codetracer/src/db-backend/src/ctfs_trace_reader`):
     read `calls.dat` via CTFS block seeking + the Seekable-Zstd seek table + the
     companion index — on-demand, NOT fully into memory — so a network-loaded `.ct`
-    materializes only the call records a request needs. Do NOT route this through
-    `in_memory_trace_reader.rs`. Honor the not-fully-in-memory + concurrent-reader
-    properties from Trace-Files-Overview.md.
+    materializes only the call records a request needs. Honor the
+    not-fully-in-memory + concurrent-reader properties from Trace-Files-Overview.md.
+  - [ ] Address the `in_memory_trace_reader.rs` SPEC VIOLATION (CORRECTION
+    2026-06-21): `InMemoryTraceReader::new(db: Db)` serves lookups over a
+    FULLY-MATERIALIZED in-memory `Db` (HashMaps/Vecs of steps/values/cells from the
+    whole trace) — it does not seek. The spec mandates CTFS files are NOT fully
+    processed on load (Trace-Files-Overview.md §"Random-access seeking"), and the
+    code already knows this: `trace_processor.rs` says traces "must be read through
+    `ctfs_trace_reader::CTFSTraceReader::open`" and `dap_server.rs` calls
+    `InMemoryTraceReader` "a safe placeholder". The `calls.dat`/`steps.dat` split
+    exists precisely to enable on-demand loading. So: route the production read
+    paths (DAP handlers, `diff.rs`, the `dap_server` placeholder) through the
+    seekable `CTFSTraceReader`, and retire or strictly bound the full-load
+    `in_memory_trace_reader` `Db` materialization (keep it, if at all, only as an
+    explicitly-labelled small-trace/test fallback — never the network/large-trace
+    path). The call tree must "load independently" via `calls.dat`, never by
+    materializing the whole event stream into a `Db`.
   - [ ] ct-print (codetracer-trace-format-nim): when the flag is set, read calls
     from `calls.dat` via the existing dormant `call_stream` reader; otherwise the
     legacy path. `--json-events` output is unchanged for consumers.

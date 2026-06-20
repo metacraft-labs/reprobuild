@@ -140,6 +140,10 @@ func backendOfRecorderField(value: string): Result[TraceBackend, string] =
   ## Recognised values (case-insensitive) mirror the recorder identifiers used
   ## across the CodeTracer recorders:
   ##   * ``rr`` / ``mcr`` / ``ttd``      ⇒ native (instruction-byte) path.
+  ##   * ``native-instrumented``         ⇒ native (instruction-byte) path via the
+  ##                                       M14/M15 compile-time-instrumentation
+  ##                                       capture (the LIVE native path on hosts
+  ##                                       without Intel PT / RR / MCR).
   ##   * ``interpreter``                 ⇒ source/interpreted path (legacy JSON).
   ##   * ``ctfs-interpreted``            ⇒ modern CTFS bundle from an interpreted
   ##                                       recorder (M12): CTFS discovery + source
@@ -148,7 +152,8 @@ func backendOfRecorderField(value: string): Result[TraceBackend, string] =
   ## An unrecognised value is an `Err` so a typo/forward-incompatible recorder
   ## name fails safe (the engine re-runs) rather than guessing a path.
   case value.strip().toLowerAscii()
-  of "rr", "mcr", "ttd", "native", "native-dwarf", "dwarf":
+  of "rr", "mcr", "ttd", "native", "native-dwarf", "dwarf",
+     "native-instrumented", "native_instrumented", "instrumented-native":
     ok(tbNativeDwarf)
   of "interpreter", "interpreted", "source", "source-interpreted":
     ok(tbSourceInterpreted)
