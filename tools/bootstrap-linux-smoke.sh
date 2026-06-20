@@ -429,13 +429,26 @@ step_5_smoke() {
 
   # REPRO_BINARY_CACHE_URL lets the engine publish realized artifacts. The
   # env var is read by libs/repro_engine_publisher/.
+  #
+  # We intentionally turn ``set -e`` off around the smoke invocation: the
+  # smoke is data, not a hard gate. A from-source resolution failure is
+  # interesting (e.g. ``runquotad`` has no provisioning channel) and we
+  # want to report it as the M9.R.14a.4 result rather than crashing the
+  # bootstrap. The caller decides what to do with the exit code.
+  set +e
   REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL}" \
     ./build/bin/repro build "${REPRO_SMOKE_RECIPE}" \
       --tool-provisioning=from-source \
       2>&1 | tee "${log_path}"
-
   local rc=${PIPESTATUS[0]}
+  set -e
+
   log "step 5: exit=${rc} log=${log_path}"
+  if [ "${rc}" -eq 0 ]; then
+    log "step 5: ok"
+  else
+    log "step 5: smoke surfaced a campaign gap (non-zero exit ${rc}); see ${log_path}"
+  fi
 
   popd >/dev/null
   return "${rc}"
