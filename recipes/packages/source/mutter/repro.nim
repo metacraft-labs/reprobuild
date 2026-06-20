@@ -209,6 +209,14 @@ package mutterSource:
     ## consumes. The sibling ``waylandSource`` recipe vendors 1.25.0
     ## to match.
     "wayland >=1.22"
+    ## M9.R.15e.5 — wayland-protocols ships the XML protocol-definition
+    ## files (xdg-shell, linux-dmabuf, presentation-time, ...) mutter's
+    ## Wayland backend consumes at build time. Stub routes through
+    ## nixpkgs#wayland-protocols (.pc lives at share/pkgconfig).
+    ## (``wayland-egl.pc`` is already provided by the ``waylandSource``
+    ## sibling recipe's install tree, picked up via the existing
+    ## ``wayland`` buildDep — no separate declaration needed.)
+    "wayland-protocols >=1.31"
     ## libxkbcommon is the keyboard-keymap library mutter's seat /
     ## input layer consumes to translate raw evdev keycodes into XKB
     ## keysyms.
