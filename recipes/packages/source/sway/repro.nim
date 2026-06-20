@@ -262,6 +262,12 @@ package swaySource:
     ## misses and wrap-based downloads are disabled. Matches the
     ## sibling ``wlrootsSource`` recipe's dependency declaration.
     "wayland-protocols >=1.31"
+    ## libevdev is the userspace evdev event-handling library; sway
+    ## 1.11's meson build probes for it directly (in addition to
+    ## consuming it transitively via wlroots / libinput) at
+    ## ``src/meson.build:74:11`` to translate raw evdev key/button
+    ## codes for the ``input { ... }`` block's ``code``-form bindings.
+    "libevdev >=1.9"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
