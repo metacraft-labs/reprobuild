@@ -63,6 +63,20 @@ import ../types/package_result
 # configure action's PATH plumbing at fork time.
 import ../packages/sh as sh_module
 import ../packages/make as make_module
+# M9.R.14c.8 — auto-import the autotools regen layer + m4 + perl so
+# their stdlib ``package <name>:`` provisioning blocks land in
+# ``registeredPackages()`` for any recipe that consumes
+# ``autotools_package``. Without this, the recipe's
+# ``nativeBuildDeps: "autoconf"`` carries an executable name but no
+# provisioning channels (``toInterfaceToolUse`` matches on
+# ``pkg.packageName`` against the registered set), so the bootstrap
+# cycle-break's stdlib fall-through fails with "no provisioning
+# channel declared".
+import ../packages/autoconf as autoconf_module
+import ../packages/automake as automake_module
+import ../packages/libtool as libtool_module
+import ../packages/m4 as m4_module
+import ../packages/perl as perl_module
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4)
