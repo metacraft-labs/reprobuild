@@ -196,6 +196,11 @@ package libxkbcommonSource:
     ## demo consumes (xdg-shell etc.); declared for completeness so
     ## the dependency surface stays explicit.
     "wayland-protocols >=1.31"
+    ## libxml2 is hard-required by libxkbcommon's meson build at
+    ## ``src/meson.build`` regardless of the ``enable-x11`` /
+    ## ``enable-wayland`` flags — it's used to parse the keymap
+    ## compose-tables data files at build time.
+    "libxml2 >=2.9"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
