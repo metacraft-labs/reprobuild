@@ -1454,6 +1454,22 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       payload.id,
       node.payload
     ].join("\n")
+    # M9.R.14c.4 — inline-exec actions (autotools configure scripts,
+    # from-source-custom shell rows, ...) need the same PATH +
+    # extraEnv enrichment as typed-tool actions. Without this, an
+    # autotools configure script driven via inlineExecCall lands with
+    # no tool-bin dirs on PATH and shells out to ``m4`` / ``perl`` /
+    # ``make`` against the host's PATH (empty in a from-source
+    # nix-shell), failing with diagnostics like:
+    #   ``configure: error: no acceptable m4 could be found in $PATH``
+    # The fix mirrors the typed-tool path below: prepend
+    # ``actionPathPrefix`` (the union of every resolved tool profile's
+    # bin dir) to PATH, then append the per-edge env overrides.
+    var inlineEnv: seq[string] = @[]
+    if actionPathPrefix.len > 0:
+      inlineEnv.add("PATH=" & actionPathPrefix & $PathSep & getEnv("PATH"))
+    for entry in payload.env:
+      inlineEnv.add(entry[0] & "=" & entry[1])
     return repro_build_engine.action(
       payload.id,
       argv,
@@ -1472,7 +1488,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
-      commandStatsId = commandStatsId)
+      commandStatsId = commandStatsId,
+      env = inlineEnv)
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "fs":
