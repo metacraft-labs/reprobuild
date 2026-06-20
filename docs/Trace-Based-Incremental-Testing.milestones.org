@@ -1444,3 +1444,53 @@
 
   Acceptance: a user can read how to use the feature both standalone (`ct test`)
   and under reprobuild, and the campaign docs match the implemented reality.
+
+* M20 — Bump ALL materialized recorders to the calls/steps split + verify their tests
+  :STATUS: planned
+
+  Goal (owner request 2026-06-21): the `calls.dat`/`steps.dat` split (M17) is only
+  truly delivered when EVERY materialized-trace recorder emits it and each
+  recorder's own test suite is verified green with the split. M17a added the
+  capability to the writers; this milestone propagates it to all recorders and
+  validates them end-to-end as part of the campaign.
+
+  Context (verified 2026-06-21): the live recorders (Ruby, Python, JS, shell)
+  drive the **Rust `CtfsTraceWriter`**, which currently emits `calls.dat` only when
+  the caller opts in via `with_call_stream(true)` — so by default their `.ct`
+  bundles do NOT carry `calls.dat`. The Nim `multi_stream_writer` sets
+  `has_call_stream = true` unconditionally (multi_stream_writer.nim:1092). Which
+  writer path each recorder uses at RUNTIME must be confirmed per recorder; the
+  bump makes each one emit the split.
+
+  Materialized recorders in scope (confirm the full set against
+  codetracer-trace-format-spec/internal-files.md §"Runtime Tracing (DB Traces)"):
+  codetracer-ruby-recorder, codetracer-python-recorder, codetracer-js-recorder,
+  codetracer-shell-recorders (Bash), codetracer-wasm-recorder,
+  codetracer-wasmi-recorder, and any Noir path. (RR/native MCR recordings are NOT
+  materialized DB traces and are out of scope here.)
+
+  Deliverables:
+  - [ ] Determine each recorder's actual writer path (Rust `CtfsTraceWriter` vs Nim
+    `multi_stream_writer` vs other) and make each emit `calls.dat` + set the
+    `has_call_stream` flag. Prefer a single clean lever (e.g. default
+    `with_call_stream(true)` in the Rust writer, or per-recorder opt-in) — decided
+    so no recorder is left on the flag-off path.
+  - [ ] For each recorder, a LIVE recording of a small program produces a valid
+    `calls.dat` that ct-print + the engine read (executed set identical to the
+    `events.log`-derived set).
+  - [ ] Run EACH recorder's OWN test suite in its dev shell and verify it stays
+    green with the split (no recorder regression; goldens/fixtures updated where
+    they legitimately gain `has_call_stream`).
+  - [ ] Bump each recorder's pinned `codetracer-trace-format` / `-nim` sibling to
+    the M17a revisions (the column-aware + call-stream mainline) so CI builds
+    against the writer that emits the split — mirrors the earlier sibling-pin work.
+
+  Automated tests:
+  - [ ] Per recorder: a live-recording test (in the campaign harness or the
+    recorder's own suite) asserting the produced `.ct` has `has_call_stream` and a
+    readable `calls.dat`.
+  - [ ] The campaign full live suite stays green with split-emitting recorders.
+
+  Acceptance: every materialized recorder emits the calls/steps split, each
+  recorder's tests pass with it, and a live `.ct` from each is read via `calls.dat`
+  end-to-end.
