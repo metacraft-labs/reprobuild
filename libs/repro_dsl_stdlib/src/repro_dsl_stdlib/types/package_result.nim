@@ -207,12 +207,35 @@ proc files*(r: MesonPackageResult; name: string): BuildActionDef =
 # ---------------------------------------------------------------------------
 
 proc executable*(r: CmakePackageResult; name: string): Executable =
+  ## M9.R.14h.8 — emit per-artifact stage-copy + the package's
+  ## install-tree mirror so the from-source resolver finds the staged
+  ## install layout at the canonical
+  ## ``<recipeRoot>/.repro/output/<name>`` and
+  ## ``<recipeRoot>/.repro/output/install/usr`` paths.  Matches the
+  ## meson_package + autotools_package slicing methods; without this
+  ## a cmake-built sibling recipe (json-c, ...) could compile + install
+  ## successfully yet leave its install tree invisible to consumers.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
   newExecutable(
     install = r.installEdge,
     executableName = name,
     installPrefix = componentPath(r.components, "runtime"))
 
 proc library*(r: CmakePackageResult; name: string): Library =
+  ## M9.R.14h.8 — see ``executable`` above.  json-c is the motivating
+  ## case: ``libjson-c.so`` was installed under
+  ## ``build/out/usr/lib64/`` by the cmake_package install action but
+  ## never staged into ``.repro/output/libJsonC/`` or mirrored into
+  ## ``.repro/output/install/usr/`` because the slicing methods
+  ## returned a bare ``Library`` value without emitting either glue
+  ## action.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "library", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -629,6 +652,15 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     if strippedName != name:
       script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".so\" ")
       script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".so\" ")
+      # M9.R.14h.8 — kebab + snake variants on the stripped form so
+      # ``libJsonC`` -> ``lib<json-c>.so`` and ``libGdkPixbuf`` ->
+      # ``lib<gdk_pixbuf>.so`` resolve as plain ``.so`` shapes (the
+      # version-suffix glob below handles the ``-N.M.so`` variants).
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".so\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
@@ -670,6 +702,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # misses ``libgdk_pixbuf-2.0.so`` outright.
     if strippedSnake.len > 0 and strippedSnake != strippedLowerName:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14h.8 — kebab stripped version-suffix glob for libraries like
+    # ``libjson-c.so`` where the recipe writes ``libJsonC`` -> stripped
+    # ``JsonC`` -> kebab ``json-c`` -> glob ``libjson-c-*.so``.
+    if strippedKebab.len > 0 and strippedKebab != strippedLowerName and
+        strippedKebab != strippedSnake:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
     # upstream library lives under ``lib/x86_64-linux-gnu/`` or
@@ -682,6 +720,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("for candidate in ")
       script.add("\"" & lib64Dir & "/lib" & escapedName & ".so\" ")
       script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\" ")
+      # M9.R.14h.8 — kebab+snake stripped variants on lib64 too.
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & lib64Dir & "/lib" & strippedKebab & ".so\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & lib64Dir & "/lib" & strippedSnake & ".so\" ")
       if strippedName != name:
         script.add("\"" & lib64Dir & "/lib" & strippedName & ".so\" ")
         script.add("\"" & lib64Dir & "/lib" & strippedLowerName & ".so\"; ")
@@ -693,6 +737,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       if strippedName != name:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      # M9.R.14h.8 — kebab + snake stripped version-suffix globs on lib64.
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:

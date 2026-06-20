@@ -168,8 +168,31 @@ proc cmake_package*(srcDir: string;
     toolIdentityRefs = @["cmake", "sh"])
   # M9.R.14g.6 — inline-exec install action. cmake's real install mode
   # is selected by ``--install``, NOT by ``install`` subcommand.
-  let fullPrefix = destdir & prefix
-  let installArgv = @["cmake", "--install", buildDir, "--prefix", fullPrefix]
+  #
+  # M9.R.14h.8 — match meson_package's destdir treatment: cmake's
+  # ``--prefix`` argument is resolved relative to the action's cwd, NOT
+  # to ``buildDir``, so the legacy ``destdir & prefix = "out/usr"``
+  # form lands files at ``<cwd>/out/usr/...`` instead of the expected
+  # ``<recipeRoot>/<buildDir>/<destdir>/usr/...``.  Stage-copy +
+  # install-mirror both probe under the ``build/out/usr`` layout, so
+  # files installed at the cwd-relative path go un-staged.  In provider
+  # mode pass an absolute path; in unit-test mode keep the relative
+  # form so existing tests stay green.
+  #
+  # ``effectiveDestRoot`` is the install-root WITHOUT the ``/usr``
+  # suffix (mirrors meson_package's ``effectiveDestdir``); it's what
+  # the per-artifact stage-copy + install-mirror actions consult to
+  # find the upstream-installed files at ``<destRoot>/usr/lib*/``.
+  # ``installArgv``'s ``--prefix`` is the same root WITH ``/usr``
+  # appended so cmake itself stages under the canonical FHS layout.
+  let providerProjectRootForInstall = activeProviderProjectRoot()
+  let effectiveDestRoot =
+    if providerProjectRootForInstall.len > 0:
+      providerProjectRootForInstall / buildDir / destdir
+    else:
+      destdir
+  let effectiveInstallPrefix = effectiveDestRoot & prefix
+  let installArgv = @["cmake", "--install", buildDir, "--prefix", effectiveInstallPrefix]
   let installStamp = projectRoot / ".repro" / "build" / "cmake-install.stamp"
   createDir(parentDir(installStamp))
   let installScript = block:
@@ -209,9 +232,15 @@ proc cmake_package*(srcDir: string;
   appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
+  # M9.R.14h.8 — populate ``destdir`` with the SAME absolute install
+  # prefix the install action passed via ``--prefix``.  meson_package
+  # already does this (the destdir on the result is what stage-copy +
+  # install-mirror probe to find the on-disk install tree).  Without
+  # this, slicing methods ran stage-copy against the relative ``out``
+  # value and missed the on-disk ``build/out/usr/lib*/`` layout.
   CmakePackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
     installEdge: installEdge,
-    destdir: destdir,
+    destdir: effectiveDestRoot,
     components: standardComponents())
