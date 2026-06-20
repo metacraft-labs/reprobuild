@@ -340,6 +340,18 @@ package qt6BaseSource:
         # Disabling the explicit feature lets Qt fall back to libc's
         # built-in ``clock_gettime`` symbol resolution.
         "FEATURE_clock_gettime=OFF",
+        # M9.R.15f.3 — Qt6's SBOM (Software Bill of Materials) module is
+        # default-on and hard-codes the canonical install prefix
+        # ``/usr/local/Qt-6.8.1`` when computing per-artifact
+        # checksums. The cmake_package convention's ``cmake --install
+        # --prefix <buildDir>/out/usr`` does NOT match the SBOM's
+        # baked-in prefix, so the install step fails at
+        # ``SPDXRef-PackagedFile-qt-tool-syncqt.cmake:5`` with
+        # "Cannot find 'libexec/syncqt' to compute its checksum.
+        # Expected to find it at '/usr/local/Qt-6.8.1/libexec/syncqt'".
+        # Disabling SBOM generation entirely is the v1 workaround;
+        # a future milestone can restore SBOM by aligning the prefix.
+        "QT_GENERATE_SBOM=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")
