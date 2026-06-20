@@ -194,6 +194,15 @@ package mutterSource:
     ## gcc is the host C toolchain — mutter is C11 with light use of
     ## GLib-style autoconf macros via meson's gnome module.
     "gcc >=11"
+    ## M9.R.15e.6 — gettext provides ``msgfmt`` (consumed by mutter's
+    ## ``src/data/meson.build:1`` to compile the .po translation
+    ## catalogs into .mo binaries). Without it meson setup short-fails:
+    ##   ERROR: Program 'msgfmt' not found or not executable
+    "gettext"
+    ## M9.R.15e.6 — python3 runs mutter's per-keymap helper +
+    ## clutter/cogl preamble generators at meson-setup + compile time.
+    ## Same fix shape as gtk4 / glib2 / harfbuzz / fontconfig.
+    "python3"
 
   buildDeps:
     ## glib2 is the foundation library mutter's compositor + window-
