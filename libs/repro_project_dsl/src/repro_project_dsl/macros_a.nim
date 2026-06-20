@@ -2165,6 +2165,15 @@ proc usesImportCode(pkg: PackageDef): string =
       "rustc",
       "rustfmt",
       "rustup",
+      # M9.R.14b.1: ``runquotad`` is the RunQuota daemon binary the
+      # build engine spawns transitively for from-source recipe
+      # graphs. The root ``repro.nim``'s ``uses: "runquotad"`` line
+      # needs the auto-import here so the stdlib package definition at
+      # ``repro_dsl_stdlib/packages/runquotad.nim`` reaches the
+      # project-interface extractor; without it the from-source
+      # resolver hard-fails with "no stdlib provisioning channel
+      # declared on the tool use" on every Linux smoke.
+      "runquotad",
       "sh",
       "shellcheck",
       "solc",
