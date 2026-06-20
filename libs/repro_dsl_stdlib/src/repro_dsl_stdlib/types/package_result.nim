@@ -774,6 +774,58 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
           strippedSnake != strippedKebab:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
+    # M9.R.15e.9 — some autotools projects (Linux-PAM, glibc, util-linux's
+    # libuuid path) hardcode ``libdir=/lib64`` in their configure.ac
+    # regardless of ``--prefix``, so the .so files install to
+    # ``<destdir>/lib64/`` (no ``/usr/`` segment).  Walk both bare
+    # ``<destdir>/lib`` and ``<destdir>/lib64`` as a last-resort probe
+    # AFTER the ``usr/lib`` + ``usr/lib64`` checks have failed.
+    #
+    # We re-use the install root above ``/usr`` by stripping ``/usr/lib``
+    # off escapedSrcDir; this gives the destdir root which we then walk
+    # for ``/lib`` + ``/lib64`` directly.
+    var destdirRoot = ""
+    if escapedSrcDir.endsWith("/usr/lib"):
+      destdirRoot = escapedSrcDir[0 ..< (escapedSrcDir.len - "/usr/lib".len)]
+    if destdirRoot.len > 0:
+      for bareDir in ["/lib64", "/lib"]:
+        let dirPath = destdirRoot & bareDir
+        # Plain candidates.
+        script.add("for candidate in ")
+        script.add("\"" & dirPath & "/lib" & escapedName & ".so\" ")
+        script.add("\"" & dirPath & "/lib" & escapedLowerName & ".so\" ")
+        if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+          script.add("\"" & dirPath & "/lib" & strippedKebab & ".so\" ")
+        if strippedKebabDigits.len > 0 and
+            strippedKebabDigits != strippedLowerName and
+            strippedKebabDigits != strippedKebab:
+          script.add("\"" & dirPath & "/lib" & strippedKebabDigits & ".so\" ")
+        if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+            strippedSnake != strippedKebab:
+          script.add("\"" & dirPath & "/lib" & strippedSnake & ".so\" ")
+        if strippedName != name:
+          script.add("\"" & dirPath & "/lib" & strippedName & ".so\" ")
+          script.add("\"" & dirPath & "/lib" & strippedLowerName & ".so\"; ")
+        else:
+          script.add("\"" & dirPath & "/lib" & escapedLowerName & ".so\"; ")
+        script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
+        # Version-suffix glob.
+        script.add("first=$(ls -1 \"" & dirPath & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if strippedName != name:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if strippedKebabDigits.len > 0 and
+            strippedKebabDigits != strippedLowerName and
+            strippedKebabDigits != strippedKebab and
+            strippedKebabDigits != strippedSnake:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+            strippedSnake != strippedKebab:
+          script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & dirPath & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
     # Executable: probe bare name; also try .exe for cross-builds and
