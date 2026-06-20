@@ -104,6 +104,8 @@
 ##                             ``uses:`` entry.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -171,17 +173,9 @@ package iproute2Source:
     "bison"
     "flex"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. iproute2's hand-rolled ``./configure`` wrapper accepts a
-    ## SMALLER option grammar than autoconf-generated configure scripts
-    ## but the ``--without-X`` shape is preserved.
-    ##
-    ## ``--without-libelf`` skips the libelf dependency that would
-    ##                       otherwise pull in the BPF-bytecode JIT
-    ##                       probe (``tc bpf object-file ...``).
-    "--without-libelf"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable ip:
     ## ``/sbin/ip`` — the link/address/route/rule CLI consumed by
     ## NetworkManager's dispatcher hooks (``ip route add`` for static
@@ -212,6 +206,21 @@ package iproute2Source:
     ## driver, and systemd-networkd's ``Bridge=`` directive. v1 records
     ## the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("iproute2Source")
+    try:
+      let opts = @[
+        "--without-libelf",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("ip")
+      discard pkg.executable("tc")
+      discard pkg.executable("ss")
+      discard pkg.executable("bridge")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

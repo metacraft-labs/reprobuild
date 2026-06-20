@@ -183,6 +183,8 @@
 ## artifacts (data files consumed by downstream actions).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -261,11 +263,12 @@ package kernelSource:
     ## for the CONFIG_STACK_VALIDATION pass that rewrites .o files
     ## to add unwind metadata.
     "libelf >=0.187"
-    ## libssl is consumed by kbuild's certificate-handling code (the
-    ## ``CONFIG_MODULE_SIG`` family); even with module signing
-    ## disabled, the build occasionally invokes openssl helpers via
-    ## ``scripts/sign-file``.
-    "libssl >=3.0"
+    ## openssl provides libssl, consumed by kbuild's certificate-
+    ## handling code (the ``CONFIG_MODULE_SIG`` family); even with
+    ## module signing disabled, the build occasionally invokes openssl
+    ## helpers via ``scripts/sign-file``. Recipe name ``openssl``
+    ## matches the sibling source recipe.
+    "openssl >=3.0"
     ## bc is the arbitrary-precision calculator kbuild's
     ## ``kernel/timeconst.bc`` script invokes to compute jiffies
     ## constants at build time. Required from 4.x onwards.
@@ -278,42 +281,9 @@ package kernelSource:
     ## configs) by the modules-install step.
     "rsync"
 
-  makeFlags:
-    ## Flag set tuned for a deterministic single-threaded build of
-    ## the kernel. Order is load-bearing: ``make`` evaluates variable
-    ## assignments left-to-right and the ``-j1`` sentinel lives at
-    ## the tail so M9.L can override the job-count flag by appending
-    ## ``-jN`` later without re-ordering the variable-override
-    ## block.
-    ##
-    ## ``ARCH=x86_64`` pins the target architecture so the kbuild
-    ## graph picks the ``arch/x86/`` Makefile.
-    ## ``LOCALVERSION=`` clears the version suffix kbuild would
-    ## otherwise append from the git tree state ( ``+`` if dirty,
-    ## etc.). Empty value means the kernel release matches the
-    ## upstream tag exactly; the activation layer's KERNELRELEASE
-    ## reader gets ``6.6.142``, not ``6.6.142-dirty+``.
-    ## ``KBUILD_BUILD_USER`` / ``KBUILD_BUILD_HOST`` pin the
-    ## ``__BUILD_USER__`` / ``__BUILD_HOST__`` strings kbuild
-    ## embeds in vmlinux for reproducibility (per the
-    ## ``Documentation/kbuild/reproducible-builds.rst`` upstream
-    ## doc). Hostname / username leakage is the largest source of
-    ## per-host kernel-build divergence; both pins are required.
-    ## ``KBUILD_BUILD_TIMESTAMP=@1577836800`` pins the embedded
-    ## build timestamp to 2020-01-01 00:00:00 UTC (epoch seconds
-    ## form; the leading ``@`` is the ``date -d @<seconds>`` syntax
-    ## kbuild's ``scripts/mkcompile_h`` consumes). Without this
-    ## kbuild stamps the current date into the kernel banner,
-    ## breaking byte-pin reproducibility.
-    ## ``-j1`` pins single-threaded build for determinism; M9.L can
-    ## override to ``-j$(nproc)`` at action-emission time.
-    "ARCH=x86_64"
-    "LOCALVERSION="
-    "KBUILD_BUILD_USER=reprobuild"
-    "KBUILD_BUILD_HOST=reprobuild"
-    "KBUILD_BUILD_TIMESTAMP=@1577836800"
-    "-j1"
-
+  config:
+    ## No prefix lifted from `makeFlags:`; flags inlined in the `build:` block.
+    discard
   executable bzImage:
     ## ``arch/x86/boot/bzImage`` — the bootable kernel image; the
     ## activation layer's bootloader-menu generator (NDEM1) points
@@ -355,6 +325,26 @@ package kernelSource:
     ## ``kernelRelease`` artifact uses the same path semantics so
     ## a future ``toolBuild`` edge can swap one for the other.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("kernelSource")
+    try:
+      let opts = @[
+        "ARCH=x86_64",
+        "LOCALVERSION=",
+        "KBUILD_BUILD_USER=reprobuild",
+        "KBUILD_BUILD_HOST=reprobuild",
+        "KBUILD_BUILD_TIMESTAMP=@1577836800",
+        "-j1",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("bzImage")
+      discard pkg.files("vmlinux")
+      discard pkg.files("systemMap")
+      discard pkg.files("kernelRelease")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

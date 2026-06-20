@@ -21,6 +21,8 @@
 ##   ``bin/makensis.exe`` directly.
 
 import repro_project_dsl
+# DSL-port M9.R.2c — typed slot var for ``executable makensis:``.
+import repro_dsl_stdlib/types/executable
 
 package nsis:
   provisioning:

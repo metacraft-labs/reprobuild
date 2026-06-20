@@ -99,6 +99,8 @@
 ##                                         deterministic install paths).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -168,26 +170,9 @@ package libffiSource:
     ## fast-paths for the trampoline tail-call.
     "gcc >=11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the
-    ## ``--disable-multi-os-directory`` sentinel lives at the tail so
-    ## any override (e.g. a future multilib-bundle variant) can append
-    ## ``--enable-multi-os-directory`` later without re-ordering this
-    ## block.
-    ##
-    ## ``--disable-static`` skips the static archive (not used by the
-    ## v1 desktop story).
-    ## ``--disable-docs`` skips the texinfo / pdf manual build.
-    ## ``--disable-multi-os-directory`` skips the multilib install
-    ##                                    layout (pins single-arch
-    ##                                    ``lib/`` for deterministic
-    ##                                    install paths).
-    "--disable-static"
-    "--disable-docs"
-    "--disable-multi-os-directory"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libFfi:
     ## ``libffi.so`` — the portable foreign-function-call ABI shim
     ## bundling the FFI core + per-arch assembly trampolines + type-
@@ -200,6 +185,20 @@ package libffiSource:
     ## per-artifact build body lands in M9.L when the convention's
     ## make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("libffiSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-docs",
+        "--disable-multi-os-directory",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libFfi")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

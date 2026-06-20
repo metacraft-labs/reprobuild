@@ -102,6 +102,8 @@
 ## flips ``BUILD_TESTING=ON`` for CI bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -161,26 +163,9 @@ package jsonCSource:
     ## gcc is the host C toolchain — json-c is plain C99.
     "gcc >=11"
 
-  cmakeFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: CMake evaluates ``-D`` overrides
-    ## left-to-right and the ``CMAKE_BUILD_TYPE=Release`` sentinel
-    ## lives at the tail so any override (e.g. a future debug-build
-    ## variant) can append ``-DCMAKE_BUILD_TYPE=Debug`` later without
-    ## re-ordering this block.
-    ##
-    ## ``BUILD_SHARED_LIBS=ON`` builds the shared object consumed by
-    ## sway helpers + NetworkManager + BlueZ + PolicyKit.
-    ## ``BUILD_STATIC_LIBS=OFF`` skips the static archive (not used by
-    ## the v1 desktop story).
-    ## ``BUILD_TESTING=OFF`` skips the upstream test suite.
-    ## ``BUILD_APPS=OFF`` skips the bundled apps.
-    "-DBUILD_SHARED_LIBS=ON"
-    "-DBUILD_STATIC_LIBS=OFF"
-    "-DBUILD_TESTING=OFF"
-    "-DBUILD_APPS=OFF"
-    "-DCMAKE_BUILD_TYPE=Release"
-
+  config:
+    ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
+    discard
   library libJsonC:
     ## ``libjson-c.so`` — the C JSON parser + serialiser consumed by
     ## the sway ecosystem (swayipc helpers), NetworkManager, BlueZ,
@@ -189,6 +174,22 @@ package jsonCSource:
     ## lands in M9.L when the convention's ninja-spawn + install-glue
     ## closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
+    setCurrentOwningPackageOverride("jsonCSource")
+    try:
+      let opts = @[
+        "-DBUILD_SHARED_LIBS=ON",
+        "-DBUILD_STATIC_LIBS=OFF",
+        "-DBUILD_TESTING=OFF",
+        "-DBUILD_APPS=OFF",
+        "-DCMAKE_BUILD_TYPE=Release",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      discard pkg.library("libJsonC")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

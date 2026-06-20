@@ -106,6 +106,8 @@
 ## flips ``--with-debug`` for the at-spi accessibility debug bundle).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -177,29 +179,9 @@ package libxml2Source:
     ## vendors a compatible version.
     "zlib >=1.2.11"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-mem-debug``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## debug-build variant) can append ``--with-mem-debug`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--without-python`` skips the Python bindings.
-    ## ``--without-history`` skips the readline interactive XML shell.
-    ## ``--without-html`` skips the HTML parser side of libxml2.
-    ## ``--without-debug`` skips the debug-mode tree introspection
-    ## helpers.
-    ## ``--without-mem-debug`` skips the memory-allocation debug
-    ## instrumentation.
-    "--disable-static"
-    "--without-python"
-    "--without-history"
-    "--without-html"
-    "--without-debug"
-    "--without-mem-debug"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libXml2:
     ## ``libxml2.so`` — the canonical full-DOM + SAX XML parser
     ## consumed by gsettings schema validation, polkit policy parsing,
@@ -211,6 +193,23 @@ package libxml2Source:
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("libxml2Source")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-python",
+        "--without-history",
+        "--without-html",
+        "--without-debug",
+        "--without-mem-debug",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libXml2")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

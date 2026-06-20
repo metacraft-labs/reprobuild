@@ -131,6 +131,8 @@
 ## bi-arch convention).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -192,27 +194,9 @@ package libcapSource:
     ## ``libcap/Makefile``).
     "perl >=5.32"
 
-  makeFlags:
-    ## Flag set tuned for a deterministic libcap build. Order is
-    ## load-bearing: ``make`` evaluates variable assignments left-to-
-    ## right and the ``GOLANG=no`` sentinel lives at the tail so M9.L
-    ## can override (or a future Go-edition variant can append
-    ## ``GOLANG=yes``) without re-ordering the variable-override
-    ## block.
-    ##
-    ## ``BUILD_CC=gcc`` pins the host compiler (vs the brittle ``cc``
-    ##                   default).
-    ## ``RAISE_SETFCAP=no`` skips the post-install ``setcap``
-    ##                       invocation on ``setcap`` itself.
-    ## ``lib=lib`` pins the library install subdir name to ``lib``.
-    ## ``prefix=/usr`` pins the install prefix to ``/usr``.
-    ## ``GOLANG=no`` skips the Go bindings build.
-    "BUILD_CC=gcc"
-    "RAISE_SETFCAP=no"
-    "lib=lib"
-    "prefix=/usr"
-    "GOLANG=no"
-
+  config:
+    ## No prefix lifted from `makeFlags:`; flags inlined in the `build:` block.
+    discard
   library libCap:
     ## ``libcap.so`` — the POSIX capabilities library consumed by
     ## systemd's per-unit ``CapabilityBoundingSet=`` directive, sshd's
@@ -247,6 +231,25 @@ package libcapSource:
     ## a Python script bind port 80 unprivileged). v1 records the
     ## artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("libcapSource")
+    try:
+      let opts = @[
+        "BUILD_CC=gcc",
+        "RAISE_SETFCAP=no",
+        "lib=lib",
+        "prefix=/usr",
+        "GOLANG=no",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libCap")
+      discard pkg.executable("capsh")
+      discard pkg.executable("getcap")
+      discard pkg.executable("setcap")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

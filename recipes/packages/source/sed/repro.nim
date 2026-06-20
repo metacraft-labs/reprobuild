@@ -85,6 +85,8 @@
 ##                              tar / coreutils precedent.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -150,12 +152,9 @@ package sedSource:
     ## generates the sed manpage.
     "perl >=5.32"
 
-  configureFlags:
-    ## Flag set per the task brief.
-    ##
-    ## ``--without-selinux`` skips the libselinux dependency.
-    "--without-selinux"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable sed:
     ## ``/usr/bin/sed`` — the canonical stream-editor CLI consumed
     ## by every shell pipeline + every Makefile substitution rule +
@@ -164,6 +163,18 @@ package sedSource:
     ## body lands in M9.L when the convention's make-spawn +
     ## install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("sedSource")
+    try:
+      let opts = @[
+        "--without-selinux",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("sed")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

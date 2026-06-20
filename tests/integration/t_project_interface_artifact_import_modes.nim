@@ -210,7 +210,15 @@ when isNixSupported:
       writeThinConsumer(thinConsumer, callText)
       writeSourceConsumer(sourceConsumer, callText)
 
-      let thinCheckCommand = @["nim", "check"] & pathFlags([thinDir, dslPath]) &
+      # A consumer compiled in a scratch directory never loads reprobuild's
+      # ``config.nims``, so it does not automatically get the ``--path:`` flags
+      # for the DSL umbrella's own dependencies (``repro_binary_cache_client``,
+      # ``nimcrypto`` …). Replay them via the shared engine-side helper so the
+      # thin/source consumers compile the same way a real downstream consumer
+      # would.
+      let consumerDepFlags = consumerCompilePathFlags(repoRoot)
+      let thinCheckCommand = @["nim", "check"] & consumerDepFlags &
+        pathFlags([thinDir, dslPath]) &
         @["--nimcache:" & (tempRoot / "nimcache-thin-check"), thinConsumer]
       let thinEdge1 = thinConsumerEdge(thinConsumer, stubPath,
         artifact1.interfaceFingerprint, thinCheckCommand, repoRoot)
@@ -226,18 +234,19 @@ when isNixSupported:
         "import repro_project_dsl\n" &
         "import asset_pack_interface\n\n" &
         "discard privateImplementationSalt()\n")
-      let badOutput = requireNimFailure(@["nim", "check"] & pathFlags([thinDir, dslPath]) &
+      let badOutput = requireNimFailure(@["nim", "check"] & consumerDepFlags &
+        pathFlags([thinDir, dslPath]) &
         @["--nimcache:" & (tempRoot / "nimcache-thin-private"), badThinConsumer])
       check badOutput.contains("undeclared identifier")
       check badOutput.contains("privateImplementationSalt")
 
       let thinRunOut = requireNimSuccess(@["nim", "c", "-r", "--verbosity:0",
-        "--hints:off"] & pathFlags([thinDir, dslPath]) &
+        "--hints:off"] & consumerDepFlags & pathFlags([thinDir, dslPath]) &
         @["--nimcache:" & (tempRoot / "nimcache-thin-run"),
           "--out:" & (binDir / "thin-consumer"), thinConsumer])
 
       let sourceRunOut = requireNimSuccess(@["nim", "c", "-r", "--verbosity:0",
-        "--hints:off"] & pathFlags([providerDir, dslPath]) &
+        "--hints:off"] & consumerDepFlags & pathFlags([providerDir, dslPath]) &
         @["--nimcache:" & (tempRoot / "nimcache-source-run"),
           "--out:" & (binDir / "source-consumer"), sourceConsumer])
       check lastNonEmptyLine(thinRunOut) == lastNonEmptyLine(sourceRunOut)
@@ -354,7 +363,7 @@ when isNixSupported:
       writeThinConsumer(intConsumer,
         "assetPack.bundle(@[\"public/index.html\"], output = \"dist/site.tar\", " &
         "format = 9)")
-      discard requireNimSuccess(@["nim", "check"] &
+      discard requireNimSuccess(@["nim", "check"] & consumerDepFlags &
         pathFlags([thinDir, dslPath]) &
         @["--nimcache:" & (tempRoot / "nimcache-public-edit-new"),
           intConsumer])

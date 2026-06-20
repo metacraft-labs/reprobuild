@@ -137,6 +137,8 @@
 ##                                       PolicyKit + AppArmor instead).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -207,33 +209,14 @@ package glibcSource:
   buildDeps:
     ## python is required by the build for the misc/syscall-list code
     ## generators glibc 2.x switched to in the 2.32 cut.
-    "python >=3.9"
+    "python3 >=3.9"
     ## Linux kernel headers — glibc's syscall layer pulls
     ## ``<linux/*>`` headers from the host kernel-headers package.
     "linux-headers >=4.19"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-selinux``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## SELinux-flavoured variant) can append ``--with-selinux`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-werror`` turns off ``-Werror`` for newer-host-gcc
-    ##                       resilience.
-    ## ``--enable-bind-now`` BIND_NOW-links the dynamic libraries.
-    ## ``--enable-stack-protector=strong`` enables the gcc SSP at the
-    ##                                      "strong" level.
-    ## ``--enable-kernel=4.19`` sets the minimum supported kernel at
-    ##                          the 4.19 LTS branch.
-    ## ``--without-selinux`` skips the libselinux dependency.
-    "--disable-werror"
-    "--enable-bind-now"
-    "--enable-stack-protector=strong"
-    "--enable-kernel=4.19"
-    "--without-selinux"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libC:
     ## ``libc.so.6`` — the canonical C runtime library every glibc
     ## binary links against. Since glibc 2.34 also absorbs the
@@ -286,6 +269,28 @@ package glibcSource:
     ## it); distinct from the libraries the linker itself resolves.
     ## v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("glibcSource")
+    try:
+      let opts = @[
+        "--disable-werror",
+        "--enable-bind-now",
+        "--enable-stack-protector=strong",
+        "--enable-kernel=4.19",
+        "--without-selinux",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libC")
+      discard pkg.library("libM")
+      discard pkg.library("libPthread")
+      discard pkg.library("libDl")
+      discard pkg.library("libRt")
+      discard pkg.library("libCrypt")
+      discard pkg.executable("ldso")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

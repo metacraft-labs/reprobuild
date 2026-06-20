@@ -89,6 +89,8 @@
 ##                              flag).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -168,20 +170,9 @@ package readlineSource:
     ## recipe #62 vendors a compatible version).
     "ncurses >=6.0"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-shared``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## static-only variant) can append ``--disable-shared`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--enable-shared``  builds the ``libreadline.so`` +
-    ##                        ``libhistory.so`` shared libraries.
-    "--disable-static"
-    "--enable-shared"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libReadline:
     ## ``libreadline.so`` — the line-editing + key-binding +
     ## tab-completion library bash + gdb + psql + sqlite3 + ipython
@@ -203,6 +194,20 @@ package readlineSource:
     ## records the artifact only; the per-artifact build body lands
     ## in M9.L.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("readlineSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--enable-shared",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libReadline")
+      discard pkg.library("libHistory")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

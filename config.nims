@@ -11,36 +11,52 @@ switch("path", ".")
 
 # Test-Edges-And-Parallel-Runner M1: ``repro.nim`` consumes the
 # generated ``repro_tests.nim`` whose data entries each become a
-# ``buildNimUnittest.build(...)`` call from the codetracer-side
-# ``ct_test_nim_unittest`` adapter. The adapter re-exports
-# ``ct_test_interface`` so both module paths land on ``--path``.
-let ctTestRoot = block:
-  let fromEnv = getEnv("CT_TEST_SRC")
+# ``buildNimUnittest.build(...)`` call. The build-side typed-tool
+# (``ct_test_nim_unittest`` + its ``ct_test_interface`` contract) now
+# lives in-tree under ``libs/`` (added via the ``libName`` loop below):
+# it depends only on ``repro_project_dsl`` and is the half ``repro.nim``
+# imports, so hosting it in-tree removes the reprobuild↔adapter
+# dependency cycle that the previous external import closed. Only the
+# execution-time ``TestRunner`` adapter (``ct_test_runner_adapter`` — the
+# in-process bridge in the ``reprobuild-ct-test-runner`` repo) stays
+# external and is resolved from the sibling checkout below.
+let ctTestRunnerRoot = block:
+  let fromEnv = getEnv("REPRO_CT_TEST_RUNNER_SRC")
   if fromEnv.len > 0:
     fromEnv
   else:
-    ".." / "ct-test"
+    ".." / "reprobuild-ct-test-runner"
 for ctTestLib in [
-  "ct_test_interface",
-  "ct_test_nim_unittest",
-  "ct_test_unittest_parallel",
-  # Spec-Implementation M4: ``ct_test_runner_adapter`` is the
-  # ``TestRunner`` cross-cutting-interface adapter that delegates to
-  # ``ct-test-runner`` for run/list/enumerate. Reprobuild project files
-  # import it after ``ct_test_nim_unittest`` to wire the adapter into
-  # the active build context. The previous shim at
-  # ``libs/repro_cli_support/src/repro_cli_support.nim`` ~line 1295
-  # was retired in M4; the adapter shoulders the execution-time
-  # responsibility while the build-time ``buildNimUnittest.build`` call
-  # now routes through the normal ``nim`` profile via the typed-tool
-  # wrapper machinery.
   "ct_test_runner_adapter",
 ]:
-  let candidate = ctTestRoot / "libs" / ctTestLib / "src"
+  let candidate = ctTestRunnerRoot / "libs" / ctTestLib / "src"
   if dirExists(candidate):
     switch("path", candidate)
 
+# The ``TestRunner`` cross-cutting contract lives in the standalone
+# ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
+# so out-of-tree adapter libraries and the reprobuild engine share the types
+# without a dependency cycle through the engine. Resolve it from
+# ``REPRO_TEST_ADAPTERS_SRC`` (seeded by the flake input in the sandboxed
+# package build) or a sibling checkout for local dev shells.
+let reproTestAdaptersSrc = block:
+  let fromEnv = getEnv("REPRO_TEST_ADAPTERS_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "reprobuild-test-adapters" / "src"
+if dirExists(reproTestAdaptersSrc):
+  switch("path", reproTestAdaptersSrc)
+
 for libName in [
+  # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
+  # above): ``ct_test_interface`` is the leaf contract, ``ct_test_nim_unittest``
+  # the ``buildNimUnittest`` typed-tool that ``repro.nim`` imports, and
+  # ``ct_test_unittest_parallel`` is the test-binary protocol support that
+  # reprobuild's own ``tools/test-runner`` and parallel-runner tests link.
+  "ct_test_interface",
+  "ct_test_nim_unittest",
+  "ct_test_unittest_parallel",
   "repro_core",
   "repro_platform",
   "repro_diagnostics",

@@ -328,36 +328,6 @@ proc hasCMakeListsTxt(projectRoot: string): bool =
 proc buildScratchDir(projectRoot: string): string =
   projectRoot / ScratchDirName / FromSourceCmakeSubdir / "build"
 
-proc stagingDir(projectRoot: string): string =
-  projectRoot / ScratchDirName / FromSourceCmakeSubdir / "staging"
-
-proc configureStampPath(projectRoot: string): string =
-  ## A custom stamp file the configure action touches on success. The
-  ## downstream build / install actions key off the stamp instead of
-  ## cmake's ``CMakeCache.txt`` (which can be touched during build
-  ## too).
-  buildScratchDir(projectRoot) / "from-source-cmake-configure.stamp"
-
-proc buildStampPath(projectRoot: string): string =
-  buildScratchDir(projectRoot) / "from-source-cmake-build.stamp"
-
-proc installStampPath(projectRoot: string): string =
-  buildScratchDir(projectRoot) / "from-source-cmake-install.stamp"
-
-proc artifactOutputDir(projectRoot, member: string): string =
-  projectRoot / OutputDirName / member
-
-proc artifactOutputPath(projectRoot, member: string;
-                        kind: FromSourceCmakeMemberKind): string =
-  case kind
-  of fscExecutable:
-    when defined(windows):
-      artifactOutputDir(projectRoot, member) / (member & ".exe")
-    else:
-      artifactOutputDir(projectRoot, member) / member
-  of fscLibraryStatic:
-    artifactOutputDir(projectRoot, member) / ("lib" & member & ".a")
-
 proc sanitizeNamePart(value: string): string =
   for ch in value:
     if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
@@ -367,248 +337,45 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-# ---------------------------------------------------------------------------
-# Tool discovery — lazy. ``recognize`` does NOT call these (per the
-# module docstring): a host without cmake can still register the
-# convention, exercise it via tests, and lower the action graph; the
-# actual build run will fail loudly at execution time.
-# ---------------------------------------------------------------------------
-
-proc cmakeExecutable(): string =
-  ## M9.N Batch B: emit the BARE tool name ``cmake``. The convention
-  ## stamps ``toolIdentityRefs = @["cmake", ...]`` on every action and
-  ## the engine prepends the resolved bin directory to PATH at fork
-  ## time, so the bare argv entry finds the right binary regardless
-  ## of whether the host has cmake installed. See ``from_source_meson``
-  ## §mesonExecutable for the design rationale.
-  "cmake"
+# M9.R.6.1: ``stagingDir`` / ``configureStampPath`` / ``buildStampPath``
+# / ``installStampPath`` / ``artifactOutputDir`` / ``artifactOutputPath``
+# / ``cmakeExecutable`` helpers + the 5-stage emit procs were removed
+# alongside the legacy ``emitFragment`` body. Only the sentinel helpers
+# below remain.
 
 # ---------------------------------------------------------------------------
 # Action emission
 # ---------------------------------------------------------------------------
 
-proc emitConfigureAction(projectRoot, cmakeExe, srcDir, buildDir: string;
-                        cmakeFlags: seq[string];
-                        fetchDeps: seq[string];
-                        fetchStamps: seq[string]):
-                          tuple[action: BuildActionDef; stamp: string] =
-  ## ``cmake -S <srcDir> -B <buildDir> -G Ninja
-  ## -DCMAKE_BUILD_TYPE=Release <cmakeFlags...>``.
-  ##
-  ## The convention always passes ``-G Ninja`` AND
-  ## ``-DCMAKE_BUILD_TYPE=Release`` as anchor flags. Recipes whose
-  ## cmakeFlags already include ``-DCMAKE_BUILD_TYPE=...`` will see
-  ## cmake honour the LAST occurrence (right-most wins) — this is
-  ## consistent with the in-tree c_cpp_cmake convention's behaviour.
-  createDir(extendedPath(buildDir))
-  let stamp = configureStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    var trailingOpts = ""
-    for opt in cmakeFlags:
-      trailingOpts.add(" \"")
-      trailingOpts.add(opt.replace("\"", "\\\""))
-      trailingOpts.add("\"")
-    let script = "set -e; \"" & escapedCmake & "\" -S \"" & escapedSrc &
-      "\" -B \"" & escapedBuild &
-      "\" -G Ninja -DCMAKE_BUILD_TYPE=Release" & trailingOpts &
-      "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[cmakeExe, "-S", srcDir, "-B", buildDir,
-      "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
-    for opt in cmakeFlags:
-      argv.add(opt)
-  var inputs: seq[string] = @[]
-  for st in fetchStamps:
-    inputs.add(st)
-  let action = buildAction(
-    id = "from-source-cmake-configure",
-    call = inlineExecCall(argv, projectRoot),
-    deps = fetchDeps,
-    inputs = inputs,
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.configure",
-    # M9.N Batch B: cmake configure probes ``ninja`` (the chosen
-    # generator) and a working C compiler at this step; the script
-    # itself is shelled via ``sh``.
-    toolIdentityRefs = @["cmake", "ninja", "gcc", "sh"])
-  (action, stamp)
+proc sentinelStampPath(projectRoot: string): string =
+  buildScratchDir(projectRoot) / "from-source-cmake-sentinel.stamp"
 
-proc emitBuildAction(projectRoot, cmakeExe, buildDir, configureStamp: string):
-                       tuple[action: BuildActionDef; stamp: string] =
-  ## ``cmake --build <buildDir>``. The stamp file lets downstream
-  ## actions key off build success without relying on cmake's internal
-  ## file-touch behaviour.
-  let stamp = buildStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; \"" & escapedCmake & "\" --build \"" &
-      escapedBuild & "\"; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[cmakeExe, "--build", buildDir]
-  let action = buildAction(
-    id = "from-source-cmake-build",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-cmake-configure"],
-    inputs = @[configureStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.build",
-    # M9.N Batch B: ``cmake --build`` re-invokes ninja which invokes
-    # the C compiler.
-    toolIdentityRefs = @["cmake", "ninja", "gcc", "sh"])
-  (action, stamp)
-
-proc emitInstallAction(projectRoot, cmakeExe, buildDir, staging,
-                       buildStamp: string;
-                       identity: CacheEntryIdentity):
-                         tuple[action: BuildActionDef; stamp: string] =
-  ## ``cmake --install <buildDir> --prefix <staging>``.
-  ##
-  ## CMake's ``cmake --install --prefix`` is the standard escape hatch
-  ## for non-root installs: cmake honours the configure-time install
-  ## layout (``bin/``, ``lib/``, ``include/``) but relocates the root
-  ## to ``<staging>``. For the M9.L.1 slice we assume the default
-  ## layout (``<staging>/bin/`` for executables, ``<staging>/lib/`` for
-  ## libraries) and harvest binaries accordingly. See module
-  ## docstring's "Honest deferrals" section for the limitations.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the install action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful install.
-  createDir(extendedPath(staging))
-  let stamp = installStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStaging = staging.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; \"" & escapedCmake & "\" --install \"" &
-      escapedBuild & "\" --prefix \"" & escapedStaging &
-      "\"; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[cmakeExe, "--install", buildDir, "--prefix", staging]
-  let action = buildAction(
-    id = "from-source-cmake-install",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-cmake-build"],
-    inputs = @[buildStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.install",
-    publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity),
-    # M9.N Batch B: ``cmake --install`` runs the install-time scripts;
-    # bare ``cmake`` resolves via PATH.
-    toolIdentityRefs = @["cmake", "sh"])
-  (action, stamp)
-
-proc dasherise(name: string): string =
-  ## Heuristic camelCase → dash conversion: ``libKF6CoreAddons`` →
-  ## ``lib-k-f6-core-addons``. Used to map a recipe-side member name
-  ## to the cmake-installed binary name. Limited to the M9.L.1
-  ## vertical slice; KF6 / Qt libraries actually preserve PascalCase
-  ## in their installed SONAMEs (``libKF6CoreAddons.so``), so the
-  ## stage-copy path falls back to the raw member name when the
-  ## dasherised form doesn't match an installed file. A follow-up
-  ## milestone can lift a per-artifact ``installedAs:`` override into
-  ## the DSL when more recipes surface naming mismatches.
-  for i, ch in name:
-    if ch in {'A' .. 'Z'} and i > 0:
-      result.add('-')
-      result.add(chr(ord(ch) - ord('A') + ord('a')))
-    else:
-      result.add(ch)
-
-proc stagedBinaryPath(staging, member: string;
-                      kind: FromSourceCmakeMemberKind): string =
-  ## Heuristic guess at the cmake-installed path. ``cmake --install
-  ## --prefix <staging>`` lays binaries at ``<staging>/bin/...`` and
-  ## libraries at ``<staging>/lib/...`` per the default
-  ## ``CMAKE_INSTALL_BINDIR`` / ``CMAKE_INSTALL_LIBDIR`` values from
-  ## GNUInstallDirs. We use the raw member name (PascalCase preserved)
-  ## because KF6 / Qt-style libraries keep PascalCase in their SONAMEs
-  ## (e.g. ``libKF6CoreAddons.so``); recipes whose installed file
-  ## name diverges from the member identifier will need an
-  ## ``installedAs:`` knob (deferred — see module docstring).
-  case kind
-  of fscExecutable:
-    when defined(windows):
-      staging / "bin" / (member & ".exe")
-    else:
-      staging / "bin" / member
-  of fscLibraryStatic:
-    # ``lib<member>.a`` is the GNU-archiver convention; recipes
-    # producing shared objects (``.so`` / ``.dll``) or SONAME-versioned
-    # libraries get a stage-copy path that the engine's output-
-    # collection step will report missing — exposing the gap loudly is
-    # preferable to silently mis-mapping the artifact.
-    staging / "lib" / ("lib" & member & ".a")
-
-proc emitStageCopyAction(projectRoot, staging, installStamp: string;
-                         member: FromSourceCmakeMember;
-                         identity: CacheEntryIdentity): BuildActionDef =
-  ## Copy ``<staging>/bin/<member>`` (or ``<staging>/lib/lib<member>.a``)
-  ## to ``<projectRoot>/.repro/output/<member>/<member>``. This action
-  ## is what the engine's output-collection step keys off — the
-  ## canonical per-artifact output path matches the existing direct
-  ## conventions' ``<root>/.repro/output/<name>/<name>`` schema.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful per-artifact stage.
-  let outDir = artifactOutputDir(projectRoot, member.name)
-  createDir(extendedPath(outDir))
-  let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
-  let stagedPath = stagedBinaryPath(staging, member.name, member.kind)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedStaged = stagedPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOut = outPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOutDir = outDir.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; mkdir -p \"" & escapedOutDir &
-      "\"; cp -f \"" & escapedStaged & "\" \"" & escapedOut & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @["cp", stagedPath, outPath]
-  let kindTag = case member.kind
-    of fscExecutable: "executable"
-    of fscLibraryStatic: "library-static"
+proc emitSynthesisSentinelAction(projectRoot, dslPackageName: string;
+                                 fetchActionId, fetchStamp: string;
+                                 identity: CacheEntryIdentity):
+                                   BuildActionDef =
+  ## Emit the M9.R.6.1 narrowed synthesis sentinel. See
+  ## ``from_source_meson.emitSynthesisSentinelAction`` for the rationale.
+  createDir(extendedPath(parentDir(sentinelStampPath(projectRoot))))
+  let stamp = sentinelStampPath(projectRoot)
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStampDir = parentDir(stamp).replace("\\", "/").
+    replace("\"", "\\\"")
+  let script = "set -e; mkdir -p \"" & escapedStampDir &
+    "\"; printf 'from-source-cmake sentinel for %s\\n' \"" &
+    dslPackageName & "\" > \"" & escapedStamp & "\""
+  let argv = @["sh", "-c", script]
   buildAction(
-    id = "from-source-cmake-stage-" & sanitizeNamePart(member.name),
+    id = "from-source-cmake-sentinel",
     call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-cmake-install"],
-    inputs = @[installStamp],
-    outputs = @[outPath],
+    deps = @[fetchActionId],
+    inputs = @[fetchStamp],
+    outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-cmake.stage." & kindTag,
+    commandStatsId = "from-source-cmake.sentinel",
     publishToBinaryCache = true,
     cacheEntryIdentity = some(identity),
-    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp).
     toolIdentityRefs = @["sh"])
 
 # ---------------------------------------------------------------------------
@@ -692,9 +459,11 @@ proc syntheticPackage(projectRoot: string;
 proc fromSourceCmakeEmitFragment(projectRoot: string;
                                  request: ProviderGraphRequest):
                                    GraphFragment {.gcsafe.} =
-  ## Lower the recipe into a fetch + configure + build + install + per-
-  ## member stage-copy action graph. See module docstring's pipeline
-  ## section.
+  ## M9.R.6.1 narrowed emitFragment — emits exactly fetch + sentinel.
+  ## See ``from_source_meson.fromSourceMesonEmitFragment`` for the
+  ## rationale. The configure/build/install/stage-copy actions live in
+  ## the recipe's explicit ``build:`` block via the M9.R.2b
+  ## ``cmake_package(...)`` constructor.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
@@ -717,47 +486,19 @@ proc fromSourceCmakeEmitFragment(projectRoot: string;
         "from-source-cmake convention: no fetch: spec registered for " &
           "package '" & dslPackageName & "' — recognise() should have " &
           "rejected this project")
-    let cmakeExe = cmakeExecutable()
-    let cmakeFlags = registeredBuildFlags(dslPackageName, "", "cmake")
-    let srcDir = fetchExtractedRoot(projectRoot, spec)
-    let buildDir = buildScratchDir(projectRoot)
-    let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
-    # M9.L.4-refactor Step B: compose the binary-cache identity once
-    # and thread it onto the install + stage-copy edges. The engine's
-    # ``BinaryCachePublisher`` hook consumes the same tuple from the
-    # decoded ``BuildAction``; conventions stay tool-agnostic.
     let identity = computeCacheEntryIdentity(projectRoot,
       dslPackageName, "cmake")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
       var allActions: seq[BuildActionDef] = @[]
-      # 1. Fetch
       let fetchAct = emitFetchAction(projectRoot, dslPackageName, spec)
       allActions.add(fetchAct)
       let fetchStamp = fetchStampPath(projectRoot, spec.hashHex)
-      # 2. Configure
-      let configurePair = emitConfigureAction(projectRoot, cmakeExe, srcDir,
-        buildDir, cmakeFlags, @[fetchAct.id], @[fetchStamp])
-      allActions.add(configurePair.action)
-      # 3. Build
-      let buildPair = emitBuildAction(projectRoot, cmakeExe, buildDir,
-        configurePair.stamp)
-      allActions.add(buildPair.action)
-      # 4. Install — carries the binary-cache identity so the engine
-      # hook publishes the install tree after success.
-      let installPair = emitInstallAction(projectRoot, cmakeExe, buildDir,
-        staging, buildPair.stamp, identity)
-      allActions.add(installPair.action)
-      # 5. Per-artifact stage-copy — each edge also carries the
-      # identity. The engine's hook fires per successful action; the
-      # convention does NOT emit a separate publish edge any more (the
-      # Step-A-era ``emitPublishAction`` retired in Step B).
-      for member in members:
-        let stageAct = emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member, identity)
-        allActions.add(stageAct)
+      let sentinelAct = emitSynthesisSentinelAction(projectRoot,
+        dslPackageName, fetchAct.id, fetchStamp, identity)
+      allActions.add(sentinelAct)
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

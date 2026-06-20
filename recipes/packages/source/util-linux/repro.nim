@@ -152,6 +152,8 @@
 ## helper).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -231,31 +233,9 @@ package utilLinuxSource:
     ## the per-utility capability-dropping).
     "pkg-config"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the
-    ## ``--disable-bash-completion`` sentinel lives at the tail so any
-    ## override (e.g. a future bash-shell-edition variant) can append
-    ## ``--enable-bash-completion`` later without re-ordering this
-    ## block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--without-python`` skips the Python bindings.
-    ## ``--without-systemd`` skips the libsystemd dependency (avoids
-    ##                        cyclic uses with the systemd recipe).
-    ## ``--disable-makeinstall-chown`` skips the chown calls in
-    ##                                  ``make install``.
-    ## ``--disable-makeinstall-setuid`` skips the setuid bits on
-    ##                                   ``mount`` / ``umount``.
-    ## ``--disable-bash-completion`` skips the bash completion install.
-    "--disable-static"
-    "--without-python"
-    "--without-systemd"
-    "--disable-makeinstall-chown"
-    "--disable-makeinstall-setuid"
-    "--disable-bash-completion"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable mount:
     ## ``/bin/mount`` — the filesystem mount CLI; every systemd
     ## ``.mount`` unit and every initramfs eventually shells into it.
@@ -310,6 +290,30 @@ package utilLinuxSource:
     ## systemd's mount-unit machinery + gvfs. v1 records the artifact
     ## only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("utilLinuxSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-python",
+        "--without-systemd",
+        "--disable-makeinstall-chown",
+        "--disable-makeinstall-setuid",
+        "--disable-bash-completion",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("mount")
+      discard pkg.executable("umount")
+      discard pkg.executable("mkfsBin")
+      discard pkg.executable("fdisk")
+      discard pkg.executable("lsblk")
+      discard pkg.library("libBlkid")
+      discard pkg.library("libUuid")
+      discard pkg.library("libMount")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

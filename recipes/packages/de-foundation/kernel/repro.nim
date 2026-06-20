@@ -138,6 +138,9 @@
 
 import repro_project_dsl
 import repro_project_dsl/fs as fs
+# DSL-port M9.R.2c — pulls ``Executable`` into scope for the typed
+# slot var injected for ``executable bzImage:`` below.
+import repro_dsl_stdlib/types/executable
 
 # The stdlib impl module that owns the render* template procs +
 # KernelConfig type + the Nde0kPackageName / Nde0kDefault* constants.

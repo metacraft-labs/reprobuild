@@ -103,7 +103,10 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
     check "flex >=2.6" in native
     check "perl >=5.32" in native
     check "libelf >=0.187" in build
-    check "libssl >=3.0" in build
+    # The kernel recipe lists ``openssl >=3.0`` (the recipe name)
+    # rather than the legacy ``libssl`` library spelling — matches the
+    # sibling source recipe at ``recipes/packages/source/openssl``.
+    check "openssl >=3.0" in build
 
   test "convention bridge: nativeBuildDeps fold into projectInterface.toolUses":
     # The M9.R.5a bridge lives in ``packageLiteral`` —

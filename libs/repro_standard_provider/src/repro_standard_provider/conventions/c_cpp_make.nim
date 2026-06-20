@@ -672,10 +672,9 @@ proc cCppMakeEmitFragment(projectRoot: string;
       if dslPackageName.len > 0: registeredFetchSpec(dslPackageName)
       else: DslFetchSpec()
     let hasFetch = fetchSpec.url.len > 0 and fetchSpec.hashHex.len > 0
-    let makeFlags =
-      if dslPackageName.len > 0:
-        registeredBuildFlags(dslPackageName, "", "make")
-      else: @[]
+    # M9.R.6.1: ``registeredBuildFlags`` registry retired; recipes route
+    # makeFlags through an explicit ``build:`` block.
+    let makeFlags: seq[string] = @[]
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]

@@ -34,6 +34,10 @@
 import std/[unittest]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Executable`` into scope for the typed
+# slot var the ``package`` macro injects for ``executable <n>:``
+# declarations.
+import repro_dsl_stdlib/types
 
 # Single-artifact executable with a build: block declaring one output.
 package execBuildPkg:

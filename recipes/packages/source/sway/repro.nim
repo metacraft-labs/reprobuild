@@ -151,6 +151,8 @@
 ## man-pages).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -221,8 +223,10 @@ package swaySource:
     ## wayland-scanner is the protocol-XML → C marshalling-stub
     ## generator from the Wayland package; Sway's meson build invokes
     ## it during configure / compile to emit protocol stubs for
-    ## sway-protocols + wlr-protocols XML files.
-    "wayland-scanner"
+    ## sway-protocols + wlr-protocols XML files. Recipe name
+    ## ``wayland`` matches the sibling source recipe — the scanner is
+    ## a sub-artefact of the wayland tarball, not a separate package.
+    "wayland"
     ## libxkbcommon is the keyboard-keymap library Sway's seat / input
     ## layer consumes to translate raw evdev keycodes into XKB
     ## keysyms (e.g. parsing ``bindsym Mod4+Return exec foot`` from
@@ -250,28 +254,9 @@ package swaySource:
     ## for ``output background <image>`` config entries.
     "gdk-pixbuf >=2.40"
 
-  mesonOptions:
-    ## Flag set mirroring the task brief's desktop-baseline. Order is
-    ## load-bearing: meson evaluates options left-to-right and the
-    ## ``--buildtype=release`` sentinel lives at the tail so any
-    ## override (e.g. a future debug-build variant) can append
-    ## ``--buildtype=debug`` later without re-ordering this block.
-    ##
-    ## ``xwayland=disabled`` drops the X11-server transitive dep
-    ## (matches the wlroots sibling's xwayland=disabled setting;
-    ## NDE-H1 v1 is pure-Wayland).
-    ## ``man-pages=disabled`` skips the scdoc man-page build (heavy,
-    ## runtime-irrelevant, adds an extra build-time tool dep).
-    ## ``tray=disabled`` disables libdbusmenu/systray in swaybar
-    ## (drops the libdbusmenu-gtk3 transitive dep; minimal-compositor
-    ## variant doesn't expose a systray).
-    ## ``werror=false`` makes the build resilient to toolchain bumps.
-    "-Dxwayland=disabled"
-    "-Dman-pages=disabled"
-    "-Dtray=disabled"
-    "-Dwerror=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   executable sway:
     ## ``/usr/bin/sway`` — the compositor itself; long-running daemon
     ## that drives the wlroots backend, parses ``/etc/sway/config``,
@@ -300,6 +285,25 @@ package swaySource:
     ## internal helpers to query workspace state and dispatch
     ## commands.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("swaySource")
+    try:
+      let opts = @[
+        "-Dxwayland=disabled",
+        "-Dman-pages=disabled",
+        "-Dtray=disabled",
+        "-Dwerror=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("sway")
+      discard pkg.executable("swaybar")
+      discard pkg.executable("swaynag")
+      discard pkg.executable("swaymsg")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

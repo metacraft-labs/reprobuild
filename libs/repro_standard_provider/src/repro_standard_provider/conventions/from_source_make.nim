@@ -335,37 +335,9 @@ proc hasInTreeBuildArtifact(projectRoot: string): bool =
 # Path layout
 # ---------------------------------------------------------------------------
 
-proc stagingDir(projectRoot: string): string =
-  projectRoot / ScratchDirName / FromSourceMakeSubdir / "staging"
-
 proc stampDir(projectRoot: string): string =
+  ## Per-action stamp directory (kept for the M9.R.6.1 sentinel).
   projectRoot / ScratchDirName / FromSourceMakeSubdir / "stamps"
-
-proc buildStampPath(projectRoot: string): string =
-  stampDir(projectRoot) / "from-source-make-build.stamp"
-
-proc installStampPath(projectRoot: string): string =
-  stampDir(projectRoot) / "from-source-make-install.stamp"
-
-proc artifactOutputDir(projectRoot, member: string): string =
-  projectRoot / OutputDirName / member
-
-proc artifactOutputPath(projectRoot, member: string;
-                        kind: FromSourceMakeMemberKind): string =
-  case kind
-  of fsmkExecutable:
-    when defined(windows):
-      artifactOutputDir(projectRoot, member) / (member & ".exe")
-    else:
-      artifactOutputDir(projectRoot, member) / member
-  of fsmkLibrary:
-    artifactOutputDir(projectRoot, member) / ("lib" & member & ".so")
-  of fsmkFiles:
-    # Files artefacts preserve their member name verbatim in the
-    # output tree (no ``.exe`` / ``lib<>.so`` decoration). The kernel
-    # recipe's vmlinux / systemMap / kernelRelease all use this
-    # shape — the activation layer reads them by member name.
-    artifactOutputDir(projectRoot, member) / member
 
 proc sanitizeNamePart(value: string): string =
   for ch in value:
@@ -376,270 +348,52 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-# ---------------------------------------------------------------------------
-# Tool discovery — lazy. ``recognize`` does NOT call these (per the
-# module docstring): a host without ``make`` / ``gcc`` can still
-# register the convention, exercise it via tests, and lower the
-# action graph; the actual build run will fail loudly at execution
-# time.
-# ---------------------------------------------------------------------------
-
-proc makeExecutable(): string =
-  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
-  ## See ``from_source_meson`` §mesonExecutable for rationale.
-  "make"
-
-proc stripLibPrefix(name: string): string =
-  ## Recipes declare library members under names like ``libCap`` whose
-  ## installed file is ``libcap.so`` — i.e. the ``lib`` prefix is
-  ## already part of the member name. The stage-copy logic expects to
-  ## look at ``<staging>/usr/lib/<installed>``; if the member name
-  ## starts with ``lib`` we use it verbatim, otherwise we prefix
-  ## ``lib``. Same heuristic as the from-source-autotools sibling.
-  if name.startsWith("lib") or name.startsWith("Lib"):
-    name
-  else:
-    "lib" & name
+# M9.R.6.1: ``stagingDir`` / ``buildStampPath`` / ``installStampPath`` /
+# ``artifactOutputDir`` / ``artifactOutputPath`` / ``makeExecutable`` /
+# ``stripLibPrefix`` + the legacy 5-stage emit procs were removed
+# alongside the legacy ``emitFragment`` body.
 
 # ---------------------------------------------------------------------------
 # Action emission
 # ---------------------------------------------------------------------------
 
-proc emitBuildAction(projectRoot, makeExe, srcDir: string;
-                     makeFlags: seq[string];
-                     fetchDeps: seq[string];
-                     fetchStamps: seq[string]):
-                       tuple[action: BuildActionDef; stamp: string] =
-  ## ``cd <srcDir> && make <makeFlags...>``. The stamp file lets
-  ## downstream actions key off build success without relying on
-  ## Makefile-touched targets. ``makeFlags`` are appended in declared
-  ## order so variable overrides (``ARCH=x86_64`` /
-  ## ``KBUILD_BUILD_TIMESTAMP=...`` / ``BUILD_CC=gcc`` / ``-j1``) and
-  ## non-variable flags (``-jN`` / ``--debug=v`` / ...) round-trip
-  ## verbatim.
-  createDir(extendedPath(stampDir(projectRoot)))
-  let stamp = buildStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    var trailingFlags = ""
-    for flag in makeFlags:
-      trailingFlags.add(" \"")
-      trailingFlags.add(flag.replace("\"", "\\\""))
-      trailingFlags.add("\"")
-    let script = "set -e; cd \"" & escapedSrc & "\"; \"" & escapedMake &
-      "\"" & trailingFlags & "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[makeExe]
-    for flag in makeFlags:
-      argv.add(flag)
-  var inputs: seq[string] = @[]
-  for st in fetchStamps:
-    inputs.add(st)
-  let action = buildAction(
-    id = "from-source-make-build",
-    call = inlineExecCall(argv, projectRoot),
-    deps = fetchDeps,
-    inputs = inputs,
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-make.build",
-    # M9.N Batch B: ``make`` reads the project's Makefile which
-    # invokes the C compiler per the build rules.
-    toolIdentityRefs = @["make", "gcc", "sh"])
-  (action, stamp)
+proc sentinelStampPath(projectRoot: string): string =
+  stampDir(projectRoot) / "from-source-make-sentinel.stamp"
 
-proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
-                       buildStamp: string;
-                       makeFlags: seq[string];
-                       identity: CacheEntryIdentity):
-                         tuple[action: BuildActionDef; stamp: string] =
-  ## ``cd <srcDir> && make install DESTDIR=<staging> <makeFlags...>``.
-  ##
-  ## ``DESTDIR`` is the standard escape hatch for non-root installs:
-  ## make honours the Makefile's own prefix and writes install paths
-  ## prefixed with ``<destdir>``. Binaries land at
-  ## ``<staging>/usr/{bin,sbin,lib}/...`` given the recipe's
-  ## ``prefix=/usr`` makeFlag (libcap) or wherever the kernel's
-  ## install target writes (typically a no-op for the artefacts the
-  ## stage-copy step probes for).
-  ##
-  ## The ``makeFlags`` are re-applied to the install action so any
-  ## ``prefix=`` / ``lib=`` overrides the build action saw also apply
-  ## to install — libcap's Makefile reads both at install time.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the install action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful install.
-  createDir(extendedPath(staging))
-  let stamp = installStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStaging = staging.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    var trailingFlags = ""
-    for flag in makeFlags:
-      trailingFlags.add(" \"")
-      trailingFlags.add(flag.replace("\"", "\\\""))
-      trailingFlags.add("\"")
-    let script = "set -e; cd \"" & escapedSrc & "\"; \"" & escapedMake &
-      "\" install DESTDIR=\"" & escapedStaging & "\"" & trailingFlags &
-      "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[makeExe, "install", "DESTDIR=" & staging]
-    for flag in makeFlags:
-      argv.add(flag)
-  let action = buildAction(
-    id = "from-source-make-install",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-make-build"],
-    inputs = @[buildStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-make.install",
-    publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity),
-    # M9.N Batch B: ``make install`` re-invokes ``make``'s install
-    # target.
-    toolIdentityRefs = @["make", "sh"])
-  (action, stamp)
-
-proc kernelInSourcePath(srcDir, member: string): string =
-  ## Probe-order helper #1 — well-known kernel artefact paths inside
-  ## the extracted source tree. The kernel's bzImage lives at
-  ## ``arch/x86/boot/bzImage`` and vmlinux + System.map at the source
-  ## root; ``kernelRelease`` is an alias for the
-  ## ``include/config/kernel.release`` text file kbuild emits during
-  ## compile.
-  case member
-  of "bzImage":
-    srcDir / "arch" / "x86" / "boot" / "bzImage"
-  of "vmlinux":
-    srcDir / "vmlinux"
-  of "systemMap":
-    srcDir / "System.map"
-  of "kernelRelease":
-    srcDir / "include" / "config" / "kernel.release"
-  else:
-    ""
-
-proc stagingCandidatePaths(staging, member: string;
-                           kind: FromSourceMakeMemberKind): seq[string] =
-  ## Probe-order helper #2 — generic staging-dir paths the
-  ## ``make install DESTDIR=<staging>`` step might land the artefact
-  ## at. libcap's Makefile installs ``capsh`` / ``getcap`` / ``setcap``
-  ## under ``<staging>/usr/sbin/`` (the ``sbin`` flavour is the
-  ## libcap-specific quirk — vanilla autotools puts binaries under
-  ## ``/usr/bin/``). The probe sequence covers both layouts so a
-  ## future recipe that installs to ``/usr/bin/`` instead of
-  ## ``/usr/sbin/`` doesn't need a new convention.
-  case kind
-  of fsmkExecutable:
-    @[
-      staging / "usr" / "sbin" / member,
-      staging / "usr" / "bin" / member,
-      staging / "sbin" / member,
-      staging / "bin" / member,
-    ]
-  of fsmkLibrary:
-    let prefixed = stripLibPrefix(member)
-    let lowered = prefixed.toLowerAscii()
-    @[
-      staging / "usr" / "lib" / (lowered & ".so"),
-      staging / "usr" / "lib64" / (lowered & ".so"),
-      staging / "lib" / (lowered & ".so"),
-      staging / "lib64" / (lowered & ".so"),
-    ]
-  of fsmkFiles:
-    @[
-      staging / "usr" / "share" / member,
-      staging / "usr" / "lib" / member,
-      staging / member,
-    ]
-
-proc emitStageCopyAction(projectRoot, srcDir, staging,
-                         installStamp: string;
-                         member: FromSourceMakeMember;
-                         identity: CacheEntryIdentity): BuildActionDef =
-  ## Copy the staged artefact to
-  ## ``<projectRoot>/.repro/output/<member>/<member>``. The emitted
-  ## shell script probes the in-source kernel path first (for the
-  ## kernel-specific artefacts) then walks the staging-dir candidate
-  ## list. The first existing path wins; the script hard-fails if
-  ## NONE of the probes match (so a regression that breaks every
-  ## probe surfaces as a build failure, not a silent missing-output).
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful per-artifact stage.
-  let outDir = artifactOutputDir(projectRoot, member.name)
-  createDir(extendedPath(outDir))
-  let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-
-  # Build the ordered candidate list.
-  var candidates: seq[string] = @[]
-  let kernelPath = kernelInSourcePath(srcDir, member.name)
-  if kernelPath.len > 0:
-    candidates.add(kernelPath)
-  for c in stagingCandidatePaths(staging, member.name, member.kind):
-    candidates.add(c)
-
-  if shExe.len > 0:
-    let escapedOut = outPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOutDir = outDir.replace("\\", "/").replace("\"", "\\\"")
-    var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
-    # Emit one ``if [ -f <c> ]; then cp -f <c> <out>; else ...`` chain
-    # so the first existing candidate wins.
-    var open = 0
-    for c in candidates:
-      let escapedC = c.replace("\\", "/").replace("\"", "\\\"")
-      script.add("if [ -f \"" & escapedC & "\" ]; then cp -f \"" &
-        escapedC & "\" \"" & escapedOut & "\"; else ")
-      inc open
-    script.add("echo \"from-source-make: no candidate found for member " &
-      member.name & "\" >&2; exit 1")
-    for _ in 0 ..< open:
-      script.add("; fi")
-    argv = @[shExe, "-c", script]
-  else:
-    # Fallback for hosts without ``sh``: just attempt the first
-    # candidate via plain ``cp``. The action fails loudly at
-    # execution time if the file is missing — the script-based
-    # cascade above is the production path.
-    argv = @["cp", candidates[0], outPath]
-
-  let kindTag = case member.kind
-    of fsmkExecutable: "executable"
-    of fsmkLibrary: "library"
-    of fsmkFiles: "files"
+proc emitSynthesisSentinelAction(projectRoot, dslPackageName: string;
+                                 fetchActionId, fetchStamp: string;
+                                 identity: CacheEntryIdentity):
+                                   BuildActionDef =
+  ## M9.R.6.1 narrowed synthesis sentinel — see
+  ## ``from_source_meson.emitSynthesisSentinelAction`` for rationale.
+  createDir(extendedPath(parentDir(sentinelStampPath(projectRoot))))
+  let stamp = sentinelStampPath(projectRoot)
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStampDir = parentDir(stamp).replace("\\", "/").
+    replace("\"", "\\\"")
+  let script = "set -e; mkdir -p \"" & escapedStampDir &
+    "\"; printf 'from-source-make sentinel for %s\\n' \"" &
+    dslPackageName & "\" > \"" & escapedStamp & "\""
+  let argv = @["sh", "-c", script]
   buildAction(
-    id = "from-source-make-stage-" & sanitizeNamePart(member.name),
+    id = "from-source-make-sentinel",
     call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-make-install"],
-    inputs = @[installStamp],
-    outputs = @[outPath],
+    deps = @[fetchActionId],
+    inputs = @[fetchStamp],
+    outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-make.stage." & kindTag,
+    commandStatsId = "from-source-make.sentinel",
     publishToBinaryCache = true,
     cacheEntryIdentity = some(identity),
-    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp probe chain).
     toolIdentityRefs = @["sh"])
+
+# M9.R.6.1: ``emitBuildAction`` / ``emitInstallAction`` /
+# ``kernelInSourcePath`` / ``stagingCandidatePaths`` /
+# ``emitStageCopyAction`` were all removed (along with the 5-stage
+# emitFragment body). The recipe's explicit ``build:`` body owns
+# build/install/stage-copy via ``autotools_package(...)`` or, for
+# raw-Makefile recipes, an explicit ``shell()`` chain.
 
 # ---------------------------------------------------------------------------
 # Convention entry
@@ -672,26 +426,25 @@ proc fromSourceMakeRecognize(projectRoot: string;
     let spec = registeredFetchSpec(dslPackageName)
     if spec.url.len == 0 or spec.hashHex.len == 0:
       return false
-    # The makeFlags channel is the unambiguous discriminator. The
-    # convention sits BELOW the autotools / meson / cmake siblings in
-    # the registration order so a recipe that declares BOTH
-    # ``makeFlags:`` and ``configureFlags:`` (a custom-configure
-    # dialect that ALSO drives make explicitly) routes through the
-    # autotools sibling first. We additionally reject when any of
-    # the configureFlags / mesonOptions / cmakeFlags channels are
-    # populated, even though the registration order makes the check
-    # redundant — defensive in case the registration order changes.
-    let makeFlags = registeredBuildFlags(dslPackageName, "", "make")
-    if makeFlags.len == 0:
-      return false
-    let configureFlags = registeredBuildFlags(dslPackageName, "", "configure")
-    if configureFlags.len > 0:
-      return false
-    let mesonOptions = registeredBuildFlags(dslPackageName, "", "meson")
-    if mesonOptions.len > 0:
-      return false
-    let cmakeFlags = registeredBuildFlags(dslPackageName, "", "cmake")
-    if cmakeFlags.len > 0:
+    # M9.R.6.1: the flag-channel discriminators are gone — recognise via
+    # ``registeredNativeBuildDeps`` for the ``make`` token while
+    # rejecting recipes that also declare meson / cmake / autotools
+    # (those siblings sit ABOVE this convention in the registration
+    # order so they claim first; this check is defensive).
+    var sawMake = false
+    var sawHigherPriorityDriver = false
+    for raw in registeredNativeBuildDeps(dslPackageName):
+      let stripped = raw.strip()
+      var head = ""
+      for ch in stripped:
+        if ch in {' ', '\t', '>', '<', '=', '!', ',', ';'}:
+          break
+        head.add(ch)
+      if head == "make":
+        sawMake = true
+      elif head in ["meson", "cmake", "autoconf", "automake", "libtool"]:
+        sawHigherPriorityDriver = true
+    if not sawMake or sawHigherPriorityDriver:
       return false
   if extractMembers(source).len == 0:
     return false
@@ -740,42 +493,21 @@ proc fromSourceMakeEmitFragment(projectRoot: string;
         "from-source-make convention: no fetch: spec registered for " &
           "package '" & dslPackageName & "' — recognise() should have " &
           "rejected this project")
-    let makeExe = makeExecutable()
-    let makeFlags = registeredBuildFlags(dslPackageName, "", "make")
-    let srcDir = fetchExtractedRoot(projectRoot, spec)
-    let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
-    # M9.L.4-refactor Step B: compose the binary-cache identity once
-    # and thread it onto the install + stage-copy edges. The engine's
-    # ``BinaryCachePublisher`` hook consumes the same tuple from the
-    # decoded ``BuildAction``; conventions stay tool-agnostic.
+    # M9.R.6.1: narrowed to fetch + sentinel. The build / install /
+    # stage-copy actions live in the recipe's explicit ``build:`` block.
     let identity = computeCacheEntryIdentity(projectRoot,
       dslPackageName, "make")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
       var allActions: seq[BuildActionDef] = @[]
-      # 1. Fetch
       let fetchAct = emitFetchAction(projectRoot, dslPackageName, spec)
       allActions.add(fetchAct)
       let fetchStamp = fetchStampPath(projectRoot, spec.hashHex)
-      # 2. Build (no configure step — raw Makefile / kbuild)
-      let buildPair = emitBuildAction(projectRoot, makeExe, srcDir,
-        makeFlags, @[fetchAct.id], @[fetchStamp])
-      allActions.add(buildPair.action)
-      # 3. Install — carries the binary-cache identity so the engine
-      # hook publishes the install tree after success.
-      let installPair = emitInstallAction(projectRoot, makeExe, srcDir,
-        staging, buildPair.stamp, makeFlags, identity)
-      allActions.add(installPair.action)
-      # 4. Per-artifact stage-copy — each edge also carries the
-      # identity. The engine's hook fires per successful action; the
-      # convention does NOT emit a separate publish edge any more (the
-      # Step-A-era ``emitPublishAction`` retired in Step B).
-      for member in members:
-        let stageAct = emitStageCopyAction(projectRoot, srcDir, staging,
-          installPair.stamp, member, identity)
-        allActions.add(stageAct)
+      let sentinelAct = emitSynthesisSentinelAction(projectRoot,
+        dslPackageName, fetchAct.id, fetchStamp, identity)
+      allActions.add(sentinelAct)
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

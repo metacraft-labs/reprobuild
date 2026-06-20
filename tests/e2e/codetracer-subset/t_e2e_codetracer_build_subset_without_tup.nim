@@ -6,7 +6,7 @@ import repro_test_support
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
   NimSubcmdProc = "subcmd_2d_d_3a_asyncBackend_3d_asyncdispatch"
-  NimJsSemanticsHash = "02d964fa722450c1"
+  NimJsSemanticsHash = "a7cf3ce1b73f8bfa"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
 
 type
@@ -118,6 +118,18 @@ proc logicalTupLines(path: string): seq[string] =
 proc loadTupRules(path: string): TupRules =
   result.variables = initTable[string, string]()
   result.macros = initTable[string, string]()
+  # Tup built-in: `$(TUP_CWD)` is the directory of the current Tupfile
+  # relative to the directory of the Tupfile that `include_rules` pulls it
+  # into. `src/Tuprules.tup` is auto-included by `src/Tupfile` (the Tupfile
+  # that drives every `!nim_js` rule, see `src/Tupfile`'s `: ... |> !nim_js`
+  # lines), and both files live in the same `src/` directory (the tup variant
+  # root, marked by `src/Tupfile.ini`). For a Tuprules included by a Tupfile
+  # in its own directory `$(TUP_CWD)` is therefore `.`, so codetracer's
+  # `ROOT = $(TUP_CWD)/../../` resolves relative to `src/`. The repo's real
+  # library search path comes from `nim.cfg` (replayed here by
+  # `withNimConfigPathContext`); the `$(ROOT)`-based `--path:` flags are the
+  # committed Tuprules text and are modeled verbatim.
+  result.variables["TUP_CWD"] = "."
   for line in logicalTupLines(path):
     let eq = line.find('=')
     if eq < 0:
@@ -131,17 +143,35 @@ proc loadTupRules(path: string): TupRules =
 
 proc expandTupVars(value: string; variables: Table[string, string]): string =
   result = value
+  # Expand one substitution level per pass and cap the number of *passes*
+  # (i.e. the variable-reference nesting depth), not the number of individual
+  # substitutions. codetracer's `NIM_DEBUG` chains through several layers
+  # (`NIM_DEBUG` -> `NIM_DEBUG_FLAGS` -> `NIM_REPO_PATH_FLAGS` -> `ROOT` ->
+  # `TUP_CWD`) and `NIM_REPO_PATH_FLAGS` alone references `$(ROOT)` ~30 times,
+  # so a per-substitution cap would trip on legitimate input while a
+  # depth-bounded pass still catches a genuine recursive cycle.
   for _ in 0 ..< 32:
-    let start = result.find("$(")
-    if start < 0:
+    var expanded = ""
+    var index = 0
+    var madeSubstitution = false
+    while index < result.len:
+      let start = result.find("$(", index)
+      if start < 0:
+        expanded.add(result[index .. ^1])
+        break
+      let finish = result.find(")", start + 2)
+      if finish < 0:
+        raise newException(ValueError, "unterminated Tup variable in: " & result)
+      let name = result[start + 2 ..< finish]
+      if not variables.hasKey(name):
+        raise newException(ValueError, "unknown Tup variable $(" & name & ")")
+      expanded.add(result[index ..< start])
+      expanded.add(variables[name])
+      index = finish + 1
+      madeSubstitution = true
+    result = expanded
+    if not madeSubstitution:
       return
-    let finish = result.find(")", start + 2)
-    if finish < 0:
-      raise newException(ValueError, "unterminated Tup variable in: " & result)
-    let name = result[start + 2 ..< finish]
-    if not variables.hasKey(name):
-      raise newException(ValueError, "unknown Tup variable $(" & name & ")")
-    result = result[0 ..< start] & variables[name] & result[finish + 1 .. ^1]
   raise newException(ValueError, "recursive Tup variable expansion: " & value)
 
 proc tupRuleParts(rules: TupRules; name: string): tuple[command: string;

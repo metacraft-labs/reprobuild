@@ -108,6 +108,8 @@
 ##                                   re-verify).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -178,24 +180,9 @@ package kmodSource:
     ## zlib + xz (used by libkmod's compressed-module-image support).
     "pkg-config"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-openssl``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## signed-modules-edition variant) can append ``--with-openssl``
-    ## later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-manpages`` skips the manpage build.
-    ## ``--disable-test-modules`` skips the in-tree test-module build.
-    ## ``--without-openssl`` skips the OpenSSL signature-verification
-    ##                        dependency.
-    "--disable-static"
-    "--disable-manpages"
-    "--disable-test-modules"
-    "--without-openssl"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable modprobe:
     ## ``/sbin/modprobe`` — the dependency-resolving module loader
     ## consumed by ``systemd-modules-load.service``, udev rules, and
@@ -236,6 +223,25 @@ package kmodSource:
     ## ``lib`` prefix while PascalCasing the SONAME body. v1 records
     ## the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("kmodSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-manpages",
+        "--disable-test-modules",
+        "--without-openssl",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("modprobe")
+      discard pkg.executable("lsmod")
+      discard pkg.executable("insmod")
+      discard pkg.executable("rmmod")
+      discard pkg.library("libKmod")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

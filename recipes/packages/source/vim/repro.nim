@@ -130,6 +130,8 @@
 ##                                  vim stays minimal.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -204,30 +206,9 @@ package vimSource:
     ## but the ncurses TUI is always linked in.
     "ncurses"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the
-    ## ``--disable-luainterp`` sentinel lives at the tail so any
-    ## override (e.g. a future Lua-edition variant for treesitter
-    ## bridging) can append ``--enable-luainterp`` later without
-    ## re-ordering this block.
-    ##
-    ## ``--enable-gui=no`` skips the GTK / Athena / Motif GUI surface.
-    ## ``--without-x`` skips the libX11 link entirely.
-    ## ``--disable-gpm`` skips the GPM Linux-console mouse-driver.
-    ## ``--disable-perlinterp`` skips the embedded Perl interpreter.
-    ## ``--disable-pythoninterp`` skips the embedded Python interpreter.
-    ## ``--disable-rubyinterp`` skips the embedded Ruby interpreter.
-    ## ``--disable-luainterp`` skips the embedded Lua interpreter.
-    "--enable-gui=no"
-    "--without-x"
-    "--disable-gpm"
-    "--disable-perlinterp"
-    "--disable-pythoninterp"
-    "--disable-rubyinterp"
-    "--disable-luainterp"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable vim:
     ## ``/usr/bin/vim`` — the modal editor itself; the canonical
     ## ``EDITOR=`` target on every Linux distribution. Spawned by
@@ -255,6 +236,26 @@ package vimSource:
     ## following the ``vim`` install README. v1 records the artifact
     ## only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("vimSource")
+    try:
+      let opts = @[
+        "--enable-gui=no",
+        "--without-x",
+        "--disable-gpm",
+        "--disable-perlinterp",
+        "--disable-pythoninterp",
+        "--disable-rubyinterp",
+        "--disable-luainterp",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("vim")
+      discard pkg.executable("vimdiff")
+      discard pkg.executable("vimtutor")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

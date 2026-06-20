@@ -150,6 +150,16 @@
 ##                                    them up at configure time.
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Library`` / ``Executable`` into scope for
+# the typed artifact slot vars the ``package`` macro injects. (This
+# recipe doesn't import ``repro_dsl_stdlib/constructors`` so the
+# implicit re-export through ``types/package_result`` doesn't apply.)
+import repro_dsl_stdlib/types
+# DSL-port M9.R.10a — bring perl + bison + flex + gmp + mpfr + mpc +
+# binutils stdlib packages into scope so the from-source resolver
+# finds their provisioning metadata on this recipe's nativeBuildDeps
+# / buildDeps uses.
+import repro_dsl_stdlib/packages/system_tools
 
 # ---------------------------------------------------------------------------
 # Package declaration

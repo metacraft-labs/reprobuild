@@ -107,6 +107,8 @@
 ## flips tests on, or a packaging variant that emits documentation).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -175,28 +177,9 @@ package waylandSource:
     ## flips ``tests=true`` or ``dtd_validation=true``.
     "libxml2 >=2.9"
 
-  mesonOptions:
-    ## Flag set mirroring a modern-desktop baseline. Order is
-    ## load-bearing: meson evaluates options left-to-right and the
-    ## ``--buildtype=release`` sentinel lives at the tail so any
-    ## override (e.g. a future debug-build variant) can append
-    ## ``--buildtype=debug`` later without re-ordering this block.
-    ##
-    ## ``documentation=false`` skips doxygen + xmlto + docbook (the
-    ## heaviest portion of Wayland's build and not needed at runtime).
-    ## ``dtd_validation=false`` skips libxml2-based protocol XML
-    ## validation (build-time only; the protocols ship pre-validated).
-    ## ``libraries=true`` builds libwayland-{client,server,cursor,egl}.
-    ## ``scanner=true`` builds the wayland-scanner code generator.
-    ## ``tests=false`` skips the upstream test suite to keep the build
-    ## hermetic + fast (matches nixpkgs's macOS/non-Linux default).
-    "-Ddocumentation=false"
-    "-Ddtd_validation=false"
-    "-Dlibraries=true"
-    "-Dscanner=true"
-    "-Dtests=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libwaylandClient:
     ## ``libwayland-client.so`` — client-side protocol library, linked
     ## by every Wayland application (GTK/Qt/Firefox/...).
@@ -222,6 +205,26 @@ package waylandSource:
     ## recipes all transitively consume this binary at their own
     ## build time.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("waylandSource")
+    try:
+      let opts = @[
+        "-Ddocumentation=false",
+        "-Ddtd_validation=false",
+        "-Dlibraries=true",
+        "-Dscanner=true",
+        "-Dtests=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libwaylandClient")
+      discard pkg.library("libwaylandServer")
+      discard pkg.library("libwaylandCursor")
+      discard pkg.executable("waylandScanner")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

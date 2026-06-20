@@ -98,6 +98,8 @@
 ## flips tests on for upstream contributions).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -152,22 +154,9 @@ package pixmanSource:
     ## per-arch SIMD intrinsics.
     "gcc >=7"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``tests=disabled`` skips the upstream test suite (heaviest
-    ## portion of the build, not needed at runtime).
-    ## ``demos=disabled`` skips the demo applications (radial-test et
-    ## al; not consumed by downstream packages).
-    "-Dtests=disabled"
-    "-Ddemos=disabled"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libpixman1:
     ## ``libpixman-1.so`` — the 2D pixel-manipulation library used by
     ## wlroots' software renderer + scene-graph damage tracking and
@@ -178,6 +167,20 @@ package pixmanSource:
     ## lands in M9.L when the convention's ninja-spawn + install-glue
     ## closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("pixmanSource")
+    try:
+      let opts = @[
+        "-Dtests=disabled",
+        "-Ddemos=disabled",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libpixman1")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

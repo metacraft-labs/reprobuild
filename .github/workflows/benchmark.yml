@@ -34,12 +34,22 @@ jobs:
         with:
           path: reprobuild
 
+      # Mint an installation token via the CI Token Provider GitHub
+      # App for the private metacraft-labs sibling checkouts below.
+      - name: Mint installation token for cross-repo checkouts
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       - name: Checkout RunQuota
         uses: actions/checkout@v4
         with:
           repository: metacraft-labs/runquota
           path: runquota
-          token: ${{ secrets.METACRAFT_CI_TOKEN || github.token }}
+          token: ${{ steps.ci_token.outputs.token }}
 
       - name: Checkout Reprobuild CMake fork
         uses: actions/checkout@v4
@@ -47,7 +57,7 @@ jobs:
           repository: metacraft-labs/reprobuild-cmake
           ref: reprobuild
           path: reprobuild-cmake
-          token: ${{ secrets.METACRAFT_CI_TOKEN || github.token }}
+          token: ${{ steps.ci_token.outputs.token }}
 
       - uses: cachix/install-nix-action@v30
         with:

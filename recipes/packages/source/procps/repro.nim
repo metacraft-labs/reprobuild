@@ -119,6 +119,8 @@
 ##                               uses graph between systemd + procps.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -192,23 +194,9 @@ package procpsSource:
     ## ncurses (used by ``top``'s TUI).
     "pkg-config"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--with-systemd=no``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## systemd-edition variant) can append ``--with-systemd=yes``
-    ## later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-nls`` skips the native-language-support gettext
-    ##                    dependency surface.
-    ## ``--with-systemd=no`` skips the libsystemd dependency (avoids
-    ##                        cyclic uses with the systemd recipe).
-    "--disable-static"
-    "--disable-nls"
-    "--with-systemd=no"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable ps:
     ## ``/bin/ps`` — the process-state CLI consumed by every shell
     ## session, every monitoring agent, every container-runtime debug
@@ -250,6 +238,25 @@ package procpsSource:
     ## with the ``2`` version-suffix folded into the convention layer's
     ## lib-versioning metadata). v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("procpsSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-nls",
+        "--with-systemd=no",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("ps")
+      discard pkg.executable("top")
+      discard pkg.executable("free")
+      discard pkg.executable("kill")
+      discard pkg.executable("uptime")
+      discard pkg.library("libProc")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -2479,6 +2479,29 @@ var warmToolIdentities = initTable[string, WarmToolIdentity]()
 var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
 var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
 
+# DSL-port M9.R.9 — auto-recurse guards for from-source provisioning.
+# When ``--tool-provisioning=from-source`` is active, the dispatcher
+# (``ensureFromSourceArtifacts`` below) probes each tool use and may
+# schedule a recursive sub-build for any sibling recipe whose artefact
+# is missing. The guards cap the call depth, detect cycles, and dedupe
+# repeat resolutions across a single build session.
+const FromSourceMaxRecursionDepth* = 32
+  ## DSL-port M9.R.9 — sanity ceiling for recursive from-source
+  ## sub-builds. A 33-recipe chain trips the depth bound diagnostic; in
+  ## practice production graphs reach single-digit depth.
+var fromSourceBuildStack*: seq[string] = @[]
+  ## DSL-port M9.R.9 — active recursion stack (absolute recipe dirs).
+  ## A cycle is detected when the dispatcher would push a recipe dir
+  ## already present in the stack. Exported for test introspection +
+  ## ``repro why`` diagnostics; not intended for external mutation.
+var fromSourceResolvedRecipes*: HashSet[string] = initHashSet[string]()
+  ## DSL-port M9.R.9 — per-process cache. Once a sibling recipe has
+  ## been successfully built once in a session, repeat probes return
+  ## immediately (the artefact is now on disk so
+  ## ``tryResolveFromSourceTool`` would resolve, but the dedup avoids
+  ## even re-walking the candidate list). Exported for test
+  ## introspection + ``repro why`` diagnostics.
+
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
     if not fileExists(extendedPath(path)):
@@ -3437,6 +3460,32 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
     identityPath: result.identityPath, inspectionPath: result.inspectionPath,
     identityEvidence: durableFileEvidence(result.identityPath),
     keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+
+proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
+  ## M9.R.8 Part 1 — extracted predicate for the build-pipeline dispatch
+  ## gate (formerly an inline ``in {tpmPathOnly, tpmNix, tpmTarball,
+  ## tpmScoop}`` literal at three sites in this module). Centralising the
+  ## set membership here:
+  ##
+  ##   * makes the dispatcher gate testable in isolation
+  ##     (``t_m9r8_dispatcher_gate.nim``);
+  ##   * keeps the three call sites in sync when a new
+  ##     ``ToolProvisioningMode`` is added (previously the new mode had
+  ##     to remember to update three places — the M9.Q ``tpmFromSource``
+  ##     mode missed all three, which is the gap M9.R.8 closes).
+  ##
+  ## ``tpmFromSource`` is included here so a build invoked with
+  ## ``--tool-provisioning=from-source`` enters the same provider-
+  ## compile / lowered-graph / engine-run pipeline as the four
+  ## pre-existing modes. ``resolveFromSourceTool`` is the downstream
+  ## resolver (already wired through ``toolProfileFor``) and the M9.R.7
+  ## ``mkToolIdentityResolver`` returns the from-source artefact's
+  ## ``parentDir`` in ``binDirs`` so action argv resolves correctly.
+  ##
+  ## ``tpmUnspecified`` deliberately stays out — the caller resolves
+  ## it via ``parseToolProvisioning`` / env var / project default
+  ## before reaching this predicate.
+  mode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop, tpmFromSource}
 
 proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
     ToolIdentityResolver =
@@ -5057,6 +5106,101 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
 
+  # DSL-port M9.R.9 — auto-recurse pass for from-source provisioning.
+  # When the active mode is ``tpmFromSource`` we probe every tool use
+  # against the sibling-recipe layout BEFORE the identity resolver runs.
+  # Any ``rrNeedsBuild`` outcome (sibling recipe present but artefact
+  # missing) triggers a recursive ``executeBuildTarget`` call for the
+  # sibling, threaded through the same provider-compile + lowered-graph
+  # + engine pipeline (NOT a ``repro build`` subprocess). After every
+  # sibling resolves the outer build proceeds with the resolver pass,
+  # which now finds the artefacts on disk.
+  #
+  # Guards (in order of consultation):
+  #   1. ``fromSourceResolvedRecipes`` — per-process dedup, so a single
+  #      sibling shared across many tool uses is built once.
+  #   2. ``fromSourceBuildStack`` — cycle detection: pushing a recipe
+  #      dir that's already on the stack raises with the full cycle
+  #      path so the operator can edit one of the recipes' uses lists.
+  #   3. ``FromSourceMaxRecursionDepth`` — sanity ceiling. Production
+  #      recipe chains stay below 10; the ceiling exists to crash
+  #      cleanly on a runaway pattern rather than blow the stack.
+  if effectiveMode == tpmFromSource:
+    for useDef in artifact.projectInterface.toolUses:
+      let outcome = tryResolveFromSourceTool(useDef)
+      if outcome.kind != rrNeedsBuild:
+        continue
+      let siblingRecipeDir = absolutePath(outcome.recipeDir)
+      if siblingRecipeDir in fromSourceResolvedRecipes:
+        continue
+      if siblingRecipeDir in fromSourceBuildStack:
+        # DSL-port M9.R.10a — cycle break via stdlib fall-through.
+        # Instead of raising the cycle diagnostic, mark the closing-edge
+        # tool in ``fromSourceCycleBrokenTools`` so the downstream
+        # ``toolProfileFor(tpmFromSource, ...)`` resolves it via stdlib
+        # provisioning (nix / scoop / tarball) rather than recursing
+        # again into the sibling recipe. The probe inside
+        # ``toolProfileFor`` confirms the stdlib has a usable channel —
+        # if it does not, the resolver raises with a tighter diagnostic
+        # that points the operator at the stdlib package definition.
+        # This unblocks bootstrap tool chains (gcc ↔ binutils ↔ make)
+        # without sacrificing from-source semantics for the rest of the
+        # build graph: every tool that doesn't close a cycle continues
+        # to build from source recursively.
+        var cycle = fromSourceBuildStack
+        cycle.add(siblingRecipeDir)
+        logSummary("from-source cycle break: routing \"" & outcome.toolName &
+          "\" through stdlib provisioning to break cycle " &
+          cycle.join(" -> "))
+        fromSourceCycleBrokenTools.incl(outcome.toolName)
+        # Mark the recipe as "already resolved" so the caller doesn't
+        # try to recurse again on the next probe pass — the closing-edge
+        # tool resolves via stdlib from here on.
+        fromSourceResolvedRecipes.incl(siblingRecipeDir)
+        continue
+      if fromSourceBuildStack.len >= FromSourceMaxRecursionDepth:
+        raise newException(ValueError,
+          "tool-resolution failed: from-source recursion depth bound " &
+          "exceeded (" & $FromSourceMaxRecursionDepth & ") while resolving \"" &
+          outcome.toolName & "\" at " & siblingRecipeDir &
+          ". Active stack: " & fromSourceBuildStack.join(" -> ") &
+          ". This is a sanity ceiling — production recipe chains should " &
+          "stay well below it; investigate the call chain for an " &
+          "accidental fan-out.")
+      let siblingManifest = siblingRecipeDir / "repro.nim"
+      logSummary("from-source auto-recurse: building \"" & outcome.toolName &
+        "\" at " & siblingRecipeDir)
+      fromSourceBuildStack.add(siblingRecipeDir)
+      try:
+        let siblingOutcome = executeBuildTarget(siblingManifest, effectiveMode,
+          publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = progressMode,
+          progressBarStyle = progressBarStyle,
+          statsMode = statsMode,
+          reportMode = reportMode,
+          logMode = logMode,
+          diagnosticsPath = "",
+          prepareOnly = prepareOnly,
+          dryRun = dryRun,
+          forceRebuild = forceRebuild,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if siblingOutcome.exitCode != 0:
+          raise newException(OSError,
+            "tool-resolution failed: from-source auto-recurse sub-build of " &
+            siblingRecipeDir & " (tool \"" & outcome.toolName &
+            "\") exited with status " & $siblingOutcome.exitCode &
+            ". See the sub-build's diagnostics for the underlying failure.")
+      finally:
+        if fromSourceBuildStack.len > 0 and
+            fromSourceBuildStack[^1] == siblingRecipeDir:
+          discard fromSourceBuildStack.pop()
+      fromSourceResolvedRecipes.incl(siblingRecipeDir)
+
   # Tier 2b fast path: a package whose DSL body declared no ``build:``
   # block is eligible for the pre-built ``repro-standard-provider``
   # binary. The provider walks language conventions (Nim/Rust/Go/...) to
@@ -5125,7 +5269,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("standardDirect: provider binary missing; falling back to " &
         "per-project provider compile")
 
-  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if shouldEnterBuildPipeline(effectiveMode):
     let identityStart = statStart(statsEnabled)
     progressRenderer.renderPhase("resolving tool identities")
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
@@ -10503,7 +10647,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var identity = PathOnlyBuildIdentity(
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
-  if effectiveMode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if shouldEnterBuildPipeline(effectiveMode):
     let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
     identity = resolved.identity
     result.toolIdentityPath = resolved.identityPath
@@ -13295,9 +13439,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
-  if mode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if not shouldEnterBuildPipeline(mode):
     raise newException(ValueError,
-      "repro watch requires --tool-provisioning=path|nix|tarball|scoop")
+      "repro watch requires --tool-provisioning=path|nix|tarball|scoop|from-source")
   # Windows: kqueue gate dropped — Windows now reaches the live watch loop
   # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
   # surfaces the deferred-backend OSError from openFilesystemWatcher.
@@ -14179,7 +14323,7 @@ proc runDevelopCommand(args: openArray[string]): int =
         interfaceFingerprint: artifact.interfaceFingerprint),
       "", "", interfacePath)
 
-  if effectiveMode notin {tpmPathOnly, tpmNix, tpmTarball, tpmScoop}:
+  if not shouldEnterBuildPipeline(effectiveMode):
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & effectiveMode.modeName)
 

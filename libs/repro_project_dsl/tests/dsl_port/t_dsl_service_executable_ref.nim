@@ -13,6 +13,9 @@
 import std/[unittest]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Executable`` into scope for the typed
+# slot var injected for ``executable myBin:`` below.
+import repro_dsl_stdlib/types
 
 package refPkg:
   executable myBin:

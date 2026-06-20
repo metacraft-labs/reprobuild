@@ -80,6 +80,8 @@
 ## as a flag-count mismatch.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -127,12 +129,9 @@ package autoconfSource:
     ## ``./configure``.
     "make"
 
-  configureFlags:
-    ## Modern-desktop baseline. ``--disable-static`` is preserved for
-    ## consistency with the other autotools recipes even though
-    ## autoconf is Perl-implemented.
-    "--disable-static"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable autoconf:
     ## ``$PREFIX/bin/autoconf`` — the canonical ``configure.ac`` →
     ## ``./configure`` generator. v1 records the artifact only.
@@ -169,6 +168,24 @@ package autoconfSource:
     ## ``$PREFIX/bin/ifnames`` — helper for enumerating preprocessor
     ## identifiers. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("autoconfSource")
+    try:
+      let opts = @[
+        "--disable-static",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("autoconf")
+      discard pkg.executable("autoheader")
+      discard pkg.executable("autom4te")
+      discard pkg.executable("autoreconf")
+      discard pkg.executable("autoscan")
+      discard pkg.executable("autoupdate")
+      discard pkg.executable("ifnames")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

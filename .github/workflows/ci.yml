@@ -26,10 +26,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Mint a GitHub App installation token via the CI Token Provider
+      # app.  GitHub free plan restricts org-level secrets with
+      # visibility ALL from being readable inside private repos, so we
+      # mint per-run tokens from the repo-local CI_TOKEN_PROVIDER_APP_ID
+      # + CI_TOKEN_PROVIDER_PRIVATE_KEY secrets.
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs
@@ -54,6 +66,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Mint a GitHub App installation token via the CI Token Provider
+      # app for the sibling-repo clones + setup-dev-env below.  See the
+      # comment in the `lint` job for the rationale.
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       # Sibling clones: scripts/run_tests.sh builds ../runquota and
       # ct_test_nim_unittest resolves the ct-test source via the
       # `CT_TEST_SRC` env var. Both come from local clones so changes
@@ -65,14 +88,14 @@ jobs:
           repo: metacraft-labs/ct-test
           ref: main
           path: ${{ github.workspace }}/../ct-test
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
       - name: Clone runquota sibling
         uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
           repo: metacraft-labs/runquota
           ref: main
           path: ${{ github.workspace }}/../runquota
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
 
       # reprobuild-examples carries the canonical M71 reference home.nim
       # under m71-home-profile-walkthrough/ + a number of hello-binary
@@ -88,7 +111,7 @@ jobs:
           repo: metacraft-labs/reprobuild-examples
           ref: main
           path: ${{ github.workspace }}/../reprobuild-examples
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
 
       # vm-harness ships the ``vm_harness`` library that the ReproOS
       # R2 / R9 boot integration tests import unconditionally at the
@@ -109,12 +132,12 @@ jobs:
           repo: metacraft-labs/vm-harness
           ref: main
           path: ${{ github.workspace }}/../vm-harness
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
 
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
           flake-override-inputs: |
             ct-test-src=../ct-test
             runquota-src=../runquota
@@ -134,10 +157,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
-          gh-token: ${{ secrets.GH_READ_METACRAFT_PRIVATE_REPOS }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
       - name: nix build
         run: dev-exec nix build .#default
       - name: Upload logs

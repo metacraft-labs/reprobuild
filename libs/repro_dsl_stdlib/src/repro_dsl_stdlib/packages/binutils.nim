@@ -28,6 +28,10 @@
 ## separate Scoop manifest is harvested here.
 
 import repro_project_dsl
+# DSL-port M9.R.2c — typed slot var for each ``executable <tool>Bin:``
+# declared below (ldBin / arBin / ranlibBin / stripBin / nmBin /
+# objdumpBin / objcopyBin / gasBin).
+import repro_dsl_stdlib/types/executable
 
 # ---------------------------------------------------------------------------
 # ld — GNU linker.

@@ -122,6 +122,8 @@
 ## examples + Werror for upstream testing).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -193,7 +195,10 @@ package wlrootsSource:
     ## wayland-scanner is the protocol-XML → C marshalling-stub
     ## generator from the Wayland package; wlroots' meson build
     ## invokes it during configure / compile to emit protocol stubs.
-    "wayland-scanner"
+    ## Recipe name ``wayland`` matches the sibling source recipe — the
+    ## scanner is a sub-artefact of the wayland tarball, not a
+    ## separate package.
+    "wayland"
     ## libxkbcommon is the keyboard-keymap library wlroots' seat /
     ## input layer consumes to translate raw evdev keycodes into
     ## XKB keysyms.
@@ -205,25 +210,9 @@ package wlrootsSource:
     ## libinput backend wraps for evdev / touchpad / tablet support.
     "libinput >=1.14"
 
-  mesonOptions:
-    ## Flag set mirroring the task brief's desktop-baseline. Order is
-    ## load-bearing: meson evaluates options left-to-right and the
-    ## ``--buildtype=release`` sentinel lives at the tail so any
-    ## override (e.g. a future debug-build variant) can append
-    ## ``--buildtype=debug`` later without re-ordering this block.
-    ##
-    ## ``examples=false`` skips the example compositors (TinyWL et al)
-    ## which Sway / labwc don't consume.
-    ## ``xwayland=disabled`` drops the X11-server transitive dep
-    ## (large tree; NDE-H Sway v1 is pure-Wayland).
-    ## ``xcb-errors=disabled`` companion to the XWayland-off setting.
-    ## ``werror=false`` makes the build resilient to toolchain bumps.
-    "-Dexamples=false"
-    "-Dxwayland=disabled"
-    "-Dxcb-errors=disabled"
-    "-Dwerror=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libwlroots:
     ## ``libwlroots.so`` — the modular Wayland compositor library;
     ## wlroots ships everything (backend + renderer + scene + protocol
@@ -233,6 +222,22 @@ package wlrootsSource:
     ## v1 records the artifact only; the per-artifact build body lands
     ## in M9.L when the convention's ninja-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("wlrootsSource")
+    try:
+      let opts = @[
+        "-Dexamples=false",
+        "-Dxwayland=disabled",
+        "-Dxcb-errors=disabled",
+        "-Dwerror=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libwlroots")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

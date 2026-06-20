@@ -1905,34 +1905,13 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.I — ``mesonOptions:`` block registry. Real packages like
-  # ``dbus-broker`` declare per-package flags passed to ``meson setup``
-  # via this block; the body is a sequence of string literals (one per
-  # line). REGISTRATION + parser ONLY; convention-side consumption is
-  # deferred to M9.L.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_meson_options.nim",
-    binary: "build/test-bin/t_dsl_meson_options",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.I — five-channel cross product. Pins the M9.I block
-  # taxonomy (``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:`` /
-  # ``makeFlags:`` / ``ninjaFlags:``) registered on a single package and
-  # the registry partitions flags into independent per-channel seqs (no
-  # cross-channel bleeding). The ``makeFlags:`` case carries two flags
-  # so an order-preserving sequence equality assertion catches any
-  # reordering bug.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_flags_all_channels.nim",
-    binary: "build/test-bin/t_dsl_build_flags_all_channels",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
+  # M9.R.6.1 (2026-06-19): t_dsl_meson_options.nim +
+  # t_dsl_build_flags_all_channels.nim were removed alongside the
+  # ``registerBuildFlag`` / ``registeredBuildFlags`` runtime registry
+  # + the five ``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:``
+  # / ``makeFlags:`` / ``ninjaFlags:`` parser arms. Recipes route
+  # per-tool options through their explicit ``build:`` body calling
+  # the M9.R.2b Layer-1 typed constructors instead.
   # DSL-port M9.K — fetch-action emission gate. Verifies that the
   # M9.H ``registeredFetchSpec`` registry feeds the shared fetch_action
   # helper (consumed by the four c-cpp-* Tier 2b conventions) into a
@@ -6888,6 +6867,28 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.2c: package macro injects per-kind typed slot vars
+  # (``var <n>: Library`` / ``var <n>: Executable`` / ``var <n>:
+  # BuildActionDef``) so recipe authors can assign constructor results
+  # directly to the slot from the package's ``build:`` block. Pins:
+  #   * Per-kind slot type via ``typeof`` (Library / Executable /
+  #     BuildActionDef).
+  #   * Default-init slot value when the recipe never assigns.
+  #   * Assignment binding from build: lands a populated Library in
+  #     the slot.
+  #   * Discard pattern (``discard pkg.library("...")``) keeps working
+  #     — the slot stays at its default since no assignment ever fires.
+  #   * Mixed-kind recipe gets one slot per kind without collision.
+  #   * c_library(into = ...) auto-lifted into a typed Library slot.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r2c_artifact_slot_typed.nim",
+    binary: "build/test-bin/t_m9r2c_artifact_slot_typed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.7: engine-side ``targetTriple``-variant binary-cache
   # namespacing. Pins ``buildPlatformTriple()`` /
   # ``resolvedTargetTriple()`` / ``cachePlatformTagFor(kind, ...)`` +
@@ -6944,6 +6945,164 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
     binary: "build/test-bin/t_m9r6_convention_narrowing_default_synthesis",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.6.1 — physical convention narrowing (2026-06-19).
+  # Pins:
+  #   * the convention's ``emitFragment`` returns EXACTLY fetch +
+  #     synthesis sentinel (no setup / compile / install / stage-copy);
+  #   * ``registerBuildFlag`` / ``registeredBuildFlags`` /
+  #     ``resetDslPortBuildFlagState`` no longer compile (compile-time
+  #     ``compiles(...)`` checks for the regression);
+  #   * ``synthesizeMesonPackage`` returns a result without an options
+  #     argument (the legacy ``legacy<X>Flags`` shims were retired);
+  #   * the convention's recognise path stays end-to-end functional via
+  #     ``registriesIncludeMeson`` against ``registeredNativeBuildDeps``;
+  #   * the sentinel preserves the binary-cache identity wiring the
+  #     legacy install + stage-copy edges used to carry.
+  # Added by hand because the new test references the production
+  # dbus-broker recipe via a relative import; the auto-generator's
+  # boilerplate doesn't reach into ``recipes/packages/source/`` so a
+  # hand-added entry preserves the side-effect import order.
+  TestSpec(
+    source: "tests/unit/t_m9r6_1_convention_minimal_emission.nim",
+    binary: "build/test-bin/t_m9r6_1_convention_minimal_emission",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.8 — dispatcher gate + buildDeps fallthrough. Pins:
+  #   * ``parseToolProvisioning("from-source") == tpmFromSource`` round-
+  #     trips through the env-var + CLI flag path.
+  #   * ``shouldEnterBuildPipeline(tpmFromSource) == true`` — the
+  #     extracted predicate Part 1 introduces so the dispatcher gate
+  #     no longer short-circuits ``--tool-provisioning=from-source``
+  #     to "no external tools requested" (the symptom captured at
+  #     ``D:/metacraft/gap-a-wayland.stdout.log``).
+  #   * buildDeps fallthrough — a useDef whose sibling recipe exists
+  #     but is unbuilt surfaces the M9.Q "has not produced an artefact"
+  #     diagnostic (the M9.R.9 auto-recurse target), NOT the Gap A
+  #     "does not declare provisioning" diagnostic.
+  #   * Non-from-source modes (``tpmTarball``, ``tpmNix``) still raise
+  #     the "does not declare provisioning" diagnostic for the same
+  #     useDef shape — guards against an over-broad fix relaxing the
+  #     existing error surface.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r8_dispatcher_gate.nim",
+    binary: "build/test-bin/t_m9r8_dispatcher_gate",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.9 — auto-recurse + stdlib fall-through.
+  #
+  # Closes the M9.R.8 "sibling source recipe has not produced an
+  # artefact" hard-fail surfaced by the Gap A wayland smoke. Pins:
+  #
+  #   * ``tryResolveFromSourceTool`` returns a discriminated outcome
+  #     (``rrResolved`` / ``rrNeedsBuild`` / ``rrSiblingMissing``) the
+  #     dispatcher pattern-matches on for auto-recurse + fall-through;
+  #   * ``toolProfileFor(tpmFromSource, ...)`` falls through to nix /
+  #     scoop / tarball provisioning declared on the ``useDef`` when
+  #     no sibling source recipe exists (Part 2 — meson's python3 dep
+  #     was the trigger);
+  #   * the dispatcher-side guards (cycle detection, depth ceiling,
+  #     per-process resolution cache) are addressable from outside
+  #     ``executeBuildTarget`` so a future ``repro why`` integration
+  #     can inspect them;
+  #   * the hard-fail diagnostic when both the sibling recipe AND the
+  #     stdlib provisioning are absent lists both remediation paths.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r9_auto_recurse.nim",
+    binary: "build/test-bin/t_m9r9_auto_recurse",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.10a — cycle break + stdlib fall-through. Pins:
+  #   * the dispatcher's recursion-cycle detector no longer raises
+  #     immediately when the closing-edge tool's stdlib package declares
+  #     a usable provisioning channel — it instead marks the tool in
+  #     ``fromSourceCycleBrokenTools`` and the downstream
+  #     ``toolProfileFor(tpmFromSource, ...)`` routes that one tool
+  #     through stdlib provisioning (nix / scoop / tarball) the same way
+  #     the M9.R.9 ``rrSiblingMissing`` branch does;
+  #   * the cycle-break override is keyed strictly by ``executableName``
+  #     so the from-source semantics still apply to every other tool in
+  #     the chain;
+  #   * a genuine cycle (no node has stdlib provisioning) still raises,
+  #     with a tighter diagnostic that points the operator at the
+  #     stdlib package definition.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r10a_cycle_break.nim",
+    binary: "build/test-bin/t_m9r10a_cycle_break",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.10a — exec-name audit. Asserts every
+  # ``nativeBuildDeps`` / ``buildDeps`` entry across the source-recipe
+  # corpus resolves to either a sibling source recipe OR a stdlib
+  # package, and pins the python→python3 rename + pkg-config backtick
+  # header parsing as load-bearing regression cases.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r10a_exec_name_audit.nim",
+    binary: "build/test-bin/t_m9r10a_exec_name_audit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.10b — default-build synthesis wiring. Pins the
+  # package macro's M9.R.6 default-synthesis dispatch path:
+  #   * a recipe with ``fetch:`` + a recognised convention tool but no
+  #     explicit ``build:`` body registers a synthesised
+  #     ``default-build-synthesis (M9.R.10b)`` build action via the
+  #     ``emitM9R10bDefaultBuildSynthesis`` emitter in macros_b.nim;
+  #   * a recipe with an explicit ``build:`` block opts out — the
+  #     compile-time gate suppresses the synthesis emission entirely;
+  #   * ``raiseCustomBuildRequired`` has a stable error-message shape
+  #     (recipe name + ``build:`` token + ``shell(`` token) so authors
+  #     of custom-convention recipes get an actionable diagnostic.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r10b_synthesis_wiring.nim",
+    binary: "build/test-bin/t_m9r10b_synthesis_wiring",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
+  #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
+  #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block
+  #     (the M9.R.6.1 unblocker — the registry is empty so the
+  #     ``legacy<X>Flags`` accessors can be retired);
+  #   * every swept recipe registers a package-level ``build:`` block
+  #     that calls the matching M9.R.2b high-level constructor
+  #     (``meson_package`` / ``cmake_package`` / ``autotools_package``)
+  #     with the lifted ``config:`` values + inlined verbatim flags;
+  #   * recipes WITHOUT options (the 5 ``ca-certificates`` / ``cmake`` /
+  #     ``gcc`` / ``meson`` / ``ninja`` packages) still compile and
+  #     register their dep surface;
+  #   * the configurable-override pathway (``setConfigurable`` ->
+  #     ``readConfigurable``) round-trips correctly so config values
+  #     can flow into the ``build:`` block's flag construction.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
+    binary: "build/test-bin/t_m9r5b_recipe_options_sweep",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

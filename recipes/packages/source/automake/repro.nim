@@ -61,6 +61,8 @@
 ## preserved for consistency with the other autotools recipes.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -108,11 +110,9 @@ package automakeSource:
     ## ``./configure``.
     "make"
 
-  configureFlags:
-    ## Modern-desktop baseline. ``--disable-static`` is preserved for
-    ## consistency with the other autotools recipes.
-    "--disable-static"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable automake:
     ## ``$PREFIX/bin/automake`` — the canonical ``Makefile.am`` →
     ## ``Makefile.in`` generator. v1 records the artifact only.
@@ -123,6 +123,19 @@ package automakeSource:
     ## system + project M4 macro tree so autoconf can find third-
     ## party macros. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("automakeSource")
+    try:
+      let opts = @[
+        "--disable-static",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("automake")
+      discard pkg.executable("aclocal")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

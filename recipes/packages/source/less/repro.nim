@@ -84,6 +84,8 @@
 ##                               need.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -147,19 +149,9 @@ package lessSource:
     ## terminfo glue.
     "gcc >=11"
 
-  configureFlags:
-    ## Single-flag set for less — the ``--with-regex=`` knob is the
-    ## only build-time choice that materially changes behaviour.
-    ##
-    ## ``--with-regex=posix`` pins the regex engine to the POSIX
-    ##                         implementation (vs PCRE / PCRE2 / GNU
-    ##                         regex). POSIX regex is what every
-    ##                         ``/<pattern>`` search in less uses;
-    ##                         PCRE2 would pull in a heavy library
-    ##                         dependency the v1 desktop doesn't
-    ##                         need.
-    "--with-regex=posix"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable less:
     ## ``/usr/bin/less`` — the canonical Unix pager. Consumed by
     ## ``man`` + git's ``core.pager`` + systemd's ``systemctl
@@ -168,6 +160,18 @@ package lessSource:
     ## only; the per-artifact build body lands in M9.L when the
     ## convention's make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("lessSource")
+    try:
+      let opts = @[
+        "--with-regex=posix",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("less")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

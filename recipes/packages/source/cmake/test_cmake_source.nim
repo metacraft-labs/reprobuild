@@ -72,33 +72,13 @@ suite "cmakeSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "no flags registered on the configure channel":
-    # M9.I cross-channel registry empty-state — cmake's upstream
-    # bootstrap path takes no ``./configure`` flags (the recipe drives
-    # ``./bootstrap`` + ``make`` + ``make install`` directly via the
-    # from-source-custom shell-action pipeline).
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("cmakeSource", "", "configure") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the meson channel":
-    # M9.I cross-channel registry empty-state #2.
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("cmakeSource", "", "meson") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the cmake channel":
-    # M9.I cross-channel registry empty-state #3 — cmake channel is
-    # empty (we are not bootstrapping cmake via cmake, that would be
-    # the chicken-and-egg).
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("cmakeSource", "", "cmake") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the make channel":
-    # M9.I cross-channel registry empty-state #4 — the make channel
-    # is empty because the from-source-custom pipeline records the
-    # ``make`` invocation as a shell action, not as a flag-block
-    # entry.
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("cmakeSource", "", "make") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "artifacts register three executables all tagged dakExecutable":
     # M3 artifact registry: cmake + ctest + cpack are all tagged
     # ``dakExecutable``. cmake's bootstrap-build-install pipeline

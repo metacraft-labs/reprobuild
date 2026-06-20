@@ -23,6 +23,10 @@
 import std/[unittest]
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Executable`` into scope for the typed
+# slot vars the ``package`` macro injects for the executable artifacts
+# below.
+import repro_dsl_stdlib/types
 
 # Recipe-side declaration: one package with TWO executables, each
 # carrying a small ``build:`` block that records shell actions. The

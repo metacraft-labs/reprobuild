@@ -132,6 +132,8 @@
 ## that flips ``KWIN_BUILD_X11=ON`` for legacy bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -227,26 +229,9 @@ package kwinSource:
     ## compositor uses for fallback paths.
     "pixman >=0.40"
 
-  cmakeFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: CMake evaluates ``-D`` overrides
-    ## left-to-right and the ``CMAKE_BUILD_TYPE=Release`` sentinel
-    ## lives at the tail so any override (e.g. a future debug-build
-    ## variant) can append ``-DCMAKE_BUILD_TYPE=Debug`` later without
-    ## re-ordering this block.
-    ##
-    ## ``BUILD_TESTING=OFF`` skips the upstream test suite.
-    ## ``KWIN_BUILD_TABBOX=OFF`` skips the legacy task-switcher tab-box.
-    ## ``KWIN_BUILD_X11=OFF`` skips X11/XWayland session support
-    ## (v1 Plasma is pure-Wayland).
-    ## ``KWIN_BUILD_KCMS=OFF`` skips the System Settings ``kcm`` modules
-    ## (v1 minimal Plasma ships no Settings GUI).
-    "-DBUILD_TESTING=OFF"
-    "-DKWIN_BUILD_TABBOX=OFF"
-    "-DKWIN_BUILD_X11=OFF"
-    "-DKWIN_BUILD_KCMS=OFF"
-    "-DCMAKE_BUILD_TYPE=Release"
-
+  config:
+    ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
+    discard
   executable kwinWayland:
     ## ``/usr/bin/kwin_wayland`` — the standalone Wayland compositor
     ## binary kwin ships. Hosts the Wayland display server + runs the
@@ -263,6 +248,23 @@ package kwinSource:
     ## Third-party kwin effects also link against this for their UI
     ## plugin contracts. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
+    setCurrentOwningPackageOverride("kwinSource")
+    try:
+      let opts = @[
+        "-DBUILD_TESTING=OFF",
+        "-DKWIN_BUILD_TABBOX=OFF",
+        "-DKWIN_BUILD_X11=OFF",
+        "-DKWIN_BUILD_KCMS=OFF",
+        "-DCMAKE_BUILD_TYPE=Release",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      discard pkg.executable("kwinWayland")
+      discard pkg.library("libKWin")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -73,18 +73,23 @@
 ## into a compile-time ``error()`` via the ``{.compileTime.}`` call from
 ## ``macros_b.nim``'s package macro.
 ##
-## ## Backward-compat with M9.I ``registeredBuildFlags``
+## ## M9.R.6.1 — backward-compat shims GONE
 ##
-## The registry stays accessible for backward-decode; M9.R.5b will
-## sweep its remaining call sites into the ``config:`` surface. This
-## module DOES read the registry today via ``registeredBuildFlags`` so
-## recipes whose ``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:``
-## / ``makeFlags:`` blocks haven't been swept still build with the right
-## options. The accessor itself carries a deprecation comment.
+## The ``legacyMesonOptions`` / ``legacyCmakeFlags`` /
+## ``legacyConfigureFlags`` / ``legacyMakeFlags`` shims that wrapped
+## the M9.I ``registeredBuildFlags`` registry were removed on
+## 2026-06-19. The ``registerBuildFlag`` / ``registeredBuildFlags``
+## runtime API + the five parser arms
+## (``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:`` /
+## ``makeFlags:`` / ``ninjaFlags:``) were retired in the same
+## milestone. The ``synthesize<X>Package`` entry points now construct
+## the typed Layer-1 call with NO options arg — recipes that need
+## per-tool options provide an explicit ``build:`` block calling the
+## constructor with the options inlined as a constructor argument.
 ##
 ## See ``reprobuild-specs/From-Source-DSL-Realignment.milestones.org``
-## §M9.R.6 + ``From-Source-Build-Recipes.md`` §"Where this knowledge
-## lives".
+## §M9.R.6 + §M9.R.6.1 + ``From-Source-Build-Recipes.md`` §"Where this
+## knowledge lives".
 
 import std/strutils
 
@@ -215,54 +220,28 @@ proc raiseCustomBuildRequired*(packageName: string) =
       "``recipes/packages/source/cmake/repro.nim`` for a production " &
       "example.")
 
-proc legacyMesonOptions*(packageName: string): seq[string] =
-  ## Read the M9.I ``registeredBuildFlags`` channel on ``"meson"`` for
-  ## ``packageName``. Backward-compat shim: M9.R.6 deprecates the
-  ## ``registeredBuildFlags`` accessor but recipes still use the
-  ## ``mesonOptions:`` block today (M9.R.5b sweep pending). The
-  ## synthesis layer threads the registered options into the
-  ## ``meson_package(...)`` constructor's ``configureOptions`` arg so
-  ## the synthesised build graph matches what the convention's
-  ## emitFragment would have produced.
-  registeredBuildFlags(packageName, "", "meson")
-
-proc legacyCmakeFlags*(packageName: string): seq[string] =
-  registeredBuildFlags(packageName, "", "cmake")
-
-proc legacyConfigureFlags*(packageName: string): seq[string] =
-  registeredBuildFlags(packageName, "", "configure")
-
-proc legacyMakeFlags*(packageName: string): seq[string] =
-  registeredBuildFlags(packageName, "", "make")
-
 proc synthesizeMesonPackage*(packageName, srcDir: string): MesonPackageResult =
-  ## Drive ``meson_package(srcDir = <fetched/extracted dir>,
-  ## configureOptions = legacyMesonOptions(...))``. The returned
-  ## ``MesonPackageResult`` exposes ``.executable(name)`` /
-  ## ``.library(name)`` / ``.files(name)`` slicing methods the macro
-  ## binds to each declared artifact.
-  meson_package(
-    srcDir = srcDir,
-    configureOptions = legacyMesonOptions(packageName))
+  ## Drive ``meson_package(srcDir = <fetched/extracted dir>)`` with no
+  ## options argument. Recipes that need per-tool options provide an
+  ## explicit ``build:`` block calling ``meson_package(...)`` directly
+  ## with the option seq inlined as the ``configureOptions`` argument;
+  ## the synthesis path covers only recipes that have no options to
+  ## thread (M9.R.6.1 narrowing).
+  discard packageName
+  meson_package(srcDir = srcDir)
 
 proc synthesizeCmakePackage*(packageName, srcDir: string): CmakePackageResult =
-  ## Drive ``cmake_package(srcDir = ..., cacheVars =
-  ## legacyCmakeFlags(...))``. The ``cmakeFlags:`` block routes here
-  ## as ``cacheVars`` because cmake's command-line ``-D<name>=<value>``
-  ## form is what the registry holds.
-  cmake_package(
-    srcDir = srcDir,
-    cacheVars = legacyCmakeFlags(packageName))
+  ## Drive ``cmake_package(srcDir = ...)`` with no cache vars. See
+  ## ``synthesizeMesonPackage`` for the M9.R.6.1 narrowing rationale.
+  discard packageName
+  cmake_package(srcDir = srcDir)
 
 proc synthesizeAutotoolsPackage*(packageName, srcDir: string):
     AutotoolsPackageResult =
-  ## Drive ``autotools_package(srcDir = ..., configureOptions =
-  ## legacyConfigureFlags(...))``. The ``configureFlags:`` block routes
-  ## here as ``configureOptions``. Raw-Makefile recipes (no
-  ## ``configure`` step) end up here too — the autotools_package
-  ## constructor handles them via its ``make`` step (configure is
-  ## a no-op for projects without a real ``./configure`` script when
-  ## the flags seq is empty).
-  autotools_package(
-    srcDir = srcDir,
-    configureOptions = legacyConfigureFlags(packageName))
+  ## Drive ``autotools_package(srcDir = ...)`` with no configure options.
+  ## Raw-Makefile recipes (no ``configure`` step) end up here too — the
+  ## autotools_package constructor handles them via its ``make`` step
+  ## (configure is a no-op for projects without a real ``./configure``
+  ## script when the flags seq is empty).
+  discard packageName
+  autotools_package(srcDir = srcDir)

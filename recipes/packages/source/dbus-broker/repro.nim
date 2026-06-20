@@ -63,6 +63,8 @@
 ## strategies. For now the recipe stays declarative-only.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -114,21 +116,9 @@ package dbusBrokerSource:
     ## C++ component, so the C compiler is sufficient.
     "gcc >=11"
 
-  mesonOptions:
-    ## Flag set mirroring the production-distro default (Debian /
-    ## Fedora ship the same toggles). Order is load-bearing: meson
-    ## evaluates options left-to-right and the ``--buildtype=release``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## debug-build variant) can append ``--buildtype=debug`` later
-    ## without re-ordering this block.
-    "-Daudit=false"
-    "-Dlauncher=true"
-    "-Dlinux-4-17=true"
-    "-Dreference-test=false"
-    "-Dselinux=false"
-    "-Dapparmor=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   executable dbusBroker:
     ## ``/usr/bin/dbus-broker`` — the core message-bus broker daemon.
     ## v1 records the artifact only; the per-artifact build body lands
@@ -140,6 +130,25 @@ package dbusBrokerSource:
     ## NDE0-D ``dbus.service`` unit invokes when
     ## ``busActivationStrategy = basBroker``.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("dbusBrokerSource")
+    try:
+      let opts = @[
+        "-Daudit=false",
+        "-Dlauncher=true",
+        "-Dlinux-4-17=true",
+        "-Dreference-test=false",
+        "-Dselinux=false",
+        "-Dapparmor=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("dbusBroker")
+      discard pkg.executable("dbusBrokerLaunch")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

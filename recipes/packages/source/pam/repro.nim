@@ -103,6 +103,8 @@
 ## that flips ``--with-selinux`` for SELinux-enforcing bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -175,26 +177,9 @@ package pamSource:
     ## bison is the parser generator pam.conf consumes alongside flex.
     "bison >=3.6"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the
-    ## ``--enable-securedir=/lib/security`` sentinel lives at the
-    ## tail so any override (e.g. a future
-    ## ``--enable-securedir=/usr/lib/security`` for distros using the
-    ## merged /usr layout) can append later without re-ordering this
-    ## block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-doc`` skips the doc build (docbook-xsl + xmlto).
-    ## ``--without-selinux`` skips the SELinux integration.
-    ## ``--enable-securedir=/lib/security`` pins the canonical
-    ##                                       PAM-module directory.
-    "--disable-static"
-    "--disable-doc"
-    "--without-selinux"
-    "--enable-securedir=/lib/security"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libpam:
     ## ``libpam.so`` — the core PAM authentication API consumed by
     ## gdm, sddm, sshd, su, sudo, polkit-pam, screen-lock unlock.
@@ -223,6 +208,23 @@ package pamSource:
     ## as-is in the artifact identifier. v1 records the artifact
     ## only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("pamSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-doc",
+        "--without-selinux",
+        "--enable-securedir=/lib/security",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libpam")
+      discard pkg.library("libpamMisc")
+      discard pkg.library("libpamc")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

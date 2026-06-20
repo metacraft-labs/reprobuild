@@ -1,28 +1,15 @@
-## M9.L.2 verification: from-source Autotools (Tier 2b) convention.
+## M9.L.2 + M9.R.6.1 verification: from-source Autotools (Tier 2b)
+## convention.
 ##
-## Pins the wiring between:
+## Pins the convention's narrowed wiring:
 ##
 ##   * the M9.H ``registeredFetchSpec`` registry (fetch: block) → fetch
-##     BuildAction emitted by the shared
-##     ``conventions/fetch_action.emitFetchAction`` helper;
-##   * the M9.I ``registeredBuildFlags`` registry on the ``"configure"``
-##     channel (configureFlags: block) → configure BuildAction's argv;
-##   * the per-recipe ``executable``/``library`` declarations →
-##     per-artifact stage-copy BuildAction one per declared member.
+##     BuildAction;
+##   * the M9.R.6.1 synthesis sentinel action.
 ##
-## The test runs against the **real production expat recipe** under
-## ``recipes/packages/source/expat/`` (vendored tarball) and exercises
-## ``recognize`` + ``emitFragment`` end-to-end. expat is the first
-## autotools-driven recipe in the suite (~493 KB tarball, 1 library
-## ``libExpat``, 5 configureFlags — wait, the recipe declares 4
-## configureFlags; the brief's "5" is a count typo. The assertions
-## below pin the exact 4 production flags.).
-##
-## Tool availability (``make`` / ``gcc`` on PATH) is intentionally NOT
-## a precondition: the convention emits the action graph regardless so
-## the wiring assertions run identically on hosts that don't have a C
-## toolchain installed. The actual end-to-end build run is gated by
-## ``scripts/validate-from-source-autotools-expat.ps1``.
+## The configure / build / install / stage-copy actions are NO LONGER
+## emitted by this convention — they live in the recipe's explicit
+## ``build:`` block via ``autotools_package(...)``.
 
 import std/[options, os, strutils, unittest]
 
@@ -33,17 +20,9 @@ import repro_standard_provider/convention
 import repro_standard_provider/conventions/from_source_autotools as
   from_source_autotools_convention
 
-# Side-effect import: triggers the expat recipe's package macro which
-# registers the fetch spec + configure flags + library artifact under
-# the ``expatSource`` key at module init time. The path is relative to
-# this test file's location; ``../../..`` lands at the reprobuild repo
-# root, and ``recipes/...`` from there.
 import "../../../recipes/packages/source/expat/repro"
 
 const
-  ## parentDir four times from
-  ## ``libs/repro_standard_provider/tests/test_from_source_autotools_convention.nim``
-  ## lands at the reprobuild repo root.
   ReprobuildRoot = currentSourcePath.parentDir.parentDir.parentDir.parentDir
   ExpatRecipe =
     ReprobuildRoot / "recipes" / "packages" / "source" / "expat"
@@ -58,14 +37,6 @@ proc dummyRequest(projectRoot: string): ProviderGraphRequest =
     arguments: projectRoot,
     namespace: "project")
 
-proc inlineArgvOf(action: BuildActionDef): seq[string] =
-  for arg in action.call.arguments:
-    if arg.name == "argv":
-      if arg.encodedValue.len == 0:
-        return @[]
-      return arg.encodedValue.split("\x1f")
-  @[]
-
 proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
   for node in fragment.nodes:
     if node.kind != gnkAction:
@@ -78,7 +49,7 @@ proc findById(actions: seq[BuildActionDef]; id: string): BuildActionDef =
       return a
   raise newException(ValueError, "action not found: " & id)
 
-suite "from-source-autotools convention M9.L.2 — expat":
+suite "from-source-autotools convention M9.R.6.1 — expat":
 
   test "convention name is 'from-source-autotools'":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
@@ -86,334 +57,54 @@ suite "from-source-autotools convention M9.L.2 — expat":
 
   test "recognize: positive — expat source recipe":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    # Sanity: the production recipe must exist at the expected path —
-    # a regression that moves the recipe should fail loudly here, not
-    # silently turn the assertion into a no-op.
     check fileExists(ExpatRecipe / "repro.nim")
-    # Sanity: the recipe import must have populated the M9.H fetch
-    # registry. If this fails, the relative-path import didn't reach
-    # the side-effect macro and recognise will return false for the
-    # wrong reason.
     let spec = registeredFetchSpec("expatSource")
     check spec.url.len > 0
-    # Sanity: the configureFlags channel must be non-empty — that's the
-    # convention's discriminator. A regression that drops the M9.I
-    # configure-channel registration would surface here BEFORE the
-    # recognise assertion confuses the diagnosis.
-    let configureFlags = registeredBuildFlags("expatSource", "", "configure")
-    check configureFlags.len > 0
-    # No in-tree configure.ac / Makefile.am at projectRoot — otherwise
-    # the existing M17/M28 ``c-cpp-autotools`` convention claims it and
-    # the from-source variant intentionally yields.
-    check not fileExists(extendedPath(ExpatRecipe / "configure.ac"))
-    check not fileExists(extendedPath(ExpatRecipe / "Makefile.am"))
     let request = dummyRequest(ExpatRecipe)
     check conv.recognize(ExpatRecipe, request)
 
-  test "recognize: returns true even without autoconf/make on PATH (M9.N)":
-    # M9.N architectural correction: recognize must claim a recipe based
-    # on DECLARATION (fetch: + configure flags channel non-empty), NOT
-    # host PATH availability. Tool identity is resolved AFTER recognise
-    # by the engine — possibly via cache substitute or source build.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    check fileExists(ExpatRecipe / "repro.nim")
-    let autoconfOnPath = findExe("autoconf").len > 0
-    let makeOnPath = findExe("make").len > 0
-    checkpoint "autoconf on PATH: " & $autoconfOnPath &
-      ", make on PATH: " & $makeOnPath
-    check conv.recognize(ExpatRecipe, request)
-
-  test "recognize: negative — projectRoot carries in-tree configure.ac":
-    # If ``configure.ac`` is present at the root, the existing M17/M28
-    # ``c-cpp-autotools`` convention claims the project; the from-source
-    # variant intentionally yields.
-    let scratch = getTempDir() /
-      "test_from_source_autotools_convention_intree_configure_ac"
-    if dirExists(scratch):
-      removeDir(scratch)
-    createDir(scratch)
-    writeFile(scratch / "configure.ac",
-      "AC_INIT([intree], [1.0])\n")
-    writeFile(scratch / "Makefile.am",
-      "bin_PROGRAMS = foo\nfoo_SOURCES = foo.c\n")
-    writeFile(scratch / "repro.nim",
-      "import repro_project_dsl\n" &
-      "package fromSourceAutotoolsIntreePkg:\n" &
-      "  fetch:\n" &
-      "    url: \"https://example.com/foo.tar.gz\"\n" &
-      "    sha256: \"abc\" & repeat(\"0\", 61)\n" &
-      "  uses:\n" &
-      "    \"autoconf\"\n" &
-      "    \"automake\"\n" &
-      "    \"make\"\n" &
-      "  configureFlags:\n" &
-      "    \"--disable-static\"\n" &
-      "  executable foo:\n" &
-      "    discard\n")
-    defer:
-      removeDir(scratch)
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(scratch)
-    check not conv.recognize(scratch, request)
-
-  test "recognize: negative — no fetch: block registered":
-    # A recipe with ``uses: autoconf`` + a configureFlags: channel but no
-    # fetch spec must NOT be claimed by the from-source variant (no
-    # source to fetch).
-    let scratch = getTempDir() /
-      "test_from_source_autotools_convention_no_fetch"
-    if dirExists(scratch):
-      removeDir(scratch)
-    createDir(scratch)
-    writeFile(scratch / "repro.nim",
-      "import repro_project_dsl\n" &
-      "package fromSourceAutotoolsNoFetchPkg:\n" &
-      "  uses:\n" &
-      "    \"autoconf\"\n" &
-      "  executable foo:\n" &
-      "    discard\n")
-    defer:
-      removeDir(scratch)
-    # The fetch registry is per-thread; the test recipe is NOT imported
-    # (no module-level macro run) so the registry slot stays empty. The
-    # recognize gate must reject.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(scratch)
-    check not conv.recognize(scratch, request)
-
-  test "emitFragment: produces fetch + configure + build + install + stage-copy chain":
+  test "emitFragment: returns EXACTLY fetch + synthesis sentinel (M9.R.6.1)":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     require conv.recognize(ExpatRecipe, request)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
-
-    # M9.L.4-refactor Step B: the pipeline emits exactly 5 actions for
-    # expat (fetch + configure + build + install + 1 stage-copy). The
-    # Step-A-era binary-cache publish action retired in Step B.
-    check actions.len >= 5
-
+    check actions.len == 2
     var sawFetch = false
-    var sawConfigure = false
-    var sawBuild = false
-    var sawInstall = false
-    var sawStageLib = false
-    var sawPublishEdge = false
+    var sawSentinel = false
     for a in actions:
       if a.id == "ccpp-fetch-expatSource":
         sawFetch = true
-      elif a.id == "from-source-autotools-configure":
-        sawConfigure = true
-      elif a.id == "from-source-autotools-build":
-        sawBuild = true
-      elif a.id == "from-source-autotools-install":
-        sawInstall = true
-      elif a.id == "from-source-autotools-stage-libExpat":
-        sawStageLib = true
-      elif a.id == "from-source-autotools-publish-expatSource":
-        sawPublishEdge = true
+      elif a.id == "from-source-autotools-sentinel":
+        sawSentinel = true
     check sawFetch
-    check sawConfigure
-    check sawBuild
-    check sawInstall
-    check sawStageLib
-    # Step B: NO publish action emitted. The engine's hook publishes
-    # via the passive metadata on the install + stage-copy edges.
-    check not sawPublishEdge
+    check sawSentinel
+    # Defensive: the legacy 5-stage action ids must be absent.
+    for legacyId in @["from-source-autotools-configure",
+                      "from-source-autotools-build",
+                      "from-source-autotools-install"]:
+      var present = false
+      for a in actions:
+        if a.id == legacyId:
+          present = true
+      check not present
 
-  test "emitFragment: configure argv carries ./configure + --prefix + configureFlags":
+  test "emitFragment: sentinel depends on fetch action":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
-    let configure = findById(actions, "from-source-autotools-configure")
-    let argvJoined = inlineArgvOf(configure).join(" ")
+    let sentinel = findById(actions, "from-source-autotools-sentinel")
+    check sentinel.deps == @["ccpp-fetch-expatSource"]
 
-    # Anchor flags
-    check argvJoined.contains("./configure")
-    check argvJoined.contains("--prefix=/usr")
-
-    # M9.I-registered configureFlags from the expat recipe — every
-    # production flag must round-trip into the configure argv. Order is
-    # not asserted here (the test_expat_source.nim test already pins
-    # declaration-order preservation against the same registry); the
-    # presence check is sufficient at this layer. The brief mentioned
-    # "5 configureFlags" but the recipe declares 4 — we assert the
-    # actual 4.
-    check argvJoined.contains("--disable-static")
-    check argvJoined.contains("--without-docbook")
-    check argvJoined.contains("--without-examples")
-    check argvJoined.contains("--without-tests")
-
-  test "emitFragment: build depends on configure; install depends on build":
+  test "emitFragment: sentinel carries publishToBinaryCache + identity":
     let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
     let request = dummyRequest(ExpatRecipe)
     let fragment = conv.emitFragment(ExpatRecipe, request)
     let actions = extractActions(fragment)
-    let build = findById(actions, "from-source-autotools-build")
-    let install = findById(actions, "from-source-autotools-install")
-    check build.deps == @["from-source-autotools-configure"]
-    check install.deps == @["from-source-autotools-build"]
-
-  test "emitFragment: stage-copy actions depend on install":
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let stageLib = findById(actions,
-      "from-source-autotools-stage-libExpat")
-    check stageLib.deps == @["from-source-autotools-install"]
-
-  test "emitFragment: stage-copy output paths land under .repro/output/<member>/":
-    # The canonical per-artifact output schema — engine output
-    # collection keys off this path shape.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let stageLib = findById(actions,
-      "from-source-autotools-stage-libExpat")
-    check stageLib.outputs.len == 1
-    let unified = stageLib.outputs[0].replace('\\', '/')
-    check unified.contains(".repro/output/libExpat/")
-
-  test "emitFragment: configure depends on fetch action":
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let configure = findById(actions, "from-source-autotools-configure")
-    var sawFetchDep = false
-    for dep in configure.deps:
-      if dep == "ccpp-fetch-expatSource":
-        sawFetchDep = true
-    check sawFetchDep
-
-  test "emitFragment: fetch action's argv carries the recipe's URL + sha256":
-    # M9.H/M9.K round-trip: the fetch action's argv must embed the
-    # vendored URL and the 64-hex sha256 from the expat recipe.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let fetch = findById(actions, "ccpp-fetch-expatSource")
-    let argvJoined = inlineArgvOf(fetch).join(" ")
-    check argvJoined.contains("expat-2.7.0.tar.xz")
-    check argvJoined.contains(
-      "25df13dd2819e85fb27a1ce0431772b7047d72af81ae78dc26b4c6e0805f48d1")
-
-  test "emitFragment: build action's argv invokes make":
-    # The convention's build step must call ``make`` from the extracted
-    # source dir so the autotools-generated Makefile drives compilation.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let build = findById(actions, "from-source-autotools-build")
-    let argvJoined = inlineArgvOf(build).join(" ")
-    check argvJoined.contains("make")
-
-  test "emitFragment: install action's argv invokes make install DESTDIR=<staging>":
-    # The install step must call ``make install DESTDIR=<stagingDir>``
-    # so the engine collects artifacts from a known location regardless
-    # of the recipe's configure-time --prefix.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let install = findById(actions, "from-source-autotools-install")
-    let argvJoined = inlineArgvOf(install).join(" ")
-    check argvJoined.contains("make")
-    check argvJoined.contains("install")
-    check argvJoined.contains("DESTDIR=")
-    let unified = argvJoined.replace('\\', '/')
-    check unified.contains("from-source-autotools/staging")
-
-  test "emitFragment: install action carries publishToBinaryCache + identity (M9.L.4-refactor Step B)":
-    # M9.L.4-refactor Step B: the install action stamps the
-    # binary-cache identity tuple on its ``BuildActionDef`` so the
-    # engine's ``BinaryCachePublisher`` hook fires after a successful
-    # install. The convention no longer emits a publish edge.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let install = findById(actions, "from-source-autotools-install")
-    check install.publishToBinaryCache == true
-    check install.cacheEntryIdentity.isSome
-    let identity = install.cacheEntryIdentity.get()
-    # The identity is keyed on the recipe's ``package <name>:`` header.
+    let sentinel = findById(actions, "from-source-autotools-sentinel")
+    check sentinel.publishToBinaryCache == true
+    check sentinel.cacheEntryIdentity.isSome
+    let identity = sentinel.cacheEntryIdentity.get()
     check identity.packageName == "expatSource"
-    # ``registeredVersions("expatSource")`` exposes the version
-    # ``"2.7.0"`` from the recipe's ``versions:`` block.
-    check identity.packageVersion == "2.7.0"
-    # The toolchain identity name MUST be the convention tag so the
-    # canonical encoder distinguishes meson- / cmake- / autotools- /
-    # make-built artefacts for the same recipe.
     check identity.toolchain.name == "autotools"
-    # The provider-revision field must be a BLAKE3-derived hex (32
-    # lowercase hex chars from ``providerRevisionHex``).
-    check identity.providerRevision.len == 32
-    for ch in identity.providerRevision:
-      check ch in {'0'..'9', 'a'..'f'}
-
-  test "emitFragment: stage-copy actions carry publishToBinaryCache + identity (M9.L.4-refactor Step B)":
-    # M9.L.4-refactor Step B: every stage-copy action also carries the
-    # same identity tuple. The engine's hook fires per successful
-    # action; each contributing edge advertises the cache entry it
-    # belongs to via the passive metadata.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let stageLib = findById(actions,
-      "from-source-autotools-stage-libExpat")
-    check stageLib.publishToBinaryCache == true
-    check stageLib.cacheEntryIdentity.isSome
-    # The stage-copy identity MUST match the install action's identity
-    # byte-for-byte — they contribute to the same logical cache entry.
-    let install = findById(actions, "from-source-autotools-install")
-    let installIdy = install.cacheEntryIdentity.get()
-    let stageLibIdy = stageLib.cacheEntryIdentity.get()
-    check stageLibIdy.packageName == installIdy.packageName
-    check stageLibIdy.packageVersion == installIdy.packageVersion
-    check stageLibIdy.toolchain.name == installIdy.toolchain.name
-    check stageLibIdy.providerRevision == installIdy.providerRevision
-
-  test "emitFragment: identity is stable across calls (M9.L.4-refactor Step B)":
-    # M9.L.4-refactor Step B: the cache-entry identity is a pure
-    # function of recipe identity. Re-emitting the fragment must yield
-    # the same packageName / packageVersion / toolchain.name /
-    # providerRevision quadruple.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragmentA = conv.emitFragment(ExpatRecipe, request)
-    let fragmentB = conv.emitFragment(ExpatRecipe, request)
-    let installA = findById(extractActions(fragmentA),
-      "from-source-autotools-install")
-    let installB = findById(extractActions(fragmentB),
-      "from-source-autotools-install")
-    let identA = installA.cacheEntryIdentity.get()
-    let identB = installB.cacheEntryIdentity.get()
-    check identA.packageName == identB.packageName
-    check identA.packageVersion == identB.packageVersion
-    check identA.toolchain.name == identB.toolchain.name
-    check identA.providerRevision == identB.providerRevision
-
-  test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
-    # M9.N Batch B: every emitted action stamps the list of ``uses:``
-    # tools it invokes so the engine resolves them at fork time.
-    let conv = from_source_autotools_convention.fromSourceAutotoolsConvention()
-    let request = dummyRequest(ExpatRecipe)
-    let fragment = conv.emitFragment(ExpatRecipe, request)
-    let actions = extractActions(fragment)
-    let configure = findById(actions, "from-source-autotools-configure")
-    check "make" in configure.toolIdentityRefs
-    check "gcc" in configure.toolIdentityRefs
-    check "sh" in configure.toolIdentityRefs
-    let build = findById(actions, "from-source-autotools-build")
-    check "make" in build.toolIdentityRefs
-    check "gcc" in build.toolIdentityRefs
-    let install = findById(actions, "from-source-autotools-install")
-    check "make" in install.toolIdentityRefs

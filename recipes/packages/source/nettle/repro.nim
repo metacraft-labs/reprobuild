@@ -104,6 +104,8 @@
 ##                                    a future static-only host probe.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -181,21 +183,9 @@ package nettleSource:
     ## preprocessor.
     "m4"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--enable-shared``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## static-bundle variant) can append ``--disable-shared`` later
-    ## without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-documentation`` skips the texinfo manual build.
-    ## ``--enable-shared`` explicitly pins the shared-library variant.
-    "--disable-static"
-    "--disable-documentation"
-    "--enable-shared"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libNettle:
     ## ``libnettle.so`` — the symmetric-cipher + hash + AEAD primitive
     ## library (AES, ChaCha20, SHA-2, SHA-3, BLAKE2, Poly1305).
@@ -219,6 +209,21 @@ package nettleSource:
     ## is PascalCased to ``libHogweed`` per the libCrypto / libSsl
     ## precedent. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("nettleSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-documentation",
+        "--enable-shared",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libNettle")
+      discard pkg.library("libHogweed")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

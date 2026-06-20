@@ -31,13 +31,23 @@
       url = "github:metacraft-labs/nim-stackable-hooks";
       flake = false;
     };
-    ct-test-src = {
-      # ct-test ships the ct_test_nim_unittest adapter that
-      # `buildNimUnittest.build` in repro.tests.nim depends on, plus the
-      # ct_test_unittest_parallel framework adapter the parallel runner
-      # speaks. config.nims reads CT_TEST_SRC to thread these onto Nim's
-      # --path.
-      url = "github:metacraft-labs/ct-test/main";
+    reprobuild-ct-test-runner-src = {
+      # The run-side ``ct_test_runner_adapter`` — the in-process
+      # ``TestRunner`` adapter reprobuild installs (it depends only on the
+      # ``repro_test_adapters`` contract, not the engine). config.nims
+      # reads REPRO_CT_TEST_RUNNER_SRC to thread it onto Nim's --path.
+      # (The build-side typed-tool — ct_test_interface / ct_test_nim_unittest
+      # / ct_test_unittest_parallel — now lives in-tree under libs/.)
+      url = "github:metacraft-labs/reprobuild-ct-test-runner";
+      flake = false;
+    };
+    reprobuild-test-adapters-src = {
+      # The ``TestRunner`` cross-cutting contract (Nim package
+      # ``repro_test_adapters``). config.nims reads
+      # REPRO_TEST_ADAPTERS_SRC to thread it onto Nim's --path; the dev
+      # shell resolves it from the sibling checkout, but the sandboxed
+      # package build has no sibling so we seed it from this input.
+      url = "github:metacraft-labs/reprobuild-test-adapters";
       flake = false;
     };
     codetracer-native-recorder = {
@@ -62,7 +72,8 @@
       nimcrypto-src,
       bearssl-src,
       stackable-hooks-src,
-      ct-test-src,
+      reprobuild-ct-test-runner-src,
+      reprobuild-test-adapters-src,
       codetracer-native-recorder,
       runquota-src,
       ...
@@ -155,7 +166,8 @@
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
-                export CT_TEST_SRC=${ct-test-src}
+                export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
+                export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
@@ -205,7 +217,8 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
-            CT_TEST_SRC = ct-test-src;
+            REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
+            REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
@@ -275,7 +288,8 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
-            CT_TEST_SRC = ct-test-src;
+            REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
+            REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;

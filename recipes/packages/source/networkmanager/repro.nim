@@ -150,6 +150,8 @@
 ##                                        profile install).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -247,24 +249,9 @@ package networkManagerSource:
     ## enumeration (the wired / wireless / Bluetooth interface probe).
     "systemd >=240"
 
-  configureFlags:
-    ## Flag set per the task brief.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--disable-tests`` skips the upstream test suite.
-    ## ``--disable-introspection`` skips GObject Introspection.
-    ## ``--without-docs`` skips the gtk-doc + man-page build.
-    ## ``--without-systemd-journal`` skips the libsystemd-journal
-    ##   log-target build.
-    ## ``--with-modify-system=true`` allows ``nmcli`` modifications to
-    ##   system-wide connection profiles without polkit gating.
-    "--disable-static"
-    "--disable-tests"
-    "--disable-introspection"
-    "--without-docs"
-    "--without-systemd-journal"
-    "--with-modify-system=true"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable nmDaemon:
     ## ``/usr/sbin/NetworkManager`` — the connection manager daemon.
     ## Started by ``NetworkManager.service`` (system systemd unit) on
@@ -298,6 +285,25 @@ package networkManagerSource:
     ## canonical ``lib`` prefix while PascalCasing the SONAME body.
     ## v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("networkManagerSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--disable-tests",
+        "--disable-introspection",
+        "--without-docs",
+        "--without-systemd-journal",
+        "--with-modify-system=true",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("nmDaemon")
+      discard pkg.executable("nmcli")
+      discard pkg.library("libNm")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

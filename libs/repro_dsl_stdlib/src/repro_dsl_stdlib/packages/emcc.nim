@@ -32,3 +32,18 @@ package emcc:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:emsdk@6.0.0:sha256:57aa2e320cd852598034c4bf636ea8693b1be44882111686d71ab1468a3cff9f"
+    # Linux x86_64: emsdk source tarball (same project + version as the
+    # Windows entry — emsdk's source archive is platform-agnostic; the
+    # POSIX entry script is `emsdk` rather than `emsdk.bat`). Same
+    # post-install caveat applies: the realized prefix carries the emsdk
+    # tooling but not a working emcc until the operator runs
+    # `./emsdk install latest && ./emsdk activate latest`.
+    tarball url = "https://github.com/emscripten-core/emsdk/archive/refs/tags/6.0.0.tar.gz",
+      sha256 = "85c35c690ff6747243cb439076835c2a870df8cc5e8d304fe0800c69f6f6e265",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "emsdk",
+      packageId = "emsdk@6.0.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:emsdk@6.0.0:linux:sha256:85c35c690ff6747243cb439076835c2a870df8cc5e8d304fe0800c69f6f6e265"

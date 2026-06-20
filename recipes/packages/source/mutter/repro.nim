@@ -135,6 +135,8 @@
 ## flips ``x11=true`` for legacy bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -227,35 +229,9 @@ package mutterSource:
     ## icon decoding + background image loading.
     "gdk-pixbuf >=2.40"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``introspection=false`` skips GObject Introspection.
-    ## ``profiler=false`` skips the Sysprof profiler integration.
-    ## ``tests=false`` skips the upstream test suite.
-    ## ``debug=false`` disables debug assertions.
-    ## ``native_backend=true`` enables the KMS/DRM native backend.
-    ## ``wayland=true`` enables the Wayland compositor backend.
-    ## ``x11=false`` drops the X11-server backend.
-    ## ``xwayland=false`` drops the XWayland legacy-client support.
-    ## ``remote_desktop=false`` drops the PipeWire / libei remote-
-    ## desktop backend.
-    "-Dintrospection=false"
-    "-Dprofiler=false"
-    "-Dtests=false"
-    "-Ddebug=false"
-    "-Dnative_backend=true"
-    "-Dwayland=true"
-    "-Dx11=false"
-    "-Dxwayland=false"
-    "-Dremote_desktop=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libMutter:
     ## ``libmutter-15.so`` — the compositor / window-manager library
     ## consumed by gnome-shell as its compositor glue layer. The
@@ -277,6 +253,28 @@ package mutterSource:
     ## layer's binary-discovery glob recognises ``mutter`` as the
     ## upstream-emitted basename).
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("mutterSource")
+    try:
+      let opts = @[
+        "-Dintrospection=false",
+        "-Dprofiler=false",
+        "-Dtests=false",
+        "-Ddebug=false",
+        "-Dnative_backend=true",
+        "-Dwayland=true",
+        "-Dx11=false",
+        "-Dxwayland=false",
+        "-Dremote_desktop=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libMutter")
+      discard pkg.executable("mutterBin")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

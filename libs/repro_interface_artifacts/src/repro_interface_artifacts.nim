@@ -2505,6 +2505,28 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passL:-L" & clingoPrefix / "lib")
     result.add("--passL:-Wl,-rpath," & clingoPrefix / "lib")
 
+proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
+  ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module
+  ## must be compiled with when it ``import``s ``repro_project_dsl`` (or a
+  ## generated interface stub, which itself ``import``s the DSL umbrella)
+  ## from OUTSIDE the reprobuild source tree.
+  ##
+  ## The DSL umbrella takes hard dependencies on reprobuild's own
+  ## libraries (``repro_binary_cache_client``, ``repro_binary_cache_server``,
+  ## ``repro_core`` …) plus out-of-tree packages (``nimcrypto`` …). In a
+  ## normal in-tree compile reprobuild's ``config.nims`` registers all of
+  ## those on ``--path``; a consumer compiled in a scratch directory never
+  ## loads that ``config.nims``, so the flags have to be replayed
+  ## explicitly. This is the same flag set the interface-extraction and
+  ## provider-compile commands assemble (see ``interfaceExtractionCommand``
+  ## / ``providerCompileCommand``), exposed publicly so the engine-side
+  ## consumer compile and the integration tests share one authoritative
+  ## source of truth instead of hand-maintaining a parallel ``--path``
+  ## list.
+  result.add(reproLibPathFlags(workDir))
+  result.add(reproPackagePathFlags(workDir))
+  result.add(externalHashFlags(workDir))
+
 proc fnvHex64(parts: openArray[string]): string =
   ## FNV-1a 64-bit hex digest of the concatenation of `parts` (with a NUL
   ## separator between parts so prefix collisions are impossible). Rendered
@@ -2533,7 +2555,21 @@ proc sharedProviderNimcacheKey(workDir: string;
   ## configure (the parent project plus every `try_compile`) land in the
   ## same nimcache so unchanged library modules are reused across them --
   ## the dominant slice of each provider compile.
-  var parts = @[nimCompilerPath(), absolutePath(workDir)]
+  ##
+  ## Concurrent-process hazard: the key is also process-scoped via
+  ## `getCurrentProcessId()`. Multiple `repro` sessions (separate processes)
+  ## can run provider/interface compiles at the same time -- e.g. several
+  ## concurrent dev-env sessions sharing one project tree. Nim's incremental
+  ## compiler renames/removes temporary entries inside the nimcache while it
+  ## builds; if a sibling process is concurrently populating the *same*
+  ## directory, that cleanup hits `ENOTEMPTY` ("Directory not empty") and the
+  ## compile aborts. Folding the process id into the key gives each process
+  ## its own nimcache directory, so concurrent sessions never collide, while
+  ## every compile *within* one process still reuses the same cache and keeps
+  ## Nim's `.sha1` incremental benefit (the parent-project compile plus every
+  ## `try_compile` in a single CMake configure all run in one process).
+  var parts = @[nimCompilerPath(), absolutePath(workDir),
+                "pid=" & $getCurrentProcessId()]
   for f in hostFlags:
     parts.add(f)
   for f in libFlags:
@@ -2784,12 +2820,17 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # uses.
   #
   # The key is shared across every provider compile that targets the same
-  # toolchain + library set (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
+  # toolchain + library set *within one process*
+  # (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
   # Each CMake configure pays for one cold provider compile; subsequent
   # try_compile providers reuse all unchanged library object files via
   # Nim's `.sha1`-based incremental compilation. Within a single CMake
   # configure the provider compiles are sequential, so the shared cache is
-  # safe. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` restores the legacy
+  # safe. Across processes the key is additionally scoped by process id (see
+  # `sharedProviderNimcacheKey`) so concurrent `repro` sessions building from
+  # the same project tree never share a nimcache directory and never race
+  # Nim's incremental rename/rmdir cleanup into an `ENOTEMPTY` abort.
+  # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` restores the legacy
   # per-output isolation.
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)

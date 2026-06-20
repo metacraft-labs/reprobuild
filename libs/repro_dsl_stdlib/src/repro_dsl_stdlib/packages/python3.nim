@@ -69,6 +69,20 @@ package python3:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:python@3.12.10:sha256:4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+    # Linux x86_64: python.org does NOT publish a Linux "embeddable"
+    # equivalent of the Windows python-X.Y.Z-embed-amd64.zip. Use the
+    # astral-sh/python-build-standalone install_only tarball as the
+    # Linux counterpart — same source `python_dev.nim` consumes; ships
+    # `python/bin/python3` plus the full Lib/ tree under a top-level
+    # `python/` directory.
+    tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      sha256 = "c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a",
+      archiveType = "tar.gz",
+      executablePath = "python/bin/python3",
+      packageId = "python@3.12.13+20260610",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:python@3.12.13+20260610:linux:sha256:c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a"
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).

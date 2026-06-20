@@ -131,6 +131,8 @@
 ## flips ``extensions_app=true`` for extension-development bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -218,31 +220,9 @@ package gnomeShellSource:
     ## decoding + wallpaper loading.
     "gdk-pixbuf >=2.40"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``gtk_doc=false`` skips the gtk-doc API documentation build.
-    ## ``tests=false`` skips the upstream test suite.
-    ## ``man=false`` skips man-page generation.
-    ## ``networkmanager=false`` drops the NetworkManager status-menu
-    ## integration.
-    ## ``systemd=false`` drops the systemd-journal integration.
-    ## ``extensions_app=false`` skips the GNOME Extensions GUI app.
-    ## ``extensions_tool=false`` skips the gnome-extensions CLI tool.
-    "-Dgtk_doc=false"
-    "-Dtests=false"
-    "-Dman=false"
-    "-Dnetworkmanager=false"
-    "-Dsystemd=false"
-    "-Dextensions_app=false"
-    "-Dextensions_tool=false"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   executable gnomeShell:
     ## ``/usr/bin/gnome-shell`` — the standalone shell binary that
     ## drives the user-session UI (top bar, activities overview,
@@ -261,6 +241,26 @@ package gnomeShellSource:
     ## per the gdk-pixbuf / glib2 precedent. v1 records the artifact
     ## only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("gnomeShellSource")
+    try:
+      let opts = @[
+        "-Dgtk_doc=false",
+        "-Dtests=false",
+        "-Dman=false",
+        "-Dnetworkmanager=false",
+        "-Dsystemd=false",
+        "-Dextensions_app=false",
+        "-Dextensions_tool=false",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("gnomeShell")
+      discard pkg.library("libGnomeShell")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -105,6 +105,8 @@
 ##                            desktop is non-SELinux).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -169,25 +171,9 @@ package coreutilsSource:
     ## generates the per-binary manpages.
     "perl >=5.32"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-selinux``
-    ## sentinel lives at the tail so any override (e.g. a future
-    ## SELinux variant) can append ``--with-selinux`` later without
-    ## re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--enable-no-install-program=kill,uptime,arch`` skips installing
-    ##                                                  the three binaries
-    ##                                                  util-linux /
-    ##                                                  procps-ng /
-    ##                                                  ``uname -m`` cover.
-    ## ``--without-selinux`` skips the libselinux dependency.
-    "--disable-static"
-    "--enable-no-install-program=kill,uptime,arch"
-    "--without-selinux"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable ls:
     ## ``/usr/bin/ls`` — the directory-listing CLI consumed by every
     ## shell session, every install script, every Makefile rule. v1
@@ -227,6 +213,25 @@ package coreutilsSource:
     ## script uses ``\`echo X\``` via env shimming or when the path is
     ## explicit. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("coreutilsSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--enable-no-install-program=kill,uptime,arch",
+        "--without-selinux",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("ls")
+      discard pkg.executable("cp")
+      discard pkg.executable("mv")
+      discard pkg.executable("rm")
+      discard pkg.executable("cat")
+      discard pkg.executable("echo")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

@@ -444,14 +444,32 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   result.shim = requireBinary(monitorShimPath(repoRoot),
     "reprobuild.test_fixtures.monitor_shim")
 
+  # Concurrent-reuse hazard: the test runner executes many test BINARIES in
+  # parallel, and several of them pass the SAME ``cacheKey`` (e.g. the four
+  # ``t_e2e_shell_hook_*`` programs all share ``"m76-shell-hook"`` via
+  # ``shell_hook_helper``). ``cacheKey`` alone therefore does NOT isolate
+  # processes — only suites WITHIN one process. When two ``nim c`` invocations
+  # from different processes target the same on-disk ``nimcache`` directory,
+  # Nim's incremental compiler renames/removes temporary entries inside it
+  # while a sibling process is still populating the same directory, so the
+  # ``rmdir`` / rename hits ``ENOTEMPTY`` ("Directory not empty") and the
+  # compile aborts. The symptom surfaces intermittently as a dev-session /
+  # shell-hook e2e failure during a provider/fs-snoop compile.
+  #
+  # Scope the nimcache (and the synthesized wrapper source it consumes) to the
+  # current process so parallel binaries never share a nimcache directory,
+  # while repeated calls within ONE process (the per-suite cases) still reuse
+  # the same cache and keep Nim's ``.sha1`` incremental benefit.
+  let processCacheKey = cacheKey & "-p" & $getCurrentProcessId()
   # Executable-Consolidation M1: compile the synthesized fs-snoop wrapper
   # (see ``fsSnoopWrapperSource``) instead of the deleted standalone entry
   # point source.
   let fsSnoopArgs = @[
     "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
     "--warnings:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / (cacheKey & "-fs-snoop"),
+    "--nimcache:" & repoRoot / "build" / "nimcache" /
+      (processCacheKey & "-fs-snoop"),
     "--out:" & result.fsSnoop,
-    fsSnoopWrapperSource(repoRoot, cacheKey)
+    fsSnoopWrapperSource(repoRoot, processCacheKey)
   ]
   discard requireSuccess(shellCommand(fsSnoopArgs), repoRoot)

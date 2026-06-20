@@ -153,6 +153,8 @@
 ##                                drift.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -214,26 +216,9 @@ package binutilsSource:
     ## for it.
     "texinfo >=6.7"
 
-  configureFlags:
-    ## Flag set per the task brief. Order is load-bearing: the
-    ## ``./configure`` script evaluates options left-to-right and
-    ## ``--enable-ld=default`` MUST come AFTER ``--enable-gold`` so
-    ## the two-linker decision tree picks BFD ld as the default
-    ## ``$PREFIX/bin/ld`` symlink target (vs gold).
-    ##
-    ## ``--enable-gold`` enables the gold linker as a sidecar.
-    ## ``--enable-ld=default`` pins ``$PREFIX/bin/ld`` to BFD ld.
-    ## ``--enable-plugins`` enables linker-plugin support for LTO.
-    ## ``--enable-shared`` emits libbfd / libopcodes / libctf as
-    ## shared objects in addition to the static archives.
-    ## ``--disable-werror`` keeps the build resilient to host-
-    ## compiler version drift.
-    "--enable-gold"
-    "--enable-ld=default"
-    "--enable-plugins"
-    "--enable-shared"
-    "--disable-werror"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable ld:
     ## ``$PREFIX/bin/ld`` — the classical BFD linker, pinned as the
     ## default by the ``--enable-ld=default`` configure flag. Every
@@ -293,6 +278,32 @@ package binutilsSource:
     ## ``$PREFIX/bin/strings`` — the printable-ASCII-extractor. v1
     ## records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("binutilsSource")
+    try:
+      let opts = @[
+        "--enable-gold",
+        "--enable-ld=default",
+        "--enable-plugins",
+        "--enable-shared",
+        "--disable-werror",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("ld")
+      discard pkg.executable("as")
+      discard pkg.executable("ar")
+      discard pkg.executable("nm")
+      discard pkg.executable("objcopy")
+      discard pkg.executable("objdump")
+      discard pkg.executable("ranlib")
+      discard pkg.executable("strip")
+      discard pkg.executable("readelf")
+      discard pkg.executable("size")
+      discard pkg.executable("strings")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

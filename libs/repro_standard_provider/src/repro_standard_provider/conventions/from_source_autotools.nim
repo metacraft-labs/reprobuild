@@ -320,43 +320,9 @@ proc hasMakefileAm(projectRoot: string): bool =
 # Path layout
 # ---------------------------------------------------------------------------
 
-proc stagingDir(projectRoot: string): string =
-  projectRoot / ScratchDirName / FromSourceAutotoolsSubdir / "staging"
-
 proc stampDir(projectRoot: string): string =
-  ## Per-action stamp directory. The autotools convention has no
-  ## meaningful "build dir" of its own (it runs configure + make in
-  ## ``<projectRoot>/src/``) so stamps live in a sibling subdir under
-  ## ``.repro/build/from-source-autotools/`` to keep ``repro clean``
-  ## semantics consistent.
+  ## Per-action stamp directory (kept for the M9.R.6.1 sentinel).
   projectRoot / ScratchDirName / FromSourceAutotoolsSubdir / "stamps"
-
-proc configureStampPath(projectRoot: string): string =
-  ## A custom stamp file the configure action touches on success. The
-  ## downstream build / install actions key off the stamp instead of
-  ## autotools' generated ``Makefile`` / ``config.status`` (which can be
-  ## touched during build too).
-  stampDir(projectRoot) / "from-source-autotools-configure.stamp"
-
-proc buildStampPath(projectRoot: string): string =
-  stampDir(projectRoot) / "from-source-autotools-build.stamp"
-
-proc installStampPath(projectRoot: string): string =
-  stampDir(projectRoot) / "from-source-autotools-install.stamp"
-
-proc artifactOutputDir(projectRoot, member: string): string =
-  projectRoot / OutputDirName / member
-
-proc artifactOutputPath(projectRoot, member: string;
-                        kind: FromSourceAutotoolsMemberKind): string =
-  case kind
-  of fsaExecutable:
-    when defined(windows):
-      artifactOutputDir(projectRoot, member) / (member & ".exe")
-    else:
-      artifactOutputDir(projectRoot, member) / member
-  of fsaLibraryStatic:
-    artifactOutputDir(projectRoot, member) / ("lib" & member & ".so")
 
 proc sanitizeNamePart(value: string): string =
   for ch in value:
@@ -367,245 +333,52 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-# ---------------------------------------------------------------------------
-# Tool discovery — lazy. ``recognize`` does NOT call these (per the
-# module docstring): a host without ``make`` / ``gcc`` can still
-# register the convention, exercise it via tests, and lower the action
-# graph; the actual build run will fail loudly at execution time.
-# ---------------------------------------------------------------------------
-
-proc makeExecutable(): string =
-  ## M9.N Batch B: bare tool name; engine resolves via PATH plumbing.
-  ## See ``from_source_meson`` §mesonExecutable for rationale.
-  "make"
+# M9.R.6.1: ``stagingDir`` / ``configureStampPath`` / ``buildStampPath`` /
+# ``installStampPath`` / ``artifactOutputDir`` / ``artifactOutputPath`` /
+# ``makeExecutable`` + the 5-stage emit procs were removed alongside the
+# legacy ``emitFragment`` body.
 
 # ---------------------------------------------------------------------------
 # Action emission
 # ---------------------------------------------------------------------------
 
-proc emitConfigureAction(projectRoot, srcDir: string;
-                         configureFlags: seq[string];
-                         fetchDeps: seq[string];
-                         fetchStamps: seq[string]):
-                           tuple[action: BuildActionDef; stamp: string] =
-  ## ``cd <srcDir> && ./configure --prefix=/usr <configureFlags...>``.
-  ##
-  ## The convention always passes ``--prefix=/usr`` as an anchor flag so
-  ## the install step lands binaries at a predictable
-  ## ``<staging>/usr/{bin,lib}/`` location. Recipes whose configureFlags
-  ## already include ``--prefix=`` will see autoconf honour the LAST
-  ## occurrence (right-most wins) — a known limitation; see module
-  ## docstring.
-  createDir(extendedPath(stampDir(projectRoot)))
-  let stamp = configureStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    var trailingOpts = ""
-    for opt in configureFlags:
-      trailingOpts.add(" \"")
-      trailingOpts.add(opt.replace("\"", "\\\""))
-      trailingOpts.add("\"")
-    let script = "set -e; cd \"" & escapedSrc &
-      "\"; ./configure --prefix=" & InstallPrefix & trailingOpts &
-      "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    # On the rare host without ``sh`` on PATH we fall back to a direct
-    # ``./configure`` argv that runs from ``projectRoot``; the
-    # action's workingDir is set to ``srcDir`` by ``inlineExecCall``'s
-    # second arg so the configure script resolves relatively. This path
-    # is best-effort — autotools configure scripts assume a POSIX
-    # ``sh`` is available regardless.
-    argv = @["./configure", "--prefix=" & InstallPrefix]
-    for opt in configureFlags:
-      argv.add(opt)
-  var inputs: seq[string] = @[]
-  for st in fetchStamps:
-    inputs.add(st)
-  let action = buildAction(
-    id = "from-source-autotools-configure",
-    call = inlineExecCall(argv, projectRoot),
-    deps = fetchDeps,
-    inputs = inputs,
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.configure",
-    # M9.N Batch B: autotools configure shells out to the project's
-    # ``./configure`` script which probes ``make`` + a C compiler.
-    toolIdentityRefs = @["make", "gcc", "sh"])
-  (action, stamp)
+proc sentinelStampPath(projectRoot: string): string =
+  stampDir(projectRoot) / "from-source-autotools-sentinel.stamp"
 
-proc emitBuildAction(projectRoot, makeExe, srcDir, configureStamp: string):
-                       tuple[action: BuildActionDef; stamp: string] =
-  ## ``cd <srcDir> && make``. The stamp file lets downstream actions key
-  ## off build success without relying on autotools-generated
-  ## ``Makefile`` touch behaviour.
-  let stamp = buildStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; cd \"" & escapedSrc & "\"; \"" & escapedMake &
-      "\"; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[makeExe]
-  let action = buildAction(
-    id = "from-source-autotools-build",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-autotools-configure"],
-    inputs = @[configureStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.build",
-    # M9.N Batch B: ``make`` re-invokes the C compiler per the
-    # generated Makefile.
-    toolIdentityRefs = @["make", "gcc", "sh"])
-  (action, stamp)
-
-proc emitInstallAction(projectRoot, makeExe, srcDir, staging,
-                       buildStamp: string;
-                       identity: CacheEntryIdentity):
-                         tuple[action: BuildActionDef; stamp: string] =
-  ## ``cd <srcDir> && make install DESTDIR=<staging>``.
-  ##
-  ## ``DESTDIR`` is the standard autotools escape hatch for non-root
-  ## installs: make honours the configure-time ``--prefix`` and
-  ## prefixes every install path with ``<destdir>``. Binaries land at
-  ## ``<staging>/usr/bin/...`` and libraries at ``<staging>/usr/lib/...``
-  ## given the ``--prefix=/usr`` anchor.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the install action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful install.
-  createDir(extendedPath(staging))
-  let stamp = installStampPath(projectRoot)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedMake = makeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStaging = staging.replace("\\", "/").replace("\"", "\\\"")
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; cd \"" & escapedSrc & "\"; \"" & escapedMake &
-      "\" install DESTDIR=\"" & escapedStaging &
-      "\"; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @[makeExe, "install", "DESTDIR=" & staging]
-  let action = buildAction(
-    id = "from-source-autotools-install",
-    call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-autotools-build"],
-    inputs = @[buildStamp],
-    outputs = @[stamp],
-    pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.install",
-    publishToBinaryCache = true,
-    cacheEntryIdentity = some(identity),
-    # M9.N Batch B: ``make install`` invokes the autotools install
-    # rules.
-    toolIdentityRefs = @["make", "sh"])
-  (action, stamp)
-
-proc stripLibPrefix(name: string): string =
-  ## Autotools recipes commonly declare library members under names like
-  ## ``libExpat`` whose installed file is ``libexpat.so`` — i.e. the
-  ## ``lib`` prefix is already part of the member name. The stage-copy
-  ## logic expects to look at ``<staging>/usr/lib/<installed>``; if the
-  ## member name starts with ``lib`` we use it verbatim, otherwise we
-  ## prefix ``lib`` to match libtool's naming convention. This is a
-  ## best-effort heuristic; recipes whose installed file name diverges
-  ## (e.g. SONAME-versioned ``libexpat.so.1.10.0``) need an
-  ## ``installedAs:`` knob (deferred — see module docstring).
-  if name.startsWith("lib"):
-    name
-  else:
-    "lib" & name
-
-proc stagedBinaryPath(staging, member: string;
-                      kind: FromSourceAutotoolsMemberKind): string =
-  ## Heuristic guess at the autotools-installed path. ``make install
-  ## DESTDIR=<staging>`` with ``--prefix=/usr`` lays binaries at
-  ## ``<staging>/usr/bin/<member>`` and libraries at
-  ## ``<staging>/usr/lib/<libname>.so``. For libraries the member name
-  ## is normalised via ``stripLibPrefix`` because recipes commonly
-  ## declare a member like ``libExpat`` whose installed file is
-  ## already ``libexpat.so``.
-  case kind
-  of fsaExecutable:
-    when defined(windows):
-      staging / "usr" / "bin" / (member & ".exe")
-    else:
-      staging / "usr" / "bin" / member
-  of fsaLibraryStatic:
-    # ``stripLibPrefix(libExpat) == "libExpat"`` then we apply
-    # ``toLowerAscii`` because libtool-built shared objects use the
-    # lowercased package name (``libexpat.so``) regardless of the
-    # camelCase member identifier used in the recipe. This matches
-    # expat's installed file name; recipes whose installed file name
-    # diverges (KF6 / Qt-style PascalCase SONAMEs) need an
-    # ``installedAs:`` knob.
-    let prefixed = stripLibPrefix(member)
-    let lowered = prefixed.toLowerAscii()
-    staging / "usr" / "lib" / (lowered & ".so")
-
-proc emitStageCopyAction(projectRoot, staging, installStamp: string;
-                         member: FromSourceAutotoolsMember;
-                         identity: CacheEntryIdentity): BuildActionDef =
-  ## Copy ``<staging>/usr/bin/<member>`` (or
-  ## ``<staging>/usr/lib/lib<member>.so``) to
-  ## ``<projectRoot>/.repro/output/<member>/<member>``. This action is
-  ## what the engine's output-collection step keys off — the canonical
-  ## per-artifact output path matches the existing direct conventions'
-  ## ``<root>/.repro/output/<name>/<name>`` schema.
-  ##
-  ## M9.L.4-refactor Step B: stamps the binary-cache identity tuple on
-  ## the stage-copy action so the engine's ``BinaryCachePublisher`` hook
-  ## fires after a successful per-artifact stage.
-  let outDir = artifactOutputDir(projectRoot, member.name)
-  createDir(extendedPath(outDir))
-  let outPath = artifactOutputPath(projectRoot, member.name, member.kind)
-  let stagedPath = stagedBinaryPath(staging, member.name, member.kind)
-  # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
-  let shExe = "sh"
-  var argv: seq[string]
-  if shExe.len > 0:
-    let escapedStaged = stagedPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOut = outPath.replace("\\", "/").replace("\"", "\\\"")
-    let escapedOutDir = outDir.replace("\\", "/").replace("\"", "\\\"")
-    let script = "set -e; mkdir -p \"" & escapedOutDir &
-      "\"; cp -f \"" & escapedStaged & "\" \"" & escapedOut & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    argv = @["cp", stagedPath, outPath]
-  let kindTag = case member.kind
-    of fsaExecutable: "executable"
-    of fsaLibraryStatic: "library-static"
+proc emitSynthesisSentinelAction(projectRoot, dslPackageName: string;
+                                 fetchActionId, fetchStamp: string;
+                                 identity: CacheEntryIdentity):
+                                   BuildActionDef =
+  ## M9.R.6.1 narrowed synthesis sentinel — see
+  ## ``from_source_meson.emitSynthesisSentinelAction`` for rationale.
+  createDir(extendedPath(parentDir(sentinelStampPath(projectRoot))))
+  let stamp = sentinelStampPath(projectRoot)
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStampDir = parentDir(stamp).replace("\\", "/").
+    replace("\"", "\\\"")
+  let script = "set -e; mkdir -p \"" & escapedStampDir &
+    "\"; printf 'from-source-autotools sentinel for %s\\n' \"" &
+    dslPackageName & "\" > \"" & escapedStamp & "\""
+  let argv = @["sh", "-c", script]
   buildAction(
-    id = "from-source-autotools-stage-" & sanitizeNamePart(member.name),
+    id = "from-source-autotools-sentinel",
     call = inlineExecCall(argv, projectRoot),
-    deps = @["from-source-autotools-install"],
-    inputs = @[installStamp],
-    outputs = @[outPath],
+    deps = @[fetchActionId],
+    inputs = @[fetchStamp],
+    outputs = @[stamp],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "from-source-autotools.stage." & kindTag,
+    commandStatsId = "from-source-autotools.sentinel",
     publishToBinaryCache = true,
     cacheEntryIdentity = some(identity),
-    # M9.N Batch B: stage-copy is pure ``sh`` (mkdir + cp).
     toolIdentityRefs = @["sh"])
+
+# M9.R.6.1: ``emitConfigureAction`` / ``emitBuildAction`` /
+# ``emitInstallAction`` / ``stripLibPrefix`` / ``stagedBinaryPath`` /
+# ``emitStageCopyAction`` were all removed (along with the 5-stage
+# emitFragment body). The recipe's explicit ``build:`` body owns
+# configure/build/install/stage-copy via the M9.R.2b
+# ``autotools_package(...)`` Layer-1 constructor.
 
 # ---------------------------------------------------------------------------
 # Convention entry
@@ -640,15 +413,26 @@ proc fromSourceAutotoolsRecognize(projectRoot: string;
     let spec = registeredFetchSpec(dslPackageName)
     if spec.url.len == 0 or spec.hashHex.len == 0:
       return false
-    # The configureFlags channel is the unambiguous discriminator.
-    # Recipes that list ``make`` / ``gcc`` in ``uses:`` without
-    # ``autoconf``/``automake``/``libtool`` still legitimately drive a
-    # ``./configure`` step (zlib, openssl, sqlite). The presence of any
-    # registered configure-channel flag tells us the recipe author
-    # intends to use ``./configure`` regardless of the ``uses:`` token
-    # mix.
-    let configureFlags = registeredBuildFlags(dslPackageName, "", "configure")
-    if configureFlags.len == 0:
+    # M9.R.6.1: the configureFlags channel discriminator is gone (the
+    # registry was retired). Recognise via ``registeredNativeBuildDeps``
+    # for the canonical autotools tokens instead. Recipes that drive a
+    # ``./configure`` step without listing autoconf/automake/libtool
+    # explicitly (zlib, openssl, sqlite et al.) fall back to listing
+    # ``make`` — which the meson / cmake siblings would already have
+    # claimed if they matched first per the standard-provider's
+    # registration order.
+    var sawAutotools = false
+    for raw in registeredNativeBuildDeps(dslPackageName):
+      let stripped = raw.strip()
+      var head = ""
+      for ch in stripped:
+        if ch in {' ', '\t', '>', '<', '=', '!', ',', ';'}:
+          break
+        head.add(ch)
+      if head in ["autoconf", "automake", "libtool", "make"]:
+        sawAutotools = true
+        break
+    if not sawAutotools:
       return false
   if extractMembers(source).len == 0:
     return false
@@ -673,9 +457,10 @@ proc syntheticPackage(projectRoot: string;
 proc fromSourceAutotoolsEmitFragment(projectRoot: string;
                                      request: ProviderGraphRequest):
                                        GraphFragment {.gcsafe.} =
-  ## Lower the recipe into a fetch + configure + build + install + per-
-  ## member stage-copy action graph. See module docstring's pipeline
-  ## section.
+  ## M9.R.6.1 narrowed emitFragment — emits exactly fetch + sentinel.
+  ## See ``from_source_meson.fromSourceMesonEmitFragment`` for rationale.
+  ## The configure/build/install/stage-copy actions live in the recipe's
+  ## explicit ``build:`` block via ``autotools_package(...)``.
   {.cast(gcsafe).}:
     let source = readReprobuildSource(projectRoot)
     let members = extractMembers(source)
@@ -698,46 +483,19 @@ proc fromSourceAutotoolsEmitFragment(projectRoot: string;
         "from-source-autotools convention: no fetch: spec registered for " &
           "package '" & dslPackageName & "' — recognise() should have " &
           "rejected this project")
-    let makeExe = makeExecutable()
-    let configureFlags = registeredBuildFlags(dslPackageName, "", "configure")
-    let srcDir = fetchExtractedRoot(projectRoot, spec)
-    let staging = stagingDir(projectRoot)
     let pkg = syntheticPackage(projectRoot, members)
-    # M9.L.4-refactor Step B: compose the binary-cache identity once
-    # and thread it onto the install + stage-copy edges. The engine's
-    # ``BinaryCachePublisher`` hook consumes the same tuple from the
-    # decoded ``BuildAction``; conventions stay tool-agnostic.
     let identity = computeCacheEntryIdentity(projectRoot,
       dslPackageName, "autotools")
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       discard buildPool("fetch", 2'u32)
       var allActions: seq[BuildActionDef] = @[]
-      # 1. Fetch
       let fetchAct = emitFetchAction(projectRoot, dslPackageName, spec)
       allActions.add(fetchAct)
       let fetchStamp = fetchStampPath(projectRoot, spec.hashHex)
-      # 2. Configure
-      let configurePair = emitConfigureAction(projectRoot, srcDir,
-        configureFlags, @[fetchAct.id], @[fetchStamp])
-      allActions.add(configurePair.action)
-      # 3. Build
-      let buildPair = emitBuildAction(projectRoot, makeExe, srcDir,
-        configurePair.stamp)
-      allActions.add(buildPair.action)
-      # 4. Install — carries the binary-cache identity so the engine
-      # hook publishes the install tree after success.
-      let installPair = emitInstallAction(projectRoot, makeExe, srcDir,
-        staging, buildPair.stamp, identity)
-      allActions.add(installPair.action)
-      # 5. Per-artifact stage-copy — each edge also carries the
-      # identity. The engine's hook fires per successful action; the
-      # convention does NOT emit a separate publish edge any more (the
-      # Step-A-era ``emitPublishAction`` retired in Step B).
-      for member in members:
-        let stageAct = emitStageCopyAction(projectRoot, staging,
-          installPair.stamp, member, identity)
-        allActions.add(stageAct)
+      let sentinelAct = emitSynthesisSentinelAction(projectRoot,
+        dslPackageName, fetchAct.id, fetchStamp, identity)
+      allActions.add(sentinelAct)
       defaultTarget(target("default", allActions))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

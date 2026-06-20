@@ -132,6 +132,8 @@
 ## that flips ``libwacom=true``).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -198,30 +200,9 @@ package libinputSource:
     ## libinput's input layer's primary consumer.
     "libevdev >=1.9"
 
-  mesonOptions:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: meson evaluates options
-    ## left-to-right and the ``--buildtype=release`` sentinel lives at
-    ## the tail so any override (e.g. a future debug-build variant)
-    ## can append ``--buildtype=debug`` later without re-ordering this
-    ## block.
-    ##
-    ## ``documentation=false`` skips doxygen + sphinx documentation
-    ## generation.
-    ## ``debug-gui=false`` skips the GTK4 event-debug GUI (drops the
-    ## gtk4 transitive dep that no v1 desktop story needs).
-    ## ``tests=false`` skips the upstream test suite to keep the build
-    ## hermetic + fast.
-    ## ``libwacom=false`` drops wacom-tablet integration.
-    ## ``udev-dir=/lib/udev`` installs udev rules under the LSB
-    ## canonical path.
-    "-Ddocumentation=false"
-    "-Ddebug-gui=false"
-    "-Dtests=false"
-    "-Dlibwacom=false"
-    "-Dudev-dir=/lib/udev"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libinput:
     ## ``libinput.so`` — the input-device abstraction shared library
     ## linked by wlroots / Mutter / KWin. v1 records the artifact
@@ -241,6 +222,24 @@ package libinputSource:
     ## ``$prefix/bin/libinput`` filename. v1 records the artifact
     ## only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("libinputSource")
+    try:
+      let opts = @[
+        "-Ddocumentation=false",
+        "-Ddebug-gui=false",
+        "-Dtests=false",
+        "-Dlibwacom=false",
+        "-Dudev-dir=/lib/udev",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libinput")
+      discard pkg.executable("libinputBin")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

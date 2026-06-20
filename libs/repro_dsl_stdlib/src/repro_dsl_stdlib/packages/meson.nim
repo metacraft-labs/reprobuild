@@ -25,6 +25,8 @@
 import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+# DSL-port M9.R.2c — typed slot var for ``executable mesonBin:``.
+import repro_dsl_stdlib/types/executable
 export packages_schema
 
 # ---------------------------------------------------------------------------

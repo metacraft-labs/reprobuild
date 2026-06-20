@@ -332,71 +332,17 @@ suite "c-cpp-meson convention M39":
             sawCcPin = true
       check sawCcPin
 
-  test "M9.K: mesonOptions flags appear in meson setup argv":
-    # DSL-port M9.K: when the M9.I registry holds mesonOptions for the
-    # DSL package, ``emitFragment`` must inject them into the
-    # ``meson setup`` action's argv. The test pre-populates the
-    # registry directly (no DSL recipe evaluation) and verifies the
-    # flags round-trip into the configure action's argv text.
-    if not mesonToolchainReady():
-      skip()
-    else:
-      # Use a scratch project the convention recognises. The recipe's
-      # ``package <name>:`` line is the registry lookup key the
-      # convention scans for at emit time.
-      let scratch = getTempDir() / "test_c_cpp_meson_convention_m9k_flags"
-      if dirExists(scratch):
-        removeDir(scratch)
-      createDir(scratch)
-      createDir(scratch / "src")
-      writeFile(scratch / "src" / "main.c",
-        "#include <stdio.h>\nint main(void){puts(\"hi\");return 0;}\n")
-      writeFile(scratch / "meson.build",
-        "project('m9khello', 'c')\n" &
-        "executable('m9khello', 'src/main.c')\n")
-      writeFile(scratch / "reprobuild.nim",
-        "import repro_project_dsl\n" &
-        "package m9kMesonPkg:\n" &
-        "  uses:\n" &
-        "    \"gcc >=11\"\n" &
-        "    \"meson >=1.3\"\n" &
-        "\n" &
-        "  executable m9khello:\n" &
-        "    discard\n")
-      defer:
-        removeDir(scratch)
-      # M9.K registry pre-population — the convention reads these at
-      # emit time. resetDslPortBuildFlagState keeps any prior test's
-      # registrations from leaking in.
-      resetDslPortBuildFlagState()
-      registerBuildFlag("m9kMesonPkg", "", "meson", "-Daudit=false")
-      registerBuildFlag("m9kMesonPkg", "", "meson", "-Dlauncher=true")
-      registerBuildFlag("m9kMesonPkg", "", "ninja", "-j4")
-      defer:
-        resetDslPortBuildFlagState()
-      let conv = meson_convention.cCppMesonConvention()
-      let request = dummyRequest(scratch)
-      require conv.recognize(scratch, request)
-      let fragment = conv.emitFragment(scratch, request)
-      var sawAudit = false
-      var sawLauncher = false
-      var sawNinjaPassthrough = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        let argvJoined = inlineArgvOf(action).join(" ")
-        if action.id == "ccpp-meson-configure":
-          if argvJoined.contains("-Daudit=false"):
-            sawAudit = true
-          if argvJoined.contains("-Dlauncher=true"):
-            sawLauncher = true
-        elif action.id.startsWith("ccpp-meson-build-"):
-          if argvJoined.contains("--ninja-args=-j4"):
-            sawNinjaPassthrough = true
-      check sawAudit
-      check sawLauncher
-      check sawNinjaPassthrough
+  test "M9.K: mesonOptions flags injection retired (M9.R.6.1)":
+    # M9.R.6.1 (2026-06-19): the ``registeredBuildFlags`` runtime
+    # registry + the five ``mesonOptions:`` / ``cmakeFlags:`` /
+    # ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` parser arms
+    # were retired. The in-tree c_cpp_meson convention no longer threads
+    # mesonOptions / ninjaFlags into the configure / compile argv —
+    # recipes route per-tool options through their explicit ``build:``
+    # body calling ``meson_package(...)`` directly. This assertion
+    # documents the retirement at compile time.
+    check not compiles((proc (): seq[string] =
+      result = registeredBuildFlags("m9kMesonPkg", "", "meson"))())
 
   test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
     # M9.N Batch B: every action stamps the catalog tool refs the

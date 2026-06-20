@@ -326,54 +326,13 @@ suite "c-cpp-make convention M17":
             arg0Base.endsWith("-ar") or arg0Base.endsWith("-ar.exe")
       check argv[1] == "rcs"
 
-  test "M9.K: makeFlags appear in link action argv":
-    # DSL-port M9.K: when the M9.I registry holds makeFlags for the
-    # DSL package, ``emitFragment`` must inject them into the link
-    # action's argv. The c-cpp-make convention does NOT invoke ``make``
-    # itself — see the module docstring's "makeFlags" note — so the
-    # pragmatic mapping is to append the registered tokens to the
-    # ``gcc -o ...`` link command.
-    if not gccOnPath():
-      skip()
-    else:
-      # Read the fixture's recipe to pull the DSL package name so the
-      # M9.K lookup key matches.
-      let recipePath = BinaryFixture / "reprobuild.nim"
-      let recipeSrc = if fileExists(recipePath): readFile(recipePath) else: ""
-      var pkgName = ""
-      for rawLine in recipeSrc.splitLines():
-        let stripped = rawLine.strip()
-        if stripped.startsWith("package"):
-          let rest = stripped[len("package") .. ^1].strip()
-          for ch in rest:
-            if ch in {' ', '\t', ':', ','}: break
-            pkgName.add(ch)
-          if pkgName.len > 0:
-            break
-      check pkgName.len > 0
-      resetDslPortBuildFlagState()
-      registerBuildFlag(pkgName, "", "make", "-lm")
-      registerBuildFlag(pkgName, "", "make", "-static")
-      defer:
-        resetDslPortBuildFlagState()
-      let conv = c_cpp_make_convention.cCppMakeConvention()
-      let request = dummyRequest(BinaryFixture)
-      let fragment = conv.emitFragment(BinaryFixture, request)
-      var sawLm = false
-      var sawStatic = false
-      for node in fragment.nodes:
-        if node.kind != gnkAction:
-          continue
-        let action = decodeBuildActionPayload(toBytes(node.payload))
-        if not action.id.startsWith("ccpp-make-link-"):
-          continue
-        let argvJoined = inlineArgvOf(action).join(" ")
-        if argvJoined.contains("-lm"):
-          sawLm = true
-        if argvJoined.contains("-static"):
-          sawStatic = true
-      check sawLm
-      check sawStatic
+  test "M9.K: makeFlags injection retired (M9.R.6.1)":
+    # M9.R.6.1 (2026-06-19): the ``registeredBuildFlags`` runtime
+    # registry + the ``makeFlags:`` parser arm were retired. Recipes
+    # route per-tool options through their explicit ``build:`` body.
+    # This assertion documents the retirement at compile time.
+    check not compiles((proc (): seq[string] =
+      result = registeredBuildFlags("makePkg", "", "make"))())
 
   test "emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)":
     # M9.N Batch B: every emitted compile / link / archive action

@@ -107,6 +107,18 @@
 ## needing a flag channel.
 
 import repro_project_dsl
+# DSL-port M9.R.2c — pulls ``Library`` / ``Executable`` into scope for
+# the typed artifact slot vars the ``package`` macro injects.
+import repro_dsl_stdlib/types
+# DSL-port M9.R.10a — bring the system-tool stdlib package set into
+# scope so the project-interface extractor (``toInterfaceToolUse``)
+# finds the provisioning blocks declared on the stdlib python3 package
+# and threads them onto the meson recipe's
+# ``nativeBuildDeps: "python3 >=3.8"`` use. Without this import the
+# provisioning blocks would be invisible at extract time and the
+# from-source resolver would hard-fail with "no stdlib provisioning
+# channel declared on the tool use".
+import repro_dsl_stdlib/packages/system_tools
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -153,7 +165,11 @@ package mesonSource:
     ## upstream tarball ships pure-Python code with no native
     ## extensions, so no C toolchain is required at install time —
     ## extracting + copying + writing a wrapper script is sufficient.
-    "python >=3.8"
+    ## DSL-port M9.R.10a — the stdlib package + provisioning lives
+    ## under ``python3`` (the POSIX command name); align the recipe
+    ## constraint to the canonical name so the resolver finds the
+    ## scoop / nix / tarball channels declared on the stdlib package.
+    "python3 >=3.8"
 
   executable meson:
     ## ``$PREFIX/bin/meson`` — the wrapper script that ``exec``s the

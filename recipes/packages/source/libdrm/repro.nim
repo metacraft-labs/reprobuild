@@ -91,6 +91,8 @@
 ## live here when the per-distro variants need different strategies.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -147,30 +149,9 @@ package libdrmSource:
     ## C++ component, so the C compiler is sufficient.
     "gcc >=7"
 
-  mesonOptions:
-    ## Flag set mirroring a modern-desktop baseline. Order is
-    ## load-bearing: meson evaluates options left-to-right and the
-    ## ``--buildtype=release`` sentinel lives at the tail so any
-    ## override (e.g. a future debug-build variant) can append
-    ## ``--buildtype=debug`` later without re-ordering this block.
-    ##
-    ## The per-vendor KMS API toggles are explicit ``enabled`` /
-    ## ``disabled`` (libdrm exposes them as meson ``feature`` options
-    ## so the tri-state ``auto`` value is the default we override
-    ## here for determinism).
-    "-Dintel=disabled"
-    "-Dradeon=disabled"
-    "-Damdgpu=enabled"
-    "-Dnouveau=enabled"
-    "-Dvmwgfx=disabled"
-    "-Dfreedreno=disabled"
-    "-Dvc4=disabled"
-    "-Detnaviv=disabled"
-    "-Dtegra=disabled"
-    "-Dvalgrind=disabled"
-    "-Dman-pages=disabled"
-    "--buildtype=release"
-
+  config:
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
+    discard
   library libdrm:
     ## ``libdrm.so`` — the core user-space ioctl wrapper. Built
     ## unconditionally from the libdrm meson build.
@@ -188,6 +169,31 @@ package libdrmSource:
     ## ``libdrm_nouveau.so`` — open NVIDIA driver side library,
     ## gated on ``-Dnouveau=enabled`` above.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    setCurrentOwningPackageOverride("libdrmSource")
+    try:
+      let opts = @[
+        "-Dintel=disabled",
+        "-Dradeon=disabled",
+        "-Damdgpu=enabled",
+        "-Dnouveau=enabled",
+        "-Dvmwgfx=disabled",
+        "-Dfreedreno=disabled",
+        "-Dvc4=disabled",
+        "-Detnaviv=disabled",
+        "-Dtegra=disabled",
+        "-Dvalgrind=disabled",
+        "-Dman-pages=disabled",
+        "--buildtype=release",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libdrm")
+      discard pkg.library("libdrmAmdgpu")
+      discard pkg.library("libdrmNouveau")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

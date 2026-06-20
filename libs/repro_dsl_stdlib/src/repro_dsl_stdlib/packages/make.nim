@@ -1,4 +1,6 @@
 import repro_project_dsl
+# DSL-port M9.R.2c — typed slot var for ``executable makeBin:``.
+import repro_dsl_stdlib/types/executable
 
 # GNU make. On Nix it ships under bin/make.
 package make:

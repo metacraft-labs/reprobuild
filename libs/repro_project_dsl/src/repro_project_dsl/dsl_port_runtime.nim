@@ -3566,10 +3566,25 @@ proc registeredFetchSpec*(packageName: string): DslFetchSpec =
     extractedRoot: "")
 
 # ---------------------------------------------------------------------------
-# DSL-port M9.I — per-package convention-layer flag-injection registry.
+# DSL-port M9.R.6.1 — M9.I per-package flag-injection registry RETIRED.
 # ---------------------------------------------------------------------------
 ##
-## ## What the M9.I surface covers
+## The M9.I ``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:`` /
+## ``makeFlags:`` / ``ninjaFlags:`` block parser arms + the
+## ``registerBuildFlag(...)`` / ``registeredBuildFlags(...)`` accessors
+## + the ``DslBuildFlagSet`` row type are all GONE as of M9.R.6.1
+## (2026-06-19). The M9.R.5b recipe sweep lifted every per-recipe flag
+## block into an explicit ``build:`` body that calls one of the
+## M9.R.2b Layer-1 typed constructors (``meson_package(...)`` /
+## ``cmake_package(...)`` / ``autotools_package(...)``) with the flag
+## sequence inlined as a configureOptions / cacheVars argument; the
+## convention layer no longer needs a side channel to thread the flags
+## through.
+##
+## See ``reprobuild-specs/From-Source-DSL-Realignment.milestones.org``
+## §M9.R.6.1 for the narrowing rationale.
+##
+## --- HISTORICAL CONTEXT (pre-M9.R.6.1) ---
 ##
 ## Real from-source recipes need to pass per-package flags into the
 ## convention layer's underlying build tool. Examples:
@@ -3579,7 +3594,7 @@ proc registeredFetchSpec*(packageName: string): DslFetchSpec =
 ##   * wlroots: ``-Dxwayland=disabled`` to ``meson setup``.
 ##   * kernel: ``ARCH=x86_64`` / ``V=1`` to ``make``.
 ##
-## M9.I adds four package-body blocks (all optional, all repeatable for
+## M9.I added four package-body blocks (all optional, all repeatable for
 ## append semantics):
 ##
 ##   * ``mesonOptions:`` — flags passed to ``meson setup``.
@@ -3594,9 +3609,9 @@ proc registeredFetchSpec*(packageName: string): DslFetchSpec =
 ## semantics would be wrong here because flag order matters for some
 ## build systems).
 ##
-## **M9.I is REGISTRATION + parser ONLY.** No actual injection into the
+## **M9.I was REGISTRATION + parser ONLY.** No actual injection into the
 ## build action runs as part of this milestone. The convention layer
-## (c_cpp_meson, c_cpp_cmake, c_cpp_autotools, c_cpp_make) needs to be
+## (c_cpp_meson, c_cpp_cmake, c_cpp_autotools, c_cpp_make) needed to be
 ## widened to consume these registries; that's deferred to M9.L.
 ##
 ## ## Threading model
@@ -3613,120 +3628,12 @@ proc registeredFetchSpec*(packageName: string): DslFetchSpec =
 ## level flags (``artifactName == ""``); artifact-level injection is a
 ## follow-up.
 
-type
-  DslBuildFlagSet* = object
-    ## One package's accumulated convention-layer flag sequences. M9.I
-    ## records ONE row per ``(packageName, artifactName)`` pair; the
-    ## five channel-specific seqs append in source-declaration order so
-    ## flag-order-sensitive build systems (e.g. autotools' ``configure``
-    ## script's left-to-right env-var precedence) round-trip correctly.
-    ##
-    ## ``artifactName == ""`` indicates a package-level row — flags
-    ## apply to every artifact the package's build action produces.
-    ## Artifact-level rows (``artifactName != ""``) are reserved for a
-    ## follow-up milestone; M9.I always registers package-level rows.
-    packageName*: string
-    artifactName*: string
-      ## ``""`` = package-level (applies to all artifacts).
-    mesonOptions*: seq[string]
-      ## Passed to ``meson setup`` in declaration order.
-    cmakeFlags*: seq[string]
-      ## Passed to ``cmake ..`` in declaration order.
-    configureFlags*: seq[string]
-      ## Passed to ``./configure`` in declaration order.
-    makeFlags*: seq[string]
-      ## Passed to ``make`` in declaration order. Some flags act as
-      ## variable overrides (e.g. ``ARCH=x86_64``) so the registry
-      ## preserves the source order verbatim.
-    ninjaFlags*: seq[string]
-      ## Passed to ``ninja`` in declaration order.
-
-var dslPortBuildFlagSets {.threadvar.}: Table[string, DslBuildFlagSet]
-  ## Per-(package, artifact) flag-set registry. The key is the literal
-  ## ``packageName & '\x00' & artifactName`` (``\x00`` is a byte that
-  ## cannot appear in either component so the encoding is unambiguous).
-  ## ``registerBuildFlag`` appends; ``registeredBuildFlags`` reads back
-  ## the channel-specific seq.
-
-proc resetDslPortBuildFlagState*() =
-  ## Drop every build-flag registration. Test fixtures call this between
-  ## scenarios so registry entries do not leak across cases. Symmetric
-  ## with ``resetDslPortFetchState`` / ``resetDslPortBootloaderState``.
-  dslPortBuildFlagSets.clear()
-
-proc m9iFlagSetKey(packageName, artifactName: string): string {.inline.} =
-  ## Compose the ``(packageName, artifactName)`` registry key. The byte
-  ## ``\x00`` separator cannot appear in either component so the encoding
-  ## is unambiguous (Nim identifiers exclude NUL by tokenisation).
-  result = packageName & '\x00' & artifactName
-
-proc registerBuildFlag*(packageName, artifactName, channel, flag: string) =
-  ## Append ``flag`` to the appropriate channel-specific seq for the
-  ## ``(packageName, artifactName)`` row. The M9.I macro emitter calls
-  ## this once per string literal in each ``mesonOptions:`` /
-  ## ``cmakeFlags:`` / ``configureFlags:`` / ``makeFlags:`` /
-  ## ``ninjaFlags:`` block, in source-declaration order.
-  ##
-  ## ``channel`` ∈ {``"meson"``, ``"cmake"``, ``"configure"``,
-  ## ``"make"``, ``"ninja"``}; unknown channels are silently ignored
-  ## so forward-compatibility with future channels (e.g. ``"cargo"``)
-  ## stays open at the emitter layer.
-  ##
-  ## NOTE: M9.I performs NO injection into the build action. The
-  ## registered seqs are the INPUT to a future M9.L follow-up; this
-  ## proc only mutates the in-memory registry.
-  let key = m9iFlagSetKey(packageName, artifactName)
-  if key notin dslPortBuildFlagSets:
-    dslPortBuildFlagSets[key] = DslBuildFlagSet(
-      packageName: packageName,
-      artifactName: artifactName,
-      mesonOptions: @[],
-      cmakeFlags: @[],
-      configureFlags: @[],
-      makeFlags: @[],
-      ninjaFlags: @[])
-  case channel
-  of "meson": dslPortBuildFlagSets[key].mesonOptions.add(flag)
-  of "cmake": dslPortBuildFlagSets[key].cmakeFlags.add(flag)
-  of "configure": dslPortBuildFlagSets[key].configureFlags.add(flag)
-  of "make": dslPortBuildFlagSets[key].makeFlags.add(flag)
-  of "ninja": dslPortBuildFlagSets[key].ninjaFlags.add(flag)
-  else: discard
-
-proc registeredBuildFlags*(packageName, artifactName, channel: string):
-    seq[string] =
-  ## Return the registered flag seq for the ``(packageName, artifactName,
-  ## channel)`` triple in source-declaration order. Returns an empty seq
-  ## when nothing was registered or ``channel`` is unknown.
-  ##
-  ## **DEPRECATED — M9.R.6.** This accessor is retained for
-  ## backward-decode of recipes that still spell ``mesonOptions:`` /
-  ## ``cmakeFlags:`` / ``configureFlags:`` / ``makeFlags:`` /
-  ## ``ninjaFlags:`` blocks. The M9.R.5b recipe sweep will lift these
-  ## flags into the per-package ``config:`` block; once the sweep
-  ## lands, this accessor + its underlying registry will be removed.
-  ## New code MUST route flag values through ``config:`` Configurables
-  ## instead. The narrowed from-source conventions (M9.R.6) no longer
-  ## read this registry directly — the synthesis layer at
-  ## ``libs/repro_dsl_stdlib/.../synthesis/from_source_default_build.nim``
-  ## owns the channel-to-constructor-arg mapping during the transition
-  ## via ``legacyMesonOptions`` / ``legacyCmakeFlags`` /
-  ## ``legacyConfigureFlags`` / ``legacyMakeFlags``. A ``{.deprecated.}``
-  ## pragma is intentionally NOT added here because every from-source
-  ## convention still calls this proc until the synthesis migration
-  ## completes; adding the pragma would emit warnings on every recipe
-  ## build until the sweep retires the remaining call sites.
-  let key = m9iFlagSetKey(packageName, artifactName)
-  if key notin dslPortBuildFlagSets:
-    return @[]
-  let row = dslPortBuildFlagSets[key]
-  case channel
-  of "meson": return row.mesonOptions
-  of "cmake": return row.cmakeFlags
-  of "configure": return row.configureFlags
-  of "make": return row.makeFlags
-  of "ninja": return row.ninjaFlags
-  else: return @[]
+# M9.R.6.1: ``DslBuildFlagSet`` type + ``dslPortBuildFlagSets``
+# threadvar + ``resetDslPortBuildFlagState`` + ``m9iFlagSetKey`` +
+# ``registerBuildFlag`` + ``registeredBuildFlags`` were all removed
+# on 2026-06-19. Recipes route per-tool options through their
+# explicit ``build:`` block calling the M9.R.2b Layer-1 typed
+# constructors instead.
 
 # ---------------------------------------------------------------------------
 # DSL-port M9.R.1 — package-level dependency-declaration surface.

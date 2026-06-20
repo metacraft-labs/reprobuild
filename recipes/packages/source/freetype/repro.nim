@@ -111,6 +111,8 @@
 ## ``--with-harfbuzz`` for advanced auto-hinting bundles).
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -180,25 +182,9 @@ package freetypeSource:
     ## when present on the host.
     "pkg-config"
 
-  configureFlags:
-    ## Flag set mirroring the modern-desktop baseline per the task
-    ## brief. Order is load-bearing: the ``./configure`` script
-    ## evaluates options left-to-right and the ``--without-harfbuzz``
-    ## sentinel lives at the tail so any override (e.g. a variant that
-    ## enables harfbuzz-driven auto-hinting) can append
-    ## ``--with-harfbuzz`` later without re-ordering this block.
-    ##
-    ## ``--disable-static`` skips the static archive.
-    ## ``--without-zlib=auto`` autodetects host zlib (used for WOFF).
-    ## ``--without-bzip2`` skips the optional bzip2 dependency.
-    ## ``--without-png=auto`` autodetects libpng (used for color emoji).
-    ## ``--without-harfbuzz`` breaks the freetype<->harfbuzz cycle.
-    "--disable-static"
-    "--without-zlib=auto"
-    "--without-bzip2"
-    "--without-png=auto"
-    "--without-harfbuzz"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   library libFreetype:
     ## ``libfreetype.so`` — the TrueType / OpenType / Type1 / CFF /
     ## WOFF font-format loader + glyph rasteriser + hinting /
@@ -208,6 +194,22 @@ package freetypeSource:
     ## per-artifact build body lands in M9.L when the convention's
     ## make-spawn + install-glue closes.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("freetypeSource")
+    try:
+      let opts = @[
+        "--disable-static",
+        "--without-zlib=auto",
+        "--without-bzip2",
+        "--without-png=auto",
+        "--without-harfbuzz",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.library("libFreetype")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /

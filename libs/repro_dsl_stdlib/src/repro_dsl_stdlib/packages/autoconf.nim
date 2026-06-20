@@ -14,6 +14,8 @@
 ## matching the existing ``autoreconf`` (autoconf-archive bundle).
 
 import repro_project_dsl
+# DSL-port M9.R.2c — typed slot var for ``executable autoconfBin:``.
+import repro_dsl_stdlib/types/executable
 
 package autoconf:
   provisioning:

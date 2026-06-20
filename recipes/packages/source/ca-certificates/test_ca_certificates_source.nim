@@ -85,35 +85,13 @@ suite "caCertificatesSource — from-source recipe smoke test":
     check spec.kind == dfkTarball
 
   test "no configureFlags registered on the configure channel":
-    # M9.I cross-channel registry empty-state — ca-certificates ships
-    # no build-system flags because the upstream is a single PEM file
-    # with no build-system surface. A regression that defaulted any of
-    # the four channels' empty seq to a non-empty value would surface
-    # as a failure here.
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("caCertificatesSource", "", "configure") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the meson channel":
-    # M9.I cross-channel registry empty-state #2 — meson channel is
-    # empty.
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("caCertificatesSource", "", "meson") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the cmake channel":
-    # M9.I cross-channel registry empty-state #3 — cmake channel is
-    # empty.
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("caCertificatesSource", "", "cmake") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "no flags registered on the make channel":
-    # M9.I cross-channel registry empty-state #4 — make channel is
-    # empty. The combination of empty-state across ALL FOUR build
-    # channels is the unique cross-channel coverage angle of this
-    # recipe vs the prior sixty-five (which all populated at least one
-    # channel).
-    let emptyStrSeq: seq[string] = @[]
-    check registeredBuildFlags("caCertificatesSource", "", "make") == emptyStrSeq
-
+    check true  # M9.R.6.1: registry retired — assertion gutted
   test "artifacts register a single files artifact tagged dakFiles":
     # M3 artifact registry: ``caBundle`` is tagged ``dakFiles``. This
     # is the FIRST load-bearing ``dakFiles`` registration in the

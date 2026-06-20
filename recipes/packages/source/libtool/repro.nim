@@ -68,6 +68,8 @@
 ## and emits only the shared variant.
 
 import repro_project_dsl
+import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/types/package_result
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -120,11 +122,9 @@ package libtoolSource:
     ## that replaces the hardcoded ``/usr/bin/file`` reference.
     "file"
 
-  configureFlags:
-    ## Modern-desktop baseline. ``--disable-static`` skips the static
-    ## archive of libltdl.
-    "--disable-static"
-
+  config:
+    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    discard
   executable libtool:
     ## ``$PREFIX/bin/libtool`` — the canonical shell driver wrapping
     ## compile / link / install / finish / execute operations. v1
@@ -141,6 +141,20 @@ package libtoolSource:
     ## autotools projects link against when they need portable
     ## ``dlopen`` semantics. v1 records the artifact only.
     discard
+
+  build:
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    setCurrentOwningPackageOverride("libtoolSource")
+    try:
+      let opts = @[
+        "--disable-static",
+      ]
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      discard pkg.executable("libtool")
+      discard pkg.executable("libtoolize")
+      discard pkg.library("libltdl")
+    finally:
+      clearCurrentOwningPackageOverride()
 
   runtimeDeps:
     ## TODO(M9.R.5b): derive runtime closure from pkg-config /
