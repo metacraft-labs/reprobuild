@@ -658,6 +658,14 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       # version-suffix glob below handles the ``-N.M.so`` variants).
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
         script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".so\" ")
+      # M9.R.15e.2 — kebab-with-digits stripped variant so PascalCase
+      # names with trailing digits resolve to the upstream SONAME shape.
+      # ``libGtk4`` -> stripped ``Gtk4`` -> kebabDigits ``gtk-4`` ->
+      # probe ``libgtk-4.so`` (matches gtk4's upstream layout).
+      if strippedKebabDigits.len > 0 and
+          strippedKebabDigits != strippedLowerName and
+          strippedKebabDigits != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebabDigits & ".so\" ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
         script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".so\" ")
@@ -708,6 +716,17 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     if strippedKebab.len > 0 and strippedKebab != strippedLowerName and
         strippedKebab != strippedSnake:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.15e.2 — kebab-with-digits stripped version-suffix glob for
+    # PascalCase names whose digit suffix is the SOVERSION separator.
+    # ``libGtk4`` -> stripped ``Gtk4`` -> kebabDigits ``gtk-4`` ->
+    # glob ``libgtk-4-*.so`` (gtk-4 ships ``libgtk-4.so`` AND
+    # ``libgtk-4.so.<X>`` — the plain-name probe handles the former; the
+    # glob handles version-suffix variants like ``libgtk-4-extras.so``).
+    if strippedKebabDigits.len > 0 and
+        strippedKebabDigits != strippedLowerName and
+        strippedKebabDigits != strippedKebab and
+        strippedKebabDigits != strippedSnake:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
     # upstream library lives under ``lib/x86_64-linux-gnu/`` or
@@ -723,6 +742,11 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       # M9.R.14h.8 — kebab+snake stripped variants on lib64 too.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
         script.add("\"" & lib64Dir & "/lib" & strippedKebab & ".so\" ")
+      # M9.R.15e.2 — kebab-with-digits stripped variant on lib64 (gtk4).
+      if strippedKebabDigits.len > 0 and
+          strippedKebabDigits != strippedLowerName and
+          strippedKebabDigits != strippedKebab:
+        script.add("\"" & lib64Dir & "/lib" & strippedKebabDigits & ".so\" ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
         script.add("\"" & lib64Dir & "/lib" & strippedSnake & ".so\" ")
@@ -740,6 +764,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       # M9.R.14h.8 — kebab + snake stripped version-suffix globs on lib64.
       if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      # M9.R.15e.2 — kebab-with-digits stripped version-suffix glob on lib64.
+      if strippedKebabDigits.len > 0 and
+          strippedKebabDigits != strippedLowerName and
+          strippedKebabDigits != strippedKebab and
+          strippedKebabDigits != strippedSnake:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebabDigits & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
       if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
           strippedSnake != strippedKebab:
         script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
