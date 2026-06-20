@@ -69,3 +69,20 @@ suite "DSL-port M9.R.14d.7 — meson_package stage-copy emission":
       # behaviour is exercised end-to-end by the wayland smoke loop.
     finally:
       clearCurrentOwningPackageOverride()
+
+  test "PascalCase artifact names convert to meson's kebab-case":
+    # Naming-translation rule that lets the stage-copy probe find
+    # `libwayland-client.so` from a recipe declaring
+    # `library libwaylandClient:`. The conversion preserves the
+    # leading `lib` prefix and inserts `-` before each subsequent
+    # uppercase letter, then lowercases everything.
+    check m9r14dPascalToKebab("libwaylandClient") == "libwayland-client"
+    check m9r14dPascalToKebab("libwaylandServer") == "libwayland-server"
+    check m9r14dPascalToKebab("waylandScanner") == "wayland-scanner"
+    check m9r14dPascalToKebab("libwaylandCursor") == "libwayland-cursor"
+    # No-op on already-kebab + lowercase names.
+    check m9r14dPascalToKebab("libexpat") == "libexpat"
+    check m9r14dPascalToKebab("libffi") == "libffi"
+    # Adjacent uppercase characters collapse cleanly (KDE-style names).
+    check m9r14dPascalToKebab("KDE6Service") == "k-d-e6-service"
+    check m9r14dPascalToKebab("libGModule") == "lib-g-module"

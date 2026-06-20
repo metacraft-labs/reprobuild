@@ -243,6 +243,22 @@ proc sanitizeStageCopyName(value: string): string =
   if result.len == 0:
     result = "x"
 
+proc m9r14dPascalToKebab*(value: string): string =
+  ## DSL-port M9.R.14d.7c — convert ``libwaylandClient`` → ``libwayland-client``.
+  ## meson packages name their shared libraries in kebab-case
+  ## (``libwayland-client.so``) while recipes commonly declare them
+  ## in PascalCase (``library libwaylandClient:``). The probe order
+  ## consumes both forms.
+  result = ""
+  for i, ch in value:
+    if ch in {'A' .. 'Z'} and i > 0 and value[i - 1] notin {'-', '_'}:
+      result.add('-')
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    elif ch in {'A' .. 'Z'}:
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    else:
+      result.add(ch)
+
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string) =
   ## Emit a single stage-copy action that copies the installed
@@ -278,29 +294,43 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   # safety), <prefix>/lib<name>.so (library shape).
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
   if kind == "library":
-    # Library: probe several common autotools naming patterns.
+    # Library: probe several common autotools / meson naming patterns.
     # The DSL allows the recipe author to declare ``library libExpat:``
     # while the actual file is ``libexpat.so`` (autotools lowercases +
-    # prefixes ``lib``). The probe order:
-    #   1. lib<name>.so        (exact-case)
-    #   2. lib<lowerName>.so   (autotools convention — case-folded)
-    #   3. <name>.so           (no lib- prefix, exact-case)
-    #   4. <lowerName>.so      (no lib- prefix, case-folded)
-    #   5. lib<name>.a / lib<lowerName>.a (static archive fallbacks)
+    # prefixes ``lib``); meson uses kebab-case so ``library
+    # libwaylandClient:`` maps to ``libwayland-client.so``. The probe
+    # order:
+    #   1. lib<name>.so          (exact-case)
+    #   2. lib<lowerName>.so     (autotools convention — case-folded)
+    #   3. <kebabName>.so        (meson kebab-case, with `lib` prefix
+    #                             collapsed when the recipe already wrote
+    #                             it — `libwaylandClient` → `libwayland-client`)
+    #   4. <name>.so             (no lib- prefix, exact-case)
+    #   5. <lowerName>.so        (no lib- prefix, case-folded)
+    #   6. lib<name>.a / lib<lowerName>.a (static archive fallbacks)
     let escapedLowerName = name.toLowerAscii.replace("\"", "\\\"")
+    let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
     script.add("for candidate in ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
-    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\"; ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\"; ")
     script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
-    # Executable: probe bare name; also try .exe for cross-builds.
+    # Executable: probe bare name; also try .exe for cross-builds and
+    # kebab-case (meson convention — recipe declares
+    # ``executable waylandScanner`` while meson installs
+    # ``wayland-scanner``).
+    let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
     script.add("if [ -f \"" & escapedSrcDir & "/" & escapedName & "\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    script.add("elif [ -f \"" & escapedSrcDir & "/" & kebabName & "\" ]; then ")
+    script.add("cp -fL \"" & escapedSrcDir & "/" & kebabName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedName & ".exe\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
     script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
