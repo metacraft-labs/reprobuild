@@ -188,6 +188,13 @@ package dbusSource:
     ## expat (the XML parser dbus uses for the introspection XML +
     ## bus-config file parsing).
     "pkg-config"
+    ## python3 is invoked at configure time by ``test/data/meson.build``'s
+    ## ``copy_data_for_tests.py`` helper (the script is unconditionally
+    ## executed regardless of the ``modular_tests=disabled`` /
+    ## ``installed_tests=false`` flag combo because meson populates the
+    ## ``test/data/`` subtree even when the tests themselves are skipped
+    ## — the run_command at ``test/data/meson.build:211`` is not gated).
+    "python3 >=3.8"
 
   buildDeps:
     ## expat is the SAX XML parser dbus uses for the introspection
