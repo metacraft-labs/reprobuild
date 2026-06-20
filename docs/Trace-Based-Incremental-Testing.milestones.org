@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 3: M12-M13 complete; M11 (symBodyHash) next
+#+STATUS: Phase 3 complete (M11-M13) — campaign complete
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -788,7 +788,7 @@
     here; the native recorders emit CTFS.
 
 * M11 — Nim symBodyHash optimisation (deep when reported; shallow retained)
-  :STATUS: not started
+  :STATUS: complete
 
   Spec: §16.2 (`symBodyHash` = compile-time deep hash over the transitive call
   graph), §16.3 (library embeds per-test `bodyHash` in `--list-json`), §16.5 /
@@ -799,29 +799,76 @@
   (skip iff unchanged, no trace / no shallow combination); otherwise FALL BACK to
   the existing runtime shallow path (M1/M9), which must NOT be removed.
 
-  Deliverables:
-  - [ ] Catalog reader: parse a test binary's `--list-json` (or a committed
-    catalog fixture) into `test → bodyHash` (the §16.3 field). Document the schema
-    from the real `ct_test_unittest_parallel` `--list-json` (cite it).
-  - [ ] `decideByCatalog*(testId; catalog; cache)` — catalog `bodyHash` equal to
-    cached ⇒ `idSkipUnchanged`; differ ⇒ `idRerunChanged`; absent from cache ⇒
-    `idRunFresh`. No trace, no shallow hashing.
-  - [ ] A TIERED selector in/around `decide`: prefer the catalog `bodyHash` (deep)
-    when present for the test; else dispatch to the existing backend shallow path
-    (M6/M9). Document "deep-when-the-library-reports-it, shallow-otherwise" and
-    that removing the shallow path would break the no-library case.
-  - [ ] `record` stores the catalog `bodyHash` alongside `{deepHash, deps}` so
-    both paths update/compare independently.
+  Catalog source taken — PATH (1b), with the reason CITED. The in-tree library
+  `ct_test_unittest_parallel` does NOT (yet) emit a `bodyHash`/`symBodyHash`
+  field in its `--list-json`: `emitListJson`
+  (`libs/ct_test_unittest_parallel/src/ct_test_unittest_parallel.nim` ~line 157)
+  writes only `name`/`suite`/`file`/`line`. So the §3.6 "Full" tier
+  (`bodyHash` in `--list-json`) is unavailable out of the box and path (1a) is
+  not achievable here. Instead M11 produces a GENUINE `symBodyHash` catalog
+  directly via `std/macros.symBodyHash` (§16.2): a tiny macro + fixture
+  (`libs/repro_ct_incremental/tests/symbodyhash_catalog.nim`'s `symBodyHashOf`)
+  records `symBodyHash(theProc)` for each "test" proc into a flat
+  `{testId: bodyHash}` catalog JSON. The catalog reader
+  (`src/repro_ct_incremental/catalog.nim`) ALSO accepts the §16.3 `--list-json`
+  `{tests:[{name,bodyHash}]}` shape so it is forward-compatible the moment the
+  library starts emitting the field. Both the reader and the macro/fixture cite
+  §16.2/§16.3.
 
-  Automated tests:
-  - test_name: catalog_bodyhash_unchanged_skips_without_a_trace
-  - test_name: catalog_bodyhash_changed_reruns
-  - test_name: no_catalog_falls_back_to_shallow_path (shallow path intact)
-  - test_name: deep_preferred_over_shallow_when_both_available (static over-
-    estimate is a safe re-run, never a false-skip)
+  Deliverables:
+  - [X] Catalog reader: `src/repro_ct_incremental/catalog.nim` parses a catalog
+    into `BodyHashCatalog` (`test → bodyHash`), accepting BOTH the flat
+    `{testId: bodyHash}` shape (the path-1b macro output) AND the §16.3
+    `--list-json` `{tests:[{name,bodyHash}]}` shape. Empty/garbled ⇒ `Err`
+    (⇒ fall back to shallow / re-run, never a silent skip); an empty-string hash
+    is treated as ABSENT. The schema decision (no library bodyHash today ⇒ path
+    1b) is documented + cited in the module header and in the M11 test header.
+  - [X] `decideByCatalog*(testId; catalog; cache)` — catalog `bodyHash` equal to
+    the cached `bodyHash` ⇒ `idSkipUnchanged`; differ ⇒ `idRerunChanged`; testId
+    absent from cache ⇒ `idRunFresh`. NO trace, NO shallow hashing. Guards:
+    non-deterministic ⇒ `idRerunNonDeterministic`; a cache entry with no recorded
+    deep hash ⇒ conservative `idRerunChanged` (never a skip against an absent
+    baseline). `recordBodyHash*` records a test purely by its deep hash (no
+    trace).
+  - [X] A TIERED selector `decideTiered*(testId; catalog; traceDir; sourceRoot;
+    cache)`: DEEP path (`decideByCatalog`) iff the catalog reports a `bodyHash`
+    for the test (traceDir/sourceRoot NOT consulted); else dispatch to the
+    existing backend shallow `decide` (M6/M9). Documented
+    "deep-when-the-library-reports-it, shallow-otherwise" on the proc, and that
+    removing the shallow path would break the no-library case (every non-Nim
+    language + Nim built without the library).
+  - [X] `record` stores the catalog `bodyHash` alongside `{deepHash, deps}` (new
+    optional `bodyHash` param; cache `version` bumped 2 → 3 per M5 ⇒ a v2 file
+    re-runs). The two paths update/compare INDEPENDENTLY: a `record` WITH a
+    catalog stores the bodyHash AND the shallow deps; a `record` without one
+    stores the deps and leaves `bodyHash` empty.
+
+  Automated tests (`libs/repro_ct_incremental/tests/t_symbodyhash.nim`, all real
+  — genuine compile-time symBodyHashes + the real m0 Ruby fixture/trace):
+  - [X] test_name: catalog_bodyhash_unchanged_skips_without_a_trace
+    description: an unchanged genuine catalog hash ⇒ `idSkipUnchanged` via the
+    DEEP path with a deliberately-BROKEN traceDir+sourceRoot that would fail-safe
+    re-run if the shallow path were consulted — proving the deep path ran and the
+    shallow path was never touched.
+  - [X] test_name: catalog_bodyhash_changed_reruns (a changed genuine hash ⇒
+    `idRerunChanged`).
+  - [X] test_name: no_catalog_falls_back_to_shallow_path — with NO catalog
+    bodyHash, the tiered selector decides EXACTLY as the existing `decide` (the
+    same real m0 unchanged-skip AND executed-function-change-rerun cases run BOTH
+    ways, asserted byte-identical incl. the changed-func set) — shallow path
+    intact and used.
+  - [X] test_name: deep_preferred_over_shallow_when_both_available — BOTH a
+    catalog bodyHash AND a real trace/source exist; the source is UNCHANGED (so
+    shallow alone would SKIP) but the catalog reports a CHANGED hash, and the
+    tiered selector RERUNS — proving deep is chosen; a static over-estimate is a
+    SAFE re-run, never a false-skip (the inverse same-hash case skips only on
+    byte-equal deep hashes). A supporting guard asserts the fixture symBodyHashes
+    are real (non-empty) and discriminating.
 
   Acceptance: deep `symBodyHash` decisions when reported; shallow retained + used
-  otherwise; no false-skip on either.
+  otherwise; no false-skip on either. (All M11 tests green; full M0-M10 + M12 +
+  M13 regression green — see the report; the shallow-path M1/M9 tests pass
+  unchanged.)
 
 * M12 — Consume modern CTFS `.ct` traces
   :STATUS: complete

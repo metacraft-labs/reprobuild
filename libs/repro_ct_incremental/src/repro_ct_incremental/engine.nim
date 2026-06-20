@@ -54,7 +54,7 @@
 ## listed — a removed/unreadable dependency is treated as changed and is never
 ## silently skipped (see `removed_executed_function_reruns`).
 
-import std/[json, os, algorithm, hashes, strutils, tables]
+import std/[json, os, algorithm, hashes, strutils, tables, options]
 import results
 
 import trace_reader
@@ -63,6 +63,7 @@ import backends
 import native_trace
 import native_hash
 import ctfs_trace
+import catalog
 
 export trace_reader
 export extractors
@@ -70,6 +71,7 @@ export backends
 export native_trace
 export native_hash
 export ctfs_trace
+export catalog
 
 type
   IncrementalDecisionKind* = enum
@@ -117,6 +119,17 @@ type
       ## whether any executed function's hash changed (spec §16.7: non-deterministic
       ## tests are always re-run). Persisted in the cache JSON so the marking
       ## survives a process restart.
+    bodyHash*: string
+      ## The catalog-reported compile-time DEEP hash (`symBodyHash`, §16.2/§16.3)
+      ## for this test, when the CodeTracer unit-testing library reported one at
+      ## `record` time. Empty (``""``) means NO deep hash was recorded — the test
+      ## is then decided purely by the runtime shallow path (M1/M9). When
+      ## non-empty, `decideByCatalog`/`decideTiered` compare the CURRENT catalog
+      ## `bodyHash` directly against this value: equal ⇒ skip, differ ⇒ re-run,
+      ## with NO trace and NO shallow hashing. The two paths update and compare
+      ## INDEPENDENTLY — a `record` with a catalog stores this field AND the
+      ## shallow deps; a `record` without one stores the deps and leaves this
+      ## empty (M11).
 
   IncrementalCache* = object
     ## In-memory map of `testId -> CachedTest`, with JSON persistence.
@@ -126,13 +139,16 @@ type
 const
   DefaultCacheDir* = ".repro-ct-incremental"
   DefaultCacheFile* = "cache.json"
-  CacheVersion* = 2
-    ## Current on-disk cache schema version (M5). A cache file written with a
+  CacheVersion* = 3
+    ## Current on-disk cache schema version (M5/M11). A cache file written with a
     ## DIFFERENT version (older or newer) is IGNORED by `loadCache` — treated as
     ## an empty/fresh cache so every test re-runs — rather than mis-parsed or
     ## partially trusted. Bumped from 1 to 2 in M5 when the per-test
-    ## ``deterministic`` field was introduced; a v1 file lacks that field and any
-    ## fields the next schema adds, so trusting it could silently skip a test.
+    ## ``deterministic`` field was introduced; bumped from 2 to 3 in M11 when the
+    ## per-test catalog ``bodyHash`` (the compile-time deep hash, §16.2/§16.3) was
+    ## added. A v2 file lacks `bodyHash`, so a v2 entry that was recorded under
+    ## the deep path would look like a shallow-only entry; per M5 the version
+    ## mismatch makes the whole file re-run, which is the safe outcome.
 
 # ---------------------------------------------------------------------------
 # Decision constructors
@@ -438,6 +454,16 @@ proc loadCache*(path = defaultCachePath()): Result[IncrementalCache, string] =
       if entry["deterministic"].kind != JBool:
         return err("cache entry '" & testId & "' deterministic must be a bool")
       ct.deterministic = entry["deterministic"].getBool()
+    # The M11 catalog deep hash is OPTIONAL in the JSON: a shallow-only entry has
+    # no `bodyHash`, which decodes to the empty string ⇒ "no deep hash recorded"
+    # ⇒ the shallow path decides this test. A non-empty value is the recorded
+    # compile-time `symBodyHash` the deep path compares the current catalog
+    # against. Tolerating its absence keeps the reader robust to a hand-edited
+    # cache without ever defaulting to the unsafe direction.
+    if entry.hasKey("bodyHash"):
+      if entry["bodyHash"].kind != JString:
+        return err("cache entry '" & testId & "' bodyHash must be a string")
+      ct.bodyHash = entry["bodyHash"].getStr()
     if entry["deps"].kind != JArray:
       return err("cache entry '" & testId & "' deps must be an array")
     for dep in entry["deps"].elems:
@@ -473,6 +499,10 @@ proc toJson(cache: IncrementalCache): JsonNode =
     var entry = newJObject()
     entry["deepHash"] = newJString(ct.deepHash)
     entry["deterministic"] = newJBool(ct.deterministic)
+    # The M11 catalog deep hash (`symBodyHash`). Written unconditionally (empty
+    # for a shallow-only entry) so a round-trip is loss-free and the field is
+    # self-documenting on disk.
+    entry["bodyHash"] = newJString(ct.bodyHash)
     entry["deps"] = deps
     tests[id] = entry
   result = newJObject()
@@ -542,15 +572,25 @@ proc pruneCache*(cache: var IncrementalCache;
 # ---------------------------------------------------------------------------
 
 proc record*(cache: var IncrementalCache; testId, traceDir, sourceRoot: string;
-             deterministic = true): Result[void, string] =
+             deterministic = true; bodyHash = ""): Result[void, string] =
   ## Record a fresh run: read the trace's executed functions, compute each
   ## one's shallow hash from the CURRENT source under `sourceRoot`, combine into
-  ## the deep hash, and store `{deepHash, deps, deterministic}` for `testId`.
-  ## Called after a test is actually executed and re-traced (§16.7.4 step 4).
+  ## the deep hash, and store `{deepHash, deps, deterministic, bodyHash}` for
+  ## `testId`. Called after a test is actually executed and re-traced (§16.7.4
+  ## step 4).
   ##
   ## `deterministic` marks whether the test is reproducible. Pass `false` for a
   ## test known to be non-deterministic: it is persisted in the cache and makes
   ## every future `decide` re-run the test regardless of hashes (§16.7).
+  ##
+  ## `bodyHash` (M11) is the catalog-reported compile-time DEEP hash
+  ## (`symBodyHash`, §16.2/§16.3) for this test, when the CodeTracer unit-testing
+  ## library reported one. Pass it through (or use `recordWithCatalog`) so the
+  ## deep path can compare against it later. The empty default means "no deep
+  ## hash reported" — the entry is then a shallow-only entry decided by the
+  ## runtime path. The two paths are stored side by side and compared
+  ## INDEPENDENTLY (M11): this proc ALWAYS records the shallow deps, and
+  ## ADDITIONALLY records `bodyHash` when one is supplied.
   ##
   ## # Backend routing (M6)
   ##
@@ -574,8 +614,34 @@ proc record*(cache: var IncrementalCache; testId, traceDir, sourceRoot: string;
   cache.entries[testId] = CachedTest(
     deepHash: deepHashOfCachedDeps(deps),
     deps: deps,
-    deterministic: deterministic)
+    deterministic: deterministic,
+    bodyHash: bodyHash)
   ok()
+
+proc recordBodyHash*(cache: var IncrementalCache; testId, bodyHash: string;
+                     deterministic = true) =
+  ## Record a test PURELY by its catalog deep hash — NO trace, NO shallow deps.
+  ##
+  ## This is the deep-path counterpart of `record`: when the CodeTracer
+  ## unit-testing library reports a per-test `bodyHash` (§16.3), the runner can
+  ## record the test's deep hash WITHOUT ever producing or reading a trace
+  ## (§16.5 — the catalog comparison needs no runtime observation). A subsequent
+  ## `decideByCatalog`/`decideTiered` compares the CURRENT catalog `bodyHash`
+  ## against the value stored here.
+  ##
+  ## The stored entry has an EMPTY shallow dependency set, so if a future build
+  ## stops reporting a `bodyHash` for this test (the library was dropped), the
+  ## tiered selector falls back to the shallow path and `decide` sees an empty
+  ## recorded dep set ⇒ `idSkipUnchanged` only if nothing was recorded. To avoid
+  ## a stale shallow skip in that mixed case, callers that may toggle the library
+  ## should re-`record` with a trace. In the steady deep-path state (library
+  ## always present) only `bodyHash` is consulted, so the empty dep set is never
+  ## reached. This is documented and asserted in the M11 tests.
+  cache.entries[testId] = CachedTest(
+    deepHash: "",
+    deps: @[],
+    deterministic: deterministic,
+    bodyHash: bodyHash)
 
 proc markNonDeterministic*(cache: var IncrementalCache; testId: string;
                            deterministic = false): Result[void, string] =
@@ -794,3 +860,105 @@ proc decide*(testId, traceDir, sourceRoot: string;
     return skipUnchanged()
   changed.sort()
   rerunChanged(changed)
+
+# ---------------------------------------------------------------------------
+# M11 — the catalog DEEP path (compile-time symBodyHash) + tiered selector
+# ---------------------------------------------------------------------------
+#
+# When the CodeTracer Nim unit-testing library is linked, it reports a per-test
+# compile-time DEEP hash (`symBodyHash`, §16.2) in its `--list-json` catalog
+# (§16.3). `symBodyHash` already covers the test's entire transitive call graph,
+# so it IS the deep hash — there is nothing to combine and NO trace is needed
+# (§16.5/§3.7: the runner compares catalog `bodyHash`es between builds and skips
+# the unchanged ones). The engine compares that hash DIRECTLY.
+#
+# # Why the shallow path is RETAINED (an explicit M11 requirement)
+#
+# `symBodyHash` exists only when the test binary links the library AND only for
+# Nim. When the engine runs WITHOUT that library — every non-Nim language, and
+# Nim binaries built without it — there is NO catalog `bodyHash`, so the engine
+# MUST fall back to the runtime shallow path (M1/M9): discover the executed
+# functions from a trace and compare per-function source/instruction hashes.
+# Removing the shallow path would break that no-library case entirely. So
+# `decideTiered` is "deep-when-the-library-reports-it, shallow-otherwise": it
+# uses `decideByCatalog` iff a catalog `bodyHash` is available for the test, and
+# otherwise dispatches to the existing backend shallow `decide`. Both decisions
+# are equally fail-safe (the only skip is `idSkipUnchanged`).
+
+proc decideByCatalog*(testId: string; catalog: BodyHashCatalog;
+                      cache: IncrementalCache): IncrementalDecision =
+  ## The DEEP path: decide skip vs re-run for `testId` PURELY from the catalog's
+  ## compile-time `bodyHash` (§16.2/§16.3) — NO trace, NO shallow hashing, NO
+  ## source inspection.
+  ##
+  ## Preconditions: the caller must have established that the catalog reports a
+  ## `bodyHash` for `testId` (use `catalog.hasBodyHash` or let `decideTiered`
+  ## dispatch). If it does NOT, this returns `idRunFresh` (treating the test as
+  ## never-deep-recorded) so a caller that reaches here without a hash never
+  ## silently skips.
+  ##
+  ## Decision (per the M11 spec):
+  ##   * `testId` absent from the cache ⇒ `idRunFresh` (run + record the hash).
+  ##   * cache entry marked non-deterministic ⇒ `idRerunNonDeterministic`
+  ##     (checked first, exactly as the shallow `decide` does — a
+  ##     non-deterministic test is ALWAYS re-run, §16.7).
+  ##   * the cache has NO recorded `bodyHash` for this test (it was recorded by
+  ##     the shallow path only) ⇒ `idRerunChanged` — we cannot prove the deep
+  ##     hash is unchanged against an absent baseline, so we conservatively
+  ##     re-run (and the caller re-records WITH the hash). Never a silent skip.
+  ##   * recorded `bodyHash` EQUALS the current catalog `bodyHash` ⇒
+  ##     `idSkipUnchanged`.
+  ##   * they DIFFER ⇒ `idRerunChanged`.
+  ##
+  ## # Safety (static over-estimation is a SAFE re-run)
+  ##
+  ## `symBodyHash` is a STATIC compile-time deep hash over the transitive call
+  ## graph; it may OVER-estimate the dynamic dependency set (e.g. a branch the
+  ## test never takes at runtime still contributes to the hash). An over-estimate
+  ## only ever causes MORE re-runs (a changed hash ⇒ `idRerunChanged`), which is
+  ## always safe. It can NEVER cause a false skip: a skip requires the recorded
+  ## and current deep hashes to be byte-equal.
+  let current = catalog.bodyHashFor(testId)
+  if current.isNone:
+    # No deep hash reported for this test — caller should have used the shallow
+    # path. Fail safe to a fresh run rather than skip.
+    return runFresh()
+  if not cache.entries.hasKey(testId):
+    return runFresh()
+  let cached = cache.entries[testId]
+  # Guard: a non-deterministic test is always re-run, before any comparison.
+  if not cached.deterministic:
+    return rerunNonDeterministic()
+  if cached.bodyHash.len == 0:
+    # The cache entry has no recorded deep hash (it was recorded by the shallow
+    # path). We have no deep baseline to compare against, so we cannot prove the
+    # test is unchanged on the deep path — re-run conservatively (the caller
+    # re-records with the catalog hash). Reported as a changed deep dependency.
+    return rerunChanged(@[testId])
+  if cached.bodyHash == current.get():
+    return skipUnchanged()
+  rerunChanged(@[testId])
+
+proc decideTiered*(testId: string; catalog: BodyHashCatalog;
+                   traceDir, sourceRoot: string;
+                   cache: IncrementalCache): IncrementalDecision =
+  ## The TIERED selector (M11): use the compile-time DEEP path when the catalog
+  ## reports a `bodyHash` for `testId`, otherwise fall back to the existing
+  ## runtime backend SHALLOW path (`decide`).
+  ##
+  ## "Deep-when-the-library-reports-it, shallow-otherwise":
+  ##   * catalog HAS a `bodyHash` for `testId` ⇒ `decideByCatalog` (no trace, no
+  ##     shallow hashing; `traceDir`/`sourceRoot` are NOT consulted at all).
+  ##   * catalog does NOT ⇒ `decide(testId, traceDir, sourceRoot, cache)` — the
+  ##     unchanged M1/M9 shallow path. This is the no-library case; removing the
+  ##     shallow path would break it, which is why the shallow path is retained.
+  ##
+  ## When BOTH a catalog `bodyHash` AND a trace are available, the DEEP path is
+  ## preferred (the catalog hash already covers the whole transitive call graph,
+  ## so it is at least as conservative as the shallow runtime set and needs no
+  ## trace read). A static over-estimate there is a SAFE re-run, never a false
+  ## skip (see `decideByCatalog`).
+  if catalog.hasBodyHash(testId):
+    decideByCatalog(testId, catalog, cache)
+  else:
+    decide(testId, traceDir, sourceRoot, cache)

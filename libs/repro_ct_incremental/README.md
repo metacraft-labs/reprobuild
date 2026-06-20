@@ -95,6 +95,36 @@ Tests: `t_live_ruby.nim` (live, must pass here), `t_live_python.nim`,
 `t_live_full_suite.nim` (`full_suite_green_with_live_recordings` — compiles and
 runs every campaign test file and asserts all exit 0).
 
+## M11 — compile-time `symBodyHash` deep path (deep when reported; shallow retained)
+
+When the CodeTracer Nim unit-testing library reports a per-test compile-time
+**deep** hash (`symBodyHash`, spec §16.2) in its `--list-json` catalog (§16.3),
+the engine compares that hash DIRECTLY: equal ⇒ skip, differ ⇒ re-run, with **no
+trace and no shallow hashing** (§16.5/§3.7). `symBodyHash` already folds the
+test's entire transitive call graph into one digest, so it *is* the deep hash.
+
+- Catalog reader: `src/repro_ct_incremental/catalog.nim` →
+  `BodyHashCatalog` (`test → bodyHash`). Accepts the flat `{testId: bodyHash}`
+  shape and the §16.3 `--list-json` `{tests:[{name,bodyHash}]}` shape.
+- Deep decision: `engine.decideByCatalog` (no trace); `engine.recordBodyHash`
+  records a test purely by its deep hash.
+- **Tiered selector**: `engine.decideTiered` is
+  *deep-when-the-library-reports-it, shallow-otherwise* — it uses the catalog
+  deep path iff a `bodyHash` is reported for the test, else dispatches to the
+  existing runtime **shallow** `decide` (M1/M9). The shallow path is **retained
+  on purpose**: every non-Nim language, and Nim built without the library, has
+  no catalog `bodyHash`, so removing it would break the no-library case.
+
+Catalog source here is **path 1b**: the in-tree `ct_test_unittest_parallel`
+`--list-json` does not yet emit `bodyHash` (its `emitListJson` writes only
+`name`/`suite`/`file`/`line`), so M11 produces a **genuine** `symBodyHash`
+catalog with `std/macros.symBodyHash` via the
+`tests/symbodyhash_catalog.nim` macro — not a hand-invented hash. A static
+`symBodyHash` may over-estimate the dynamic dependency set, which only ever
+causes *more* re-runs (always safe), never a false skip.
+
+Tests: `t_symbodyhash.nim`.
+
 ## Supported languages (M10 — the full matrix)
 
 CodeTracer has exactly **two** incremental-testing mechanisms (spec §16.7),
