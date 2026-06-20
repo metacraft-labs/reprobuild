@@ -25,13 +25,23 @@
 ## to the hex value pinned below; verified to match the upstream
 ## tarball bytes downloaded once from download.gnome.org).
 ##
-## ## Version choice — 4.22.4 (current upstream stable)
+## ## Version choice — 4.18.5 (compatible with v1 glib2 2.82.5)
 ##
-## gtk4 4.22.4 is the current stable in the 4.22.x line as of mid-2026
-## (matches the nixpkgs pin). The 4.x ABI is stable since 4.0; any
-## ``>=4.10`` covers libadwaita 1.x's consumption.
+## We pin gtk4 4.18.5 (rather than the current stable 4.22.4) because
+## gtk4 4.22 requires ``glib >= 2.84`` (per gtk-4.22.4/meson.build's
+## ``glib_minor_req = 84``) while the sibling ``glib2Source`` recipe
+## at M9.R.15b vendors 2.82.5. Bumping the glib2 recipe is out of
+## scope for this milestone — it would invalidate every downstream
+## cairo / pango / gdk-pixbuf / mutter cache key, and the dep
+## constraint on every consumer's ``buildDeps`` row would need
+## auditing in lockstep.
 ##
-## sha256 = 51bd9f60c7d23a665a556c7364c21fb2e4e282566b3e7e092455e8f910330893
+## gtk4 4.18.5 requires ``glib >= 2.80`` (per its meson.build's
+## ``glib_minor_req = 80``), which the v1 glib 2.82.5 satisfies.
+## 4.18 is the previous LTS-shaped line; the libadwaita 1.6+
+## ecosystem still supports 4.18.
+##
+## sha256 = bb5267a062f5936947d34c9999390a674b0b2b0d8aa3472fe0d05e2064955abc
 ##
 ## ## Build shape
 ##
@@ -97,14 +107,14 @@ package gtk4Source:
   ## underpinning libadwaita + every GTK4 application.
 
   versions:
-    "4.22.4":
-      sourceRevision = "4.22.4"
-      sourceUrl = "https://download.gnome.org/sources/gtk/4.22/gtk-4.22.4.tar.xz"
+    "4.18.5":
+      sourceRevision = "4.18.5"
+      sourceUrl = "https://download.gnome.org/sources/gtk/4.18/gtk-4.18.5.tar.xz"
       sourceRepository = "https://gitlab.gnome.org/GNOME/gtk"
 
   fetch:
-    url: "https://download.gnome.org/sources/gtk/4.22/gtk-4.22.4.tar.xz"
-    sha256: "51bd9f60c7d23a665a556c7364c21fb2e4e282566b3e7e092455e8f910330893"
+    url: "https://download.gnome.org/sources/gtk/4.18/gtk-4.18.5.tar.xz"
+    sha256: "bb5267a062f5936947d34c9999390a674b0b2b0d8aa3472fe0d05e2064955abc"
     extractStrip: 1
 
   nativeBuildDeps:
@@ -168,6 +178,15 @@ package gtk4Source:
     "libdrm >=2.4.110"
     ## fribidi is required for pango's bidirectional text layout.
     "fribidi"
+    ## M9.R.15d.3 — libegl-headers exposes the Khronos EGL header set
+    ## (``EGL/egl.h`` + ``EGL/eglext.h`` + ``EGL/eglplatform.h``).
+    ## gtk4's ``gdk/gdkdmabuf.c`` includes ``<epoxy/egl.h>`` whose
+    ## libepoxy 1.5.10 generated header (``epoxy/egl_generated.h``)
+    ## transitively includes ``EGL/eglplatform.h``. Now that libepoxy
+    ## is built with egl=yes (M9.R.15d.1) gtk4 needs the same Khronos
+    ## headers on its include search path at compile time. Stub
+    ## points at ``nixpkgs#libglvnd.dev``.
+    "libegl-headers"
 
   config:
     discard
@@ -192,22 +211,44 @@ package gtk4Source:
     setCurrentOwningPackageOverride("gtk4Source")
     try:
       let opts = @[
+        # M9.R.15b — pin to gtk4 4.18.5's option schema. Feature-type
+        # options use the enabled/disabled/auto trichotomy; boolean
+        # types stay true/false.
         "introspection=disabled",
         "documentation=false",
         "man-pages=false",
+        "screenshots=false",
         "build-tests=false",
         "build-testsuite=false",
         "build-examples=false",
         "build-demos=false",
+        # M9.R.15d.3 — re-enable wayland-backend. The M9.R.15b.9
+        # broadway-only deferral is lifted: libepoxy now ships with
+        # egl=yes (M9.R.15d.1) and gtk4 declares ``libegl-headers``
+        # in its buildDeps so the Khronos EGL header set
+        # (``EGL/eglplatform.h`` etc.) lands on the include search
+        # path at compile time.
         "broadway-backend=true",
         "wayland-backend=true",
         "x11-backend=false",
         "vulkan=disabled",
         "print-cups=disabled",
+        "print-cpdb=disabled",
         "tracker=disabled",
         "colord=disabled",
         "media-gstreamer=disabled",
         "f16c=disabled",
+        # M9.R.15b.8 — disable the sysprof subproject fallback. When
+        # gtk4's meson.build cannot find ``sysprof-capture-4`` via
+        # pkg-config it falls through to the vendored
+        # ``subprojects/sysprof`` tree, whose own meson.build then
+        # tries to override ``glib-2.0`` and crashes with
+        #   ERROR: Tried to override dependency 'glib-2.0' which has
+        #   already been resolved or overridden.
+        # ``sysprof=disabled`` keeps gtk4 from probing for it at all.
+        "sysprof=disabled",
+        "cloudproviders=disabled",
+        "accesskit=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libGtk4")

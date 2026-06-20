@@ -53,7 +53,9 @@
 ## ## Build shape
 ##
 ## Meson + ninja. Build-time tools needed: flex, bison, pkg-config,
-## python3 with ``mako`` + ``markdown`` modules. v1 elides the docs
+## python3 with ``setuptools`` + ``mako`` + ``markdown`` modules
+## (surfaced via the M9.R.15d.2 ``python3-with-modules`` stdlib stub
+## which wraps ``nixpkgs#python3.withPackages``). v1 elides the docs
 ## build (``gtk_doc=false``) so the docbook-xsl-nons + docbook-xml-dtd
 ## dependencies are skipped.
 ##
@@ -115,8 +117,12 @@ package gobjectIntrospectionSource:
     ## bison generates the GIR parser at build time.
     "bison"
     ## python3 + the mako/markdown packages run the scanner's
-    ## template-driven code generators.
-    "python3"
+    ## template-driven code generators. M9.R.15d.2 introduced the
+    ## ``python3-with-modules`` stdlib stub that wraps python3 with
+    ## ``setuptools``, ``mako`` and ``markdown`` pre-loaded — bare
+    ## ``python3`` is insufficient because the scanner's startup
+    ## ``import mako`` short-fails on a plain interpreter.
+    "python3-with-modules"
 
   buildDeps:
     ## glib2 is the foundation library (libgirepository links against

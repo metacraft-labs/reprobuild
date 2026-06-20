@@ -72,6 +72,15 @@ import ./gtk_update_icon_cache
 # M9.R.15b.2 — sassc is referenced by gtk4's nativeBuildDeps for Sass
 # stylesheet compilation of the Adwaita default theme.
 import ./sassc
+# M9.R.15d.1 — libegl-headers exposes the Khronos EGL header set
+# (EGL/egl.h + EGL/eglext.h + EGL/eglplatform.h) via nixpkgs#libglvnd.dev.
+# Consumed by libepoxy's egl=yes meson option and downstream by gtk4 /
+# qt6 OpenGL backends.
+import ./libegl_headers
+# M9.R.15d.2 — python3-with-modules wraps python3 with the
+# setuptools + mako + markdown modules consumed by
+# gobject-introspection's build-time scanner.
+import ./python3_with_modules
 
 export bc
 export bison
@@ -111,3 +120,5 @@ export python3
 export runquotad
 export gtk_update_icon_cache
 export sassc
+export libegl_headers
+export python3_with_modules

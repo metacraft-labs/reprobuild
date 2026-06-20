@@ -314,6 +314,32 @@ package qt6BaseSource:
         "FEATURE_dbus=ON",
         "FEATURE_sql_sqlite=ON",
         "FEATURE_widgets=ON",
+        # M9.R.15a.7 — disable OpenGL entirely. qt6-base's gui configure
+        # runs a TEST_opengl_egl probe that requires libGL + EGL headers;
+        # without a mesa from-source recipe in cache the test fails with
+        # ``ERROR: The OpenGL functionality tests failed!``. Plasma's
+        # default render path is QtQuick scene-graph via QRhi which can
+        # fall back to software / vulkan when GL is absent. The v1
+        # minimal-desktop story is GL-less for now; a future M9.R.15c+
+        # milestone landing mesa-from-source will flip this back on.
+        "INPUT_opengl=no",
+        "FEATURE_opengl=OFF",
+        # M9.R.15c.2 — pcre2 is not yet vendored from-source, so fall
+        # back to qtbase's bundled copy under src/3rdparty/pcre2. Qt's
+        # default auto-FORCES ``system_pcre2=ON`` once a system pcre2
+        # is probed for, and the configure aborts when WrapSystemPCRE2
+        # comes back unfound. Explicitly disabling the system path
+        # picks the bundled copy without operator action; a future
+        # milestone landing pcre2-from-source flips this back on.
+        "FEATURE_system_pcre2=OFF",
+        # M9.R.15c.2 — clock_gettime auto-FORCEs to ON on UNIX hosts but
+        # its second condition (WrapRt_FOUND) probes for ``-lrt`` via
+        # a stand-alone CMake test. The nix-shell glibc implements
+        # ``clock_gettime`` in libc itself (no separate librt), so the
+        # WrapRt probe fails and the auto-FORCE-ON aborts configure.
+        # Disabling the explicit feature lets Qt fall back to libc's
+        # built-in ``clock_gettime`` symbol resolution.
+        "FEATURE_clock_gettime=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")

@@ -198,7 +198,14 @@ proc defaultMonitorDepFileReaderOptions*(): MonitorDepFileReaderOptions =
     allowUnknownOptionalRecords: false,
     requireTrailerChecksum: true,
     maxPathTableBytes: 64'u64 * 1024'u64 * 1024'u64,
-    maxObservationCount: 10'u64 * 1000'u64 * 1000'u64,
+    # M9.R.15a.8 — qt6-base cmake configure produces > 10M file
+    # observations when fs-snoop captures every probe under the
+    # 50+-entry WSL-inherited Windows PATH (each ``find_program()``
+    # call multiplies). Bumping to 100M unblocks the qt6-base configure
+    # action. The reader-side observation array is sized lazily
+    # (``seq[MonitorRecord]`` grows on push) so the higher cap doesn't
+    # commit memory until the writer actually fills it.
+    maxObservationCount: 100'u64 * 1000'u64 * 1000'u64,
     streamRecords: false)
 
 proc raiseMonitorDepFileReaderError*(kind: MonitorDepFileReaderErrorKind;

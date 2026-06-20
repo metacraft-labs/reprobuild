@@ -374,6 +374,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim",
+    binary: "build/test-bin/t_watch_ct_incremental_flags",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim",
     binary: "build/test-bin/test_engine_publisher_wiring",
     defines: @[],
@@ -512,6 +520,158 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_core/tests/t_smoke_repro_core.nim",
     binary: "build/test-bin/t_smoke_repro_core",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_backend_abstraction.nim",
+    binary: "build/test-bin/t_backend_abstraction",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_ctfs_reader.nim",
+    binary: "build/test-bin/t_ctfs_reader",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_invalidation_engine.nim",
+    binary: "build/test-bin/t_invalidation_engine",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_js_regex_no_false_skip.nim",
+    binary: "build/test-bin/t_js_regex_no_false_skip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_language_matrix.nim",
+    binary: "build/test-bin/t_language_matrix",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_large_program_precision.nim",
+    binary: "build/test-bin/t_large_program_precision",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_live_full_suite.nim",
+    binary: "build/test-bin/t_live_full_suite",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_live_js.nim",
+    binary: "build/test-bin/t_live_js",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_live_native.nim",
+    binary: "build/test-bin/t_live_native",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_live_python.nim",
+    binary: "build/test-bin/t_live_python",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_live_ruby.nim",
+    binary: "build/test-bin/t_live_ruby",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_multilang_extractors.nim",
+    binary: "build/test-bin/t_multilang_extractors",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_native_decision.nim",
+    binary: "build/test-bin/t_native_decision",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_native_hash.nim",
+    binary: "build/test-bin/t_native_hash",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_nim_dual.nim",
+    binary: "build/test-bin/t_nim_dual",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_read_executed_functions.nim",
+    binary: "build/test-bin/t_read_executed_functions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_robustness.nim",
+    binary: "build/test-bin/t_robustness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_symbodyhash.nim",
+    binary: "build/test-bin/t_symbodyhash",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_ct_incremental/tests/t_watch_seam.nim",
+    binary: "build/test-bin/t_watch_seam",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -5910,87 +6070,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/unit/t_m9r1_deps_package_level.nim",
-    binary: "build/test-bin/t_m9r1_deps_package_level",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/unit/t_m9r2_typed_cli_surfaces.nim",
-    binary: "build/test-bin/t_m9r2_typed_cli_surfaces",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/unit/t_m9r2b_typed_value_layer.nim",
-    binary: "build/test-bin/t_m9r2b_typed_value_layer",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/unit/t_m9r2c_artifact_slot_typed.nim",
-    binary: "build/test-bin/t_m9r2c_artifact_slot_typed",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/unit/t_m9r3_library_api_block.nim",
-    binary: "build/test-bin/t_m9r3_library_api_block",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/unit/t_m9r4_library_api_exports.nim",
-    binary: "build/test-bin/t_m9r4_library_api_exports",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
-    binary: "build/test-bin/t_m9r5a_recipe_sweep_smoke",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.13a -- provider-compile cache sharing across recipes.
-  # Pins:
-  #   * sharedProviderNimcacheKey is independent of recipe modulePath /
-  #     outputBinaryPath (the structural property that lets recipe A and
-  #     recipe B share a nimcache directory at all);
-  #   * the cache key is driven by $REPRO_PROVIDER_NIMCACHE_SESSION
-  #     instead of getCurrentProcessId(), so all 84 from-source recipes
-  #     auto-recurse fires for one `repro build` invocation share one
-  #     nimcache (every subprocess inherits the env var via the build
-  #     engine's envTableFromArgvStyle env-table layering);
-  #   * independent concurrent ``repro`` sessions still get distinct
-  #     session tokens (the M9.R.12 ENOTEMPTY-collision safety property
-  #     is preserved unchanged);
-  #   * Nim's .sha1-based incremental compilation reuses the cached .o
-  #     files across two compiles into the same nimcache (the warm
-  #     recompile is at least 2x faster than the cold compile and the
-  #     shared .o files survive a source-file swap byte-for-byte);
-  #   * ensureProviderNimcacheSession seeds the env var iff it is
-  #     currently unset, so the root ``repro`` process at runThinApp
-  #     entry sets the token and every nested subprocess inherits it.
-  # Closes the wayland from-source smoke's hours-to-days wall-time gap
-  # (each per-recipe provider compile dropped from ~5 min cold to ~30 s
-  # warm; the 84-recipe campaign is now O(minutes) instead of
-  # O(hours-days)).
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
     source: "tests/unit/t_m9r13a_provider_compile_sharing.nim",
     binary: "build/test-bin/t_m9r13a_provider_compile_sharing",
     defines: @[],
@@ -5998,14 +6077,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.R.13b.1 — Windows ``externalHashFlags`` must propagate
-  # ``--define:reproVendoredHash`` alongside the ``-I`` includes so the
-  # interface-extract runner / provider compile actually compiles the
-  # vendored ``xxhash.c`` + ``blake3.c`` translation units. Without the
-  # define the runner sees only ``xxhash.h`` and the final link fails
-  # with ``undefined reference to XXH3_64bits`` — the symptom that
-  # blocked the wayland from-source smoke at the interface-extract
-  # LINK stage on the M9.R.13a → M9.R.13b handover.
   TestSpec(
     source: "tests/unit/t_m9r13b_1_toolchain_pin.nim",
     binary: "build/test-bin/t_m9r13b_1_toolchain_pin",
@@ -6014,13 +6085,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.R.13c.1 — deterministic stale-pipe recovery for the canonical
-  # Windows runquota named pipe. Pre-M9.R.13c the operator had to
-  # ``Stop-Process runquotad.exe`` between every from-source build
-  # whenever the prior daemon had been killed without releasing its
-  # NPFS handle; M9.R.13c.1 closes the gap by adding a client-side
-  # owner-liveness probe + auto-recovery. The test pins the probe
-  # classifier + the no-op idempotence of the recovery helper.
   TestSpec(
     source: "tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim",
     binary: "build/test-bin/t_m9r13c_1_runquota_stale_pipe_recovery",
@@ -6029,17 +6093,41 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.R.13c.2 — monitor-shim DLL discovery for the daemon-hosted
-  # ``repro internal fs-snoop`` subprocess. The build engine's
-  # ``monitoredAction`` now seeds ``REPRO_MONITOR_SHIM_LIB`` on the
-  # action env so the subprocess deterministically locates
-  # ``librepro_monitor_shim.{dll,so,dylib}`` regardless of which prefix
-  # the daemon's executable lives under. The test pins the public
-  # ``findShimLibrary`` lookup priority + total-function contract that
-  # the seed depends on.
   TestSpec(
     source: "tests/unit/t_m9r13c_2_shim_lib_resolution.nim",
     binary: "build/test-bin/t_m9r13c_2_shim_lib_resolution",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14c_1_autotools_parallel_make.nim",
+    binary: "build/test-bin/t_m9r14c_1_autotools_parallel_make",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14c_2_binutils_cycle_break.nim",
+    binary: "build/test-bin/t_m9r14c_2_binutils_cycle_break",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim",
+    binary: "build/test-bin/t_m9r14c_4_inline_exec_path_enrichment",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14c_5_autotools_stage_copy.nim",
+    binary: "build/test-bin/t_m9r14c_5_autotools_stage_copy",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -6104,6 +6192,94 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_m9r14e_3_action_env_threading.nim",
     binary: "build/test-bin/t_m9r14e_3_action_env_threading",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14f_1_transitive_lib_dirs.nim",
+    binary: "build/test-bin/t_m9r14f_1_transitive_lib_dirs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14f_2_rpath_patching.nim",
+    binary: "build/test-bin/t_m9r14f_2_rpath_patching",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim",
+    binary: "build/test-bin/t_m9r14h_1_auto_recurse_idempotency",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r15c_1_fs_snoop_fragment_log_perf.nim",
+    binary: "build/test-bin/t_m9r15c_1_fs_snoop_fragment_log_perf",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r1_deps_package_level.nim",
+    binary: "build/test-bin/t_m9r1_deps_package_level",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r2_typed_cli_surfaces.nim",
+    binary: "build/test-bin/t_m9r2_typed_cli_surfaces",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r2b_typed_value_layer.nim",
+    binary: "build/test-bin/t_m9r2b_typed_value_layer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r2c_artifact_slot_typed.nim",
+    binary: "build/test-bin/t_m9r2c_artifact_slot_typed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r3_library_api_block.nim",
+    binary: "build/test-bin/t_m9r3_library_api_block",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r4_library_api_exports.nim",
+    binary: "build/test-bin/t_m9r4_library_api_exports",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
+    binary: "build/test-bin/t_m9r5a_recipe_sweep_smoke",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
