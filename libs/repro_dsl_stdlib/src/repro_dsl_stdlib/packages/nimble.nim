@@ -34,3 +34,16 @@ package nimble:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:nim@2.2.10:linux:sha256:0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
+    # macOS aarch64: nim-lang.org does not publish a stable macOS aarch64
+    # build, but nim-lang/nightlies does — same nightly tarball nim.nim
+    # consumes for its macOS aarch64 slice (the archive ships both
+    # ``bin/nim`` and ``bin/nimble``; executablePath selects nimble).
+    tarball url = "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_arm64.tar.xz",
+      sha256 = "9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/nimble",
+      packageId = "nim@2.2.10",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:nim@2.2.10:macos-aarch64:sha256:9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e"

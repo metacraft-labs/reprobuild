@@ -86,6 +86,20 @@ package cargo:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:rust@1.92.0:linux:sha256:d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c"
+    # macOS aarch64: same rust standalone-distribution tarball — different
+    # triple (Apple Silicon). All current GitHub-hosted macOS runners are
+    # M1/M2/M3, so aarch64 is the only macOS slice we ship. The realize
+    # loop's rust-installer auto-merge applies the same way as on Linux
+    # and Windows so `cargo` lands at `<prefix>/bin/cargo`.
+    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-aarch64-apple-darwin.tar.xz",
+      sha256 = "22276ecf826b22e718f099d7bf7ddb8c88aa46230fdba74962ab3c5031472268",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cargo",
+      packageId = "rust@1.92.0",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:rust@1.92.0:macos-aarch64:sha256:22276ecf826b22e718f099d7bf7ddb8c88aa46230fdba74962ab3c5031472268"
 
   executable cargo:
     cli:
