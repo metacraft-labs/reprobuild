@@ -223,8 +223,10 @@ package swaySource:
     ## wayland-scanner is the protocol-XML → C marshalling-stub
     ## generator from the Wayland package; Sway's meson build invokes
     ## it during configure / compile to emit protocol stubs for
-    ## sway-protocols + wlr-protocols XML files.
-    "wayland-scanner"
+    ## sway-protocols + wlr-protocols XML files. Recipe name
+    ## ``wayland`` matches the sibling source recipe — the scanner is
+    ## a sub-artefact of the wayland tarball, not a separate package.
+    "wayland"
     ## libxkbcommon is the keyboard-keymap library Sway's seat / input
     ## layer consumes to translate raw evdev keycodes into XKB
     ## keysyms (e.g. parsing ``bindsym Mod4+Return exec foot`` from

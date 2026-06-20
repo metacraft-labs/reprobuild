@@ -7027,6 +7027,43 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.10a — cycle break + stdlib fall-through. Pins:
+  #   * the dispatcher's recursion-cycle detector no longer raises
+  #     immediately when the closing-edge tool's stdlib package declares
+  #     a usable provisioning channel — it instead marks the tool in
+  #     ``fromSourceCycleBrokenTools`` and the downstream
+  #     ``toolProfileFor(tpmFromSource, ...)`` routes that one tool
+  #     through stdlib provisioning (nix / scoop / tarball) the same way
+  #     the M9.R.9 ``rrSiblingMissing`` branch does;
+  #   * the cycle-break override is keyed strictly by ``executableName``
+  #     so the from-source semantics still apply to every other tool in
+  #     the chain;
+  #   * a genuine cycle (no node has stdlib provisioning) still raises,
+  #     with a tighter diagnostic that points the operator at the
+  #     stdlib package definition.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r10a_cycle_break.nim",
+    binary: "build/test-bin/t_m9r10a_cycle_break",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.10a — exec-name audit. Asserts every
+  # ``nativeBuildDeps`` / ``buildDeps`` entry across the source-recipe
+  # corpus resolves to either a sibling source recipe OR a stdlib
+  # package, and pins the python→python3 rename + pkg-config backtick
+  # header parsing as load-bearing regression cases.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r10a_exec_name_audit.nim",
+    binary: "build/test-bin/t_m9r10a_exec_name_audit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.10b — default-build synthesis wiring. Pins the
   # package macro's M9.R.6 default-synthesis dispatch path:
   #   * a recipe with ``fetch:`` + a recognised convention tool but no

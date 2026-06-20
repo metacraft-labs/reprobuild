@@ -5,7 +5,7 @@
 ## from-source recipes:
 ##
 ##   * FIRST source recipe in the corpus to declare a Python-only
-##     toolchain dependency (``uses: "python >=3.8"`` alone, no C / C++
+##     toolchain dependency (``uses: "python3 >=3.8"`` alone, no C / C++
 ##     compiler) — pins the M9.N Batch A "uses: emits bare tool names"
 ##     surface against a Python tool consumer (vs the prior precedents
 ##     that all bundle ``"gcc >=11"`` + a make/cmake/meson driver).

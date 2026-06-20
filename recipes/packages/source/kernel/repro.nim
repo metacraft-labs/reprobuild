@@ -263,11 +263,12 @@ package kernelSource:
     ## for the CONFIG_STACK_VALIDATION pass that rewrites .o files
     ## to add unwind metadata.
     "libelf >=0.187"
-    ## libssl is consumed by kbuild's certificate-handling code (the
-    ## ``CONFIG_MODULE_SIG`` family); even with module signing
-    ## disabled, the build occasionally invokes openssl helpers via
-    ## ``scripts/sign-file``.
-    "libssl >=3.0"
+    ## openssl provides libssl, consumed by kbuild's certificate-
+    ## handling code (the ``CONFIG_MODULE_SIG`` family); even with
+    ## module signing disabled, the build occasionally invokes openssl
+    ## helpers via ``scripts/sign-file``. Recipe name ``openssl``
+    ## matches the sibling source recipe.
+    "openssl >=3.0"
     ## bc is the arbitrary-precision calculator kbuild's
     ## ``kernel/timeconst.bc`` script invokes to compute jiffies
     ## constants at build time. Required from 4.x onwards.

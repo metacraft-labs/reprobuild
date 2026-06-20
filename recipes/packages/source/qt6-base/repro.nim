@@ -221,12 +221,12 @@ package qt6BaseSource:
   buildDeps:
     ## python is invoked by qt6-base's QML compiler driver + a handful
     ## of code-generation helpers in the build.
-    "python >=3.8"
-    ## glib is consumed transitively via QtGui's wayland-client glue
+    "python3 >=3.8"
+    ## glib2 is consumed transitively via QtGui's wayland-client glue
     ## (qtwayland would be the proper consumer but qt6-base's QPA
     ## abstraction probes for the wayland-protocols pkgconfig at build
     ## time).
-    "glib >=2.62"
+    "glib2 >=2.62"
     ## libxkbcommon supplies the keyboard-keymap library QtGui's QPA
     ## Wayland backend uses for layout switching + compose-key handling.
     ## The sibling ``libxkbcommonSource`` recipe vendors a compatible
@@ -249,14 +249,16 @@ package qt6BaseSource:
     ## complex-script rendering (Arabic, Hebrew, Devanagari, CJK). The
     ## sibling ``harfbuzzSource`` recipe vendors 10.1.0.
     "harfbuzz >=4.0"
-    ## libdbus is the D-Bus client library QtDBus binds to — the
-    ## upstream libdbus-1 reference implementation.
-    "libdbus >=1.14"
+    ## dbus is the D-Bus client library QtDBus binds to — the
+    ## upstream libdbus-1 reference implementation; the sibling source
+    ## recipe is named ``dbus``.
+    "dbus >=1.14"
     ## sqlite supplies the SQLite SQL driver QtSql loads when the
     ## ``FEATURE_sql_sqlite=ON`` flag is set.
     "sqlite >=3.40"
-    ## libssl is consumed by QtNetwork for HTTPS / TLS support.
-    "libssl >=3.0"
+    ## openssl provides libssl, which QtNetwork consumes for HTTPS /
+    ## TLS support; the sibling source recipe is named ``openssl``.
+    "openssl >=3.0"
     ## zlib supplies the deflate / inflate primitives QtCore +
     ## QtNetwork consume for HTTP compression + QFile transparent
     ## decompression.

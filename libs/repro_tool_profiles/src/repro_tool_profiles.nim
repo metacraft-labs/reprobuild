@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, strutils, tables, times]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tables, times]
 
 import blake3
 import cbor
@@ -3244,6 +3244,21 @@ proc actionSpecFor*(identity: ToolActionIdentity): ActionSpec =
 
 const FromSourceRootEnvVar* = "REPRO_FROM_SOURCE_ROOT"
 
+var fromSourceCycleBrokenTools*: HashSet[string] = initHashSet[string]()
+  ## DSL-port M9.R.10a — per-process set of tool ``executableName``s
+  ## flagged by the auto-recurse dispatcher as part of a closing edge of
+  ## a from-source build cycle. When ``toolProfileFor(tpmFromSource, ...)``
+  ## resolves a tool whose name is in this set, the sibling-recipe probe
+  ## is bypassed entirely and the resolver falls through directly to
+  ## ``tryResolveStdlibProvisioning`` — same logic as the
+  ## ``rrSiblingMissing`` branch. This breaks the cycle without disabling
+  ## from-source semantics for the rest of the build graph: the *one*
+  ## tool whose recursive build would close the cycle (e.g. ``gcc`` when
+  ## the chain is ``expat → autoconf → make → gcc → binutils → gcc``)
+  ## comes from stdlib provisioning (nix on Linux/macOS, scoop on
+  ## Windows, tarball anywhere); the rest of the chain still builds from
+  ## source. Exported for test introspection.
+
 proc fromSourceRecipeRoot*(): string =
   ## Resolve the from-source recipe anchor. Honours
   ## ``REPRO_FROM_SOURCE_ROOT`` first; falls back to
@@ -3421,6 +3436,40 @@ proc resolveFromSourceTool*(useDef: InterfaceToolUse;
       " (or .exe). Build the recipe first: `repro build " &
       outcome.recipeDir & " --no-runquota` (M9.Q.1 follow-up will auto-recurse).")
 
+proc tryResolveStdlibProvisioning*(useDef: InterfaceToolUse;
+                                  storeRoot: string;
+                                  profile: var PathOnlyToolProfile): bool =
+  ## DSL-port M9.R.10a — shared stdlib fall-through helper. Walks the
+  ## host-preference order (nix on Nix-capable hosts → scoop on Windows →
+  ## tarball anywhere) against whatever provisioning channels the
+  ## ``useDef`` carries from the stdlib ``package <name>:`` block.
+  ##
+  ## Returns ``true`` and fills ``profile`` when one of the channels
+  ## resolves; ``false`` when no channel is declared on the use. The
+  ## individual channel resolvers may themselves raise ``OSError`` —
+  ## those propagate to the caller because they indicate a declared
+  ## channel that failed to resolve at run time (not a missing channel).
+  ##
+  ## Used by:
+  ##   * ``toolProfileFor(tpmFromSource, ...)`` for the ``rrSiblingMissing``
+  ##     outcome (M9.R.9 fall-through).
+  ##   * The dispatcher-side cycle break in ``executeBuildTarget``
+  ##     (M9.R.10a) — when an auto-recurse cycle is detected we route
+  ##     the closing-edge tool through stdlib provisioning instead of
+  ##     raising, breaking the cycle without sacrificing from-source
+  ##     semantics for the rest of the graph.
+  const isNixHost = defined(linux) or defined(macosx)
+  if isNixHost and useDef.nixProvisioning.len > 0:
+    profile = resolveNixTool(useDef, storeRoot)
+    return true
+  if defined(windows) and useDef.scoopProvisioning.len > 0:
+    profile = resolveScoopTool(useDef, storeRoot)
+    return true
+  if useDef.tarballProvisioning.len > 0:
+    profile = resolveTarballTool(useDef, storeRoot)
+    return true
+  false
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string): PathOnlyToolProfile =
   case mode
@@ -3469,6 +3518,31 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # before reaching this entry point, so we never observe it here
     # in the normal path (and surface a clean OSError if we do, with
     # the M9.Q operator hint preserved).
+    #
+    # DSL-port M9.R.10a — cycle-break override. The auto-recurse
+    # dispatcher (``executeBuildTarget``) marks the closing-edge tool of
+    # a recursion cycle in ``fromSourceCycleBrokenTools`` and falls
+    # through to the stdlib provisioning channels HERE instead of
+    # raising a cycle diagnostic. Bootstrap tools (gcc, binutils, make,
+    # autoconf, automake, libtool, pkg-config) thereby come from stdlib
+    # provisioning at cycle-break time; everything else still builds
+    # from source. When the stdlib has NO provisioning the cycle is
+    # genuinely unrecoverable and we surface the original diagnostic.
+    if useDef.executableName.len > 0 and
+        useDef.executableName in fromSourceCycleBrokenTools:
+      var fallProfile: PathOnlyToolProfile
+      if tryResolveStdlibProvisioning(useDef, storeRoot, fallProfile):
+        result = fallProfile
+        return
+      raise newException(OSError,
+        "tool-resolution failed: --tool-provisioning=from-source " &
+        "auto-recurse detected a cycle for \"" & useDef.executableName &
+        "\" (package \"" & useDef.packageSelector & "\") and attempted " &
+        "the stdlib fall-through, but no provisioning channel " &
+        "(nix / scoop / tarball) is declared on the tool use. Declare a " &
+        "provisioning block in the stdlib package definition for \"" &
+        useDef.executableName & "\" OR break the cycle by editing one " &
+        "of the recipes' nativeBuildDeps lists.")
     let outcome = tryResolveFromSourceTool(useDef)
     case outcome.kind
     of rrResolved:
@@ -3483,13 +3557,9 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
         outcome.recipeDir & " --no-runquota` (M9.R.9 auto-recurse " &
         "did not pre-build it — recursion may be guarded against a cycle).")
     of rrSiblingMissing:
-      const isNixHost = defined(linux) or defined(macosx)
-      if isNixHost and useDef.nixProvisioning.len > 0:
-        result = resolveNixTool(useDef, storeRoot)
-      elif defined(windows) and useDef.scoopProvisioning.len > 0:
-        result = resolveScoopTool(useDef, storeRoot)
-      elif useDef.tarballProvisioning.len > 0:
-        result = resolveTarballTool(useDef, storeRoot)
+      var fallProfile: PathOnlyToolProfile
+      if tryResolveStdlibProvisioning(useDef, storeRoot, fallProfile):
+        result = fallProfile
       else:
         raise newException(OSError,
           "tool-resolution failed: --tool-provisioning=from-source requested " &

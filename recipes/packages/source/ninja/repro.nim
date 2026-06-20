@@ -117,6 +117,10 @@ import repro_project_dsl
 # DSL-port M9.R.2c — pulls ``Library`` / ``Executable`` into scope for
 # the typed artifact slot vars the ``package`` macro injects.
 import repro_dsl_stdlib/types
+# DSL-port M9.R.10a — bring python3 + other system-tool stdlib
+# packages into scope so the from-source resolver finds their
+# provisioning metadata on this recipe's ``"python3 >=3.8"`` use.
+import repro_dsl_stdlib/packages/system_tools
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -162,7 +166,7 @@ package ninjaSource:
   buildDeps:
     ## python3 drives the ``configure.py --bootstrap`` step that
     ## compiles ninja's C++ sources into the self-hosting binary.
-    "python >=3.8"
+    "python3 >=3.8"
 
   executable ninja:
     ## ``$PREFIX/bin/ninja`` — the build-driver binary the meson /

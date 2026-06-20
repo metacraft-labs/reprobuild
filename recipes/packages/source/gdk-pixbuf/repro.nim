@@ -166,9 +166,10 @@ package gdkPixbufSource:
     "gcc >=7"
 
   buildDeps:
-    ## glib provides GObject + GIO that gdk-pixbuf's loader objects
-    ## subclass; gdk-pixbuf is a GObject library at heart.
-    "glib >=2.62"
+    ## glib2 provides GObject + GIO that gdk-pixbuf's loader objects
+    ## subclass; gdk-pixbuf is a GObject library at heart. Recipe name
+    ## ``glib2`` matches the sibling source recipe.
+    "glib2 >=2.62"
     ## libpng is required for the PNG loader (the most-used image
     ## format on the v1 desktop story).
     "libpng >=1.6"

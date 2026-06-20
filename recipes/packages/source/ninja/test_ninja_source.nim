@@ -6,7 +6,7 @@
 ## in this same batch):
 ##
 ##   * SECOND source recipe in the corpus to declare a
-##     Python-bootstrapped toolchain (``uses: "python >=3.8"`` +
+##     Python-bootstrapped toolchain (``uses: "python3 >=3.8"`` +
 ##     ``uses: "gcc >=11"``) — pairs with the sibling ``mesonSource``
 ##     recipe but ALSO declares the C++ toolchain because ninja's
 ##     bootstrap step compiles C++ sources (whereas meson is pure

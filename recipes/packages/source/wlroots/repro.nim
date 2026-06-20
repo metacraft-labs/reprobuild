@@ -195,7 +195,10 @@ package wlrootsSource:
     ## wayland-scanner is the protocol-XML → C marshalling-stub
     ## generator from the Wayland package; wlroots' meson build
     ## invokes it during configure / compile to emit protocol stubs.
-    "wayland-scanner"
+    ## Recipe name ``wayland`` matches the sibling source recipe — the
+    ## scanner is a sub-artefact of the wayland tarball, not a
+    ## separate package.
+    "wayland"
     ## libxkbcommon is the keyboard-keymap library wlroots' seat /
     ## input layer consumes to translate raw evdev keycodes into
     ## XKB keysyms.

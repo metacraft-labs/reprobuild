@@ -170,10 +170,11 @@ package harfbuzzSource:
     "gcc >=11"
 
   buildDeps:
-    ## glib is consumed for the GObject wrapper (disabled) AND for the
+    ## glib2 is consumed for the GObject wrapper (disabled) AND for the
     ## ``g_uchar_*`` helpers in non-gobject builds; meson can probe it
-    ## via pkg-config even when gobject=disabled.
-    "glib >=2.62"
+    ## via pkg-config even when gobject=disabled. Recipe name ``glib2``
+    ## matches the sibling source recipe.
+    "glib2 >=2.62"
     ## freetype is the glyph rasteriser harfbuzz consumes for the
     ## ``hb-ft.h`` FreeType integration layer (the canonical pairing
     ## downstream consumers go through). The sibling ``freetypeSource``

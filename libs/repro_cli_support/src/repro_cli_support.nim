@@ -5131,14 +5131,30 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if siblingRecipeDir in fromSourceResolvedRecipes:
         continue
       if siblingRecipeDir in fromSourceBuildStack:
+        # DSL-port M9.R.10a — cycle break via stdlib fall-through.
+        # Instead of raising the cycle diagnostic, mark the closing-edge
+        # tool in ``fromSourceCycleBrokenTools`` so the downstream
+        # ``toolProfileFor(tpmFromSource, ...)`` resolves it via stdlib
+        # provisioning (nix / scoop / tarball) rather than recursing
+        # again into the sibling recipe. The probe inside
+        # ``toolProfileFor`` confirms the stdlib has a usable channel —
+        # if it does not, the resolver raises with a tighter diagnostic
+        # that points the operator at the stdlib package definition.
+        # This unblocks bootstrap tool chains (gcc ↔ binutils ↔ make)
+        # without sacrificing from-source semantics for the rest of the
+        # build graph: every tool that doesn't close a cycle continues
+        # to build from source recursively.
         var cycle = fromSourceBuildStack
         cycle.add(siblingRecipeDir)
-        raise newException(ValueError,
-          "tool-resolution failed: from-source recursion cycle detected — " &
-          "recipe \"" & outcome.toolName & "\" at " & siblingRecipeDir &
-          " is already being built earlier in the call chain. Cycle: " &
-          cycle.join(" -> ") & ". Edit one of the recipes' tool uses " &
-          "lists to break the cycle.")
+        logSummary("from-source cycle break: routing \"" & outcome.toolName &
+          "\" through stdlib provisioning to break cycle " &
+          cycle.join(" -> "))
+        fromSourceCycleBrokenTools.incl(outcome.toolName)
+        # Mark the recipe as "already resolved" so the caller doesn't
+        # try to recurse again on the next probe pass — the closing-edge
+        # tool resolves via stdlib from here on.
+        fromSourceResolvedRecipes.incl(siblingRecipeDir)
+        continue
       if fromSourceBuildStack.len >= FromSourceMaxRecursionDepth:
         raise newException(ValueError,
           "tool-resolution failed: from-source recursion depth bound " &

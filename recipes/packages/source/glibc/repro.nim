@@ -209,7 +209,7 @@ package glibcSource:
   buildDeps:
     ## python is required by the build for the misc/syscall-list code
     ## generators glibc 2.x switched to in the 2.32 cut.
-    "python >=3.9"
+    "python3 >=3.9"
     ## Linux kernel headers — glibc's syscall layer pulls
     ## ``<linux/*>`` headers from the host kernel-headers package.
     "linux-headers >=4.19"

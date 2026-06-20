@@ -168,9 +168,10 @@ package pangoSource:
     "gcc >=7"
 
   buildDeps:
-    ## glib provides GObject + GIO that pango's text-layout objects
-    ## subclass; pango is a GObject library at heart.
-    "glib >=2.62"
+    ## glib2 provides GObject + GIO that pango's text-layout objects
+    ## subclass; pango is a GObject library at heart. Recipe name
+    ## ``glib2`` matches the sibling source recipe.
+    "glib2 >=2.62"
     ## harfbuzz is the OpenType text-shaping engine pango drives for
     ## script + bidi handling.
     "harfbuzz >=4.0"
