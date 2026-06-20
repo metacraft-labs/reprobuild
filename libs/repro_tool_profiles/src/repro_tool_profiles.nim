@@ -3450,6 +3450,16 @@ const BootstrapCycleBreakTools* = @[
   # .repro/output/<artifactName>/). Routing them through the stdlib
   # provisioning skips the unproductive recursion.
   "meson", "ninja", "python3", "python", "pkg-config", "pkgconf",
+  # M9.R.14g.5 — cmake bootstrap floor. cmake's from-source recipe
+  # transitively pulls gcc and (per M9.R.10a) trips the gcc cycle break
+  # too late — by then the sub-build worker has already failed because
+  # the gcc tool use has no stdlib provisioning channel declared on the
+  # CMake source recipe's lifted nativeBuildDeps. Routing cmake itself
+  # through stdlib (nix on Linux/macOS, tarball on Windows) terminates
+  # the recursion at the first edge. Same shape as meson/ninja above:
+  # cmake is a build-system driver, not a leaf C/C++ artifact a recipe
+  # needs to ship.
+  "cmake",
 ]
   ## Exported so tests + the dispatcher init code can audit + seed the
   ## list without re-declaring it.
