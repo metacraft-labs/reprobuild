@@ -1,5 +1,9 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: M5 complete — campaign done
+#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M6 next
+
+# Phase 1 (M0-M5): the source/interpreted path — DONE.
+# Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
+#   native / Multi-Core-Recorder (MCR) path and Nim's dual recording path.
 
 * Overview
 
@@ -339,3 +343,219 @@
   that should run. The ONLY skip path is `idSkipUnchanged`, reachable only when
   the test is deterministic, its trace dir is readable, and every recorded
   dependency's current shallow hash equals its recorded hash.
+
+* ============================================================================
+* PHASE 2 — All CodeTracer languages, including native / MCR
+* ============================================================================
+
+  Phase 1 implemented exactly ONE of CodeTracer's two incremental-testing
+  mechanisms (§16.7): the *source/interpreted* path — dependency discovery from
+  canonical `Function`/`Call` trace records + a *source-text* shallow hash.
+  CodeTracer also records **native** programs (C, C++, Rust, Go, Pascal, D,
+  Fortran, Ada, Crystal, Odin, V, and Nim compiled via C) through the
+  Multi-Core Recorder (MCR) / RR + DWARF. Native traces do **not** emit
+  `Function`/`Call` records, and a function's identity is its *compiled
+  instruction bytes*, not its source text (spec §16.7.1 "System languages
+  (DWARF-based)" + native-recorder `AUDIT-CTFS-2026-05.md`).
+
+  So the two mechanisms are independent on BOTH axes:
+
+  | path                | dependency discovery                 | shallow hash                 |
+  |---------------------|--------------------------------------|------------------------------|
+  | source/interpreted  | canonical `Function`/`Call` records  | source text (Phase 1 extractors) |
+  | native / MCR        | executed-function set from the native trace's calltrace (MCR emulator CallRecords / Intel-PT+DWARF) | function's compiled instruction bytes via the binary's symbol/DWARF table |
+
+  **Nim is special**: it is recordable BOTH ways — materialized Nim-source
+  tracing (source path) AND compiled-via-C MCR tracing (native path). The
+  engine must pick the strategy *per trace*, by detecting the backend.
+
+  Phase 2 generalizes the engine into pluggable `(DependencyDiscovery,
+  ShallowHash)` strategies selected by a detected `TraceBackend`, then adds the
+  native path, the Nim dual path, and the full language→strategy matrix. Native
+  shallow hashing uses real compiled fixtures (a tiny C/Rust program built with
+  the toolchain in the dev shell) so instruction-byte hashing is exercised for
+  real; native *traces* (the executed-function set) are hand-crafted in the real
+  native-trace shape where a live MCR/RR run isn't available in the dev shell
+  (documented per fixture, mirroring Phase 1). The same fail-safe invariant
+  holds: any ambiguity ⇒ re-run, never a silent skip.
+
+* M6 — Backend abstraction + detection
+  :STATUS: not started
+
+  Goal: refactor the engine so dependency discovery and shallow hashing are
+  pluggable strategies chosen by the detected trace backend — with NO behaviour
+  change for the existing source/interpreted languages.
+
+  Deliverables:
+  - [ ] `TraceBackend` enum: `tbSourceInterpreted` (canonical Function/Call +
+    source hash), `tbNativeDwarf` (native MCR/RR + instruction-byte hash),
+    `tbNimInstrumented` (reserved for Nim's future materialized path).
+  - [ ] `proc detectBackend*(traceDir: string): Result[TraceBackend, string]` —
+    detect from trace shape/metadata: a `trace.json` (canonical records) ⇒
+    source/interpreted; an `rr/` dir or a `.ct` CTFS container (and/or a
+    `trace_db_metadata.json`) ⇒ native; ambiguous/unknown ⇒ `Err` (⇒ re-run
+    upstream). Prefer an explicit `recorder_backend` metadata field when present,
+    else fall back to structure detection (document the precedence).
+  - [ ] Generalize the engine: a `DependencyDiscovery` seam (current JSON reader
+    becomes the source-interpreted impl) and a `ShallowHasher` seam (current
+    extractor-based hasher becomes the source impl), both selected by backend.
+    `decide`/`record` route through the seams. The existing source path must be
+    byte-for-byte behaviourally identical (same hashes, same decisions).
+
+  Automated tests:
+  - test_name: detect_backend_source_vs_native
+    description: a canonical `trace.json` fixture ⇒ `tbSourceInterpreted`; an
+    `rr/`-dir and a `.ct`-container fixture ⇒ `tbNativeDwarf`; an empty/ambiguous
+    dir ⇒ `Err`.
+  - test_name: source_path_unchanged_through_abstraction
+    description: every Phase-1 decision (the M1/M3/M4 skip/rerun cases) yields the
+    IDENTICAL result when routed through the new strategy seams (no regression).
+  - test_name: backend_metadata_field_overrides_structure
+    description: an explicit `recorder_backend` in metadata is honoured over
+    structure detection.
+
+  Acceptance: all Phase-1 tests pass unchanged; the seams exist and are selected
+  by `detectBackend`.
+
+* M7 — Native shallow hash (compiled instruction bytes)
+  :STATUS: not started
+
+  Goal: hash a native function by its compiled instruction bytes (§16.7.1), for
+  real, against a compiled binary.
+
+  Deliverables:
+  - [ ] A real native fixture: a tiny C program (≥3 functions; one called by the
+    test path, one not) compiled WITH symbols in the dev shell (`cc`/`clang` is
+    available). Commit the source + a build script; the test builds the binary
+    at test time (or commits a prebuilt one + rebuilds to verify determinism).
+  - [ ] `proc nativeFunctionTable*(binary: string): Result[Table[string, HashSlice], string]`
+    — `function_name → (offset,size)` from the binary's symbol table (ELF/Mach-O)
+    via `nm --print-size --defined-only`/`readelf -sW`/`objdump` (whichever is in
+    the dev shell; document the tool).
+  - [ ] `proc shallowHashNative*(binary, funcName): Result[string, string]` — hash
+    the function's instruction bytes `binary[offset .. offset+size)`. Missing
+    function / zero-size / unreadable ⇒ `Err` (⇒ re-run upstream, never skip).
+
+  Automated tests (build a real binary, edit C source, rebuild):
+  - test_name: native_function_hash_is_stable_across_identical_rebuilds
+    description: hashing the same function in two builds of identical source
+    yields the same hash (account for any non-determinism: pin flags / strip as
+    needed; document).
+  - test_name: editing_a_native_function_changes_its_instruction_hash
+    description: edit one C function's body, rebuild ⇒ that function's
+    instruction-byte hash changes.
+  - test_name: editing_one_native_function_leaves_anothers_hash_stable
+    description: editing function A's body does not change function B's
+    instruction-byte hash (per-function precision at the machine-code level).
+  - test_name: missing_or_zero_size_function_errs
+    description: an absent / zero-size symbol ⇒ `Err`, never a usable hash.
+
+  Acceptance: real per-function instruction-byte hashing with per-function
+  precision, and a fail-safe `Err` on any lookup problem.
+
+* M8 — Native dependency discovery + native incremental decision
+  :STATUS: not started
+
+  Goal: end-to-end native incremental testing — skip a native test when none of
+  the native functions it executed changed at the instruction-byte level.
+
+  Deliverables:
+  - [ ] `proc readExecutedFunctionsNative*(traceDir): Result[seq[ExecutedFunction], string]`
+    — the native `DependencyDiscovery` impl: read the executed-function set from
+    a native trace's calltrace (the MCR emulator CallRecord shape / the
+    native-trace layout). Hand-craft the fixture trace in that real shape where a
+    live MCR run isn't available in the dev shell; document the shape + how it
+    maps to the real native trace (cite the native-recorder source). The
+    `ExecutedFunction` carries the function name + the owning binary (not a
+    source defLine — native deps key on name+binary).
+  - [ ] Wire the native backend through the M6 seams so `decide`/`record` use
+    `readExecutedFunctionsNative` + `shallowHashNative` for `tbNativeDwarf`
+    traces. The cache stores the same `{deepHash, deps}` shape (deps carry the
+    binary path for re-hashing).
+  - [ ] `record` re-hashes deps against the CURRENT binary; `decide` re-hashes the
+    cached native deps against the current binary and skips iff all unchanged.
+
+  Automated tests (real compiled binary + native-trace fixture):
+  - test_name: native_unchanged_binary_skips
+    description: record() then decide() with the identical rebuilt binary ⇒
+    `idSkipUnchanged`.
+  - test_name: native_changing_an_executed_function_reruns
+    description: edit + rebuild an EXECUTED native function ⇒ `idRerunChanged`
+    naming it.
+  - test_name: native_changing_an_unexecuted_function_skips
+    description: edit + rebuild a native function the test did NOT execute ⇒
+    `idSkipUnchanged` (function-level precision at the machine-code level).
+  - test_name: native_missing_binary_falls_back_to_rerun
+    description: a missing/unreadable binary ⇒ re-run, never skip.
+
+  Acceptance: native skip/rerun precision demonstrated end-to-end on a real
+  compiled binary; `native_changing_an_unexecuted_function_skips` alongside
+  `native_changing_an_executed_function_reruns`.
+
+* M9 — Nim's dual recording path
+  :STATUS: not started
+
+  Goal: the SAME Nim program decides correctly whether it was traced via the
+  materialized source path (source-text hash) or the native MCR path
+  (instruction-byte hash), chosen per trace by backend detection.
+
+  Deliverables:
+  - [ ] A Nim fixture program recordable two ways, with TWO trace fixtures: one
+    in the source/interpreted shape (canonical Function/Call, ⇒ source hash) and
+    one in the native shape (⇒ instruction-byte hash of the compiled binary).
+    Document how each corresponds to the real Nim recording path (materialized
+    vs compiled-via-C/MCR; cite Language-Support-Matrix Nim dual-path).
+  - [ ] The engine selects the shallow-hash strategy per trace via
+    `detectBackend` — a Nim source-traced run uses the source extractor; a Nim
+    native-traced run uses `shallowHashNative`. No language-name special-casing;
+    purely backend-driven.
+
+  Automated tests:
+  - test_name: nim_source_traced_uses_source_hash_and_decides
+    description: the Nim source-path fixture: edit the Nim function body (source)
+    ⇒ rerun; edit an unexecuted Nim function ⇒ skip.
+  - test_name: nim_native_traced_uses_instruction_hash_and_decides
+    description: the Nim native-path fixture (compiled binary): edit + rebuild an
+    executed function ⇒ rerun; an unexecuted one ⇒ skip — via instruction bytes,
+    NOT source.
+  - test_name: same_nim_program_different_backend_picks_different_strategy
+    description: detectBackend drives source-vs-native hashing for the same Nim
+    program; assert the strategy actually chosen per trace.
+
+  Acceptance: Nim works on both paths with the strategy chosen by backend
+  detection, no language-name branching.
+
+* M10 — Full language→strategy matrix
+  :STATUS: not started
+
+  Goal: make "all CodeTracer languages" concrete — a single dispatch table
+  mapping every supported language to its `(TraceBackend, DependencyDiscovery,
+  ShallowHash)` and demonstrate the representative groups end-to-end.
+
+  Deliverables:
+  - [ ] A `languageStrategy(lang): LanguageStrategy` table covering the
+    CodeTracer Language-Support-Matrix groups: interpreted (Python, Ruby, JS,
+    Lua, WASM ⇒ source path), native (C, C++, Rust, Go, Pascal, D, Fortran, Ada,
+    Crystal, Odin, V ⇒ native path), Nim (dual). Each entry cites the matrix.
+    Unknown language ⇒ a clear error / conservative re-run, never a wrong hash.
+  - [ ] At least one passing end-to-end skip/rerun test per MECHANISM group
+    (interpreted via Phase-1 fixtures; native via a real compiled fixture; Nim
+    dual via M9) selected through the table — proving the same engine covers the
+    whole matrix with only the strategy varying.
+  - [ ] Docs: a table in this file + a short `libs/repro_ct_incremental/README`
+    section listing every supported language and its path, and explicitly noting
+    which paths are validated with live recordings vs hand-crafted fixtures.
+
+  Automated tests:
+  - test_name: language_strategy_table_covers_matrix
+    description: every language group in the matrix resolves to a strategy;
+    unknown ⇒ error.
+  - test_name: representative_language_per_group_decides_end_to_end
+    description: one interpreted + one native + Nim(dual) language each drive a
+    correct skip/rerun through the table.
+  - test_name: full_phase2_suite_has_no_regressions
+    description: all Phase-1 + Phase-2 lib tests pass; `repro_cli_support` still
+    compiles standalone; `--ct-incremental` absent leaves behaviour unchanged.
+
+  Acceptance: a single table + engine covers every CodeTracer language group;
+  representative end-to-end tests are green for interpreted, native, and Nim-dual.
