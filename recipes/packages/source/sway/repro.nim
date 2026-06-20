@@ -268,6 +268,17 @@ package swaySource:
     ## ``src/meson.build:74:11`` to translate raw evdev key/button
     ## codes for the ``input { ... }`` block's ``code``-form bindings.
     "libevdev >=1.9"
+    ## libudev is the userspace device-management library; sway's C
+    ## sources transitively include ``<libinput.h>`` (via
+    ## ``sway/config.h`` -> ``sway/server.h``) which in turn includes
+    ## ``<libudev.h>``. Without libudev's include / pkg-config
+    ## fragment on the path, the ninja compile step short-fails at
+    ## ``src/sway/xdg_decoration.c:3`` with
+    ## ``libudev.h: No such file or directory``. The eudev recipe
+    ## provides the ABI-compatible libudev.so via the ``libudev``
+    ## resolver name (matches the sibling ``libinputSource``
+    ## declaration).
+    "libudev >=232"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
