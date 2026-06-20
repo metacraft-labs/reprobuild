@@ -168,6 +168,12 @@ package harfbuzzSource:
     ## gcc is the host C/C++ toolchain — harfbuzz is C++11 with light
     ## use of C++17 features in the OT layout layer.
     "gcc >=11"
+    ## python3 runs ``gen-hb-version.py`` at meson-setup time to expand
+    ## ``hb-version.h.in`` into the version header consumed at compile
+    ## time. Without python3 on PATH, meson fails with
+    ## ``ERROR: Command ``gen-hb-version.py ...`` failed with status
+    ## 127`` (script invoked via ``#!/usr/bin/env python3`` shebang).
+    "python3"
 
   buildDeps:
     ## glib2 is consumed for the GObject wrapper (disabled) AND for the
