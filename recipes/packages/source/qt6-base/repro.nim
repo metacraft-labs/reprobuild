@@ -314,6 +314,16 @@ package qt6BaseSource:
         "FEATURE_dbus=ON",
         "FEATURE_sql_sqlite=ON",
         "FEATURE_widgets=ON",
+        # M9.R.15a.7 — disable OpenGL entirely. qt6-base's gui configure
+        # runs a TEST_opengl_egl probe that requires libGL + EGL headers;
+        # without a mesa from-source recipe in cache the test fails with
+        # ``ERROR: The OpenGL functionality tests failed!``. Plasma's
+        # default render path is QtQuick scene-graph via QRhi which can
+        # fall back to software / vulkan when GL is absent. The v1
+        # minimal-desktop story is GL-less for now; a future M9.R.15c+
+        # milestone landing mesa-from-source will flip this back on.
+        "INPUT_opengl=no",
+        "FEATURE_opengl=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")
