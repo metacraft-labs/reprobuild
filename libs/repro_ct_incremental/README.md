@@ -75,16 +75,17 @@ EXACT captured failure); the per-language test then emits a LOUD, ASSERTED gate.
 
 ### Validated LIVE vs gated (this host: arm64 macOS)
 
-Two languages record **genuinely live** here (Ruby and Python); the other two are
-gated on **real, current upstream breaks that are RED on the recorders' OWN CI** —
-not on a wrong dev shell or a missing package install.
+Three languages record **genuinely live** here (Ruby, Python and JavaScript); the
+native path is **platform-gated** (RR is Linux-only). None of the gates is a wrong
+dev shell or a missing package install — and the JS "upstream break" a prior
+revision claimed was a **stale-sibling misdiagnosis**, now corrected.
 
 | language | status on this host | how |
 |----------|---------------------|-----|
 | **Ruby** | ✅ **LIVE, end-to-end** (required, passes) | native Rust-extension recorder; `just build` then `codetracer-ruby-recorder --out-dir <dir> prog.rb` |
-| **Python** | ✅ **LIVE, end-to-end** (required, passes) | maturin/PyO3 recorder; `just venv 3.13 dev` (build once) then `.venv/bin/python -m codetracer_python_recorder --out-dir <dir> prog.py`. Now builds + records here after the recorder's **flake fix gating `cargo-llvm-cov` off darwin** (pushed upstream); the prior "dev shell won't build" gate used the WRONG entry (`just dev` + `uv`). |
-| **JavaScript** | ⛔ **GATED** — genuine upstream break (CI red) | `just build` fails compiling the napi addon (`recorder_native`): `NimTraceWriter` has no `enable_column_breakpoints_support` / `enable_column_motions_support` (a `codetracer-trace-format-nim` **column-aware-tracing API mismatch**; rustc even suggests `enable_column_aware_steps`). **JS recorder CI is RED on `dev`.** Not a missing `npm install`. |
-| **Native / Nim (MCR/RR)** | ⛔ **GATED** — genuine upstream break (CI red) + Linux-only | RR is **Linux-only**; and `codetracer-native-recorder` **CI is RED on `main`+`dev`** (Linux+Windows test suites failing), so even the supported Linux path is currently broken. On this host the record attempt fails: `license check failed: could not load libct_license_ffi.dylib` (its `@rpath` dep `liblldb.dylib` / `libstdc++` is unresolvable outside the recorder dev shell). |
+| **Python** | ✅ **LIVE, end-to-end** (required, passes) | maturin/PyO3 recorder; `just venv 3.13 dev` (build once) then `.venv/bin/python -m codetracer_python_recorder --out-dir <dir> prog.py`. Builds + records here after the recorder's **flake fix gating `cargo-llvm-cov` off darwin** (pushed upstream); the prior "dev shell won't build" gate used the WRONG entry (`just dev` + `uv`). |
+| **JavaScript** | ✅ **LIVE, end-to-end** (required, passes) | SWC instrumenter + napi-rs native runtime; `just build` then `node packages/cli/dist/index.js record --out-dir <dir> prog.js` (bundle nests under `<out-dir>/trace-N/`). Builds + records here once the workspace siblings `codetracer-trace-format` + `codetracer-trace-format-nim` are **synced to mainline**; the prior "napi addon won't compile / `enable_column_*_support` missing" gate was caused by STALE sibling checkouts (old writer API → build failure, then SIGSEGV at record time), NOT a genuine upstream break. |
+| **Native / Nim (MCR/RR)** | ⛔ **GATED** — Linux-only RR | RR is **Linux-only**; on arm64-macOS the record path is platform-gated. The harness builds `ct-mcr` and attempts a real recording, emitting the captured diagnostic when the platform cannot record — never a silent skip. |
 
 The real, validated commands per recorder live in `tests/live_record.nim`
 (`recordRubyLive` / `recordPythonLive` / `recordJsLive` / `recordNativeLive`).

@@ -975,14 +975,19 @@
         (`just dev` + `uv`). After the recorder's FLAKE FIX gating
         `cargo-llvm-cov` off darwin (pushed upstream to the recorder repo),
         `just venv 3.13 dev` builds and records LIVE here, as the test proves.
-      * JavaScript — ⛔ GATED (LOUD, asserted) on a GENUINE upstream break.
-        `just build` fails compiling the napi addon (`recorder_native`):
-        `NimTraceWriter` has no `enable_column_breakpoints_support` /
-        `enable_column_motions_support` (a `codetracer-trace-format-nim`
-        column-aware-tracing API mismatch; rustc suggests `enable_column_aware_steps`).
-        The JS recorder's OWN CI is RED on `dev`. NOT a missing `npm install` or
-        wrong dev shell. Captured verbatim; the SAME test records live once the
-        upstream API mismatch is fixed.
+      * JavaScript — ✅ LIVE. `just build` compiles the napi addon
+        (`recorder_native`) and the recorder records a real CTFS bundle; the
+        engine extracts exactly the executed functions and decides skip/rerun.
+        An earlier revision WRONGLY gated this as an upstream break
+        (`NimTraceWriter` missing `enable_column_breakpoints_support` /
+        `enable_column_motions_support`): those methods DO exist on the
+        column-aware-tracing API — the failure was STALE sibling checkouts
+        (`codetracer-trace-format` + `codetracer-trace-format-nim` behind their
+        mainline, so the addon built against an old writer API and SIGSEGV'd at
+        record time). With the siblings synced the recorder builds and records
+        cleanly; the test ASSERTS success (no accepted gate). The recorder
+        nests its bundle under `<out-dir>/trace-N/`, so the harness locates the
+        `.ct` recursively and uses that subdir as the trace dir.
       * Native / Nim via MCR/RR — ⛔ GATED (LOUD, asserted) on a GENUINE upstream
         break + Linux-only RR. RR is Linux-only; and `codetracer-native-recorder`
         CI is RED on `main`+`dev` (Linux+Windows test suites failing), so even
@@ -993,14 +998,13 @@
         verified root cause. The gate path asserts `roGated` + a non-empty
         diagnostic — never a `unittest.skip`, never a hand-crafted substitute.
   - [X] The interpreted group is validated with GENUINE live CTFS recordings
-    (Ruby AND Python) consumed by the engine. The hand-crafted Phase-1/2
-    fixtures are RETAINED for JS/native (those recorders are a verified current
-    upstream break — JS column-aware-tracing API mismatch, native CI red on
-    main+dev — so a live migration is not achievable until upstream is fixed);
-    the README's M13 section marks exactly which languages are LIVE vs gated,
-    with the real commands and the verified CI-red root causes. (Migrating
-    M0/M3/M8/M9 to live recordings is gated on the same upstream fixes —
-    documented, not silently skipped.)
+    (Ruby, Python AND JavaScript) consumed by the engine. JS is live once the
+    workspace siblings (`codetracer-trace-format` + `-trace-format-nim`) are
+    synced to mainline — the earlier "JS upstream break" was a stale-sibling
+    misdiagnosis, now corrected. The hand-crafted Phase-1/2 fixtures are
+    RETAINED for the native path (Linux-only RR; on arm64-macOS the record path
+    is platform-gated); the README's M13 section marks exactly which languages
+    are LIVE vs gated, with the real commands and verified root causes.
 
   Automated tests:
   - [X] test_name: live_ruby_recording_decides_end_to_end
@@ -1018,10 +1022,13 @@
     not the local write path, so the macOS `/var/folders` ↔ `/private/var`
     canonicalisation cannot misplace the mirror.)
   - [X] test_name: live_js_recording_decides_end_to_end
-    (`tests/t_live_js.nim`) — attempts the live recording; on this host emits a
-    LOUD asserted gate with the exact captured compiler error proving the
-    `enable_column_*_support` API mismatch (JS recorder CI red on `dev`). Where
-    the recorder builds the SAME test records live and asserts skip/rerun.
+    (`tests/t_live_js.nim`) — writes a real 4-function `.js`, records it LIVE
+    with the production SWC + napi recorder, asserts the live executed set
+    ({`<module>`,`main`,`used_a`,`used_b`}; `unused_c` absent), then a correct
+    SKIP (unchanged), a correct RERUN (edit executed `used_a` ⇒ `idRerunChanged`
+    naming it), and a correct SKIP (edit unexecuted `unused_c`). ASSERTS success
+    (no accepted gate); fails loudly with the captured diagnostic if the
+    recorder cannot build/record (e.g. stale sibling checkouts). PASSES here.
   - [X] test_name: native_recording_runs_where_supported_else_gated
     (`tests/t_live_native.nim`) — compiles a real C binary, attempts a `ct-mcr`
     recording; on this host emits the LOUD asserted gate citing the verified

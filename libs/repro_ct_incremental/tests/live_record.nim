@@ -173,6 +173,19 @@ proc findCtBundle(dir: string): string =
         found.add path
   if found.len == 1: found[0] else: ""
 
+proc findCtBundleRec(dir: string): string =
+  ## Like `findCtBundle` but searches `dir` recursively, returning the single
+  ## `.ct` bundle anywhere beneath it (or "" if absent/ambiguous). The JS
+  ## recorder nests its bundle one level down (`<out-dir>/trace-N/<prog>.ct`)
+  ## rather than writing it directly into `--out-dir` like the Ruby/Python
+  ## recorders, so its driver needs the recursive search.
+  var found: seq[string]
+  if dirExists(dir):
+    for path in walkDirRec(dir):
+      if path.toLowerAscii().endsWith(".ct"):
+        found.add path
+  if found.len == 1: found[0] else: ""
+
 proc markCtfsInterpreted*(traceDir: string) =
   ## Stamp an INTERPRETED-language CTFS trace dir with the explicit
   ## `recorder_backend: "ctfs-interpreted"` metadata signal, so `detectBackend`
@@ -321,13 +334,17 @@ proc recordJsLive*(program: string): RecorderOutcome =
     "node " & quoteShell(cli) & " record --out-dir " & quoteShell(outDir) &
     " " & quoteShell(program)
   let (output, code) = runInRecorderShell(JsRecorderRepo, cmd)
-  let bundle = findCtBundle(outDir)
+  # The JS recorder nests the bundle under a `trace-N/` subdir of `--out-dir`
+  # (unlike the Ruby/Python recorders), so search recursively and use the
+  # bundle's OWN directory as the trace dir the engine reads.
+  let bundle = findCtBundleRec(outDir)
   if bundle.len == 0:
     return RecorderOutcome(kind: roGated,
       diagnostic: "js recording produced no .ct bundle (exit " & $code &
         ") in " & outDir & ":\n" & output)
-  markCtfsInterpreted(outDir)  # interpreted CTFS ⇒ source-text hashing
-  RecorderOutcome(kind: roSuccess, traceDir: outDir, ctPath: bundle)
+  let bundleDir = bundle.parentDir
+  markCtfsInterpreted(bundleDir)  # interpreted CTFS ⇒ source-text hashing
+  RecorderOutcome(kind: roSuccess, traceDir: bundleDir, ctPath: bundle)
 
 proc ctMcrBin(): string =
   NativeRecorderRepo / "ct_cli/ct_cli"

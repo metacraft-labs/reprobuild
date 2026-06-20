@@ -1,25 +1,25 @@
-## M13 — LIVE JavaScript recording drives the engine (attempt; loud gate on
-## failure).
+## M13 — LIVE JavaScript recording drives the engine.
 ##
-## Attempts a GENUINE live recording with the PRODUCTION JS recorder (the SWC
+## Performs a GENUINE live recording with the PRODUCTION JS recorder (the SWC
 ## instrumenter + napi-rs native runtime, via its `record` subcommand), then
 ## drives the engine over the resulting CTFS bundle. NO hand-crafted trace, NO
-## `unittest.skip`.
+## `unittest.skip`, NO accepted gate — this path is genuinely live and the test
+## ASSERTS success.
 ##
-## # Loud gate — a GENUINE upstream break (CI red), NOT a silent skip
+## # Why this is live (the earlier "upstream break" was a stale sibling)
 ##
-## The JS recorder is currently broken at the source: its napi addon (the
-## `recorder_native` crate) FAILS TO COMPILE because `NimTraceWriter` no longer
-## exposes the `enable_column_breakpoints_support` / `enable_column_motions_support`
-## methods the addon calls — a `codetracer-trace-format-nim` API mismatch from the
-## column-aware-tracing rollout. This is a real, current upstream break, confirmed
-## RED on the recorder repo's OWN CI on `dev` (it is NOT a missing `npm install`
-## or a wrong dev shell). `recordJsLive` ATTEMPTS the build and, when it fails,
-## returns a `roGated` outcome carrying the EXACT captured compiler error. This
-## test prints that diagnostic loudly and ASSERTS the documented gate. Once the
-## column-aware-tracing API mismatch is fixed upstream and the recorder builds,
-## the SAME test records live and asserts the engine's skip/rerun decisions over
-## the live bundle (no test change needed).
+## A prior revision of this test ACCEPTED a build gate, claiming the napi addon
+## (`recorder_native`) could not compile because `NimTraceWriter` lacked the
+## `enable_column_breakpoints_support` / `enable_column_motions_support` methods.
+## That diagnosis was WRONG: those methods DO exist on the column-aware-tracing
+## API — the failure came from STALE sibling checkouts (`codetracer-trace-format`
+## and `codetracer-trace-format-nim` behind their mainline, so the addon built
+## against an old writer API and even SIGSEGV'd at record time on the old Nim
+## writer). With the siblings synced to mainline the recorder builds AND records
+## cleanly, and the engine extracts exactly the executed functions. A workspace
+## with stale siblings is a misconfiguration, not a legitimate platform gate, so
+## this test FAILS LOUDLY (printing the captured diagnostic) rather than
+## accepting a gate.
 
 import std/[unittest, os, strutils]
 import repro_ct_incremental
@@ -71,47 +71,48 @@ suite "M13 live JavaScript recording":
     let progPath = writeProgram(progDir, jsProgram)
     let rec = recordJsLive(progPath)
 
+    # The JS recorder builds and records LIVE on a correctly-synced workspace.
+    # A `roGated` outcome here means the recorder failed to build/record — on a
+    # synced workspace that is a real regression (e.g. stale sibling checkouts),
+    # NOT a legitimate platform gate, so fail loudly with the captured output.
     if rec.kind == roGated:
-      echo "\n================ M13 JS LIVE-RECORDING GATE ================"
-      echo "The production JS recorder does not build: a GENUINE current upstream"
-      echo "break, RED on the recorder repo's own CI on `dev`. The napi addon"
-      echo "(recorder_native) fails to compile because NimTraceWriter lacks"
-      echo "enable_column_breakpoints_support / enable_column_motions_support"
-      echo "(a codetracer-trace-format-nim API mismatch from the column-aware-"
-      echo "tracing rollout). This is NOT a missing npm install or wrong dev shell."
-      echo "Captured diagnostic from the real build attempt:"
+      echo "\n=========== M13 JS LIVE-RECORDING FAILURE ==========="
+      echo "The production JS recorder failed to build/record. On a correctly-"
+      echo "synced workspace this is a REGRESSION (commonly stale sibling"
+      echo "checkouts of codetracer-trace-format / -trace-format-nim behind their"
+      echo "mainline). Captured diagnostic from the real attempt:"
       echo rec.diagnostic
-      echo "===========================================================\n"
-      check rec.diagnostic.len > 0
-    else:
-      check rec.kind == roSuccess
-      let execRes = readExecutedFunctionsCtfs(rec.ctPath)
-      check execRes.isOk
-      var names: seq[string]
-      for f in execRes.get(): names.add f.name
-      check "used_a" in names
-      check "used_b" in names
-      check "unused_c" notin names
+      echo "====================================================\n"
+    doAssert rec.kind == roSuccess,
+      "JS live recording did not succeed (see diagnostic above)"
 
-      let rootSkip = mirrorRecordedSource(progPath, jsProgram)
-      var cacheSkip = initCache(rootSkip / "cache.json")
-      check record(cacheSkip, "js_live", rec.traceDir, rootSkip).isOk
-      check decide("js_live", rec.traceDir, rootSkip, cacheSkip).kind ==
-        idSkipUnchanged
+    let execRes = readExecutedFunctionsCtfs(rec.ctPath)
+    check execRes.isOk
+    var names: seq[string]
+    for f in execRes.get(): names.add f.name
+    check "used_a" in names
+    check "used_b" in names
+    check "unused_c" notin names
 
-      let rootRerun = mirrorRecordedSource(progPath, jsProgram)
-      var cacheRerun = initCache(rootRerun / "cache.json")
-      check record(cacheRerun, "js_live", rec.traceDir, rootRerun).isOk
-      editJsFunctionLine(rootRerun, progPath, "used_a",
-        "function used_a(x) { return x + 1000; }")
-      let decRerun = decide("js_live", rec.traceDir, rootRerun, cacheRerun)
-      check decRerun.kind == idRerunChanged
-      check "used_a" in decRerun.changedFuncs
+    let rootSkip = mirrorRecordedSource(progPath, jsProgram)
+    var cacheSkip = initCache(rootSkip / "cache.json")
+    check record(cacheSkip, "js_live", rec.traceDir, rootSkip).isOk
+    check decide("js_live", rec.traceDir, rootSkip, cacheSkip).kind ==
+      idSkipUnchanged
 
-      let rootUnexec = mirrorRecordedSource(progPath, jsProgram)
-      var cacheUnexec = initCache(rootUnexec / "cache.json")
-      check record(cacheUnexec, "js_live", rec.traceDir, rootUnexec).isOk
-      editJsFunctionLine(rootUnexec, progPath, "unused_c",
-        "function unused_c(x) { return x - 123456; }")
-      check decide("js_live", rec.traceDir, rootUnexec, cacheUnexec).kind ==
-        idSkipUnchanged
+    let rootRerun = mirrorRecordedSource(progPath, jsProgram)
+    var cacheRerun = initCache(rootRerun / "cache.json")
+    check record(cacheRerun, "js_live", rec.traceDir, rootRerun).isOk
+    editJsFunctionLine(rootRerun, progPath, "used_a",
+      "function used_a(x) { return x + 1000; }")
+    let decRerun = decide("js_live", rec.traceDir, rootRerun, cacheRerun)
+    check decRerun.kind == idRerunChanged
+    check "used_a" in decRerun.changedFuncs
+
+    let rootUnexec = mirrorRecordedSource(progPath, jsProgram)
+    var cacheUnexec = initCache(rootUnexec / "cache.json")
+    check record(cacheUnexec, "js_live", rec.traceDir, rootUnexec).isOk
+    editJsFunctionLine(rootUnexec, progPath, "unused_c",
+      "function unused_c(x) { return x - 123456; }")
+    check decide("js_live", rec.traceDir, rootUnexec, cacheUnexec).kind ==
+      idSkipUnchanged
