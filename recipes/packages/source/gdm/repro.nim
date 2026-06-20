@@ -221,6 +221,9 @@ package gdmSource:
     "udev"
     "gudev"
     "accountsservice >=0.6.35"
+    ## M9.R.15e.12 — json-glib is gdm 47.x's GLib-style JSON parser
+    ## library dep (meson.build:67), routed through nixpkgs#json-glib.
+    "json-glib"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.

@@ -113,6 +113,9 @@ import ./cvt
 # nixpkgs prebuilt rather than a from-source recipe (the upstream
 # build needs polkit + vala + dbus-daemon at configure-time).
 import ./accountsservice
+# M9.R.15e.12 — json-glib is gdm 47.x's GLib-style JSON library dep
+# (meson.build:67).
+import ./json_glib
 
 export bc
 export bison
@@ -166,3 +169,4 @@ export libgudev
 export udev
 export cvt
 export accountsservice
+export json_glib
