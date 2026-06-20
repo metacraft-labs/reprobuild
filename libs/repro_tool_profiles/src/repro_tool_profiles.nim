@@ -3849,6 +3849,13 @@ const FromSourceInstallTreeRoots* = @[
   ".repro/output/install/usr",
   ".repro/output/install",
   "build/out/usr",
+  # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
+  # libdir=/lib64 in their configure.ac regardless of --prefix, so the
+  # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
+  # Add the bare destdir root so consumers' LIBRARY_PATH /
+  # CMAKE_PREFIX_PATH find ``<destdir>/lib64/libpam.so`` etc. The
+  # populator's lib + lib64 walk picks up files under either root.
+  "build/out",
 ]
 
 proc addUniquePath*(dst: var seq[string]; value: string) =

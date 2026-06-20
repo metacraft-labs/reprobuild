@@ -449,6 +449,31 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add("if [ -d \"" & escapedSrcUsr & "\" ]; then ")
   script.add("cp -a -- \"" & escapedSrcUsr & "\" \"" & escapedDstUsrRoot & "/\"; ")
   script.add("fi; ")
+  # M9.R.15e.11 — some autotools projects (Linux-PAM, glibc) hardcode
+  # libdir=/lib64 in their configure.ac regardless of --prefix, so the
+  # .so files install to ``<destdir>/lib64/`` (no ``/usr/`` segment).
+  # Merge ``<destdir>/lib`` and ``<destdir>/lib64`` into the mirrored
+  # ``usr/lib`` and ``usr/lib64`` so consumers' resolver search paths
+  # (anchored at ``<recipeDir>/.repro/output/install/usr``) find them.
+  for bareSubdir in ["lib", "lib64", "etc", "sbin"]:
+    let srcBare = effectiveDestRoot & "/" & bareSubdir
+    let escapedSrcBare = srcBare.replace("\\", "/").replace("\"", "\\\"")
+    let usrTarget = "usr/" & bareSubdir
+    if bareSubdir in ["etc", "sbin"]:
+      # ``etc`` + ``sbin`` are not nested under ``usr/`` in the FHS;
+      # mirror them at the dstUsrRoot directly so the canonical install
+      # tree carries them at ``<install>/etc`` / ``<install>/sbin``.
+      script.add("if [ -d \"" & escapedSrcBare & "\" ]; then ")
+      script.add("cp -a -- \"" & escapedSrcBare & "\" \"" & escapedDstUsrRoot & "/\"; ")
+      script.add("fi; ")
+    else:
+      # ``lib`` + ``lib64`` are FOLDED into ``usr/lib`` + ``usr/lib64``.
+      let dstBare = dstUsr / bareSubdir
+      let escapedDstBare = dstBare.replace("\\", "/").replace("\"", "\\\"")
+      script.add("if [ -d \"" & escapedSrcBare & "\" ]; then ")
+      script.add("mkdir -p \"" & escapedDstBare & "\"; ")
+      script.add("cp -a -- \"" & escapedSrcBare & "\"/. \"" & escapedDstBare & "/\"; ")
+      script.add("fi; ")
   # M9.R.14e.8 — rewrite the .pc files' ``prefix=`` line to point at the
   # absolute path of the mirrored ``usr/`` tree so consumers that consult
   # ``pkg-config --variable=...`` or ``pkg-config --cflags`` see real
