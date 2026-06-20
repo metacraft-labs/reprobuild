@@ -5153,6 +5153,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # etc.) still build from source.
     seedBootstrapCycleBreakTools()
     for useDef in artifact.projectInterface.toolUses:
+      # M9.R.14c.2 — if the tool is in the cycle-break set (either
+      # seeded as part of the bootstrap floor OR added reactively by
+      # an earlier closing-edge cycle), skip the auto-recurse + sibling
+      # probe entirely. The downstream ``toolProfileFor`` resolver
+      # routes it through stdlib provisioning instead. Without this
+      # gate the dispatcher would still recurse into the sibling
+      # binutils / gcc / make recipe even though we already decided
+      # the tool comes from stdlib -- wasting ~15 minutes of CI on a
+      # build whose output we'll never consume.
+      if useDef.executableName.len > 0 and
+          useDef.executableName in fromSourceCycleBrokenTools:
+        continue
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind != rrNeedsBuild:
         continue
