@@ -230,6 +230,17 @@ package libxkbcommonSource:
         "enable-x11=false",
         "enable-wayland=true",
         "enable-tools=true",
+        # M9.R.14f.3 — upstream 1.13.2 references
+        # ``DFLT_XKB_CONFIG_UNVERSIONED_EXTENSIONS_PATH`` /
+        # ``DFLT_XKB_CONFIG_VERSIONED_EXTENSIONS_PATH`` from
+        # ``tools/info.c`` unconditionally, but the macros are gated
+        # in ``src/meson.build`` on the options being non-empty.
+        # Provide non-empty defaults matching nixpkgs's
+        # ``pkgs/development/libraries/libxkbcommon/default.nix``
+        # conventional values so the build closes without patching
+        # upstream sources.
+        "xkb-config-unversioned-extensions-path=/etc/xkb",
+        "xkb-config-versioned-extensions-path=/etc/xkb",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libxkbcommon")
