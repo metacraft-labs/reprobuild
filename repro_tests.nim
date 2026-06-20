@@ -5886,6 +5886,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r12_3_runquota_standard_pools.nim",
+    binary: "build/test-bin/t_m9r12_3_runquota_standard_pools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim",
+    binary: "build/test-bin/t_m9r12_sh_inline_exec_and_typed_tool_fallback",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r1_deps_package_level.nim",
     binary: "build/test-bin/t_m9r1_deps_package_level",
     defines: @[],
