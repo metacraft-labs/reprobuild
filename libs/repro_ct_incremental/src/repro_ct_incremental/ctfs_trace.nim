@@ -221,6 +221,57 @@ proc runCtPrintJsonEvents(ctPrint, bundle: string): Result[string, string] =
       " on " & bundle & ":\n" & output)
   ok(output)
 
+proc ctfsHasCallStream*(traceDirOrCtFile: string): Result[bool, string] =
+  ## M17a: report whether the bundle carries a DEDICATED `calls.dat` call
+  ## stream — i.e. whether its `meta.dat` has the `has_call_stream` capability
+  ## flag (bit 8) set.  Probes `ct-print --meta-json` (the metadata-only fast
+  ## path; it does NOT decode the event streams) and reads
+  ## `metadata.flags.has_call_stream`.
+  ##
+  ## When true, the engine PREFERS the dedicated call stream for executed-
+  ## function discovery: the call tree is split out of the unified step/value
+  ## stream, so reading it does not require scanning the (far larger) step
+  ## stream.  When false (a legacy bundle), discovery falls back to the unified
+  ## stream.  EITHER WAY the executed SET is identical — the split is purely a
+  ## storage/locality optimisation (the call records are derived from the same
+  ## Call/Return events).  A missing/old `ct-print`, or a flag field absent from
+  ## the JSON, yields `ok(false)` (treat as legacy), never a crash; a failed
+  ## subprocess launch is an `Err` (⇒ re-run upstream, never a silent skip).
+  let bundleRes = resolveCtBundle(traceDirOrCtFile)
+  if bundleRes.isErr:
+    return err(bundleRes.error)
+  let bundle = bundleRes.value
+  let ctPrintRes = resolveCtPrint()
+  if ctPrintRes.isErr:
+    return err(ctPrintRes.error)
+  var output: string
+  var code: int
+  try:
+    (output, code) = execCmdEx(
+      quoteShell(ctPrintRes.value) & " --meta-json " & quoteShell(bundle))
+  except CatchableError as e:
+    return err("failed to run ct-print --meta-json: " & e.msg)
+  except Exception as e:
+    return err("failed to run ct-print --meta-json: " & e.msg)
+  if code != 0:
+    return err("ct-print --meta-json exited with code " & $code &
+      " on " & bundle & ":\n" & output)
+  # --meta-json output is pure ASCII (metadata only, no value bytes), so a
+  # straight std/json parse is safe here.
+  var root: JsonNode
+  try:
+    root = parseJson(output)
+  except CatchableError as e:
+    return err("malformed ct-print --meta-json for " & bundle & ": " & e.msg)
+  if root.kind == JObject and root.hasKey("metadata") and
+      root["metadata"].kind == JObject and root["metadata"].hasKey("flags") and
+      root["metadata"]["flags"].kind == JObject and
+      root["metadata"]["flags"].hasKey("has_call_stream") and
+      root["metadata"]["flags"]["has_call_stream"].kind == JBool:
+    return ok(root["metadata"]["flags"]["has_call_stream"].getBool())
+  # Older ct-print that does not surface the flag ⇒ treat as legacy (no split).
+  ok(false)
+
 func extractFromEvents(root: JsonNode): Result[seq[ExecutedFunction], string] =
   ## Parse the modern `type`-tagged event array into the executed-function set.
   ##

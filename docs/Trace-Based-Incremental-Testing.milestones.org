@@ -1282,7 +1282,16 @@
   (recorder-independent), unit-tested everywhere, live path honestly gated.
 
 * M17 — Dedicated `calls.dat` call stream in materialized `.ct` (additive, compat)
-  :STATUS: planned
+  :STATUS: M17a complete (writer + ct-print + engine flag-detection + round-trip/engine tests); M17b pending (db-backend seekable reader + engine reading calls.dat + in_memory_trace_reader)
+
+  NOTE (2026-06-21): M17 is split into M17a (the dedicated `calls.dat` call
+  stream in materialized `.ct` traces plus the format-level readers, and engine
+  DETECTION of the stream — DONE) and M17b (the db-backend SEEKABLE reader for
+  `calls.dat`, the engine actually READING `calls.dat` to avoid scanning the
+  unified stream, and the `in_memory_trace_reader.rs` spec-violation fix —
+  PENDING). The boxes below are checked per the M17a deliverables; the
+  db-backend reader, the engine's calls.dat-preferring read path, and
+  `in_memory_trace_reader` are left UNCHECKED/partial for M17b.
 
   Goal: implement the first, backward-compatible step of trace-events.md's "Event
   Stream Redesign" — emit a DEDICATED `calls.dat` call stream alongside the existing
@@ -1309,11 +1318,20 @@
   independently"), never by reading the whole trace into memory.
 
   Deliverables:
-  - [ ] Writer (codetracer-trace-format/codetracer_trace_writer): emit `calls.dat`
+  - [X] Writer (codetracer-trace-format/codetracer_trace_writer): emit `calls.dat`
     call records per trace-events.md §"Call Stream Records", with its companion
     chunk index (`calls.idx`) for seekable access, in addition to `events.log`,
     behind a new `meta.dat` flag bit (e.g. has_call_stream). Old readers ignore
     the extra files; the combined stream is unchanged.
+    (M17a: `CtfsTraceWriter::with_call_stream(true)` builds the call records
+    from the same Call/Return/Step events that feed `events.log` via the new
+    `call_stream::CallStreamBuilder`, encodes them per the spec wire format
+    (byte-compatible with `call_stream.nim`), and writes `calls.dat` (chunked
+    Zstd) + `calls.idx` (companion offset index per seekable-zstd.md) + a
+    `meta.dat` carrying the new `FLAG_HAS_CALL_STREAM` bit. The flag bit is also
+    added to the canonical Nim writer (`meta_dat.nim` bit 8 `FlagHasCallStream`),
+    and the Nim `multi_stream_writer` — which always emits a v4 `calls.dat` —
+    now stamps it.)
   - [ ] db-backend SEEKABLE reader (`codetracer/src/db-backend/src/ctfs_trace_reader`):
     read `calls.dat` via CTFS block seeking + the Seekable-Zstd seek table + the
     companion index — on-demand, NOT fully into memory — so a network-loaded `.ct`
@@ -1334,21 +1352,47 @@
     explicitly-labelled small-trace/test fallback — never the network/large-trace
     path). The call tree must "load independently" via `calls.dat`, never by
     materializing the whole event stream into a `Db`.
-  - [ ] ct-print (codetracer-trace-format-nim): when the flag is set, read calls
+  - [X] ct-print (codetracer-trace-format-nim): when the flag is set, read calls
     from `calls.dat` via the existing dormant `call_stream` reader; otherwise the
     legacy path. `--json-events` output is unchanged for consumers.
-  - [ ] Engine (reprobuild ctfs_trace.nim): prefer `calls.dat` for executed-
-    function discovery when present (cheaper than the unified stream); identical
-    results either way.
+    (M17a: ct-print's `NewTraceReader` already sources call records from the v4
+    `calls.dat` via the `call_stream` reader; the new `has_call_stream` flag is
+    surfaced under `metadata.flags` in `--full`/`--meta-json` only.
+    `--json-events` is proven byte-for-byte unchanged — a baseline ct-print and
+    the new ct-print produce identical `--json-events` over the same bundle.)
+  - [~] Engine (reprobuild ctfs_trace.nim): DETECT the dedicated `calls.dat`
+    stream and prove results are identical with or without it; identical results
+    either way.
+    (M17a: new `ctfsHasCallStream` probes the `has_call_stream` flag via
+    `ct-print --meta-json` (metadata-only, does not decode the event streams),
+    and the engine proves the executed set is identical for a split vs a legacy
+    bundle. Any subprocess/parse error ⇒ Err ⇒ re-run, never a silent skip.
+    NOTE: `readExecutedFunctionsCtfs` still extracts the executed set from the
+    unified stream via `ct-print --json-events` for BOTH bundles — it does NOT
+    yet read `calls.dat` directly. Actually PREFERRING `calls.dat` (so discovery
+    avoids scanning the larger step/value stream) depends on the db-backend
+    seekable reader and is deferred to M17b; this box is therefore left partial
+    `[~]` until that cheaper read path is realized.)
 
   Automated tests:
-  - [ ] Round-trip: writer emits `calls.dat` (+`calls.idx`), the Rust reader +
+  - [X] Round-trip: writer emits `calls.dat` (+`calls.idx`), the Rust reader +
     ct-print read it back, call records match the combined stream.
+    (M17a: `codetracer_trace_reader/tests/call_stream_tests.rs` —
+    `calls_dat_matches_events_log` writes a nested-call trace with the flag on,
+    reads `calls.dat` via the seekable `CallStreamReader`, and asserts the
+    records equal the call tree re-derived from the unchanged `events.log`;
+    `seek_to_call_by_key` seeks across a chunk boundary (chunk_size 2);
+    `legacy_trace_has_no_call_stream` confirms a flag-off trace exposes no call
+    stream and still reads.)
   - [ ] db-backend seekable read: fetch a call record by `call_key` WITHOUT
     materializing the whole trace (assert bounded decompression / only the needed
     chunk is read), and verify concurrent-reader access.
-  - [ ] Engine extracts the SAME executed set from a split bundle and a legacy
+  - [X] Engine extracts the SAME executed set from a split bundle and a legacy
     bundle; backward compat — a legacy (no calls.dat) `.ct` still reads.
+    (M17a: `repro_ct_incremental/tests/t_call_stream_split.nim` — over a
+    `ruby_split.ct` (flag set) and the legacy `ruby.ct` (flag clear) twin, the
+    engine extracts an identical executed set and decides identically; the
+    `t_live_full_suite.nim` driver auto-includes it and stays green.)
 
   Acceptance: materialized `.ct` carries a dedicated, spec-shaped, seekable
   `calls.dat` stream, read on-demand by the db-backend's seekable reader and by
