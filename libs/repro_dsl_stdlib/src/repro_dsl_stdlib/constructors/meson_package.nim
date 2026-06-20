@@ -30,6 +30,19 @@ import repro_project_dsl
 import ../types/package_result
 import ../packages/meson as meson_module
 import ../packages/sh as sh_module
+# M9.R.14d.3 — auto-import the bootstrap toolchain + ninja so their
+# stdlib ``package <name>:`` provisioning blocks land in
+# ``registeredPackages()`` for any recipe that consumes
+# ``meson_package``. Without this, a recipe's
+# ``nativeBuildDeps: "gcc"``/``"ninja"`` use carries an executable
+# name but no provisioning channels, and the bootstrap cycle-break's
+# stdlib fall-through fails with "no provisioning channel declared".
+# Same idiom autotools_package uses for the autotools regen layer
+# (M9.R.14c.9).
+import ../packages/gcc as gcc_module
+import ../packages/ninja as ninja_module
+import ../packages/make as make_module
+import ../packages/pkg_config as pkg_config_module
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4) — shared shape with ``autotools_package``.

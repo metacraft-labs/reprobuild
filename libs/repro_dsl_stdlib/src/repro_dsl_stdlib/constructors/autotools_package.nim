@@ -77,6 +77,15 @@ import ../packages/automake as automake_module
 import ../packages/libtool as libtool_module
 import ../packages/m4 as m4_module
 import ../packages/perl as perl_module
+# M9.R.14d.3 — also auto-import gcc + pkg-config so application
+# recipes that consume autotools_package pick up those stdlib
+# provisioning channels for the cycle-break fall-through. libxml2
+# happens to build without this because the runtime registry was
+# already warm from an earlier smoke iteration, but a fresh recipe
+# (or a clean environment) trips with "no provisioning channel
+# declared" on ``nativeBuildDeps: "gcc"``.
+import ../packages/gcc as gcc_module
+import ../packages/pkg_config as pkg_config_module
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4)

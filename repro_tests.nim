@@ -6062,6 +6062,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r14d_3_meson_package_autoimports.nim",
+    binary: "build/test-bin/t_m9r14d_3_meson_package_autoimports",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",
     defines: @[],
