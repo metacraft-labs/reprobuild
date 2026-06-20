@@ -352,6 +352,17 @@ package qt6BaseSource:
         # Disabling SBOM generation entirely is the v1 workaround;
         # a future milestone can restore SBOM by aligning the prefix.
         "QT_GENERATE_SBOM=OFF",
+        # M9.R.15f.4 — zstd is not in the v1 from-source closure (the
+        # zstd dep was previously satisfied via a /mnt/d/.../msys2
+        # leak on Windows-host-mounted WSL builds; with the clean
+        # PATH that leak is gone). Qt6's QtCore auto-links against
+        # libzstd when the configure-time probe finds it. Disabling
+        # the feature forces QtCore to use its bundled zlib
+        # compression path; consumer link-edges (lupdate, lrelease,
+        # KF6 modules) then don't pick up the dangling libzstd.so.1
+        # dependency. A future milestone landing zstd-from-source
+        # flips this back on.
+        "FEATURE_zstd=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")
