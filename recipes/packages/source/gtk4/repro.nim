@@ -178,6 +178,15 @@ package gtk4Source:
     "libdrm >=2.4.110"
     ## fribidi is required for pango's bidirectional text layout.
     "fribidi"
+    ## M9.R.15d.3 — libegl-headers exposes the Khronos EGL header set
+    ## (``EGL/egl.h`` + ``EGL/eglext.h`` + ``EGL/eglplatform.h``).
+    ## gtk4's ``gdk/gdkdmabuf.c`` includes ``<epoxy/egl.h>`` whose
+    ## libepoxy 1.5.10 generated header (``epoxy/egl_generated.h``)
+    ## transitively includes ``EGL/eglplatform.h``. Now that libepoxy
+    ## is built with egl=yes (M9.R.15d.1) gtk4 needs the same Khronos
+    ## headers on its include search path at compile time. Stub
+    ## points at ``nixpkgs#libglvnd.dev``.
+    "libegl-headers"
 
   config:
     discard
@@ -213,22 +222,14 @@ package gtk4Source:
         "build-testsuite=false",
         "build-examples=false",
         "build-demos=false",
-        # M9.R.15b.9 — disable wayland-backend in v1 because gtk4's
-        # gdk/wayland/gdkdisplay-wayland.h unconditionally
-        # ``#include <epoxy/egl.h>`` and our v1 libepoxy is built
-        # with egl=no (the v1 closure does not yet build mesa from
-        # source, so EGL/eglplatform.h is not on the include search
-        # path; see libepoxy/repro.nim's M9.R.15b.3 deferral note).
-        # Without EGL headers libepoxy does not emit epoxy/egl.h
-        # either, so gtk4's wayland backend short-fails compile at
-        # gdkprimary-wayland.c with
-        #   fatal error: epoxy/egl.h: No such file or directory
-        # Until M9.R.15c lifts libepoxy's egl back to yes (after a
-        # from-source mesa / libegl-headers recipe lands), gtk4 ships
-        # with broadway-only — the Wayland session can still load
-        # gtk4 apps via broadway-over-HTML for v1 validation.
+        # M9.R.15d.3 — re-enable wayland-backend. The M9.R.15b.9
+        # broadway-only deferral is lifted: libepoxy now ships with
+        # egl=yes (M9.R.15d.1) and gtk4 declares ``libegl-headers``
+        # in its buildDeps so the Khronos EGL header set
+        # (``EGL/eglplatform.h`` etc.) lands on the include search
+        # path at compile time.
         "broadway-backend=true",
-        "wayland-backend=false",
+        "wayland-backend=true",
         "x11-backend=false",
         "vulkan=disabled",
         "print-cups=disabled",
