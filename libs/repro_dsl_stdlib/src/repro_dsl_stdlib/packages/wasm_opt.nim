@@ -35,3 +35,16 @@ package `wasm-opt`:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:binaryen@130:linux:sha256:0a18362361ad05465118cd8eeb72edaeec89de6894bc283576ef4e07aa3babcc"
+    # macOS aarch64: WebAssembly/binaryen GitHub Releases. Native Apple
+    # Silicon archive ships under the same top-level `binaryen-version_130/`
+    # directory as the Linux + Windows entries; stripComponents=1 flattens
+    # to the prefix root.
+    tarball url = "https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-arm64-macos.tar.gz",
+      sha256 = "79d3ab9f417d9e215f15f598f523d001a7d9ac1e59367e5c869fbdabd1cba72e",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "bin/wasm-opt",
+      packageId = "binaryen@130",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:binaryen@130:macos-aarch64:sha256:79d3ab9f417d9e215f15f598f523d001a7d9ac1e59367e5c869fbdabd1cba72e"

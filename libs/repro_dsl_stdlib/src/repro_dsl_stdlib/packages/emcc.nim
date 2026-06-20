@@ -47,3 +47,19 @@ package emcc:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:emsdk@6.0.0:linux:sha256:85c35c690ff6747243cb439076835c2a870df8cc5e8d304fe0800c69f6f6e265"
+    # macOS aarch64: identical emsdk source tarball as the Linux entry —
+    # emsdk's source archive is platform-agnostic so the same tarball
+    # serves every POSIX host. Same post-install caveat: the realized
+    # prefix carries the emsdk tooling but not a working emcc until the
+    # operator runs `./emsdk install latest && ./emsdk activate latest`
+    # (the activator downloads the per-platform LLVM + Node + Python
+    # toolchain, which IS Apple-Silicon-specific).
+    tarball url = "https://github.com/emscripten-core/emsdk/archive/refs/tags/6.0.0.tar.gz",
+      sha256 = "85c35c690ff6747243cb439076835c2a870df8cc5e8d304fe0800c69f6f6e265",
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "emsdk",
+      packageId = "emsdk@6.0.0",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:emsdk@6.0.0:macos-aarch64:sha256:85c35c690ff6747243cb439076835c2a870df8cc5e8d304fe0800c69f6f6e265"

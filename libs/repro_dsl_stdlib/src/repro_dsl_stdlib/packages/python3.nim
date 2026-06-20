@@ -83,6 +83,19 @@ package python3:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:python@3.12.13+20260610:linux:sha256:c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a"
+    # macOS aarch64: same astral-sh/python-build-standalone install_only
+    # tarball as the Linux entry (and the one `python_dev.nim` consumes
+    # for its macOS aarch64 slice) — native Apple Silicon build. Ships
+    # `python/bin/python3` plus the full Lib/ tree under a top-level
+    # `python/` directory.
+    tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-aarch64-apple-darwin-install_only.tar.gz",
+      sha256 = "e18ddd4c1e8f4a1d6c4590b37f423d76aec734447edc20ed08e93983d95f2132",
+      archiveType = "tar.gz",
+      executablePath = "python/bin/python3",
+      packageId = "python@3.12.13+20260610",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:python@3.12.13+20260610:macos-aarch64:sha256:e18ddd4c1e8f4a1d6c4590b37f423d76aec734447edc20ed08e93983d95f2132"
 
 # ---------------------------------------------------------------------------
 # M68 bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
