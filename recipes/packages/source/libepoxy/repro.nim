@@ -55,21 +55,16 @@
 ##
 ## v1 ships NO configurables — meson options are pinned:
 ##
-##   * ``egl=no``     — DISABLE EGL support. M9.R.15b honest deferral:
-##                       the v1 from-source closure does not yet build
-##                       mesa from source, so the ``EGL/eglplatform.h``
-##                       header (which ships in ``libegl-dev`` on debian
-##                       or in the mesa ``out`` output on nix) is not on
-##                       the include search path. The upstream meson
-##                       build emits ``include/epoxy/egl_generated.h``
-##                       containing ``#include "EGL/eglplatform.h"`` if
-##                       egl=yes, which then fails compile. M9.R.15c
-##                       must lift this to ``egl=yes`` after a from-
-##                       source mesa / libegl-headers recipe lands.
-##                       Downstream impact: gtk4's Wayland GL renderer
-##                       cannot resolve EGL function pointers through
-##                       libepoxy — gtk4 must use its software renderer
-##                       or fall back to dlopen'd EGL until M9.R.15c.
+##   * ``egl=yes``    — ENABLE EGL support. M9.R.15d.1 lifted the
+##                       ``egl=no`` deferral after the
+##                       ``libegl-headers`` stdlib stub
+##                       (``nixpkgs#libglvnd.dev``) landed; the
+##                       libglvnd dev output exposes ``EGL/egl.h`` +
+##                       ``EGL/eglext.h`` + ``EGL/eglplatform.h`` on
+##                       the include search path so meson's egl=yes
+##                       configure probe succeeds. Downstream impact:
+##                       gtk4's Wayland GL renderer can now resolve
+##                       EGL function pointers through libepoxy.
 ##   * ``glx=no``     — drop GLX (X11-only; v1 is pure Wayland).
 ##   * ``x11=false``  — drop X11 dependencies entirely.
 ##   * ``tests=false`` — skip the upstream test suite.
@@ -109,7 +104,12 @@ package libepoxySource:
     ## v1 sets x11=false so libX11 is not required. The wayland-EGL
     ## path resolves through the system EGL implementation (mesa);
     ## EGL is dlopen'd at runtime, no link-time dep needed.
-    discard
+    ##
+    ## M9.R.15d.1 — egl=yes needs ``EGL/egl.h`` + ``EGL/eglext.h`` +
+    ## ``EGL/eglplatform.h`` at compile time. The ``libegl-headers``
+    ## stdlib stub points at nixpkgs#libglvnd.dev which carries the
+    ## canonical Khronos EGL header set.
+    "libegl-headers"
 
   config:
     discard
@@ -123,7 +123,7 @@ package libepoxySource:
     setCurrentOwningPackageOverride("libepoxySource")
     try:
       let opts = @[
-        "egl=no",
+        "egl=yes",
         "glx=no",
         "x11=false",
         "tests=false",
