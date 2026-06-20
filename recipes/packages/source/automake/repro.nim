@@ -95,7 +95,7 @@ package automakeSource:
     ## nixpkgs cross-check deferred because nixpkgs pins automake
     ## 1.18.1 (not the 1.17 the task brief requests).
     url: "https://ftp.gnu.org/gnu/automake/automake-1.17.tar.xz"
-    sha256: "b069564d4361e50dfe31956fb1982f43201c558588fd1f9142a00b3db6aeecc2"
+    sha256: "8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990"
     extractStrip: 1
 
   nativeBuildDeps:
