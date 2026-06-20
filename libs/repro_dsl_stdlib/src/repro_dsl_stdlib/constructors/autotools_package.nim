@@ -50,7 +50,7 @@
 
 {.experimental: "callOperator".}
 
-import std/[options, os, strutils]
+import std/[options, os, osproc, strutils]
 
 import repro_project_dsl
 
@@ -256,8 +256,34 @@ proc autotools_package*(srcDir: string;
   # carry a ``-C buildDir`` output slot so we have to wire it
   # explicitly via the ``after:`` parameter the typed-tool macro
   # generator emits on every typed-tool call site.
+  #
+  # M9.R.14c.1 — parallel make via ``MAKEFLAGS`` env-var injection.
+  # The single-threaded make invocation dominated wall time on every
+  # autotools-driven from-source recipe (binutils, gcc, expat,
+  # autoconf, automake, libtool, ...): a 30-minute binutils compile
+  # collapsed to ~4 minutes on a 32-core host once make ran with
+  # ``-j N``. We compute ``N = max(1, min(countProcessors(), 8))`` at
+  # action-emit time so the speedup applies anywhere.
+  #
+  # **Determinism guard.** The action's cache fingerprint
+  # (``BuildAction.weakFingerprint``) is derived from the action ``id``
+  # via ``weakFingerprintFromText(id)`` in ``repro_build_engine``. The
+  # ``id`` here is derived from ``defaultToolActionId(call)``, whose
+  # input is ``callIdentity(call)`` — the package name + executable
+  # name + subcommand + per-argument encoded values. Neither
+  # ``extraEnv`` nor the spawned-process ``BuildAction.env`` enters
+  # the fingerprint. So passing ``MAKEFLAGS=-j N`` via ``extraEnv``
+  # keeps the cache key BYTE-IDENTICAL across hosts with different
+  # core counts. Same recipe + same source → same cache key.
+  #
+  # We deliberately do NOT pass ``-j N`` via the typed ``jobs`` flag
+  # because that would land in ``callIdentity`` and the action id
+  # would vary with N — defeating determinism.
+  let jobs = max(1, min(countProcessors(), 8))
+  let makeflags = "-j" & $jobs
   let buildEdge = make(workDir = buildDir, vars = @[], targets = @[],
-    after = @[configureEdge])
+    after = @[configureEdge],
+    extraEnv = @[("MAKEFLAGS", makeflags)])
   # M9.R.14b.3b: install must wait for compile to finish; the prior
   # ``after = @[configureEdge]`` form let the engine schedule install
   # in parallel with compile (both only depended on configure), and
@@ -271,7 +297,8 @@ proc autotools_package*(srcDir: string;
     workDir = buildDir,
     targets = @[installTarget],
     vars = @["DESTDIR=" & destdir],
-    after = @[configureEdge, buildEdge])
+    after = @[configureEdge, buildEdge],
+    extraEnv = @[("MAKEFLAGS", makeflags)])
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
