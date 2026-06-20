@@ -1104,7 +1104,21 @@
 # M18 ports the engine into `ct test`. M19 ships docs.
 
 * M14 — Native call trace via compile-time instrumentation (cross-platform)
-  :STATUS: complete
+  :STATUS: needs rework — must reuse the existing ct_instrument plugin (do NOT duplicate)
+
+  REWORK NOTE (2026-06-21): the first M14 cut added a NEW
+  `-finstrument-functions` C runtime (`csrc/ct_instrument_runtime.c`) + build
+  logic inside reprobuild. That DUPLICATES the existing compile-time
+  instrumentation plugin `codetracer-native-recorder/ct_instrument` — which
+  already provides `ct_gcc_wrapper.buildWithShadowStack` / `ct_clang_wrapper`,
+  the `shadow_stack/ct_shadow_stack.c` runtime, and GCC GIMPLE / LLVM IR passes
+  (`ct_rcb_gcc.cc`, `CtRcbPass.cpp`, pad/atomic passes). The reworked M14 MUST
+  instrument via that existing plugin (invoked through the build-siblings
+  strategy, `direnv exec codetracer-native-recorder ...`) and EXTEND it (e.g. an
+  executed-function sink on the shadow-stack runtime) to persist the executed
+  set — not maintain a parallel runtime in reprobuild. The committed reprobuild
+  runtime (e466d8f9) is to be reverted/repurposed. Instrumentation belongs in
+  the native recorder; reprobuild only CONSUMES the executed-function set.
 
   Goal: implement the spec's "compile-time instrumentation that produces the call
   trace" alternative (Nim-Parallel-Test-Framework §16.7; MCR-Calltrace-Design §22d
@@ -1144,7 +1158,15 @@
   compile-time-instrumentation run on this host, deterministically.
 
 * M15 — Engine consumes the real native call trace (retire native_calltrace.json)
-  :STATUS: planned
+  :STATUS: needs rework — engine wiring is sound; instrumentation source must come from ct_instrument (M14)
+
+  REWORK NOTE (2026-06-21): the engine wiring (backends.nim routing,
+  native-instrumented detection, the clean-binary instruction-byte hash, and the
+  live t_live_native skip/rerun/skip-unexecuted decision) is correct and worth
+  keeping. What changes with the M14 rework: the harness must obtain the
+  executed-function set from the existing `ct_instrument` plugin (shadow-stack
+  sink) rather than reprobuild's duplicated runtime. The end-to-end macOS-live
+  native decision stays the acceptance bar.
 
   Goal: wire M14's instrumentation-produced call trace into the engine's native
   backend so the native incremental decision (skip / re-run) runs end-to-end on
@@ -1153,49 +1175,83 @@
   only as an explicitly-labelled legacy fixture path if still needed by old tests).
 
   Deliverables:
-  - [ ] `native_trace.nim` reads the instrumentation call trace as the native
-    dependency-discovery source; `detectBackend` routes an instrumentation-native
-    trace dir to `tbNativeDwarf` discovery + native shallow hashing.
-  - [ ] `tests/t_live_native.nim` flips from the platform gate to a GENUINE live
-    native decision on macOS: record via instrumentation, assert the executed set,
-    then a correct SKIP (unchanged), a correct RE-RUN (edit an executed function),
-    and a correct SKIP (edit an unexecuted function) — mirroring the live Ruby/
-    Python/JS tests.
+  - [X] `native_trace.nim` reads the instrumentation call trace as a FIRST-CLASS
+    native dependency-discovery source. A flavour dispatch
+    (`readExecutedFunctionsNativeAny` / `nativeTraceBinaryAny` /
+    `nativeTraceDirReadableAny`) selects, per trace dir, the GENUINE
+    instrumentation capture (M14: `native_instrument_calls.log` +
+    `instrumented_prog`) — preferred when present — else the legacy
+    `native_calltrace.json` projection (M8, kept as an explicitly-labelled legacy
+    path so every M8 test keeps passing, with backward-compatible error messages).
+    `detectBackend` routes an instrumentation-native trace dir to `tbNativeDwarf`
+    (its `trace_db_metadata.json` marker is a native structural signal; the
+    harness also stamps `recorder_backend: "native-instrumented"`, newly mapped to
+    `tbNativeDwarf` in `backends.nim`). The native shallow hash stays the M7
+    instruction-byte hasher. CRUCIAL: the hash reads a CLEAN (non-instrumented)
+    `recorded_prog` build of the same source, NOT the instrumented binary —
+    `-finstrument-functions` makes every function's bytes relocation-sensitive to
+    unrelated edits, so hashing the instrumented binary would re-hash the executed
+    set on an `unused_c` edit (a safe but useless re-run). Instrumentation is the
+    DISCOVERY tool; the hash reflects the production binary
+    (`native_trace.instrumentHashBinaryPath`). The fail-safe invariant holds: any
+    read/resolve error ⇒ re-run, never a false skip.
+  - [X] `tests/t_live_native.nim` flips from the platform gate to a GENUINE live
+    native decision on macOS: record via `recordNativeInstrumentedLive` (a new
+    harness driver in `tests/live_record.nim` reusing M14's `native_instrument`),
+    assert the executed set == {used_a, used_b, main} (unused_c ABSENT), then a
+    correct SKIP (recompile unchanged), a correct RE-RUN (edit the executed used_a,
+    recompile ⇒ idRerunChanged naming used_a, NOT used_b), and a correct SKIP
+    (edit the unexecuted unused_c, recompile ⇒ idSkipUnchanged) — mirroring the
+    live Ruby/Python/JS tests. NO gate, NO unittest.skip, asserts success on this
+    arm64-macOS host. (The ct-mcr/MCR path is M16's concern and is not under test
+    here.)
 
   Automated tests:
-  - [ ] End-to-end native skip/re-run over a real C binary, on arm64-macOS.
-  - [ ] Full live suite stays green.
+  - [X] End-to-end native skip/re-run over a real C binary, on arm64-macOS
+    (`t_live_native.nim`).
+  - [X] Full live suite stays green (`t_live_full_suite.nim`).
 
   Acceptance: native is LIVE end-to-end on this host via instrumentation — the
   native row in the README/matrix moves from gated to live.
 
-* M16 — Intel PT / MCR-emulator native discovery (Linux spec-primary; honest gate)
+* M16 — Intel PT native discovery (OS-level, recorder-independent; honest gate)
   :STATUS: planned
 
-  Goal: the spec-primary native path — derive the executed-function set from a REAL
-  CodeTracer native recording: the Linux `ct-mcr` emulator's CallTree
-  (ct_emulator/calltrace.nim → CallNode), and/or an Intel-PT decode of the RR
-  recording (ProcessorTraceDecoder, INTEL_PT_DECODING). Replaces the hand-crafted
-  JSON projection with consumption of the real recorder artifact.
+  Goal: derive the executed-function set from an **Intel PT control-flow trace**,
+  decoded into call/return events. CORRECTION (2026-06-21): Intel PT is NOT tied
+  to RR or MCR. Per Intel-PT-Call-Trace-Research.md, raw PT packets come from
+  **`perf_event` OR an RR recording** and are decoded by **libipt** (Rust bindings
+  `libipt-rs`) independently — "no perf dependency", "no MCR infrastructure
+  required". Recording is ORTHOGONAL to producing a trace: PT can be captured on
+  any OS/host with PT hardware, with or without an MCR/RR recording. So this
+  milestone is an OS-level PT-decode path, not an RR-bound one.
 
   Deliverables:
-  - [ ] A reader that consumes the real MCR call-tree artifact (function names +
-    call PCs) into `seq[ExecutedFunction]`.
-  - [ ] (If feasible) a PT-decode path: RR PT stream → executed instruction
-    ranges → functions via DWARF; behind the recorder's PT capability.
-  - [ ] Honest platform gate: on a host without a Linux MCR / PT recording, the
-    test prints the VERIFIED reason and asserts a documented gate — never a skip,
-    never a misdiagnosis. (On arm64-macOS, M14/M15 instrumentation is the live
-    native path; this milestone's live assertions run on Linux MCR.)
+  - [ ] Capture an Intel PT control-flow trace for a native test run via the
+    OS facility (`perf record -e intel_pt//`), independent of RR/MCR. (An RR
+    recording's PT data is an alternative source, not a requirement.)
+  - [ ] Decode the PT stream with libipt's instruction-flow / block decoder
+    (`libipt-rs`): classify CALL/RET (`pt_insn.iclass`) → reconstruct the call
+    tree → resolve PCs to functions via DWARF → executed-function set
+    (`seq[ExecutedFunction]`). Per the spec, decode once at import and build a
+    persistent index.
+  - [ ] (Optional, complementary) consume the Linux `ct-mcr` emulator CallTree
+    (ct_emulator/calltrace.nim → CallNode) where an MCR recording exists — but the
+    PT path does not depend on it.
+  - [ ] Honest gate on hosts without PT hardware (e.g. arm64-macOS): the test
+    prints the VERIFIED reason and asserts a documented gate — never a skip. On
+    arm64-macOS the live native path is M14/M15 instrumentation; PT live
+    assertions run on an x86 host with PT.
 
   Automated tests:
-  - [ ] Unit tests for the call-tree / PT parse logic over committed fixtures
-    (run everywhere).
-  - [ ] Live end-to-end native decision asserted where a Linux MCR recording is
-    available; honest gate otherwise.
+  - [ ] Unit tests for the PT-decode → call-tree → function-resolution logic over
+    committed raw-PT fixtures (run everywhere, no PT hardware needed to decode a
+    captured fixture).
+  - [ ] Live end-to-end native decision asserted on an x86+PT host; honest gate
+    elsewhere.
 
-  Acceptance: the spec-primary native source is consumed where available, with the
-  parse logic unit-tested everywhere and the live path honestly gated.
+  Acceptance: the executed set is derived from an OS-level Intel PT decode
+  (recorder-independent), unit-tested everywhere, live path honestly gated.
 
 * M17 — Dedicated `calls.dat` call stream in materialized `.ct` (additive, compat)
   :STATUS: planned
@@ -1204,34 +1260,57 @@
   Stream Redesign" — emit a DEDICATED `calls.dat` call stream alongside the existing
   combined `events.log`, gated by a new `meta.dat` capability flag, so the call
   trace can be read without scanning the step/value events; activate ct-print's
-  dormant `call_stream` reader; and have the engine prefer `calls.dat` when present.
-  (The full multi-stream migration — `steps.dat`/value/`events.dat`/varint interning
-  — is a larger trace-format initiative beyond this campaign; this milestone lands
-  ONLY the call-stream split, additively, breaking nothing.)
+  dormant `call_stream` reader; have the engine prefer `calls.dat` when present;
+  AND wire the db-backend's SEEKABLE reader to consume it. (The full multi-stream
+  migration — `steps.dat`/value/`events.dat`/varint interning — is a larger
+  trace-format initiative beyond this campaign; this milestone lands ONLY the
+  call-stream split, additively, breaking nothing.)
+
+  IMPORTANT reader-side requirement (CORRECTION 2026-06-21): the db-backend
+  (`codetracer/src/db-backend/`) is the production reader for materialized `.ct`
+  traces and its architecture is SEEKABLE / not-fully-in-memory by design — to
+  support a `.ct` loaded over the network without materializing the whole trace
+  (Trace-Files-Overview.md §"Random-access seeking": CTFS block-level seeking
+  O(log n) + Seekable-Zstd O(1) frame lookup + a supplementary event offset index;
+  on-demand decompression with an LRU; multiple concurrent readers during
+  recording). The earlier plan WRONGLY assumed the db-backend "consumes Vec<Event>
+  and is format-agnostic" — that is the fully-in-memory path
+  (`in_memory_trace_reader.rs`), NOT the seekable `ctfs_trace_reader`. A dedicated
+  `calls.dat` stream MUST be exposed through the seekable reader so the call tree
+  loads independently and on-demand (per trace-events.md "Call tree loads
+  independently"), never by reading the whole trace into memory.
 
   Deliverables:
   - [ ] Writer (codetracer-trace-format/codetracer_trace_writer): emit `calls.dat`
-    call records per trace-events.md §"Call Stream Records", in addition to
-    `events.log`, behind a new `meta.dat` flag bit (e.g. has_call_stream). Old
-    readers ignore the extra file; the combined stream is unchanged.
+    call records per trace-events.md §"Call Stream Records", with its companion
+    chunk index (`calls.idx`) for seekable access, in addition to `events.log`,
+    behind a new `meta.dat` flag bit (e.g. has_call_stream). Old readers ignore
+    the extra files; the combined stream is unchanged.
+  - [ ] db-backend SEEKABLE reader (`codetracer/src/db-backend/src/ctfs_trace_reader`):
+    read `calls.dat` via CTFS block seeking + the Seekable-Zstd seek table + the
+    companion index — on-demand, NOT fully into memory — so a network-loaded `.ct`
+    materializes only the call records a request needs. Do NOT route this through
+    `in_memory_trace_reader.rs`. Honor the not-fully-in-memory + concurrent-reader
+    properties from Trace-Files-Overview.md.
   - [ ] ct-print (codetracer-trace-format-nim): when the flag is set, read calls
     from `calls.dat` via the existing dormant `call_stream` reader; otherwise the
     legacy path. `--json-events` output is unchanged for consumers.
   - [ ] Engine (reprobuild ctfs_trace.nim): prefer `calls.dat` for executed-
     function discovery when present (cheaper than the unified stream); identical
     results either way.
-  - [ ] No regressions in the GUI/db-backend reader (it consumes `Vec<Event>` and
-    is format-agnostic — verify it still reads split bundles).
 
   Automated tests:
-  - [ ] Round-trip: writer emits `calls.dat`, the Rust reader + ct-print read it
-    back, call records match the combined stream.
+  - [ ] Round-trip: writer emits `calls.dat` (+`calls.idx`), the Rust reader +
+    ct-print read it back, call records match the combined stream.
+  - [ ] db-backend seekable read: fetch a call record by `call_key` WITHOUT
+    materializing the whole trace (assert bounded decompression / only the needed
+    chunk is read), and verify concurrent-reader access.
   - [ ] Engine extracts the SAME executed set from a split bundle and a legacy
-    bundle.
-  - [ ] Backward compat: a legacy (no calls.dat) `.ct` still reads.
+    bundle; backward compat — a legacy (no calls.dat) `.ct` still reads.
 
-  Acceptance: materialized `.ct` carries a dedicated, spec-shaped `calls.dat`
-  stream, read end-to-end, with zero breakage to existing readers.
+  Acceptance: materialized `.ct` carries a dedicated, spec-shaped, seekable
+  `calls.dat` stream, read on-demand by the db-backend's seekable reader and by
+  ct-print/the engine, with zero breakage to existing readers.
 
 * M18 — `ct test --incremental` standalone integration (codetracer)
   :STATUS: planned
