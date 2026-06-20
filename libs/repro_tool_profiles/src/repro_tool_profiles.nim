@@ -3759,23 +3759,12 @@ proc addUniquePath*(dst: var seq[string]; value: string) =
       return
   dst.add(abs)
 
-proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
-                                    recipeDir: string) =
-  ## DSL-port M9.R.14e.1 — fill the four extra search-path channels on
-  ## ``profile`` by probing the sibling recipe's install tree(s). The
-  ## probe walks ``FromSourceInstallTreeRoots`` for each known FHS
-  ## subdir (``lib``, ``lib/pkgconfig``, ``include``, ``share/pkgconfig``)
-  ## and adds the dirs that exist on disk to the corresponding list.
-  ##
-  ## The autotools_package / meson_package constructors stage the
-  ## upstream's ``make install DESTDIR=<recipe>/build/out`` (or
-  ## ``meson install --destdir=...``) tree under ``build/out/usr/`` so
-  ## the resolver finds the upstream's full install layout there
-  ## directly — no extra stage-copy needed for Part 1 to work end-to-
-  ## end on existing recipes.
-  ##
-  ## Idempotent + deterministic: same inputs → same lists (order from
-  ## ``FromSourceInstallTreeRoots`` × `FHS dirs`).
+proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
+                                        recipeDir: string) =
+  ## Internal: populate ONLY this recipe's install-tree search paths
+  ## (no transitive walk). Extracted from ``populateFromSourceSearchPaths``
+  ## so the M9.R.14f.1 transitive walk can call it per-node without
+  ## re-entering the dep-discovery loop.
   for root in FromSourceInstallTreeRoots:
     let prefixRoot = recipeDir / root
     if not dirExists(extendedPath(prefixRoot)):
@@ -3792,6 +3781,134 @@ proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
     # distros).
     addUniquePath(profile.libraryPathList, prefixRoot / "lib")
     addUniquePath(profile.libraryPathList, prefixRoot / "lib64")
+    # M9.R.14f.2 — also expose the ``bin/`` dir so tools the dep
+    # ships (e.g. ``wayland-scanner``) are visible to consumers via
+    # ``pathSearchList``.
+    let binRoot = prefixRoot / "bin"
+    if dirExists(extendedPath(binRoot)):
+      let abs = absolutePath(binRoot)
+      var present = false
+      for p in profile.pathSearchList:
+        if p == abs:
+          present = true
+          break
+      if not present:
+        profile.pathSearchList.add(abs)
+
+const M9R14fMaxTransitiveDepth* = 16
+  ## DSL-port M9.R.14f.1 — sanity bound on the transitive dep walk. The
+  ## graph SHOULD already be acyclic (the M9.R.10a cycle-break handles
+  ## genuine cycles), so this exists purely to make accidental cycles
+  ## terminate fast with a clear diagnostic in tests rather than to
+  ## hang the resolver.
+
+proc m9r14fStripConstraint(value: string): string =
+  ## DSL-port M9.R.14f.1 — strip a version-constraint suffix off a raw
+  ## constraint string so ``"wayland >=1.22"`` → ``"wayland"``. Mirrors
+  ## the same trimming the meson_package constructor does for tool refs.
+  for i, ch in value:
+    if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+        ch == '~' or ch == '^':
+      return value[0 ..< i]
+  return value
+
+proc m9r14fDepRecipeName(useDef: InterfaceToolUse): string =
+  ## Derive the sibling recipe dir name for a dep. Prefers
+  ## ``executableName`` (the canonical from-source resolver key), falls
+  ## back to the constraint-stripped ``packageSelector``, and finally to
+  ## the trimmed ``rawConstraint``. Empty result = the dep can't be
+  ## mapped onto a sibling recipe and the walk skips it.
+  if useDef.executableName.len > 0:
+    return useDef.executableName
+  if useDef.packageSelector.len > 0:
+    return m9r14fStripConstraint(useDef.packageSelector)
+  if useDef.rawConstraint.len > 0:
+    return m9r14fStripConstraint(useDef.rawConstraint)
+  ""
+
+proc m9r14fLoadInterfaceToolUses*(recipeDir: string): seq[InterfaceToolUse] =
+  ## DSL-port M9.R.14f.1 — read the sibling recipe's
+  ## ``project-interface.rbsz`` and return its ``toolUses`` (which carry
+  ## both ``nativeBuildDeps`` and ``buildDeps``). Returns the empty seq
+  ## when the recipe has not been built yet OR the artifact is
+  ## unreadable — the caller treats that as "no transitive walk available
+  ## for this dep" and moves on. Auto-recurse (M9.R.9) ensures the
+  ## interface exists by the time a consumer reaches this code path.
+  let interfacePath = recipeDir / ".repro" / "build" / "repro" /
+    "project-interface.rbsz"
+  if not fileExists(extendedPath(interfacePath)):
+    return
+  try:
+    let artifact = readInterfaceArtifact(interfacePath)
+    result = artifact.projectInterface.toolUses
+  except CatchableError:
+    discard
+
+proc populateFromSourceSearchPathsImpl(profile: var PathOnlyToolProfile;
+                                       recipeDir: string;
+                                       recipeRoot: string;
+                                       visited: var HashSet[string];
+                                       depth: int) =
+  ## DSL-port M9.R.14f.1 — recursive worker. Visits THIS node, then walks
+  ## every dep declared in the node's ``project-interface.rbsz`` and
+  ## recurses for each dep that has a sibling from-source recipe.
+  if depth > M9R14fMaxTransitiveDepth:
+    return
+  let key = absolutePath(recipeDir)
+  if key in visited:
+    return
+  visited.incl(key)
+  populateFromSourceSearchPathsLocal(profile, recipeDir)
+  # Walk the recipe's declared deps and recurse for each from-source
+  # sibling. Tools without a sibling recipe (gcc / meson / ninja / ...)
+  # are silently skipped — they don't contribute install-tree search
+  # paths anyway.
+  for useDef in m9r14fLoadInterfaceToolUses(recipeDir):
+    let depName = m9r14fDepRecipeName(useDef)
+    if depName.len == 0: continue
+    if depName in fromSourceCycleBrokenTools: continue
+    let depDir = recipeRoot / depName
+    if not fileExists(extendedPath(depDir / "repro.nim")):
+      continue
+    populateFromSourceSearchPathsImpl(profile, depDir, recipeRoot,
+      visited, depth + 1)
+
+proc populateFromSourceSearchPaths*(profile: var PathOnlyToolProfile;
+                                    recipeDir: string;
+                                    recipeRoot = "") =
+  ## DSL-port M9.R.14e.1 + M9.R.14f.1 — fill the four extra search-path
+  ## channels on ``profile`` by probing the sibling recipe's install
+  ## tree(s) AND, recursively, every from-source sibling recipe the
+  ## sibling itself depends on.
+  ##
+  ## The probe walks ``FromSourceInstallTreeRoots`` for each known FHS
+  ## subdir (``lib``, ``lib/pkgconfig``, ``include``, ``share/pkgconfig``)
+  ## and adds the dirs that exist on disk to the corresponding list.
+  ##
+  ## M9.R.14f.1 layered the transitive walk on top: the resolver reads
+  ## ``<recipeDir>/.repro/build/repro/project-interface.rbsz`` to
+  ## discover the dep's own deps and recurses into each from-source
+  ## sibling. The visited-set prevents infinite recursion on accidental
+  ## cycles; depth is capped at ``M9R14fMaxTransitiveDepth`` as a
+  ## sanity bound. Tools in ``fromSourceCycleBrokenTools`` (gcc, meson,
+  ## ninja, ...) are skipped — they're stdlib-provisioned and don't
+  ## contribute install-tree search paths.
+  ##
+  ## The autotools_package / meson_package constructors stage the
+  ## upstream's ``make install DESTDIR=<recipe>/build/out`` (or
+  ## ``meson install --destdir=...``) tree under ``build/out/usr/`` so
+  ## the resolver finds the upstream's full install layout there
+  ## directly — no extra stage-copy needed.
+  ##
+  ## Idempotent + deterministic: same inputs (recipe tree on disk) →
+  ## same lists. Order is depth-first preorder from ``recipeDir`` so a
+  ## graph ``consumer → A → B → C`` populates in order ``A, B, C``.
+  let effectiveRoot =
+    if recipeRoot.len > 0: recipeRoot
+    else: parentDir(absolutePath(recipeDir))
+  var visited: HashSet[string] = initHashSet[string]()
+  populateFromSourceSearchPathsImpl(profile, recipeDir, effectiveRoot,
+    visited, 0)
 
 proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
                                recipeRoot = ""): FromSourceResolveResult =
@@ -3907,7 +4024,12 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
   # Each list is deduplicated and only populated with directories that
   # actually exist on disk so the engine doesn't add bogus entries to
   # the action's env vars.
-  populateFromSourceSearchPaths(profile, recipeDir)
+  # M9.R.14f.1 — pass ``root`` so the transitive walk knows where to
+  # look up sibling recipes. Without an explicit root the walk uses
+  # ``parentDir(absolutePath(recipeDir))``, which is correct in
+  # production (where ``recipeDir = <root>/<name>``) but the tests'
+  # ``REPRO_FROM_SOURCE_ROOT`` override pattern wants the explicit form.
+  populateFromSourceSearchPaths(profile, recipeDir, root)
 
   profile.probes = collectConfiguredProbes(absolute,
     useDef.packageSelector, useDef.executableName)
