@@ -200,8 +200,11 @@ package gdmSource:
     ## python3 runs gdm's per-build glib-mkenums passes + the
     ## gobject-introspection scanner wrapper.
     "python3"
-    ## gdm 47.x's meson.build does NOT invoke itstool (the user-help
-    ## DocBook integration was retired before 47.0). No itstool dep.
+    ## M9.R.15g.2 — corrected: gdm 47.0's ``src/docs/meson.build:1``
+    ## DOES call ``find_program('itstool')`` (the user-help DocBook
+    ## integration is still wired through itstool; the docs subdir is
+    ## unconditional). itstool stub routes via nixpkgs#itstool.
+    "itstool"
 
   buildDeps:
     ## glib2 is the foundation library gdm's daemon + greeter consume

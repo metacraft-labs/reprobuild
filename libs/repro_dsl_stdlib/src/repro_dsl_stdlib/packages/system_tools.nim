@@ -116,6 +116,11 @@ import ./accountsservice
 # M9.R.15e.12 — json-glib is gdm 47.x's GLib-style JSON library dep
 # (meson.build:67).
 import ./json_glib
+# M9.R.15g.2 — itstool is the XML-to-PO translator GNOME projects
+# (incl. gdm 47.x) use to localise DocBook user help.  gdm's
+# ``src/docs/meson.build:1`` runs ``find_program('itstool')`` and
+# fails the configure when missing.
+import ./itstool
 
 export bc
 export bison
@@ -170,3 +175,4 @@ export udev
 export cvt
 export accountsservice
 export json_glib
+export itstool
