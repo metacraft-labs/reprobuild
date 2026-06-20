@@ -259,15 +259,42 @@ package mutterSource:
     setCurrentOwningPackageOverride("mutterSource")
     try:
       let opts = @[
+        # M9.R.15b.1 — mutter 47.10's `tests` and `libdisplay_info`
+        # options are meson `feature` types (enabled/disabled/auto); the
+        # plain bool form `tests=false` short-fails meson setup with
+        # ``Value "false" ... is not one of the choices``. Use the
+        # feature-shape verbatim. `debug` is not a recipe-level option
+        # for mutter (debug-mode is selected via the global buildtype
+        # which `meson_package` pins to `release`); drop the no-op
+        # `debug=false`.
         "introspection=false",
         "profiler=false",
-        "tests=false",
-        "debug=false",
+        "tests=disabled",
         "native_backend=true",
         "wayland=true",
         "x11=false",
         "xwayland=false",
         "remote_desktop=false",
+        # M9.R.15b.1 — drop the heavy optional integrations: each pulls
+        # one or more deps that the v1 from-source closure does not yet
+        # provide (gnome-desktop-4, libwacom, libcanberra, libice/libsm,
+        # libdisplay-info). Setting them false (booleans) or disabled
+        # (features) keeps the v1 mutter binary minimal — bare Wayland
+        # compositor + KMS/DRM backend, suitable for an embedded
+        # mutter-only session.
+        "libgnome_desktop=false",
+        "libwacom=false",
+        "sound_player=false",
+        "startup_notification=false",
+        "sm=false",
+        "libdisplay_info=disabled",
+        # Tests of cogl/clutter/mutter sub-trees are independent
+        # booleans — disable explicitly so the overall `tests=disabled`
+        # feature short-circuit is not partially defeated by the
+        # cogl/clutter level booleans defaulting true.
+        "cogl_tests=false",
+        "clutter_tests=false",
+        "mutter_tests=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libMutter")
