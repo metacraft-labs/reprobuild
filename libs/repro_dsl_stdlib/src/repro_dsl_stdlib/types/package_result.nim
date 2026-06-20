@@ -601,6 +601,22 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # M9.R.14f.9 — snake_case probe for libdrm / mesa-style naming
     # where ``libdrmAmdgpu`` maps to ``libdrm_amdgpu.so``.
     let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
+    # M9.R.14g.7 — strip a leading ``lib`` prefix from the DSL name so
+    # recipes that already wrote ``library libGModule:`` (the DSL
+    # convention) probe the same file shapes recipes using bare
+    # ``library glib2:`` shapes do. Without this strip, the lib<name>
+    # probe becomes ``liblibGModule.so`` (double-lib) and misses the
+    # upstream ``libgmodule-2.0.so``.
+    proc stripLibPrefix(value: string): string =
+      if value.len > 3 and value[0 .. 2].toLowerAscii == "lib":
+        value[3 ..< value.len]
+      else:
+        value
+    let strippedName = stripLibPrefix(name).replace("\"", "\\\"")
+    let strippedLowerName = strippedName.toLowerAscii
+    let strippedKebab = m9r14dPascalToKebab(stripLibPrefix(name)).replace("\"", "\\\"")
+    let strippedKebabDigits = m9r14dPascalToKebabWithDigits(stripLibPrefix(name)).replace("\"", "\\\"")
+    let strippedSnake = m9r14fPascalToSnake(stripLibPrefix(name)).replace("\"", "\\\"")
     script.add("for candidate in ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
@@ -609,6 +625,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("\"" & escapedSrcDir & "/" & snakeName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
+    # M9.R.14g.7 — stripped-prefix variants for ``library libFoo:`` shapes.
+    if strippedName != name:
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".so\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
@@ -625,7 +645,34 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
     script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/" & kebabName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
+    if strippedName != name:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
+    # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
+    # upstream library lives under ``lib/x86_64-linux-gnu/`` or
+    # ``lib64/`` instead of ``lib/``. Probe both common multi-arch
+    # subdirs as a last-resort fallback so x86_64 cmake recipes
+    # publishing under ``lib64/`` (e.g. json-c, gobject-introspection)
+    # don't fail stage-copy.
+    let lib64Dir = escapedSrcDir.replace("/usr/lib", "/usr/lib64")
+    if lib64Dir != escapedSrcDir:
+      script.add("for candidate in ")
+      script.add("\"" & lib64Dir & "/lib" & escapedName & ".so\" ")
+      script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\" ")
+      if strippedName != name:
+        script.add("\"" & lib64Dir & "/lib" & strippedName & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedLowerName & ".so\"; ")
+      else:
+        script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\"; ")
+      script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
+      script.add("first=$(ls -1 \"" & lib64Dir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      if strippedName != name:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
     # Executable: probe bare name; also try .exe for cross-builds and
