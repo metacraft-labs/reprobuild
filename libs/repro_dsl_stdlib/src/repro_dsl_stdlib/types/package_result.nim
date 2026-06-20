@@ -139,13 +139,16 @@ proc componentPath(components: Table[string, string]; name: string): string =
     return components[name]
   name
 
-# Forward declaration — ``emitAutotoolsStageCopy`` is defined below in
-# the stage-copy helpers section but is referenced by the meson
-# slicing methods above. Forward-declaring (rather than reordering)
-# keeps the related stage-copy logic in one block at the bottom of
-# the module where the autotools slicing methods consume it too.
+# Forward declarations — ``emitAutotoolsStageCopy`` /
+# ``emitInstallTreeMirror`` are defined below in the stage-copy helpers
+# section but are referenced by the meson slicing methods above.
+# Forward-declaring (rather than reordering) keeps the related stage-
+# copy logic in one block at the bottom of the module where the
+# autotools slicing methods consume it too.
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string)
+proc emitInstallTreeMirror*(installEdge: BuildActionDef;
+                            buildDir, destdir, packageName: string)
 
 proc executable*(r: MesonPackageResult; name: string): Executable =
   ## Slice the meson install edge into an executable artifact. The
@@ -163,6 +166,12 @@ proc executable*(r: MesonPackageResult; name: string): Executable =
   ## relative segment.
   emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
     currentOwningPackage(), "executable", name)
+  # M9.R.14e.2 — also emit the package's install-tree mirror so the
+  # M9.R.14e.1 resolver's search-path probe finds the staged
+  # ``.pc`` / ``include`` / ``lib`` tree at a layout-stable location.
+  # Idempotent (one mirror per package) — see ``emitInstallTreeMirror``.
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -179,6 +188,9 @@ proc library*(r: MesonPackageResult; name: string): Library =
   ## meson build actually emitted.
   emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
     currentOwningPackage(), "library", name)
+  # M9.R.14e.2 — install-tree mirror (see executable() above).
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -230,6 +242,12 @@ proc files*(r: CmakePackageResult; name: string): BuildActionDef =
 import std/sets
 
 var stageCopyEmitted {.threadvar.}: HashSet[string]
+  ## Per-artifact stage-copy emission guard (executable/library kind).
+var installMirrorEmitted {.threadvar.}: HashSet[string]
+  ## M9.R.14e.2 — per-package install-tree-mirror emission guard. A
+  ## recipe may call ``pkg.executable(...)`` AND ``pkg.library(...)``
+  ## multiple times; we want the install-tree mirror emitted exactly
+  ## once per package so the action registry doesn't collide.
 
 proc stageCopyEmittedKey(packageName, kind, name: string): string =
   packageName & "." & kind & "." & name
@@ -242,6 +260,81 @@ proc sanitizeStageCopyName(value: string): string =
       result.add('_')
   if result.len == 0:
     result = "x"
+
+proc emitInstallTreeMirror*(installEdge: BuildActionDef;
+                            buildDir, destdir, packageName: string) =
+  ## DSL-port M9.R.14e.2 — mirror the recipe's DESTDIR install tree
+  ## (``<recipeRoot>/<buildDir>/<destdir>/usr/``) to the canonical
+  ## stable location at ``<recipeRoot>/.repro/output/install/usr/`` so
+  ## consumer recipes have a layout-stable on-disk install tree to
+  ## point ``PKG_CONFIG_PATH`` / ``CMAKE_PREFIX_PATH`` / ``CPATH`` /
+  ## ``LIBRARY_PATH`` at — independent of which ``buildDir`` /
+  ## ``destdir`` parameters the upstream recipe configured.
+  ##
+  ## Why: M9.R.14e.1's resolver already probes ``build/out/usr/``
+  ## directly, but two recipes may configure different ``buildDir``
+  ## values (e.g. ``meson_package(buildDir = "build")`` vs
+  ## ``cmake_package(buildDir = "_build")``). The mirror at
+  ## ``.repro/output/install/usr/`` is the single canonical location the
+  ## resolver enumerates first, so the threaded env vars stay stable
+  ## across constructor variants and across upstream layout drift.
+  ##
+  ## The action runs ``cp -a`` to preserve symlinks (load-bearing for
+  ## ``.so`` SONAME chains: ``libwayland-client.so.0.25.0`` is the real
+  ## file; ``libwayland-client.so.0`` and ``libwayland-client.so`` are
+  ## symlinks the linker / loader resolve at run time).
+  ##
+  ## Idempotent: gated by ``installMirrorEmitted`` so a recipe that
+  ## calls ``pkg.executable(...)`` AND ``pkg.library(...)`` emits the
+  ## mirror once. Inert in unit-test mode (empty ``projectRoot``).
+  let projectRoot = activeProviderProjectRoot()
+  if projectRoot.len == 0:
+    return
+  if installMirrorEmitted.len == 0:
+    installMirrorEmitted = initHashSet[string]()
+  if packageName in installMirrorEmitted:
+    return
+  installMirrorEmitted.incl(packageName)
+  let effectiveDestRoot =
+    if buildDir.len > 0: buildDir & "/" & destdir
+    else: destdir
+  let srcUsr = effectiveDestRoot & "/usr"
+  let escapedSrcUsr = srcUsr.replace("\\", "/").replace("\"", "\\\"")
+  let dstUsrRoot = projectRoot / ".repro" / "output" / "install"
+  let dstUsr = dstUsrRoot / "usr"
+  createDir(dstUsrRoot)
+  let escapedDstUsrRoot = dstUsrRoot.replace("\\", "/").replace("\"", "\\\"")
+  let escapedDstUsr = dstUsr.replace("\\", "/").replace("\"", "\\\"")
+  # Output stamp: a touch file so the engine has a concrete artefact to
+  # key the action on without enumerating every nested file (recipes
+  # routinely install hundreds of headers).
+  let stampPath = dstUsrRoot / ".m9r14e_2_install_mirror.stamp"
+  let escapedStamp = stampPath.replace("\\", "/").replace("\"", "\\\"")
+  var script = "set -e; "
+  # Remove the previous mirror to avoid stale artefacts. ``rm -rf`` is
+  # safe here because ``dstUsr`` is a deterministic per-recipe path that
+  # we own; no user data lives under ``.repro/output/install/usr``.
+  script.add("rm -rf \"" & escapedDstUsr & "\"; ")
+  script.add("mkdir -p \"" & escapedDstUsrRoot & "\"; ")
+  # ``cp -a`` preserves symlinks, modes, timestamps. The ``--`` guards
+  # against a future ``destdir`` whose value starts with ``-`` from
+  # being interpreted as a flag.
+  script.add("if [ -d \"" & escapedSrcUsr & "\" ]; then ")
+  script.add("cp -a -- \"" & escapedSrcUsr & "\" \"" & escapedDstUsrRoot & "/\"; ")
+  script.add("fi; ")
+  script.add("touch \"" & escapedStamp & "\"")
+  let argv = @["sh", "-c", script]
+  let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
+  discard buildAction(
+    id = stageId,
+    call = inlineExecCall(argv),
+    deps = @[installEdge.id],
+    inputs = installEdge.outputs,
+    outputs = @[stampPath],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "autotools_package.install_mirror",
+    toolIdentityRefs = @["sh"])
 
 proc m9r14dPascalToKebab*(value: string): string =
   ## DSL-port M9.R.14d.7c — convert ``libwaylandClient`` → ``libwayland-client``.
@@ -388,6 +481,10 @@ proc executable*(r: AutotoolsPackageResult; name: string): Executable =
   # resolve the artefact at the location the resolver looks for it.
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), "executable", name)
+  # M9.R.14e.2 — install-tree mirror at the canonical layout-stable
+  # location ``.repro/output/install/usr/`` (see ``emitInstallTreeMirror``).
+  emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage())
   newExecutable(
     install = r.installEdge,
     executableName = name,
@@ -396,6 +493,8 @@ proc executable*(r: AutotoolsPackageResult; name: string): Executable =
 proc library*(r: AutotoolsPackageResult; name: string): Library =
   emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
     currentOwningPackage(), "library", name)
+  emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage())
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
