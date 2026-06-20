@@ -3544,7 +3544,11 @@ proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
   ##   1. Exact case-insensitive match on artifact name.
   ##   2. Lowercased match.
   ##   3. Canonicalized lib-stripped match (either direction).
-  ##   4. Sole-artifact fallback: if exactly ONE candidate has a
+  ##   4. Canonical-prefix fallback: artifact's canonical form starts
+  ##      with the dep's canonical form (covers the wayland case where
+  ##      dep "wayland" finds artifact "libwaylandClient" — canonical
+  ##      forms `wayland` vs `waylandclient`).
+  ##   5. Sole-artifact fallback: if exactly ONE candidate has a
   ##      resolved on-disk file, return it (the dep selector already
   ##      identified the recipe).
   ##
@@ -3554,6 +3558,7 @@ proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
   ## tier wins because the resolver needs an on-disk file.
   result = -1
   var bestTier = high(int)
+  let depCanon = m9r14dCanonicalizeName(depName)
   for i, cand in candidates:
     var tier = high(int)
     if depName.cmpIgnoreCase(cand.artifactName) == 0:
@@ -3562,6 +3567,11 @@ proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
       tier = 1
     elif m9r14dDepMatchesArtifact(depName, cand.artifactName):
       tier = 2
+    else:
+      let artCanon = m9r14dCanonicalizeName(cand.artifactName)
+      if depCanon.len > 0 and artCanon.len > 0 and
+          (artCanon.startsWith(depCanon) or depCanon.startsWith(artCanon)):
+        tier = 3
     if tier < bestTier:
       bestTier = tier
       result = i

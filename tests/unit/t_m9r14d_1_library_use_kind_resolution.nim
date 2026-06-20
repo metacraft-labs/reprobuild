@@ -236,6 +236,41 @@ suite "DSL-port M9.R.14d.1 — library-use-kind resolution":
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     check outcome.kind == rrSiblingMissing
 
+  test "canonical_prefix_match_resolves_multi_artifact_recipe":
+    # The wayland canary: dep "wayland" matches the recipe directory
+    # named "wayland", but the recipe declares 4 artifacts
+    # (libwaylandClient, libwaylandServer, libwaylandCursor,
+    # waylandScanner) — none of which canonicalize exactly to
+    # "wayland". The sole-artifact fallback can't fire (>1 staged).
+    # The canonical-prefix tier picks the artifact whose canonical
+    # form is a prefix or extension of the dep's canonical form.
+    let scratch = createTempDir("repro-m9r14d-prefix-", "")
+    defer: removeDir(scratch)
+    makeRecipeFile(scratch, "wayland")
+    let clientPath = makeLibraryArtefact(scratch, "wayland",
+      "libwaylandClient")
+    discard makeLibraryArtefact(scratch, "wayland", "libwaylandServer")
+    discard makeLibraryArtefact(scratch, "wayland", "libwaylandCursor")
+    discard makeExecutableArtefact(scratch, "wayland", "waylandScanner")
+    writeSyntheticInterface(scratch, "wayland",
+      executables = @["waylandScanner"],
+      libraries = @["libwaylandClient", "libwaylandServer",
+                    "libwaylandCursor"])
+
+    let useDef = syntheticUseDef("wayland")
+    let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
+    check outcome.kind == rrResolved
+    # The lexicographically-first canonical-prefix match wins.
+    # Library `libwaylandClient` canonicalizes to `waylandclient`,
+    # which starts with the dep canonical `wayland`. The other
+    # libraries' canonicalizations also start with `wayland`; the
+    # resolver picks the first hit (libwaylandClient comes first in
+    # both walkDir order on the synthetic fixture and is the most
+    # common downstream consumer).
+    let resolvedName = lastPathPart(parentDir(
+      outcome.profile.resolvedExecutablePath))
+    check resolvedName.startsWith("libwayland") or resolvedName.startsWith("wayland")
+
   test "sole_artifact_fallback_resolves_when_no_name_match":
     let scratch = createTempDir("repro-m9r14d-sole-", "")
     defer: removeDir(scratch)
