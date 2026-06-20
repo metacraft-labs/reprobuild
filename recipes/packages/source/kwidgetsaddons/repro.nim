@@ -85,7 +85,7 @@ package kwidgetsaddonsSource:
     ## sha256 was computed over the vendored 4,277,788-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kwidgetsaddons/vendor/kwidgetsaddons-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kwidgetsaddons-6.10.0.tar.xz"
     sha256: "e0fa4943d7874287fd2c2c254f1ef21edf7e573b6b19354df5fdef8cbbefe74e"
     extractStrip: 1
 

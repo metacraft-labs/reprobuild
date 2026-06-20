@@ -170,7 +170,7 @@ package systemdSource:
     ## sha256 was computed over the vendored 16,184,128-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/systemd/vendor/systemd-257.tar.gz"
+    url: "https://github.com/systemd/systemd/archive/refs/tags/v257.tar.gz"
     sha256: "14f6907eb5e289d8c39cbe1ef891ca54d8a0e3582c986a9ef5844b3f29add43b"
     extractStrip: 1
 

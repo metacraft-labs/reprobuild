@@ -154,7 +154,7 @@ package kcoreaddonsSource:
     ## sha256 was computed over the vendored 2,553,780-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kcoreaddons/vendor/kcoreaddons-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kcoreaddons-6.10.0.tar.xz"
     sha256: "89bf28747915e987cab21c77397b0971caffa1258b6f575543d73d4188184a72"
     extractStrip: 1
 

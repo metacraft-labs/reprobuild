@@ -164,7 +164,7 @@ package dbusSource:
     ## sha256 was computed over the vendored 1,114,680-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/dbus/vendor/dbus-1.16.0.tar.xz"
+    url: "https://dbus.freedesktop.org/releases/dbus/dbus-1.16.0.tar.xz"
     sha256: "9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
     extractStrip: 1
 

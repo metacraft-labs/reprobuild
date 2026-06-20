@@ -153,7 +153,7 @@ package kmodSource:
     ## sha256 was computed over the vendored 514,428-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kmod/vendor/kmod-33.tar.xz"
+    url: "https://www.kernel.org/pub/linux/utils/kernel/kmod/kmod-33.tar.xz"
     sha256: "dc768b3155172091f56dc69430b5481f2d76ecd9ccb54ead8c2540dbcf5ea9bc"
     extractStrip: 1
 

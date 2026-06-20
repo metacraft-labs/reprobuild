@@ -203,7 +203,7 @@ package utilLinuxSource:
     ## sha256 was computed over the vendored 8,848,216-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/util-linux/vendor/util-linux-2.40.4.tar.xz"
+    url: "https://www.kernel.org/pub/linux/utils/util-linux/v2.40/util-linux-2.40.4.tar.xz"
     sha256: "5c1daf733b04e9859afdc3bd87cc481180ee0f88b5c0946b16fdec931975fb79"
     extractStrip: 1
 

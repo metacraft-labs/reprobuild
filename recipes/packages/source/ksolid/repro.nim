@@ -101,7 +101,7 @@ package ksolidSource:
     ## sha256 was computed over the vendored 307,236-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/ksolid/vendor/solid-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/solid-6.10.0.tar.xz"
     sha256: "24892e81a3047f753519dbd384b47635c5a2543d8ee0bf3c299b0fcfef318e8c"
     extractStrip: 1
 

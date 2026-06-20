@@ -90,7 +90,7 @@ package kglobalaccelSource:
     ## sha256 was computed over the vendored 2,294,700-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kglobalaccel/vendor/kglobalaccel-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kglobalaccel-6.10.0.tar.xz"
     sha256: "05b0ec6a44d43ce7a9cfd6cd70c8d07dca5c5f6216968af8128fe9a5ed9b1928"
     extractStrip: 1
 

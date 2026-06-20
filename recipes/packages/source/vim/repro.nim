@@ -178,7 +178,7 @@ package vimSource:
     ## in the from-source corpus by raw size — the runtime/ tree
     ## (syntax/, doc/, ftplugin/, indent/, ...) accounts for ~70% of
     ## the bytes.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/vim/vendor/vim-9.1.1000.tar.gz"
+    url: "https://github.com/vim/vim/archive/refs/tags/v9.1.1000.tar.gz"
     sha256: "c8ccd457bba5563513ab3e2088ad10d62b982682af9a9278686b48202b8c7697"
     extractStrip: 1
 

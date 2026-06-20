@@ -193,7 +193,7 @@ package qt6BaseSource:
     ## sha256 was computed over the vendored 48,220,752-byte tarball
     ## downloaded once from the upstream URL recorded in ``versions:``
     ## above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/qt6-base/vendor/qtbase-everywhere-src-6.8.1.tar.xz"
+    url: "https://download.qt.io/official_releases/qt/6.8/6.8.1/submodules/qtbase-everywhere-src-6.8.1.tar.xz"
     sha256: "40b14562ef3bd779bc0e0418ea2ae08fa28235f8ea6e8c0cb3bce1d6ad58dcaf"
     extractStrip: 1
 

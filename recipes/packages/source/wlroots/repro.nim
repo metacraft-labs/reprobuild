@@ -168,7 +168,7 @@ package wlrootsSource:
     ## against nixpkgs isn't possible. The version cross-check still
     ## holds — both nixpkgs and this recipe pin 0.19.3 as the current
     ## 0.19 stable.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/wlroots/vendor/wlroots-0.19.3.tar.gz"
+    url: "https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/0.19.3/downloads/wlroots-0.19.3.tar.gz"
     sha256: "5d02693175e5afd9af5f10e3e4976d6e9249dc39a90eb17d23fa5f54b125ccc5"
     extractStrip: 1
 

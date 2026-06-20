@@ -149,7 +149,7 @@ package bashSource:
     ## sha256 was computed over the vendored 11,128,314-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/bash/vendor/bash-5.2.37.tar.gz"
+    url: "https://ftp.gnu.org/gnu/bash/bash-5.2.37.tar.gz"
     sha256: "9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff"
     extractStrip: 1
 

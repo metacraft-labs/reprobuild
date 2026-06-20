@@ -129,7 +129,7 @@ package lessSource:
     ## sha256 was computed over the vendored 649,770-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/less/vendor/less-668.tar.gz"
+    url: "https://www.greenwoodsoftware.com/less/less-668.tar.gz"
     sha256: "2819f55564d86d542abbecafd82ff61e819a3eec967faa36cd3e68f1596a44b8"
     extractStrip: 1
 

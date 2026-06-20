@@ -150,7 +150,7 @@ package coreutilsSource:
     ## sha256 was computed over the vendored 6,007,136-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/coreutils/vendor/coreutils-9.5.tar.xz"
+    url: "https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz"
     sha256: "cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"
     extractStrip: 1
 

@@ -176,7 +176,7 @@ package ncursesSource:
     ## sha256 was computed over the vendored 3,688,489-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/ncurses/vendor/ncurses-6.5.tar.gz"
+    url: "https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz"
     sha256: "136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"
     extractStrip: 1
 

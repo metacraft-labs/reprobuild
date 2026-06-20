@@ -151,7 +151,7 @@ package fontconfigSource:
     ## sha256 was computed over the vendored 1,294,156-byte tarball
     ## downloaded once from the upstream URL recorded in ``versions:``
     ## above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/fontconfig/vendor/fontconfig-2.16.0.tar.xz"
+    url: "https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.16.0.tar.xz"
     sha256: "6a33dc555cc9ba8b10caf7695878ef134eeb36d0af366041f639b1da9b6ed220"
     extractStrip: 1
 

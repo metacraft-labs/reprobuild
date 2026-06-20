@@ -147,7 +147,7 @@ package pamSource:
     ## sha256 was computed over the vendored 1,054,152-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/pam/vendor/Linux-PAM-1.6.1.tar.xz"
+    url: "https://github.com/linux-pam/linux-pam/releases/download/v1.6.1/Linux-PAM-1.6.1.tar.xz"
     sha256: "f8923c740159052d719dbfc2a2f81942d68dd34fcaf61c706a02c9b80feeef8e"
     extractStrip: 1
 

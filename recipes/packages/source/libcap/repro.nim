@@ -177,7 +177,7 @@ package libcapSource:
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above. libcap is the SMALLEST source tarball in
     ## the from-source corpus (< 200 KB).
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libcap/vendor/libcap-2.71.tar.xz"
+    url: "https://www.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-2.71.tar.xz"
     sha256: "b7006c9af5168315f35fc734bf1a8d2aa70766bd8b8c4340962e05b19c35b900"
     extractStrip: 1
 

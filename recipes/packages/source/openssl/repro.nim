@@ -182,7 +182,7 @@ package opensslSource:
     ## sha256 was computed over the vendored 18,320,899-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/openssl/vendor/openssl-3.4.0.tar.gz"
+    url: "https://github.com/openssl/openssl/releases/download/openssl-3.4.0/openssl-3.4.0.tar.gz"
     sha256: "e15dda82fe2fe8139dc2ac21a36d4ca01d5313c75f99f46c4e8a27709b7294bf"
     extractStrip: 1
 

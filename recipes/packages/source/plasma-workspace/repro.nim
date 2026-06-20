@@ -172,7 +172,7 @@ package plasmaWorkspaceSource:
     ## sha256 was computed over the vendored 19,136,676-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/plasma-workspace/vendor/plasma-workspace-6.2.5.tar.xz"
+    url: "https://download.kde.org/stable/plasma/6.2.5/plasma-workspace-6.2.5.tar.xz"
     sha256: "b82511e46f62e1b8f60b969c828c8d8d32fc7928401a70cc28c29f85f46c412f"
     extractStrip: 1
 

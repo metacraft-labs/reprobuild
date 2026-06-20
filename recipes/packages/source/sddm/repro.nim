@@ -177,7 +177,7 @@ package sddmSource:
     ## sha256 was computed over the vendored 3,557,266-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/sddm/vendor/sddm-0.21.0.tar.gz"
+    url: "https://github.com/sddm/sddm/archive/refs/tags/v0.21.0.tar.gz"
     sha256: "f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf"
     extractStrip: 1
 

@@ -168,7 +168,7 @@ package procpsSource:
     ## sha256 was computed over the vendored 2,392,641-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/procps/vendor/procps-v4.0.5.tar.gz"
+    url: "https://gitlab.com/procps-ng/procps/-/archive/v4.0.5/procps-v4.0.5.tar.gz"
     sha256: "2c6d7ed9f2acde1d4dd4602c6172fe56eff86953fe8639bd633dbd22cc18f5db"
     extractStrip: 1
 

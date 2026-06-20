@@ -153,7 +153,7 @@ package gnutlsSource:
     ## sha256 was computed over the vendored 6,696,460-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/gnutls/vendor/gnutls-3.8.8.tar.xz"
+    url: "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.8.tar.xz"
     sha256: "ac4f020e583880b51380ed226e59033244bc536cad2623f2e26f5afa2939d8fb"
     extractStrip: 1
 

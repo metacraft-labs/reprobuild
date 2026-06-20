@@ -152,7 +152,7 @@ package nettleSource:
     ## sha256 was computed over the vendored 2,640,485-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/nettle/vendor/nettle-3.10.tar.gz"
+    url: "https://ftp.gnu.org/gnu/nettle/nettle-3.10.tar.gz"
     sha256: "b4c518adb174e484cb4acea54118f02380c7133771e7e9beb98a0787194ee47c"
     extractStrip: 1
 

@@ -184,7 +184,7 @@ package glibcSource:
     ## sha256 was computed over the vendored 18,752,204-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/glibc/vendor/glibc-2.40.tar.xz"
+    url: "https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.xz"
     sha256: "19a890175e9263d748f627993de6f4b1af9cd21e03f080e4bfb3a1fac10205a2"
     extractStrip: 1
 

@@ -180,7 +180,7 @@ package gdmSource:
     ## sha256 was computed over the vendored 936,172-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/gdm/vendor/gdm-47.0.tar.xz"
+    url: "https://download.gnome.org/sources/gdm/47/gdm-47.0.tar.xz"
     sha256: "c5858326bfbcc8ace581352e2be44622dc0e9e5c2801c8690fd2eed502607f84"
     extractStrip: 1
 

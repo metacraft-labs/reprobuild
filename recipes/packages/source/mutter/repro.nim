@@ -179,7 +179,7 @@ package mutterSource:
     ## sha256 was computed over the vendored 6,860,276-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/mutter/vendor/mutter-47.10.tar.xz"
+    url: "https://download.gnome.org/sources/mutter/47/mutter-47.10.tar.xz"
     sha256: "ee8a583c2b6ff309b501dc97e7c0b4f11d6197a9529ed22247ee95e89663e969"
     extractStrip: 1
 

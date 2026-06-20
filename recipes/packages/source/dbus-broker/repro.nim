@@ -101,7 +101,7 @@ package dbusBrokerSource:
     ## sha256 was computed over the vendored 241,290-byte tarball
     ## downloaded once from the upstream tag URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/dbus-broker/vendor/dbus-broker-v36.tar.gz"
+    url: "https://github.com/bus1/dbus-broker/archive/refs/tags/v36.tar.gz"
     sha256: "5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8"
     extractStrip: 1
 

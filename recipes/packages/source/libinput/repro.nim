@@ -173,7 +173,7 @@ package libinputSource:
     ## sha256 was computed over the vendored 1,074,349-byte tarball
     ## downloaded once from the Debian source pool URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libinput/vendor/libinput-1.28.1.tar.gz"
+    url: "http://deb.debian.org/debian/pool/main/libi/libinput/libinput_1.28.1.orig.tar.gz"
     sha256: "a13f8c9a7d93df3c85c66afd135f0296701d8d32f911991b7aa4273fdd6a42a3"
     extractStrip: 1
 

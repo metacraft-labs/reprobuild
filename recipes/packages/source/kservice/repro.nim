@@ -91,7 +91,7 @@ package kserviceSource:
     ## sha256 was computed over the vendored 2,439,968-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kservice/vendor/kservice-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kservice-6.10.0.tar.xz"
     sha256: "04ad53850967e38822f8af1652b118992cd1bfa382e2718278bb6de03a0bdbb3"
     extractStrip: 1
 

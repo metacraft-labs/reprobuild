@@ -150,7 +150,7 @@ package iproute2Source:
     ## sha256 was computed over the vendored 925,392-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/iproute2/vendor/iproute2-6.12.0.tar.xz"
+    url: "https://www.kernel.org/pub/linux/utils/net/iproute2/iproute2-6.12.0.tar.xz"
     sha256: "bbd141ef7b5d0127cc2152843ba61f274dc32814fa3e0f13e7d07a080bef53d9"
     extractStrip: 1
 

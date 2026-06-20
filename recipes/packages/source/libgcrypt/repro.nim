@@ -141,7 +141,7 @@ package libgcryptSource:
     ## ``versions:`` above. FIRST recipe in the corpus to vendor a
     ## .tar.bz2 archive (the convention layer's extract action selects
     ## the bunzip2 decompressor based on the URL suffix).
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libgcrypt/vendor/libgcrypt-1.11.0.tar.bz2"
+    url: "https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.11.0.tar.bz2"
     sha256: "09120c9867ce7f2081d6aaa1775386b98c2f2f246135761aae47d81f58685b9c"
     extractStrip: 1
 

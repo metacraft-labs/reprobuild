@@ -153,7 +153,7 @@ package harfbuzzSource:
     ## sha256 was computed over the vendored 17,922,136-byte tarball
     ## downloaded once from the upstream URL recorded in ``versions:``
     ## above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/harfbuzz/vendor/harfbuzz-10.1.0.tar.xz"
+    url: "https://github.com/harfbuzz/harfbuzz/releases/download/10.1.0/harfbuzz-10.1.0.tar.xz"
     sha256: "6ce3520f2d089a33cef0fc48321334b8e0b72141f6a763719aaaecd2779ecb82"
     extractStrip: 1
 

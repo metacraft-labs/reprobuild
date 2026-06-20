@@ -134,7 +134,7 @@ package libdrmSource:
     ## ``versions:`` above. The same hash is independently shipped by
     ## nixpkgs at ``pkgs/by-name/li/libdrm/package.nix`` (in SRI
     ## form), so a future bump can cross-reference both sources.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libdrm/vendor/libdrm-2.4.133.tar.xz"
+    url: "https://dri.freedesktop.org/libdrm/libdrm-2.4.133.tar.xz"
     sha256: "fc68f9d0ba2ea63c9432a299e14fea09fad7a8a66e8039fcd7802ca59f77b4f5"
     extractStrip: 1
 

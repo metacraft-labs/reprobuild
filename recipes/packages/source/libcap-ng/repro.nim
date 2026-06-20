@@ -147,7 +147,7 @@ package libcapNgSource:
     ## sha256 was computed over the vendored 460,149-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libcap-ng/vendor/libcap-ng-0.8.5.tar.gz"
+    url: "https://people.redhat.com/sgrubb/libcap-ng/libcap-ng-0.8.5.tar.gz"
     sha256: "3ba5294d1cbdfa98afaacfbc00b6af9ed2b83e8a21817185dfd844cc8c7ac6ff"
     extractStrip: 1
 

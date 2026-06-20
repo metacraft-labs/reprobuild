@@ -84,7 +84,7 @@ package kxmlguiSource:
     ## sha256 was computed over the vendored 2,915,712-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kxmlgui/vendor/kxmlgui-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kxmlgui-6.10.0.tar.xz"
     sha256: "561fa755638da16cae204b670f62fab70156b9121b9313612238ca9c9e8e1292"
     extractStrip: 1
 

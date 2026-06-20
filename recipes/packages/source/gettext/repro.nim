@@ -171,7 +171,7 @@ package gettextSource:
     ## sha256 was computed over the vendored 10,329,748-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/gettext/vendor/gettext-0.22.5.tar.xz"
+    url: "https://ftp.gnu.org/gnu/gettext/gettext-0.22.5.tar.xz"
     sha256: "fe10c37353213d78a5b83d48af231e005c4da84db5ce88037d88355938259640"
     extractStrip: 1
 

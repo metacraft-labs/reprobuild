@@ -139,7 +139,7 @@ package readlineSource:
     ## sha256 was computed over the vendored 3,043,945-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/readline/vendor/readline-8.2.tar.gz"
+    url: "https://ftp.gnu.org/gnu/readline/readline-8.2.tar.gz"
     sha256: "3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a5f6d5fd58b2f2c5f4ec"
     extractStrip: 1
 

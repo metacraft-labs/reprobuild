@@ -194,7 +194,7 @@ package eudevSource:
     ## sha256 was computed over the vendored 2,188,254-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/eudev/vendor/eudev-3.2.14.tar.gz"
+    url: "https://github.com/eudev-project/eudev/releases/download/v3.2.14/eudev-3.2.14.tar.gz"
     sha256: "8da4319102f24abbf7fff5ce9c416af848df163b29590e666d334cc1927f006f"
     extractStrip: 1
 

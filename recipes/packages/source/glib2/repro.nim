@@ -166,7 +166,7 @@ package glib2Source:
     ## sha256 was computed over the vendored 5,554,704-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/glib2/vendor/glib-2.82.5.tar.xz"
+    url: "https://download.gnome.org/sources/glib/2.82/glib-2.82.5.tar.xz"
     sha256: "05c2031f9bdf6b5aba7a06ca84f0b4aced28b19bf1b50c6ab25cc675277cbc3f"
     extractStrip: 1
 

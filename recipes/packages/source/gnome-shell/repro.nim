@@ -177,7 +177,7 @@ package gnomeShellSource:
     ## sha256 was computed over the vendored 2,144,616-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/gnome-shell/vendor/gnome-shell-47.10.tar.xz"
+    url: "https://download.gnome.org/sources/gnome-shell/47/gnome-shell-47.10.tar.xz"
     sha256: "5174d25bb05d35f3612498efc33a1de533fc4e0f39e3eb377fd09591c94a10e6"
     extractStrip: 1
 

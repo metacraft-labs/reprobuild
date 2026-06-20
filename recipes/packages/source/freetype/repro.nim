@@ -155,7 +155,7 @@ package freetypeSource:
     ## sha256 was computed over the vendored 2,617,564-byte tarball
     ## downloaded once from the upstream URL recorded in ``versions:``
     ## above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/freetype/vendor/freetype-2.13.3.tar.xz"
+    url: "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz"
     sha256: "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
     extractStrip: 1
 

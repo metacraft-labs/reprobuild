@@ -93,7 +93,7 @@ package kioSource:
     ## sha256 was computed over the vendored 3,423,932-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kio/vendor/kio-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kio-6.10.0.tar.xz"
     sha256: "7eb454438f149e7ed513c3bbd526b67e3e3ecfe32ae7c986168baa59600b699c"
     extractStrip: 1
 

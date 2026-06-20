@@ -156,7 +156,7 @@ package xzSource:
     ## sha256 was computed over the vendored 1,503,860-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/xz/vendor/xz-5.6.3.tar.xz"
+    url: "https://tukaani.org/xz/xz-5.6.3.tar.xz"
     sha256: "db0590629b6f0fa36e74aea5f9731dc6f8df068ce7b7bafa45301832a5eebc3a"
     extractStrip: 1
 

@@ -145,7 +145,7 @@ package sqliteSource:
     ## sha256 was computed over the vendored 3,328,564-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/sqlite/vendor/sqlite-autoconf-3470100.tar.gz"
+    url: "https://www.sqlite.org/2024/sqlite-autoconf-3470100.tar.gz"
     sha256: "416a6f45bf2cacd494b208fdee1beda509abda951d5f47bc4f2792126f01b452"
     extractStrip: 1
 

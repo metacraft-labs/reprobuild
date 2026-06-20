@@ -178,7 +178,7 @@ package kwinSource:
     ## sha256 was computed over the vendored 8,563,352-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kwin/vendor/kwin-6.2.5.tar.xz"
+    url: "https://download.kde.org/stable/plasma/6.2.5/kwin-6.2.5.tar.xz"
     sha256: "5cc450a6e41105c8c49929b72550b331237f96aafb294690f4707bdc5f776848"
     extractStrip: 1
 

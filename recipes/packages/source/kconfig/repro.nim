@@ -148,7 +148,7 @@ package kconfigSource:
     ## sha256 was computed over the vendored 349,400-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kconfig/vendor/kconfig-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kconfig-6.10.0.tar.xz"
     sha256: "00ef2c75be68bacf8c30e3bf072358b8f6d2bc78d462e7b14c086808c69d8d7f"
     extractStrip: 1
 

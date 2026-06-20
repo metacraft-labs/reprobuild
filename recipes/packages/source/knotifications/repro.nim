@@ -91,7 +91,7 @@ package knotificationsSource:
     ## sha256 was computed over the vendored 2,335,588-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/knotifications/vendor/knotifications-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/knotifications-6.10.0.tar.xz"
     sha256: "36b7881d50400f37b4f3aeaa4c0a6a943e5783d35441e2b0cacdc6dad06af2a1"
     extractStrip: 1
 

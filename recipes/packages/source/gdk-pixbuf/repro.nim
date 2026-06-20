@@ -148,7 +148,7 @@ package gdkPixbufSource:
     ## sha256 was computed over the vendored 6,525,072-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/gdk-pixbuf/vendor/gdk-pixbuf-2.42.12.tar.xz"
+    url: "https://download.gnome.org/sources/gdk-pixbuf/2.42/gdk-pixbuf-2.42.12.tar.xz"
     sha256: "b9505b3445b9a7e48ced34760c3bcb73e966df3ac94c95a148cb669ab748e3c7"
     extractStrip: 1
 

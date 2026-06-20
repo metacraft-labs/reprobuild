@@ -152,7 +152,7 @@ package waylandSource:
     ## nixpkgs at ``pkgs/development/libraries/wayland/default.nix``
     ## (in SRI form), so a future bump can cross-reference both
     ## sources.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/wayland/vendor/wayland-1.25.0.tar.xz"
+    url: "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.25.0/downloads/wayland-1.25.0.tar.xz"
     sha256: "c065f040afdff3177680600f249727e41a1afc22fccf27222f15f5306faa1f03"
     extractStrip: 1
 

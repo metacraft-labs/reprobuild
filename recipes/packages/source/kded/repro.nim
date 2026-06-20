@@ -104,7 +104,7 @@ package kdedSource:
     ## sha256 was computed over the vendored 34,976-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/kded/vendor/kded-6.10.0.tar.xz"
+    url: "https://download.kde.org/stable/frameworks/6.10/kded-6.10.0.tar.xz"
     sha256: "5601d9dbfdc9507feaf17f4774bb7d12d38c7e19724ae8b987639a16ff0e6a8e"
     extractStrip: 1
 

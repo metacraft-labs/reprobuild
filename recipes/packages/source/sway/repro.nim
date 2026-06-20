@@ -199,7 +199,7 @@ package swaySource:
     ## isn't possible. The version cross-check still holds — both
     ## nixpkgs (``pkgs/by-name/sw/sway-unwrapped/package.nix``) and
     ## this recipe pin 1.11 as the current upstream stable.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/sway/vendor/sway-1.11.tar.gz"
+    url: "https://github.com/swaywm/sway/archive/refs/tags/1.11.tar.gz"
     sha256: "034ec4519326d6af5275814700dde46e852c5174614109affe4c86b2fbee062a"
     extractStrip: 1
 

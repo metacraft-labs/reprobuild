@@ -167,7 +167,7 @@ package libxkbcommonSource:
     ## sha256 was computed over the vendored 1,243,485-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/libxkbcommon/vendor/libxkbcommon-1.13.2.tar.gz"
+    url: "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz"
     sha256: "acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528"
     extractStrip: 1
 

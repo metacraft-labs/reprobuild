@@ -151,7 +151,7 @@ package pangoSource:
     ## sha256 was computed over the vendored 1,963,180-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/pango/vendor/pango-1.54.0.tar.xz"
+    url: "https://download.gnome.org/sources/pango/1.54/pango-1.54.0.tar.xz"
     sha256: "8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8"
     extractStrip: 1
 
