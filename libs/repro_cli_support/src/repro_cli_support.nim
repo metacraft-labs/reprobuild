@@ -8759,6 +8759,58 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
+proc findRunQuotaDaemonBin*(): string =
+  ## M9.R.11 — deterministic discovery of the ``runquotad`` binary.
+  ##
+  ## Lookup order:
+  ##   1. ``$RUNQUOTAD_BIN`` env override (highest priority — operator
+  ##      explicit choice; used by the nix dev-shell flake.nix to point
+  ##      at the locally-built daemon).
+  ##   2. ``runquotad`` on ``$PATH`` (``findExe``). Covers nix dev-shells,
+  ##      direnv-managed shells, system installs.
+  ##   3. Sibling-repo discovery: ``../runquota/build/bin/runquotad{.exe}``
+  ##      relative to the reprobuild source root (the canonical workspace
+  ##      layout described in the metacraft env.ps1 sibling-detection
+  ##      block + the .envrc flake-overrides comment). This is what makes
+  ##      ``repro build`` from a plain Windows pwsh (no nix, no PATH
+  ##      install) deterministically discover the daemon: as long as the
+  ##      sibling has been built once, the build engine self-spawns it.
+  ##   4. Empty string — caller must surface the diagnostic with the
+  ##      complete remediation hint (build the sibling, set
+  ##      ``RUNQUOTAD_BIN``, or run with ``--bypass-runquota``).
+  result = getEnv("RUNQUOTAD_BIN", "")
+  if result.len > 0 and fileExists(result):
+    return
+  result = findExe("runquotad")
+  if result.len > 0:
+    return
+  # Sibling-repo fall-through. The reprobuild source root is the dir that
+  # contains ``repro.nim`` + ``apps/`` — we find it by walking upward
+  # from ``getAppDir()`` (the dir of ``repro.exe``) until we hit a path
+  # whose parent contains a sibling ``runquota/`` directory with the
+  # built ``runquotad`` binary.
+  let exeName = when defined(windows): "runquotad.exe" else: "runquotad"
+  var dir = getAppDir()
+  for _ in 0 .. 8:
+    if dir.len == 0:
+      break
+    let candidate = dir.parentDir / "runquota" / "build" / "bin" / exeName
+    if fileExists(candidate):
+      return candidate
+    let parent = dir.parentDir
+    if parent == dir:
+      break
+    dir = parent
+  # Last resort — the current working directory's sibling. Covers
+  # ``cd D:/metacraft/reprobuild; ./build/bin/repro.exe build ...``
+  # where ``getAppDir()`` already pointed at the right ancestor but the
+  # walk above terminated early.
+  let cwdSibling = getCurrentDir().parentDir / "runquota" / "build" / "bin" /
+    exeName
+  if fileExists(cwdSibling):
+    return cwdSibling
+  result = ""
+
 const
   ## Explicit env-var whitelist forwarded from the user-facing CLI invocation
   ## across the daemon protocol into the daemon-hosted build executor. These are
@@ -8958,10 +9010,25 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool): owned(Process) =
   # both platforms self-healing.
   if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
     return nil
-  var runquotad = getEnv("RUNQUOTAD_BIN", "")
+  # M9.R.11 — also bypass a fresh spawn when the default per-user pipe
+  # is already serviced by a healthy daemon (the common case: a previous
+  # ``repro build`` left its daemon running and we just need to reuse
+  # it). ``isRunQuotaDaemonReachable`` already does the cheap
+  # WaitNamedPipeW probe + Hello/HelloOk round-trip via
+  # ``connectDefault`` on Windows, so when it returns true the daemon
+  # is genuinely accepting connections.
+  if isRunQuotaDaemonReachable():
+    return nil
+  let runquotad = findRunQuotaDaemonBin()
   if runquotad.len == 0:
-    runquotad = findExe("runquotad")
-  if runquotad.len == 0:
+    # No daemon binary discovered. Return nil silently — downstream
+    # ``tryEnsureInlineRunQuotaSession`` will probe ``connectDefault``,
+    # and ``config.fallbackToRunQuotaBypass`` (set true for
+    # ``tpmPathOnly`` / ``tpmScoop``) routes to the bypass path. For
+    # modes with ``fallbackToRunQuotaBypass=false`` (e.g.
+    # ``tpmFromSource``) the build engine surfaces the diagnostic
+    # through the rewritten exception in ``tryEnsureInlineRunQuotaSession``
+    # (M9.R.11 — see ``repro_build_engine.runQuotaUnreachableHint``).
     return nil
   # Pipe-name / socket-path derivation.
   #

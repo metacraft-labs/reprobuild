@@ -2741,7 +2741,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if config.fallbackToRunQuotaBypass:
         result = false
       else:
-        raise err
+        # M9.R.11 — rewrite the raw ``CreateFileW failed for
+        # \\.\pipe\runquota-<user>: Windows error 2`` (or POSIX
+        # equivalent) into a remediation hint. The auto-spawn pass
+        # (``startAutoRunQuotaIfNeeded``) already tried PATH +
+        # $RUNQUOTAD_BIN + the sibling-repo fall-through; reaching this
+        # branch means none of those worked AND the build mode demands
+        # a real lease coordinator (typically ``--tool-provisioning=
+        # from-source`` for which ``fallbackToRunQuotaBypass`` is
+        # false). Surfacing the canonical remediation here costs zero
+        # behaviour change for the bypass-OK path (returns false above
+        # before reaching this branch).
+        raise newException(ReproRunQuotaError,
+          "runquota daemon unreachable and bypass is disabled. " &
+          "Underlying error: " & err.msg & ". " &
+          "Searched for runquotad binary on PATH, " &
+          "$RUNQUOTAD_BIN, and ../runquota/build/bin/ relative to " &
+          "repro.exe. Remediation: " &
+          "(a) build the sibling runquota daemon (e.g. " &
+          "`cd ../runquota && just build`); " &
+          "(b) set $RUNQUOTAD_BIN to an absolute path; " &
+          "(c) install runquotad system-wide and re-run; " &
+          "(d) bypass runquota explicitly with `--no-runquota` or " &
+          "`REPROBUILD_NO_RUNQUOTA=1`.")
     finally:
       finishStat("repro runquota session open", sessionStart)
 

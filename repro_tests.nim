@@ -7084,6 +7084,43 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # DSL-port M9.R.11 — stub provisioning widening. Pins the texinfo
+  # canary + the ~10 wayland-chain stubs (texinfo, perl, m4, bison,
+  # flex, gperf, bc, file, rsync, swig, gmp, mpfr, mpc) carry tarball
+  # provisioning entries so the Windows from-source resolver lands a
+  # usable channel on non-Nix hosts. Without this widening the wayland
+  # from-source smoke hard-fails on ``no stdlib provisioning channel
+  # declared`` at the first stub reached.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r11_stub_provisioning_widening.nim",
+    binary: "build/test-bin/t_m9r11_stub_provisioning_widening",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  # DSL-port M9.R.11 — runquota daemon discovery + recovery. Pins:
+  #   * ``findRunQuotaDaemonBin`` honours $RUNQUOTAD_BIN, PATH, and the
+  #     ``../runquota/build/bin/runquotad{.exe}`` sibling-repo walk in
+  #     that order;
+  #   * a bogus $RUNQUOTAD_BIN doesn't poison the discovery (falls
+  #     through);
+  #   * the discovery helper is total (never raises);
+  #   * REPROBUILD_NO_RUNQUOTA / REPROBUILD_AUTO_RUNQUOTA env gates
+  #     keep the documented set of value spellings.
+  # Closes the wayland + meson from-source smokes' "CreateFileW failed"
+  # gap by ensuring deterministic auto-spawn of the sibling-built
+  # daemon.
+  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r11_runquota_daemon_recovery.nim",
+    binary: "build/test-bin/t_m9r11_runquota_daemon_recovery",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
   #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
   #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block
