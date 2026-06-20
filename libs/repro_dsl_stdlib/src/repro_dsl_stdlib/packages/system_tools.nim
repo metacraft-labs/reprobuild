@@ -81,6 +81,51 @@ import ./libegl_headers
 # setuptools + mako + markdown modules consumed by
 # gobject-introspection's build-time scanner.
 import ./python3_with_modules
+# M9.R.15e.3 — gsettings-desktop-schemas surfaces the canonical GNOME
+# GSettings .gschema.xml definitions (a11y, calendar, default-apps,
+# input-sources, lockdown, peripherals, privacy, screen, sound, system,
+# thumbnailers). Consumed by mutter (47.x src/meson.build:116) and
+# gnome-shell. Pure-data; nixpkgs prebuilt is byte-identical to
+# from-source so we keep this as a stdlib stub.
+import ./gsettings_desktop_schemas
+# M9.R.15e.4 — mutter 47.x's src/meson.build declares unconditional
+# dependencies on: atk (line 126), colord (127), lcms2 (128), libeis
+# (130), libei (131), gl/egl/glesv2 (189/195/209), libgbm (251),
+# gudev (237), udev (238).  Each stub points at nixpkgs; the
+# multi-output resolver walks ^* to pick up the .pc files in the
+# -dev outputs.  The libei stub covers both libei-1.0.pc and
+# libeis-1.0.pc (the nixpkgs#libei derivation ships both).
+import ./atk
+import ./colord
+import ./lcms2
+import ./libei
+import ./libeis
+import ./gl_egl_glesv2
+import ./libgbm
+import ./libgudev
+import ./udev
+# M9.R.15e.7 — mutter's native KMS/DRM backend invokes ``cvt`` (the
+# VESA video-timings calculator) at compile time to generate the
+# default-modes header. Routed through nixpkgs#libxcvt's bin/cvt.
+import ./cvt
+# M9.R.15e.10 — accountsservice is gdm 47.x's user-account D-Bus
+# daemon dep (meson.build:69). Pure-runtime dep; routed via the
+# nixpkgs prebuilt rather than a from-source recipe (the upstream
+# build needs polkit + vala + dbus-daemon at configure-time).
+import ./accountsservice
+# M9.R.15e.12 — json-glib is gdm 47.x's GLib-style JSON library dep
+# (meson.build:67).
+import ./json_glib
+# M9.R.15g.2 — itstool is the XML-to-PO translator GNOME projects
+# (incl. gdm 47.x) use to localise DocBook user help.  gdm's
+# ``src/docs/meson.build:1`` runs ``find_program('itstool')`` and
+# fails the configure when missing.
+import ./itstool
+# M9.R.15g.2 — libsystemd is gdm 47.x's logind-provider client library
+# (``src/common/gdm-common.c`` includes ``systemd/sd-login.h``).
+# Pinned via nixpkgs#systemdMinimal.dev so the include path picks up
+# ``systemd/sd-login.h`` + the rest of the ``sd-*`` headers.
+import ./libsystemd
 
 export bc
 export bison
@@ -122,3 +167,18 @@ export gtk_update_icon_cache
 export sassc
 export libegl_headers
 export python3_with_modules
+export gsettings_desktop_schemas
+export atk
+export colord
+export lcms2
+export libei
+export libeis
+export gl_egl_glesv2
+export libgbm
+export libgudev
+export udev
+export cvt
+export accountsservice
+export json_glib
+export itstool
+export libsystemd

@@ -177,6 +177,14 @@ package pamSource:
     ## bison is the parser generator pam.conf consumes alongside flex.
     "bison >=3.6"
 
+  buildDeps:
+    ## M9.R.15e.8 — libxcrypt provides the modern crypt(3) implementation
+    ## (libcrypt.so) consumed by the pam_pwhistory + pam_unix modules to
+    ## hash passwords. Without it the link step short-fails:
+    ##   undefined reference to `crypt'
+    ## at ``modules/pam_pwhistory/opasswd.c:139``.
+    "libcrypt"
+
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
     discard

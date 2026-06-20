@@ -185,23 +185,26 @@ package gdmSource:
     extractStrip: 1
 
   nativeBuildDeps:
-    ## autoconf generates the upstream ``configure`` script when the
-    ## release tarball ships a stale ``configure.ac``.
-    "autoconf"
-    ## automake provides the upstream ``Makefile.in`` templates the
-    ## release tarball pre-generates.
-    "automake"
-    ## libtool provides the ``./libtool`` shim the autotools build
-    ## drives for ``--disable-static`` to honour the shared-only build
-    ## semantics correctly.
-    "libtool"
-    ## make is the build-system driver — the c_cpp_autotools
-    ## convention's compile action invokes ``make`` after
-    ## ``./configure``.
-    "make"
-    ## gcc is the host C toolchain — gdm is C11 with light use of
-    ## autoconf macros.
+    ## M9.R.15e.10 — gdm 47.x migrated to meson (upstream commit
+    ## 84d4a40e in 2024). The recipe previously declared autotools
+    ## tooling (autoconf/automake/libtool/make) but the release
+    ## tarball ships ``meson.build`` + ``meson_options.txt`` only
+    ## (no ``configure.ac`` / ``Makefile.am``). Switched to meson +
+    ## ninja to match upstream.
+    "meson >=1.0"
+    "ninja >=1.10"
     "gcc >=11"
+    ## gettext provides ``msgfmt`` for the .po -> .mo catalog
+    ## compilation (same idiom as mutter / gtk4 / glib2).
+    "gettext"
+    ## python3 runs gdm's per-build glib-mkenums passes + the
+    ## gobject-introspection scanner wrapper.
+    "python3"
+    ## M9.R.15g.2 — corrected: gdm 47.0's ``src/docs/meson.build:1``
+    ## DOES call ``find_program('itstool')`` (the user-help DocBook
+    ## integration is still wired through itstool; the docs subdir is
+    ## unconditional). itstool stub routes via nixpkgs#itstool.
+    "itstool"
 
   buildDeps:
     ## glib2 is the foundation library gdm's daemon + greeter consume
@@ -215,6 +218,27 @@ package gdmSource:
     ## libxkbcommon is the keyboard-keymap library gdm's greeter
     ## consumes to handle layout selection / password entry input.
     "libxkbcommon >=1.5"
+    ## M9.R.15e.10 — gdm 47.x's meson.build declares unconditional
+    ## dependencies on udev (line 51) + gudev-1.0 (line 52) +
+    ## accountsservice (line 69).  Each maps to a stdlib stub.
+    "udev"
+    "gudev"
+    "accountsservice >=0.6.35"
+    ## M9.R.15e.12 — json-glib is gdm 47.x's GLib-style JSON parser
+    ## library dep (meson.build:67), routed through nixpkgs#json-glib.
+    "json-glib"
+    ## M9.R.15e.14 — gobject-introspection is required by gdm 47.x's
+    ## libgdm sub-tree (src/libgdm/meson.build:89) — there's no
+    ## ``-Dintrospection=disabled`` option to gate it. Backed by the
+    ## sibling gobjectIntrospectionSource recipe.
+    "gobject-introspection"
+    ## M9.R.15g.2 — libsystemd ships ``systemd/sd-login.h`` which
+    ## ``src/common/gdm-common.c`` + ``src/libgdm/gdm-sessions.c``
+    ## include unconditionally for the logind-provider integration.
+    ## gdm 47.x's meson option ``logind-provider`` defaults to
+    ## ``systemd`` and there is no header-disable opt-out. Routed via
+    ## nixpkgs#systemdMinimal.dev.
+    "libsystemd"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
@@ -237,18 +261,39 @@ package gdmSource:
     discard
 
   build:
-    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    ## M9.R.15e.10 — gdm 47.x uses meson; switched the constructor +
+    ## option set. Boolean options use true/false (meson convention);
+    ## the v1 baseline drops Plymouth, X11, runtime-systemd integration.
     setCurrentOwningPackageOverride("gdmSource")
     try:
       let opts = @[
-        "--disable-static",
-        "--without-plymouth",
-        "--without-systemdsystemunitdir",
-        "--with-default-pam-config=none",
-        "--disable-wayland-support=false",
-        "--enable-gdm-xsession",
+        # Drop Plymouth boot-splash integration (NDE-G1 deferred).
+        "plymouth=disabled",
+        # Drop the SELinux integration (v1 baseline does not run SELinux).
+        "selinux=disabled",
+        # Drop the systemd-journal integration.
+        "systemd-journal=false",
+        # Drop the upstream-baked PAM config templating; NDE-G1's PAM
+        # layer owns /etc/pam.d/gdm directly.
+        "default-pam-config=none",
+        # Wayland-only posture: enable Wayland sessions, drop X11
+        # sessions (the v1 NDE-G1 is pure-Wayland — matches the
+        # wlroots/sway/mutter posture), run the display-server (Xorg
+        # shim or wayland compositor) as the session user (modern
+        # systemd convention).
+        "wayland-support=true",
+        "x11-support=false",
+        "user-display-server=true",
+        # gdm.xsession wrapper is still useful in pure-Wayland mode
+        # for tightly-coupled session-management hand-off.
+        "gdm-xsession=true",
+        "run-dir=/run/gdm",
+        "profiling=false",
+        # libaudit is not in the v1 closure; gate as disabled to keep
+        # the build minimal.
+        "libaudit=disabled",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("gdm")
       discard pkg.executable("gdmGreeterSession")
     finally:

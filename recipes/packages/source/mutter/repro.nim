@@ -194,6 +194,21 @@ package mutterSource:
     ## gcc is the host C toolchain — mutter is C11 with light use of
     ## GLib-style autoconf macros via meson's gnome module.
     "gcc >=11"
+    ## M9.R.15e.6 — gettext provides ``msgfmt`` (consumed by mutter's
+    ## ``src/data/meson.build:1`` to compile the .po translation
+    ## catalogs into .mo binaries). Without it meson setup short-fails:
+    ##   ERROR: Program 'msgfmt' not found or not executable
+    "gettext"
+    ## M9.R.15e.6 — python3 runs mutter's per-keymap helper +
+    ## clutter/cogl preamble generators at meson-setup + compile time.
+    ## Same fix shape as gtk4 / glib2 / harfbuzz / fontconfig.
+    "python3"
+    ## M9.R.15e.7 — mutter's native KMS/DRM backend invokes ``cvt``
+    ## (the VESA video-timings calculator) at compile time via
+    ## ``find_program('cvt')`` in src/src/meson.build:1005 to generate
+    ## the ``meta-default-modes.h`` fallback display-mode table.
+    ## Routed through nixpkgs#libxcvt via the M9.R.15e.7 stdlib stub.
+    "cvt"
 
   buildDeps:
     ## glib2 is the foundation library mutter's compositor + window-
@@ -209,6 +224,14 @@ package mutterSource:
     ## consumes. The sibling ``waylandSource`` recipe vendors 1.25.0
     ## to match.
     "wayland >=1.22"
+    ## M9.R.15e.5 — wayland-protocols ships the XML protocol-definition
+    ## files (xdg-shell, linux-dmabuf, presentation-time, ...) mutter's
+    ## Wayland backend consumes at build time. Stub routes through
+    ## nixpkgs#wayland-protocols (.pc lives at share/pkgconfig).
+    ## (``wayland-egl.pc`` is already provided by the ``waylandSource``
+    ## sibling recipe's install tree, picked up via the existing
+    ## ``wayland`` buildDep — no separate declaration needed.)
+    "wayland-protocols >=1.31"
     ## libxkbcommon is the keyboard-keymap library mutter's seat /
     ## input layer consumes to translate raw evdev keycodes into XKB
     ## keysyms.
@@ -245,6 +268,47 @@ package mutterSource:
     ## libxml2 ships xmllint, consumed by mutter's GResource compile
     ## step + GSettings schema validation.
     "libxml2"
+    ## M9.R.15e.3 — gsettings-desktop-schemas surfaces the GNOME GSettings
+    ## schema set (a11y / calendar / default-apps / lockdown / peripherals
+    ## / privacy / screen / sound / system / ...). mutter 47.x's
+    ## ``src/meson.build:116`` declares the dep and short-fails meson
+    ## setup with ``Dependency "gsettings-desktop-schemas" not found,
+    ## tried pkgconfig`` when the .pc file is missing from
+    ## ``PKG_CONFIG_PATH``. Routed through nixpkgs via the M9.R.15e.3
+    ## stdlib stub; the .pc lives at ``share/pkgconfig`` which the
+    ## from-source resolver already threads (M9.R.14e.1).
+    "gsettings-desktop-schemas"
+    ## M9.R.15e.4 — mutter 47.x's ``src/meson.build`` declares the
+    ## following unconditional pkgconfig dependencies that the prior
+    ## buildDeps row did not cover. Each maps to a stdlib stub
+    ## pointing at the matching nixpkgs derivation.
+    ##
+    ## * ``atk`` (line 126) — GNOME accessibility toolkit, via
+    ##   ``nixpkgs#atk`` (aliased to at-spi2-core upstream).
+    ## * ``colord`` (line 127) — color-management daemon.
+    ## * ``lcms2`` (line 128) — Little CMS 2 color transforms.
+    ## * ``libei`` + ``libeis`` (lines 130-131) — Emulated Input
+    ##   protocol library; nixpkgs ships both client + server .pc
+    ##   files from one derivation.
+    ## * ``gl`` + ``egl`` + ``glesv2`` (lines 189/195/209) — OpenGL
+    ##   vendor-neutral dispatch via ``nixpkgs#libglvnd`` (gated on
+    ##   the cogl/cogl-pango/clutter compile path).
+    ## * ``libgbm`` (line 251, gated on native_backend=true) — mesa
+    ##   GBM userspace via ``nixpkgs#libgbm``.
+    ## * ``gudev`` (line 237) + ``udev`` (line 238) — libgudev GLib
+    ##   wrapper + udev.pc from systemd's -dev output.
+    "atk"
+    "colord"
+    "lcms2"
+    "libei"
+    "libeis"
+    "gl"
+    "egl"
+    "glesv2"
+    "libgbm"
+    "gudev"
+    "udev"
+    "libudev"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.

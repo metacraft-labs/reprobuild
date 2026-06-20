@@ -35,7 +35,9 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/plasma-workspace/vendor/plasma-workspace-6.2.5.tar.xz"
+  # M9.R.15f.5 drive-by — the recipe long since switched to the
+  # upstream download.kde.org URL but this constant was never updated.
+  "https://download.kde.org/stable/plasma/6.2.5/plasma-workspace-6.2.5.tar.xz"
 
 const ExpectedHash =
   "b82511e46f62e1b8f60b969c828c8d8d32fc7928401a70cc28c29f85f46c412f"

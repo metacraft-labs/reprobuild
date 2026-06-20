@@ -217,12 +217,33 @@ package cairoSource:
 
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    ##
+    ## M9.R.15e.1 — disable the bundled libpng subproject fallback.
+    ## cairo's ``subprojects/libpng.wrap`` provides a libpng-1.6.43
+    ## fallback that meson auto-resolves when the external pkg-config
+    ## probe for ``libpng16`` fails. The fallback ships a SONAME
+    ## ``libpng16.so.16.43.0`` baked into ``libcairo.so.2``'s
+    ## ``DT_NEEDED`` entries, while sibling gdk-pixbuf links the
+    ## resolver-provisioned external libpng (from ``nixpkgs#libpng``).
+    ## At gtk4 link time the two siblings disagree on the libpng
+    ## SONAME and the linker fails. Two fixes are applied:
+    ##
+    ## * ``png=enabled`` — promote PNG support from ``auto`` to
+    ##   ``enabled`` so the external probe is required (configure
+    ##   hard-fails if the resolver did not provision libpng).
+    ## * ``wrap_mode=nofallback`` — disallow any subproject wrap
+    ##   download/fallback (meson built-in option). This forbids the
+    ##   bundled libpng / glib / freetype / fontconfig / pixman / zlib
+    ##   wraps from kicking in and guarantees every dep is satisfied
+    ##   through the resolver's ``PKG_CONFIG_PATH``.
     setCurrentOwningPackageOverride("cairoSource")
     try:
       let opts = @[
         "tests=disabled",
         "xlib=disabled",
         "xcb=disabled",
+        "png=enabled",
+        "wrap_mode=nofallback",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libcairo")

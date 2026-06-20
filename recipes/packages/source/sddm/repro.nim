@@ -199,6 +199,10 @@ package sddmSource:
     ## QML-driven sddm greeter uses for its login-form UI surface.
     ## 6.6 is the minimum the sddm 0.21 line targets.
     "qt6-base >=6.6"
+    ## M9.R.15f.6 — qt6-tools supplies lupdate / lrelease / qhelpgenerator
+    ## tooling sddm's CMakeLists invoke (`find_package(Qt6 ...
+    ## LinguistTools)`) at configure time for the translations build.
+    "qt6-tools >=6.6"
     ## pam is the authentication-stack library sddm's greeter consumes
     ## to authenticate logins against ``/etc/pam.d/sddm``.
     "pam >=1.5"

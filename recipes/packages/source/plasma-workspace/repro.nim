@@ -196,14 +196,31 @@ package plasmaWorkspaceSource:
     ## sibling ``kwinSource`` recipe vendors 6.2.5 to match the
     ## Plasma 6.2.x point-release coordination.
     "kwin >=6.2"
-    ## kf6-base is the umbrella KF6 frameworks package
-    ## (kcoreaddons + kconfig + ki18n + kwidgetsaddons + kcompletion +
-    ## kxmlgui + kservice + knotifications + plasma-framework + etc.)
-    ## plasma-workspace's shell + applets + system tray consume.
-    "kf6-base >=6.0"
+    ## M9.R.15f.5 — the legacy ``kf6-base`` umbrella name had no
+    ## resolvable recipe. Replaced with the individual KF6 modules we
+    ## ship as from-source recipes (plasma-workspace's CMakeLists
+    ## explicitly find_package(KF6CoreAddons REQUIRED), KF6Config
+    ## REQUIRED, KF6I18n REQUIRED, etc.).
+    "kcoreaddons >=6.0"
+    "kconfig >=6.0"
+    "ki18n >=6.0"
+    "kwidgetsaddons >=6.0"
+    "kxmlgui >=6.0"
+    "kservice >=6.0"
+    "kglobalaccel >=6.0"
+    "knotifications >=6.0"
+    "ksvg >=6.0"
+    "ksolid >=6.0"
+    "kio >=6.0"
+    "kded >=6.0"
+    "plasma-framework >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtQml / QtQuick which the
     ## QML-driven Plasma shell uses for its entire UI surface.
     "qt6-base >=6.6"
+    ## qt6-tools supplies the lupdate/lrelease/qhelpgenerator tooling
+    ## ECM's per-module find_package(Qt6 ... LinguistTools) probe
+    ## requires at configure time even when translations are disabled.
+    "qt6-tools >=6.6"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

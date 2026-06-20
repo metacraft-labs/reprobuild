@@ -37,7 +37,9 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/sddm/vendor/sddm-0.21.0.tar.gz"
+  # M9.R.15f.6 drive-by — the recipe long since switched to the
+  # upstream GitHub archive URL but this constant was never updated.
+  "https://github.com/sddm/sddm/archive/refs/tags/v0.21.0.tar.gz"
 
 const ExpectedHash =
   "f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf"

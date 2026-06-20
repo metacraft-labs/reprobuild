@@ -35,7 +35,10 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kwin/vendor/kwin-6.2.5.tar.xz"
+  # M9.R.15f.5 drive-by — the recipe long since switched to the
+  # upstream download.kde.org URL but this constant was never
+  # updated.
+  "https://download.kde.org/stable/plasma/6.2.5/kwin-6.2.5.tar.xz"
 
 const ExpectedHash =
   "5cc450a6e41105c8c49929b72550b331237f96aafb294690f4707bdc5f776848"

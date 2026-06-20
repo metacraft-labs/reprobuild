@@ -201,11 +201,25 @@ package kwinSource:
     ## ``kcoreaddonsSource`` recipe vendors 6.10.0 to match the KF6
     ## 6.x ABI requirement.
     "kcoreaddons >=6.0"
-    ## kf6-base is the umbrella KF6 frameworks package (kconfig,
-    ## ki18n, kwidgetsaddons, kcompletion, kxmlgui, kservice,
-    ## knotifications, etc.) kwin's compositor + window-management
-    ## logic consumes.
-    "kf6-base >=6.0"
+    ## M9.R.15f.5 — kwin's CMakeLists explicitly find_package(KF6Config
+    ## REQUIRED), KF6I18n REQUIRED, KF6WidgetsAddons REQUIRED,
+    ## KF6XmlGui REQUIRED, etc.; the legacy ``kf6-base`` umbrella name
+    ## had no resolvable recipe. Replaced with the individual KF6
+    ## modules we ship as from-source recipes (the kwin from-source
+    ## convention layer probes for each via pkg-config at configure
+    ## time).
+    "kconfig >=6.0"
+    "ki18n >=6.0"
+    "kwidgetsaddons >=6.0"
+    "kxmlgui >=6.0"
+    "kservice >=6.0"
+    "kglobalaccel >=6.0"
+    "knotifications >=6.0"
+    "ksvg >=6.0"
+    "ksolid >=6.0"
+    "kio >=6.0"
+    "kded >=6.0"
+    "plasma-framework >=6.0"
     ## wayland supplies the protocol scanner + libwayland-server kwin
     ## uses for its Wayland compositor implementation. The sibling
     ## ``waylandSource`` recipe vendors a compatible version.
@@ -214,6 +228,10 @@ package kwinSource:
     ## modern kwin compositor (incl. the QML-based effect runtime)
     ## consumes. 6.6 is the minimum the Plasma 6.2.x line targets.
     "qt6-base >=6.6"
+    ## qt6-tools supplies the lupdate/lrelease/qhelpgenerator tooling
+    ## ECM's per-module find_package(Qt6 ... LinguistTools) probe
+    ## requires at configure time even when translations are disabled.
+    "qt6-tools >=6.6"
     ## libdrm is the kernel DRM client library kwin's DRM backend uses
     ## to drive direct-rendering on tty consoles. The sibling
     ## ``libdrmSource`` recipe vendors a compatible version.

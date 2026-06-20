@@ -98,3 +98,10 @@ suite "DSL-port M9.R.14d.7 — meson_package stage-copy emission":
       "libwayland-client"
     # Trailing version numbers in PascalCase round-trip cleanly.
     check m9r14dPascalToKebabWithDigits("libQt6Core") == "lib-qt-6-core"
+    # M9.R.15e.2 — gtk4 ships SONAME ``libgtk-4.so`` while the recipe
+    # declares ``library libGtk4:``. The stripped+digits chain must
+    # produce ``gtk-4`` (so the staging probe finds ``libgtk-4.so``).
+    # Lib-prefix strip is the caller's job; the conversion itself
+    # only inserts separators at the appropriate transitions.
+    check m9r14dPascalToKebabWithDigits("Gtk4") == "gtk-4"
+    check m9r14dPascalToKebabWithDigits("libGtk4") == "lib-gtk-4"
