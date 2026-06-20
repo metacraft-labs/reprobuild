@@ -614,6 +614,18 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\"; ")
     script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
+    # M9.R.14g.3 — version-suffix glob fallback for libraries that meson
+    # builds with `soversion = '0.19'` and similar (wlroots, gtk-3,
+    # libfoo-2.0, ...). The literal probe above only matches
+    # `lib<name>.so` shapes; this glob covers `lib<name>-<version>.so`
+    # where the version is baked into the SONAME stem rather than as a
+    # `.so.<X>` suffix. We sort `LC_ALL=C` and take the FIRST match to
+    # stay deterministic; multiple matches in the same directory would
+    # be a packaging anomaly we'd surface in the upstream recipe.
+    script.add("first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/" & kebabName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
     # Executable: probe bare name; also try .exe for cross-builds and
