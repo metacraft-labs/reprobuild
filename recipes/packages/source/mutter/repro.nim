@@ -255,6 +255,37 @@ package mutterSource:
     ## stdlib stub; the .pc lives at ``share/pkgconfig`` which the
     ## from-source resolver already threads (M9.R.14e.1).
     "gsettings-desktop-schemas"
+    ## M9.R.15e.4 — mutter 47.x's ``src/meson.build`` declares the
+    ## following unconditional pkgconfig dependencies that the prior
+    ## buildDeps row did not cover. Each maps to a stdlib stub
+    ## pointing at the matching nixpkgs derivation.
+    ##
+    ## * ``atk`` (line 126) — GNOME accessibility toolkit, via
+    ##   ``nixpkgs#atk`` (aliased to at-spi2-core upstream).
+    ## * ``colord`` (line 127) — color-management daemon.
+    ## * ``lcms2`` (line 128) — Little CMS 2 color transforms.
+    ## * ``libei`` + ``libeis`` (lines 130-131) — Emulated Input
+    ##   protocol library; nixpkgs ships both client + server .pc
+    ##   files from one derivation.
+    ## * ``gl`` + ``egl`` + ``glesv2`` (lines 189/195/209) — OpenGL
+    ##   vendor-neutral dispatch via ``nixpkgs#libglvnd`` (gated on
+    ##   the cogl/cogl-pango/clutter compile path).
+    ## * ``libgbm`` (line 251, gated on native_backend=true) — mesa
+    ##   GBM userspace via ``nixpkgs#libgbm``.
+    ## * ``gudev`` (line 237) + ``udev`` (line 238) — libgudev GLib
+    ##   wrapper + udev.pc from systemd's -dev output.
+    "atk"
+    "colord"
+    "lcms2"
+    "libei"
+    "libeis"
+    "gl"
+    "egl"
+    "glesv2"
+    "libgbm"
+    "gudev"
+    "udev"
+    "libudev"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.

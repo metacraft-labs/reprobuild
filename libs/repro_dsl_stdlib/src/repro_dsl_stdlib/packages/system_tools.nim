@@ -88,6 +88,22 @@ import ./python3_with_modules
 # gnome-shell. Pure-data; nixpkgs prebuilt is byte-identical to
 # from-source so we keep this as a stdlib stub.
 import ./gsettings_desktop_schemas
+# M9.R.15e.4 — mutter 47.x's src/meson.build declares unconditional
+# dependencies on: atk (line 126), colord (127), lcms2 (128), libeis
+# (130), libei (131), gl/egl/glesv2 (189/195/209), libgbm (251),
+# gudev (237), udev (238).  Each stub points at nixpkgs; the
+# multi-output resolver walks ^* to pick up the .pc files in the
+# -dev outputs.  The libei stub covers both libei-1.0.pc and
+# libeis-1.0.pc (the nixpkgs#libei derivation ships both).
+import ./atk
+import ./colord
+import ./lcms2
+import ./libei
+import ./libeis
+import ./gl_egl_glesv2
+import ./libgbm
+import ./libgudev
+import ./udev
 
 export bc
 export bison
@@ -130,3 +146,12 @@ export sassc
 export libegl_headers
 export python3_with_modules
 export gsettings_desktop_schemas
+export atk
+export colord
+export lcms2
+export libei
+export libeis
+export gl_egl_glesv2
+export libgbm
+export libgudev
+export udev
