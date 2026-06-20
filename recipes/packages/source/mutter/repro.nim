@@ -259,16 +259,15 @@ package mutterSource:
     setCurrentOwningPackageOverride("mutterSource")
     try:
       let opts = @[
-        "-Dintrospection=false",
-        "-Dprofiler=false",
-        "-Dtests=false",
-        "-Ddebug=false",
-        "-Dnative_backend=true",
-        "-Dwayland=true",
-        "-Dx11=false",
-        "-Dxwayland=false",
-        "-Dremote_desktop=false",
-        "--buildtype=release",
+        "introspection=false",
+        "profiler=false",
+        "tests=false",
+        "debug=false",
+        "native_backend=true",
+        "wayland=true",
+        "x11=false",
+        "xwayland=false",
+        "remote_desktop=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libMutter")

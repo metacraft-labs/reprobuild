@@ -136,13 +136,12 @@ package dbusBrokerSource:
     setCurrentOwningPackageOverride("dbusBrokerSource")
     try:
       let opts = @[
-        "-Daudit=false",
-        "-Dlauncher=true",
-        "-Dlinux-4-17=true",
-        "-Dreference-test=false",
-        "-Dselinux=false",
-        "-Dapparmor=false",
-        "--buildtype=release",
+        "audit=false",
+        "launcher=true",
+        "linux-4-17=true",
+        "reference-test=false",
+        "selinux=false",
+        "apparmor=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("dbusBroker")

@@ -198,12 +198,11 @@ package harfbuzzSource:
     setCurrentOwningPackageOverride("harfbuzzSource")
     try:
       let opts = @[
-        "-Dtests=disabled",
-        "-Dintrospection=disabled",
-        "-Ddocs=disabled",
-        "-Dgobject=disabled",
-        "-Dicu=disabled",
-        "--buildtype=release",
+        "tests=disabled",
+        "introspection=disabled",
+        "docs=disabled",
+        "gobject=disabled",
+        "icu=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libHarfbuzz")

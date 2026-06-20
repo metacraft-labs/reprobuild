@@ -271,20 +271,19 @@ package systemdSource:
     setCurrentOwningPackageOverride("systemdSource")
     try:
       let opts = @[
-        "-Dmode=release",
-        "-Dtests=false",
-        "-Dman=disabled",
-        "-Dtranslations=false",
-        "-Dxdg-autostart=false",
-        "-Dnetworkd=false",
-        "-Dresolve=false",
-        "-Dtimesyncd=false",
-        "-Dhomed=false",
-        "-Duserdb=false",
-        "-Dimportd=false",
-        "-Dportabled=false",
-        "-Dpolkit=false",
-        "--buildtype=release",
+        "mode=release",
+        "tests=false",
+        "man=disabled",
+        "translations=false",
+        "xdg-autostart=false",
+        "networkd=false",
+        "resolve=false",
+        "timesyncd=false",
+        "homed=false",
+        "userdb=false",
+        "importd=false",
+        "portabled=false",
+        "polkit=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("systemdInit")

@@ -212,11 +212,10 @@ package pangoSource:
     setCurrentOwningPackageOverride("pangoSource")
     try:
       let opts = @[
-        "-Dintrospection=disabled",
-        "-Dgtk_doc=false",
-        "-Dman-pages=false",
-        "-Dbuild-testsuite=false",
-        "--buildtype=release",
+        "introspection=disabled",
+        "gtk_doc=false",
+        "man-pages=false",
+        "build-testsuite=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libpango")

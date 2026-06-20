@@ -307,13 +307,13 @@ package qt6BaseSource:
     setCurrentOwningPackageOverride("qt6BaseSource")
     try:
       let opts = @[
-        "-DBUILD_TESTING=OFF",
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DFEATURE_developer_build=OFF",
-        "-DFEATURE_xcb=OFF",
-        "-DFEATURE_dbus=ON",
-        "-DFEATURE_sql_sqlite=ON",
-        "-DFEATURE_widgets=ON",
+        "BUILD_TESTING=OFF",
+        "CMAKE_BUILD_TYPE=Release",
+        "FEATURE_developer_build=OFF",
+        "FEATURE_xcb=OFF",
+        "FEATURE_dbus=ON",
+        "FEATURE_sql_sqlite=ON",
+        "FEATURE_widgets=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libQt6Core")

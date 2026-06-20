@@ -233,13 +233,12 @@ package glib2Source:
     setCurrentOwningPackageOverride("glib2Source")
     try:
       let opts = @[
-        "-Dtests=false",
-        "-Ddocumentation=false",
-        "-Dman-pages=disabled",
-        "-Dintrospection=disabled",
-        "-Dnls=disabled",
-        "-Dxattr=false",
-        "--buildtype=release",
+        "tests=false",
+        "documentation=false",
+        "man-pages=disabled",
+        "introspection=disabled",
+        "nls=disabled",
+        "xattr=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libGlib2")

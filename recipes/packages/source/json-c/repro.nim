@@ -180,11 +180,11 @@ package jsonCSource:
     setCurrentOwningPackageOverride("jsonCSource")
     try:
       let opts = @[
-        "-DBUILD_SHARED_LIBS=ON",
-        "-DBUILD_STATIC_LIBS=OFF",
-        "-DBUILD_TESTING=OFF",
-        "-DBUILD_APPS=OFF",
-        "-DCMAKE_BUILD_TYPE=Release",
+        "BUILD_SHARED_LIBS=ON",
+        "BUILD_STATIC_LIBS=OFF",
+        "BUILD_TESTING=OFF",
+        "BUILD_APPS=OFF",
+        "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libJsonC")

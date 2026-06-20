@@ -210,13 +210,18 @@ package waylandSource:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
     setCurrentOwningPackageOverride("waylandSource")
     try:
+      # M9.R.14d.6 — strip the literal `-D` prefix: the meson.setup
+      # typed-tool's `options` flag has `alias = "-D"` + `format =
+      # concat`, so each element gets `-D` prepended at emit time.
+      # Recipes that ship pre-prefixed `-Dfoo=bar` strings end up
+      # invoking meson with `-D-Dfoo=bar`. `--buildtype` is the same
+      # — the typed tool exposes `buildtype:` as a separate flag.
       let opts = @[
-        "-Ddocumentation=false",
-        "-Ddtd_validation=false",
-        "-Dlibraries=true",
-        "-Dscanner=true",
-        "-Dtests=false",
-        "--buildtype=release",
+        "documentation=false",
+        "dtd_validation=false",
+        "libraries=true",
+        "scanner=true",
+        "tests=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libwaylandClient")

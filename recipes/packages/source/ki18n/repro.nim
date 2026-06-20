@@ -147,10 +147,10 @@ package ki18nSource:
     setCurrentOwningPackageOverride("ki18nSource")
     try:
       let opts = @[
-        "-DBUILD_TESTING=OFF",
-        "-DBUILD_QCH=OFF",
-        "-DBUILD_PYTHON_BINDINGS=OFF",
-        "-DCMAKE_BUILD_TYPE=Release",
+        "BUILD_TESTING=OFF",
+        "BUILD_QCH=OFF",
+        "BUILD_PYTHON_BINDINGS=OFF",
+        "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6I18n")

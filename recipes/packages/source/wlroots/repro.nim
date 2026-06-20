@@ -228,11 +228,10 @@ package wlrootsSource:
     setCurrentOwningPackageOverride("wlrootsSource")
     try:
       let opts = @[
-        "-Dexamples=false",
-        "-Dxwayland=disabled",
-        "-Dxcb-errors=disabled",
-        "-Dwerror=false",
-        "--buildtype=release",
+        "examples=false",
+        "xwayland=disabled",
+        "xcb-errors=disabled",
+        "werror=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libwlroots")

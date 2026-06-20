@@ -206,10 +206,9 @@ package cairoSource:
     setCurrentOwningPackageOverride("cairoSource")
     try:
       let opts = @[
-        "-Dtests=disabled",
-        "-Dxlib=disabled",
-        "-Dxcb=disabled",
-        "--buildtype=release",
+        "tests=disabled",
+        "xlib=disabled",
+        "xcb=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libcairo")

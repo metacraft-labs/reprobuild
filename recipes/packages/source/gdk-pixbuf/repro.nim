@@ -196,11 +196,10 @@ package gdkPixbufSource:
     setCurrentOwningPackageOverride("gdkPixbufSource")
     try:
       let opts = @[
-        "-Dtests=false",
-        "-Dman=false",
-        "-Dgtk_doc=false",
-        "-Dintrospection=disabled",
-        "--buildtype=release",
+        "tests=false",
+        "man=false",
+        "gtk_doc=false",
+        "introspection=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libgdkPixbuf")

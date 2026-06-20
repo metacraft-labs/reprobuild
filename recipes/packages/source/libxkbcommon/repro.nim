@@ -221,11 +221,10 @@ package libxkbcommonSource:
     setCurrentOwningPackageOverride("libxkbcommonSource")
     try:
       let opts = @[
-        "-Denable-docs=false",
-        "-Denable-x11=false",
-        "-Denable-wayland=true",
-        "-Denable-tools=true",
-        "--buildtype=release",
+        "enable-docs=false",
+        "enable-x11=false",
+        "enable-wayland=true",
+        "enable-tools=true",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libxkbcommon")

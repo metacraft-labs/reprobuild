@@ -239,10 +239,10 @@ package sddmSource:
     setCurrentOwningPackageOverride("sddmSource")
     try:
       let opts = @[
-        "-DBUILD_TESTING=OFF",
-        "-DBUILD_MAN_PAGES=OFF",
-        "-DENABLE_JOURNALD=OFF",
-        "-DCMAKE_BUILD_TYPE=Release",
+        "BUILD_TESTING=OFF",
+        "BUILD_MAN_PAGES=OFF",
+        "ENABLE_JOURNALD=OFF",
+        "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.executable("sddm")

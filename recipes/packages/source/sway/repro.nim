@@ -291,11 +291,10 @@ package swaySource:
     setCurrentOwningPackageOverride("swaySource")
     try:
       let opts = @[
-        "-Dxwayland=disabled",
-        "-Dman-pages=disabled",
-        "-Dtray=disabled",
-        "-Dwerror=false",
-        "--buildtype=release",
+        "xwayland=disabled",
+        "man-pages=disabled",
+        "tray=disabled",
+        "werror=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("sway")

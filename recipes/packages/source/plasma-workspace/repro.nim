@@ -232,9 +232,9 @@ package plasmaWorkspaceSource:
     setCurrentOwningPackageOverride("plasmaWorkspaceSource")
     try:
       let opts = @[
-        "-DBUILD_TESTING=OFF",
-        "-DKWIN_BUILD_X11=OFF",
-        "-DCMAKE_BUILD_TYPE=Release",
+        "BUILD_TESTING=OFF",
+        "KWIN_BUILD_X11=OFF",
+        "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.executable("plasmashell")

@@ -247,11 +247,10 @@ package pipewireSource:
     setCurrentOwningPackageOverride("pipewireSource")
     try:
       let opts = @[
-        "-Dtests=disabled",
-        "-Ddocs=disabled",
-        "-Dexamples=disabled",
-        "-Dman=disabled",
-        "--buildtype=release",
+        "tests=disabled",
+        "docs=disabled",
+        "examples=disabled",
+        "man=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("pipewireDaemon")

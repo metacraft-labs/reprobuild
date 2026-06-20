@@ -221,11 +221,10 @@ package wireplumberSource:
     setCurrentOwningPackageOverride("wireplumberSource")
     try:
       let opts = @[
-        "-Ddocumentation=disabled",
-        "-Dintrospection=disabled",
-        "-Dsystem-lua=true",
-        "-Dtests=false",
-        "--buildtype=release",
+        "documentation=disabled",
+        "introspection=disabled",
+        "system-lua=true",
+        "tests=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("wireplumber")

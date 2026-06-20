@@ -173,9 +173,8 @@ package pixmanSource:
     setCurrentOwningPackageOverride("pixmanSource")
     try:
       let opts = @[
-        "-Dtests=disabled",
-        "-Ddemos=disabled",
-        "--buildtype=release",
+        "tests=disabled",
+        "demos=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libpixman1")

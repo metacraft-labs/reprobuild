@@ -175,18 +175,17 @@ package libdrmSource:
     setCurrentOwningPackageOverride("libdrmSource")
     try:
       let opts = @[
-        "-Dintel=disabled",
-        "-Dradeon=disabled",
-        "-Damdgpu=enabled",
-        "-Dnouveau=enabled",
-        "-Dvmwgfx=disabled",
-        "-Dfreedreno=disabled",
-        "-Dvc4=disabled",
-        "-Detnaviv=disabled",
-        "-Dtegra=disabled",
-        "-Dvalgrind=disabled",
-        "-Dman-pages=disabled",
-        "--buildtype=release",
+        "intel=disabled",
+        "radeon=disabled",
+        "amdgpu=enabled",
+        "nouveau=enabled",
+        "vmwgfx=disabled",
+        "freedreno=disabled",
+        "vc4=disabled",
+        "etnaviv=disabled",
+        "tegra=disabled",
+        "valgrind=disabled",
+        "man-pages=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libdrm")

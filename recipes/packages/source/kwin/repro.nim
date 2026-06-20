@@ -254,11 +254,11 @@ package kwinSource:
     setCurrentOwningPackageOverride("kwinSource")
     try:
       let opts = @[
-        "-DBUILD_TESTING=OFF",
-        "-DKWIN_BUILD_TABBOX=OFF",
-        "-DKWIN_BUILD_X11=OFF",
-        "-DKWIN_BUILD_KCMS=OFF",
-        "-DCMAKE_BUILD_TYPE=Release",
+        "BUILD_TESTING=OFF",
+        "KWIN_BUILD_TABBOX=OFF",
+        "KWIN_BUILD_X11=OFF",
+        "KWIN_BUILD_KCMS=OFF",
+        "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.executable("kwinWayland")

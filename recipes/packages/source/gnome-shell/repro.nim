@@ -247,14 +247,13 @@ package gnomeShellSource:
     setCurrentOwningPackageOverride("gnomeShellSource")
     try:
       let opts = @[
-        "-Dgtk_doc=false",
-        "-Dtests=false",
-        "-Dman=false",
-        "-Dnetworkmanager=false",
-        "-Dsystemd=false",
-        "-Dextensions_app=false",
-        "-Dextensions_tool=false",
-        "--buildtype=release",
+        "gtk_doc=false",
+        "tests=false",
+        "man=false",
+        "networkmanager=false",
+        "systemd=false",
+        "extensions_app=false",
+        "extensions_tool=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("gnomeShell")

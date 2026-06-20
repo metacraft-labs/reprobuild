@@ -228,12 +228,11 @@ package libinputSource:
     setCurrentOwningPackageOverride("libinputSource")
     try:
       let opts = @[
-        "-Ddocumentation=false",
-        "-Ddebug-gui=false",
-        "-Dtests=false",
-        "-Dlibwacom=false",
-        "-Dudev-dir=/lib/udev",
-        "--buildtype=release",
+        "documentation=false",
+        "debug-gui=false",
+        "tests=false",
+        "libwacom=false",
+        "udev-dir=/lib/udev",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libinput")
