@@ -39,6 +39,12 @@ libs/*/src/**/*
 !libs/*/src/**/*.nim
 !libs/*/src/**/*.nims
 !libs/*/src/**/*.cfg
+# M9.R.15d.2 — repro_dsl_stdlib's packages/nix/ subtree hosts custom
+# Nix expressions (per-stub default.nix + lockfiles) consumed by the
+# stdlib provisioning channel. These complement the .nim sources.
+!libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nix/**/*.nix
+!libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nix/**/*.json
+!libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nix/**/*.lock
 
 # Same pattern for app entry points compiled in-place during local
 # iteration (e.g. `nim c apps/repro-peer-cache-sim/repro_peer_cache_sim.nim`).

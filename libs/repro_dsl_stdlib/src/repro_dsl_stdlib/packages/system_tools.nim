@@ -77,6 +77,10 @@ import ./sassc
 # Consumed by libepoxy's egl=yes meson option and downstream by gtk4 /
 # qt6 OpenGL backends.
 import ./libegl_headers
+# M9.R.15d.2 — python3-with-modules wraps python3 with the
+# setuptools + mako + markdown modules consumed by
+# gobject-introspection's build-time scanner.
+import ./python3_with_modules
 
 export bc
 export bison
@@ -117,3 +121,4 @@ export runquotad
 export gtk_update_icon_cache
 export sassc
 export libegl_headers
+export python3_with_modules
