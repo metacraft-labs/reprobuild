@@ -307,12 +307,35 @@ proc autotools_package*(srcDir: string;
   # install. The configure dep is still implied through compile so we
   # don't need to keep it explicitly, but the chain is more readable
   # spelt out.
+  # M9.R.14c.11 — libtool requires DESTDIR to be an absolute path:
+  #   libtool: error: 'out/usr/lib' must be an absolute directory name
+  # The relative ``out`` works for cp/install commands but libtool's
+  # install wrapper sanity-checks the destination. We pass DESTDIR via
+  # ``extraEnv`` instead of the typed ``vars`` slot so:
+  #   1. The absolute path doesn't enter the action's ``callIdentity``
+  #      and therefore not the cache fingerprint — same recipe + same
+  #      source produces the same cache key on every host.
+  #   2. GNU make's ``MAKEFLAGS`` mechanism doesn't apply here (make
+  #      reads DESTDIR from env when no command-line override is
+  #      present), so this is the standard portable pattern.
+  # When the provider context is unavailable (unit-test mode) we leave
+  # the env empty; the install action then runs with the relative
+  # DESTDIR=out form via ``vars``, preserving legacy behaviour for
+  # tests that don't go through engine spawn.
+  let providerProjectRoot = activeProviderProjectRoot()
+  var installVars: seq[string] = @[]
+  var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
+  if providerProjectRoot.len > 0:
+    let absoluteDestdir = providerProjectRoot / buildDir / destdir
+    installEnv.add(("DESTDIR", absoluteDestdir))
+  else:
+    installVars.add("DESTDIR=" & destdir)
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],
-    vars = @["DESTDIR=" & destdir],
+    vars = installVars,
     after = @[configureEdge, buildEdge],
-    extraEnv = @[("MAKEFLAGS", makeflags)])
+    extraEnv = installEnv)
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
