@@ -175,6 +175,12 @@ package fontconfigSource:
     ## pkg-config is used by the configure script to probe for the
     ## freetype + libxml2 dependencies.
     "pkg-config"
+    ## M9.R.14f.7 — python3 is required by fontconfig's configure
+    ## script for the orth.py / template processing steps.
+    "python3"
+    ## M9.R.14f.7 — gperf generates the perfect-hash tables for the
+    ## font-property name table at build time.
+    "gperf"
 
   buildDeps:
     ## freetype is the font-glyph loader fontconfig uses to scan TTF /

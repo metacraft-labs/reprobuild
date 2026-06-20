@@ -253,6 +253,43 @@ package swaySource:
     ## dependency declaration stays explicit for forward compat) and
     ## for ``output background <image>`` config entries.
     "gdk-pixbuf >=2.40"
+    ## wayland-protocols ships the protocol-XML files (xdg-shell,
+    ## pointer-constraints, idle-inhibit, layer-shell, ...) that
+    ## sway's meson build consumes at configure / compile time to
+    ## emit protocol-stub C bindings. Without this dep, sway's meson
+    ## setup fails at ``src/meson.build:67:17`` because sway tries
+    ## to fall back to a subproject clone when the pkg-config probe
+    ## misses and wrap-based downloads are disabled. Matches the
+    ## sibling ``wlrootsSource`` recipe's dependency declaration.
+    "wayland-protocols >=1.31"
+    ## libevdev is the userspace evdev event-handling library; sway
+    ## 1.11's meson build probes for it directly (in addition to
+    ## consuming it transitively via wlroots / libinput) at
+    ## ``src/meson.build:74:11`` to translate raw evdev key/button
+    ## codes for the ``input { ... }`` block's ``code``-form bindings.
+    "libevdev >=1.9"
+    ## libudev is the userspace device-management library; sway's C
+    ## sources transitively include ``<libinput.h>`` (via
+    ## ``sway/config.h`` -> ``sway/server.h``) which in turn includes
+    ## ``<libudev.h>``. Without libudev's include / pkg-config
+    ## fragment on the path, the ninja compile step short-fails at
+    ## ``src/sway/xdg_decoration.c:3`` with
+    ## ``libudev.h: No such file or directory``. The eudev recipe
+    ## provides the ABI-compatible libudev.so via the ``libudev``
+    ## resolver name (matches the sibling ``libinputSource``
+    ## declaration).
+    "libudev >=232"
+    ## libpng + libjpeg are transitive link-time dependencies of the
+    ## ``libgdk_pixbuf-2.0.so`` we link swaybar against. Without them
+    ## on the link search path, swaybar's link step short-fails with
+    ## ``undefined reference to png_*@PNG16_0`` /
+    ## ``undefined reference to jpeg_*@LIBJPEG_6.2`` (the linker
+    ## walks DT_NEEDED of libgdk_pixbuf-2.0.so and reports the
+    ## unresolved symbols when libpng16.so / libjpeg.so aren't on
+    ## the search path). Matches the gdk-pixbuf recipe's own
+    ## buildDeps declarations.
+    "libpng >=1.6"
+    "libjpeg >=2.0"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -291,10 +328,28 @@ package swaySource:
     setCurrentOwningPackageOverride("swaySource")
     try:
       let opts = @[
-        "xwayland=disabled",
+        # M9.R.14h.9 — sway 1.11's meson_options dropped the
+        # ``xwayland`` knob; xwayland is now controlled at wlroots
+        # build time, not sway's.  ``man-pages`` + ``tray`` survive as
+        # feature options on the new schema.
         "man-pages=disabled",
         "tray=disabled",
         "werror=false",
+        # M9.R.14i.5 — disable meson's default ``-Wl,--no-undefined``
+        # gate (``b_lundef=true``). Sway transitively pulls in
+        # ``libgdk_pixbuf-2.0.so`` whose DT_NEEDED references
+        # ``libpng16.so.16`` + ``libjpeg.so.62`` resolve via nix's
+        # ``LIBRARY_PATH`` env at gcc-driver time but the nix
+        # binutils-wrapper's auto-injected ``-L`` flags don't reach the
+        # ninja-spawned swaybar link step (gcc shells out to ``ld``
+        # directly under ninja, bypassing the wrapper's
+        # ``LIBRARY_PATH`` -> ``-L`` translation). Disabling the
+        # ``--no-undefined`` gate lets the linker leave transitive
+        # undefined references unresolved at link time; ``ld.so``
+        # resolves them at runtime via ``LD_LIBRARY_PATH`` (which the
+        # ld.so.conf.d overlay populates for installed sway). Matches
+        # the pattern many distros use for swaybar specifically.
+        "b_lundef=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("sway")

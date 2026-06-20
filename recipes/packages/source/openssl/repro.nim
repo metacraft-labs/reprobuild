@@ -209,6 +209,15 @@ package opensslSource:
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
     discard
+  executable openssl:
+    ## ``/usr/bin/openssl`` — the openssl CLI binary qt6-base + other
+    ## downstream recipes consume at build time as a tool (the
+    ## ``openssl`` tool resolution channel looks for a binary named
+    ## ``openssl`` at ``.repro/output/openssl/openssl``). M9.R.15a.5
+    ## registered the artifact so the M9.K artifact registry routes
+    ## the staged binary there.
+    discard
+
   library libCrypto:
     ## ``libcrypto.so`` — the cryptography primitive library
     ## (symmetric ciphers, asymmetric ciphers, hash functions, random
@@ -231,6 +240,14 @@ package opensslSource:
 
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    ##
+    ## M9.R.15a.3 — openssl's configure entry-point is the upper-case
+    ## Perl-driven ``./Configure`` (not the lower-case ``./configure``
+    ## that vanilla autotools projects ship); pass
+    ## ``configureScriptName = "Configure"`` so the out-of-tree
+    ## driver builds ``../src/Configure ...`` instead of the default
+    ## ``../src/configure ...`` (which doesn't exist in the openssl
+    ## tarball and trips the build with ``No such file or directory``).
     setCurrentOwningPackageOverride("opensslSource")
     try:
       let opts = @[
@@ -240,7 +257,10 @@ package opensslSource:
         "no-docs",
         "--release",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src",
+                                  configureOptions = opts,
+                                  configureScriptName = "Configure")
+      discard pkg.executable("openssl")
       discard pkg.library("libCrypto")
       discard pkg.library("libSsl")
     finally:

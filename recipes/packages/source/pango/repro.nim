@@ -166,6 +166,10 @@ package pangoSource:
     ## gcc is the host C toolchain — pango is plain C99 with light
     ## use of GLib-style autoconf macros via meson's gnome module.
     "gcc >=7"
+    ## python3 runs at meson-setup time for pango's various scriptlet
+    ## helpers (glib's gnome module invokes python). Same pattern as
+    ## glib2 / harfbuzz / cairo.
+    "python3"
 
   buildDeps:
     ## glib2 provides GObject + GIO that pango's text-layout objects
@@ -212,9 +216,12 @@ package pangoSource:
     setCurrentOwningPackageOverride("pangoSource")
     try:
       let opts = @[
+        # M9.R.14h.4 — pango 1.54 renamed ``gtk_doc`` to ``documentation``
+        # and dropped ``man-pages`` entirely (the man pages now live in
+        # the documentation pipeline). Use the new option name; the
+        # broader ``build-testsuite=false`` keeps the build minimal.
         "introspection=disabled",
-        "gtk_doc=false",
-        "man-pages=false",
+        "documentation=false",
         "build-testsuite=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)

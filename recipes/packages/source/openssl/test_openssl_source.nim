@@ -36,7 +36,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/openssl/vendor/openssl-3.4.0.tar.gz"
+  "https://github.com/openssl/openssl/releases/download/openssl-3.4.0/openssl-3.4.0.tar.gz"
 
 const ExpectedHash =
   "e15dda82fe2fe8139dc2ac21a36d4ca01d5313c75f99f46c4e8a27709b7294bf"
@@ -80,28 +80,39 @@ suite "opensslSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "configureFlags does not leak into the cmake channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register two libraries":
-    # M3 artifact registry: TWO libraries are registered, each tagged
-    # ``dakLibrary``. openssl's build emits two shared objects from
-    # one ``Configure`` + ``make`` invocation: ``libcrypto.so`` (the
-    # cryptography primitives) and ``libssl.so`` (the TLS protocol
-    # layered on top of libcrypto). A regression that collapsed the
-    # multi-library packages or dropped one of the two would surface
-    # in the artifact-count + per-artifact name pinning below.
+  test "artifacts register the openssl binary + two libraries":
+    # M3 artifact registry: ONE executable (``openssl``) + TWO libraries
+    # (``libCrypto``, ``libSsl``). openssl's build emits both shared
+    # objects from one ``Configure`` + ``make`` invocation:
+    # ``libcrypto.so`` (the cryptography primitives) and ``libssl.so``
+    # (the TLS protocol layered on top of libcrypto). M9.R.15a.5
+    # added the ``openssl`` CLI binary artifact so the from-source
+    # tool-resolution channel can route the staged binary at
+    # ``.repro/output/openssl/openssl`` to downstream consumers
+    # (e.g. qt6-base's nativeBuildDeps probe). A regression that
+    # collapsed the multi-artifact packages or dropped one of the
+    # three would surface in the artifact-count + per-artifact name
+    # pinning below.
     let arts = registeredArtifacts("opensslSource")
-    check arts.len == 2
+    check arts.len == 3
+    var seenBin = false
     var seenCrypto = false
     var seenSsl = false
     for art in arts:
       check art.packageName == "opensslSource"
-      check art.kind == dakLibrary
       case art.artifactName
+      of "openssl":
+        seenBin = true
+        check art.kind == dakExecutable
       of "libCrypto":
         seenCrypto = true
+        check art.kind == dakLibrary
       of "libSsl":
         seenSsl = true
+        check art.kind == dakLibrary
       else:
         discard
+    check seenBin
     check seenCrypto
     check seenSsl
 

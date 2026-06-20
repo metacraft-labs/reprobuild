@@ -184,7 +184,9 @@ proc autotools_package*(srcDir: string;
                         destdir = "out";
                         prefix = "/usr";
                         configureOptions: seq[string] = @[];
-                        installTarget = "install"): AutotoolsPackageResult =
+                        installTarget = "install";
+                        configureScriptName = "configure";
+                        prefixFlagFormat = "--prefix="): AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
   ## the engine skips path-mode profile lookup for ``sh`` (recipes
@@ -196,7 +198,15 @@ proc autotools_package*(srcDir: string;
   ## fetch action is auto-emitted and the configure action gains a dep
   ## on its stamp so the configure step doesn't run before the source
   ## tree is extracted.
-  var configureArgs = @["--prefix=" & prefix]
+  # M9.R.15a.3 — accept a custom prefix flag format (openssl's
+  # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
+  # also accepts ``--openssldir=`` etc. via the same channel; we keep
+  # the parameter open). Empty string drops the prefix arg entirely
+  # (recipes that don't honour ``--prefix=`` opt out by setting
+  # ``prefixFlagFormat = ""``).
+  var configureArgs: seq[string] = @[]
+  if prefixFlagFormat.len > 0:
+    configureArgs.add(prefixFlagFormat & prefix)
   for o in configureOptions:
     configureArgs.add(o)
   # M9.R.14b.3: out-of-tree autotools pattern. The previous shape ran
@@ -231,9 +241,12 @@ proc autotools_package*(srcDir: string;
   let srcFromBuild =
     if relSrcDir.len > 0 and relSrcDir[0] == '/': relSrcDir
     else: "../" & relSrcDir
+  # M9.R.15a.3 — ``configureScriptName`` defaults to ``configure`` for
+  # vanilla autotools; openssl-style projects pass ``"Configure"``
+  # (uppercase, Perl-driven). The shape stays out-of-tree.
   let configureScript =
     "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
-    srcFromBuild & "/configure " & configureArgs.join(" ")
+    srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
@@ -331,14 +344,29 @@ proc autotools_package*(srcDir: string;
   # the env empty; the install action then runs with the relative
   # DESTDIR=out form via ``vars``, preserving legacy behaviour for
   # tests that don't go through engine spawn.
+  # M9.R.15a.4 — env-DESTDIR is honoured only by Makefiles that don't
+  # already assign ``DESTDIR=`` themselves; openssl's Makefile DOES
+  # default it to empty, which silently drops the env value and
+  # writes the install into the REAL /usr (destructive). The portable
+  # fix is to pass ``DESTDIR=...`` on the make command line — GNU
+  # make's command-line overrides ALWAYS win over Makefile
+  # assignments, regardless of any ``-e`` switch. Adding it via
+  # ``vars`` (positional args) routes through the typed CLI and
+  # therefore enters ``callIdentity`` — but since the install step
+  # already used host-specific absolute paths in the typed
+  # ``workDir`` slot pre-M9.R.15a, the cache fingerprint was already
+  # host-bound. So spelling DESTDIR on cmdline doesn't make the cache
+  # any less portable than it already was.
   let providerProjectRoot = activeProviderProjectRoot()
   var installVars: seq[string] = @[]
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
-  if providerProjectRoot.len > 0:
-    let absoluteDestdir = providerProjectRoot / buildDir / destdir
-    installEnv.add(("DESTDIR", absoluteDestdir))
-  else:
-    installVars.add("DESTDIR=" & destdir)
+  let installDestdir =
+    if providerProjectRoot.len > 0:
+      providerProjectRoot / buildDir / destdir
+    else:
+      destdir
+  installEnv.add(("DESTDIR", installDestdir))
+  installVars.add("DESTDIR=" & installDestdir)
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],

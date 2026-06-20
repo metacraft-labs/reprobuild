@@ -5,12 +5,15 @@
 ## which packages the alternative bus1 broker implementation. Both
 ## ship an activation helper (``dbus-launch`` / ``dbus-broker-launch``)
 ## and both speak the same wire protocol on the system bus + the
-## per-session bus, but they differ at three levels:
+## per-session bus, but they differ at two levels:
 ##
-##   * **Build system** — reference dbus uses autotools (``./configure``
-##     + ``make``); dbus-broker uses meson + ninja. So this recipe is
-##     the FIRST from-source dbus daemon to drive the autotools
-##     ``configureFlags:`` channel for the bus daemon family.
+##   * **Build system** — historical reference dbus used autotools, but
+##     upstream 1.16.x ships meson-only (the autotools layer was retired
+##     prior to the 1.16 cut: the 1.16.0 tarball contains ``meson.build``
+##     + ``CMakeLists.txt`` but NO ``configure``/``configure.ac``).
+##     dbus-broker also uses meson + ninja. So this recipe drives the
+##     meson ``mesonOptions:`` channel for the reference daemon, with
+##     option names matched to the upstream ``meson_options.txt``.
 ##   * **Daemon binary** — reference ships ``/usr/bin/dbus-daemon`` (the
 ##     binary the NDE0-D ``dbus.service`` unit invokes when
 ##     ``busActivationStrategy = basDaemon``); dbus-broker ships
@@ -71,9 +74,9 @@
 ##
 ## ## Build shape
 ##
-## The c_cpp_autotools convention (M9.K) reads both the M9.H ``fetch:``
-## block and the M9.I ``configureFlags:`` block off this package's
-## registries and lowers them into fetch + ``./configure`` + ``make``
+## The c_cpp_meson convention (M9.K) reads both the M9.H ``fetch:``
+## block and the M9.I ``mesonOptions:`` block off this package's
+## registries and lowers them into fetch + ``meson setup`` + ``ninja``
 ## BuildActions; the per-artifact build body + install glue lands in
 ## M9.L; the recipe records the executable + library artifacts via the
 ## ``executable`` / ``library`` blocks so the M9.K artifact registry
@@ -94,26 +97,30 @@
 ##
 ## ## Configurables
 ##
-## v1 ships NO configurables — the configure flags are hardcoded to the
-## modern-desktop baseline per the task brief:
+## v1 ships NO configurables — the meson options are hardcoded to the
+## modern-desktop baseline per the task brief. Option names map to the
+## upstream ``meson_options.txt`` 1:1:
 ##
-##   * ``--disable-static``        — skip the static archive (not used
-##                                    by the v1 desktop story).
-##   * ``--disable-tests``         — skip the upstream test suite to
-##                                    keep the build hermetic + fast.
-##   * ``--without-x``             — skip the legacy ``dbus-launch``
-##                                    X11 helper (every modern desktop
-##                                    uses Wayland; the X11 helper is
-##                                    only needed for ancient X-only
-##                                    sessions).
-##   * ``--disable-doxygen-docs``  — skip the Doxygen API documentation
-##                                    build (heavy Doxygen dependency
-##                                    surface, not needed at runtime).
-##   * ``--disable-xml-docs``      — skip the DocBook XML manpage build
-##                                    (heavy XSLT dependency surface,
-##                                    not needed at runtime; matches
-##                                    the ``--without-docbook`` expat
-##                                    precedent).
+##   * ``modular_tests=disabled``    — skip the upstream modular test
+##                                      suite (the historical autotools
+##                                      ``--disable-tests``).
+##   * ``intrusive_tests=false``     — skip in-tree intrusive tests.
+##   * ``installed_tests=false``     — skip ``installed-tests`` artefact
+##                                      generation.
+##   * ``x11_autolaunch=disabled``   — drop the legacy ``dbus-launch``
+##                                      X11 autolaunch helper (the
+##                                      historical autotools
+##                                      ``--without-x``); every modern
+##                                      desktop uses Wayland.
+##   * ``doxygen_docs=disabled``     — skip the Doxygen API docs build
+##                                      (the historical autotools
+##                                      ``--disable-doxygen-docs``).
+##   * ``xml_docs=disabled``         — skip the DocBook XML manpage
+##                                      build (the historical autotools
+##                                      ``--disable-xml-docs``).
+##   * ``ducktype_docs=disabled``    — skip the Ducktype documentation
+##                                      build (introduced in the meson
+##                                      port; no autotools precedent).
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -125,18 +132,18 @@ import repro_dsl_stdlib/types/package_result
 
 package dbusSource:
   ## From-source reference D-Bus daemon — fortieth M9.H/I/K production
-  ## recipe and FIRST from-source dbus daemon to drive the autotools
-  ## ``configureFlags:`` channel for the bus daemon family (the sibling
+  ## recipe. Upstream retired autotools before the 1.16 cut so this
+  ## recipe drives the meson ``mesonOptions:`` channel (the sibling
   ## ``dbusBrokerSource`` covers the alternative bus1 broker
-  ## implementation via meson + ninja). Ships ONE executable
+  ## implementation also via meson + ninja). Ships ONE executable
   ## (``dbusDaemon``) + ONE library (``libDbus1``) from a single
-  ## ``./configure`` + ``make`` invocation.
+  ## ``meson setup`` + ``ninja`` invocation.
   ##
-  ## Tier-2b c_cpp_autotools convention consumer: the convention layer
+  ## Tier-2b c_cpp_meson convention consumer: the convention layer
   ## reads the ``fetch:`` block (registered via ``registeredFetchSpec``)
-  ## and the ``configureFlags:`` block (registered via
-  ## ``registeredBuildFlags`` on the ``"configure"`` channel) and
-  ## lowers them into fetch + configure BuildActions wired with the
+  ## and the ``mesonOptions:`` block (registered via
+  ## ``registeredBuildFlags`` on the ``"meson"`` channel) and
+  ## lowers them into fetch + meson-setup BuildActions wired with the
   ## right URL + hash + flags. One executable + one library artifact
   ## recipe.
 
@@ -169,26 +176,25 @@ package dbusSource:
     extractStrip: 1
 
   nativeBuildDeps:
-    ## autoconf generates the upstream ``configure`` script when the
-    ## release tarball ships a stale ``configure.ac``.
-    "autoconf"
-    ## automake provides the upstream ``Makefile.in`` templates the
-    ## release tarball pre-generates.
-    "automake"
-    ## libtool provides the ``./libtool`` shim the autotools build
-    ## drives for ``--disable-static`` to honour the shared-only build
-    ## semantics correctly.
-    "libtool"
-    ## make is the build-system driver — the c_cpp_autotools
-    ## convention's compile action invokes ``make`` after
-    ## ``./configure``.
-    "make"
+    ## meson is the build-system driver — the c_cpp_meson convention's
+    ## configure action invokes ``meson setup``.
+    "meson >=1.3"
+    ## ninja is meson's default backend — the compile action invokes
+    ## ``ninja`` against the meson build directory.
+    "ninja >=1.10"
     ## gcc is the host C toolchain — dbus is plain C99.
     "gcc >=11"
-    ## pkg-config is used by the autotools configure step to probe for
+    ## pkg-config is used by the meson configure step to probe for
     ## expat (the XML parser dbus uses for the introspection XML +
     ## bus-config file parsing).
     "pkg-config"
+    ## python3 is invoked at configure time by ``test/data/meson.build``'s
+    ## ``copy_data_for_tests.py`` helper (the script is unconditionally
+    ## executed regardless of the ``modular_tests=disabled`` /
+    ## ``installed_tests=false`` flag combo because meson populates the
+    ## ``test/data/`` subtree even when the tests themselves are skipped
+    ## — the run_command at ``test/data/meson.build:211`` is not gated).
+    "python3 >=3.8"
 
   buildDeps:
     ## expat is the SAX XML parser dbus uses for the introspection
@@ -197,7 +203,7 @@ package dbusSource:
     "expat >=2.6"
 
   config:
-    ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
+    ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
     discard
   executable dbusDaemon:
     ## ``/usr/bin/dbus-daemon`` — the core reference message-bus daemon
@@ -219,17 +225,24 @@ package dbusSource:
     discard
 
   build:
-    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
+    ##
+    ## M9.R.15a.1 — upstream dbus 1.16.0 ships meson-only; the
+    ## historical autotools shape produced ``../src/configure: No such
+    ## file or directory`` on apply. Option names mapped 1:1 from
+    ## ``recipes/packages/source/dbus/src/meson_options.txt``.
     setCurrentOwningPackageOverride("dbusSource")
     try:
       let opts = @[
-        "--disable-static",
-        "--disable-tests",
-        "--without-x",
-        "--disable-doxygen-docs",
-        "--disable-xml-docs",
+        "modular_tests=disabled",
+        "intrusive_tests=false",
+        "installed_tests=false",
+        "x11_autolaunch=disabled",
+        "doxygen_docs=disabled",
+        "xml_docs=disabled",
+        "ducktype_docs=disabled",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("dbusDaemon")
       discard pkg.library("libDbus1")
     finally:

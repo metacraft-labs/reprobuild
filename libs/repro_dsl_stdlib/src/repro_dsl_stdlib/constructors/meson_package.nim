@@ -199,7 +199,11 @@ proc meson_package*(srcDir: string;
   # carries no refs and the from-source resolver's search-path channels
   # never make it into the action env.
   m9r14eThreadRecipeDepsAsToolRefs(setup.id, pkgName)
-  let compileEdge = meson.compile(workDir = buildDir)
+  # M9.R.14g.9 — compile MUST depend on setup. Mirror the install fix
+  # below; the automatic-monitor evidence on ``meson setup`` may not
+  # land before the scheduler dispatches ``meson compile``, races the
+  # build.ninja file write, and breaks vendored-subproject builds.
+  let compileEdge = meson.compile(workDir = buildDir, after = @[setup])
   m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
   # M9.R.14d.7 — meson rejects relative ``--destdir`` (it tries to
   # resolve `wayland/out` under the action's cwd at install time and
@@ -215,10 +219,19 @@ proc meson_package*(srcDir: string;
       providerProjectRoot / buildDir / destdir
     else:
       destdir
+  # M9.R.14g.9 — install MUST depend on compile, not just on setup.
+  # Without the explicit `after`, the scheduler may launch
+  # ``meson install`` in parallel with ``meson compile`` when the
+  # automatic-monitor evidence on compile hasn't landed yet (e.g. for
+  # glib2 where ``meson compile`` rebuilds a vendored pcre2 subproject
+  # in parallel with the parent build, racing the ninja log file write).
+  # Symptom: ``ninja: warning: premature end of file; recovering`` with
+  # exit 127 on the install action.
   let installEdge = meson.install(
     workDir = buildDir,
     destdir = effectiveDestdir,
-    tags = @[])
+    tags = @[],
+    after = @[compileEdge])
   m9r14eThreadRecipeDepsAsToolRefs(installEdge.id, pkgName)
   MesonPackageResult(
     buildEdge: setup,

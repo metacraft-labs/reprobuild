@@ -207,12 +207,35 @@ proc files*(r: MesonPackageResult; name: string): BuildActionDef =
 # ---------------------------------------------------------------------------
 
 proc executable*(r: CmakePackageResult; name: string): Executable =
+  ## M9.R.14h.8 — emit per-artifact stage-copy + the package's
+  ## install-tree mirror so the from-source resolver finds the staged
+  ## install layout at the canonical
+  ## ``<recipeRoot>/.repro/output/<name>`` and
+  ## ``<recipeRoot>/.repro/output/install/usr`` paths.  Matches the
+  ## meson_package + autotools_package slicing methods; without this
+  ## a cmake-built sibling recipe (json-c, ...) could compile + install
+  ## successfully yet leave its install tree invisible to consumers.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
   newExecutable(
     install = r.installEdge,
     executableName = name,
     installPrefix = componentPath(r.components, "runtime"))
 
 proc library*(r: CmakePackageResult; name: string): Library =
+  ## M9.R.14h.8 — see ``executable`` above.  json-c is the motivating
+  ## case: ``libjson-c.so`` was installed under
+  ## ``build/out/usr/lib64/`` by the cmake_package install action but
+  ## never staged into ``.repro/output/libJsonC/`` or mirrored into
+  ## ``.repro/output/install/usr/`` because the slicing methods
+  ## returned a bare ``Library`` value without emitting either glue
+  ## action.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "library", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))
@@ -447,9 +470,28 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     "/share/pkgconfig\"; do ")
   script.add("if [ -d \"$pcdir\" ]; then ")
   script.add("for pc in \"$pcdir\"/*.pc; do ")
-  script.add("[ -f \"$pc\" ] && sed -i ")
-  script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedDstUsr & "|; }' ")
+  script.add("if [ -f \"$pc\" ]; then ")
+  # M9.R.14f.8 — rewrite ALL of prefix / exec_prefix / libdir /
+  # includedir / datadir / sharedstatedir lines that point at an
+  # absolute ``/usr...`` path baked in at build time. Some
+  # autotools-generated pc files (e.g. freetype's freetype2.pc)
+  # expand ``${prefix}/include`` to ``/usr/include`` at install
+  # time, so the M9.R.14e.8 prefix-only rewrite leaves consumers
+  # pointed at the host's /usr/include (or a non-existent dir
+  # under the install mirror) instead of the mirror's own include
+  # tree. Rewrite each of the standard variable lines that begins
+  # with ``/usr`` to start with the mirror's ``<dstUsr>`` instead.
+  script.add("sed -i ")
+  script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedDstUsr & "|; } ")
+  script.add("; s|^exec_prefix=/usr|exec_prefix=" & escapedDstUsr & "| ")
+  script.add("; s|^libdir=/usr/lib64|libdir=" & escapedDstUsr & "/lib64| ")
+  script.add("; s|^libdir=/usr/lib|libdir=" & escapedDstUsr & "/lib| ")
+  script.add("; s|^includedir=/usr/include|includedir=" & escapedDstUsr & "/include| ")
+  script.add("; s|^datadir=/usr/share|datadir=" & escapedDstUsr & "/share| ")
+  script.add("; s|^datarootdir=/usr/share|datarootdir=" & escapedDstUsr & "/share| ")
+  script.add("; s|^sharedstatedir=/usr/com|sharedstatedir=" & escapedDstUsr & "/com|' ")
   script.add("\"$pc\"; ")
+  script.add("fi; ")
   script.add("done; fi; done; ")
   # M9.R.14f.2 — patch RPATH on every ELF under the mirror's lib/lib64/bin
   # dirs so the resulting binaries can find their transitive deps without
@@ -480,6 +522,22 @@ proc m9r14dPascalToKebab*(value: string): string =
   for i, ch in value:
     if ch in {'A' .. 'Z'} and i > 0 and value[i - 1] notin {'-', '_'}:
       result.add('-')
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    elif ch in {'A' .. 'Z'}:
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    else:
+      result.add(ch)
+
+proc m9r14fPascalToSnake*(value: string): string =
+  ## DSL-port M9.R.14f.9 — convert ``libdrmAmdgpu`` → ``libdrm_amdgpu``.
+  ## libdrm / mesa-style libraries use snake_case for the SONAME suffix
+  ## (``libdrm_amdgpu.so`` / ``libdrm_nouveau.so``) while recipes
+  ## commonly declare them in PascalCase. Mirrors
+  ## ``m9r14dPascalToKebab`` but inserts ``_`` instead of ``-``.
+  result = ""
+  for i, ch in value:
+    if ch in {'A' .. 'Z'} and i > 0 and value[i - 1] notin {'-', '_'}:
+      result.add('_')
       result.add(chr(ord(ch) - ord('A') + ord('a')))
     elif ch in {'A' .. 'Z'}:
       result.add(chr(ord(ch) - ord('A') + ord('a')))
@@ -563,18 +621,129 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
     let kebabDigitsName =
       m9r14dPascalToKebabWithDigits(name).replace("\"", "\\\"")
+    # M9.R.14f.9 — snake_case probe for libdrm / mesa-style naming
+    # where ``libdrmAmdgpu`` maps to ``libdrm_amdgpu.so``.
+    let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
+    # M9.R.14g.7 — strip a leading ``lib`` prefix from the DSL name so
+    # recipes that already wrote ``library libGModule:`` (the DSL
+    # convention) probe the same file shapes recipes using bare
+    # ``library glib2:`` shapes do. Without this strip, the lib<name>
+    # probe becomes ``liblibGModule.so`` (double-lib) and misses the
+    # upstream ``libgmodule-2.0.so``.
+    proc stripLibPrefix(value: string): string =
+      if value.len > 3 and value[0 .. 2].toLowerAscii == "lib":
+        value[3 ..< value.len]
+      else:
+        value
+    let strippedName = stripLibPrefix(name).replace("\"", "\\\"")
+    let strippedLowerName = strippedName.toLowerAscii
+    let strippedKebab = m9r14dPascalToKebab(stripLibPrefix(name)).replace("\"", "\\\"")
+    let strippedKebabDigits = m9r14dPascalToKebabWithDigits(stripLibPrefix(name)).replace("\"", "\\\"")
+    let strippedSnake = m9r14fPascalToSnake(stripLibPrefix(name)).replace("\"", "\\\"")
     script.add("for candidate in ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/" & snakeName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
+    # M9.R.14g.7 — stripped-prefix variants for ``library libFoo:`` shapes.
+    if strippedName != name:
+      script.add("\"" & escapedSrcDir & "/lib" & strippedName & ".so\" ")
+      script.add("\"" & escapedSrcDir & "/lib" & strippedLowerName & ".so\" ")
+      # M9.R.14h.8 — kebab + snake variants on the stripped form so
+      # ``libJsonC`` -> ``lib<json-c>.so`` and ``libGdkPixbuf`` ->
+      # ``lib<gdk_pixbuf>.so`` resolve as plain ``.so`` shapes (the
+      # version-suffix glob below handles the ``-N.M.so`` variants).
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedKebab & ".so\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & escapedSrcDir & "/lib" & strippedSnake & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\"; ")
     script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
+    # M9.R.14g.3 — version-suffix glob fallback for libraries that meson
+    # builds with `soversion = '0.19'` and similar (wlroots, gtk-3,
+    # libfoo-2.0, ...). The literal probe above only matches
+    # `lib<name>.so` shapes; this glob covers `lib<name>-<version>.so`
+    # where the version is baked into the SONAME stem rather than as a
+    # `.so.<X>` suffix. We sort `LC_ALL=C` and take the FIRST match to
+    # stay deterministic; multiple matches in the same directory would
+    # be a packaging anomaly we'd surface in the upstream recipe.
+    script.add("first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/" & kebabName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
+    if strippedName != name:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14g.8 — letters-only glob. ``libGlib2`` -> ``glib`` (strip
+    # ``lib`` + drop trailing digits) -> glob ``libglib-*.so`` matches
+    # upstream ``libglib-2.0.so`` where the soversion ``2.0`` contains a
+    # ``.`` that simple kebab-digit conversion can't represent.
+    proc lettersOnlyLower(value: string): string =
+      for ch in value:
+        if ch in {'a' .. 'z'}:
+          result.add(ch)
+        elif ch in {'A' .. 'Z'}:
+          result.add(chr(ord(ch) - ord('A') + ord('a')))
+    let lettersOnly = lettersOnlyLower(stripLibPrefix(name))
+    if lettersOnly.len > 0 and lettersOnly != strippedLowerName:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & lettersOnly & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14h.7 — snake-case version-suffix glob for libraries like
+    # ``libgdk_pixbuf-2.0.so`` whose upstream SONAME uses an underscore
+    # between the project segments while the DSL writes the artifact as
+    # ``libgdkPixbuf``.  Without this probe the version-suffix walk
+    # only tries ``libgdkPixbuf-*.so`` / ``libgdkpixbuf-*.so`` and
+    # misses ``libgdk_pixbuf-2.0.so`` outright.
+    if strippedSnake.len > 0 and strippedSnake != strippedLowerName:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.14h.8 — kebab stripped version-suffix glob for libraries like
+    # ``libjson-c.so`` where the recipe writes ``libJsonC`` -> stripped
+    # ``JsonC`` -> kebab ``json-c`` -> glob ``libjson-c-*.so``.
+    if strippedKebab.len > 0 and strippedKebab != strippedLowerName and
+        strippedKebab != strippedSnake:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
+    # M9.R.14g.7 — many recipes write ``library libGModule:`` but the
+    # upstream library lives under ``lib/x86_64-linux-gnu/`` or
+    # ``lib64/`` instead of ``lib/``. Probe both common multi-arch
+    # subdirs as a last-resort fallback so x86_64 cmake recipes
+    # publishing under ``lib64/`` (e.g. json-c, gobject-introspection)
+    # don't fail stage-copy.
+    let lib64Dir = escapedSrcDir.replace("/usr/lib", "/usr/lib64")
+    if lib64Dir != escapedSrcDir:
+      script.add("for candidate in ")
+      script.add("\"" & lib64Dir & "/lib" & escapedName & ".so\" ")
+      script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\" ")
+      # M9.R.14h.8 — kebab+snake stripped variants on lib64 too.
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("\"" & lib64Dir & "/lib" & strippedKebab & ".so\" ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("\"" & lib64Dir & "/lib" & strippedSnake & ".so\" ")
+      if strippedName != name:
+        script.add("\"" & lib64Dir & "/lib" & strippedName & ".so\" ")
+        script.add("\"" & lib64Dir & "/lib" & strippedLowerName & ".so\"; ")
+      else:
+        script.add("\"" & lib64Dir & "/lib" & escapedLowerName & ".so\"; ")
+      script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
+      script.add("first=$(ls -1 \"" & lib64Dir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      if strippedName != name:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      # M9.R.14h.8 — kebab + snake stripped version-suffix globs on lib64.
+      if strippedKebab.len > 0 and strippedKebab != strippedLowerName:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedKebab & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      if strippedSnake.len > 0 and strippedSnake != strippedLowerName and
+          strippedSnake != strippedKebab:
+        script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & lib64Dir & "/lib" & strippedSnake & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+      script.add("if [ -n \"$first\" ]; then cp -fL \"$first\" \"" & escapedOut & "\"; exit 0; fi; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
     # Executable: probe bare name; also try .exe for cross-builds and
@@ -582,10 +751,30 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # ``executable waylandScanner`` while meson installs
     # ``wayland-scanner``).
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
+    # M9.R.14f.11 — recipes sometimes append a disambiguating suffix
+    # like ``Bin`` / ``CLI`` / ``Cmd`` / ``Tool`` to the DSL artifact
+    # identifier so the slot doesn't collide with the recipe's library
+    # of the same upstream name (e.g. libinput recipe has
+    # ``library libinput`` + ``executable libinputBin`` but upstream
+    # installs the CLI as bare ``libinput``). Probe the suffix-
+    # stripped form as a fallback.
+    var strippedName = name
+    for suffix in ["Bin", "CLI", "Cmd", "Tool", "Exe"]:
+      if strippedName.endsWith(suffix) and strippedName.len > suffix.len:
+        strippedName = strippedName[0 ..< (strippedName.len - suffix.len)]
+        break
+    let strippedEscaped = strippedName.replace("\"", "\\\"")
+    let strippedKebab =
+      m9r14dPascalToKebab(strippedName).replace("\"", "\\\"")
     script.add("if [ -f \"" & escapedSrcDir & "/" & escapedName & "\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & escapedSrcDir & "/" & kebabName & "\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & kebabName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    if strippedName != name:
+      script.add("elif [ -f \"" & escapedSrcDir & "/" & strippedEscaped & "\" ]; then ")
+      script.add("cp -fL \"" & escapedSrcDir & "/" & strippedEscaped & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      script.add("elif [ -f \"" & escapedSrcDir & "/" & strippedKebab & "\" ]; then ")
+      script.add("cp -fL \"" & escapedSrcDir & "/" & strippedKebab & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedName & ".exe\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
     script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")

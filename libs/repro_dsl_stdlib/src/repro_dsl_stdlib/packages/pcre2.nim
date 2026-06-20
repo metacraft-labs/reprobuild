@@ -17,6 +17,11 @@ import repro_project_dsl
 
 package `pcre2`:
   provisioning:
-    nixPackage "nixpkgs#pcre2", executablePath = "lib/libpcre2-8.so",
+    # M9.R.14f.3 — pcre2 in nixpkgs declares outputs `bin, dev, out,
+    # doc, man, devdoc` with `outputsToInstall = [bin, man]`. The
+    # default `nixpkgs#pcre2` selector therefore only realizes `bin +
+    # man` — neither contains `lib/libpcre2-8.so`. Pin the selector to
+    # the `.out` output so the resolver finds the library.
+    nixPackage "nixpkgs#pcre2.out", executablePath = "lib/libpcre2-8.so",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="

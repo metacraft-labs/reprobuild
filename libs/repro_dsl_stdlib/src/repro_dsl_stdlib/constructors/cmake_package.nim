@@ -105,6 +105,25 @@ proc cmake_package*(srcDir: string;
   ## project. v1 leaves component selection up to the recipe
   ## (``component`` field on the install call); the standard layout
   ## table populated on the result mirrors meson's.
+  ##
+  ## ## M9.R.14g.6 — inline-exec build + install
+  ##
+  ## The legacy ``cmake.build(buildDir = ...)`` + ``cmake.install(...)``
+  ## paths lowered through the DSL CLI surface with a leading subcommand
+  ## literal (``cmake build --build <dir>`` / ``cmake install --install
+  ## <dir>``). cmake does NOT accept ``build`` / ``install`` as
+  ## subcommand names — its build/install modes are selected by the
+  ## ``--build`` / ``--install`` flag itself. The legacy emission failed
+  ## with ``CMake Error: Unknown argument --build`` because cmake
+  ## consumed ``build`` as a positional source-dir path and then the
+  ## ``--build`` flag was unexpected.
+  ##
+  ## Route both actions through ``inlineExecCall`` so the literal argv
+  ## is what cmake actually accepts. Configure stays on the DSL CLI
+  ## path because cmake silently tolerates the bogus ``configure``
+  ## positional (with a warning), and reworking the configure shape
+  ## would require fixing the broader cmake.nim subcommand surface
+  ## (cross-cutting + outside this milestone's scope).
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let extractedRel = block:
@@ -120,12 +139,80 @@ proc cmake_package*(srcDir: string;
     generator = generator,
     cacheVars = cacheVars,
     after = configureAfter)
-  let buildEdge = cmake.build(
-    buildDir = buildDir,
-    target = target)
-  let installEdge = cmake.install(
-    buildDir = buildDir,
-    prefix = destdir & prefix)
+  # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
+  # selected by the ``--build`` flag, NOT by a ``build`` subcommand
+  # literal.
+  var buildArgv = @["cmake", "--build", buildDir]
+  if target.len > 0:
+    buildArgv.add("--target")
+    buildArgv.add(target)
+  let buildStamp = projectRoot / ".repro" / "build" / "cmake-build.stamp"
+  createDir(parentDir(buildStamp))
+  let buildScript = block:
+    var s = "set -e; "
+    var quoted: seq[string] = @[]
+    for a in buildArgv:
+      quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
+    s.add(quoted.join(" ") & "; ")
+    s.add("touch \"" & buildStamp.replace("\\", "/") & "\"")
+    s
+  let buildEdge = buildAction(
+    id = "cmake-build-" & pkgName,
+    call = inlineExecCall(@["sh", "-c", buildScript]),
+    deps = @[configureEdge.id],
+    inputs = configureEdge.outputs,
+    outputs = @[buildStamp],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "cmake_package.build",
+    toolIdentityRefs = @["cmake", "sh"])
+  # M9.R.14g.6 — inline-exec install action. cmake's real install mode
+  # is selected by ``--install``, NOT by ``install`` subcommand.
+  #
+  # M9.R.14h.8 — match meson_package's destdir treatment: cmake's
+  # ``--prefix`` argument is resolved relative to the action's cwd, NOT
+  # to ``buildDir``, so the legacy ``destdir & prefix = "out/usr"``
+  # form lands files at ``<cwd>/out/usr/...`` instead of the expected
+  # ``<recipeRoot>/<buildDir>/<destdir>/usr/...``.  Stage-copy +
+  # install-mirror both probe under the ``build/out/usr`` layout, so
+  # files installed at the cwd-relative path go un-staged.  In provider
+  # mode pass an absolute path; in unit-test mode keep the relative
+  # form so existing tests stay green.
+  #
+  # ``effectiveDestRoot`` is the install-root WITHOUT the ``/usr``
+  # suffix (mirrors meson_package's ``effectiveDestdir``); it's what
+  # the per-artifact stage-copy + install-mirror actions consult to
+  # find the upstream-installed files at ``<destRoot>/usr/lib*/``.
+  # ``installArgv``'s ``--prefix`` is the same root WITH ``/usr``
+  # appended so cmake itself stages under the canonical FHS layout.
+  let providerProjectRootForInstall = activeProviderProjectRoot()
+  let effectiveDestRoot =
+    if providerProjectRootForInstall.len > 0:
+      providerProjectRootForInstall / buildDir / destdir
+    else:
+      destdir
+  let effectiveInstallPrefix = effectiveDestRoot & prefix
+  let installArgv = @["cmake", "--install", buildDir, "--prefix", effectiveInstallPrefix]
+  let installStamp = projectRoot / ".repro" / "build" / "cmake-install.stamp"
+  createDir(parentDir(installStamp))
+  let installScript = block:
+    var s = "set -e; "
+    var quoted: seq[string] = @[]
+    for a in installArgv:
+      quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
+    s.add(quoted.join(" ") & "; ")
+    s.add("touch \"" & installStamp.replace("\\", "/") & "\"")
+    s
+  let installEdge = buildAction(
+    id = "cmake-install-" & pkgName,
+    call = inlineExecCall(@["sh", "-c", installScript]),
+    deps = @[buildEdge.id],
+    inputs = buildEdge.outputs,
+    outputs = @[installStamp],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "cmake_package.install",
+    toolIdentityRefs = @["cmake", "sh"])
   # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
   # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
   # from-source search-path channels reach the action env at fork time.
@@ -145,9 +232,15 @@ proc cmake_package*(srcDir: string;
   appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
+  # M9.R.14h.8 — populate ``destdir`` with the SAME absolute install
+  # prefix the install action passed via ``--prefix``.  meson_package
+  # already does this (the destdir on the result is what stage-copy +
+  # install-mirror probe to find the on-disk install tree).  Without
+  # this, slicing methods ran stage-copy against the relative ``out``
+  # value and missed the on-disk ``build/out/usr/lib*/`` layout.
   CmakePackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
     installEdge: installEdge,
-    destdir: destdir,
+    destdir: effectiveDestRoot,
     components: standardComponents())

@@ -1131,7 +1131,20 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     nixArgs.add("--file")
     nixArgs.add(plan.nixExpressionFile)
   else:
-    nixArgs.add(selector)
+    # DSL-port M9.R.14h.5 — nixpkgs's multi-output packages (libjpeg,
+    # libtiff, libpng, ...) split runtime libraries into the ``.out``
+    # output and headers into ``.dev``.  ``nix build`` without an
+    # explicit output selector only realizes + prints
+    # ``meta.outputsToInstall`` (typically ``bin`` and ``man``), so a
+    # consumer asking for ``lib/libjpeg.so`` resolves zero outputs even
+    # though nix's libjpeg ships the .so under
+    # ``<...>-libjpeg-turbo-3.1.2/lib/libjpeg.so``.  Append ``^*`` so
+    # every output is realized and printed; the downstream loop already
+    # walks every line searching for ``declaredExecutablePath``.
+    var selectorWithAllOutputs = selector
+    if not selectorWithAllOutputs.contains("^"):
+      selectorWithAllOutputs.add("^*")
+    nixArgs.add(selectorWithAllOutputs)
   let res = execCmdEx(shellCommand(nixArgs))
   if res.exitCode != 0:
     raise newException(OSError,
@@ -1179,25 +1192,31 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     adapterStrength: asStrong,
     cachePortability: cpPortable)
 
-  # M9.R.14e.7 — populate the same four auxiliary search-path channels
-  # the from-source resolver populates, but anchored at the nix store
-  # output. Many nix packages (e.g. wayland-protocols, libxml2-dev) ship
-  # ``.pc`` files at ``<store>/share/pkgconfig/`` and headers at
-  # ``<store>/include/``; the engine threads these onto
-  # ``PKG_CONFIG_PATH`` / ``CMAKE_PREFIX_PATH`` / ``CPATH`` /
-  # ``LIBRARY_PATH`` at fork time so a meson/cmake recipe consuming
-  # the dep finds its pc files / headers without having to declare a
-  # special-case ``env:`` block.
-  addUniquePath(result.cmakePrefixList, selectedStorePath)
-  addUniquePath(result.pkgConfigSearchList,
-    selectedStorePath / "lib" / "pkgconfig")
-  addUniquePath(result.pkgConfigSearchList,
-    selectedStorePath / "lib64" / "pkgconfig")
-  addUniquePath(result.pkgConfigSearchList,
-    selectedStorePath / "share" / "pkgconfig")
-  addUniquePath(result.cpathList, selectedStorePath / "include")
-  addUniquePath(result.libraryPathList, selectedStorePath / "lib")
-  addUniquePath(result.libraryPathList, selectedStorePath / "lib64")
+  # M9.R.14e.7 + M9.R.14f.10 — populate the same four auxiliary
+  # search-path channels the from-source resolver populates, but
+  # anchored at the nix store output. Many nix packages (e.g.
+  # wayland-protocols, libxml2-dev) ship ``.pc`` files at
+  # ``<store>/share/pkgconfig/`` and headers at ``<store>/include/``;
+  # the engine threads these onto ``PKG_CONFIG_PATH`` /
+  # ``CMAKE_PREFIX_PATH`` / ``CPATH`` / ``LIBRARY_PATH`` at fork time
+  # so a meson/cmake recipe consuming the dep finds its pc files /
+  # headers without having to declare a special-case ``env:`` block.
+  #
+  # M9.R.14f.10: multi-output nix packages ship the .pc / headers /
+  # libraries in DIFFERENT outputs. systemd's libudev.pc lives in the
+  # ``dev`` output, not ``out``. Walk every realized store path so
+  # consumers find them.
+  for storePath in realized:
+    addUniquePath(result.cmakePrefixList, storePath)
+    addUniquePath(result.pkgConfigSearchList,
+      storePath / "lib" / "pkgconfig")
+    addUniquePath(result.pkgConfigSearchList,
+      storePath / "lib64" / "pkgconfig")
+    addUniquePath(result.pkgConfigSearchList,
+      storePath / "share" / "pkgconfig")
+    addUniquePath(result.cpathList, storePath / "include")
+    addUniquePath(result.libraryPathList, storePath / "lib")
+    addUniquePath(result.libraryPathList, storePath / "lib64")
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
@@ -3444,6 +3463,16 @@ const BootstrapCycleBreakTools* = @[
   # .repro/output/<artifactName>/). Routing them through the stdlib
   # provisioning skips the unproductive recursion.
   "meson", "ninja", "python3", "python", "pkg-config", "pkgconf",
+  # M9.R.14g.5 — cmake bootstrap floor. cmake's from-source recipe
+  # transitively pulls gcc and (per M9.R.10a) trips the gcc cycle break
+  # too late — by then the sub-build worker has already failed because
+  # the gcc tool use has no stdlib provisioning channel declared on the
+  # CMake source recipe's lifted nativeBuildDeps. Routing cmake itself
+  # through stdlib (nix on Linux/macOS, tarball on Windows) terminates
+  # the recursion at the first edge. Same shape as meson/ninja above:
+  # cmake is a build-system driver, not a leaf C/C++ artifact a recipe
+  # needs to ship.
+  "cmake",
 ]
   ## Exported so tests + the dispatcher init code can audit + seed the
   ## list without re-declaring it.
@@ -3708,6 +3737,81 @@ proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
         inc resolvedCount
     if resolvedCount == 1:
       result = resolvedIdx
+
+proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
+  ## DSL-port M9.R.14h.1 — install-mirror fast-path probe.
+  ##
+  ## When a sibling recipe has successfully completed an install-mirror
+  ## pass (M9.R.14e.2) it owns
+  ## ``<recipeDir>/.repro/output/install/usr/lib*/lib<X>.so*`` files
+  ## with the upstream SONAME chain preserved.  The per-artifact stage
+  ## tree (``.repro/output/<artifactName>/`` walked by
+  ## ``m9r14dEnumerateArtifacts``) is the FIRST fast-path; the
+  ## install-mirror is a SECOND fast-path covering recipes whose
+  ## ``library: cli:`` block did not declare a name that survives the
+  ## stage-copy probe (e.g. SONAME-versioned ``libcairo.so.2.11800.0``
+  ## with no plain ``libcairo.so`` symlink in the per-artifact tree).
+  ##
+  ## Returns the absolute path of the first matching library file or
+  ## ``""`` when nothing matches.  Mirrors the ``m9r14dProbeArtifactFile``
+  ## return-shape so callers can ``len > 0``-gate the result.
+  ##
+  ## Idempotency guarantee (Gap 1 fix): callers can probe this BEFORE
+  ## scheduling a sub-build so a sibling whose install-mirror is on disk
+  ## is NEVER re-built within the same dispatcher invocation, even when
+  ## the per-process ``fromSourceResolvedRecipes`` cache was cleared
+  ## (e.g. by a fresh ``executeBuildTarget`` call from a sub-recurse).
+  let mirrorRoot = recipeDir / ".repro" / "output" / "install" / "usr"
+  if not dirExists(extendedPath(mirrorRoot)):
+    return ""
+  let canon = m9r14dCanonicalizeName(depName)
+  if canon.len == 0:
+    return ""
+  # Candidate base names to probe.  We use the canonical lib-stripped
+  # form so a dep selector ``zlib`` matches ``libz.so`` AND ``libzlib.so``.
+  var bases: seq[string] = @[]
+  bases.add("lib" & canon)
+  if depName.toLowerAscii != canon:
+    # Also probe the un-canonicalized lowercase form so ``zlib`` →
+    # ``libzlib.so`` resolves when the recipe baked in the redundant
+    # prefix.
+    bases.add("lib" & depName.toLowerAscii)
+  # Suffix candidates per platform.  Match either the plain ``.so`` /
+  # ``.dylib`` / ``.dll`` shape OR a SONAME-versioned shape like
+  # ``.so.2`` / ``.so.0.25.0`` so recipes that don't ship the plain
+  # symlink (or that ship only the upstream-versioned chain) still
+  # register as "already built".
+  let suffixes = m9r14dPlatformLibrarySuffixes()
+  for libDir in ["lib", "lib64"]:
+    let dir = mirrorRoot / libDir
+    if not dirExists(extendedPath(dir)):
+      continue
+    for base in bases:
+      for suffix in suffixes:
+        let exact = dir / (base & suffix)
+        if fileExists(extendedPath(exact)):
+          return absolutePath(exact)
+      # SONAME-versioned probe: walk the dir for any file starting with
+      # ``<base>.so`` (Linux) / ``<base>.dylib`` (Darwin) / ``<base>.dll``
+      # (Windows) and accept the first one.  Order is non-deterministic
+      # from ``walkDir`` but every match is a legitimate library file so
+      # the fast-path stays correct.  We walk with ``extendedPath(dir)``
+      # for long-path safety, then strip the ``\\?\`` prefix the walker
+      # may have prepended so the return value is the plain canonical
+      # form callers compare against.
+      for kindPc, walked in walkDir(extendedPath(dir)):
+        if kindPc != pcFile and kindPc != pcLinkToFile:
+          continue
+        var path = walked
+        when defined(windows):
+          if path.startsWith("\\\\?\\"):
+            path = path[4 .. ^1]
+        let leaf = lastPathPart(path)
+        for suffix in suffixes:
+          let prefix = base & suffix
+          if leaf.startsWith(prefix):
+            return absolutePath(path)
+  return ""
 
 type
   FromSourceResolveKind* = enum
@@ -3984,6 +4088,20 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
               it in getFilePermissions(extendedPath(candidate))):
             resolved = candidate
             break
+  if resolved.len == 0:
+    # DSL-port M9.R.14h.1 — install-mirror fast-path.  If the per-
+    # artifact tree didn't probe a library AND the legacy bare-name
+    # probe missed (the typical case for a recipe that ONLY stages via
+    # ``emitInstallTreeMirror``), check the install-mirror at
+    # ``<recipeDir>/.repro/output/install/usr/lib*/lib<name>*.so*``.
+    # Treat presence as a strong "already built" signal so the
+    # dispatcher's auto-recurse path skips the sub-build — preventing
+    # the determinism break where a sibling that successfully published
+    # in an earlier sub-recurse gets its install mirror clobbered by a
+    # fresh ``rm -rf install/usr`` from ``emitInstallTreeMirror``.
+    let mirrorHit = m9r14hProbeInstallMirrorLibrary(recipeDir, name)
+    if mirrorHit.len > 0:
+      resolved = mirrorHit
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,

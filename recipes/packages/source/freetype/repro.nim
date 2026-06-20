@@ -201,9 +201,15 @@ package freetypeSource:
     try:
       let opts = @[
         "--disable-static",
-        "--without-zlib=auto",
+        # M9.R.14f.6 — freetype's configure recognises EITHER
+        # ``--with-zlib`` or ``--without-zlib`` for the auto-detection
+        # gate, NOT ``--without-zlib=auto`` (which the autoconf macros
+        # reject as "invalid package name"). The v1 desktop story
+        # wants zlib + libpng + harfbuzz auto-detected when present, so
+        # use the ``--with-X=auto`` form for both.
+        "--with-zlib=auto",
         "--without-bzip2",
-        "--without-png=auto",
+        "--with-png=auto",
         "--without-harfbuzz",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)

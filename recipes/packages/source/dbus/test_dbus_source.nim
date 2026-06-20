@@ -1,14 +1,13 @@
 ## Smoke test for the from-source ``dbusSource`` recipe.
 ##
 ## Pins the M9.H/I/K trio's behaviour on the FORTIETH real production
-## from-source recipe. dbus's unique coverage angle vs the prior
-## thirty-nine is being the FIRST from-source dbus daemon family
-## recipe driven by autotools (sibling ``dbusBrokerSource`` covers the
-## bus1 broker via meson + ninja). One executable (``dbusDaemon``) +
-## one library (``libDbus1``) from a single ``./configure`` + ``make``
-## invocation — exercising the executable + library mixed-kind shape
-## on the autotools channel (util-linux precedent for the same shape
-## at the eight-artifact cardinality).
+## from-source recipe. Upstream dbus 1.16.0 ships meson-only (the
+## autotools layer was retired before the cut); the recipe and this
+## test were converted from autotools-shape to meson-shape in
+## ``M9.R.15a.1``. One executable (``dbusDaemon``) + one library
+## (``libDbus1``) from a single ``meson setup`` + ``ninja`` invocation
+## — exercising the executable + library mixed-kind shape on the
+## meson channel.
 ##
 ## Coverage (≥8 tests with multiple assertions each):
 ##
@@ -32,17 +31,19 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/dbus/vendor/dbus-1.16.0.tar.xz"
+  "https://dbus.freedesktop.org/releases/dbus/dbus-1.16.0.tar.xz"
 
 const ExpectedHash =
   "9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849"
 
-const ExpectedConfigureFlags = @[
-  "--disable-static",
-  "--disable-tests",
-  "--without-x",
-  "--disable-doxygen-docs",
-  "--disable-xml-docs",
+const ExpectedMesonOptions = @[
+  "modular_tests=disabled",
+  "intrusive_tests=false",
+  "installed_tests=false",
+  "x11_autolaunch=disabled",
+  "doxygen_docs=disabled",
+  "xml_docs=disabled",
+  "ducktype_docs=disabled",
 ]
 
 suite "dbusSource — from-source recipe smoke test":
@@ -70,16 +71,16 @@ suite "dbusSource — from-source recipe smoke test":
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
 
-  test "configureFlags registers the exact production flag sequence":
+  test "mesonOptions registers the exact production flag sequence":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "configureFlags does not leak into the meson channel":
+  test "mesonOptions does not leak into the configure channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "configureFlags does not leak into the cmake channel":
+  test "mesonOptions does not leak into the cmake channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "artifacts register one executable + one library with correct kinds":
     # M3 artifact registry: ``dbusDaemon`` is tagged ``dakExecutable``
-    # while ``libDbus1`` is tagged ``dakLibrary``. dbus's autotools
-    # build emits both binaries from one ``./configure`` + ``make``
+    # while ``libDbus1`` is tagged ``dakLibrary``. dbus's meson build
+    # emits both binaries from one ``meson setup`` + ``ninja``
     # invocation: ``/usr/bin/dbus-daemon`` (the reference message-bus
     # daemon) and ``libdbus-1.so`` (the canonical libdbus client
     # library). A regression that flattened the kind discriminator

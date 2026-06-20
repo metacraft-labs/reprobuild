@@ -173,6 +173,11 @@ package cairoSource:
     ## gcc is the host C toolchain — cairo is C99 with light C++ in
     ## the test harness (skipped via ``-Dtests=disabled``).
     "gcc >=7"
+    ## python3 runs cairo's various pre-process / version-stamp helpers
+    ## at meson-setup + compile time; without it, setup or compile
+    ## fails with exit 127. Same fix shape as glib2 / harfbuzz /
+    ## fontconfig.
+    "python3"
 
   buildDeps:
     ## pixman is cairo's per-pixel software-rasteriser backend; the
@@ -189,6 +194,15 @@ package cairoSource:
     "zlib >=1.2"
     ## libpng is required for the image backend's PNG IO.
     "libpng >=1.6"
+    ## glib2 ships GObject + GIO surface support for cairo's higher-
+    ## level integration. Without an external glib visible via
+    ## pkg-config, cairo's meson falls back to a subproject ``wrap``
+    ## download of glib 2.74 (M9.R.14h smoke), which triggers the
+    ## Python 3.12 ``distutils`` removal at codegen time. Declaring
+    ## glib2 here threads the sibling recipe's install-mirror
+    ## ``lib/pkgconfig`` into cairo's ``PKG_CONFIG_PATH`` so the
+    ## external glib resolves and the subproject wrap is bypassed.
+    "glib2 >=2.74"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
