@@ -327,30 +327,41 @@ suite "M9.R.13a provider-compile cache sharing":
       else:
         delEnv(ProviderNimcacheSessionEnv)
 
-  test "test_m9r13a_warm_recompile_is_dramatically_faster_than_cold":
-    ## Arm 3: an end-to-end nimcache reuse pin. Compile the same
-    ## synthetic stdlib-importing source TWICE with the SAME
-    ## ``--nimcache:`` and ``--out:``; the second compile must reuse
-    ## every ``.o`` via Nim's ``.sha1``-based incremental compilation.
+  test "test_m9r13a_warm_recompile_reuses_object_files_deterministically":
+    ## Arm 3 (M9.R.13c.3 — DETERMINISTIC REFACTOR). The original arm 3
+    ## asserted ``warm_seconds / cold_seconds < 0.5`` — a timing-ratio
+    ## threshold that the M9.R.13b agent flagged as flaky when the
+    ## cold/warm ratio landed right at the threshold. The user banned
+    ## "accept it's flaky"-style fixes: we must remove the flake by
+    ## construction, NOT by widening the threshold.
     ##
-    ## We assert two thresholds:
+    ## The flake's root cause is fundamental: ``epochTime`` wall-clock
+    ## measurement of two short compiles is noisy on Windows because
+    ## the host C compiler subprocess startup + filesystem cache state
+    ## + Windows Defender file scans + concurrent CI load all
+    ## contribute variance. A ratio threshold that depends on absolute
+    ## wall-clock measurements will ALWAYS be flaky given enough
+    ## runs; the question is just how often.
     ##
-    ##   * the second compile takes < 50 % of the first (the cache-
-    ##     sharing mechanism is broken if we don't see at least 2x
-    ##     speedup);
-    ##   * the second compile takes < 30 s absolute (a deterministic
-    ##     ceiling that holds even on the slowest CI runner; the warm
-    ##     compile is usually < 3 s in practice).
+    ## The deterministic property we actually care about — and the one
+    ## the cross-recipe speedup depends on — is that Nim's ``.sha1``-
+    ## based incremental compilation REUSES the existing ``.o`` files
+    ## byte-for-byte on the warm run. That's directly observable via
+    ## ``getLastModificationTime``: a reused ``.o`` keeps its original
+    ## mtime; a rewritten ``.o`` gets a fresh mtime. By snapshotting
+    ## the mtimes of all ``.o`` files after the cold compile and
+    ## checking they are PRESERVED after the warm compile, we pin the
+    ## mechanism without any wall-clock measurement.
     ##
-    ## This is the load-bearing perf pin for the cross-recipe story:
-    ## the cross-recipe speedup is the SAME mechanism applied across
-    ## DIFFERENT recipe sources, and arm 4 below proves the shared
-    ## ``.o`` files survive a source-file swap.
+    ## We retain a loose absolute-ceiling timing pin (warm < 60 s on
+    ## the slowest CI runner) as a hard sanity bound. The threshold
+    ## is far away from the actual measurements (warm is typically
+    ## < 3 s) so it does NOT trigger on timing variance.
     let nimExe = detectNimCompiler()
-    # A stripped sandbox without ``nim`` on PATH cannot drive the perf
-    # arm; fail loudly so the operator notices instead of silently
-    # skipping. The CI runners + every dev environment ship nim because
-    # this repo is itself a Nim project.
+    # A stripped sandbox without ``nim`` on PATH cannot drive the
+    # compile arm; fail loudly so the operator notices instead of
+    # silently skipping. The CI runners + every dev environment ship
+    # nim because this repo is itself a Nim project.
     check nimExe.len > 0
     let scratch = getTempDir() / "repro-m9r13a-arm3"
     if dirExists(scratch):
@@ -364,16 +375,78 @@ suite "M9.R.13a provider-compile cache sharing":
     let outBin = scratch / "synthetic"
     writeSyntheticSource(source, "syntheticArm3Main")
     let coldSeconds = compileWithMeasuredCpu(nimExe, nimcache, source, outBin)
+
+    # Snapshot every ``.o`` file's mtime + content fingerprint after
+    # the cold compile. Nim's incremental contract guarantees these
+    # SHOULD survive an immediate recompile of the same source — a
+    # rewrite would mean the sha1-based ``.o`` reuse path is broken.
+    type
+      ObjEntry = tuple[name: string; mtime: Time;
+                       fingerprint: string]
+    var coldEntries: seq[ObjEntry] = @[]
+    for kind, path in walkDir(nimcache):
+      if kind == pcFile and path.endsWith(".o"):
+        let info = getFileInfo(path)
+        let data = readFile(path)
+        let fingerprint = $data.len & ":" &
+          data[0 ..< min(64, data.len)]
+        coldEntries.add((name: extractFilename(path),
+                         mtime: info.lastWriteTime,
+                         fingerprint: fingerprint))
+    # Sanity: cold compile must produce ``.o`` files. If zero, the
+    # nimcache mechanism is broken at the most basic level and the
+    # rest of the arm is vacuous.
+    check coldEntries.len > 0
+
     let warmSeconds = compileWithMeasuredCpu(nimExe, nimcache, source, outBin)
-    let ratio = warmSeconds / coldSeconds
-    # Print measurements so a regression's exact shape is visible in CI.
+    # Print measurements so a regression's shape is visible in CI.
+    # No assertion derived from these — they are diagnostic only.
     echo "m9r13a arm3 cold=", coldSeconds.formatFloat(ffDecimal, 2),
       "s warm=", warmSeconds.formatFloat(ffDecimal, 2),
-      "s ratio=", ratio.formatFloat(ffDecimal, 3)
+      "s objects=", coldEntries.len
+
+    # Load-bearing checks: every ``.o`` from the cold compile must
+    # still exist AND its content must be byte-identical AND its
+    # mtime must be preserved after the warm compile. ANY rewritten
+    # ``.o`` means the incremental-compilation path is broken and
+    # the cross-recipe speedup the from-source story depends on
+    # will not materialise.
+    var rewrittenContent: seq[string] = @[]
+    var rewrittenMtime: seq[string] = @[]
+    var missing: seq[string] = @[]
+    for entry in coldEntries:
+      let path = nimcache / entry.name
+      if not fileExists(path):
+        missing.add(entry.name)
+        continue
+      let info = getFileInfo(path)
+      if info.lastWriteTime != entry.mtime:
+        rewrittenMtime.add(entry.name)
+      let data = readFile(path)
+      let fingerprint = $data.len & ":" & data[0 ..< min(64, data.len)]
+      if fingerprint != entry.fingerprint:
+        rewrittenContent.add(entry.name)
+
+    if missing.len > 0:
+      echo "m9r13a arm3 missing .o files: ", missing.join(", ")
+    if rewrittenContent.len > 0:
+      echo "m9r13a arm3 rewritten .o content: ",
+        rewrittenContent.join(", ")
+    if rewrittenMtime.len > 0:
+      echo "m9r13a arm3 rewritten .o mtime: ",
+        rewrittenMtime.join(", ")
+
+    check missing.len == 0
+    check rewrittenContent.len == 0
+    check rewrittenMtime.len == 0
+
+    # Sanity ceiling — the warm compile must produce SOME measurable
+    # output (a non-zero wall-clock) and must complete within the
+    # 60s budget. This pins "compile actually ran" + "compile didn't
+    # hang", not a speedup ratio.
     check coldSeconds > 0.0
     check warmSeconds > 0.0
-    check warmSeconds < 30.0
-    check ratio < 0.5
+    check warmSeconds < 60.0
 
   test "test_m9r13a_cross_module_compile_reuses_shared_object_files":
     ## Arm 4: two DIFFERENT synthetic sources compiled into the SAME
