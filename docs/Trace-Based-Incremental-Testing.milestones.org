@@ -1104,7 +1104,7 @@
 # M18 ports the engine into `ct test`. M19 ships docs.
 
 * M14 — Native call trace via compile-time instrumentation (cross-platform)
-  :STATUS: planned
+  :STATUS: complete
 
   Goal: implement the spec's "compile-time instrumentation that produces the call
   trace" alternative (Nim-Parallel-Test-Framework §16.7; MCR-Calltrace-Design §22d
@@ -1112,23 +1112,33 @@
   WITHOUT Intel PT / RR / the MCR emulator — and is testable on arm64-macOS.
 
   Deliverables:
-  - [ ] A tiny C call-recorder runtime using the `-finstrument-functions` ABI
+  - [X] A tiny C call-recorder runtime using the `-finstrument-functions` ABI
     (`__cyg_profile_func_enter` / `__cyg_profile_func_exit`) that records the set
-    of entered function addresses (PCs) into a file in the trace dir. Thread-safe,
-    bounded, no heap churn on the hot path; the file format is documented.
-  - [ ] A build/run helper that compiles+links a native test fixture with
-    `-finstrument-functions` against the runtime, runs it, and produces the PC log.
-  - [ ] PC → function-name resolution via the binary symbol table (reuse
-    native_hash.nim's `nm`-based parsing; Mach-O + ELF), yielding the
-    de-duplicated executed-function set (`seq[ExecutedFunction]`).
-  - [ ] Fail-safe: any resolution/read error ⇒ `Err` (engine re-runs, never a
-    false skip).
+    of entered functions into a file in the trace dir. Thread-safe, bounded, no
+    heap churn on the steady-state hot path; the file format is documented.
+    Implemented in `libs/repro_ct_incremental/csrc/ct_instrument_runtime.c`.
+    NOTE: name resolution is via `dladdr(this_fn,&info).dli_sname` (robust to
+    PIE/ASLR) rather than mapping raw runtime PCs back to static symbol
+    addresses — so the recorder records NAMES directly, one per line.
+  - [X] A build/run helper that compiles+links a native test fixture with
+    `-finstrument-functions` against the runtime, runs it with
+    `CT_INSTRUMENT_OUT` set into the trace dir, and produces the name log
+    (`native_instrument.nim`: `compileInstrumented` / `runInstrumented` /
+    `instrumentAndRun`). `dladdr` needs `-ldl` on Linux; handled per-host.
+  - [X] Function-name → executed-set resolution yielding the de-duplicated
+    `seq[ExecutedFunction]` (`readExecutedFunctionsInstrumented`); best-effort
+    pruning of names not in the binary's own symbol table reuses
+    native_hash.nim's `nativeFunctionTable` (Mach-O + ELF). Leading Mach-O
+    underscore stripped to match the native_hash symbol keys.
+  - [X] Fail-safe: any compile/run/read error, a missing/empty log, or an
+    unresolvable capture ⇒ `Err` (engine re-runs, never a false skip).
 
   Automated tests:
-  - [ ] A real 4-function C program is compiled with instrumentation, run, and the
+  - [X] A real 4-function C program is compiled with instrumentation, run, and the
     executed set asserts to {used_a, used_b, main} with `unused_c` ABSENT — on
-    arm64-macOS (no skip, no gate).
-  - [ ] Malformed / missing PC-log and unresolved-symbol cases return `Err`.
+    arm64-macOS (no skip, no gate). `tests/t_native_instrument.nim`.
+  - [X] Missing-log, empty-log, unresolvable-capture, missing-source, and
+    non-zero-exit cases all return `Err`.
 
   Acceptance: the native executed-function set is derived from a GENUINE
   compile-time-instrumentation run on this host, deterministically.
