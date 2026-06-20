@@ -1863,9 +1863,19 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
   ## StringTable-style env mutator. Used by the bypass-spawn path. Each
   ## env var is prepended in-place via ``prependEnvDirs``.
+  ##
+  ## ``PKG_CONFIG_PATH_FOR_TARGET`` is set IN ADDITION TO
+  ## ``PKG_CONFIG_PATH`` because nixpkgs's pkg-config-wrapper consults
+  ## ``PKG_CONFIG_PATH_FOR_{BUILD,TARGET}`` and IGNORES the standard
+  ## ``PKG_CONFIG_PATH`` env var when those nix-specific ones are set
+  ## (which they are inside any ``nix-shell`` invocation). Setting both
+  ## keeps the behaviour correct against both host pkg-config (which
+  ## reads ``PKG_CONFIG_PATH``) and the nix wrapper.
   if env == nil:
     return
   prependEnvDirs(env, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_TARGET", paths.pkgConfigDirs)
+  prependEnvDirs(env, "PKG_CONFIG_PATH_FOR_BUILD", paths.pkgConfigDirs)
   prependEnvDirs(env, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
   prependEnvDirs(env, "CPATH", paths.includeDirs)
   prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
@@ -1876,9 +1886,14 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
 proc applyResolvedAuxPathsArgv*(env: seq[string];
                                 paths: ResolvedAuxPaths): seq[string] =
   ## Argv-style env mutator. Used by the RunQuota-helper-spawn +
-  ## inline-runquota paths.
+  ## inline-runquota paths. See ``applyResolvedAuxPathsTable`` for
+  ## the rationale on ``PKG_CONFIG_PATH_FOR_{TARGET,BUILD}``.
   result = env
   result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH", paths.pkgConfigDirs)
+  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_TARGET",
+    paths.pkgConfigDirs)
+  result = prependEnvDirsToArgvEnv(result, "PKG_CONFIG_PATH_FOR_BUILD",
+    paths.pkgConfigDirs)
   result = prependEnvDirsToArgvEnv(result, "CMAKE_PREFIX_PATH", paths.cmakePrefixDirs)
   result = prependEnvDirsToArgvEnv(result, "CPATH", paths.includeDirs)
   result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
