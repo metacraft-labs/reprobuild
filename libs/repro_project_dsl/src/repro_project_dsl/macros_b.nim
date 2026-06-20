@@ -3234,6 +3234,9 @@ macro package*(name: untyped; body: untyped): untyped =
   # ``buildCode`` since the build body never references them.
   let m9r2cArtifactSlotEmission =
     emitM9R2cArtifactSlots(packageName, classifiedSections)
+  if m9r2cArtifactSlotEmission.len > 0:
+    result.add(quote do:
+      import repro_dsl_stdlib/types)
   result.add(m9r2cArtifactSlotEmission)
   # ── existing builder emission (now feeding instrumented body) ────
   result.add(buildCode(pkg, bodyForBuild))

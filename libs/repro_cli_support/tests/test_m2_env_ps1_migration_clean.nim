@@ -7,12 +7,12 @@
 ## the M70 CLI uses on Windows hosts) and asserts the post-M2 outcome
 ## distribution per the M2 spec table:
 ##
-##   - 12 env-file lines total
-##   - 4 moIgnored (the M70 ``IgnoredEnvVars`` list: JDK_BUILD,
-##     GIT_REPO_VERSION, VULKAN_HEADERS_VERSION, MESA_VERSION)
-##   - 8 catalog-eligible
-##     - 6 moMigrate (jdk, just, gh, maven, gradle, zig)
-##     - 2 moDeferred (swift, python3 — the M70 deferred-8 contract;
+##   - 9 env-file lines total
+##   - 3 moIgnored from the M70 ``IgnoredEnvVars`` list
+##     (JDK_BUILD, VULKAN_HEADERS_VERSION, MESA_VERSION)
+##   - 6 catalog-eligible
+##     - 5 moMigrate (jdk, maven, gradle, zig, go)
+##     - 1 moDeferred (swift — the M70 deferred-8 contract;
 ##       a TODO comment IS the clean outcome for these tools until
 ##       M3-M5 closes the realize-time gap)
 ##   - 0 moMissingVersion (the M2 scope-exit gate — every
@@ -78,11 +78,11 @@ const ExpectedIgnoredSet = [
 
 # Catalog-eligible, non-deferred tools the current
 # ``windows/toolchain-versions.env`` pins. ``just`` / ``gh`` / ``python``
-# were delegated to the framework (dropped from the env file); ``go`` /
-# ``fpc`` were added with versioned catalog entries (packages/go.nim,
-# packages/fpc.nim), so they migrate cleanly.
+# were delegated to the framework (dropped from the env file); ``go``
+# was added with a versioned catalog entry (packages/go.nim), so it
+# migrates cleanly.
 const ExpectedCleanMigrateTools = [
-  "jdk", "maven", "gradle", "zig", "go", "fpc",
+  "jdk", "maven", "gradle", "zig", "go",
 ]
 
 # M70 deferred tools that still appear in the env file. ``python3`` left
@@ -117,12 +117,12 @@ suite "M2 — real toolchain-versions.env reconciles per the decision table":
     check envFilePath.len > 0
     check fileExists(envFilePath)
 
-  test "real env file parses to the expected 10 pins":
+  test "real env file parses to the expected 9 pins":
     let parsed = loadEnvFile(envFilePath)
     # Pin count tracks the current ``windows/toolchain-versions.env``:
-    # 10 lines after just/gh/python were delegated to the framework and
-    # go/fpc/vulkan/mesa were added.
-    check parsed.pins.len == 10
+    # 9 lines after just/gh/python/git_repo were delegated to the
+    # framework and go/vulkan/mesa were added.
+    check parsed.pins.len == 9
 
   test "post-M2 migrator reports the expected outcome distribution":
     let parsed = loadEnvFile(envFilePath)
@@ -130,7 +130,7 @@ suite "M2 — real toolchain-versions.env reconciles per the decision table":
       initHashSet[string]())
     let s = summarize(plan)
     check s.ignored == 3
-    check s.migrated == 6
+    check s.migrated == 5
     check s.deferred == 1
     check s.missingVersion == 0
     check s.unknown == 0

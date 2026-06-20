@@ -1,19 +1,17 @@
-## Bootstrap-And-Self-Build B0: develop-mode resolution uses the local
-## runquota source root.
+## Bootstrap-And-Self-Build B0: develop-mode resolution carries runquotad.
 ##
-## Asserts that when the engine inspects reprobuild's action graph
-## with ``runquotad`` declared in ``uses:``, the resolved source for
-## ``runquotad`` is the local sibling at ``../runquota/`` (i.e. the
-## develop-mode path-mode resolver picks the sibling rather than a
-## pinned upstream tarball).
+## Asserts that when the engine inspects reprobuild's action graph with
+## ``runquotad`` declared in ``uses:``, the path-mode tool inspection resolves
+## a concrete ``runquotad`` executable. Older graph payloads exposed the bare
+## selector in graph JSON; current payloads record it in
+## ``toolInspectionPath``.
 ##
 ## Engine surface
 ## --------------
-## We use ``./build/bin/repro graph --tool-provisioning=path
-## --format=json`` to render the action graph as JSON, then walk the
-## graph payload for any reference to ``runquotad`` whose ``inputs``
-## or ``executable``-path field is rooted at the workspace's
-## ``../runquota/`` directory.
+## We use ``./build/bin/repro graph --tool-provisioning=path --format=json`` to
+## render the action graph as JSON, then load the graph's
+## ``toolInspectionPath`` artifact and check for a resolved ``runquotad``
+## profile.
 ##
 ## Note: ``--daemon=off`` is intentionally NOT passed here. The
 ## ``--daemon`` flag is a ``build``/``watch`` option, not a global
@@ -156,9 +154,19 @@ proc graphMentionsRunquotadAtAll(payload: JsonNode): bool =
       return false
   walk(payload)
 
-suite "Bootstrap-And-Self-Build B0: develop-mode uses local sibling":
+proc inspectionResolvesRunquotad(payload: JsonNode):
+    tuple[found: bool; resolvedPath: string] =
+  let inspectionPath = payload{"toolInspectionPath"}.getStr("")
+  if inspectionPath.len == 0 or not fileExists(inspectionPath):
+    return
+  let inspection = parseFile(inspectionPath)
+  for profile in inspection{"profiles"}:
+    if profile{"executableName"}.getStr("") == "runquotad":
+      return (true, profile{"resolvedExecutablePath"}.getStr(""))
 
-  test "repro graph references local ../runquota/ for runquotad":
+suite "Bootstrap-And-Self-Build B0: develop-mode resolves runquotad":
+
+  test "repro graph records a path-mode runquotad profile":
     let reprobuildRoot = findRepoRoot()
     let runquotaCheckout = runquotaRoot(reprobuildRoot)
     if not dirExists(runquotaCheckout):
@@ -229,23 +237,20 @@ suite "Bootstrap-And-Self-Build B0: develop-mode uses local sibling":
               checkpoint(output)
               check false
             else:
-              let sawAny = graphMentionsRunquotadAtAll(payload)
-              checkpoint("graph mentions runquotad: " & $sawAny)
-              check sawAny
+              let resolved = inspectionResolvesRunquotad(payload)
+              checkpoint("tool inspection resolves runquotad: " &
+                $resolved.found)
+              checkpoint("runquotad resolved path: " & resolved.resolvedPath)
+              if resolved.found:
+                check resolved.resolvedPath.len > 0
+              else:
+                # Older graph payloads exposed the bare selector directly in
+                # the graph JSON. Keep that as a compatibility fallback.
+                let sawAny = graphMentionsRunquotadAtAll(payload)
+                checkpoint("graph mentions runquotad: " & $sawAny)
+                check sawAny
 
               let sawLocalSource =
                 graphMentionsRunquotad(payload, runquotaCheckout)
               checkpoint("graph roots runquotad at local sibling: " &
                 $sawLocalSource)
-              # The strict assertion: when the engine renders the
-              # graph, the runquotad reference must point at the local
-              # sibling. If the engine surfaces only the bare selector
-              # (no source path yet), the loose ``sawAny`` check above
-              # still passes; the strict arm is a soft-check below so
-              # a future milestone (B1+) that grows the source-path
-              # field on the use entry will tighten this.
-              if not sawLocalSource:
-                checkpoint("strict source-path assertion not yet " &
-                  "enforced — engine does not yet expose source-" &
-                  "rooting metadata for use entries in the graph " &
-                  "payload. B1+ may flip this.")

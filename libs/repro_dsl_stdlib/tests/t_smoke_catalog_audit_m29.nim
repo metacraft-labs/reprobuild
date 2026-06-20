@@ -90,6 +90,10 @@ const AuditExemptions = [
   # shape. Exempt it here rather than retroactively contort the
   # adapter to declare a fake one.
   "python_unittest_runner",
+  # M9.R.10a: stdlib aggregator modules. They re-export concrete package
+  # stubs that carry provisioning, but do not represent standalone packages.
+  "system_tools",
+  "kf6_qt6_modules",
 ]
 
 iterator catalogFiles(): tuple[name, path: string] =
