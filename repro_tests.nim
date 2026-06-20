@@ -5998,6 +5998,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
+  # M9.R.13b.1 — Windows ``externalHashFlags`` must propagate
+  # ``--define:reproVendoredHash`` alongside the ``-I`` includes so the
+  # interface-extract runner / provider compile actually compiles the
+  # vendored ``xxhash.c`` + ``blake3.c`` translation units. Without the
+  # define the runner sees only ``xxhash.h`` and the final link fails
+  # with ``undefined reference to XXH3_64bits`` — the symptom that
+  # blocked the wayland from-source smoke at the interface-extract
+  # LINK stage on the M9.R.13a → M9.R.13b handover.
+  TestSpec(
+    source: "tests/unit/t_m9r13b_1_toolchain_pin.nim",
+    binary: "build/test-bin/t_m9r13b_1_toolchain_pin",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",

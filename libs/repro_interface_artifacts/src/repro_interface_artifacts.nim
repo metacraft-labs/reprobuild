@@ -2460,6 +2460,23 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # alongside the reprobuild library tree, so resolve the include dirs relative
   # to workDir (which is the reprobuildLibraryWorkDir).
   when defined(windows):
+    # M9.R.13b.1 — propagate `--define:reproVendoredHash` so the vendored
+    # path in `blake3.nim` / `xxh3.nim` (a `when defined(reproVendoredHash):
+    # {.compile: ...c.}` block guarding the inclusion of the portable C
+    # implementations) actually fires when the interface-extract runner
+    # and the provider compile run outside the reprobuild project's
+    # `config.nims` scope. Without this define the runner picks up only
+    # the `-I` include flags below — `xxh3/capi.c` resolves `XXH3_64bits`
+    # through `xxhash.h` but no implementation translation unit is
+    # compiled, so the link step fails with `undefined reference to
+    # XXH3_64bits` / `XXH3_64bits_withSeed` (the symptom that blocked the
+    # wayland from-source smoke at the interface-extract LINK stage,
+    # M9.R.13a → M9.R.13b handover). The non-Windows branch below
+    # delegates to system-installed libblake3 / libxxhash via `-L` + `-l`
+    # so it doesn't need the define; Windows has no such system install
+    # so the vendored path is the only one available.
+    let envSystem = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii()
+    let useSystem = envSystem in ["1", "true", "yes", "on"]
     if workDir.len > 0:
       let blake3Inc = workDir / "libs" / "blake3" / "src" / "blake3" /
         "vendor"
@@ -2473,6 +2490,14 @@ proc externalHashFlags(workDir = ""): seq[string] =
         result.add("--passC:-I" & blake3Inc)
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):
         result.add("--passC:-I" & xxhashInc)
+      if not useSystem and
+         fileExists(extendedPath(blake3Inc / "blake3.h")) and
+         fileExists(extendedPath(xxhashInc / "xxhash.h")):
+        # Mirror `config.nims`'s `switch("define", "reproVendoredHash")`
+        # for the runner / provider compile so the `{.compile:.}` pragmas
+        # in `blake3.nim` / `xxh3.nim` fire and the vendored C sources
+        # land in the link.
+        result.add("--define:reproVendoredHash")
     return
 
   let blake3Prefix = block:
