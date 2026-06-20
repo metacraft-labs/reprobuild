@@ -231,6 +231,14 @@ package opensslSource:
 
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
+    ##
+    ## M9.R.15a.3 — openssl's configure entry-point is the upper-case
+    ## Perl-driven ``./Configure`` (not the lower-case ``./configure``
+    ## that vanilla autotools projects ship); pass
+    ## ``configureScriptName = "Configure"`` so the out-of-tree
+    ## driver builds ``../src/Configure ...`` instead of the default
+    ## ``../src/configure ...`` (which doesn't exist in the openssl
+    ## tarball and trips the build with ``No such file or directory``).
     setCurrentOwningPackageOverride("opensslSource")
     try:
       let opts = @[
@@ -240,7 +248,9 @@ package opensslSource:
         "no-docs",
         "--release",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src",
+                                  configureOptions = opts,
+                                  configureScriptName = "Configure")
       discard pkg.library("libCrypto")
       discard pkg.library("libSsl")
     finally:
