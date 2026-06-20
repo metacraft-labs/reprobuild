@@ -1131,7 +1131,20 @@ proc resolveNixTool*(useDef: InterfaceToolUse;
     nixArgs.add("--file")
     nixArgs.add(plan.nixExpressionFile)
   else:
-    nixArgs.add(selector)
+    # DSL-port M9.R.14h.5 — nixpkgs's multi-output packages (libjpeg,
+    # libtiff, libpng, ...) split runtime libraries into the ``.out``
+    # output and headers into ``.dev``.  ``nix build`` without an
+    # explicit output selector only realizes + prints
+    # ``meta.outputsToInstall`` (typically ``bin`` and ``man``), so a
+    # consumer asking for ``lib/libjpeg.so`` resolves zero outputs even
+    # though nix's libjpeg ships the .so under
+    # ``<...>-libjpeg-turbo-3.1.2/lib/libjpeg.so``.  Append ``^*`` so
+    # every output is realized and printed; the downstream loop already
+    # walks every line searching for ``declaredExecutablePath``.
+    var selectorWithAllOutputs = selector
+    if not selectorWithAllOutputs.contains("^"):
+      selectorWithAllOutputs.add("^*")
+    nixArgs.add(selectorWithAllOutputs)
   let res = execCmdEx(shellCommand(nixArgs))
   if res.exitCode != 0:
     raise newException(OSError,
