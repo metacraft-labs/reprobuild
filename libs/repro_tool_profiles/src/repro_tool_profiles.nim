@@ -3725,6 +3725,81 @@ proc m9r14dPickBestMatch*(candidates: seq[M9R14dArtifactCandidate];
     if resolvedCount == 1:
       result = resolvedIdx
 
+proc m9r14hProbeInstallMirrorLibrary*(recipeDir, depName: string): string =
+  ## DSL-port M9.R.14h.1 — install-mirror fast-path probe.
+  ##
+  ## When a sibling recipe has successfully completed an install-mirror
+  ## pass (M9.R.14e.2) it owns
+  ## ``<recipeDir>/.repro/output/install/usr/lib*/lib<X>.so*`` files
+  ## with the upstream SONAME chain preserved.  The per-artifact stage
+  ## tree (``.repro/output/<artifactName>/`` walked by
+  ## ``m9r14dEnumerateArtifacts``) is the FIRST fast-path; the
+  ## install-mirror is a SECOND fast-path covering recipes whose
+  ## ``library: cli:`` block did not declare a name that survives the
+  ## stage-copy probe (e.g. SONAME-versioned ``libcairo.so.2.11800.0``
+  ## with no plain ``libcairo.so`` symlink in the per-artifact tree).
+  ##
+  ## Returns the absolute path of the first matching library file or
+  ## ``""`` when nothing matches.  Mirrors the ``m9r14dProbeArtifactFile``
+  ## return-shape so callers can ``len > 0``-gate the result.
+  ##
+  ## Idempotency guarantee (Gap 1 fix): callers can probe this BEFORE
+  ## scheduling a sub-build so a sibling whose install-mirror is on disk
+  ## is NEVER re-built within the same dispatcher invocation, even when
+  ## the per-process ``fromSourceResolvedRecipes`` cache was cleared
+  ## (e.g. by a fresh ``executeBuildTarget`` call from a sub-recurse).
+  let mirrorRoot = recipeDir / ".repro" / "output" / "install" / "usr"
+  if not dirExists(extendedPath(mirrorRoot)):
+    return ""
+  let canon = m9r14dCanonicalizeName(depName)
+  if canon.len == 0:
+    return ""
+  # Candidate base names to probe.  We use the canonical lib-stripped
+  # form so a dep selector ``zlib`` matches ``libz.so`` AND ``libzlib.so``.
+  var bases: seq[string] = @[]
+  bases.add("lib" & canon)
+  if depName.toLowerAscii != canon:
+    # Also probe the un-canonicalized lowercase form so ``zlib`` →
+    # ``libzlib.so`` resolves when the recipe baked in the redundant
+    # prefix.
+    bases.add("lib" & depName.toLowerAscii)
+  # Suffix candidates per platform.  Match either the plain ``.so`` /
+  # ``.dylib`` / ``.dll`` shape OR a SONAME-versioned shape like
+  # ``.so.2`` / ``.so.0.25.0`` so recipes that don't ship the plain
+  # symlink (or that ship only the upstream-versioned chain) still
+  # register as "already built".
+  let suffixes = m9r14dPlatformLibrarySuffixes()
+  for libDir in ["lib", "lib64"]:
+    let dir = mirrorRoot / libDir
+    if not dirExists(extendedPath(dir)):
+      continue
+    for base in bases:
+      for suffix in suffixes:
+        let exact = dir / (base & suffix)
+        if fileExists(extendedPath(exact)):
+          return absolutePath(exact)
+      # SONAME-versioned probe: walk the dir for any file starting with
+      # ``<base>.so`` (Linux) / ``<base>.dylib`` (Darwin) / ``<base>.dll``
+      # (Windows) and accept the first one.  Order is non-deterministic
+      # from ``walkDir`` but every match is a legitimate library file so
+      # the fast-path stays correct.  We walk with ``extendedPath(dir)``
+      # for long-path safety, then strip the ``\\?\`` prefix the walker
+      # may have prepended so the return value is the plain canonical
+      # form callers compare against.
+      for kindPc, walked in walkDir(extendedPath(dir)):
+        if kindPc != pcFile and kindPc != pcLinkToFile:
+          continue
+        var path = walked
+        when defined(windows):
+          if path.startsWith("\\\\?\\"):
+            path = path[4 .. ^1]
+        let leaf = lastPathPart(path)
+        for suffix in suffixes:
+          let prefix = base & suffix
+          if leaf.startsWith(prefix):
+            return absolutePath(path)
+  return ""
+
 type
   FromSourceResolveKind* = enum
     ## DSL-port M9.R.9 — discriminated outcome for from-source
@@ -4000,6 +4075,20 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
               it in getFilePermissions(extendedPath(candidate))):
             resolved = candidate
             break
+  if resolved.len == 0:
+    # DSL-port M9.R.14h.1 — install-mirror fast-path.  If the per-
+    # artifact tree didn't probe a library AND the legacy bare-name
+    # probe missed (the typical case for a recipe that ONLY stages via
+    # ``emitInstallTreeMirror``), check the install-mirror at
+    # ``<recipeDir>/.repro/output/install/usr/lib*/lib<name>*.so*``.
+    # Treat presence as a strong "already built" signal so the
+    # dispatcher's auto-recurse path skips the sub-build — preventing
+    # the determinism break where a sibling that successfully published
+    # in an earlier sub-recurse gets its install mirror clobbered by a
+    # fresh ``rm -rf install/usr`` from ``emitInstallTreeMirror``.
+    let mirrorHit = m9r14hProbeInstallMirrorLibrary(recipeDir, name)
+    if mirrorHit.len > 0:
+      resolved = mirrorHit
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
