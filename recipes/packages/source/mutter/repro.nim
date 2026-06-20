@@ -245,6 +245,16 @@ package mutterSource:
     ## libxml2 ships xmllint, consumed by mutter's GResource compile
     ## step + GSettings schema validation.
     "libxml2"
+    ## M9.R.15e.3 — gsettings-desktop-schemas surfaces the GNOME GSettings
+    ## schema set (a11y / calendar / default-apps / lockdown / peripherals
+    ## / privacy / screen / sound / system / ...). mutter 47.x's
+    ## ``src/meson.build:116`` declares the dep and short-fails meson
+    ## setup with ``Dependency "gsettings-desktop-schemas" not found,
+    ## tried pkgconfig`` when the .pc file is missing from
+    ## ``PKG_CONFIG_PATH``. Routed through nixpkgs via the M9.R.15e.3
+    ## stdlib stub; the .pc lives at ``share/pkgconfig`` which the
+    ## from-source resolver already threads (M9.R.14e.1).
+    "gsettings-desktop-schemas"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.

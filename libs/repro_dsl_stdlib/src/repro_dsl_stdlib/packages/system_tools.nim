@@ -81,6 +81,13 @@ import ./libegl_headers
 # setuptools + mako + markdown modules consumed by
 # gobject-introspection's build-time scanner.
 import ./python3_with_modules
+# M9.R.15e.3 — gsettings-desktop-schemas surfaces the canonical GNOME
+# GSettings .gschema.xml definitions (a11y, calendar, default-apps,
+# input-sources, lockdown, peripherals, privacy, screen, sound, system,
+# thumbnailers). Consumed by mutter (47.x src/meson.build:116) and
+# gnome-shell. Pure-data; nixpkgs prebuilt is byte-identical to
+# from-source so we keep this as a stdlib stub.
+import ./gsettings_desktop_schemas
 
 export bc
 export bison
@@ -122,3 +129,4 @@ export gtk_update_icon_cache
 export sassc
 export libegl_headers
 export python3_with_modules
+export gsettings_desktop_schemas
