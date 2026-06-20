@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M9 complete, M10 next
+#+STATUS: Phase 2 (M6-M10) complete — all language mechanisms covered
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -673,36 +673,101 @@
   `.nim` extractor addition.)
 
 * M10 — Full language→strategy matrix
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: make "all CodeTracer languages" concrete — a single dispatch table
   mapping every supported language to its `(TraceBackend, DependencyDiscovery,
   ShallowHash)` and demonstrate the representative groups end-to-end.
 
   Deliverables:
-  - [ ] A `languageStrategy(lang): LanguageStrategy` table covering the
+  - [X] A `languageStrategy(lang): LanguageStrategy` table covering the
     CodeTracer Language-Support-Matrix groups: interpreted (Python, Ruby, JS,
-    Lua, WASM ⇒ source path), native (C, C++, Rust, Go, Pascal, D, Fortran, Ada,
-    Crystal, Odin, V ⇒ native path), Nim (dual). Each entry cites the matrix.
-    Unknown language ⇒ a clear error / conservative re-run, never a wrong hash.
-  - [ ] At least one passing end-to-end skip/rerun test per MECHANISM group
-    (interpreted via Phase-1 fixtures; native via a real compiled fixture; Nim
-    dual via M9) selected through the table — proving the same engine covers the
-    whole matrix with only the strategy varying.
-  - [ ] Docs: a table in this file + a short `libs/repro_ct_incremental/README`
-    section listing every supported language and its path, and explicitly noting
-    which paths are validated with live recordings vs hand-crafted fixtures.
+    TypeScript, Lua, WASM ⇒ source path), native (C, C++, Rust, Go, Pascal, D,
+    Fortran, Ada, Crystal, Odin, V, plus Lean/Julia/Assembly ⇒ native path), Nim
+    (dual). Each entry cites the matrix in `matrixCitation`. Implemented in
+    `libs/repro_ct_incremental/src/repro_ct_incremental/language_matrix.nim`
+    (re-exported from the package). Unknown/empty language ⇒ a clear `Err`
+    (conservative re-run), never a wrong hash, never a silent skip.
+    THE TABLE IS ADVISORY: it maps language→expected-strategy for reporting and
+    validation (`expectedBackends`/`backendIsExpected`). The engine still detects
+    the REAL backend from the trace via `detectBackend`, which remains the SINGLE
+    SOURCE OF TRUTH for which strategy runs — documented on the module + on
+    `languageStrategy` so there is no second source of truth that can drift. Nim
+    is modelled as DUAL (BOTH backends valid); the per-trace backend wins.
+  - [X] At least one passing end-to-end skip/rerun test per MECHANISM group
+    (interpreted = Python via the M3 fixture; native = C via the M8 real compiled
+    fixture; Nim dual via the M9 fixtures, BOTH arms) selected through the table
+    — proving the SAME engine covers the whole matrix with only the strategy
+    varying. Each group asserts the table's expected backend matches
+    `detectBackend` (authoritative), then drives a correct RERUN (edit an
+    executed function) AND a correct SKIP (edit an unexecuted function).
+  - [X] Docs: this table (below) + a `libs/repro_ct_incremental/README.md`
+    "Supported languages" section listing every supported language and its path,
+    explicitly noting LIVE recordings vs HAND-CRAFTED fixtures (honest: in this
+    prototype the TRACES are hand-crafted in the real schemas; the
+    instruction-byte hashing + source extraction run on REAL artifacts — real
+    source files and binaries the tests compile at test time).
 
-  Automated tests:
-  - test_name: language_strategy_table_covers_matrix
-    description: every language group in the matrix resolves to a strategy;
-    unknown ⇒ error.
-  - test_name: representative_language_per_group_decides_end_to_end
-    description: one interpreted + one native + Nim(dual) language each drive a
-    correct skip/rerun through the table.
-  - test_name: full_phase2_suite_has_no_regressions
-    description: all Phase-1 + Phase-2 lib tests pass; `repro_cli_support` still
-    compiles standalone; `--ct-incremental` absent leaves behaviour unchanged.
+  Automated tests (`tests/t_language_matrix.nim`):
+  - [X] test_name: language_strategy_table_covers_matrix
+    description: every language group in the matrix (the interpreted, native, and
+    Nim-dual groups encoded in-test) resolves to the expected mechanism with the
+    expected backend(s)/discovery/hash and a matrix citation; aliases resolve; an
+    unknown/empty language ⇒ `Err`. Fails if a group becomes unclassified.
+  - [X] test_name: representative_language_per_group_decides_end_to_end
+    description: Python (interpreted) + C (native, real binary) + Nim (dual, BOTH
+    arms) each drive a correct skip AND a correct rerun through the table → the
+    engine, with the table's expected backend confirmed against `detectBackend`.
+  - [X] test_name: full_phase2_suite_has_no_regressions
+    description: with `--ct-incremental` absent the watch decision is the
+    byte-for-byte legacy run path (the disabled `WatchCtIncrementalGate` via
+    `gatedWatchDecision` short-circuits to `weaRun`/``ct-incremental-disabled``
+    without consulting the engine; enabling it delegates to the real seam). As
+    part of verification the ENTIRE lib suite (all 11 M0-M9 test files) +
+    `repro_cli_support/tests/t_watch_ct_incremental_flags.nim` +
+    `nim check libs/repro_cli_support/src/repro_cli_support.nim` (exit 0) all run
+    green, and `nim check repro.nim` now compiles (exit 0) — the unrelated
+    `Executable` error noted in M5/M6 was fixed upstream after the rebase, so the
+    whole-project caveat no longer applies.
 
   Acceptance: a single table + engine covers every CodeTracer language group;
   representative end-to-end tests are green for interpreted, native, and Nim-dual.
+
+** The language → strategy table (every language cites the matrix)
+
+   Authoritative language list: `codetracer-specs/Language-Support-Matrix.md`
+   ("Last updated: March 2026"). `detectBackend(traceDir)` is the AUTHORITATIVE
+   per-trace source of truth; this table is ADVISORY (reporting/validation).
+
+   | language    | mechanism          | expected backend(s)                    | discovery / shallow-hash        | matrix citation                                                |
+   |-------------+--------------------+----------------------------------------+---------------------------------+----------------------------------------------------------------|
+   | Python      | source/interpreted | tbSourceInterpreted                    | canonical Function/Call · source-text | Platform Support Overview row 'Python' (Supported, Linux; interpreted recorder) |
+   | Ruby        | source/interpreted | tbSourceInterpreted                    | canonical Function/Call · source-text | Platform Support Overview row 'Ruby'                           |
+   | JavaScript  | source/interpreted | tbSourceInterpreted                    | canonical Function/Call · source-text | Platform Support Overview row 'JavaScript' (Planned; JS recorder) |
+   | TypeScript  | source/interpreted | tbSourceInterpreted                    | canonical Function/Call · source-text | traced via the JS recorder (TS runs as JS); classified with row 'JavaScript' |
+   | Lua         | source/interpreted | tbSourceInterpreted                    | canonical Function/Call · source-text | Platform Support Overview row 'Lua' (Planned; Lua recorder)    |
+   | WASM        | source/interpreted | tbSourceInterpreted                    | canonical Function/Call · source-text | Wasm/wasmi recorders (managed runtime, not native machine code) |
+   | C           | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'C' (LLDB + DWARF, rr)         |
+   | C++         | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'C++'                          |
+   | Rust        | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Rust'                         |
+   | Go          | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Go' (Delve + DWARF)           |
+   | Pascal      | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Pascal'                       |
+   | D           | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'D'                            |
+   | Fortran     | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Fortran' (GDB + DWARF)        |
+   | Ada         | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Ada' (GDB + DWARF + GNAT)     |
+   | Crystal     | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Crystal'                      |
+   | Odin        | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Odin'                         |
+   | V           | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'V' (DWARF via C backend)      |
+   | Lean        | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Lean' (DWARF via C; partial values — still native) |
+   | Julia       | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Recording Backends → Linux row 'Julia' (partial; native capture) |
+   | Assembly    | native / MCR       | tbNativeDwarf                          | native calltrace · instruction-bytes | Platform Support Overview row 'Assembly' (Partial; native machine code) |
+   | Nim         | DUAL               | tbSourceInterpreted AND tbNativeDwarf  | per-trace (detectBackend wins)  | Recording Backends → Linux row 'Nim' (DWARF via C backend) + a materialized-source path |
+
+   Validation in this prototype: Python/Ruby/JS source extraction + C and Nim
+   instruction-byte hashing run on REAL artifacts (real source files; binaries
+   the tests compile with `cc`/`nim c` at test time). The TRACES (executed-set
+   ingestion) are HAND-CRAFTED in the real schemas (no live recorder/MCR-RR in
+   the dev shell). Languages marked "table-only" in the README are classified +
+   covered by the matrix-coverage test but not separately exercised end-to-end
+   (their MECHANISM is, via the representative-per-group tests). See
+   `libs/repro_ct_incremental/README.md` for the full LIVE-vs-hand-crafted note.

@@ -15,6 +15,7 @@ import repro_ct_incremental/native_trace
 import repro_ct_incremental/native_hash
 import repro_ct_incremental/engine
 import repro_ct_incremental/watch
+import repro_ct_incremental/language_matrix
 
 export trace_reader
 export extractors
@@ -23,3 +24,4 @@ export native_trace
 export native_hash
 export engine
 export watch
+export language_matrix
