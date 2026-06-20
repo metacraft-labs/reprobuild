@@ -344,14 +344,29 @@ proc autotools_package*(srcDir: string;
   # the env empty; the install action then runs with the relative
   # DESTDIR=out form via ``vars``, preserving legacy behaviour for
   # tests that don't go through engine spawn.
+  # M9.R.15a.4 — env-DESTDIR is honoured only by Makefiles that don't
+  # already assign ``DESTDIR=`` themselves; openssl's Makefile DOES
+  # default it to empty, which silently drops the env value and
+  # writes the install into the REAL /usr (destructive). The portable
+  # fix is to pass ``DESTDIR=...`` on the make command line — GNU
+  # make's command-line overrides ALWAYS win over Makefile
+  # assignments, regardless of any ``-e`` switch. Adding it via
+  # ``vars`` (positional args) routes through the typed CLI and
+  # therefore enters ``callIdentity`` — but since the install step
+  # already used host-specific absolute paths in the typed
+  # ``workDir`` slot pre-M9.R.15a, the cache fingerprint was already
+  # host-bound. So spelling DESTDIR on cmdline doesn't make the cache
+  # any less portable than it already was.
   let providerProjectRoot = activeProviderProjectRoot()
   var installVars: seq[string] = @[]
   var installEnv: seq[(string, string)] = @[("MAKEFLAGS", makeflags)]
-  if providerProjectRoot.len > 0:
-    let absoluteDestdir = providerProjectRoot / buildDir / destdir
-    installEnv.add(("DESTDIR", absoluteDestdir))
-  else:
-    installVars.add("DESTDIR=" & destdir)
+  let installDestdir =
+    if providerProjectRoot.len > 0:
+      providerProjectRoot / buildDir / destdir
+    else:
+      destdir
+  installEnv.add(("DESTDIR", installDestdir))
+  installVars.add("DESTDIR=" & installDestdir)
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],
