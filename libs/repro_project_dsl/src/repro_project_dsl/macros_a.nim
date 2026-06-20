@@ -1371,6 +1371,8 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
     if policy.ignoredInputPrefixes.len > 0:
       parts.add(ignoredCode())
     "makeDepfilePolicy(" & parts.join(", ") & ")"
+  of bdpDeclaredOnly:
+    "declaredOnlyDependencyPolicy(" & ignoredCode() & ")"
 
 proc packageUseSeqLiteral(uses: seq[PackageUseDef]): string =
   ## DSL-port M9.R.1: shared serializer for ``seq[PackageUseDef]``

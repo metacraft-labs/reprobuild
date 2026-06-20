@@ -168,10 +168,9 @@ suite "t_repro_build_test_aggregate_builds_every_test":
           var testEdgeActions = 0
           for entry in actions:
             let id = entry{"id"}.getStr("")
-            # Engine lowercases the typed-tool name in the action id
-            # (``buildnimunittest`` not ``buildNimUnittest``); match
-            # the actual on-disk shape rather than the source identifier.
-            if id.startsWith("ct_test_nim_unittest.buildnimunittest-build-"):
+            # Current reports use hashed ``nim-c-*`` compile action IDs, but
+            # each generated ``TestSpec`` still has one stable execute action.
+            if id.startsWith("reprobuild.test_execute."):
               inc testEdgeActions
           checkpoint("declared test edges: " & $declaredCount)
           checkpoint("test edge actions in report: " & $testEdgeActions)

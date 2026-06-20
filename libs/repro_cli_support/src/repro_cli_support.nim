@@ -1367,6 +1367,9 @@ proc lowerDependencyPolicy(actionId, depfile: string;
       raise newException(ValueError,
         "action " & actionId & " uses makeDepfilePolicy without a depfile path")
     result = depfilePolicyMulti(merged)
+  of bdpDeclaredOnly:
+    result = DependencyGatheringPolicy(kind: dgNoRuntimeDependencies,
+      completeness: decComplete)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
@@ -8898,6 +8901,7 @@ const
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX",
     "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC", "CT_TEST_SRC",
+    "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
     # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
     # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
     # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs

@@ -24,6 +24,7 @@ import std/[unittest]
 
 import repro_interface_artifacts
 import repro_project_dsl
+import repro_dsl_stdlib/types
 
 # Clear the registry so packages declared by earlier link units (in
 # this same binary) don't leak into the assertions below.

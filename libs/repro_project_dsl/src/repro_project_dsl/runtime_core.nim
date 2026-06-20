@@ -170,7 +170,7 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 17'u16
+  BuildActionPayloadVersion = 18'u16
     ## v17: M9.N Batch B — appends a length-prefixed string array of
     ## ``BuildAction.toolIdentityRefs`` so the engine can resolve each
     ## referenced tool through the catalog at fork time and prepend
@@ -681,6 +681,13 @@ proc automaticMonitorPolicy*(
     BuildActionDependencyPolicy {.dynOrStatic.} =
   BuildActionDependencyPolicy(
     kind: bdpAutomaticMonitor,
+    ignoredInputPrefixes: @ignoredInputPrefixes)
+
+proc declaredOnlyDependencyPolicy*(
+    ignoredInputPrefixes: openArray[string] = []):
+    BuildActionDependencyPolicy {.dynOrStatic.} =
+  BuildActionDependencyPolicy(
+    kind: bdpDeclaredOnly,
     ignoredInputPrefixes: @ignoredInputPrefixes)
 
 proc makeDepfilePolicy*(depfile = "";
@@ -1725,7 +1732,7 @@ proc writeDependencyPolicy(outp: var seq[byte];
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
   let kind = readByte(bytes, pos)
-  if kind > byte(ord(bdpMakeDepfile)):
+  if kind > byte(ord(bdpDeclaredOnly)):
     raisePayload("invalid dependency policy kind in build action payload")
   result.kind = BuildActionDependencyPolicyKind(kind)
   if version >= 15'u16:

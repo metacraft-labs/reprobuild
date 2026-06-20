@@ -685,6 +685,25 @@ proc textBytes(text: string): seq[byte] =
 proc weakFingerprintFromText*(text: string): ContentDigest =
   blake3DomainDigest(text.textBytes(), hdActionFingerprint)
 
+proc legacyDepfileGatheringPolicy(depfile: string;
+                                  ignoredInputPrefixes: openArray[string]):
+    DependencyGatheringPolicy =
+  DependencyGatheringPolicy(
+    kind: dgRecognizedFormat,
+    completeness: decComplete,
+    recognizedReports: @[
+      RecognizedDependencyReportSpec(
+        formatName: DependencyFormatName(MakeDepfileFormatName),
+        outputs: @[
+          ExpectedDependencyFile(
+            logicalName: "deps",
+            path: depfile,
+            required: false)
+        ],
+        completeness: decComplete)
+    ],
+    ignoredInputPrefixes: @ignoredInputPrefixes)
+
 proc action*(id: string; argv: openArray[string]; cwd = "";
              deps: openArray[string] = []; inputs: openArray[string] = [];
              outputs: openArray[string] = []; pool = ""; poolUnits = 1'u32;
@@ -696,6 +715,13 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              env: openArray[string] = []): BuildAction =
+  let effectiveDependencyPolicy =
+    if depfile.len > 0 and monitorDepfile.len == 0 and
+        dependencyPolicy.kind == dgAutomaticMonitor:
+      legacyDepfileGatheringPolicy(depfile,
+        dependencyPolicy.ignoredInputPrefixes)
+    else:
+      dependencyPolicy
   BuildAction(
     kind: bakProcess,
     id: id,
@@ -716,7 +742,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
-    dependencyPolicy: dependencyPolicy)
+    dependencyPolicy: effectiveDependencyPolicy)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     deps: openArray[string] = [];
@@ -1462,6 +1488,11 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # wired (e.g. the hermetic workspace/VCS integration tests). Only
   # ``bakProcess`` actions spawn a monitorable subprocess.
   if action.kind != bakProcess:
+    return
+  # Direct engine callers may provide a monitor depfile path for actions that
+  # produce RMDF evidence themselves. Preserve that prewired evidence path
+  # instead of wrapping the command and overwriting it with fs-snoop output.
+  if action.monitorDepfile.len > 0:
     return
   # Windows: automatic monitor dependency gathering now works on Windows via
   # the IAT-patching shim + CreateRemoteThread injection (see

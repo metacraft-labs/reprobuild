@@ -1,7 +1,6 @@
-## Bootstrap-And-Self-Build Deferred-D3: the ``ct-test-src`` flake
-## input is pinned past the B3/B4 API additions so the in-tree
-## ``scripts/run_tests.sh`` does not need the live-sibling
-## ``CT_TEST_SRC`` override.
+## Bootstrap-And-Self-Build Deferred-D3: reprobuild's split ct-test runner
+## inputs are locked, and the legacy live-sibling ``CT_TEST_SRC`` override is
+## gone from ``scripts/run_tests.sh``.
 ##
 ## Background
 ## ----------
@@ -20,23 +19,19 @@
 ## on ``buildNimUnittest.build``. Without the override the in-tree
 ## DSL call sites would fail to compile against the stale snapshot.
 ##
-## D3 closed the gap by bumping the lock to ct-test's current ``main``
-## (post-B4) and dropped the override. This test is the structural
-## regression guard: a future ``nix flake update`` that accidentally
-## rolled the input back, or a revert of the run_tests.sh edit, must
-## fail this test.
+## D3 closed the gap by moving the build-side ct-test packages in-tree and
+## keeping only the run-side adapter / shared contract as split flake inputs.
+## This test is the structural regression guard: those inputs must remain
+## locked, and a revert of the run_tests.sh edit must fail this test.
 ##
 ## Strategy
 ## --------
 ## Two structural assertions, both on-disk text only — no engine, no
 ## ct-test build, no nix evaluation:
 ##
-##   1. ``flake.lock`` ct-test-src entry's ``rev`` field is NOT the
-##      pre-B3 SHA. We intentionally do not pin the new SHA; the lock
-##      should be free to roll forward as ct-test ``main`` advances.
-##      The negative assertion catches the specific regression we
-##      care about (back to pre-B3) without locking the test to a
-##      single snapshot.
+##   1. ``flake.lock`` carries full-SHA locks for
+##      ``reprobuild-ct-test-runner-src`` and
+##      ``reprobuild-test-adapters-src``.
 ##
 ##   2. ``scripts/run_tests.sh`` no longer contains the live-sibling
 ##      override block (the ``CT_TEST_SRC_ABS`` literal). A revert
@@ -66,10 +61,10 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc lockedCtTestRev(repoRoot: string): string =
-  ## Parse ``flake.lock`` and return the ``rev`` field of the
-  ## ``ct-test-src`` input's ``locked`` block. Raises on missing
-  ## input — a missing input is itself a regression worth flagging.
+proc lockedInputRev(repoRoot, inputName: string): string =
+  ## Parse ``flake.lock`` and return the ``rev`` field of the input's
+  ## ``locked`` block. Raises on missing input — a missing input is itself a
+  ## regression worth flagging.
   let lockPath = repoRoot / "flake.lock"
   check fileExists(lockPath)
   let root = parseFile(lockPath)
@@ -77,8 +72,8 @@ proc lockedCtTestRev(repoRoot: string): string =
   check root.hasKey("nodes")
   let nodes = root["nodes"]
   check nodes.kind == JObject
-  check nodes.hasKey("ct-test-src")
-  let entry = nodes["ct-test-src"]
+  check nodes.hasKey(inputName)
+  let entry = nodes[inputName]
   check entry.kind == JObject
   check entry.hasKey("locked")
   let locked = entry["locked"]
@@ -90,23 +85,25 @@ proc lockedCtTestRev(repoRoot: string): string =
 
 suite "Deferred-D3: ct-test flake input carries the B3+B4 buildNimUnittest API":
 
-  test "structural: flake.lock ct-test-src rev is past the pre-B3 snapshot":
+  test "structural: flake.lock carries the split ct-test runner inputs":
     let repoRoot = findRepoRoot()
-    let rev = lockedCtTestRev(repoRoot)
-    checkpoint("flake.lock ct-test-src rev: " & rev)
+    for inputName in [
+      "reprobuild-ct-test-runner-src",
+      "reprobuild-test-adapters-src",
+    ]:
+      let rev = lockedInputRev(repoRoot, inputName)
+      checkpoint("flake.lock " & inputName & " rev: " & rev)
 
-    # The pinned rev must be a full 40-char hex SHA (github inputs
-    # always lock to a full SHA — a short-form hit here would mean
-    # the lock file shape changed and the test needs a refresh).
-    check rev.len == 40
-    for ch in rev:
-      check ch in {'0'..'9', 'a'..'f'}
+      # GitHub inputs always lock to a full SHA. A short-form hit here would
+      # mean the lock file shape changed and the test needs a refresh.
+      check rev.len == 40
+      for ch in rev:
+        check ch in {'0'..'9', 'a'..'f'}
 
-    # The critical regression guard: bumping back to the pre-B3
-    # snapshot would re-break ``scripts/run_tests.sh`` without the
-    # live-sibling override.
-    check rev != PreB3CtTestSha
-    checkpoint("ct-test-src lock past pre-B3 snapshot: OK")
+      # The old monorepo ct-test snapshot is no longer a valid source for
+      # these split inputs.
+      check rev != PreB3CtTestSha
+    checkpoint("split ct-test runner inputs locked: OK")
 
   test "structural: scripts/run_tests.sh no longer overrides CT_TEST_SRC":
     let repoRoot = findRepoRoot()

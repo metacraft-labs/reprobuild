@@ -16,6 +16,7 @@
 ## "additional outputs survive" rule from the M1 spec.
 
 import repro_project_dsl
+import repro_dsl_stdlib/types
 
 type
   CmakeBuildCall* = object

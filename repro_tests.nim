@@ -70,6 +70,70 @@ type
 
 const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
+    source: "libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim",
+    binary: "build/test-bin/t_smoke_ct_test_interface",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim",
+    binary: "build/test-bin/t_smoke_ct_test_nim_unittest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim",
+    binary: "build/test-bin/t_backward_compat_std_unittest_test_runs_unchanged",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim",
+    binary: "build/test-bin/t_ct_test_runner_full_suite_parity",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim",
+    binary: "build/test-bin/t_ct_test_runner_partition_file_mode",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protocol.nim",
+    binary: "build/test-bin/t_every_test_binary_speaks_list_json_protocol",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim",
+    binary: "build/test-bin/t_smoke_ct_test_unittest_parallel",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
+    binary: "build/test-bin/t_test_binary_run_one_writes_result_file",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p1_module_loads.nim",
     binary: "build/test-bin/t_a2_5_p1_module_loads",
     defines: @[],
@@ -173,19 +237,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.N Step A/B/C — in-process publisher path.
   TestSpec(
-    source: "libs/repro_binary_cache_client/tests/test_publish_in_process.nim",
-    binary: "build/test-bin/test_publish_in_process",
+    source: "libs/repro_binary_cache_client/tests/test_auto_credentials.nim",
+    binary: "build/test-bin/test_auto_credentials",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.O — auto-generated producer credentials + lazy WSL repro-cache start.
   TestSpec(
-    source: "libs/repro_binary_cache_client/tests/test_auto_credentials.nim",
-    binary: "build/test-bin/test_auto_credentials",
+    source: "libs/repro_binary_cache_client/tests/test_publish_in_process.nim",
+    binary: "build/test-bin/test_publish_in_process",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -263,7 +325,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.N Step A/B/C — binary cache publisher hook + tool-identity env plumbing.
   TestSpec(
     source: "libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim",
     binary: "build/test-bin/test_binary_cache_publisher_hook",
@@ -312,7 +373,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.N Step A/B/C — engine publisher CLI wiring.
   TestSpec(
     source: "libs/repro_cli_support/tests/test_engine_publisher_wiring.nim",
     binary: "build/test-bin/test_engine_publisher_wiring",
@@ -1554,8 +1614,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
-    binary: "build/test-bin/t_dsl_build_package_empty",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim",
+    binary: "build/test-bin/t_dsl_bootloader",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1564,6 +1624,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_input_wiring.nim",
     binary: "build/test-bin/t_dsl_build_input_wiring",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
+    binary: "build/test-bin/t_dsl_build_package_empty",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1666,6 +1734,30 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_action_emission.nim",
+    binary: "build/test-bin/t_dsl_fetch_action_emission",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_git.nim",
+    binary: "build/test-bin/t_dsl_fetch_git",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_tarball.nim",
+    binary: "build/test-bin/t_dsl_fetch_tarball",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
     binary: "build/test-bin/t_dsl_files",
     defines: @[],
@@ -1676,6 +1768,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_configfile.nim",
     binary: "build/test-bin/t_dsl_fs_configfile",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_directory.nim",
+    binary: "build/test-bin/t_dsl_fs_directory",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1697,13 +1797,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.A — content-addressed on-disk materialisation for the
-  # M8 ``fs.configFile`` / ``fs.managedBlock`` surfaces. The three
-  # entries below pin sha256 hashing (configFile path), merged-content
-  # materialisation (managedBlock path), and the dhaFnv1a fallback.
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_configfile.nim",
     binary: "build/test-bin/t_dsl_fs_materialise_configfile",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_fnv_fallback.nim",
+    binary: "build/test-bin/t_dsl_fs_materialise_fnv_fallback",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1718,29 +1822,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_fnv_fallback.nim",
-    binary: "build/test-bin/t_dsl_fs_materialise_fnv_fallback",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.B — typed ``fs.symlink`` / ``fs.directory`` registration
-  # + on-disk materialisation surfaces. Drives NDE0-S systemd-session
-  # unmask symlinks, NDE0-G graphics-stack WantedBy symlinks, NDEM1
-  # display-manager.service chooser, and NDE0-D dbus-broker
-  # ``/var/lib/dbus`` spool placeholder.
-  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_symlink.nim",
     binary: "build/test-bin/t_dsl_fs_symlink",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_directory.nim",
-    binary: "build/test-bin/t_dsl_fs_directory",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1803,8 +1886,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim",
-    binary: "build/test-bin/t_dsl_service_executable_ref",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim",
+    binary: "build/test-bin/t_dsl_service_dependencies",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1819,40 +1902,16 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim",
-    binary: "build/test-bin/t_dsl_service_dependencies",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim",
+    binary: "build/test-bin/t_dsl_service_executable_ref",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.N Batch C.1 — ``shell()`` DSL action. Records passive shell
-  # invocations into a per-package registry consumed by the
-  # from_source_custom convention.
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim",
     binary: "build/test-bin/t_dsl_shell_action",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
-    binary: "build/test-bin/t_dsl_versions_single",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.E — ``variant <configField>:`` arms + ``validate:``
-  # predicate closures. The two entries pin the NDEM1 reproos-desktop
-  # shape: per-DE arms gate ``uses:`` clauses on the desktopKind
-  # configurable, and a ``validate:`` closure enforces
-  # ``activeAtBoot in desktopKind`` at solver time.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
-    binary: "build/test-bin/t_dsl_variant_uses",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -1866,1698 +1925,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.G — ``bootloader:`` block registry. NDEM1 reproos-
-  # desktop needs per-package GRUB metadata so the generation-switch
-  # apply phase can render the menu. The block recognises three top-
-  # level setters (``generationEntry`` / ``timeout`` / ``defaultEntry``)
-  # plus zero or more ``menuEntry:`` bodies.
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim",
-    binary: "build/test-bin/t_dsl_bootloader",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
+    binary: "build/test-bin/t_dsl_variant_uses",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.H — ``fetch:`` block registry (tarball mode). NDE R4-R9
-  # from-source recipes pin upstream tarball URL + hash + extract
-  # metadata directly inside the recipe so they can drop their sibling
-  # ``.ps1``/``.sh`` pre-fetch scripts. M9.H is REGISTRATION + parser
-  # ONLY; the build-engine fetch action is wired in M9.K.
   TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_tarball.nim",
-    binary: "build/test-bin/t_dsl_fetch_tarball",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.H — ``fetch:`` block registry (git-archive mode). Some
-  # NDE recipes (dbus-broker tags not in any tarball release) need a
-  # shallow git clone instead of a tarball URL; the M9.H ``gitUrl`` +
-  # ``gitRevision`` setters cover that case while sharing the same hash-
-  # verification surface.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_git.nim",
-    binary: "build/test-bin/t_dsl_fetch_git",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # M9.R.6.1 (2026-06-19): t_dsl_meson_options.nim +
-  # t_dsl_build_flags_all_channels.nim were removed alongside the
-  # ``registerBuildFlag`` / ``registeredBuildFlags`` runtime registry
-  # + the five ``mesonOptions:`` / ``cmakeFlags:`` / ``configureFlags:``
-  # / ``makeFlags:`` / ``ninjaFlags:`` parser arms. Recipes route
-  # per-tool options through their explicit ``build:`` body calling
-  # the M9.R.2b Layer-1 typed constructors instead.
-  # DSL-port M9.K — fetch-action emission gate. Verifies that the
-  # M9.H ``registeredFetchSpec`` registry feeds the shared fetch_action
-  # helper (consumed by the four c-cpp-* Tier 2b conventions) into a
-  # well-formed BuildActionDef carrying the URL + hash + dest path. The
-  # M9.K bridge from the parser-only M9.H/M9.I registries to actual
-  # build-engine actions.
-  TestSpec(
-    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_action_emission.nim",
-    binary: "build/test-bin/t_dsl_fetch_action_emission",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # First from-source production recipe to exercise the M9.H/I/K trio
-  # (fetch: + mesonOptions: + convention-layer fetch-action emission).
-  # Smoke-tests the dbusBrokerSource recipe's registry round-trips
-  # (URL + sha256, meson flag sequence, executable artifacts).
-  TestSpec(
-    source: "recipes/packages/source/dbus-broker/test_dbus_broker_source.nim",
-    binary: "build/test-bin/t_dbus_broker_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Second from-source production recipe to exercise the M9.H/I/K trio
-  # — exercises the M3 ``library`` artifact family (``dakLibrary``)
-  # where the dbus-broker smoke test exercises ``executable``
-  # (``dakExecutable``). Pins libdrm 2.4.133's vendored sha256 +
-  # meson flag sequence + three shared-library artifacts.
-  TestSpec(
-    source: "recipes/packages/source/libdrm/test_libdrm_source.nim",
-    binary: "build/test-bin/t_libdrm_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Third from-source production recipe to exercise the M9.H/I/K trio
-  # — FIRST recipe to mix ``library`` + ``executable`` artifacts in
-  # a single from-source production package. Pins Wayland 1.25.0's
-  # vendored sha256 + meson flag sequence + three shared-library
-  # artifacts (libwayland-{client,server,cursor}) PLUS one executable
-  # (wayland-scanner). Guards the M3 artifact registry against a
-  # regression that flattens the ``dakLibrary`` / ``dakExecutable``
-  # discriminator within a single package's artifact set.
-  TestSpec(
-    source: "recipes/packages/source/wayland/test_wayland_source.nim",
-    binary: "build/test-bin/t_wayland_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fourth from-source production recipe to exercise the M9.H/I/K trio
-  # — a SINGLE library artifact off a meson build whose dependency
-  # surface is wider than libdrm's (libdrm + Wayland + libxkbcommon +
-  # pixman + libinput in one ``uses:`` block). Pins wlroots 0.19.3's
-  # vendored sha256 + meson flag sequence + the single ``libwlroots``
-  # library artifact. Guards the M9.K convention layer against
-  # regressions that flatten the per-package fetch / mesonOptions
-  # registries when a wider transitive-dependency surface is in play.
-  TestSpec(
-    source: "recipes/packages/source/wlroots/test_wlroots_source.nim",
-    binary: "build/test-bin/t_wlroots_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifth from-source production recipe to exercise the M9.H/I/K trio
-  # — FOUR executable artifacts off a meson build whose dependency
-  # surface is the widest in the from-source cohort (10 entries in
-  # ``uses:`` covering meson/ninja/gcc + wlroots + wayland-scanner +
-  # libxkbcommon + pcre2 + json-c + pango + cairo + gdk-pixbuf). Pins
-  # Sway 1.11's vendored sha256 + meson flag sequence + four
-  # ``sway`` / ``swaybar`` / ``swaynag`` / ``swaymsg`` executable
-  # artifacts. Caps the wayland-stack from-source chain
-  # (wayland-scanner → libwayland → wlroots → SWAY).
-  TestSpec(
-    source: "recipes/packages/source/sway/test_sway_source.nim",
-    binary: "build/test-bin/t_sway_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixth from-source production recipe to exercise the M9.H/I/K trio
-  # — FIRST consumer of the M9.I ``makeFlags:`` channel (the five
-  # prior recipes all build under meson + ninja and consume
-  # ``mesonOptions:``). The Linux kernel uses ``make`` / kbuild, so
-  # this recipe's M9.I round-trip exercises the ``"make"`` channel of
-  # ``registeredBuildFlags``, complementing the five prior recipes'
-  # ``"meson"`` coverage. Pins linux-6.6.142's vendored sha256
-  # (b2f6607a75cd27b2e368cf2d25e1637e1e0da9dfed4cda536658879eee6f2b70)
-  # + the kbuild flag sequence (ARCH=x86_64 LOCALVERSION=
-  # KBUILD_BUILD_USER=reprobuild KBUILD_BUILD_HOST=reprobuild
-  # KBUILD_BUILD_TIMESTAMP=@1577836800 -j1) + 1 executable artifact
-  # (bzImage) + 3 files artifacts (vmlinux / systemMap /
-  # kernelRelease). First recipe to combine ``dakExecutable`` with
-  # ``dakFiles`` in a single from-source package. Complements the
-  # NDE-E ``reproosKernel`` config-emitting front end with the
-  # upstream-source back end.
-  TestSpec(
-    source: "recipes/packages/source/kernel/test_kernel_source.nim",
-    binary: "build/test-bin/t_kernel_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventh from-source production recipe to exercise the M9.H/I/K
-  # trio — BALANCED library + executable split (1 lib + 1 exe) where
-  # Wayland was imbalanced (3 libs + 1 exe). Pins libxkbcommon 1.13.2's
-  # vendored sha256 + meson flag sequence + ``libxkbcommon`` library +
-  # ``xkbcli`` executable artifacts. Upstream-source side of the
-  # ``libxkbcommon >=1.5`` dependency that ``wlrootsSource`` declares.
-  TestSpec(
-    source: "recipes/packages/source/libxkbcommon/test_libxkbcommon_source.nim",
-    binary: "build/test-bin/t_libxkbcommon_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eighth from-source production recipe to exercise the M9.H/I/K
-  # trio — second single-library shape (wlroots was the first), with
-  # a minimal ``uses:`` set (meson + ninja + gcc only). Pins pixman
-  # 0.46.4's vendored sha256 + meson flag sequence + ``libpixman1``
-  # library artifact. Upstream-source side of the ``pixman >=0.42``
-  # dependency that ``wlrootsSource`` declares.
-  TestSpec(
-    source: "recipes/packages/source/pixman/test_pixman_source.nim",
-    binary: "build/test-bin/t_pixman_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Ninth from-source production recipe to exercise the M9.H/I/K trio
-  # — library + executable pair whose on-disk filenames COLLIDE
-  # (``libinput.so`` vs the ``libinput`` CLI binary) but whose DSL
-  # identifiers stay distinct (``libinput`` for the library,
-  # ``libinputBin`` for the executable). Pins libinput 1.28.1's
-  # vendored sha256 (sourced from Debian's source pool because the
-  # canonical freedesktop.org URL sits behind an Anubis bot-protection
-  # challenge) + meson flag sequence + ``libinput`` library +
-  # ``libinputBin`` executable artifacts. Upstream-source side of the
-  # ``libinput >=1.14`` dependency that ``wlrootsSource`` declares.
-  TestSpec(
-    source: "recipes/packages/source/libinput/test_libinput_source.nim",
-    binary: "build/test-bin/t_libinput_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Tenth from-source production recipe to exercise the M9.H/I/K trio
-  # — third single-library shape (wlroots + pixman were the first
-  # two), with a WIDE ``uses:`` set (pixman + freetype + fontconfig +
-  # zlib + libpng) and a ``.tar.xz`` (rather than ``.tar.gz``) source
-  # archive. Pins cairo 1.18.4's vendored sha256 + meson flag sequence
-  # + ``libcairo`` library artifact. Upstream-source side of the
-  # ``cairo >=1.16`` dependency that ``swaySource`` declares.
-  TestSpec(
-    source: "recipes/packages/source/cairo/test_cairo_source.nim",
-    binary: "build/test-bin/t_cairo_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eleventh from-source production recipe to exercise the M9.H/I/K
-  # trio — TWO-library single-package shape (``libpango-1.0.so`` +
-  # ``libpangocairo-1.0.so``). The first multi-library single-package
-  # shape in the from-source corpus where both artifacts share the
-  # same SONAME prefix but ship distinct ABIs. Pins pango 1.54.0's
-  # vendored sha256 + meson flag sequence + ``libpango`` and
-  # ``libpangocairo`` library artifacts. Upstream-source side of the
-  # ``pango >=1.50`` dependency that ``swaySource`` declares.
-  TestSpec(
-    source: "recipes/packages/source/pango/test_pango_source.nim",
-    binary: "build/test-bin/t_pango_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twelfth from-source production recipe to exercise the M9.H/I/K
-  # trio — fourth single-library shape (wlroots + pixman + cairo were
-  # the first three) with the kebab-to-camel package-identifier
-  # mapping (``gdk-pixbuf`` -> ``gdkPixbufSource``). Pins gdk-pixbuf
-  # 2.42.12's vendored sha256 + meson flag sequence + ``libgdkPixbuf``
-  # library artifact. Upstream-source side of the
-  # ``gdk-pixbuf >=2.40`` dependency that ``swaySource`` declares.
-  TestSpec(
-    source: "recipes/packages/source/gdk-pixbuf/test_gdk_pixbuf_source.nim",
-    binary: "build/test-bin/t_gdk_pixbuf_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirteenth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST CMake-driven recipe (every prior recipe used meson
-  # or make). Single-library shape with the kebab-to-camel package-
-  # identifier mapping (``json-c`` -> ``jsonCSource``). Pins json-c
-  # 0.18-20240915's vendored sha256 + cmake flag sequence + cross-
-  # channel isolation (cmake flags MUST NOT leak into the meson or
-  # configure channels) + ``libJsonC`` library artifact. Upstream-
-  # source side of the ``json-c >=0.17`` dependency the sway helpers
-  # / NetworkManager / BlueZ / PolicyKit declare.
-  TestSpec(
-    source: "recipes/packages/source/json-c/test_json_c_source.nim",
-    binary: "build/test-bin/t_json_c_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fourteenth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST autotools-driven recipe (every prior recipe used
-  # meson, make, or CMake). Single-library shape with the
-  # ``configureFlags:`` channel. Pins expat 2.7.0's vendored sha256 +
-  # ``./configure`` flag sequence + cross-channel isolation
-  # (configure flags MUST NOT leak into the meson or cmake channels)
-  # + ``libExpat`` library artifact. Upstream-source side of the
-  # ``expat >=2.6`` dependency that ``dbusBrokerSource`` + fontconfig
-  # + shared-mime-info + at-spi declare.
-  TestSpec(
-    source: "recipes/packages/source/expat/test_expat_source.nim",
-    binary: "build/test-bin/t_expat_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifteenth from-source production recipe to exercise the M9.H/I/K
-  # trio — FOUR-library single-package shape (the third multi-library
-  # shape after Wayland's two libs + pango's two libs, and the first
-  # to ship four artifacts under one ``package`` macro). Pins
-  # glib2 2.82.5's vendored sha256 + meson flag sequence + cross-
-  # channel isolation + ``libGlib2`` / ``libGObject`` / ``libGio`` /
-  # ``libGModule`` library artifacts. Upstream-source side of the
-  # ``glib >=2.62`` dependency every GObject-based recipe (gdk-pixbuf,
-  # pango, cairo's font-config glue) declares.
-  TestSpec(
-    source: "recipes/packages/source/glib2/test_glib2_source.nim",
-    binary: "build/test-bin/t_glib2_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixteenth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the GNOME stack batch (mutter / gdm /
-  # gnome-shell). Second meson-driven multi-artifact recipe to ship
-  # BOTH a library AND an executable from the same ``package`` macro
-  # (Wayland was the first). Pins mutter 47.10's vendored sha256 +
-  # meson flag sequence + cross-channel isolation + ``libMutter``
-  # library artifact + ``mutterBin`` executable artifact within a
-  # single package's artifact set. Upstream-source side of the
-  # ``mutter >=47`` dependency ``gnomeShellSource`` declares and the
-  # NDE-G1 GNOME desktop entry pins.
-  TestSpec(
-    source: "recipes/packages/source/mutter/test_mutter_source.nim",
-    binary: "build/test-bin/t_mutter_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventeenth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND autotools-driven recipe (expat was the first) and
-  # FIRST autotools recipe to ship TWO executable artifacts from one
-  # ``package`` macro. The ``configureFlags:`` block exercises every
-  # autotools-flag idiom in one sequence (``--disable-*``,
-  # ``--without-*``, ``--with-*=value``, ``--disable-*=false``
-  # polarity flip, ``--enable-*``). Pins gdm 47.0's vendored sha256 +
-  # ``./configure`` flag sequence + cross-channel isolation
-  # (configure flags MUST NOT leak into the meson or cmake channels)
-  # + ``gdm`` daemon executable artifact + ``gdmGreeterSession``
-  # greeter executable artifact. NDE-G1's display-manager entry
-  # point.
-  TestSpec(
-    source: "recipes/packages/source/gdm/test_gdm_source.nim",
-    binary: "build/test-bin/t_gdm_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eighteenth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD (closing) recipe in the GNOME stack batch and FIRST
-  # recipe to combine BOTH a multi-word-kebab package name
-  # (``gnome-shell`` -> ``gnomeShellSource``) AND a mixed-kind
-  # artifact set (library + executable). Third meson recipe to ship
-  # a library + an executable from the same ``package`` macro
-  # (Wayland + mutter were the first two). Pins gnome-shell 47.10's
-  # vendored sha256 + meson flag sequence + cross-channel isolation +
-  # ``gnomeShell`` executable artifact + ``libGnomeShell`` library
-  # artifact within a single package's artifact set. The GNOME user-
-  # session UI: top bar, activities overview, lock screen,
-  # notification daemon, extension host.
-  TestSpec(
-    source: "recipes/packages/source/gnome-shell/test_gnome_shell_source.nim",
-    binary: "build/test-bin/t_gnome_shell_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Nineteenth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the Plasma stack batch (kcoreaddons / kwin /
-  # plasma-workspace / sddm) and SECOND CMake-driven recipe after
-  # json-c. Pins kcoreaddons 6.10.0's vendored sha256 + CMake flag
-  # sequence + cross-channel isolation + ``libKF6CoreAddons`` library
-  # artifact. The bottom of the KDE Frameworks 6 dependency graph;
-  # every other KF6 module + every Plasma component links against it.
-  # Upstream-source side of the ``kcoreaddons >=6.0`` dependency
-  # ``kwinSource`` declares and the NDE-K1 Plasma desktop entry pins.
-  TestSpec(
-    source: "recipes/packages/source/kcoreaddons/test_kcoreaddons_source.nim",
-    binary: "build/test-bin/t_kcoreaddons_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twentieth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the Plasma stack batch and THIRD CMake-
-  # driven recipe. FIRST CMake recipe to ship BOTH a library AND an
-  # executable from the same ``package`` macro (the mutter / gnome-
-  # shell precedents are meson; this is the CMake-side analogue).
-  # Pins kwin 6.2.5's vendored sha256 + CMake flag sequence +
-  # cross-channel isolation + ``libKWin`` library artifact +
-  # ``kwinWayland`` executable artifact within a single package's
-  # artifact set. The KDE Plasma Wayland compositor — analogue of
-  # mutter for the Plasma story.
-  TestSpec(
-    source: "recipes/packages/source/kwin/test_kwin_source.nim",
-    binary: "build/test-bin/t_kwin_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-first from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the Plasma stack batch and FOURTH CMake-
-  # driven recipe. FIRST CMake recipe to combine BOTH a multi-word-
-  # kebab package name (``plasma-workspace`` -> ``plasmaWorkspaceSource``)
-  # AND a mixed-kind artifact set (library + executable) — the
-  # gnome-shell precedent exercised the same shape on the meson channel,
-  # this is the CMake-side analogue. Pins plasma-workspace 6.2.5's
-  # vendored sha256 + CMake flag sequence + cross-channel isolation +
-  # ``libPlasmaWorkspace`` library artifact + ``plasmashell`` executable
-  # artifact within a single package's artifact set. The Plasma user-
-  # session UI: task bar, system tray, application launcher, activities,
-  # lock screen, notifications.
-  TestSpec(
-    source: "recipes/packages/source/plasma-workspace/test_plasma_workspace_source.nim",
-    binary: "build/test-bin/t_plasma_workspace_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-second from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the Plasma stack batch and FIFTH CMake-
-  # driven recipe. FIRST recipe in the suite to ship THREE artifacts
-  # (two executables + one library) from a single ``package`` macro
-  # — prior multi-artifact recipes shipped either TWO (wayland, pango,
-  # mutter, gnome-shell, kwin, plasma-workspace, gdm) or FOUR (glib2).
-  # Pins sddm 0.21.0's vendored sha256 + CMake flag sequence +
-  # cross-channel isolation + ``sddm`` daemon executable artifact +
-  # ``sddmGreeter`` greeter executable artifact + ``libSddmCommon``
-  # library artifact within a single package's artifact set. NDE-K1's
-  # display-manager entry point — the KDE-flavoured analogue of gdm
-  # for the Plasma story.
-  TestSpec(
-    source: "recipes/packages/source/sddm/test_sddm_source.nim",
-    binary: "build/test-bin/t_sddm_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-third from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the font + GUI infrastructure batch (freetype
-  # / harfbuzz / fontconfig / qt6-base). THIRD autotools-driven recipe
-  # after expat + gdm. Pins freetype 2.13.3's vendored sha256 +
-  # configure flag sequence (with the ``--without-X=auto`` tristate
-  # variants exercising the autotools-grammar) + cross-channel isolation
-  # + ``libFreetype`` library artifact. The font-glyph rasteriser
-  # foundation; pango / harfbuzz / fontconfig / cairo / Qt / GTK /
-  # browsers all link this transitively.
-  TestSpec(
-    source: "recipes/packages/source/freetype/test_freetype_source.nim",
-    binary: "build/test-bin/t_freetype_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-fourth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the font + GUI infrastructure batch and
-  # SIXTEENTH meson-driven recipe. Pins harfbuzz 10.1.0's vendored
-  # sha256 + meson flag sequence (six-element seq alongside cairo's
-  # six and pango's five — the largest meson flag sets in the corpus)
-  # + cross-channel isolation + ``libHarfbuzz`` library artifact. The
-  # OpenType text-shaping engine that complements freetype's glyph
-  # rasteriser; pango / cairo / GTK / Qt6 (QtGui) / Firefox / Chromium
-  # all link this transitively for complex-script rendering.
-  TestSpec(
-    source: "recipes/packages/source/harfbuzz/test_harfbuzz_source.nim",
-    binary: "build/test-bin/t_harfbuzz_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-fifth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the font + GUI infrastructure batch and
-  # FOURTH autotools-driven recipe (expat + gdm + freetype precedents).
-  # FIRST autotools recipe in the corpus to ship an ``--enable-X``
-  # POSITIVE-form configure flag — every prior autotools recipe shipped
-  # purely negative-form flags. Pins fontconfig 2.16.0's vendored sha256
-  # + configure flag sequence + cross-channel isolation +
-  # ``libFontconfig`` library artifact. The font-discovery + matching
-  # layer that sits above freetype's rasteriser; pango / cairo / GTK /
-  # Qt6 / Firefox / Chromium all link this transitively.
-  TestSpec(
-    source: "recipes/packages/source/fontconfig/test_fontconfig_source.nim",
-    binary: "build/test-bin/t_fontconfig_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-sixth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the font + GUI infrastructure batch and
-  # SIXTH CMake-driven recipe (json-c, kcoreaddons, kwin,
-  # plasma-workspace, sddm precedents). FIRST recipe in the corpus to
-  # ship SIX library artifacts from a single ``package`` macro — every
-  # prior multi-artifact recipe shipped two, three (sddm) or four
-  # (glib2). LARGEST vendored tarball in the corpus by far (48.2 MB
-  # compressed, well under the kernel-precedent 90 MB upstream-URL
-  # fallback cutoff). Pins qt6-base 6.8.1's vendored sha256 + CMake
-  # flag sequence + cross-channel isolation + six library artifacts
-  # (``libQt6Core`` + ``libQt6Gui`` + ``libQt6Widgets`` +
-  # ``libQt6Network`` + ``libQt6DBus`` + ``libQt6Sql``) within a single
-  # package's artifact set. The bottom of the Qt6 dependency graph;
-  # every KF6 module + every Plasma component links against it. SDDM
-  # greeter QML runtime also picks it up.
-  TestSpec(
-    source: "recipes/packages/source/qt6-base/test_qt6_base_source.nim",
-    binary: "build/test-bin/t_qt6_base_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-seventh from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the system-tier infrastructure batch (zlib +
-  # libxml2 + openssl + systemd) and the FIRST recipe in the corpus to
-  # drive a CUSTOM (non-autotools, non-meson, non-cmake) ``./configure``
-  # script through the abstract ``configureFlags:`` channel. zlib's
-  # custom ``./configure`` is NOT autoconf-generated and accepts a much
-  # smaller flag set with different naming conventions (``--shared``
-  # not ``--enable-shared``); the convention layer treats the
-  # ``configureFlags:`` channel as the abstract "argv passed to
-  # ``./configure``" carrier so a custom-configure recipe reuses the
-  # same channel without needing a new flag-channel taxonomy. Pins
-  # zlib 1.3.1's vendored sha256 + custom configure flag sequence +
-  # cross-channel isolation + ``libZ`` library artifact. The deflate /
-  # inflate compression foundation; glib2 / qt6-base / libxml2 /
-  # openssl / freetype / linux-kernel all link this transitively.
-  TestSpec(
-    source: "recipes/packages/source/zlib/test_zlib_source.nim",
-    binary: "build/test-bin/t_zlib_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-eighth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the system-tier infrastructure batch and
-  # the SIXTH autotools-driven recipe (expat + gdm + freetype +
-  # fontconfig + zlib precedents). Pins libxml2 2.13.5's vendored sha256
-  # + configure flag sequence (six-element seq, all negative-form
-  # ``--without-X`` flags exercising the autotools-grammar variant
-  # different from fontconfig's ``--enable-X`` positive-form) +
-  # cross-channel isolation + ``libXml2`` library artifact. The
-  # canonical full-DOM + SAX XML parser that pairs with expat for the
-  # heavyweight tree-based + XPath + XSLT entry points GNOME / KDE
-  # settings systems consume.
-  TestSpec(
-    source: "recipes/packages/source/libxml2/test_libxml2_source.nim",
-    binary: "build/test-bin/t_libxml2_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Twenty-ninth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the system-tier infrastructure batch and the
-  # SECOND recipe in the corpus to drive a CUSTOM (non-autotools,
-  # non-meson, non-cmake) ``./Configure`` script (zlib was first this
-  # batch). openssl's ``Configure`` (with a capital ``C``) is a Perl
-  # script accepting a positional target triplet (``linux-x86_64``)
-  # FOLLOWED by ``no-<feature>`` / ``enable-<feature>`` toggles, a
-  # quite different argv grammar than autotools. Pins openssl 3.4.0's
-  # vendored sha256 + Configure flag sequence (with the positional
-  # target triplet exercising the order-sensitive parsing) +
-  # cross-channel isolation + ``libCrypto`` + ``libSsl`` library
-  # artifacts. The SEVENTH multi-library single-package shape and the
-  # FIRST non-meson / non-cmake multi-library recipe. The TLS +
-  # cryptography foundation; qt6-base / glib2 / systemd / kwallet /
-  # polkit / kernel IMA all link this transitively.
-  TestSpec(
-    source: "recipes/packages/source/openssl/test_openssl_source.nim",
-    binary: "build/test-bin/t_openssl_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirtieth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the system-tier infrastructure batch and
-  # the SEVENTEENTH meson-driven recipe. FIRST recipe in the corpus to
-  # ship a SIX-ARTIFACT MIXED-KIND shape from a single ``package`` macro:
-  # four executables (``systemdInit`` + ``systemctl`` + ``journalctl``
-  # + ``systemdLogind``) PLUS two libraries (``libSystemd`` + ``libUdev``)
-  # all built from one meson invocation. Every prior multi-artifact
-  # recipe shipped at most six (qt6-base's SIX libs, all of one kind)
-  # or three (sddm's two-exec + one-lib mixed-kind) — systemd pushes
-  # the artifact-name partitioning + per-artifact kind-tagging at the
-  # six-artifact mixed-kind cardinality. Also the LARGEST meson option
-  # set in the corpus (fourteen-element seq). Pins systemd 257's
-  # vendored sha256 + meson flag sequence + cross-channel isolation +
-  # the six artifacts within a single package's artifact set. The init
-  # system + service manager + session manager + log aggregator
-  # underpinning every modern Linux desktop.
-  TestSpec(
-    source: "recipes/packages/source/systemd/test_systemd_source.nim",
-    binary: "build/test-bin/t_systemd_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-second from-source production recipe to exercise the
-  # M9.H/I/K trio — FIRST recipe in the system-userland batch
-  # (util-linux + pam + libcap + eudev) and the SEVENTH autotools-
-  # driven recipe. FIRST recipe in the corpus to ship an
-  # EIGHT-ARTIFACT MIXED-KIND shape from a single ``package`` macro:
-  # five executables (``mount`` + ``umount`` + ``mkfsBin`` + ``fdisk``
-  # + ``lsblk``) PLUS three libraries (``libBlkid`` + ``libUuid`` +
-  # ``libMount``) all built from one autotools ``./configure`` +
-  # ``make`` invocation. systemd previously held the multi-artifact
-  # record with six mixed-kind artifacts; util-linux pushes the
-  # artifact-name partitioning + per-artifact kind-tagging at the
-  # EIGHT-artifact mixed-kind cardinality. Pins util-linux 2.40.4's
-  # vendored sha256 + configure flag sequence + cross-channel
-  # isolation + the eight artifacts within a single package's
-  # artifact set. The canonical Linux system utilities bundle
-  # (mount/umount/mkfs/fdisk/lsblk + libblkid/libuuid/libmount).
-  TestSpec(
-    source: "recipes/packages/source/util-linux/test_util_linux_source.nim",
-    binary: "build/test-bin/t_util_linux_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-third from-source production recipe to exercise the
-  # M9.H/I/K trio — SECOND recipe in the system-userland batch and
-  # the EIGHTH autotools-driven recipe. THREE-library single-package
-  # autotools recipe (libpam + libpam_misc + libpamc) pushing the
-  # per-channel partitioning property at the three-library autotools
-  # cardinality (openssl was the prior two-library autotools peak).
-  # Pins Linux-PAM 1.6.1's vendored sha256 + configure flag sequence
-  # + cross-channel isolation + the three library artifacts. The
-  # canonical Linux authentication stack consumed by gdm / sddm /
-  # sshd / sudo / polkit / screen-lock unlock.
-  TestSpec(
-    source: "recipes/packages/source/pam/test_pam_source.nim",
-    binary: "build/test-bin/t_pam_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-fourth from-source production recipe to exercise the
-  # M9.H/I/K trio — THIRD recipe in the system-userland batch and
-  # the SECOND consumer of the M9.I ``makeFlags:`` channel (linux-
-  # kernel was the first). FIRST recipe to drive a non-kbuild raw
-  # Makefile through the channel — pins the ``makeFlags:`` channel's
-  # grammar from a second flavour angle (libcap-style ``BUILD_CC=`` +
-  # ``prefix=`` overrides vs the kernel's ``ARCH=`` + ``LOCALVERSION=``
-  # + ``-j1`` kbuild grammar). Also the FIRST recipe in the corpus
-  # to ship a ONE-library + THREE-executable mixed-kind shape from
-  # a raw Makefile package. Pins libcap 2.71's vendored sha256 +
-  # make flag sequence + cross-channel isolation + the four
-  # artifacts. The canonical POSIX capabilities library consumed by
-  # systemd / sshd / NetworkManager / kwin_wayland.
-  TestSpec(
-    source: "recipes/packages/source/libcap/test_libcap_source.nim",
-    binary: "build/test-bin/t_libcap_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-fifth from-source production recipe to exercise the
-  # M9.H/I/K trio — CLOSING recipe in the system-userland batch and
-  # the NINTH autotools-driven recipe. FIRST recipe in the corpus
-  # with an intentional artifact-name collision against a sibling
-  # recipe: eudev's ``libUdev`` deliberately shares an artifactName
-  # with systemd's ``libUdev`` (both packages emit ``libudev.so``
-  # with a compatible API; the variant resolver picks ONE at
-  # consumer-resolution time). The collision pins the convention
-  # layer's artifact registry's (packageName, artifactName) tuple
-  # tracking — a regression that flattened the tuple to
-  # ``artifactName`` alone would merge the two entries and mis-route
-  # the install action. Pins eudev 3.2.14's vendored sha256 +
-  # configure flag sequence + cross-channel isolation + the three
-  # artifacts (``udevd`` + ``udevadm`` + ``libUdev``) + the
-  # collision-distinctness property. The systemd-independent fork of
-  # udev maintained by the Gentoo project, used by the sysvinit-
-  # edition NDE-K1 variant.
-  TestSpec(
-    source: "recipes/packages/source/eudev/test_eudev_source.nim",
-    binary: "build/test-bin/t_eudev_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-sixth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the KF6 module-sweep batch (kconfig / ki18n /
-  # kwidgetsaddons / kxmlgui) and SEVENTH CMake-driven recipe (json-c,
-  # kcoreaddons, kwin, plasma-workspace, sddm, fontconfig precedents).
-  # SECOND KF6 foundation module after kcoreaddons. FIRST CMake recipe
-  # to ship THREE library artifacts from a single ``package`` macro
-  # (libKF6Config + libKF6ConfigCore + libKF6ConfigGui split across
-  # the umbrella/core/GUI boundary). Pins kconfig 6.10.0's vendored
-  # sha256 + CMake flag sequence + cross-channel isolation + the three
-  # library artifacts. The KF6 configuration-storage stack
-  # (KConfig/KConfigGroup/KSharedConfig) every KF6 application + Plasma
-  # component links against.
-  TestSpec(
-    source: "recipes/packages/source/kconfig/test_kconfig_source.nim",
-    binary: "build/test-bin/t_kconfig_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-seventh from-source production recipe to exercise the
-  # M9.H/I/K trio — SECOND recipe in the KF6 module-sweep batch and
-  # EIGHTH CMake-driven recipe. THIRD KF6 foundation module after
-  # kcoreaddons + kconfig. Pins ki18n 6.10.0's vendored sha256 + CMake
-  # flag sequence + cross-channel isolation + ``libKF6I18n`` library
-  # artifact. The KF6 translation/internationalisation layer wrapping
-  # gettext/libintl with a Qt-native interface (KLocalizedString /
-  # i18n() / i18nc() / i18np() macros) every KF6 application + Plasma
-  # component uses for user-facing strings.
-  TestSpec(
-    source: "recipes/packages/source/ki18n/test_ki18n_source.nim",
-    binary: "build/test-bin/t_ki18n_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-eighth from-source production recipe to exercise the
-  # M9.H/I/K trio — THIRD recipe in the KF6 module-sweep batch and
-  # NINTH CMake-driven recipe. FOURTH KF6 foundation module after
-  # kcoreaddons + kconfig + ki18n. Pins kwidgetsaddons 6.10.0's
-  # vendored sha256 + CMake flag sequence + cross-channel isolation +
-  # ``libKF6WidgetsAddons`` library artifact (the longest compound-
-  # word artifact identifier in the KF6 batch, pinning the package-
-  # name -> PascalCase artifact-name lowering when the upstream module
-  # name is itself a compound word). The cross-cutting QtWidgets
-  # extensions (KMessageBox + KPasswordDialog + KSeparator + KPageWidget
-  # + ...) every KF6 application links against on the GUI side.
-  TestSpec(
-    source: "recipes/packages/source/kwidgetsaddons/test_kwidgetsaddons_source.nim",
-    binary: "build/test-bin/t_kwidgetsaddons_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Thirty-ninth from-source production recipe to exercise the
-  # M9.H/I/K trio — CLOSING recipe in the KF6 module-sweep batch and
-  # TENTH CMake-driven recipe. FIFTH KF6 foundation module after
-  # kcoreaddons + kconfig + ki18n + kwidgetsaddons. Pins kxmlgui
-  # 6.10.0's vendored sha256 + CMake flag sequence + cross-channel
-  # isolation + ``libKF6XmlGui`` library artifact. The
-  # action/menu/toolbar XML-driven UI surface (KAction +
-  # KStandardAction + KActionCollection + KXmlGuiWindow + ``*ui.rc``
-  # reader) plasma-workspace's krunner / systemsettings / kickoff
-  # launcher pull in for their panel + window-frame UI plumbing.
-  TestSpec(
-    source: "recipes/packages/source/kxmlgui/test_kxmlgui_source.nim",
-    binary: "build/test-bin/t_kxmlgui_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-third from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the SECOND KF6 module-sweep batch (kservice
-  # / kglobalaccel / knotifications / plasma-framework) and ELEVENTH
-  # CMake-driven recipe (json-c, kcoreaddons, kwin, plasma-workspace,
-  # sddm, fontconfig, kconfig, ki18n, kwidgetsaddons, kxmlgui
-  # precedents). SIXTH KF6 foundation module after kcoreaddons +
-  # kconfig + ki18n + kwidgetsaddons + kxmlgui. Pins kservice 6.10.0's
-  # vendored sha256 + CMake flag sequence + cross-channel isolation +
-  # ``libKF6Service`` library artifact. The KF6 service-registry layer
-  # (KService + KSycoca + KApplicationTrader + KMimeTypeTrader +
-  # KServiceGroup + KServiceTypeTrader) plasma-workspace's kickoff
-  # launcher / krunner / kded MIME-bus / KIO open-with-dialog link
-  # against for desktop-entry discovery + MIME-type → application
-  # mapping.
-  TestSpec(
-    source: "recipes/packages/source/kservice/test_kservice_source.nim",
-    binary: "build/test-bin/t_kservice_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-fourth from-source production recipe to exercise the
-  # M9.H/I/K trio — SECOND recipe in the SECOND KF6 module-sweep batch
-  # and TWELFTH CMake-driven recipe. SEVENTH KF6 foundation module
-  # after kcoreaddons + kconfig + ki18n + kwidgetsaddons + kxmlgui +
-  # kservice. Pins kglobalaccel 6.10.0's vendored sha256 + CMake flag
-  # sequence + cross-channel isolation + ``libKF6GlobalAccel`` library
-  # artifact (two-token PascalCase brand). The KF6 global-shortcut
-  # broker (KGlobalAccel + KGlobalShortcutInfo + KGlobalAccelComponent
-  # + kglobalacceld D-Bus proxy) plasma-workspace's khotkeys / kded /
-  # plasma-shell consume to bind Meta / Ctrl-Alt / hardware-media keys
-  # to actions across all running applications.
-  TestSpec(
-    source: "recipes/packages/source/kglobalaccel/test_kglobalaccel_source.nim",
-    binary: "build/test-bin/t_kglobalaccel_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-fifth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the SECOND KF6 module-sweep batch and
-  # THIRTEENTH CMake-driven recipe. EIGHTH KF6 foundation module after
-  # kcoreaddons + kconfig + ki18n + kwidgetsaddons + kxmlgui +
-  # kservice + kglobalaccel. Pins knotifications 6.10.0's vendored
-  # sha256 + CMake flag sequence + cross-channel isolation +
-  # ``libKF6Notifications`` library artifact (plural-noun PascalCase
-  # brand). The KF6 desktop-notification dispatch layer (KNotification
-  # + KNotificationAction + KNotificationPermission + freedesktop
-  # ``org.freedesktop.Notifications`` D-Bus proxy) every KF6
-  # application uses to surface popup notifications + sounds +
-  # action-button events through plasma-workspace's notification
-  # daemon.
-  TestSpec(
-    source: "recipes/packages/source/knotifications/test_knotifications_source.nim",
-    binary: "build/test-bin/t_knotifications_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-sixth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the SECOND KF6 module-sweep batch and
-  # FOURTEENTH CMake-driven recipe. FIRST recipe in the recipe suite
-  # to lift from ``stable/plasma/<x.y.z>/`` instead of
-  # ``stable/frameworks/<x.y>/`` — Plasma 6.x renamed the kpackage +
-  # kdeclarative + plasma-framework trio into a unified ``libplasma``
-  # release tarball, so the historical ``plasmaFrameworkSource`` slot
-  # now pins ``libplasma-6.2.5`` per the task brief's fallback clause
-  # (frameworks/6.10/plasma-framework-6.10.0.tar.xz returns HTTP 404
-  # upstream). FIRST recipe to register a Plasma-stack-branded library
-  # artifact (``libPlasma``) WITHOUT the ``KF6`` prefix the sibling
-  # framework recipes carry. Pins libplasma 6.2.5's vendored sha256 +
-  # CMake flag sequence + cross-channel isolation + ``libPlasma``
-  # library artifact (Plasma applet runtime + PlasmaCore +
-  # PlasmaComponents + PlasmaExtras QML bindings + KPackage plugin
-  # loader). plasma-workspace's plasma-shell loads this library at
-  # startup and refuses to start without it.
-  TestSpec(
-    source: "recipes/packages/source/plasma-framework/test_plasma_framework_source.nim",
-    binary: "build/test-bin/t_plasma_framework_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fortieth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the foundation-tier-closing batch (dbus /
-  # sqlite / glibc / coreutils) and FIRST from-source dbus daemon
-  # family recipe driven by autotools (sibling ``dbusBrokerSource``
-  # covers the alternative bus1 broker via meson + ninja). Pins dbus
-  # 1.16.0's vendored sha256 + ``./configure`` flag sequence + cross-
-  # channel isolation + ``dbusDaemon`` executable + ``libDbus1``
-  # library artifacts. The reference freedesktop D-Bus daemon the
-  # NDE0-D ``dbus.service`` unit invokes when
-  # ``busActivationStrategy = basDaemon``; the libdbus client library
-  # every glib / Qt / KDE D-Bus binding links against regardless of
-  # which daemon implementation is active.
-  TestSpec(
-    source: "recipes/packages/source/dbus/test_dbus_source.nim",
-    binary: "build/test-bin/t_dbus_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-first from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the foundation-tier-closing batch and the
-  # SQLite-authoritative ``sqlite-autoconf-*.tar.gz`` amalgamation
-  # tarball (single-translation-unit C99 source distribution shipping
-  # a hand-rolled ``./configure`` script with the standard autoconf-
-  # shaped flag grammar). Pins sqlite 3.47.1's vendored sha256 +
-  # ``./configure`` flag sequence + cross-channel isolation +
-  # ``libSqlite3`` library + ``sqlite3Cli`` executable artifacts. The
-  # canonical embedded SQL database underpinning tracker + baloo +
-  # every modern web browser (Firefox / Chromium / WebKitGTK persist
-  # cookies + history + IndexedDB in SQLite databases) + every
-  # modern messaging client.
-  TestSpec(
-    source: "recipes/packages/source/sqlite/test_sqlite_source.nim",
-    binary: "build/test-bin/t_sqlite_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-second from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the foundation-tier-closing batch and the
-  # LARGEST single from-source artifact set (SEVEN artifacts: six
-  # libraries + one executable for the dynamic linker). Closes the
-  # foundation tier on the C-library side; complementary to the R5/R6
-  # bootstrap glibc-2.42 wrappers under
-  # ``recipes/bootstrap/tcc-chain/`` which continue to cover the lift-
-  # from-hex0 chain while THIS recipe covers everything downstream of
-  # the lifted gcc. Pins glibc 2.40's vendored sha256 + ``./configure``
-  # flag sequence + cross-channel isolation + ``libC`` + ``libM`` +
-  # ``libPthread`` + ``libDl`` + ``libRt`` + ``libCrypt`` library
-  # artifacts + ``ldso`` executable for the dynamic linker.
-  TestSpec(
-    source: "recipes/packages/source/glibc/test_glibc_source.nim",
-    binary: "build/test-bin/t_glibc_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-third from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the foundation-tier-closing batch and the
-  # canonical GNU userland (~100 distinct binaries from a single
-  # ``./configure`` + ``make`` invocation; v1 records the SIX most-
-  # used). Pins coreutils 9.5's vendored sha256 + ``./configure`` flag
-  # sequence + cross-channel isolation + ``ls`` + ``cp`` + ``mv`` +
-  # ``rm`` + ``cat`` + ``echo`` executable artifacts. The middle
-  # ``--enable-no-install-program=kill,uptime,arch`` flag's comma-
-  # separated value pins the per-channel handling of comma-list
-  # values — a regression that split the value on commas would surface
-  # as a flag-count mismatch.
-  TestSpec(
-    source: "recipes/packages/source/coreutils/test_coreutils_source.nim",
-    binary: "build/test-bin/t_coreutils_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-seventh from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the system-userland-coverage batch (kmod +
-  # procps + iproute2 + libcap-ng). Five-artifact mixed-kind autotools
-  # shape (four executables + one library). Pins kmod 33's vendored
-  # sha256 + ``./configure`` flag sequence + cross-channel isolation +
-  # ``modprobe`` + ``lsmod`` + ``insmod`` + ``rmmod`` executable +
-  # ``libKmod`` library artifacts. The canonical Linux kernel-module
-  # userland (libkmod.so consumed by ModemManager + NetworkManager;
-  # modprobe / lsmod / insmod / rmmod consumed by systemd-modules-load
-  # + udev rules + initramfs scripts + power-management hooks).
-  TestSpec(
-    source: "recipes/packages/source/kmod/test_kmod_source.nim",
-    binary: "build/test-bin/t_kmod_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-eighth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the system-userland-coverage batch and the
-  # FIRST recipe in the corpus to consume the GitLab archive endpoint
-  # (``/-/archive/<tag>/<name>-<tag>.tar.gz``). Six-artifact mixed-kind
-  # autotools shape (five executables + one library). Pins procps-ng
-  # 4.0.5's vendored sha256 + ``./configure`` flag sequence (incl. the
-  # ``--with-systemd=no`` ``--with-X=value`` polarity-explicit idiom) +
-  # cross-channel isolation + ``ps`` + ``top`` + ``free`` + ``kill`` +
-  # ``uptime`` executable + ``libProc`` library artifacts. The canonical
-  # Linux process-utilities userland; libproc2.so consumed by htop +
-  # glances + btop.
-  TestSpec(
-    source: "recipes/packages/source/procps/test_procps_source.nim",
-    binary: "build/test-bin/t_procps_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Forty-ninth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the system-userland-coverage batch and the
-  # FIRST recipe to drive a hand-rolled ``./configure`` shell-script
-  # wrapper (NOT autoconf-generated) paired with a raw top-level
-  # Makefile. Four-executable shape. Pins iproute2 6.12.0's vendored
-  # sha256 + ``./configure`` flag sequence (SMALLEST production
-  # configure-flag set in the corpus — a single ``--without-libelf``
-  # flag pinning the one-flag-only edge case) + cross-channel isolation
-  # + ``ip`` + ``tc`` + ``ss`` + ``bridge`` executable artifacts. The
-  # canonical Linux networking-utilities userland; consumed by
-  # NetworkManager dispatcher hooks + containerd / podman + systemd-
-  # networkd + every sysadmin network diagnostic.
-  TestSpec(
-    source: "recipes/packages/source/iproute2/test_iproute2_source.nim",
-    binary: "build/test-bin/t_iproute2_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fiftieth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the system-userland-coverage batch.
-  # SINGLE-library autotools shape that COMPLEMENTS (does NOT replace)
-  # the libcap recipe (thirty-fourth): libcap covers the "raw" POSIX
-  # 1003.1e capabilities API, libcap-ng covers the higher-level wrapper
-  # API consumed by auditd + cronie. Pins libcap-ng 0.8.5's vendored
-  # sha256 + ``./configure`` flag sequence (incl. two consecutive
-  # ``--without-python*`` flags that guard against prefix-collapse
-  # regressions in the per-channel flag-lowering logic) + cross-channel
-  # isolation + ``libCapNg`` library artifact. The kebab-cased upstream
-  # SONAME ``cap-ng`` -> ``libCapNg`` PascalCase mapping pins the
-  # json-c -> libJsonC precedent on a second hyphenated SONAME.
-  TestSpec(
-    source: "recipes/packages/source/libcap-ng/test_libcap_ng_source.nim",
-    binary: "build/test-bin/t_libcap_ng_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-first from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the crypto-and-FFI batch (libffi + nettle +
-  # libgcrypt + gnutls). Single-library autotools shape. Pins libffi
-  # 3.4.6's vendored sha256 + ``./configure`` flag sequence (incl. the
-  # ``--disable-multi-os-directory`` flag that guards the multilib
-  # install-layout split) + cross-channel isolation + ``libFfi``
-  # library artifact. libffi is the portable foreign-function-interface
-  # library at the bottom of every "call a C function from a high-level
-  # language" stack (GObject Introspection's libgirepository, Python's
-  # ctypes, Ruby's FFI gem, GJS's SpiderMonkey callback marshalling).
-  TestSpec(
-    source: "recipes/packages/source/libffi/test_libffi_source.nim",
-    binary: "build/test-bin/t_libffi_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-second from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the crypto-and-FFI batch. TWO-library
-  # autotools shape (libnettle + libhogweed) — pairs with the sibling
-  # ``libgcryptSource`` (fifty-third) + ``gnutlsSource`` (fifty-fourth)
-  # to build out the GNU TLS / crypto stack independently of openssl.
-  # Pins nettle 3.10's vendored sha256 + ``./configure`` flag sequence
-  # (incl. the mixed ``--disable-*`` / ``--enable-*`` polarity that pins
-  # the per-channel handling of mixed disable/enable polarities) +
-  # cross-channel isolation + ``libNettle`` + ``libHogweed`` library
-  # artifacts. nettle is the low-level cryptography library at the
-  # bottom of the GnuTLS stack; libnettle covers symmetric ciphers +
-  # hashes + AEAD; libhogweed covers public-key ciphers.
-  TestSpec(
-    source: "recipes/packages/source/nettle/test_nettle_source.nim",
-    binary: "build/test-bin/t_nettle_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-third from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the crypto-and-FFI batch and FIRST recipe in
-  # the corpus to vendor a .tar.bz2 archive (the prior fifty-two used
-  # .tar.gz or .tar.xz). Single-library autotools shape. Pins libgcrypt
-  # 1.11.0's vendored sha256 + ``./configure`` flag sequence (three
-  # consecutive ``--disable-*`` flags that pin the per-channel handling
-  # of common-prefix flag names) + cross-channel isolation + ``libGcrypt``
-  # library artifact + .tar.bz2 URL-suffix pin (the convention layer's
-  # extract action selects the bunzip2 decompressor based on the URL
-  # suffix; a regression that defaulted the decompressor back to gzip /
-  # xz would surface in the extract phase). libgcrypt is the GnuPG
-  # project's higher-level cryptography library consumed by gpg +
-  # gpg-agent + gpgsm + libsecret + the GNOME Keyring + dnsmasq's DNSSEC
-  # validation path.
-  TestSpec(
-    source: "recipes/packages/source/libgcrypt/test_libgcrypt_source.nim",
-    binary: "build/test-bin/t_libgcrypt_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-fourth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING recipe in the crypto-and-FFI batch. Single-library
-  # autotools shape with the LARGEST production configure-flag set in
-  # the corpus (six flags) — pins the per-channel handling of a larger-
-  # cardinality flag sequence against a regression that truncated mid-
-  # sequence. Pins gnutls 3.8.8's vendored sha256 + ``./configure`` flag
-  # sequence (mixed ``--disable-*`` / ``--without-*`` polarity that pins
-  # the autotools two-flavour convention: ``--enable-X`` / ``--disable-X``
-  # toggle a boolean feature; ``--with-X`` / ``--without-X`` toggle a
-  # dependency probe) + cross-channel isolation + ``libGnutls`` library
-  # artifact. gnutls is the GNU TLS / DTLS library at the bottom of the
-  # GNOME networking stack's non-openssl backend selection (consumed by
-  # glib-networking's gnutls backend, GStreamer's souphttpsrc + tlsenc /
-  # tlsdec elements, and GNOME Online Accounts' OAuth2 flows via libsoup).
-  TestSpec(
-    source: "recipes/packages/source/gnutls/test_gnutls_source.nim",
-    binary: "build/test-bin/t_gnutls_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-fifth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the THIRD KF6 module-sweep batch (ksvg /
-  # ksolid / kio / kded). Thirteenth CMake-driven recipe and the
-  # NINTH KF6 foundation module after kcoreaddons + kconfig + ki18n +
-  # kwidgetsaddons + kxmlgui + kservice + kglobalaccel + knotifications.
-  # Pins ksvg 6.10.0's vendored sha256 + CMake flag sequence + cross-
-  # channel isolation + ``libKF6Svg`` library artifact. The QtSvg-on-
-  # top KF6 wrapper Plasma 6's theme engine consumes for scalable
-  # vector assets (panel icons, popup-menu chrome, system-tray badges,
-  # plasmoid backgrounds via Svg / SvgItem / FrameSvg QML primitives).
-  TestSpec(
-    source: "recipes/packages/source/ksvg/test_ksvg_source.nim",
-    binary: "build/test-bin/t_ksvg_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-sixth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the THIRD KF6 module-sweep batch.
-  # Fourteenth CMake-driven recipe and the TENTH KF6 foundation
-  # module. FIRST KF6-batch recipe whose vendored tarball filename
-  # (``solid-6.10.0.tar.xz``) does NOT match the package identifier
-  # (``ksolidSource``) — upstream publishes the project as bare
-  # ``solid`` while the recipe shelves it under ``ksolid`` for
-  # consistency with the rest of the KF6 cluster. Pins ksolid 6.10.0's
-  # vendored sha256 + CMake flag sequence + cross-channel isolation +
-  # ``libKF6Solid`` library artifact. The hardware-abstraction layer
-  # KF6 applications consume to enumerate block devices, network
-  # interfaces, batteries, optical drives, and removable storage
-  # (Device + Battery + StorageVolume + NetworkInterface +
-  # OpticalDrive + Predicate) — every kded ``solidautoeject`` /
-  # ``solidnotify`` module + plasma-workspace's device-notifier applet
-  # + Dolphin's mount-point sidebar pulls it in.
-  TestSpec(
-    source: "recipes/packages/source/ksolid/test_ksolid_source.nim",
-    binary: "build/test-bin/t_ksolid_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-seventh from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the THIRD KF6 module-sweep batch. Fifteenth
-  # CMake-driven recipe and the ELEVENTH KF6 foundation module. The
-  # LARGEST KF6 framework in the recipe suite by source-size and the
-  # FIRST KF6 recipe whose upstream SONAME contains a three-letter
-  # all-caps acronym (``KF6KIO``) — the artifact identifier
-  # (``libKF6Kio``) pins the brand-conventional casing rule (``Kio``
-  # not ``KIO``) on the M3 registry. Pins kio 6.10.0's vendored sha256
-  # + CMake flag sequence + cross-channel isolation + ``libKF6Kio``
-  # library artifact. The KIO transparent-network-IO layer every KF6
-  # application (Dolphin, KMail, Okular, KDevelop) consumes for
-  # cross-protocol URL access (``smb://``, ``sftp://``, ``http(s)://``,
-  # ``trash:/``, ``recently:/``, ``man:/``).
-  TestSpec(
-    source: "recipes/packages/source/kio/test_kio_source.nim",
-    binary: "build/test-bin/t_kio_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-eighth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING (FOURTH) recipe in the THIRD KF6 module-sweep
-  # batch. Sixteenth CMake-driven recipe and the TWELFTH KF6
-  # foundation module. FIRST KF6-batch recipe to ship a LIBRARY +
-  # EXECUTABLE pair from a single ``package`` macro — the sddm
-  # precedent (3 artifacts) and gdm precedent (2 executables) cover
-  # the multi-artifact-per-package M9.K registry path; kded covers
-  # the (lib, exe) doublet specifically. The ``kded6`` digit-suffixed
-  # binary name pins the gdm + sddm precedent of retaining ABI-line
-  # digits in artifact identifiers. Pins kded 6.10.0's vendored
-  # sha256 + CMake flag sequence + cross-channel isolation +
-  # ``libKF6Ded`` library artifact + ``kded6`` executable artifact.
-  # The central KF6 module-host daemon every Plasma session spawns
-  # at autostart-phase 1; loads ``.desktop`` modules from
-  # ``$XDG_DATA_DIRS/kded6/`` (solidautoeject, networkmanagement,
-  # kfilemetadata, ksysguard) and keeps them alive across
-  # application launches.
-  TestSpec(
-    source: "recipes/packages/source/kded/test_kded_source.nim",
-    binary: "build/test-bin/t_kded_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Fifty-ninth from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the FOUR-recipe essential-userland batch
-  # (bash / less / vim / ncurses). All four are autotools and cover
-  # the critical interactive-terminal surface every shell session +
-  # every TUI application on the v1 desktop depends on. bash is THE
-  # canonical POSIX shell — ``/bin/bash`` is the login shell on every
-  # major Linux distribution + the shebang line at the top of every
-  # sysadmin script + the implicit interpreter every Makefile recipe
-  # is evaluated under. Pins bash 5.2.37's vendored sha256 + autotools
-  # five-flag configure sequence (``--disable-static`` +
-  # ``--without-bash-malloc`` + ``--enable-readline`` +
-  # ``--enable-history`` + ``--enable-job-control``) + cross-channel
-  # isolation + single ``bash`` executable artifact.
-  TestSpec(
-    source: "recipes/packages/source/bash/test_bash_source.nim",
-    binary: "build/test-bin/t_bash_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixtieth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the essential-userland batch. less is THE
-  # canonical Unix pager; every ``man <topic>`` + every ``git log`` +
-  # every ``systemctl status`` on a TTY pipes through ``/usr/bin/less``.
-  # FIRST source recipe in the corpus with a SINGLE-flag
-  # ``configureFlags:`` block — pins the M9.I block parser's one-flag
-  # path against potential off-by-one regressions at the low end.
-  # Pins less 668's vendored sha256 + ``--with-regex=posix`` flag +
-  # cross-channel isolation + single ``less`` executable artifact.
-  TestSpec(
-    source: "recipes/packages/source/less/test_less_source.nim",
-    binary: "build/test-bin/t_less_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-first from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the essential-userland batch. vim is the
-  # de-facto Unix modal editor; ``/usr/bin/vim`` is the default
-  # ``EDITOR=`` on every major Linux distribution that doesn't pin
-  # emacs, and the implicit interpreter every ``visudo`` / ``vipw`` /
-  # ``crontab -e`` invocation spawns. FIRST recipe in the corpus with
-  # a SEVEN-flag ``configureFlags:`` block (largest cardinality so
-  # far) — pins the M9.I block parser's upper end against potential
-  # off-by-one regressions. The mixed ``--enable-`` / ``--disable-`` /
-  # ``--without-`` prefixes pin the parser's grammar-agnostic flag
-  # handling. Pins vim 9.1.1000's vendored sha256 + seven-flag
-  # configure sequence + cross-channel isolation + three executable
-  # artifacts (``vim`` + ``vimdiff`` + ``vimtutor``).
-  TestSpec(
-    source: "recipes/packages/source/vim/test_vim_source.nim",
-    binary: "build/test-bin/t_vim_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-second from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING (FOURTH) recipe in the essential-userland batch.
-  # ncurses is THE canonical Unix terminal-UI library; every TTY
-  # application that paints a full-screen TUI (top, htop, less, vim,
-  # tmux, mc, ncdu) links against ``libncursesw.so`` and consults the
-  # terminfo database under ``/usr/share/terminfo/`` via
-  # ``libtinfow.so``. FIRST source recipe in the corpus to ship a
-  # TWO-library + TWO-executable mixed-kind shape from a single
-  # autotools ``./configure`` + ``make`` invocation — the prior
-  # precedents (libcap one-lib + three-exec, procps one-lib +
-  # five-exec) covered the library/executable mix at different
-  # cardinalities but not the TWO-of-each balance. Pins ncurses 6.5's
-  # vendored sha256 + six-flag configure sequence + cross-channel
-  # isolation + two library artifacts (``libNcursesw`` + ``libTinfow``)
-  # + two executable artifacts (``tic`` + ``infocmp``).
-  TestSpec(
-    source: "recipes/packages/source/ncurses/test_ncurses_source.nim",
-    binary: "build/test-bin/t_ncurses_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-third from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the system-base batch (xz + readline +
-  # gettext + ca-certificates). xz is THE canonical modern LZMA2
-  # compressor on Linux; every ``.tar.xz`` extraction shells through
-  # ``xz`` + every distro packager (rpm / pacman / dpkg / ostree) links
-  # against ``liblzma``. FIRST source recipe in the corpus to ship a
-  # ONE-executable + ONE-library mixed-kind autotools shape (the
-  # cleanest one-of-each balance — prior precedents at multi-of-each).
-  # Pins xz 5.6.3's vendored sha256 + three-flag configure sequence
-  # (``--disable-static`` + ``--disable-doc`` + ``--disable-rpath``) +
-  # cross-channel isolation + one executable artifact (``xz``) + one
-  # library artifact (``libLzma``).
-  TestSpec(
-    source: "recipes/packages/source/xz/test_xz_source.nim",
-    binary: "build/test-bin/t_xz_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-fourth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the system-base batch. readline is THE
-  # canonical line-editing + history + tab-completion library for every
-  # interactive Unix CLI (bash, gdb, psql, sqlite3, ipython). Pairs
-  # with the sibling ``bashSource`` recipe (#59) which configures
-  # ``--enable-readline`` against this library. TWO-library autotools
-  # shape (``libReadline`` + ``libHistory``) — pins the canonical
-  # readline + history SONAME pair convention. Pins readline 8.2's
-  # vendored sha256 + two-flag configure sequence (``--disable-static``
-  # + ``--enable-shared``) + cross-channel isolation + two library
-  # artifacts.
-  TestSpec(
-    source: "recipes/packages/source/readline/test_readline_source.nim",
-    binary: "build/test-bin/t_readline_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-fifth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the system-base batch. gettext is THE
-  # canonical GNU i18n / l10n toolchain on Linux; every translated
-  # menu item / button label / dialog title on the v1 desktop flows
-  # through ``libintl`` at runtime + every ``.po`` translation file
-  # flows through ``msgfmt`` / ``msgmerge`` / ``xgettext`` at build
-  # time. FIRST source recipe in the corpus to ship a THREE-executable
-  # + ONE-library mixed-kind autotools shape from a single
-  # ``./configure`` + ``make`` invocation (prior precedents capped at
-  # two-of-each). Pins gettext 0.22.5's vendored sha256 + five-flag
-  # configure sequence (``--disable-static`` + ``--disable-java`` +
-  # ``--disable-csharp`` + ``--without-emacs`` +
-  # ``--without-included-libintl``, mixed ``--disable-*`` /
-  # ``--without-*`` polarity) + cross-channel isolation + three
-  # executable artifacts (``msgfmt`` + ``msgmerge`` + ``xgettext``) +
-  # one library artifact (``libIntl``).
-  TestSpec(
-    source: "recipes/packages/source/gettext/test_gettext_source.nim",
-    binary: "build/test-bin/t_gettext_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-sixth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING (FOURTH) recipe in the system-base batch and FIRST
-  # from-source recipe in the corpus to exercise the M3 ``files:``
-  # artifact kind (``dakFiles``) as a load-bearing artifact attribution
-  # (prior ``dakFiles`` users were the NDE-E ``kernelSource``
-  # auxiliary outputs + DSL-port self-tests). ca-certificates is THE
-  # canonical Mozilla CA bundle on Linux; every TLS handshake on the
-  # v1 desktop verifies its server certificate chain against this
-  # bundle. UNIQUE coverage angles: single ``files`` artifact
-  # (``dakFiles`` discriminator end-to-end on a load-bearing recipe);
-  # ``extractStrip: 0`` (NEW value in the from-source corpus — pins
-  # the 0-value registry round-trip against a regression that defaulted
-  # to 1); NO build-system flag block on ANY channel (pins the
-  # four-channel cross-isolation registry's empty-state on a real
-  # load-bearing recipe). Pins the 2024-12-31 cacert.pem cut's
-  # vendored sha256 + single ``caBundle`` files artifact.
-  TestSpec(
-    source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
-    binary: "build/test-bin/t_ca_certificates_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-seventh from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the network + audio infrastructure batch
-  # (alsa-lib + pipewire + wireplumber + NetworkManager). alsa-lib is
-  # THE userspace half of ALSA; every modern Linux audio stack (pipewire
-  # / wireplumber / pulseaudio / GStreamer-alsa) links libasound to
-  # reach the kernel /dev/snd/* ioctl surface. Pins alsa-lib 1.2.15.3's
-  # upstream-URL fetch (kernel-precedent pattern, no vendoring) +
-  # sha256 cross-checked against nixpkgs + two-flag configure sequence
-  # (``--disable-static`` + ``--disable-python``) + cross-channel
-  # isolation across configure/meson/cmake/make + one library artifact
-  # (``libAsound``).
-  TestSpec(
-    source: "recipes/packages/source/alsa-lib/test_alsa_lib_source.nim",
-    binary: "build/test-bin/t_alsa_lib_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-eighth from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the network + audio infrastructure batch.
-  # pipewire is THE modern multimedia framework on Linux: replaces
-  # pulseaudio + jackd for audio AND provides the screen-capture
-  # transport every Wayland compositor uses for desktop sharing + screen
-  # recording. TWO-executable + ONE-library mixed-kind meson shape from
-  # a single ``meson setup`` + ``ninja`` invocation. Pins pipewire
-  # 1.6.5's upstream gitlab.freedesktop.org archive URL (kernel-
-  # precedent pattern, no vendoring) + placeholder sha256 (NEEDS
-  # VERIFICATION — nixpkgs records NAR-form hash, not tarball hash) +
-  # five-flag mesonOptions sequence + cross-channel isolation +
-  # ``pipewireDaemon`` + ``pwCat`` executables + ``libPipewire`` library.
-  TestSpec(
-    source: "recipes/packages/source/pipewire/test_pipewire_source.nim",
-    binary: "build/test-bin/t_pipewire_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Sixty-ninth from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the network + audio infrastructure batch.
-  # wireplumber is THE session/policy manager for pipewire: implements
-  # the Lua-scripted session-policy layer that decides device-to-role
-  # mappings + per-application audio routing on top of pipewire's
-  # multimedia graph. ONE-executable + ONE-library mixed-kind meson
-  # shape (the libcap / xz pattern lifted onto the meson channel).
-  # Pins wireplumber 0.5.14's upstream gitlab.freedesktop.org archive
-  # URL (kernel-precedent pattern, no vendoring) + placeholder sha256
-  # (NEEDS VERIFICATION — nixpkgs records NAR-form hash, not tarball
-  # hash) + five-flag mesonOptions sequence + cross-channel isolation +
-  # ``wireplumber`` executable + ``libWireplumber`` library.
-  TestSpec(
-    source: "recipes/packages/source/wireplumber/test_wireplumber_source.nim",
-    binary: "build/test-bin/t_wireplumber_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventieth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING (FOURTH) recipe in the network + audio infrastructure
-  # batch. NetworkManager is THE canonical network configuration daemon
-  # on modern Linux desktops; every NDE-K1 v1 desktop (sway / GNOME /
-  # Plasma) consumes its D-Bus API for Wi-Fi connection management,
-  # Ethernet hot-plug response, VPN routing, and per-application
-  # network-status indicators. TWO-executable + ONE-library mixed-kind
-  # autotools shape with the LARGEST ``configureFlags:`` block in the
-  # corpus to date (six flags spanning mixed ``--disable-*`` /
-  # ``--without-*`` / ``--with-*=value`` polarities). Pins NetworkManager
-  # 1.56.0's upstream gitlab.freedesktop.org release-tarball URL
-  # (kernel-precedent pattern, no vendoring) + sha256 cross-checked
-  # against nixpkgs + six-flag configure sequence + cross-channel
-  # isolation + ``nmDaemon`` + ``nmcli`` executables + ``libNm`` library.
-  TestSpec(
-    source: "recipes/packages/source/networkmanager/test_networkmanager_source.nim",
-    binary: "build/test-bin/t_networkmanager_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-first from-source production recipe to exercise the M9.H/I/K
-  # trio — FIRST recipe in the GNU text-processing + archiving CLI batch
-  # (tar + grep + sed + gawk). GNU tar is THE canonical archive packer/
-  # unpacker on every modern Linux distribution: every installer /
-  # backup tool / configuration-management agent / container image
-  # builder shells out to ``/usr/bin/tar``. Pins tar 1.35's upstream
-  # ftp.gnu.org release-tarball URL (kernel-precedent pattern, no
-  # vendoring) + sha256 cross-checked against nixpkgs + three-flag
-  # configure sequence (``--without-selinux`` + ``--without-posix-acls``
-  # + ``--without-xattrs``) + cross-channel isolation + single ``tar``
-  # executable.
-  TestSpec(
-    source: "recipes/packages/source/tar/test_tar_source.nim",
-    binary: "build/test-bin/t_tar_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-second from-source production recipe to exercise the M9.H/I/K
-  # trio — SECOND recipe in the GNU text-processing + archiving CLI batch.
-  # GNU grep is THE canonical line-matching CLI on every modern Linux
-  # distribution: every shell pipeline / every log scanner / every
-  # config-search Makefile rule / every IDE file-search backend shells
-  # out to ``/usr/bin/grep``. Pins grep 3.11's upstream ftp.gnu.org
-  # release-tarball URL (kernel-precedent pattern, no vendoring) +
-  # canonical published sha256 (nixpkgs records 3.12 only) + one-flag
-  # configure sequence (``--disable-perl-regexp``) + cross-channel
-  # isolation + single ``grep`` executable.
-  TestSpec(
-    source: "recipes/packages/source/grep/test_grep_source.nim",
-    binary: "build/test-bin/t_grep_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-third from-source production recipe to exercise the M9.H/I/K
-  # trio — THIRD recipe in the GNU text-processing + archiving CLI batch.
-  # GNU sed is THE canonical stream-editor CLI on every modern Linux
-  # distribution: every shell pipeline / every Makefile substitution
-  # rule / every config-rewrite script / every autotools ``./configure``
-  # run shells out to ``/usr/bin/sed``. Pins sed 4.9's upstream
-  # ftp.gnu.org release-tarball URL (kernel-precedent pattern, no
-  # vendoring) + sha256 cross-checked against nixpkgs + one-flag
-  # configure sequence (``--without-selinux``) + cross-channel
-  # isolation + single ``sed`` executable.
-  TestSpec(
-    source: "recipes/packages/source/sed/test_sed_source.nim",
-    binary: "build/test-bin/t_sed_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-fourth from-source production recipe to exercise the M9.H/I/K
-  # trio — CLOSING (FOURTH) recipe in the GNU text-processing + archiving
-  # CLI batch. GNU awk (gawk) is THE canonical AWK implementation on
-  # every modern Linux distribution: every shell pipeline / every
-  # Makefile field-extract rule / every log-analysis script / every
-  # report-generation pipeline shells out to ``/usr/bin/awk``. Pins
-  # gawk 5.3.0's upstream ftp.gnu.org release-tarball URL (kernel-
-  # precedent pattern, no vendoring) + canonical published sha256
-  # (nixpkgs records 5.4.0 only) + three-flag configure sequence
-  # (``--disable-extensions`` + ``--disable-mpfr`` +
-  # ``--disable-libsigsegv``) + cross-channel isolation + single
-  # ``awk`` executable (upstream ships as ``gawk`` and symlinks
-  # ``awk`` at install).
-  TestSpec(
-    source: "recipes/packages/source/gawk/test_gawk_source.nim",
-    binary: "build/test-bin/t_gawk_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-fifth from-source production recipe — FIRST recipe in the
-  # M9.N Batch C build-tool slice (meson + ninja). meson is a Python-
-  # based meta-build system: registration-only because none of the four
-  # ``from-source-*`` conventions claims a recipe that ships zero flag
-  # blocks AND a single ``executable`` artifact AND ``uses: "python
-  # >=3.8"`` alone. Pins meson 1.6.1's upstream GitHub release-tarball
-  # URL + locally-computed sha256 (2,276,144 bytes) + four-channel
-  # cross-isolation empty-state on a load-bearing executable-shaped
-  # recipe (vs ca-certificates' files-shaped empty-state precedent) +
-  # single ``meson`` executable. Guards the registry round-trip so a
-  # future ``from-source-python-tool`` convention (or DSL ``build:
-  # shell ...`` widening) can attach without re-touching the recipe.
-  TestSpec(
-    source: "recipes/packages/source/meson/test_meson_source.nim",
-    binary: "build/test-bin/t_meson_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-sixth from-source production recipe — CLOSING (SECOND)
-  # recipe in the M9.N Batch C build-tool slice. ninja is C++ with a
-  # Python ``configure.py --bootstrap`` driver: registration-only for
-  # the same convention-gap reason as meson (no flag channel matches a
-  # bootstrap-driven build). Pairs with the sibling ``mesonSource``
-  # recipe — both close the meson + ninja toolchain floor every C / C++
-  # ``from-source-meson`` / ``from-source-cmake`` recipe consumes at
-  # build time. Pins ninja 1.12.1's upstream GitHub source-archive URL
-  # + locally-computed sha256 (240,483 bytes) + four-channel cross-
-  # isolation empty-state + single ``ninja`` executable. Unique vs
-  # ``mesonSource``: ALSO declares ``uses: "gcc >=11"`` because the
-  # bootstrap step compiles C++ sources (whereas meson is pure
-  # Python).
-  TestSpec(
-    source: "recipes/packages/source/ninja/test_ninja_source.nim",
-    binary: "build/test-bin/t_ninja_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-seventh from-source production recipe — FIRST recipe in the
-  # M9.N Batch D build-tool slice (cmake + autoconf + automake +
-  # libtool + pkgconf). cmake's upstream build is a hand-rolled
-  # ``./bootstrap && make && make install`` driver: ``from-source-
-  # custom`` convention consumer with three shell actions registered
-  # under the ``cmake`` artifact and three executable artifacts
-  # (cmake + ctest + cpack) sharing the same install-tree. Pins the
-  # 3.31.2 upstream cmake.org release-tarball URL + real sha256
-  # computed locally (nixpkgs pins 4.1.2; cross-check deferred) +
-  # four-channel cross-isolation empty-state + per-artifact stage-
-  # copy fan-out at the THREE-executable cardinality.
-  TestSpec(
-    source: "recipes/packages/source/cmake/test_cmake_source.nim",
-    binary: "build/test-bin/t_cmake_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-eighth from-source production recipe — SECOND recipe in
-  # the M9.N Batch D build-tool slice. autoconf is the GNU build
-  # system's source-configuration generator: ``from-source-autotools``
-  # convention consumer with a SEVEN-executable install-tree (autoconf
-  # + autoheader + autom4te + autoreconf + autoscan + autoupdate +
-  # ifnames) from a single ``./configure`` + ``make`` invocation. Pins
-  # the 2.72 upstream ftp.gnu.org release-tarball URL + real sha256
-  # computed locally (nixpkgs pins 2.73; cross-check deferred) +
-  # single-flag configureFlags channel (``--disable-static``) + per-
-  # artifact stage-copy fan-out at the SEVEN-executable cardinality.
-  TestSpec(
-    source: "recipes/packages/source/autoconf/test_autoconf_source.nim",
-    binary: "build/test-bin/t_autoconf_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Seventy-ninth from-source production recipe — THIRD recipe in the
-  # M9.N Batch D build-tool slice. automake is the GNU build system's
-  # ``Makefile.in`` generator: ``from-source-autotools`` convention
-  # consumer with a TWO-executable install-tree (automake + aclocal)
-  # from a single ``./configure`` + ``make`` invocation. Pins the
-  # 1.17 upstream ftp.gnu.org release-tarball URL + real sha256
-  # computed locally (nixpkgs pins 1.18.1; cross-check deferred) +
-  # single-flag configureFlags channel + per-artifact stage-copy
-  # fan-out at the TWO-executable cardinality.
-  TestSpec(
-    source: "recipes/packages/source/automake/test_automake_source.nim",
-    binary: "build/test-bin/t_automake_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eightieth from-source production recipe — FOURTH recipe in the
-  # M9.N Batch D build-tool slice. libtool is the GNU build system's
-  # library-compilation abstraction layer: ``from-source-autotools``
-  # convention consumer with a MIXED-KIND artifact set (two
-  # executables libtool + libtoolize, plus one library libltdl)
-  # sharing a single ``./configure`` + ``make`` install-tree. Pins
-  # the 2.5.4 upstream ftp.gnu.org release-tarball URL + real sha256
-  # computed locally over the .tar.xz variant (nixpkgs consumes the
-  # .tar.gz variant so the cross-check is byte-incompatible) +
-  # single-flag configureFlags channel + per-artifact stage-copy
-  # fan-out at the (2 exec, 1 lib) mixed cardinality.
-  TestSpec(
-    source: "recipes/packages/source/libtool/test_libtool_source.nim",
-    binary: "build/test-bin/t_libtool_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eighty-first from-source production recipe — CLOSING (FIFTH) recipe
-  # in the M9.N Batch D build-tool slice. pkgconf is the modern, ISC-
-  # licensed replacement for the original freedesktop pkg-config:
-  # ``from-source-autotools`` convention consumer with a MIXED-KIND
-  # artifact set (one executable pkgconf + one library libpkgconf)
-  # sharing a single ``./configure`` + ``make`` install-tree. Pins
-  # the 2.3.0 upstream distfiles.ariadne.space release-tarball URL +
-  # real sha256 computed locally (nixpkgs pins 2.5.1; cross-check
-  # deferred) + THREE-flag configureFlags channel
-  # (``--disable-static`` + ``--with-system-libdir`` +
-  # ``--with-system-includedir``) with embedded colon-separated path
-  # lists + per-artifact stage-copy fan-out at the (1 exec, 1 lib)
-  # mixed cardinality.
-  TestSpec(
-    source: "recipes/packages/source/pkgconf/test_pkgconf_source.nim",
-    binary: "build/test-bin/t_pkgconf_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eighty-second from-source production recipe — FIRST recipe in the
-  # M9.N Batch E compiler-chain slice (gcc + binutils + make). gcc's
-  # upstream build is a hand-rolled mkdir-out-of-tree-configure-build-
-  # install driver: ``from-source-custom`` convention consumer with
-  # four shell actions registered under the ``gcc`` artifact and a
-  # MIXED-KIND artifact set (three executables gcc + g++ + cpp, plus
-  # two libraries libgcc_s + libstdc++) sharing the same install-
-  # tree. Pins the 14.2.0 upstream ftp.gnu.org release-tarball URL +
-  # real sha256 computed locally + four-channel cross-isolation
-  # empty-state + per-artifact stage-copy fan-out at the (3 exec, 2
-  # lib) mixed cardinality. The actual compilation is DEFERRED — gcc
-  # is the largest package in the corpus (88 MB tarball, 15 GB build
-  # tree, 2-4 hours compile time) — but the recipe shape lands so
-  # the convention layer can lower the pipeline when a downstream
-  # consumer recipe asks for the host C / C++ toolchain.
-  TestSpec(
-    source: "recipes/packages/source/gcc/test_gcc_source.nim",
-    binary: "build/test-bin/t_gcc_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eighty-third from-source production recipe — SECOND recipe in the
-  # M9.N Batch E compiler-chain slice. binutils is the GNU binary
-  # utilities collection: ``from-source-autotools`` convention
-  # consumer with an ELEVEN-executable install-tree (ld + as + ar +
-  # nm + objcopy + objdump + ranlib + strip + readelf + size +
-  # strings) from a single ``./configure`` + ``make`` invocation.
-  # Pins the 2.43 upstream ftp.gnu.org release-tarball URL + real
-  # sha256 computed locally + FIVE-flag configureFlags channel
-  # (``--enable-gold`` + ``--enable-ld=default`` + ``--enable-
-  # plugins`` + ``--enable-shared`` + ``--disable-werror``) + per-
-  # artifact stage-copy fan-out at the ELEVEN-executable cardinality.
-  # First recipe in the corpus to declare an executable named ``as``
-  # via string-form declaration (``executable "as":``) because
-  # ``as`` is a reserved Nim keyword.
-  TestSpec(
-    source: "recipes/packages/source/binutils/test_binutils_source.nim",
-    binary: "build/test-bin/t_binutils_source",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # Eighty-fourth from-source production recipe — CLOSING (THIRD)
-  # recipe in the M9.N Batch E compiler-chain slice. make is the
-  # canonical GNU build-system driver: ``from-source-autotools``
-  # convention consumer with a SINGLE-executable install-tree (just
-  # ``make``) from a single ``./configure`` + ``make`` invocation.
-  # Pins the 4.4.1 upstream ftp.gnu.org release-tarball URL + real
-  # sha256 computed locally + single-flag configureFlags channel
-  # (``--disable-nls``) + per-artifact stage-copy fan-out at the
-  # 1-executable cardinality. The ONLY from-source recipe in the
-  # corpus that bootstraps the build-system-driver ITSELF.
-  TestSpec(
-    source: "recipes/packages/source/make/test_make_source.nim",
-    binary: "build/test-bin/t_make_source",
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
+    binary: "build/test-bin/t_dsl_versions_single",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -4075,9 +2453,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.N Batch B/C — the 5 ``from_source_*`` conventions. The
-  # custom variant (Batch C.1) acts as a catch-all for recipes
-  # that declare ``shell()`` actions but no in-tree manifest.
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
+    binary: "build/test-bin/test_fortran_direct_convention",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_autotools_convention.nim",
     binary: "build/test-bin/test_from_source_autotools_convention",
@@ -4113,14 +2496,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_from_source_meson_convention.nim",
     binary: "build/test-bin/test_from_source_meson_convention",
-    defines: @["reproProviderMode"],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  TestSpec(
-    source: "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
-    binary: "build/test-bin/test_fortran_direct_convention",
     defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -4321,6 +2696,678 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_system_rollback/tests/t_b3_rollback_unit.nim",
     binary: "build/test-bin/t_b3_rollback_unit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/alsa-lib/test_alsa_lib_source.nim",
+    binary: "build/test-bin/test_alsa_lib_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/autoconf/test_autoconf_source.nim",
+    binary: "build/test-bin/test_autoconf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/automake/test_automake_source.nim",
+    binary: "build/test-bin/test_automake_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/bash/test_bash_source.nim",
+    binary: "build/test-bin/test_bash_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/binutils/test_binutils_source.nim",
+    binary: "build/test-bin/test_binutils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
+    binary: "build/test-bin/test_ca_certificates_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/cairo/test_cairo_source.nim",
+    binary: "build/test-bin/test_cairo_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/cmake/test_cmake_source.nim",
+    binary: "build/test-bin/test_cmake_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/coreutils/test_coreutils_source.nim",
+    binary: "build/test-bin/test_coreutils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/dbus-broker/test_dbus_broker_source.nim",
+    binary: "build/test-bin/test_dbus_broker_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/dbus/test_dbus_source.nim",
+    binary: "build/test-bin/test_dbus_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/eudev/test_eudev_source.nim",
+    binary: "build/test-bin/test_eudev_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/expat/test_expat_source.nim",
+    binary: "build/test-bin/test_expat_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/fontconfig/test_fontconfig_source.nim",
+    binary: "build/test-bin/test_fontconfig_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/freetype/test_freetype_source.nim",
+    binary: "build/test-bin/test_freetype_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gawk/test_gawk_source.nim",
+    binary: "build/test-bin/test_gawk_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gcc/test_gcc_source.nim",
+    binary: "build/test-bin/test_gcc_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gdk-pixbuf/test_gdk_pixbuf_source.nim",
+    binary: "build/test-bin/test_gdk_pixbuf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gdm/test_gdm_source.nim",
+    binary: "build/test-bin/test_gdm_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gettext/test_gettext_source.nim",
+    binary: "build/test-bin/test_gettext_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/glib2/test_glib2_source.nim",
+    binary: "build/test-bin/test_glib2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/glibc/test_glibc_source.nim",
+    binary: "build/test-bin/test_glibc_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gnome-shell/test_gnome_shell_source.nim",
+    binary: "build/test-bin/test_gnome_shell_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/gnutls/test_gnutls_source.nim",
+    binary: "build/test-bin/test_gnutls_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/grep/test_grep_source.nim",
+    binary: "build/test-bin/test_grep_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/harfbuzz/test_harfbuzz_source.nim",
+    binary: "build/test-bin/test_harfbuzz_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/iproute2/test_iproute2_source.nim",
+    binary: "build/test-bin/test_iproute2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/json-c/test_json_c_source.nim",
+    binary: "build/test-bin/test_json_c_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kconfig/test_kconfig_source.nim",
+    binary: "build/test-bin/test_kconfig_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kcoreaddons/test_kcoreaddons_source.nim",
+    binary: "build/test-bin/test_kcoreaddons_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kded/test_kded_source.nim",
+    binary: "build/test-bin/test_kded_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kernel/test_kernel_source.nim",
+    binary: "build/test-bin/test_kernel_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kglobalaccel/test_kglobalaccel_source.nim",
+    binary: "build/test-bin/test_kglobalaccel_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/ki18n/test_ki18n_source.nim",
+    binary: "build/test-bin/test_ki18n_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kio/test_kio_source.nim",
+    binary: "build/test-bin/test_kio_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kmod/test_kmod_source.nim",
+    binary: "build/test-bin/test_kmod_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/knotifications/test_knotifications_source.nim",
+    binary: "build/test-bin/test_knotifications_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kservice/test_kservice_source.nim",
+    binary: "build/test-bin/test_kservice_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/ksolid/test_ksolid_source.nim",
+    binary: "build/test-bin/test_ksolid_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/ksvg/test_ksvg_source.nim",
+    binary: "build/test-bin/test_ksvg_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kwidgetsaddons/test_kwidgetsaddons_source.nim",
+    binary: "build/test-bin/test_kwidgetsaddons_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kwin/test_kwin_source.nim",
+    binary: "build/test-bin/test_kwin_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kxmlgui/test_kxmlgui_source.nim",
+    binary: "build/test-bin/test_kxmlgui_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/less/test_less_source.nim",
+    binary: "build/test-bin/test_less_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libcap-ng/test_libcap_ng_source.nim",
+    binary: "build/test-bin/test_libcap_ng_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libcap/test_libcap_source.nim",
+    binary: "build/test-bin/test_libcap_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libdrm/test_libdrm_source.nim",
+    binary: "build/test-bin/test_libdrm_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libffi/test_libffi_source.nim",
+    binary: "build/test-bin/test_libffi_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libgcrypt/test_libgcrypt_source.nim",
+    binary: "build/test-bin/test_libgcrypt_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libinput/test_libinput_source.nim",
+    binary: "build/test-bin/test_libinput_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libtool/test_libtool_source.nim",
+    binary: "build/test-bin/test_libtool_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libxkbcommon/test_libxkbcommon_source.nim",
+    binary: "build/test-bin/test_libxkbcommon_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libxml2/test_libxml2_source.nim",
+    binary: "build/test-bin/test_libxml2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/make/test_make_source.nim",
+    binary: "build/test-bin/test_make_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/meson/test_meson_source.nim",
+    binary: "build/test-bin/test_meson_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/mutter/test_mutter_source.nim",
+    binary: "build/test-bin/test_mutter_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/ncurses/test_ncurses_source.nim",
+    binary: "build/test-bin/test_ncurses_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/nettle/test_nettle_source.nim",
+    binary: "build/test-bin/test_nettle_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/networkmanager/test_networkmanager_source.nim",
+    binary: "build/test-bin/test_networkmanager_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/ninja/test_ninja_source.nim",
+    binary: "build/test-bin/test_ninja_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/openssl/test_openssl_source.nim",
+    binary: "build/test-bin/test_openssl_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/pam/test_pam_source.nim",
+    binary: "build/test-bin/test_pam_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/pango/test_pango_source.nim",
+    binary: "build/test-bin/test_pango_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/pipewire/test_pipewire_source.nim",
+    binary: "build/test-bin/test_pipewire_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/pixman/test_pixman_source.nim",
+    binary: "build/test-bin/test_pixman_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/pkgconf/test_pkgconf_source.nim",
+    binary: "build/test-bin/test_pkgconf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/plasma-framework/test_plasma_framework_source.nim",
+    binary: "build/test-bin/test_plasma_framework_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/plasma-workspace/test_plasma_workspace_source.nim",
+    binary: "build/test-bin/test_plasma_workspace_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/procps/test_procps_source.nim",
+    binary: "build/test-bin/test_procps_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/qt6-base/test_qt6_base_source.nim",
+    binary: "build/test-bin/test_qt6_base_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/readline/test_readline_source.nim",
+    binary: "build/test-bin/test_readline_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/sddm/test_sddm_source.nim",
+    binary: "build/test-bin/test_sddm_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/sed/test_sed_source.nim",
+    binary: "build/test-bin/test_sed_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/sqlite/test_sqlite_source.nim",
+    binary: "build/test-bin/test_sqlite_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/sway/test_sway_source.nim",
+    binary: "build/test-bin/test_sway_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/systemd/test_systemd_source.nim",
+    binary: "build/test-bin/test_systemd_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/tar/test_tar_source.nim",
+    binary: "build/test-bin/test_tar_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/util-linux/test_util_linux_source.nim",
+    binary: "build/test-bin/test_util_linux_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/vim/test_vim_source.nim",
+    binary: "build/test-bin/test_vim_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/wayland/test_wayland_source.nim",
+    binary: "build/test-bin/test_wayland_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/wireplumber/test_wireplumber_source.nim",
+    binary: "build/test-bin/test_wireplumber_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/wlroots/test_wlroots_source.nim",
+    binary: "build/test-bin/test_wlroots_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/xz/test_xz_source.nim",
+    binary: "build/test-bin/test_xz_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/zlib/test_zlib_source.nim",
+    binary: "build/test-bin/test_zlib_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -6790,9 +5837,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # M9.Q from-source provisioning resolver unit test (hand-inserted —
-  # the test specs table is auto-generated, but new tests added between
-  # generator runs are appended manually so the test target picks them up).
   TestSpec(
     source: "tests/unit/t_m9q_from_source_provisioning.nim",
     binary: "build/test-bin/t_m9q_from_source_provisioning",
@@ -6801,247 +5845,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.R.1: package-level dep-block surface
-  # (``buildDeps:`` / ``nativeBuildDeps:`` / ``runtimeDeps:``).
-  # Added by hand because ``scripts/generate_test_edges.nim`` wipes
-  # ``tests/unit/`` entries on regeneration (see the M9.R.1 commit
-  # body for the rationale; the test-runner picks the row up on the
-  # next ``repro build test`` pass without further intervention).
-  TestSpec(
-    source: "tests/unit/t_m9r1_deps_package_level.nim",
-    binary: "build/test-bin/t_m9r1_deps_package_level",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.2: stdlib typed Layer-3 ``executable <tool>: cli:``
-  # blocks for meson / cmake / ninja / make / autoconf / binutils /
-  # gcc. Added by hand for the same generator-wipe reason as M9.R.1
-  # above.
-  TestSpec(
-    source: "tests/unit/t_m9r2_typed_cli_surfaces.nim",
-    binary: "build/test-bin/t_m9r2_typed_cli_surfaces",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.3: optional ``library api:`` block — pkgConfig /
-  # headers / links / defines / soname / sover / linkKind +
-  # PUBLIC/PRIVATE visibility-keyed fields. Added by hand for the
-  # same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r3_library_api_block.nim",
-    binary: "build/test-bin/t_m9r3_library_api_block",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.4: ``library api: exports:`` FFI sub-block — declares
-  # FFI-callable symbols as Nim proc signatures stored as raw source-
-  # text records (``name`` / ``paramsRaw`` / ``returnRaw`` / ``doc``).
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r4_library_api_exports.nim",
-    binary: "build/test-bin/t_m9r4_library_api_exports",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.2b: stdlib typed-value layer (Library / Executable /
-  # CompileOptions / LinkOptions / MesonPackageResult etc.) + Layer-2
-  # mid-level operation overloads (compile / link / archive / strip
-  # dispatching on a Configurable[Compiler]) + Layer-1 high-level
-  # artifact constructors (c_library / c_executable / nim_library /
-  # nim_executable / meson_package / cmake_package /
-  # autotools_package). Added by hand for the same generator-wipe
-  # reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r2b_typed_value_layer.nim",
-    binary: "build/test-bin/t_m9r2b_typed_value_layer",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.2c: package macro injects per-kind typed slot vars
-  # (``var <n>: Library`` / ``var <n>: Executable`` / ``var <n>:
-  # BuildActionDef``) so recipe authors can assign constructor results
-  # directly to the slot from the package's ``build:`` block. Pins:
-  #   * Per-kind slot type via ``typeof`` (Library / Executable /
-  #     BuildActionDef).
-  #   * Default-init slot value when the recipe never assigns.
-  #   * Assignment binding from build: lands a populated Library in
-  #     the slot.
-  #   * Discard pattern (``discard pkg.library("...")``) keeps working
-  #     — the slot stays at its default since no assignment ever fires.
-  #   * Mixed-kind recipe gets one slot per kind without collision.
-  #   * c_library(into = ...) auto-lifted into a typed Library slot.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r2c_artifact_slot_typed.nim",
-    binary: "build/test-bin/t_m9r2c_artifact_slot_typed",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.7: engine-side ``targetTriple``-variant binary-cache
-  # namespacing. Pins ``buildPlatformTriple()`` /
-  # ``resolvedTargetTriple()`` / ``cachePlatformTagFor(kind, ...)`` +
-  # the per-DepKind routing through the ``ToolIdentityResolver`` seam
-  # + the cache-key hex fold-in via the ``CachePlatformTagOptionKey``
-  # synthetic option. Passive on native (collapses everything to
-  # ``"native"``). Added by hand for the same generator-wipe reason
-  # as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r7_target_triple_cache_namespacing.nim",
-    binary: "build/test-bin/t_m9r7_target_triple_cache_namespacing",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.5a: 84-recipe sweep smoke. Pins
-  #   * sampled meson / cmake / autotools / make recipe registries
-  #     post-rename (``uses:`` -> ``buildDeps:`` + categorise into
-  #     ``nativeBuildDeps:`` per the M9.R.5a heuristic).
-  #   * convention bridge: ``nativeBuildDeps:`` entries fold into
-  #     ``ProjectInterface.toolUses`` so the convention layer's
-  #     PATH-setup surface sees them even when a recipe declares
-  #     them in ``nativeBuildDeps:`` only.
-  #   * runtimeDeps stub stays empty for sampled recipes (the M9.R.5b
-  #     pass will populate per-recipe runtime closures).
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
-    binary: "build/test-bin/t_m9r5a_recipe_sweep_smoke",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.6 — convention narrowing + default-build synthesis.
-  # Pins:
-  #   * defaultBuildConventionFor dispatch table (meson / cmake /
-  #     autotools / make / custom / "");
-  #   * shouldSynthesizeDefaultBuild gate (fetch + no-explicit-build +
-  #     known convention) including the custom-no-build raise;
-  #   * synthesizeMesonPackage / synthesizeCmakePackage /
-  #     synthesizeAutotoolsPackage thread legacy flag-channel values
-  #     into the M9.R.2b constructors;
-  #   * raiseCustomBuildRequired surfaces an actionable error for
-  #     custom-convention recipes lacking an explicit ``build:``
-  #     block;
-  #   * registeredBuildFlags backward-decode stays functional with
-  #     the deprecation comment in place;
-  #   * registry-based recognition (registriesIncludeMeson + sibling
-  #     helpers) consults registeredNativeBuildDeps in lieu of the
-  #     legacy source-text scanner.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
-    binary: "build/test-bin/t_m9r6_convention_narrowing_default_synthesis",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.6.1 — physical convention narrowing (2026-06-19).
-  # Pins:
-  #   * the convention's ``emitFragment`` returns EXACTLY fetch +
-  #     synthesis sentinel (no setup / compile / install / stage-copy);
-  #   * ``registerBuildFlag`` / ``registeredBuildFlags`` /
-  #     ``resetDslPortBuildFlagState`` no longer compile (compile-time
-  #     ``compiles(...)`` checks for the regression);
-  #   * ``synthesizeMesonPackage`` returns a result without an options
-  #     argument (the legacy ``legacy<X>Flags`` shims were retired);
-  #   * the convention's recognise path stays end-to-end functional via
-  #     ``registriesIncludeMeson`` against ``registeredNativeBuildDeps``;
-  #   * the sentinel preserves the binary-cache identity wiring the
-  #     legacy install + stage-copy edges used to carry.
-  # Added by hand because the new test references the production
-  # dbus-broker recipe via a relative import; the auto-generator's
-  # boilerplate doesn't reach into ``recipes/packages/source/`` so a
-  # hand-added entry preserves the side-effect import order.
-  TestSpec(
-    source: "tests/unit/t_m9r6_1_convention_minimal_emission.nim",
-    binary: "build/test-bin/t_m9r6_1_convention_minimal_emission",
-    defines: @["reproProviderMode"],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.8 — dispatcher gate + buildDeps fallthrough. Pins:
-  #   * ``parseToolProvisioning("from-source") == tpmFromSource`` round-
-  #     trips through the env-var + CLI flag path.
-  #   * ``shouldEnterBuildPipeline(tpmFromSource) == true`` — the
-  #     extracted predicate Part 1 introduces so the dispatcher gate
-  #     no longer short-circuits ``--tool-provisioning=from-source``
-  #     to "no external tools requested" (the symptom captured at
-  #     ``D:/metacraft/gap-a-wayland.stdout.log``).
-  #   * buildDeps fallthrough — a useDef whose sibling recipe exists
-  #     but is unbuilt surfaces the M9.Q "has not produced an artefact"
-  #     diagnostic (the M9.R.9 auto-recurse target), NOT the Gap A
-  #     "does not declare provisioning" diagnostic.
-  #   * Non-from-source modes (``tpmTarball``, ``tpmNix``) still raise
-  #     the "does not declare provisioning" diagnostic for the same
-  #     useDef shape — guards against an over-broad fix relaxing the
-  #     existing error surface.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r8_dispatcher_gate.nim",
-    binary: "build/test-bin/t_m9r8_dispatcher_gate",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.9 — auto-recurse + stdlib fall-through.
-  #
-  # Closes the M9.R.8 "sibling source recipe has not produced an
-  # artefact" hard-fail surfaced by the Gap A wayland smoke. Pins:
-  #
-  #   * ``tryResolveFromSourceTool`` returns a discriminated outcome
-  #     (``rrResolved`` / ``rrNeedsBuild`` / ``rrSiblingMissing``) the
-  #     dispatcher pattern-matches on for auto-recurse + fall-through;
-  #   * ``toolProfileFor(tpmFromSource, ...)`` falls through to nix /
-  #     scoop / tarball provisioning declared on the ``useDef`` when
-  #     no sibling source recipe exists (Part 2 — meson's python3 dep
-  #     was the trigger);
-  #   * the dispatcher-side guards (cycle detection, depth ceiling,
-  #     per-process resolution cache) are addressable from outside
-  #     ``executeBuildTarget`` so a future ``repro why`` integration
-  #     can inspect them;
-  #   * the hard-fail diagnostic when both the sibling recipe AND the
-  #     stdlib provisioning are absent lists both remediation paths.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r9_auto_recurse.nim",
-    binary: "build/test-bin/t_m9r9_auto_recurse",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.10a — cycle break + stdlib fall-through. Pins:
-  #   * the dispatcher's recursion-cycle detector no longer raises
-  #     immediately when the closing-edge tool's stdlib package declares
-  #     a usable provisioning channel — it instead marks the tool in
-  #     ``fromSourceCycleBrokenTools`` and the downstream
-  #     ``toolProfileFor(tpmFromSource, ...)`` routes that one tool
-  #     through stdlib provisioning (nix / scoop / tarball) the same way
-  #     the M9.R.9 ``rrSiblingMissing`` branch does;
-  #   * the cycle-break override is keyed strictly by ``executableName``
-  #     so the from-source semantics still apply to every other tool in
-  #     the chain;
-  #   * a genuine cycle (no node has stdlib provisioning) still raises,
-  #     with a tighter diagnostic that points the operator at the
-  #     stdlib package definition.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
   TestSpec(
     source: "tests/unit/t_m9r10a_cycle_break.nim",
     binary: "build/test-bin/t_m9r10a_cycle_break",
@@ -7050,12 +5853,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.R.10a — exec-name audit. Asserts every
-  # ``nativeBuildDeps`` / ``buildDeps`` entry across the source-recipe
-  # corpus resolves to either a sibling source recipe OR a stdlib
-  # package, and pins the python→python3 rename + pkg-config backtick
-  # header parsing as load-bearing regression cases.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
   TestSpec(
     source: "tests/unit/t_m9r10a_exec_name_audit.nim",
     binary: "build/test-bin/t_m9r10a_exec_name_audit",
@@ -7064,18 +5861,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.R.10b — default-build synthesis wiring. Pins the
-  # package macro's M9.R.6 default-synthesis dispatch path:
-  #   * a recipe with ``fetch:`` + a recognised convention tool but no
-  #     explicit ``build:`` body registers a synthesised
-  #     ``default-build-synthesis (M9.R.10b)`` build action via the
-  #     ``emitM9R10bDefaultBuildSynthesis`` emitter in macros_b.nim;
-  #   * a recipe with an explicit ``build:`` block opts out — the
-  #     compile-time gate suppresses the synthesis emission entirely;
-  #   * ``raiseCustomBuildRequired`` has a stable error-message shape
-  #     (recipe name + ``build:`` token + ``shell(`` token) so authors
-  #     of custom-convention recipes get an actionable diagnostic.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
   TestSpec(
     source: "tests/unit/t_m9r10b_synthesis_wiring.nim",
     binary: "build/test-bin/t_m9r10b_synthesis_wiring",
@@ -7084,35 +5869,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.R.11 — stub provisioning widening. Pins the texinfo
-  # canary + the ~10 wayland-chain stubs (texinfo, perl, m4, bison,
-  # flex, gperf, bc, file, rsync, swig, gmp, mpfr, mpc) carry tarball
-  # provisioning entries so the Windows from-source resolver lands a
-  # usable channel on non-Nix hosts. Without this widening the wayland
-  # from-source smoke hard-fails on ``no stdlib provisioning channel
-  # declared`` at the first stub reached.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
-  TestSpec(
-    source: "tests/unit/t_m9r11_stub_provisioning_widening.nim",
-    binary: "build/test-bin/t_m9r11_stub_provisioning_widening",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny),
-  # DSL-port M9.R.11 — runquota daemon discovery + recovery. Pins:
-  #   * ``findRunQuotaDaemonBin`` honours $RUNQUOTAD_BIN, PATH, and the
-  #     ``../runquota/build/bin/runquotad{.exe}`` sibling-repo walk in
-  #     that order;
-  #   * a bogus $RUNQUOTAD_BIN doesn't poison the discovery (falls
-  #     through);
-  #   * the discovery helper is total (never raises);
-  #   * REPROBUILD_NO_RUNQUOTA / REPROBUILD_AUTO_RUNQUOTA env gates
-  #     keep the documented set of value spellings.
-  # Closes the wayland + meson from-source smokes' "CreateFileW failed"
-  # gap by ensuring deterministic auto-spawn of the sibling-built
-  # daemon.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
   TestSpec(
     source: "tests/unit/t_m9r11_runquota_daemon_recovery.nim",
     binary: "build/test-bin/t_m9r11_runquota_daemon_recovery",
@@ -7121,22 +5877,94 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny),
-  # DSL-port M9.R.5b — recipe options sweep (M9.R.5 phase 2). Pins:
-  #   * no recipe still ships a legacy ``mesonOptions:`` / ``cmakeFlags:``
-  #     / ``configureFlags:`` / ``makeFlags:`` / ``ninjaFlags:`` block
-  #     (the M9.R.6.1 unblocker — the registry is empty so the
-  #     ``legacy<X>Flags`` accessors can be retired);
-  #   * every swept recipe registers a package-level ``build:`` block
-  #     that calls the matching M9.R.2b high-level constructor
-  #     (``meson_package`` / ``cmake_package`` / ``autotools_package``)
-  #     with the lifted ``config:`` values + inlined verbatim flags;
-  #   * recipes WITHOUT options (the 5 ``ca-certificates`` / ``cmake`` /
-  #     ``gcc`` / ``meson`` / ``ninja`` packages) still compile and
-  #     register their dep surface;
-  #   * the configurable-override pathway (``setConfigurable`` ->
-  #     ``readConfigurable``) round-trips correctly so config values
-  #     can flow into the ``build:`` block's flag construction.
-  # Added by hand for the same generator-wipe reason as M9.R.1 above.
+  TestSpec(
+    source: "tests/unit/t_m9r11_stub_provisioning_widening.nim",
+    binary: "build/test-bin/t_m9r11_stub_provisioning_widening",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r12_3_runquota_standard_pools.nim",
+    binary: "build/test-bin/t_m9r12_3_runquota_standard_pools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
+    binary: "build/test-bin/t_m9r12_4_autotools_emits_fetch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim",
+    binary: "build/test-bin/t_m9r12_sh_inline_exec_and_typed_tool_fallback",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r1_deps_package_level.nim",
+    binary: "build/test-bin/t_m9r1_deps_package_level",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r2_typed_cli_surfaces.nim",
+    binary: "build/test-bin/t_m9r2_typed_cli_surfaces",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r2b_typed_value_layer.nim",
+    binary: "build/test-bin/t_m9r2b_typed_value_layer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r2c_artifact_slot_typed.nim",
+    binary: "build/test-bin/t_m9r2c_artifact_slot_typed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r3_library_api_block.nim",
+    binary: "build/test-bin/t_m9r3_library_api_block",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r4_library_api_exports.nim",
+    binary: "build/test-bin/t_m9r4_library_api_exports",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
+    binary: "build/test-bin/t_m9r5a_recipe_sweep_smoke",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
   TestSpec(
     source: "tests/unit/t_m9r5b_recipe_options_sweep.nim",
     binary: "build/test-bin/t_m9r5b_recipe_options_sweep",
@@ -7146,8 +5974,56 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r6_1_convention_minimal_emission.nim",
+    binary: "build/test-bin/t_m9r6_1_convention_minimal_emission",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
+    binary: "build/test-bin/t_m9r6_convention_narrowing_default_synthesis",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r7_target_triple_cache_namespacing.nim",
+    binary: "build/test-bin/t_m9r7_target_triple_cache_namespacing",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r8_dispatcher_gate.nim",
+    binary: "build/test-bin/t_m9r8_dispatcher_gate",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r9_auto_recurse.nim",
+    binary: "build/test-bin/t_m9r9_auto_recurse",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_windows_system_hash_mode.nim",
+    binary: "build/test-bin/t_windows_system_hash_mode",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

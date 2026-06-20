@@ -132,6 +132,11 @@ suite "project DSL build action payload":
     check makeDepfile.commandStatsId == "compile-stats"
     check makeDepfile.actionCachePolicy == acfpChecksum
 
+    let declaredOnly = decodeBuildActionPayload(encodeBuildActionPayload(
+      sampleAction(declaredOnlyDependencyPolicy())))
+    check declaredOnly.dependencyPolicy.kind == bdpDeclaredOnly
+    check declaredOnly.dependencyPolicy.depfiles.len == 0
+
   test "version 3 payloads decode with ordinary CLI argument roles":
     let decoded = decodeBuildActionPayload(encodeLegacyBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d")), 3'u16))

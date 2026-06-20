@@ -116,19 +116,28 @@ suite "DSL-port M9.R.11 — runquota daemon discovery + recovery":
   test "sibling-repo discovery finds runquotad in the canonical layout":
     # When the test runs inside the metacraft workspace (D:/metacraft/
     # reprobuild + D:/metacraft/runquota side-by-side), the sibling
-    # walker finds the binary. CI runners without the sibling get an
-    # empty result — the assertion below is conditional.
+    # walker finds the binary after PATH has been made irrelevant. CI
+    # runners without the sibling get an empty result — the assertion
+    # below is conditional.
     putEnv("RUNQUOTAD_BIN", "")
-    let discovered = findRunQuotaDaemonBin()
-    if discovered.len > 0:
-      # When found, the path must end with the canonical filename + sit
-      # under a ``runquota/build/bin/`` segment so we know it came from
-      # the sibling walker (vs. some random PATH match).
-      let exeName = when defined(windows): "runquotad.exe" else: "runquotad"
-      check discovered.endsWith(exeName)
-      let segment = "runquota" & DirSep & "build" & DirSep & "bin" & DirSep
-      check (segment in discovered) or
-        (segment.replace(DirSep, '/') in discovered.replace('\\', '/'))
+    let previousPath = getEnv("PATH", "")
+    let emptyPath = getTempDir() / "m9r11-empty-path"
+    createDir(emptyPath)
+    putEnv("PATH", emptyPath)
+    try:
+      let discovered = findRunQuotaDaemonBin()
+      if discovered.len > 0:
+        # When found, the path must end with the canonical filename + sit
+        # under a ``runquota/build/bin/`` segment so we know it came from
+        # the sibling walker (vs. some random PATH match).
+        let exeName = when defined(windows): "runquotad.exe" else: "runquotad"
+        check discovered.endsWith(exeName)
+        let segment = "runquota" & DirSep & "build" & DirSep & "bin" & DirSep
+        check (segment in discovered) or
+          (segment.replace(DirSep, '/') in discovered.replace('\\', '/'))
+    finally:
+      putEnv("PATH", previousPath)
+      removeDir(emptyPath)
 
   test "REPROBUILD_NO_RUNQUOTA=1 disables auto-spawn entirely":
     # Sanity: the existing env-gate stays effective. Pinning the value

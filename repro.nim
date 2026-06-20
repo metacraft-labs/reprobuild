@@ -37,6 +37,10 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
+import repro_dsl_stdlib/types
+
+# Interface extraction compiles this project file without the provider build
+# body. Keep the stdlib typed-value surface visible for generated DSL helpers.
 
 # Bootstrap-And-Self-Build B4: Python tests participate in the ``test``
 # build graph collection via the ``pythonUnittest`` typed-tool wrapper.
@@ -589,11 +593,18 @@ package reprobuild:
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
 
     when defined(macosx):
+      const macosShimArchFlags =
+        when defined(arm64) or defined(aarch64):
+          @["-arch arm64", "-arch arm64e"]
+        else:
+          @[]
       reprobuildTestFixturesActions.add(nim.c(
         source = "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim",
         binary = "build/lib/librepro_monitor_shim.dylib",
         appLib = true,
         threadsOn = true,
+        passC = macosShimArchFlags,
+        passL = macosShimArchFlags,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
     elif defined(windows):
       # The Windows shim imports the stackable-hooks framework primitives;

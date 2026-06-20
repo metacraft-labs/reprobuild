@@ -1,11 +1,13 @@
 {.compile: "blake3/capi.c".}
 
-# Windows and vendored-hash builds compile the portable subset of the vendored
-# mold/blake3 C library directly. The portable implementation has no SIMD
-# requirements and works with any C99 compiler; blake3_dispatch.c hands every
-# chunk to blake3_compress_in_place_portable when none of BLAKE3_USE_* macros
-# are defined.
-when defined(windows) or defined(reproVendoredHash):
+# Vendored-hash builds compile the portable subset of the mold/blake3 C
+# library directly. In system-hash mode, including on Windows,
+# `blake3/capi.c` relies on the include/link flags configured by config.nims.
+# The portable implementation has no SIMD requirements and works with any C99
+# compiler; blake3_dispatch.c hands every chunk to
+# blake3_compress_in_place_portable when none of BLAKE3_USE_* macros are
+# defined.
+when defined(reproVendoredHash):
   const blake3Root = "../../../references/mold/third-party/blake3/c"
   {.passC: "-DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 -DBLAKE3_NO_SSE2 " &
            "-DBLAKE3_NO_SSE41 -DBLAKE3_USE_NEON=0".}

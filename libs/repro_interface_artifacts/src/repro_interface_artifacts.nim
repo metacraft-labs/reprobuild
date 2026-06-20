@@ -1742,6 +1742,19 @@ proc resolveBootstrapPackagePath*(envName: string;
       return candidate
   ""
 
+proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
+  let envRoot = getEnv("REPRO_CT_TEST_RUNNER_SRC")
+  if envRoot.len > 0:
+    let candidate = envRoot / "libs" / "ct_test_runner_adapter" / "src"
+    if fileExists(extendedPath(candidate / "ct_test_runner_adapter.nim")):
+      return candidate
+  if anchorRoot.len > 0:
+    let candidate = anchorRoot.parentDir / "reprobuild-ct-test-runner" /
+      "libs" / "ct_test_runner_adapter" / "src"
+    if fileExists(extendedPath(candidate / "ct_test_runner_adapter.nim")):
+      return candidate
+  ""
+
 proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
   ## MR14 — produce the ``--path:`` flags for the source-only sibling
   ## dependencies that ``reprobuild/config.nims`` lines 126-192 register
@@ -1837,12 +1850,18 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     ("CT_TEST_SRC", anchored([
       ".." / "ct-test" / "libs" / "ct_test_interface" / "src",
     ]), "ct_test_interface.nim"),
+    ("REPRO_TEST_ADAPTERS_SRC", anchored([
+      ".." / "reprobuild-test-adapters" / "src",
+    ]), "repro_test_adapters" / "test_runner.nim"),
   ]
   for spec in specs:
     let resolved = resolveBootstrapPackagePath(spec.envName, spec.candidates,
                                                spec.marker)
     if resolved.len > 0:
       result.add("--path:" & resolved)
+  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(reprobuildRoot)
+  if ctRunnerAdapter.len > 0:
+    result.add("--path:" & ctRunnerAdapter)
 
 proc reproLibPathFlags(workDir: string): seq[string] =
   ## Build the ``--path:`` flags the engine passes to ``nim c`` when
@@ -2380,6 +2399,9 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   ## ``reproLibPathFlags``; this helper covers only the out-of-tree packages.)
   if workDir.len == 0:
     return
+  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
+  if ctRunnerAdapter.len > 0:
+    result.add("--path:" & ctRunnerAdapter)
   result.addExternalPackagePath(workDir, "FASTSTREAMS_SRC", [
     "libs" / "nim-faststreams" / "src",
     ".." / "codetracer" / "libs" / "nim-faststreams",
@@ -2423,6 +2445,9 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   result.addExternalPackagePath(workDir, "STINT_SRC", [
     "libs" / "stint" / "src",
   ], "stint.nim")
+  result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
+    ".." / "reprobuild-test-adapters" / "src",
+  ], "repro_test_adapters" / "test_runner.nim")
 
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.

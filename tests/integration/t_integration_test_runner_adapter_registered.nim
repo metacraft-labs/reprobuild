@@ -24,7 +24,7 @@ import std/unittest
 import repro_project_dsl
 import repro_dsl_stdlib/active_context
 import repro_dsl_stdlib/interfaces/test_runner
-import ct_test_runner_adapter
+import ct_test_runner_install
 
 suite "t_integration_test_runner_adapter_registered":
   test "stdlib default is the direct-binary runner before adapter install":
