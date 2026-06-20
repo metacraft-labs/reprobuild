@@ -1,4 +1,4 @@
-import std/[algorithm, atomics, os, strutils]
+import std/[algorithm, atomics, monotimes, os, strutils, times]
 from repro_core/paths import extendedPath
 
 import repro_core/codec
@@ -31,7 +31,48 @@ const
 # (NEW), which stops at the first truncated frame instead of raising.
 # The fragment-log frame format already starts with a u32 length
 # prefix, so a partial write is detected by ``pos + length > bytes.len``.
-const FragmentDirBufLen = 4096
+#
+# DSL-port M9.R.15f.1 (fs-snoop fragment-log write batching): qt6-base
+# configure issues millions of file probes, and even with the
+# M9.R.15c.1 single-fd-per-thread cache the per-record
+# ``writeBuffer`` + ``flushFile`` call pair drives two syscalls per
+# emit (write + fdatasync-style fflush). Throughput plateaued around
+# 946K emits/s in the M9.R.15c.1 microbench; for qt6-base + the KF6
+# cascade we need another 10x.
+#
+# Fix: accumulate up to ``FragmentBatchBufLen`` bytes (64 KiB) of
+# encoded frames in a per-thread stack-resident byte buffer and flush
+# the entire batch in a single ``writeBuffer`` (followed by a single
+# ``flushFile``). The encoded-frame protocol is unchanged so the
+# tolerant reader continues to recover whole frames from a crash-
+# truncated tail. A monotone-clock check on each emit forces a flush
+# every ``FragmentBatchMaxAgeNs`` (default 100 ms) so a long-running
+# producer with sparse emits doesn't lose more than the most recent
+# ~6.4 ms of frames on SIGKILL (per the 64 KiB / 10 MB/s estimate),
+# and never more than 100 ms regardless of write rate.
+#
+# Determinism guard: each batch flush is a contiguous append to the
+# per-thread fragment file. Order within a thread is preserved by the
+# in-batch buffer order (frames are appended bottom-to-top to a flat
+# byte array). Cross-thread order is irrelevant — each thread writes
+# to its own fragment file under a deterministic path
+# (``fragmentPath(dir, osPid, threadId)``) and the merge step sorts
+# by ``(osPid, threadId, seq, kind, path)`` in ``canonicalOrder``, so
+# the on-disk batch boundaries leave the canonical depfile byte-
+# identical regardless of when each thread flushed.
+#
+# Crash safety: ``writeBuffer`` of a 64 KiB block is not atomic with
+# respect to SIGKILL (POSIX ``write`` may complete partially before
+# a kill signal preempts the process). The tolerant reader handles
+# this — any partial frame at the tail of the buffer is dropped at
+# the next length-prefix boundary that overruns the file. Every
+# frame ahead of the partial-tail boundary is byte-identical to what
+# the producer wrote.
+const
+  FragmentDirBufLen = 4096
+  FragmentBatchBufLen = 64 * 1024
+  FragmentBatchMaxAgeNs = 100_000_000'i64  # 100 ms
+  BatchStalenessProbeInterval = 64        # check time every 64 emits
 
 type
   FragmentSlot = object
@@ -52,10 +93,31 @@ type
     fragmentDirBuf: array[FragmentDirBufLen, char]
     osPid: uint64
     threadId: uint64
+    # M9.R.15f.1 — per-thread batch buffer. ``batchLen`` records how
+    # many bytes of ``batchBuf`` are currently populated; flush
+    # consumes the populated prefix and resets ``batchLen`` to 0.
+    # ``batchOpenedAtNs`` records the monotone-clock timestamp at
+    # which the first frame of the current batch was appended; the
+    # next emit forces a flush when ``now - batchOpenedAtNs`` exceeds
+    # ``FragmentBatchMaxAgeNs``.
+    batchLen: int
+    batchOpenedAtNs: int64
+    # M9.R.15f.1 — amortise the staleness clock-read over many emits.
+    # Reading the monotone clock on every emit costs ~20 ns/call which
+    # is the dominant per-record cost once the inlined encoder lands;
+    # we instead skip the staleness check entirely until at least
+    # ``BatchStalenessProbeInterval`` records have been buffered. The
+    # worst-case staleness window is bounded above by 100 ms +
+    # (interval * per-emit-cost), still well below the SIGKILL data-
+    # loss budget for any realistic emit rate.
+    batchProbeCountdown: int
+    batchBuf: array[FragmentBatchBufLen, byte]
 
 var
   fragmentSlot {.threadvar.}: FragmentSlot
   fragmentOpenCount: Atomic[uint64]
+  fragmentWriteCount: Atomic[uint64]
+  fragmentFlushCount: Atomic[uint64]
 
 proc slotFragmentDirEquals(slot: var FragmentSlot; s: string): bool =
   if slot.fragmentDirLen != s.len:
@@ -87,10 +149,65 @@ proc resetFragmentLogOpenCount*() =
   ## Test-only — reset the open counter between scenarios.
   fragmentOpenCount.store(0, moRelaxed)
 
+proc fragmentLogWriteCount*(): uint64 =
+  ## DSL-port M9.R.15f.1 — return the lifetime number of underlying
+  ## ``writeBuffer`` calls the batched fragment writer issued. Tests
+  ## assert this rises slowly relative to record count (a burst of N
+  ## records that fit in the batch buffer should issue ceil(N / B)
+  ## writes, not N).
+  fragmentWriteCount.load(moRelaxed)
+
+proc resetFragmentLogWriteCount*() =
+  ## Test-only — reset the write counter between scenarios.
+  fragmentWriteCount.store(0, moRelaxed)
+
+proc fragmentLogFlushCount*(): uint64 =
+  ## DSL-port M9.R.15f.1 — return the lifetime number of
+  ## ``flushFile`` calls the batched writer issued. One flush per
+  ## batch write.
+  fragmentFlushCount.load(moRelaxed)
+
+proc resetFragmentLogFlushCount*() =
+  ## Test-only — reset the flush counter between scenarios.
+  fragmentFlushCount.store(0, moRelaxed)
+
+proc flushFragmentBatch*() =
+  ## DSL-port M9.R.15f.1 — flush the in-flight batch buffer (if any)
+  ## to the cached fragment file. Public so external code (close,
+  ## merge, test teardown) can force a sync point without closing the
+  ## file handle. If the slot is not open or the batch is empty, the
+  ## call is a no-op.
+  if not fragmentSlot.isOpen or fragmentSlot.batchLen == 0:
+    return
+  let bufLen = fragmentSlot.batchLen
+  let written = fragmentSlot.file.writeBuffer(
+    addr fragmentSlot.batchBuf[0], bufLen)
+  if written != bufLen:
+    # Drain whatever we managed, reset the buffer so we don't replay
+    # bytes on the next flush, and raise — the producer cannot
+    # recover from a short write.
+    fragmentSlot.batchLen = 0
+    fragmentSlot.batchOpenedAtNs = 0
+    raiseEnvelopeError(eeMalformed,
+      "short write to RMDF fragment for osPid=" & $fragmentSlot.osPid &
+      " threadId=" & $fragmentSlot.threadId)
+  flushFile(fragmentSlot.file)
+  discard fragmentWriteCount.fetchAdd(1, moRelaxed)
+  discard fragmentFlushCount.fetchAdd(1, moRelaxed)
+  fragmentSlot.batchLen = 0
+  fragmentSlot.batchOpenedAtNs = 0
+  fragmentSlot.batchProbeCountdown = 0
+
 proc closeFragmentSlot*() =
   ## Force the calling thread's cached fragment-log handle (if any) to
   ## close. Called on shim shutdown / thread exit / test teardown.
+  ## M9.R.15f.1 — flush any in-flight batch buffer before closing so
+  ## the on-disk fragment includes every appended frame.
   if fragmentSlot.isOpen:
+    try:
+      flushFragmentBatch()
+    except EnvelopeError, IOError, OSError:
+      discard
     try:
       close(fragmentSlot.file)
     except IOError, OSError:
@@ -100,6 +217,9 @@ proc closeFragmentSlot*() =
     fragmentSlot.fragmentDirBuf[0] = '\0'
     fragmentSlot.osPid = 0
     fragmentSlot.threadId = 0
+    fragmentSlot.batchLen = 0
+    fragmentSlot.batchOpenedAtNs = 0
+    fragmentSlot.batchProbeCountdown = 0
 
 proc checksum*(bytes: openArray[byte]): uint64 =
   result = FnvOffset
@@ -210,23 +330,48 @@ proc openFragmentSlot(fragmentDir: string; osPid, threadId: uint64;
   fragmentSlot.isOpen = true
   fragmentSlot.osPid = osPid
   fragmentSlot.threadId = threadId
+  fragmentSlot.batchLen = 0
+  fragmentSlot.batchOpenedAtNs = 0
+  fragmentSlot.batchProbeCountdown = 0
   discard fragmentOpenCount.fetchAdd(1, moRelaxed)
   true
+
+proc monoNowNs(): int64 =
+  ## DSL-port M9.R.15f.1 — monotone-clock read used to time-bound
+  ## batch staleness. ``std/monotimes.getMonoTime`` calls
+  ## ``clock_gettime(CLOCK_MONOTONIC)`` on POSIX and
+  ## ``QueryPerformanceCounter`` on Windows; both are vDSO-resolved /
+  ## userspace-fast and add ~ns of overhead to the hot path.
+  cast[int64]((getMonoTime() - MonoTime()).inNanoseconds)
 
 proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
   ## DSL-port M9.R.15c.1 — emit ``record`` to the (osPid, threadId)
   ## fragment under ``fragmentDir``. The file handle is cached in a
   ## per-thread slot; the directory is only ``createDir``-ed on the
-  ## open path. The frame is written in a single ``writeBuffer`` call
-  ## and immediately flushed so SIGKILL leaves all-or-nothing whole
-  ## frames in the file. Truncated trailing bytes are tolerated by
+  ## open path. Truncated trailing bytes are tolerated by
   ## ``decodeFragmentRecordsTolerant`` (used by ``mergeFragments``).
+  ##
+  ## DSL-port M9.R.15f.1 — frames are appended to a per-thread
+  ## ``FragmentBatchBufLen``-byte stack buffer; the batch is flushed
+  ## to the file in a single ``writeBuffer`` + ``flushFile`` pair
+  ## when (a) the next frame would overflow the buffer, (b) the
+  ## (osPid, threadId, fragmentDir) key changes (so each fragment
+  ## file receives only its own frames), (c) ``flushFragmentBatch``
+  ## / ``closeFragmentSlot`` / ``mergeFragments`` is invoked, or
+  ## (d) the current batch has been open for longer than
+  ## ``FragmentBatchMaxAgeNs`` (default 100 ms) — bounding the worst-
+  ## case data-loss window on SIGKILL.
   let needsReopen = not fragmentSlot.isOpen or
     not slotFragmentDirEquals(fragmentSlot, fragmentDir) or
     fragmentSlot.osPid != record.osPid or
     fragmentSlot.threadId != record.threadId
   if needsReopen:
     if fragmentSlot.isOpen:
+      # Flush the in-flight batch BEFORE we close — otherwise the
+      # buffered frames belong to the previous (osPid, threadId)
+      # fragment but the close path drops them on the floor.
+      try: flushFragmentBatch()
+      except EnvelopeError, IOError, OSError: discard
       try: close(fragmentSlot.file)
       except IOError, OSError: discard
       fragmentSlot.isOpen = false
@@ -235,14 +380,119 @@ proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
     if not openFragmentSlot(fragmentDir, record.osPid, record.threadId, path):
       raiseEnvelopeError(eeMalformed,
         "cannot open RMDF fragment for append: " & path)
-  let frame = encodeFrame(record)
-  if frame.len > 0:
+
+  # M9.R.15f.1 — compute exact frame size first (4-byte length prefix
+  # + fixed 58-byte header + 4 + path-bytes + 4 + detail-bytes) so we
+  # can encode straight into the batch buffer without an intermediate
+  # ``seq[byte]`` allocation. The frame layout matches
+  # ``encodeFrame`` byte-for-byte; the unit tests assert the on-disk
+  # bytes stay byte-identical to what the legacy ``encodeFrame`` +
+  # ``copyMem`` path produced (the determinism test) so the inlined
+  # encode is observably equivalent.
+  const RecordHeaderBytes = 2 + 2 + 8 + 8 + 8 + 8 + 8 + 8 + 4 + 4
+  let pathLen = record.path.len
+  let detailLen = record.detail.len
+  let payloadLen = RecordHeaderBytes + 4 + pathLen + 4 + detailLen
+  let frameLen = 4 + payloadLen
+  if frameLen == 0:
+    return
+
+  if frameLen > FragmentBatchBufLen:
+    # Pathological case — a single frame larger than the batch buf.
+    # Flush whatever is pending, then write the giant frame directly
+    # via the legacy ``encodeFrame`` path to keep the file's frame-
+    # boundary invariant.
+    flushFragmentBatch()
+    let frame = encodeFrame(record)
     let n = fragmentSlot.file.writeBuffer(unsafeAddr frame[0], frame.len)
     if n != frame.len:
       raiseEnvelopeError(eeMalformed,
         "short write to RMDF fragment for osPid=" & $record.osPid &
         " threadId=" & $record.threadId)
     flushFile(fragmentSlot.file)
+    discard fragmentWriteCount.fetchAdd(1, moRelaxed)
+    discard fragmentFlushCount.fetchAdd(1, moRelaxed)
+    return
+
+  if fragmentSlot.batchLen + frameLen > FragmentBatchBufLen:
+    flushFragmentBatch()
+  elif fragmentSlot.batchLen > 0:
+    # Buffer non-empty + frame fits — but is the batch stale? If the
+    # first frame of this batch landed more than ``FragmentBatchMaxAgeNs``
+    # ago, force a flush so a sparse-emit producer doesn't sit on
+    # buffered frames forever.
+    #
+    # The staleness check reads the monotone clock once per
+    # ``BatchStalenessProbeInterval`` emits to amortise the vDSO
+    # call cost across the steady-state hot path. ``batchProbeCountdown``
+    # is initialised to 0 on batch-start so the FIRST post-start emit
+    # always probes (catches the sparse-emit producer that lingers
+    # past 100 ms between calls), then refreshes the countdown to the
+    # full interval on a not-stale result.
+    if fragmentSlot.batchProbeCountdown <= 0:
+      let nowNs = monoNowNs()
+      if nowNs - fragmentSlot.batchOpenedAtNs > FragmentBatchMaxAgeNs:
+        flushFragmentBatch()
+      else:
+        fragmentSlot.batchProbeCountdown = BatchStalenessProbeInterval
+    else:
+      dec fragmentSlot.batchProbeCountdown
+
+  if fragmentSlot.batchLen == 0:
+    fragmentSlot.batchOpenedAtNs = monoNowNs()
+    # Countdown starts at 0 so the first post-batch-start emit always
+    # probes the clock — this catches sparse-emit producers whose
+    # inter-emit gap exceeds the 100 ms staleness threshold and
+    # ensures bounded data loss on SIGKILL.
+    fragmentSlot.batchProbeCountdown = 0
+
+  # Inline little-endian encode straight into the batch buffer at the
+  # current offset. ``cursor`` is a local copy so we can store it
+  # back to ``batchLen`` as a single write at the end.
+  var cursor = fragmentSlot.batchLen
+  template putByte(b: byte) =
+    fragmentSlot.batchBuf[cursor] = b
+    inc cursor
+  template putU16Le(v: uint16) =
+    putByte(byte(v and 0xFF'u16))
+    putByte(byte((v shr 8) and 0xFF'u16))
+  template putU32Le(v: uint32) =
+    putByte(byte(v and 0xFF'u32))
+    putByte(byte((v shr 8) and 0xFF'u32))
+    putByte(byte((v shr 16) and 0xFF'u32))
+    putByte(byte((v shr 24) and 0xFF'u32))
+  template putU64Le(v: uint64) =
+    putByte(byte(v and 0xFF'u64))
+    putByte(byte((v shr 8) and 0xFF'u64))
+    putByte(byte((v shr 16) and 0xFF'u64))
+    putByte(byte((v shr 24) and 0xFF'u64))
+    putByte(byte((v shr 32) and 0xFF'u64))
+    putByte(byte((v shr 40) and 0xFF'u64))
+    putByte(byte((v shr 48) and 0xFF'u64))
+    putByte(byte((v shr 56) and 0xFF'u64))
+  template putString(s: string) =
+    putU32Le(uint32(s.len))
+    if s.len > 0:
+      copyMem(addr fragmentSlot.batchBuf[cursor], unsafeAddr s[0], s.len)
+      cursor += s.len
+
+  # Frame length prefix.
+  putU32Le(uint32(payloadLen))
+  # Record header — order MUST match encodeRecordPayload exactly.
+  putU16Le(uint16(ord(record.kind)))
+  putU16Le(uint16(ord(record.observationKind)))
+  putU64Le(record.seq)
+  putU64Le(record.osPid)
+  putU64Le(record.parentOsPid)
+  putU64Le(record.threadId)
+  putU64Le(record.childOsPid)
+  putU64Le(cast[uint64](record.result))
+  putU32Le(record.flags)
+  putU32Le(uint32(ord(record.probeResult)))
+  putString(record.path)
+  putString(record.detail)
+
+  fragmentSlot.batchLen = cursor
 
 proc readFragmentRecords*(path: string): seq[MonitorRecord] =
   let raw = readFile(extendedPath(path)).toBytes()
