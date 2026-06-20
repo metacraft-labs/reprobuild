@@ -2725,7 +2725,6 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     return cached.get()
 
   let moduleDir = parentDir(modulePath)
-  let moduleName = splitFile(modulePath).name
   # Windows: the extract_runner.nim path is passed verbatim to a child
   # `nim c` invocation, and nim opens it via the non-extended Win32 API,
   # so paths longer than MAX_PATH (260 chars) cause `Error: cannot open
@@ -2746,11 +2745,33 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   createDir(extendedPath(tempRoot))
   defer: removeDir(extendedPath(tempRoot))
   let runnerPath = tempRoot / "extract_runner.nim"
+  # M9.R.14b.2: Pin the recipe import to its absolute path so that
+  # ``import repro`` does not resolve through Nim's search path. The
+  # generic ``import <moduleName>`` form used to ride on
+  # ``--path:moduleDir``, but config.nims at the reprobuild root adds
+  # ``switch("path", ".")`` which gives Nim the ROOT ``repro.nim``
+  # as a SECOND candidate for the bare ``repro`` module identifier.
+  # On any from-source recipe (e.g. ``recipes/packages/source/gcc/``
+  # whose own ``repro.nim`` collides on the leaf module name with the
+  # workspace root's ``repro.nim``), Nim picked the ROOT — silently
+  # extracting the wrong project's interface (projectName = "sh"
+  # because the merged registry's first package was the stdlib's
+  # ``sh`` package via the system_tools chain, NOT the recipe's
+  # ``gccSource``). Downstream this surfaced as "root entry point
+  # is missing from provider manifest" because the standard provider
+  # could not match the gcc recipe's expected entry point against the
+  # extracted root project's interface.
+  #
+  # An absolute-path quoted import sidesteps the path-search ambiguity
+  # entirely. Nim treats ``import "<abs path>"`` as a literal file
+  # reference; the per-module symbol scope still gives us the
+  # ``registeredPackages()`` set as expected by ``artifactFromRegisteredDsl``.
+  let absoluteModulePath = absolutePath(modulePath).replace('\\', '/')
   writeFile(extendedPath(runnerPath),
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
-    "import " & moduleName & "\n\n" &
+    "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     "writeInterfaceArtifact(paramStr(1), artifact)\n" &
     "writeNimInterfaceStub(paramStr(2), artifact)\n")
