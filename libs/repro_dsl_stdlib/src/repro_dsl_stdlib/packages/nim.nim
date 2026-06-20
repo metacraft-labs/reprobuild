@@ -78,6 +78,24 @@ package nim:
       cpu = "x86_64",
       os = "linux",
       lockIdentity = "tarball:nim@2.2.10:linux:sha256:0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
+    tarball url = "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_arm64.tar.xz",
+      sha256 = "9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/nim",
+      packageId = "nim@2.2.10",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:nim@2.2.10:macos-aarch64:sha256:9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e"
+    tarball url = "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_x64.tar.xz",
+      sha256 = "35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/nim",
+      packageId = "nim@2.2.10",
+      cpu = "x86_64",
+      os = "macos",
+      lockIdentity = "tarball:nim@2.2.10:macos-x86_64:sha256:35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851"
 
   executable nim:
     cli:
@@ -248,7 +266,9 @@ let nimCatalog* = @[
       # M9.5: Linux x86_64 slice. Upstream nim-lang.org Linux prebuilt;
       # the inner dir is ``nim-<ver>/`` (same convention as Windows);
       # archive_format_override = afTarXz; binaries lack .exe.
-      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz", sha256: "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"])
+      PlatformBinary(cpu: pcX86_64, os: poLinux, url: "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz", sha256: "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"]),
+      PlatformBinary(cpu: pcAArch64, os: poMacos, url: "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_arm64.tar.xz", sha256: "9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"]),
+      PlatformBinary(cpu: pcX86_64, os: poMacos, url: "https://github.com/nim-lang/nightlies/releases/download/2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/nim-2.2.10-macosx_x64.tar.xz", sha256: "35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851", sha512: "", sha1: "", extract_path: "nim-2.2.10", archive_format_override: afTarXz, has_archive_format_override: true, bin_relpath_override: @["bin/atlas", "bin/nim", "bin/nimble", "bin/nimgrab", "bin/nimgrep", "bin/nimpretty", "bin/nimsuggest", "bin/testament"])
     ],
     installer_args: @[],
     pacman_packages: @[],

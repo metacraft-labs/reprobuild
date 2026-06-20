@@ -1244,6 +1244,12 @@ proc matchesHostPlatform(provisioning: InterfaceTarballProvisioning): bool =
     (hostOsNorm == "darwin" and osNorm == "macos")
   cpuOk and osOk
 
+proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
+  for provisioning in useDef.tarballProvisioning:
+    if matchesHostPlatform(provisioning):
+      return true
+  false
+
 proc selectTarballProvisioning(useDef: InterfaceToolUse):
     InterfaceTarballProvisioning =
   ## Pick the first ``tarballProvisioning`` entry that matches the host
@@ -3488,7 +3494,16 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     try:
       result = resolvePathOnlyTool(useDef, pathValue)
     except OSError:
-      if useDef.tarballProvisioning.len > 0:
+      if hasHostTarballProvisioning(useDef):
+        result = resolveTarballTool(useDef, storeRoot)
+      elif (defined(linux) or defined(macosx)) and
+          useDef.nixProvisioning.len > 0:
+        # Some upstreams, such as Cap'n Proto, do not publish direct
+        # Linux/macOS binary tarballs. In path mode, let Nix-capable
+        # hosts use the package's pinned Nix channel instead of failing
+        # on a tarball entry that only targets another OS.
+        result = resolveNixTool(useDef, storeRoot)
+      elif useDef.tarballProvisioning.len > 0:
         result = resolveTarballTool(useDef, storeRoot)
       else:
         raise

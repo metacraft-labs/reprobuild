@@ -57,8 +57,15 @@ proc copyScratchProjectSources(scratchRoot: string) =
     "config.nims",
     "libs/blake3/src/blake3.nim",
     "libs/blake3/src/blake3/capi.c",
+    "libs/blake3/src/blake3/vendor/blake3.c",
+    "libs/blake3/src/blake3/vendor/blake3.h",
+    "libs/blake3/src/blake3/vendor/blake3_dispatch.c",
+    "libs/blake3/src/blake3/vendor/blake3_impl.h",
+    "libs/blake3/src/blake3/vendor/blake3_portable.c",
     "libs/xxh3/src/xxh3.nim",
     "libs/xxh3/src/xxh3/capi.c",
+    "libs/xxh3/src/xxh3/vendor/xxhash.c",
+    "libs/xxh3/src/xxh3/vendor/xxhash.h",
   ]:
     copySource(relPath, scratchRoot)
 
@@ -81,6 +88,37 @@ template withEnvVar(name, value: string; body: untyped) =
       delEnv(name)
 
 suite "Windows system-hash mode":
+  test "vendored hash mode uses tracked package-local C sources":
+    let scratchRoot = RepoRoot / "build" / "test-tmp" /
+      "windows-vendored-hash-mode"
+    resetDir(scratchRoot)
+    defer:
+      if dirExists(scratchRoot):
+        removeDir(scratchRoot)
+
+    copyScratchProjectSources(scratchRoot)
+
+    let fixturePath = scratchRoot / "hash_fixture.nim"
+    writeFile(fixturePath, FixtureSource)
+
+    let nimcache = scratchRoot / "nimcache"
+    let cmd = quoteShellCommand(@[
+      "nim", "check",
+      "--os:windows",
+      "--cpu:amd64",
+      "--hints:off",
+      "--warnings:off",
+      "--nimcache:" & nimcache,
+      fixturePath,
+    ])
+
+    withEnvVar("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0"):
+      let result = execCmdEx(cmd, workingDir = scratchRoot)
+      check result.exitCode == 0
+      if result.exitCode != 0:
+        checkpoint(result.output)
+      check "references" / "mold" notin result.output
+
   test "nim check does not compile vendored hash sources on Windows":
     let scratchRoot = RepoRoot / "build" / "test-tmp" /
       "windows-system-hash-mode"

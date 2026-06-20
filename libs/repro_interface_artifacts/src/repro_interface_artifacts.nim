@@ -2451,21 +2451,24 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
 
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
-  # The reprobuild repo vendors portable C sources for both under
-  # references/mold/third-party/, and config.nims wires the include paths +
+  # The reprobuild repo vendors portable C sources for both inside the
+  # package-local source trees, and config.nims wires the include paths +
   # `{.compile:.}` pragmas accordingly. When repro is run as a CLI against an
   # arbitrary project, the project's nim invocation does NOT pick up
   # reprobuild's config.nims (different working directory), so we have to
-  # propagate the same -I flags here. The vendored sources live alongside the
-  # reprobuild library tree, so resolve the include dirs relative to workDir
-  # (which is the reprobuildLibraryWorkDir) — there is no system-wide install
-  # to discover.
+  # propagate the same define/include flags here. The vendored sources live
+  # alongside the reprobuild library tree, so resolve the include dirs relative
+  # to workDir (which is the reprobuildLibraryWorkDir).
   when defined(windows):
     if workDir.len > 0:
-      let blake3Inc = workDir / "references" / "mold" / "third-party" /
-        "blake3" / "c"
-      let xxhashInc = workDir / "references" / "mold" / "third-party" /
-        "xxhash"
+      let blake3Inc = workDir / "libs" / "blake3" / "src" / "blake3" /
+        "vendor"
+      let xxhashInc = workDir / "libs" / "xxh3" / "src" / "xxh3" /
+        "vendor"
+      if fileExists(extendedPath(blake3Inc / "blake3.c")) and
+          fileExists(extendedPath(xxhashInc / "xxhash.c")):
+        result.add("--define:reproVendoredHash")
+        result.add("--passC:-DREPRO_VENDORED_HASH")
       if fileExists(extendedPath(blake3Inc / "blake3.h")):
         result.add("--passC:-I" & blake3Inc)
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):

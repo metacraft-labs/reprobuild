@@ -4,7 +4,8 @@
 # mode, including on Windows, `xxh3/capi.c` relies on the include/link flags
 # configured by config.nims.
 when defined(reproVendoredHash):
-  const xxh3Root = "../../../references/mold/third-party/xxhash"
+  const xxh3Root = "xxh3/vendor"
+  {.passC: "-DREPRO_VENDORED_HASH".}
   {.compile: xxh3Root & "/xxhash.c".}
 
 import std/strutils
