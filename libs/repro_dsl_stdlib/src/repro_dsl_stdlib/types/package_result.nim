@@ -250,12 +250,25 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   # safety), <prefix>/lib<name>.so (library shape).
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
   if kind == "library":
-    # Library: probe lib<name>.so, lib<name>.a
-    script.add("if [ -f \"" & escapedSrcDir & "/lib" & escapedName & ".so\" ]; then ")
-    script.add("cp -fL \"" & escapedSrcDir & "/lib" & escapedName & ".so\" \"" & escapedOut & "\"; ")
-    script.add("elif [ -f \"" & escapedSrcDir & "/lib" & escapedName & ".a\" ]; then ")
-    script.add("cp -fL \"" & escapedSrcDir & "/lib" & escapedName & ".a\" \"" & escapedOut & "\"; ")
-    script.add("else echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
+    # Library: probe several common autotools naming patterns.
+    # The DSL allows the recipe author to declare ``library libExpat:``
+    # while the actual file is ``libexpat.so`` (autotools lowercases +
+    # prefixes ``lib``). The probe order:
+    #   1. lib<name>.so        (exact-case)
+    #   2. lib<lowerName>.so   (autotools convention — case-folded)
+    #   3. <name>.so           (no lib- prefix, exact-case)
+    #   4. <lowerName>.so      (no lib- prefix, case-folded)
+    #   5. lib<name>.a / lib<lowerName>.a (static archive fallbacks)
+    let escapedLowerName = name.toLowerAscii.replace("\"", "\\\"")
+    script.add("for candidate in ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
+    script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\"; ")
+    script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
+    script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:
     # Executable: probe bare name; also try .exe for cross-builds.
     script.add("if [ -f \"" & escapedSrcDir & "/" & escapedName & "\" ]; then ")
