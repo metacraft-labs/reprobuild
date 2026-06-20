@@ -149,7 +149,7 @@ package expatSource:
     ## sha256 was computed over the vendored 493,060-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "file:///metacraft/reprobuild/recipes/packages/source/expat/vendor/expat-2.7.0.tar.xz"
+    url: "https://github.com/libexpat/libexpat/releases/download/R_2_7_0/expat-2.7.0.tar.xz"
     sha256: "25df13dd2819e85fb27a1ce0431772b7047d72af81ae78dc26b4c6e0805f48d1"
     extractStrip: 1
 
