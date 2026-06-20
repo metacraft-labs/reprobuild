@@ -201,6 +201,7 @@ suite "M3: multi-language extractors (language-agnostic engine)":
     check extractorFor("a/b/x.rb").isOk
     check extractorFor("a/b/x.py").isOk
     check extractorFor("a/b/x.js").isOk
+    check extractorFor("a/b/x.nim").isOk   # M9: Nim's materialized-source path
     # Case-insensitive on the extension.
     check extractorFor("X.PY").isOk
     # Unknown extension ⇒ clear Err (asserted), never silent.
@@ -225,6 +226,20 @@ suite "M3: multi-language extractors (language-agnostic engine)":
     check pyBody.isOk
     # Indentation rule: f's body is lines 1..3, NOT g (dedented def at line 5).
     check pyBody.value == "def f():\n    return 1\n    return 2"
+
+    # Nim (.nim) reuses the SAME indentation strategy (M9): a proc body is its
+    # `proc` line through the last more-deeply-indented line; the next sibling
+    # `proc` at the def's indentation ends it.
+    let nimSrc = @[
+      "proc f(): int =",   # 1
+      "  result = 1",      # 2
+      "  result += 2",     # 3
+      "",                  # 4
+      "proc g(): int =",   # 5
+      "  result = 3"]      # 6
+    let nimBody = extractFunctionBody("x.nim", nimSrc, 1)
+    check nimBody.isOk
+    check nimBody.value == "proc f(): int =\n  result = 1\n  result += 2"
 
     let jsSrc = @[
       "function f() {",                       # 1

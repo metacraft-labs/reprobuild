@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M8 complete, M9 next
+#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M9 complete, M10 next
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -604,37 +604,73 @@
   to a conservative re-run, never a skip.
 
 * M9 — Nim's dual recording path
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: the SAME Nim program decides correctly whether it was traced via the
   materialized source path (source-text hash) or the native MCR path
   (instruction-byte hash), chosen per trace by backend detection.
 
   Deliverables:
-  - [ ] A Nim fixture program recordable two ways, with TWO trace fixtures: one
-    in the source/interpreted shape (canonical Function/Call, ⇒ source hash) and
-    one in the native shape (⇒ instruction-byte hash of the compiled binary).
-    Document how each corresponds to the real Nim recording path (materialized
-    vs compiled-via-C/MCR; cite Language-Support-Matrix Nim dual-path).
-  - [ ] The engine selects the shallow-hash strategy per trace via
-    `detectBackend` — a Nim source-traced run uses the source extractor; a Nim
-    native-traced run uses `shallowHashNative`. No language-name special-casing;
-    purely backend-driven.
+  - [X] A `.nim` SOURCE extractor added to the M3 `FunctionBodyExtractor`
+    registry (`extractors.nim`): Nim routines (`proc`/`func`/`method`/`template`/
+    `macro`) are indentation-delimited, so `.nim` reuses the SAME
+    `extractByIndentation` strategy as Ruby/Python — body = the `proc` line
+    through the next non-blank line at indentation `<= the proc's indent`. The
+    rule is documented in `extractors.nim`; an unknown extension still Errs
+    (M3 fail-safe). `t_multilang_extractors.nim`'s
+    `extractor_selected_by_extension` now also asserts `.nim` resolves and
+    applies the indentation rule.
+  - [X] A Nim fixture program recordable two ways under
+    `tests/fixtures/m9_nim_dual/`:
+      * SOURCE: `src/calc.nim` (4 procs; `usedA`/`usedB`/`mainCalc` executed,
+        `unusedC` not) + `trace_source/` in the canonical Function/Call JSON
+        shape (⇒ `tbSourceInterpreted` ⇒ `.nim` source extractor over calc.nim;
+        explicit `recorder_backend: "interpreter"`). A guard test
+        (`source_trace_deflines_match_calc_nim`) pins the trace defLines to the
+        actual `proc` lines so a doc edit can't silently break extraction.
+      * NATIVE: the test COMPILES the same `calc.nim` with `nim c` (via
+        `build.sh`, leaf-stabilising flags) at test time, and `trace_native/`
+        carries a native structural signal (`trace_db_metadata.json`,
+        `recorder_backend: "rr"`) + a native calltrace whose `functionName`s are
+        the binary's actual MANGLED symbols, DISCOVERED by running `nm` on the
+        freshly-built binary (`t_nim_dual.nim`'s `mangledName`). Documented in the
+        fixture README + `build.sh`: with `-g` the dev-shell Nim emits the
+        Itanium-style `_ZN<len>calc<len>usedAE`; without `-g`,
+        `usedA__<modulehash>_uN` (build-specific suffix) — so names MUST come from
+        the binary, never the source identifier.
+  - [X] The engine selects the shallow-hash strategy per trace via
+    `detectBackend` — a Nim source-traced run uses the `.nim` source extractor; a
+    Nim native-traced run uses `shallowHashNative`. NO language-name special-
+    casing anywhere (verified: the engine branches only on `TraceBackend`); this
+    already worked through the M6 seams, confirmed not special-cased.
 
-  Automated tests:
-  - test_name: nim_source_traced_uses_source_hash_and_decides
-    description: the Nim source-path fixture: edit the Nim function body (source)
-    ⇒ rerun; edit an unexecuted Nim function ⇒ skip.
-  - test_name: nim_native_traced_uses_instruction_hash_and_decides
-    description: the Nim native-path fixture (compiled binary): edit + rebuild an
-    executed function ⇒ rerun; an unexecuted one ⇒ skip — via instruction bytes,
-    NOT source.
-  - test_name: same_nim_program_different_backend_picks_different_strategy
-    description: detectBackend drives source-vs-native hashing for the same Nim
-    program; assert the strategy actually chosen per trace.
+  Automated tests (`tests/t_nim_dual.nim`, all real — compile + edit + rebuild):
+  - [X] test_name: nim_source_traced_uses_source_hash_and_decides
+    description: over `trace_source/` + calc.nim: editing an EXECUTED proc
+    (usedA) body ⇒ `idRerunChanged` naming it (sibling usedB not listed); editing
+    an UNEXECUTED proc (unusedC) ⇒ `idSkipUnchanged`. (Source-text precision.)
+  - [X] test_name: nim_native_traced_uses_instruction_hash_and_decides
+    description: over `trace_native/` + the nim-compiled binary: edit + rebuild
+    an executed proc (usedA) ⇒ `idRerunChanged`; edit + rebuild an unexecuted
+    proc (unusedC) ⇒ `idSkipUnchanged`. The executed procs are pure
+    position-independent leaves ordered BEFORE unusedC, so the unusedC edit does
+    not change their instruction bytes nor their symbol names — guards assert the
+    executed leaves' instruction-byte hashes AND mangled names are unchanged
+    across the edit (and unusedC's own hash DID change), so the skip is genuine.
+    (Instruction-byte precision, NOT source.)
+  - [X] test_name: same_nim_program_different_backend_picks_different_strategy
+    description: asserts `detectBackend(trace_source) == tbSourceInterpreted` and
+    `detectBackend(trace_native) == tbNativeDwarf`, then drives the SAME
+    comment-only edit to usedA through BOTH: the source-text hasher sees a change
+    ⇒ `idRerunChanged`, while the native instruction-byte hasher sees
+    byte-identical machine code (a comment is not emitted) ⇒ `idSkipUnchanged` —
+    same program, same edit, OPPOSITE decision, proving the per-trace strategy is
+    genuinely different and chosen by backend alone.
 
   Acceptance: Nim works on both paths with the strategy chosen by backend
-  detection, no language-name branching.
+  detection, no language-name branching. (All 4 M9 tests pass; full Phase-1 +
+  M6/M7/M8 regression green, including M3 `t_multilang_extractors` after the
+  `.nim` extractor addition.)
 
 * M10 — Full language→strategy matrix
   :STATUS: not started

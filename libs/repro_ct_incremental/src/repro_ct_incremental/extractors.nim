@@ -51,6 +51,36 @@
 ##   fixtures do not exercise that and any such edit only ever *over*-captures,
 ##   which stays conservative (it can cause a re-run, never a false skip).
 ##
+## ## Nim (`.nim`) — indentation heuristic (`proc`/`func`/`method`/`template`/`macro`)
+##
+##   Nim routine bodies are indentation-delimited (like Python suites), so the
+##   rule reuses the SAME `extractByIndentation` strategy as Ruby/Python: the
+##   body is the routine's definition line through the last line indented more
+##   deeply than the definition line — the next non-blank line at indentation
+##   `<= def indent` (a sibling `proc`/`func`/`method`/`template`/`macro`, a
+##   dedented top-level statement, or end-of-file) ends the routine. Blank lines
+##   are carried along and trailing blanks dropped.
+##
+##   The `.nim` extension is registered to this strategy purely as a SOURCE-text
+##   hasher. It is selected when a Nim trace was recorded the *materialized
+##   source* way (CodeTracer emits canonical `Function`/`Call` records ⇒
+##   `tbSourceInterpreted` ⇒ this extractor). When the SAME Nim program is
+##   instead recorded the *native / compiled-via-C MCR* way the engine does NOT
+##   reach this extractor at all: `detectBackend` selects `tbNativeDwarf` and the
+##   function is hashed from its compiled instruction bytes
+##   (`native_hash.shallowHashNative`) — never its source text. The per-trace
+##   backend choice (NOT the language name) decides which hasher runs; this
+##   extractor only handles the source-traced Nim case (M9).
+##
+##   The definition keyword itself is not matched specially — the trace records
+##   the routine's `defLine`, and the indentation rule captures from there. Any
+##   edit to the routine body or its signature line changes the captured text;
+##   edits to sibling routines do not (function-level precision). Documented
+##   limitation (shared with Python): a routine whose body dedents inside a
+##   multi-line expression / continuation is not specially handled; the fixture
+##   does not exercise that, and any such case only ever OVER-captures, which is
+##   conservative (it can cause a re-run, never a false skip).
+##
 ## ## JavaScript (`.js`) — brace matching (`function` / method)
 ##
 ##   JS bodies are brace-delimited, a genuinely different strategy: from the
@@ -549,6 +579,7 @@ proc extractByBraces(sourceLines: seq[string]; defLine: int):
 const extractorRegistry: Table[string, ExtractorProc] = {
   ".rb": ExtractorProc(extractByIndentation),
   ".py": ExtractorProc(extractByIndentation),
+  ".nim": ExtractorProc(extractByIndentation),  # M9: Nim's materialized-source path
   ".js": ExtractorProc(extractByBraces),
 }.toTable
 

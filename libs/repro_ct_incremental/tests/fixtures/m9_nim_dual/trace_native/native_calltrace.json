@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "M9 Nim NATIVE-path calltrace — an ILLUSTRATIVE committed example.",
+    "The REAL calltrace the test drives is regenerated at test time into a",
+    "temp dir pointing at the freshly-built binary, with the 'binary' field set",
+    "to that binary and each 'functionName' set to the MANGLED symbol name",
+    "discovered by running `nm` on THAT binary. Nim mangles proc names via the C",
+    "backend: with `-g` (this fixture's build.sh) the dev-shell Nim emits the",
+    "Itanium-style `_ZN<len>calc<len>usedAE` shown below; without `-g` it emits",
+    "`usedA__<modulehash>_uN` with a build-specific declaration-order suffix.",
+    "Either way the names MUST come from the binary's own symbol table — see",
+    "t_nim_dual.nim's `mangledName` — never the source identifier.",
+    "The executed set is the two pure leaves {usedA, usedB}; mainCalc (the",
+    "call-containing, relocation-sensitive proc) is deliberately excluded, and",
+    "unusedC is emitted-but-not-executed, so neither appears here."
+  ],
+  "binary": "<filled in at test time: path to the nim-compiled calc binary>",
+  "calls": [
+    { "functionName": "_ZN4calc5usedAE", "calleePc": 4096 },
+    { "functionName": "_ZN4calc5usedBE3int", "calleePc": 4112 }
+  ]
+}

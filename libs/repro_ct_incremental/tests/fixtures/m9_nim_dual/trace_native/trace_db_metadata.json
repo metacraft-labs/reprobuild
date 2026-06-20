@@ -1,0 +1,5 @@
+{
+  "format": "ctfs",
+  "recorder_backend": "rr",
+  "note": "M9 Nim native-path fixture: a native structural signal (+ explicit recorder_backend) so detectBackend routes the SAME calc.nim's native trace to tbNativeDwarf (instruction-byte hashing), while ../trace_source routes to tbSourceInterpreted (source-text hashing)."
+}
