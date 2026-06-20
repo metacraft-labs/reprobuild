@@ -349,7 +349,7 @@ package swaySource:
         # resolves them at runtime via ``LD_LIBRARY_PATH`` (which the
         # ld.so.conf.d overlay populates for installed sway). Matches
         # the pattern many distros use for swaybar specifically.
-        "-Db_lundef=false",
+        "b_lundef=false",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("sway")
