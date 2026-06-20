@@ -111,6 +111,14 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check foundSh
 
   test "configure argv carries the literal sh -c script":
+    # M9.R.14b.3: the script now executes the canonical out-of-tree
+    # autotools pattern (``mkdir -p <buildDir> && cd <buildDir> &&
+    # ../<srcDir>/configure ...``) so the generated ``Makefile`` lands
+    # under ``<buildDir>/`` where the downstream ``make -C <buildDir>``
+    # actions look for it. Pre-M9.R.14b.3 the script ran
+    # ``./src/configure`` from the recipe root, which wrote
+    # ``Makefile`` into the recipe root and broke the ``make -C build``
+    # invocation with ``build: No such file or directory``.
     let pkg = autotools_package(
       srcDir = "./src",
       configureOptions = @["--enable-gold", "--disable-werror"])
@@ -119,7 +127,12 @@ suite "DSL-port M9.R.12.1 — autotools_package routes configure via inlineExecC
     check argvParts.len == 3
     check argvParts[0] == "sh"
     check argvParts[1] == "-c"
-    check "./src/configure" in argvParts[2]
+    # The out-of-tree pattern: mkdir -p build && cd build && ...
+    check "mkdir -p build" in argvParts[2]
+    check "cd build" in argvParts[2]
+    # The configure invocation: ``../src/configure`` (relative to
+    # buildDir which sits one level beneath the recipe root).
+    check "../src/configure" in argvParts[2]
     check "--prefix=/usr" in argvParts[2]
     check "--enable-gold" in argvParts[2]
     check "--disable-werror" in argvParts[2]

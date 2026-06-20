@@ -176,7 +176,41 @@ proc autotools_package*(srcDir: string;
   var configureArgs = @["--prefix=" & prefix]
   for o in configureOptions:
     configureArgs.add(o)
-  let configureScript = srcDir & "/configure " & configureArgs.join(" ")
+  # M9.R.14b.3: out-of-tree autotools pattern. The previous shape ran
+  # ``./src/configure`` from the recipe root, which wrote ``Makefile``
+  # directly into the recipe root, NOT into the ``buildDir`` subdir
+  # the downstream ``make -C build`` actions expect. On Linux this
+  # surfaced as ``make: *** build: No such file or directory.  Stop.``
+  # — the ``-C build`` flag pointed at a directory that ``configure``
+  # had never created. (Pre-M9.R.14b the issue was hidden because the
+  # Linux smoke trip happened earlier, at runquotad resolution.)
+  #
+  # The fix is the canonical autotools out-of-tree pattern: create the
+  # buildDir, cd into it, run ``../src/configure`` (relative path
+  # adjusts srcDir from a buildDir vantage point), so the generated
+  # ``Makefile`` lands under ``buildDir/`` exactly where the downstream
+  # ``make -C buildDir`` actions look for it. This mirrors the gcc
+  # recipe's ``from-source-custom`` four-shell-action sequence (mkdir
+  # / cd / configure / make) but keeps it inline so the higher-level
+  # ``autotools_package`` constructor stays a single fire-and-forget
+  # call site for recipes.
+  #
+  # ``srcDir`` is treated as a recipe-root-relative path; from the
+  # buildDir vantage point we prepend ``../`` so e.g. ``./src``
+  # becomes ``../src``. We strip a leading ``./`` from ``srcDir``
+  # to keep the prepend clean.
+  var relSrcDir = srcDir
+  if relSrcDir.startsWith("./"):
+    relSrcDir = relSrcDir[2 .. ^1]
+  elif relSrcDir.startsWith("/"):
+    # Absolute path: leave as-is.
+    discard
+  let srcFromBuild =
+    if relSrcDir.len > 0 and relSrcDir[0] == '/': relSrcDir
+    else: "../" & relSrcDir
+  let configureScript =
+    "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
+    srcFromBuild & "/configure " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
