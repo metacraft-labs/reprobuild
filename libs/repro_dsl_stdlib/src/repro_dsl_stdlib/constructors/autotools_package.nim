@@ -207,11 +207,28 @@ proc autotools_package*(srcDir: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.configure",
     toolIdentityRefs = @["sh"])
-  let buildEdge = make(workDir = buildDir, vars = @[], targets = @[])
+  # M9.R.13b.5 — thread the configure edge as a sequencing dep through
+  # the ``make`` build + install actions. Without this the engine sees
+  # three independent actions (configure, compile, install) and may
+  # schedule the compile concurrently with configure -- the recipe's
+  # ``./src/configure`` writes ``build/Makefile`` which the make
+  # invocations require as input, so an out-of-order schedule fails
+  # with ``make: *** No rule to make target ...`` / ``Makefile not
+  # found``. cmake_package + meson_package don't trip on this because
+  # their configure actions declare ``buildDir`` as an output and the
+  # build action declares ``buildDir`` as an input, so
+  # ``inferDeclaredActionDeps`` (M5 / Recipe-Val M8) auto-wires the
+  # edge via the output-producer table. The make typed CLI doesn't
+  # carry a ``-C buildDir`` output slot so we have to wire it
+  # explicitly via the ``after:`` parameter the typed-tool macro
+  # generator emits on every typed-tool call site.
+  let buildEdge = make(workDir = buildDir, vars = @[], targets = @[],
+    after = @[configureEdge])
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],
-    vars = @["DESTDIR=" & destdir])
+    vars = @["DESTDIR=" & destdir],
+    after = @[configureEdge])
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
