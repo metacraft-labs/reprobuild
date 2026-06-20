@@ -104,6 +104,10 @@ import ./gl_egl_glesv2
 import ./libgbm
 import ./libgudev
 import ./udev
+# M9.R.15e.7 — mutter's native KMS/DRM backend invokes ``cvt`` (the
+# VESA video-timings calculator) at compile time to generate the
+# default-modes header. Routed through nixpkgs#libxcvt's bin/cvt.
+import ./cvt
 
 export bc
 export bison
@@ -155,3 +159,4 @@ export gl_egl_glesv2
 export libgbm
 export libgudev
 export udev
+export cvt

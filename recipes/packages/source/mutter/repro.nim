@@ -203,6 +203,12 @@ package mutterSource:
     ## clutter/cogl preamble generators at meson-setup + compile time.
     ## Same fix shape as gtk4 / glib2 / harfbuzz / fontconfig.
     "python3"
+    ## M9.R.15e.7 — mutter's native KMS/DRM backend invokes ``cvt``
+    ## (the VESA video-timings calculator) at compile time via
+    ## ``find_program('cvt')`` in src/src/meson.build:1005 to generate
+    ## the ``meta-default-modes.h`` fallback display-mode table.
+    ## Routed through nixpkgs#libxcvt via the M9.R.15e.7 stdlib stub.
+    "cvt"
 
   buildDeps:
     ## glib2 is the foundation library mutter's compositor + window-
