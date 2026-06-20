@@ -97,6 +97,16 @@ type
     compileEdge*: BuildActionDef
     installEdge*: BuildActionDef
     destdir*: string
+      ## DESTDIR-style staging path. Relative to ``buildDir`` for
+      ## autotools recipes (``make install DESTDIR=out`` from a
+      ## ``cwd = buildDir`` process lands at
+      ## ``<recipeRoot>/<buildDir>/out``).
+    buildDir*: string
+      ## M9.R.14c.5 — the out-of-tree build directory the install
+      ## action runs ``make install DESTDIR=...`` from. Stage-copy
+      ## emission joins ``buildDir / destdir`` to locate the
+      ## DESTDIR staging tree on disk. Empty string means the destdir
+      ## value is interpreted relative to the recipe root directly.
     components*: Table[string, string]
 
 # ---------------------------------------------------------------------------
@@ -206,7 +216,7 @@ proc sanitizeStageCopyName(value: string): string =
     result = "x"
 
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
-                            destdir, packageName, kind, name: string) =
+                            buildDir, destdir, packageName, kind, name: string) =
   ## Emit a single stage-copy action that copies the installed
   ## artefact at ``destdir/usr/{bin,lib}/<name>`` into the canonical
   ## ``<projectRoot>/.repro/output/<name>/<name>`` location so the
@@ -230,7 +240,10 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   let outputPath = outputDir / name
   let escapedOut = outputPath.replace("\\", "/").replace("\"", "\\\"")
   let escapedOutDir = outputDir.replace("\\", "/").replace("\"", "\\\"")
-  let installPrefix = destdir & "/usr/" & (if kind == "library": "lib" else: "bin")
+  let effectiveDestRoot =
+    if buildDir.len > 0: buildDir & "/" & destdir
+    else: destdir
+  let installPrefix = effectiveDestRoot & "/usr/" & (if kind == "library": "lib" else: "bin")
   let escapedSrcDir = installPrefix.replace("\\", "/").replace("\"", "\\\"")
   let escapedName = name.replace("\"", "\\\"")
   # Probe order: <prefix>/<name>, <prefix>/<name>.exe (cross-build
@@ -270,20 +283,20 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
 
 proc executable*(r: AutotoolsPackageResult; name: string): Executable =
   # M9.R.14c.5 — emit a stage-copy action that bridges the autotools
-  # DESTDIR install tree (``destdir/usr/bin/<name>``) onto the
-  # canonical from-source resolver path (``.repro/output/<name>/<name>``)
-  # so consumers of the recipe can resolve the artefact at the
-  # location the resolver looks for it.
-  emitAutotoolsStageCopy(r.installEdge, r.destdir, currentOwningPackage(),
-    "executable", name)
+  # DESTDIR install tree (``<buildDir>/<destdir>/usr/bin/<name>``)
+  # onto the canonical from-source resolver path
+  # (``.repro/output/<name>/<name>``) so consumers of the recipe can
+  # resolve the artefact at the location the resolver looks for it.
+  emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage(), "executable", name)
   newExecutable(
     install = r.installEdge,
     executableName = name,
     installPrefix = componentPath(r.components, "runtime"))
 
 proc library*(r: AutotoolsPackageResult; name: string): Library =
-  emitAutotoolsStageCopy(r.installEdge, r.destdir, currentOwningPackage(),
-    "library", name)
+  emitAutotoolsStageCopy(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage(), "library", name)
   newLibrary(
     install = r.installEdge,
     installPrefix = componentPath(r.components, "library"))

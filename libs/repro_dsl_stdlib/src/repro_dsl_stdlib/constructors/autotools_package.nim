@@ -304,4 +304,5 @@ proc autotools_package*(srcDir: string;
     compileEdge: buildEdge,
     installEdge: installEdge,
     destdir: destdir,
+    buildDir: buildDir,
     components: standardComponents())
