@@ -20,10 +20,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
   macos_shim_arch_flags=()
   if [ "$(uname -m)" = "arm64" ]; then
     macos_shim_arch_flags+=(
-      --passC:-arch --passC:arm64
-      --passC:-arch --passC:arm64e
-      --passL:-arch --passL:arm64
-      --passL:-arch --passL:arm64e
+      "--passC:-arch arm64"
+      "--passC:-arch arm64e"
+      "--passL:-arch arm64"
+      "--passL:-arch arm64e"
     )
   fi
   nim c \
