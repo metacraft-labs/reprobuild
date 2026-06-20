@@ -57,6 +57,44 @@ The `ct-print` resolution order is `CT_PRINT` env → `PATH` → the known build
 (no subprocess). The M12 fixture (`tests/fixtures/m12_ctfs/`) is a **real** `.ct`
 bundle recorded from `live_demo.rb` by the native Ruby recorder.
 
+## M13 — LIVE-recording integration tests
+
+M13 replaces hand-crafted traces with **live recordings from the production
+recorders** wherever the recorder builds and records on the host. The test-support
+harness `tests/live_record.nim` builds a recorder in ITS OWN Nix dev shell
+(`direnv exec <recorder-repo> <build>`, the CodeTracer build-siblings strategy),
+records a small program into a modern CTFS `.ct` bundle, and hands the bundle to
+the SAME `record()`/`decide()` engine. Builds are cached (build-once): each
+recorder exposes a cheap on-disk *built-marker* and the heavy build runs only when
+the marker is absent; `ct-print` reuses the M12 known-build-path cache.
+
+A recorder that genuinely cannot build/record on the host does NOT produce a
+`unittest.skip`. The harness returns a `RecorderOutcome` that distinguishes a
+real `.ct` (`roSuccess`) from a **documented gate** (`roGated`, carrying the
+EXACT captured failure); the per-language test then emits a LOUD, ASSERTED gate.
+
+### Validated LIVE vs platform-gated (this host: arm64 macOS)
+
+| language | status on this host | how |
+|----------|---------------------|-----|
+| **Ruby** | ✅ **LIVE, end-to-end** (required, passes) | native Rust-extension recorder; `just build` then `codetracer-ruby-recorder --out-dir <dir> prog.rb` |
+| **Python** | ⛔ **GATED** (loud, asserted) | `just dev` fails: the recorder's pinned nixpkgs marks `cargo-llvm-cov-0.6.20` **broken**, so its dev shell will not evaluate and `uv` is unavailable. Records LIVE where the dev shell builds (Linux CI). |
+| **JavaScript** | ⛔ **GATED** (loud, asserted) | `just build` fails at `npx napi build` with `ENOVERSIONS` / "No versions available for napi" (the `@napi-rs/cli` package is unresolvable in this environment). |
+| **Native / Nim (MCR/RR)** | ⛔ **GATED** (loud, asserted) | `ct-mcr` BUILDS (`just build-ct-mcr` → `ct_cli`) but recording fails: `license check failed: could not load libct_license_ffi.dylib` (its `@rpath` dep `liblldb.dylib` / `libstdc++` is unresolvable outside the recorder dev shell). RR is Linux-only regardless. Gate message: *"native live recording requires a Linux/MCR-supporting platform"*. |
+
+The real, validated commands per recorder live in `tests/live_record.nim`
+(`recordRubyLive` / `recordPythonLive` / `recordJsLive` / `recordNativeLive`).
+**Ruby is genuinely live** here: a real `.ct` is recorded at test time and the
+engine's skip/rerun decisions are made from that live bundle's executed set
+({`<top-level>`, `main`, `used_a`, `used_b`}; `unused_c` is never called and is
+absent). The gates are HONEST: each prints the underlying captured failure and
+asserts a documented gate — never a hidden skip, never a hand-crafted substitute.
+
+Tests: `t_live_ruby.nim` (live, must pass here), `t_live_python.nim`,
+`t_live_js.nim`, `t_live_native.nim` (attempt-or-gate), and
+`t_live_full_suite.nim` (`full_suite_green_with_live_recordings` — compiles and
+runs every campaign test file and asserts all exit 0).
+
 ## Supported languages (M10 — the full matrix)
 
 CodeTracer has exactly **two** incremental-testing mechanisms (spec §16.7),

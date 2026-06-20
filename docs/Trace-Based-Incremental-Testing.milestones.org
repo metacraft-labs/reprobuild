@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 2 (M6-M10) complete; Phase 3 M12 complete, M13 next
+#+STATUS: Phase 3: M12-M13 complete; M11 (symBodyHash) next
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -889,33 +889,80 @@
   every executed function's current source hash equals its recorded hash).
 
 * M13 — Live-recording integration tests (native recorders, all languages)
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: real integration tests — build the native recorders, record real
   programs, run the engine over the resulting CTFS, per language group. No
   hand-crafted traces where a recorder is available.
 
   Deliverables:
-  - [ ] A harness that builds a recorder in ITS dev shell per the build-siblings
-    strategy (`direnv exec <recorder-repo> just build`) and records a small
-    program into a `.ct` bundle, then drives the engine. Build once, reuse.
-  - [ ] LIVE recordings via the PRODUCTION recorders (NOT the pure-Ruby oracle):
-    Ruby (native Rust ext), Python, and/or JS record on this platform; native /
-    Nim via MCR/RR where the platform supports it. RR is Linux-only — if MCR/RR
-    can't record on the dev-shell host, GATE those to the platform that can
-    (Linux CI) and say so loudly (a documented platform gate, NOT a silent skip,
-    NOT a hand-crafted substitute).
-  - [ ] Migrate M0/M3/M8/M9 fixtures: where a live recording is achievable here,
-    the test RECORDS rather than reading a committed hand-crafted trace (delete
-    the hand-crafted trace once the live one is wired). Keep only fixtures whose
-    recorder is genuinely platform-unavailable, clearly marked.
+  - [X] A harness that builds a recorder in ITS dev shell per the build-siblings
+    strategy (`direnv exec <recorder-repo> <build>`) and records a small program
+    into a `.ct` bundle, then drives the engine. Build once, reuse.
+    Implemented as `libs/repro_ct_incremental/tests/live_record.nim`:
+    `runInRecorderShell(repo, cmd)` enters the sibling's Nix dev shell via
+    `direnv exec` (cd-ing into the repo, since `direnv exec` resets cwd) and runs
+    the command there. Each recorder has a cheap on-disk BUILT-MARKER predicate
+    (`rubyRecorderBuilt`/`pythonRecorderBuilt`/`jsRecorderBuilt`/
+    `nativeRecorderBuilt`); `ensure*Built` runs the heavy build ONLY when the
+    marker is absent, so a build happens at most once per host and re-runs reuse
+    it. `ensureCtPrintBuilt` reuses the M12 known-build-path cache
+    (`/tmp/ctprint_build/ct-print`). Interpreted recorders stamp the recorded
+    trace dir with `recorder_backend: "ctfs-interpreted"` (`markCtfsInterpreted`)
+    so `detectBackend` routes the live `.ct` through `tbSourceCtfs` (source-text
+    hashing); the native recorder leaves a bare `.ct` (⇒ `tbNativeDwarf`).
+  - [X] LIVE recordings via the PRODUCTION recorders (NOT the pure-Ruby oracle).
+    RESULTS ON THIS HOST (arm64 macOS), all REAL attempts:
+      * Ruby — ✅ LIVE end-to-end. `just build` (native Rust extension) then
+        `codetracer-ruby-recorder --out-dir <dir> prog.rb` produces a real
+        `.ct`; the engine decides over it. Executed set from the LIVE bundle is
+        {`<top-level>`,`main`,`used_a`,`used_b`}; `unused_c` (never called) is
+        absent.
+      * Python — ⛔ GATED (LOUD, asserted). `just dev` fails because the
+        recorder's pinned nixpkgs marks `cargo-llvm-cov-0.6.20` BROKEN, so its
+        dev shell will not evaluate and `uv` is unavailable. Captured verbatim;
+        gated to Linux CI where the shell builds. (Not a silent skip.)
+      * JavaScript — ⛔ GATED (LOUD, asserted). `just build` fails at
+        `npx napi build` with `ENOVERSIONS` / "No versions available for napi"
+        (the `@napi-rs/cli` package is unresolvable in this environment).
+      * Native / Nim via MCR/RR — ⛔ GATED (LOUD, asserted). `ct-mcr` BUILDS
+        (`just build-ct-mcr` → `ct_cli`) but a real record attempt fails:
+        `license check failed: could not load libct_license_ffi.dylib`
+        (its `@rpath` dep `liblldb.dylib` / `libstdc++` is unresolvable outside
+        the recorder dev shell). RR is Linux-only regardless. Gate message:
+        "native live recording requires a Linux/MCR-supporting platform". The
+        gate path asserts `roGated` + a non-empty diagnostic — never a
+        `unittest.skip`, never a hand-crafted substitute.
+  - [X] The interpreted group is validated with a GENUINE live CTFS recording
+    (Ruby) consumed by the engine. The hand-crafted Phase-1/2 fixtures are
+    RETAINED (their recorders are platform-unavailable here — Python/JS/native —
+    so a live migration is not achievable on this host); the README's M13
+    section marks exactly which languages are LIVE vs gated, with the real
+    commands. (Migrating M0/M3/M8/M9 to live recordings is gated on the same
+    Linux/MCR platform as the native arm — documented, not silently skipped.)
 
   Automated tests:
-  - test_name: live_ruby_recording_decides_end_to_end
-  - test_name: live_python_recording_decides_end_to_end (and/or JS)
-  - test_name: native_recording_runs_where_supported_else_gated (loud diagnostic)
-  - test_name: full_suite_green_with_live_recordings
+  - [X] test_name: live_ruby_recording_decides_end_to_end
+    (`tests/t_live_ruby.nim`) — writes a real 3-function `.rb`, records it LIVE,
+    asserts the live executed set, then a correct SKIP (unchanged), a correct
+    RERUN (edit executed `used_a` ⇒ `idRerunChanged` naming it, not `used_b`),
+    and a correct SKIP (edit unexecuted `unused_c`). PASSES on this host.
+  - [X] test_name: live_python_recording_decides_end_to_end (and JS)
+    (`tests/t_live_python.nim`, `tests/t_live_js.nim`) — attempt the live
+    recording; on this host both emit a LOUD asserted gate with the exact
+    captured build failure (broken nixpkgs / napi). Where the recorder builds
+    (Linux CI) the SAME test records live and asserts skip/rerun.
+  - [X] test_name: native_recording_runs_where_supported_else_gated
+    (`tests/t_live_native.nim`) — compiles a real C binary, attempts a `ct-mcr`
+    recording; on this host emits the LOUD asserted platform-gate with the real
+    license-FFI load failure. On a supported platform it detects the native
+    backend and drives the engine over the live `.ct`.
+  - [X] test_name: full_suite_green_with_live_recordings
+    (`tests/t_live_full_suite.nim`) — compiles and runs EVERY campaign test file
+    (all 16 other lib test files, M0-M13) as subprocesses and asserts each exits
+    0. Verified green (the 4 live tests + all pre-M13 engine tests).
 
   Acceptance: at least the interpreted group validated with genuine live CTFS
   recordings consumed by the engine; native/Nim either demonstrated or honestly
-  platform-gated with a loud diagnostic.
+  platform-gated with a loud diagnostic. (Ruby is genuinely LIVE end-to-end here;
+  Python/JS/native are honestly gated with the EXACT observed failures.)
