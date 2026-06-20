@@ -253,6 +253,15 @@ package swaySource:
     ## dependency declaration stays explicit for forward compat) and
     ## for ``output background <image>`` config entries.
     "gdk-pixbuf >=2.40"
+    ## wayland-protocols ships the protocol-XML files (xdg-shell,
+    ## pointer-constraints, idle-inhibit, layer-shell, ...) that
+    ## sway's meson build consumes at configure / compile time to
+    ## emit protocol-stub C bindings. Without this dep, sway's meson
+    ## setup fails at ``src/meson.build:67:17`` because sway tries
+    ## to fall back to a subproject clone when the pkg-config probe
+    ## misses and wrap-based downloads are disabled. Matches the
+    ## sibling ``wlrootsSource`` recipe's dependency declaration.
+    "wayland-protocols >=1.31"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
