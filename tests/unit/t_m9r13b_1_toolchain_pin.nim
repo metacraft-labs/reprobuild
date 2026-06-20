@@ -71,18 +71,18 @@ import repro_interface_artifacts
 
 proc reproRoot(): string =
   ## Walk upward from this test file to find the repo root (the one
-  ## containing ``references/mold/third-party/xxhash/xxhash.h``). The
-  ## test is invoked from various cwds (just / nimble / manual), so the
-  ## walk is anchored at ``currentSourcePath`` instead.
+  ## containing ``libs/xxh3/src/xxh3/vendor/xxhash.h``). The test is
+  ## invoked from various cwds (just / nimble / manual), so the walk
+  ## is anchored at ``currentSourcePath`` instead.
   var dir = parentDir(currentSourcePath())
   while dir.len > 0 and dir != parentDir(dir):
-    if fileExists(dir / "references" / "mold" / "third-party" / "xxhash" /
+    if fileExists(dir / "libs" / "xxh3" / "src" / "xxh3" / "vendor" /
         "xxhash.h"):
       return dir
     dir = parentDir(dir)
   raise newException(IOError,
     "could not locate reprobuild root from " & currentSourcePath() &
-      " -- expected references/mold/third-party/xxhash/xxhash.h ancestor")
+      " -- expected libs/xxh3/src/xxh3/vendor/xxhash.h ancestor")
 
 template withSystemHashEnv*(value: string; body: untyped) =
   ## Run ``body`` with ``REPROBUILD_USE_SYSTEM_HASH_LIBS=value`` and
@@ -156,10 +156,18 @@ suite "M9.R.13b.1 -- vendored-hash define propagation":
         let cmd = providerCompileCommand(modulePath = modulePath,
           outputBinaryPath = outBin,
           workDir = workDir)
+        # The post-commit ``66c9d23b`` layout places the vendored
+        # sources at ``libs/<pkg>/src/<pkg>/vendor/`` (replaces the
+        # earlier ``references/mold/third-party/`` location). The ``-I``
+        # flag must point at a directory whose name ends in ``vendor``
+        # under either ``libs\\blake3\\src\\blake3`` (blake3) or
+        # ``libs\\xxh3\\src\\xxh3`` (xxhash).
         let blakeI = cmd.anyIt(it.startsWith("--passC:-I") and
-          it.contains("blake3" & DirSep & "c"))
+          it.contains("blake3" & DirSep & "src" & DirSep & "blake3" &
+            DirSep & "vendor"))
         let xxhI = cmd.anyIt(it.startsWith("--passC:-I") and
-          it.contains("xxhash"))
+          it.contains("xxh3" & DirSep & "src" & DirSep & "xxh3" &
+            DirSep & "vendor"))
         if not blakeI:
           checkpoint("missing blake3 -I; command: " & cmd.join(" "))
         if not xxhI:

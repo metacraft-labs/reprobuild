@@ -135,6 +135,20 @@ package makeSource:
     ## perl is invoked by make's ``configure`` script for a handful
     ## of code-generation passes under ``doc/``.
     "perl >=5.32"
+    ## M9.R.13b.2 — declare ``make`` as a self-dep so the M9.R.10a
+    ## cycle-break detects the self-loop and falls through to stdlib
+    ## provisioning (nix / scoop / tarball) for the bootstrap make.
+    ## Without this, the ``autotools_package`` constructor's
+    ## ``make.call(...)`` typed-CLI call emits an action referencing
+    ## ``makeBin`` with no profile resolved (``make``'s own toolUses
+    ## omit it), and the lowering step hard-fails with
+    ## ``action makebin-... references executable makeBin but no tool
+    ## profile was resolved for it``. The dep is conceptually correct
+    ## anyway: GNU make's upstream ``./configure && make && make
+    ## install`` cycle requires a pre-existing ``make`` to drive the
+    ## ``make`` + ``make install`` steps; the bootstrap-from-shell
+    ## ``./build.sh`` fallback is a future R5 musl-tcc concern.
+    "make >=4"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.

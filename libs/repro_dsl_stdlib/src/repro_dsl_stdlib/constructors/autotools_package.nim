@@ -129,8 +129,16 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
       "\" | b2sum -a blake3 -c - || ")
     script.add("echo \"" & escapedHash & "  " & escapedTarball &
       "\" | blake3sum -c -; ")
-  script.add("tar -xf \"" & escapedTarball & "\" -C \"" & escapedExtracted &
-    "\" --strip-components=" & $spec.extractStrip & "; ")
+  # M9.R.13b.4 — ``--force-local`` is the standard GNU/MSYS2 tar flag
+  # that tells the extractor not to interpret a leading ``X:`` (drive
+  # letter) as ``host:`` -- without it, ``tar -xf D:/.../foo.tar``
+  # fails with ``tar: Cannot connect to D: resolve failed`` on Windows
+  # tar implementations (MSYS2 / Git-for-Windows) that default to
+  # rsh-style host parsing. Linux/macOS GNU tar accepts the same flag
+  # silently so the script stays portable. See:
+  # https://www.gnu.org/software/tar/manual/html_node/local.html
+  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let act = buildAction(

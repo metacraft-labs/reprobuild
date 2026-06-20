@@ -2482,22 +2482,19 @@ proc externalHashFlags(workDir = ""): seq[string] =
         "vendor"
       let xxhashInc = workDir / "libs" / "xxh3" / "src" / "xxh3" /
         "vendor"
-      if fileExists(extendedPath(blake3Inc / "blake3.c")) and
-          fileExists(extendedPath(xxhashInc / "xxhash.c")):
-        result.add("--define:reproVendoredHash")
-        result.add("--passC:-DREPRO_VENDORED_HASH")
       if fileExists(extendedPath(blake3Inc / "blake3.h")):
         result.add("--passC:-I" & blake3Inc)
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):
         result.add("--passC:-I" & xxhashInc)
       if not useSystem and
-         fileExists(extendedPath(blake3Inc / "blake3.h")) and
-         fileExists(extendedPath(xxhashInc / "xxhash.h")):
+         fileExists(extendedPath(blake3Inc / "blake3.c")) and
+         fileExists(extendedPath(xxhashInc / "xxhash.c")):
         # Mirror `config.nims`'s `switch("define", "reproVendoredHash")`
         # for the runner / provider compile so the `{.compile:.}` pragmas
         # in `blake3.nim` / `xxh3.nim` fire and the vendored C sources
         # land in the link.
         result.add("--define:reproVendoredHash")
+        result.add("--passC:-DREPRO_VENDORED_HASH")
     return
 
   let blake3Prefix = block:
