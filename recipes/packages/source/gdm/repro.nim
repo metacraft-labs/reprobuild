@@ -261,10 +261,13 @@ package gdmSource:
         # Drop the upstream-baked PAM config templating; NDE-G1's PAM
         # layer owns /etc/pam.d/gdm directly.
         "default-pam-config=none",
-        # Wayland-only posture: enable Wayland sessions, run the
-        # display-server (Xorg shim or wayland compositor) as the
-        # session user (modern systemd convention).
+        # Wayland-only posture: enable Wayland sessions, drop X11
+        # sessions (the v1 NDE-G1 is pure-Wayland — matches the
+        # wlroots/sway/mutter posture), run the display-server (Xorg
+        # shim or wayland compositor) as the session user (modern
+        # systemd convention).
         "wayland-support=true",
+        "x11-support=false",
         "user-display-server=true",
         # gdm.xsession wrapper is still useful in pure-Wayland mode
         # for tightly-coupled session-management hand-off.
