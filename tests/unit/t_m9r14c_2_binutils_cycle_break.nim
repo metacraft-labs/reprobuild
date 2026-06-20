@@ -164,15 +164,18 @@ suite "DSL-port M9.R.14c.2 — bootstrap cycle-break taxonomy widening":
 
   test "non-bootstrap tool still builds from source after seeding":
     # Pin the "doesn't leak" contract: a tool that's NOT in the
-    # bootstrap list (e.g. autoconf, expat, libffi) still goes
-    # through the normal from-source path — the seed must be
-    # narrow.
-    check "autoconf" notin BootstrapCycleBreakTools
-    check "automake" notin BootstrapCycleBreakTools
-    check "libtool" notin BootstrapCycleBreakTools
+    # bootstrap list (e.g. expat / libffi / wayland) still goes
+    # through the normal from-source path — the seed must be narrow
+    # enough that application recipes still build from source. The
+    # M9.R.14c.8 widening added autoconf / automake / libtool / m4 /
+    # perl to the bootstrap floor (perl scripts whose execution
+    # requires sibling install-tree assets the stage-copy convention
+    # drops), but actual application packages are still from-source.
     check "expat" notin BootstrapCycleBreakTools
     check "libffi" notin BootstrapCycleBreakTools
     check "wayland" notin BootstrapCycleBreakTools
+    check "glib2" notin BootstrapCycleBreakTools
+    check "fontconfig" notin BootstrapCycleBreakTools
 
     let scratch = createTempDir("repro-m9r14c-2-autoconf-", "")
     defer: removeDir(scratch)

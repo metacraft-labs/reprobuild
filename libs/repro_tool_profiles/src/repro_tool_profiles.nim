@@ -3266,22 +3266,34 @@ var fromSourceCycleBrokenTools*: HashSet[string] = initHashSet[string]()
   ## source. Exported for test introspection.
 
 const BootstrapCycleBreakTools* = @[
-  ## M9.R.14c.2 — pre-seeded cycle-break taxonomy for the bootstrap
-  ## tool chain. The dispatcher's reactive cycle break (M9.R.10a) only
-  ## fires on the closing edge of a recursion cycle, so the
-  ## ``gcc → binutils → gcc`` cycle adds ``gcc`` to the set but leaves
-  ## ``binutils`` (and its sub-binaries) untouched. That left the
-  ## binutils-from-source compile in the autotools smoke loop — ~15
-  ## minutes per iteration even when binutils is just an implementation
-  ## detail of the bootstrap layer.
+  ## M9.R.14c.2 / .8 — pre-seeded cycle-break taxonomy for the
+  ## bootstrap tool chain. The dispatcher's reactive cycle break
+  ## (M9.R.10a) only fires on the closing edge of a recursion cycle,
+  ## so the ``gcc → binutils → gcc`` cycle adds ``gcc`` to the set but
+  ## leaves ``binutils`` (and its sub-binaries) untouched. That left
+  ## the binutils-from-source compile in the autotools smoke loop —
+  ## ~15 minutes per iteration even when binutils is just an
+  ## implementation detail of the bootstrap layer.
   ##
-  ## The proactive seed treats the GNU bootstrap layer as a
-  ## stdlib-provisioned floor: ``gcc``, ``make``, and ``binutils``
-  ## (plus its 11 sub-binaries) come from nix on Linux/macOS, scoop on
-  ## Windows, tarball anywhere — the upper layers (autoconf / automake
-  ## / libtool / etc.) still build from source. This makes
-  ## ``--tool-provisioning=from-source`` pragmatic without sacrificing
-  ## the from-source guarantee for actual application recipes.
+  ## The proactive seed treats the GNU bootstrap layer as a stdlib-
+  ## provisioned floor: ``gcc``, ``make``, ``binutils`` (plus its 11
+  ## sub-binaries), AND the autotools regen layer
+  ## (``autoconf`` + ``automake`` + ``libtool`` + ``m4`` + ``perl``)
+  ## come from nix on Linux/macOS, scoop on Windows, tarball anywhere.
+  ## Application recipes (expat / libffi / wayland / glib2 / etc.)
+  ## still build from source.
+  ##
+  ## Why the autotools regen layer is part of the floor (M9.R.14c.8):
+  ## autoconf / automake / libtool are perl scripts whose execution
+  ## requires sibling ``share/<tool>/`` and ``lib/<tool>/`` trees with
+  ## perl modules. The autotools_package stage-copy convention
+  ## (M9.R.14c.5) stages only the executable binary, dropping the
+  ## sibling tree context, so a from-source-built autoconf can't find
+  ## ``Autom4te/ChannelDefs.pm``. The stdlib nix provisioning ships
+  ## the full install tree intact. The from-source build of these
+  ## tools is correctly producing artifacts; the issue is the staging
+  ## contract. M9.L's per-artifact install-glue will unblock genuine
+  ## from-source autotools eventually.
   ##
   ## Binutils sub-binaries enumerated to match
   ## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/binutils.nim``
@@ -3295,6 +3307,13 @@ const BootstrapCycleBreakTools* = @[
   "binutils",
   "ld", "ar", "ranlib", "strip", "nm", "objdump", "objcopy", "as",
   "readelf", "size", "strings",
+  # M9.R.14c.8 — autotools regen layer.
+  "autoconf", "autoheader", "autom4te", "autoreconf", "autoscan",
+  "autoupdate", "ifnames",
+  "automake", "aclocal",
+  "libtool", "libtoolize",
+  "m4",
+  "perl",
 ]
   ## Exported so tests + the dispatcher init code can audit + seed the
   ## list without re-declaring it.
