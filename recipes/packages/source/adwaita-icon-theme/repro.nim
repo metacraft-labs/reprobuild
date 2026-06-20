@@ -78,6 +78,14 @@ package adwaitaIconThemeSource:
   nativeBuildDeps:
     "meson >=0.55"
     "ninja >=1.10"
+    ## adwaita-icon-theme 50.0's meson.build calls
+    ##   find_program('gtk4-update-icon-cache', 'gtk-update-icon-cache',
+    ##                required: true)
+    ## at configure time. Without it meson setup short-fails. The
+    ## v1 closure does not yet publish gtk4 from source, so the
+    ## stdlib provisioning stub routes this through gtk3's
+    ## ``bin/gtk-update-icon-cache`` via nixpkgs.
+    "gtk-update-icon-cache"
 
   buildDeps:
     discard
