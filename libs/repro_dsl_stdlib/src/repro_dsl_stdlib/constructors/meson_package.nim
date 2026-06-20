@@ -9,13 +9,102 @@
 ## The v1 component layout is the standard ``meson install`` layout
 ## (``usr/bin`` for runtime, ``usr/lib`` for libraries, ``usr/share/man``
 ## for man pages, ...) — see ``types/package_result.standardComponents``.
+##
+## ## M9.R.12.4 — auto-emit fetch action when recipe declared one
+##
+## Recipes with an explicit ``build:`` block route through the per-
+## project provider; the convention layer's ``emitFragment`` (which
+## owns fetch-action emission for the from-source-* family) is NOT
+## called for them. ``meson_package`` therefore auto-emits a fetch
+## action when ``registeredFetchSpec(currentOwningPackage())`` returns
+## a populated spec AND the active provider context is available, and
+## threads it as a dep of the ``meson.setup`` step. See the
+## ``autotools_package`` constructor for the canonical rationale.
 
 {.experimental: "callOperator".}
+
+import std/[options, os, strutils]
 
 import repro_project_dsl
 
 import ../types/package_result
 import ../packages/meson as meson_module
+import ../packages/sh as sh_module
+
+# ---------------------------------------------------------------------------
+# Fetch action (M9.R.12.4) — shared shape with ``autotools_package``.
+# Kept inline so the constructor module has no cross-stdlib dep on a
+# shared "fetch" submodule (the convention-layer ``emitFetchAction``
+# lives in ``repro_standard_provider`` which the stdlib doesn't import).
+# ---------------------------------------------------------------------------
+
+const FetchScratchSubdir = ".repro/fetch"
+
+proc mesonFetchActionId(packageName: string): string =
+  var sanitized = ""
+  for ch in packageName:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
+      sanitized.add(ch)
+    else:
+      sanitized.add('_')
+  if sanitized.len == 0:
+    sanitized = "x"
+  "meson-fetch-" & sanitized
+
+proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
+    Option[BuildActionDef] =
+  if packageName.len == 0 or projectRoot.len == 0:
+    return none(BuildActionDef)
+  let spec = registeredFetchSpec(packageName)
+  if spec.url.len == 0 or spec.hashHex.len == 0:
+    return none(BuildActionDef)
+  let scratch = projectRoot / FetchScratchSubdir
+  createDir(scratch)
+  let stamp = scratch / (spec.hashHex & ".stamp")
+  let tarball = scratch / (spec.hashHex & ".tar")
+  let extracted = projectRoot / extractedRel
+  createDir(parentDir(extracted))
+  let hashAlgTag =
+    case spec.hashAlg
+    of dshaSha256: "sha256"
+    of dshaBlake3: "blake3"
+  let escapedUrl = spec.url.replace("\"", "\\\"")
+  let escapedHash = spec.hashHex.replace("\"", "\\\"")
+  let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  var script = "set -e; "
+  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
+  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
+  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
+    "\"; fi; ")
+  case spec.hashAlg
+  of dshaSha256:
+    script.add("echo \"" & escapedHash & "  " & escapedTarball &
+      "\" | sha256sum -c -; ")
+  of dshaBlake3:
+    script.add("echo \"" & escapedHash & "  " & escapedTarball &
+      "\" | b2sum -a blake3 -c - || ")
+    script.add("echo \"" & escapedHash & "  " & escapedTarball &
+      "\" | blake3sum -c -; ")
+  script.add("tar -xf \"" & escapedTarball & "\" -C \"" & escapedExtracted &
+    "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("touch \"" & escapedStamp & "\"")
+  let argv = @["sh", "-c", script]
+  let act = buildAction(
+    id = mesonFetchActionId(packageName),
+    call = inlineExecCall(argv),
+    inputs = @[],
+    outputs = @[stamp],
+    pool = "fetch",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "meson_package.fetch." & hashAlgTag,
+    toolIdentityRefs = @["sh"])
+  some(act)
+
+# ---------------------------------------------------------------------------
+# Constructor
+# ---------------------------------------------------------------------------
 
 proc meson_package*(srcDir: string;
                     buildDir = "build";
@@ -29,6 +118,19 @@ proc meson_package*(srcDir: string;
   ## project. v1 ignores ``--tags`` filtering at install time — the
   ## ``.files("man")`` slicer returns the whole install edge and the
   ## caller resolves the specific component path via ``components``.
+  ##
+  ## M9.R.12.4: when the active package declares ``fetch:`` the setup
+  ## action gains a dep on an auto-emitted fetch action so the engine
+  ## sequences source extraction before ``meson setup``.
+  let pkgName = currentOwningPackage()
+  let projectRoot = activeProviderProjectRoot()
+  let extractedRel = block:
+    let raw = registeredFetchSpec(pkgName).extractedRoot
+    if raw.len > 0: raw else: "src"
+  let fetchActOpt = maybeEmitFetchAction(pkgName, projectRoot, extractedRel)
+  var setupAfter: seq[BuildActionDef] = @[]
+  if fetchActOpt.isSome:
+    setupAfter.add(fetchActOpt.get())
   let setup = meson.setup(
     srcDir = srcDir,
     buildDir = buildDir,
@@ -36,7 +138,8 @@ proc meson_package*(srcDir: string;
     buildtype = buildtype,
     options = configureOptions,
     crossFile = crossFile,
-    nativeFile = nativeFile)
+    nativeFile = nativeFile,
+    after = setupAfter)
   let compileEdge = meson.compile(workDir = buildDir)
   let installEdge = meson.install(
     workDir = buildDir,

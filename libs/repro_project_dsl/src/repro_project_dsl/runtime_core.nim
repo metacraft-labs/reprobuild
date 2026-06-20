@@ -362,6 +362,20 @@ proc currentOwningPackage*(): string {.dynOrStatic.} =
   ## ``buildProc`` is currently running.
   currentOwningPackageOverride
 
+proc activeProviderProjectRoot*(): string {.dynOrStatic.} =
+  ## M9.R.12.4: return the active provider's project root (the
+  ## ``ProviderGraphRequest.arguments`` slot the dispatcher hands to
+  ## ``buildPackageFragment``). Empty when no ``buildProc`` is
+  ## currently running OR when the binary was compiled outside provider
+  ## mode (the underlying variable lives in the
+  ## ``reproProviderMode``-gated block). Stdlib constructors use this
+  ## to resolve scratch paths (``.repro/fetch/<hash>.tar`` etc.) the
+  ## auto-emitted fetch action writes to.
+  when defined(reproProviderMode):
+    currentProviderProjectRoot
+  else:
+    ""
+
 proc defaultBuildAction*(id: string) {.dynOrStatic.} =
   defaultBuildActionRegistry = id
 
