@@ -11,11 +11,13 @@
 import repro_ct_incremental/trace_reader
 import repro_ct_incremental/extractors
 import repro_ct_incremental/backends
+import repro_ct_incremental/native_hash
 import repro_ct_incremental/engine
 import repro_ct_incremental/watch
 
 export trace_reader
 export extractors
 export backends
+export native_hash
 export engine
 export watch

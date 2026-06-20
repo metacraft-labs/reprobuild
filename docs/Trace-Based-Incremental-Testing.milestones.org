@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M6 complete, M7 next
+#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M7 complete, M8 next
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -434,40 +434,88 @@
   the seams exist and are selected by `detectBackend`.
 
 * M7 — Native shallow hash (compiled instruction bytes)
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: hash a native function by its compiled instruction bytes (§16.7.1), for
   real, against a compiled binary.
 
   Deliverables:
-  - [ ] A real native fixture: a tiny C program (≥3 functions; one called by the
-    test path, one not) compiled WITH symbols in the dev shell (`cc`/`clang` is
-    available). Commit the source + a build script; the test builds the binary
-    at test time (or commits a prebuilt one + rebuilds to verify determinism).
-  - [ ] `proc nativeFunctionTable*(binary: string): Result[Table[string, HashSlice], string]`
-    — `function_name → (offset,size)` from the binary's symbol table (ELF/Mach-O)
-    via `nm --print-size --defined-only`/`readelf -sW`/`objdump` (whichever is in
-    the dev shell; document the tool).
-  - [ ] `proc shallowHashNative*(binary, funcName): Result[string, string]` — hash
-    the function's instruction bytes `binary[offset .. offset+size)`. Missing
-    function / zero-size / unreadable ⇒ `Err` (⇒ re-run upstream, never skip).
+  - [X] A real native fixture: a tiny C program (4 functions — `used_a`,
+    `used_b`, `unused_c`, `main`; `used_a`/`used_b` on the test path, `unused_c`
+    off it) compiled WITH symbols in the dev shell. Source + `build.sh` committed
+    under `tests/fixtures/m7_native_c/`; the binary is NOT committed — the test
+    builds it (and edited copies) at test time into temp dirs, so rebuild
+    determinism and per-function precision are genuinely exercised. Non-`main`
+    functions are `noinline` leaves so each keeps a distinct, position-independent
+    block of machine code.
+  - [X] `proc nativeFunctionTable*(binary: string): Result[Table[string, HashSlice], string]`
+    — `function_name → (file-offset,size)` from the binary's symbol table, in
+    `src/repro_ct_incremental/native_hash.nim` (re-exported from the package).
+    PLATFORM: this host is arm64 macOS ⇒ Mach-O. `nm --print-size` is zero on
+    Mach-O, so sizes come from the delta to the next symbol's address (symbols
+    address-sorted via `nm -n --defined-only`), bounding the last function by the
+    end of `__TEXT,__text`. The section's `addr`/`offset`/`size` are parsed from
+    `otool -l`; the addr→file-offset mapping is
+    `file_offset = sym.vmaddr − text.addr + text.offset`. A documented ELF branch
+    (`objdump --section-headers` + the same mapping) is compiled for Linux CI.
+  - [X] `proc shallowHashNative*(binary, funcName): Result[string, string]` —
+    hashes the function's instruction bytes `binary[offset ..< offset+size]`
+    (read from the file) via `std/hashes` (same representation as
+    `engine.shallowHash`). Missing function / zero-or-negative size / unreadable
+    binary / failing tool ⇒ `Err` (⇒ re-run upstream, never skip).
 
-  Automated tests (build a real binary, edit C source, rebuild):
-  - test_name: native_function_hash_is_stable_across_identical_rebuilds
-    description: hashing the same function in two builds of identical source
-    yields the same hash (account for any non-determinism: pin flags / strip as
-    needed; document).
-  - test_name: editing_a_native_function_changes_its_instruction_hash
-    description: edit one C function's body, rebuild ⇒ that function's
+  Automated tests (`tests/t_native_hash.nim`; build a real binary, edit C
+  source, rebuild):
+  - [X] test_name: native_function_hash_is_stable_across_identical_rebuilds
+    description: two builds of identical source yield the same per-function
+    instruction-byte hash. (Stable because only the function's `__text` bytes are
+    hashed; the full binaries differ only in DWARF/build-path metadata after the
+    text section — verified: all byte diffs land past the `__text` end.)
+  - [X] test_name: editing_a_native_function_changes_its_instruction_hash
+    description: edit `used_a`'s body (`return 1` → a loop), rebuild ⇒ `used_a`'s
     instruction-byte hash changes.
-  - test_name: editing_one_native_function_leaves_anothers_hash_stable
-    description: editing function A's body does not change function B's
-    instruction-byte hash (per-function precision at the machine-code level).
-  - test_name: missing_or_zero_size_function_errs
-    description: an absent / zero-size symbol ⇒ `Err`, never a usable hash.
+  - [X] test_name: editing_one_native_function_leaves_anothers_hash_stable
+    description: editing `used_a` does NOT change `used_b`'s or `unused_c`'s
+    instruction-byte hash — the table locates each function independently by its
+    own symbol and hashes only that function's bytes, so an edit confined to
+    `used_a` cannot leak into a sibling's hash. (Asserts `used_a`'s hash DID
+    change first, so stability is meaningful.) NOTE: on this host growing
+    `used_a` relocates it toward a LOWER address while `used_b`/`unused_c`/`main`
+    keep theirs, so this test does not itself exercise a sibling whose ADDRESS
+    shifts — the genuine relocation cases are the two tests below.
+
+  Relocation precision — the HONEST per-function-precision picture (the property
+  is NOT unconditional, and the code+tests+docs now say so):
+  - [X] test_name: relocated_leaf_function_keeps_its_instruction_hash
+    description: a layout where an unedited POSITION-INDEPENDENT leaf (`callee`)
+    genuinely relocates (a `gap` function is inserted before its caller) keeps
+    its instruction-byte hash — position-independent bytes are relocation-
+    invariant. Asserts the leaf's file offset actually moved, so stability is not
+    vacuous.
+  - [X] test_name: relocated_call_containing_function_rehashes_safely
+    description: an unedited CALL-CONTAINING function (`caller_d`, which `bl`s
+    `callee`) whose caller→callee DISTANCE changes (the inserted `gap` widens it)
+    has DIFFERENT instruction bytes — the pc-relative `bl` operand changes
+    (empirically `0x97fffff2 → 0x97ffffd5`) — so its hash CHANGES despite
+    unchanged source. This is the DOCUMENTED LIMITATION. It is SAFE: a changed
+    shallow hash drives the engine to a conservative re-run (`idRerunChanged`),
+    never a false skip — a precision/usefulness limitation, never a correctness
+    hole. Documented in `native_hash.nim`, the fixture README, and here. A future
+    milestone could normalize pc-relative operands to recover precision; M7 does
+    not.
+  - [X] test_name: missing_or_zero_size_function_errs
+    description: a nonexistent function name, a missing/unreadable binary, and the
+    zero/negative-size contract (every emitted slice has positive size; the only
+    way to reach a non-positive slice is an absent name, which Errs) ⇒ `Err`,
+    never a usable hash.
+  - [X] supporting guard: native_function_table_locates_each_fixture_function —
+    the table contains all four fixture functions with positive-size slices.
 
   Acceptance: real per-function instruction-byte hashing with per-function
-  precision, and a fail-safe `Err` on any lookup problem.
+  precision for position-independent code, a fail-safe `Err` on any lookup
+  problem, and an HONESTLY DOCUMENTED + TESTED relocation limitation
+  (call-containing functions whose callee distance shifts conservatively
+  re-hash ⇒ a SAFE re-run, never a false skip).
 
 * M8 — Native dependency discovery + native incremental decision
   :STATUS: not started
