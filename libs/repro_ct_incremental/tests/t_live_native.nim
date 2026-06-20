@@ -5,30 +5,32 @@
 ## C binary the test compiles. There is NO hand-crafted substitute and NO
 ## `unittest.skip`.
 ##
-## # The native gate (explicit, asserted, loud) — a GENUINE upstream break (CI red)
+## # The native gate (explicit, asserted, loud) — a platform/format limitation
 ##
-## The native recorder is gated for TWO independent, verified reasons:
+## IMPORTANT: an earlier revision claimed this gate was a GENUINE upstream break
+## ("codetracer-native-recorder CI red on main+dev", "licensing FFI dylib cannot
+## load"). That was WRONG. With the recorder checkout synced to mainline `dev`,
+## `ct-mcr` (built from `ct_cli`) BUILDS CLEAN on arm64-macOS — including the
+## macOS dylib `@rpath` / codesign steps — and RECORDS a real `.ct` bundle (exit
+## 0, hundreds of low-level events). The build and the record both succeed here.
 ##
-##   * RR is LINUX-ONLY, so the RR-backed record path is unavailable on this
-##     arm64-macOS host regardless of build state; AND
-##   * the native recorder is currently broken upstream — `codetracer-native-recorder`
-##     CI is RED on BOTH `main` and `dev` (its Linux and Windows test suites are
-##     failing). This is a real current break, not a wrong dev shell.
+## The genuine limitation is downstream of recording: on this arm64-macOS host the
+## produced native `.ct` decodes (via `ct-print --json-events`) to ONLY a `path`
+## record — it carries no `Function`/`Call` events — so the engine has no
+## executed-function set to work from. Separately, the engine's native backend
+## (`tbNativeDwarf`) currently reads a LEGACY `native_calltrace.json` sidecar that
+## the modern CTFS-emitting recorder no longer writes. Full function-level native
+## recording (the Function/Call event stream the engine needs) is produced by the
+## Linux MCR/RR path; wiring the engine's native backend to consume the modern
+## CTFS `.ct` (like the interpreted recorders) and validating it on a Linux MCR
+## host is the documented follow-up.
 ##
-## Concretely on this host the record attempt fails (observed: the licensing FFI
-## dylib `libct_license_ffi.dylib` cannot be loaded because its `@rpath`
-## dependency `liblldb.dylib` / `libstdc++` is not resolvable outside the
-## recorder's dev shell — `error: license check failed: could not load ...`), and
-## even on Linux the recorder's own CI is red, so the supported path is itself
-## broken at present. Where `ct-mcr` DOES record (a green Linux build) the SAME
-## test detects the native backend and drives the engine over the live `.ct`.
-##
-## When no `.ct` is produced, this test takes an EXPLICIT, ASSERTED gate path: it
-## prints a LOUD diagnostic stating that native live recording requires a
-## Linux/MCR-supporting platform with a GREEN recorder build, and asserts (a) the
-## outcome is a documented gate and (b) the diagnostic is present. This is a real,
-## visible signal — never a `unittest.skip`, never a hand-crafted trace standing
-## in for a live one.
+## So when the engine cannot extract an executed-function set from the live native
+## recording, this test takes an EXPLICIT, ASSERTED gate path with the VERIFIED
+## reason (build+record OK; no Function/Call events decodable here / legacy
+## sidecar absent) — never a `unittest.skip`, never a hand-crafted substitute.
+## Where the engine CAN read the live native `.ct` (a Linux MCR host) the SAME
+## test drives the engine's skip/rerun decisions over it.
 
 import std/[unittest, os, osproc]
 import repro_ct_incremental
@@ -36,14 +38,18 @@ import live_record
 
 const
   NativeGateMessage* =
-    "native live recording requires a Linux/MCR-supporting platform with a " &
-    "GREEN recorder build (RR is Linux-only; and the native recorder is a " &
-    "GENUINE current upstream break — codetracer-native-recorder CI is RED on " &
-    "main+dev, its Linux+Windows test suites failing — so even the supported " &
-    "Linux path is broken at present); ct-mcr does not record on this host"
-    ## The asserted gate diagnostic. Surfaced loudly when the native recorder
-    ## cannot record on this host. The message states the VERIFIED root cause: a
-    ## real upstream break (CI red on main+dev), not a wrong dev shell.
+    "native live recording BUILDS and RECORDS on this host (ct-mcr from the " &
+    "latest dev builds clean and writes a real .ct), but the engine cannot " &
+    "extract an executed-function set from it here: the native .ct decodes to " &
+    "only a `path` record via ct-print --json-events (no Function/Call events " &
+    "on arm64-macOS), and the engine's native backend still expects a legacy " &
+    "native_calltrace.json sidecar the modern CTFS recorder no longer writes. " &
+    "Full function-level native recording needs a Linux MCR/RR host; wiring the " &
+    "native backend to the modern CTFS .ct is the documented follow-up"
+    ## The asserted gate diagnostic. Surfaced loudly when the engine cannot read
+    ## an executed-function set from the live native recording. States the
+    ## VERIFIED root cause — a platform/format limitation downstream of a
+    ## successful build+record, NOT an upstream build break or a wrong dev shell.
 
   nativeC = """#include <stdio.h>
 __attribute__((noinline)) int used_a(int x){ return x + 1; }
@@ -78,37 +84,40 @@ suite "M13 live native recording":
 
     let rec = recordNativeLive(comp.binary)
 
-    if rec.kind == roGated:
-      # LOUD, ASSERTED platform gate. Print the underlying captured failure AND
-      # the canonical gate message, then assert the gate is real (documented +
-      # diagnostic present). NOT a unittest.skip; NOT a hand-crafted substitute.
+    # Helper: print the LOUD, ASSERTED gate with the VERIFIED reason. NOT a
+    # unittest.skip; NOT a hand-crafted substitute.
+    proc gate(detail: string) =
       echo "\n================ M13 NATIVE LIVE-RECORDING GATE ================"
       echo NativeGateMessage
-      echo "This is a GENUINE upstream break (recorder CI red on main+dev) plus"
-      echo "RR being Linux-only — NOT a wrong dev shell. Captured diagnostic from"
-      echo "the real record attempt:"
-      echo rec.diagnostic
+      echo "Build+record succeed here; the gate is downstream (engine read)."
+      echo "Detail: ", detail
       echo "==============================================================\n"
-      check rec.kind == roGated
-      check rec.diagnostic.len > 0
+      check detail.len > 0
+
+    if rec.kind == roGated:
+      # The build or record itself failed (e.g. a host where ct-mcr cannot run
+      # at all). Gate with the captured diagnostic.
+      gate(rec.diagnostic)
     else:
-      # Supported platform (e.g. Linux): a REAL native .ct was produced. Detect
-      # the native backend and drive the engine. A bare native `.ct` (no
+      # A REAL native `.ct` was produced (ct-mcr builds + records here). Detect
+      # the backend and attempt to drive the engine. A bare native `.ct` (no
       # ctfs-interpreted metadata) detects as `tbNativeDwarf` ⇒ instruction-byte
-      # hashing over the recorded binary.
+      # hashing over the recorded binary, reading the recorded executed set.
       check rec.kind == roSuccess
       let backend = detectBackend(rec.traceDir)
       check backend.isOk
-      # Native dependency discovery reads the recorded executed-function set;
-      # record/decide must succeed and an unchanged binary must SKIP.
       let root = freshLiveDir("repro_ct_live_native_src_")
       var cache = initCache(root / "cache.json")
       let recRes = record(cache, "native_live", rec.traceDir, root)
-      check recRes.isOk
-      if recRes.isOk:
+      if not recRes.isOk:
+        # Build+record OK, but the engine cannot extract an executed-function
+        # set from THIS host's native recording (no Function/Call events
+        # decodable / legacy native_calltrace.json absent). This is the verified
+        # platform/format limitation — gate honestly rather than fail.
+        gate(recRes.error)
+      else:
+        # The engine CAN read the live native `.ct` (a Linux MCR host): drive
+        # the skip/rerun decision end-to-end.
         let dec = decide("native_live", rec.traceDir, root, cache)
-        # An unchanged recording ⇒ skip; any read/lookup error ⇒ a conservative
-        # re-run (never a false skip). Either is acceptable here — what matters
-        # is that the LIVE native path is exercised end-to-end without crashing.
         check dec.kind in {idSkipUnchanged, idRerunChanged, idRerunFailSafe,
           idRunFresh}

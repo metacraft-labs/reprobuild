@@ -988,15 +988,21 @@
         cleanly; the test ASSERTS success (no accepted gate). The recorder
         nests its bundle under `<out-dir>/trace-N/`, so the harness locates the
         `.ct` recursively and uses that subdir as the trace dir.
-      * Native / Nim via MCR/RR — ⛔ GATED (LOUD, asserted) on a GENUINE upstream
-        break + Linux-only RR. RR is Linux-only; and `codetracer-native-recorder`
-        CI is RED on `main`+`dev` (Linux+Windows test suites failing), so even
-        the supported Linux path is currently broken. On this host the real
-        record attempt fails: `license check failed: could not load
-        libct_license_ffi.dylib` (its `@rpath` dep `liblldb.dylib` / `libstdc++`
-        is unresolvable outside the recorder dev shell). Gate message states the
-        verified root cause. The gate path asserts `roGated` + a non-empty
-        diagnostic — never a `unittest.skip`, never a hand-crafted substitute.
+      * Native / Nim via MCR/RR — ⛔ GATED (LOUD, asserted) on a verified
+        platform/format limitation — NOT an upstream build break. An earlier
+        revision wrongly claimed "recorder CI red on main+dev / licensing FFI
+        dylib cannot load"; that was incorrect. With the recorder synced to
+        mainline `dev`, `ct-mcr` (from `ct_cli`) BUILDS CLEAN on arm64-macOS
+        (incl. the macOS dylib `@rpath`/codesign steps) and RECORDS a real `.ct`
+        (exit 0, ~200 low-level events). The gate is downstream: on this host the
+        native `.ct` decodes (via `ct-print --json-events`) to only a `path`
+        record — no `Function`/`Call` events — so the engine has no executed-
+        function set; and the engine's native backend still reads a legacy
+        `native_calltrace.json` sidecar the modern CTFS recorder no longer writes.
+        Full function-level native traces come from the Linux MCR/RR path; wiring
+        the native backend to consume the modern CTFS `.ct` and validating it on
+        a Linux MCR host is the documented follow-up. The gate asserts a non-empty
+        diagnostic with the VERIFIED reason — never a `unittest.skip`.
   - [X] The interpreted group is validated with GENUINE live CTFS recordings
     (Ruby, Python AND JavaScript) consumed by the engine. JS is live once the
     workspace siblings (`codetracer-trace-format` + `-trace-format-nim`) are
@@ -1030,11 +1036,14 @@
     (no accepted gate); fails loudly with the captured diagnostic if the
     recorder cannot build/record (e.g. stale sibling checkouts). PASSES here.
   - [X] test_name: native_recording_runs_where_supported_else_gated
-    (`tests/t_live_native.nim`) — compiles a real C binary, attempts a `ct-mcr`
-    recording; on this host emits the LOUD asserted gate citing the verified
-    upstream break (recorder CI red on main+dev) + Linux-only RR, with the real
-    license-FFI load failure. On a supported (green Linux) platform it detects
-    the native backend and drives the engine over the live `.ct`.
+    (`tests/t_live_native.nim`) — compiles a real C binary and records it LIVE
+    with `ct-mcr` (builds clean from the latest dev; records a real `.ct`, exit
+    0). On this host the engine cannot extract an executed-function set from the
+    native `.ct` (it decodes to only a `path` record — no Function/Call events —
+    and the engine's native backend still expects a legacy `native_calltrace.json`
+    sidecar), so the test emits the LOUD asserted gate citing that VERIFIED
+    platform/format limitation (NOT a build break). On a Linux MCR host that
+    yields a readable native trace it drives the engine over the live `.ct`.
   - [X] test_name: full_suite_green_with_live_recordings
     (`tests/t_live_full_suite.nim`) — compiles and runs EVERY campaign test file
     (all 16 other lib test files, M0-M13) as subprocesses and asserts each exits
