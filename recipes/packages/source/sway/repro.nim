@@ -291,7 +291,10 @@ package swaySource:
     setCurrentOwningPackageOverride("swaySource")
     try:
       let opts = @[
-        "xwayland=disabled",
+        # M9.R.14h.9 — sway 1.11's meson_options dropped the
+        # ``xwayland`` knob; xwayland is now controlled at wlroots
+        # build time, not sway's.  ``man-pages`` + ``tray`` survive as
+        # feature options on the new schema.
         "man-pages=disabled",
         "tray=disabled",
         "werror=false",
