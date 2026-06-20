@@ -10,10 +10,12 @@
 
 import repro_ct_incremental/trace_reader
 import repro_ct_incremental/extractors
+import repro_ct_incremental/backends
 import repro_ct_incremental/engine
 import repro_ct_incremental/watch
 
 export trace_reader
 export extractors
+export backends
 export engine
 export watch

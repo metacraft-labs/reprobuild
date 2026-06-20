@@ -1,0 +1,2 @@
+Structure (an rr/ subdir) would say native, but the explicit
+recorder_backend 'interpreter' in trace_metadata.json wins -> tbSourceInterpreted.

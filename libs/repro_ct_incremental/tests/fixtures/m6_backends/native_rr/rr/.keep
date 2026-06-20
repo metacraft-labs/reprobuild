@@ -1,0 +1,4 @@
+An rr/ subdirectory inside a trace dir is the structural marker of an RR
+(native / Multi-Core-Recorder) replay capture. A real rr/ subdir holds the
+recorded event log + memory snapshots; this fixture only needs the directory
+to exist for backend detection (M6 detects by SHAPE, not by parsing rr data).

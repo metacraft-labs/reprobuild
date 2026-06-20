@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M6 next
+#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M6 complete, M7 next
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -380,42 +380,58 @@
   holds: any ambiguity ⇒ re-run, never a silent skip.
 
 * M6 — Backend abstraction + detection
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: refactor the engine so dependency discovery and shallow hashing are
   pluggable strategies chosen by the detected trace backend — with NO behaviour
   change for the existing source/interpreted languages.
 
   Deliverables:
-  - [ ] `TraceBackend` enum: `tbSourceInterpreted` (canonical Function/Call +
+  - [X] `TraceBackend` enum: `tbSourceInterpreted` (canonical Function/Call +
     source hash), `tbNativeDwarf` (native MCR/RR + instruction-byte hash),
     `tbNimInstrumented` (reserved for Nim's future materialized path).
-  - [ ] `proc detectBackend*(traceDir: string): Result[TraceBackend, string]` —
+    Implemented + documented in
+    `libs/repro_ct_incremental/src/repro_ct_incremental/backends.nim`.
+  - [X] `proc detectBackend*(traceDir: string): Result[TraceBackend, string]` —
     detect from trace shape/metadata: a `trace.json` (canonical records) ⇒
-    source/interpreted; an `rr/` dir or a `.ct` CTFS container (and/or a
-    `trace_db_metadata.json`) ⇒ native; ambiguous/unknown ⇒ `Err` (⇒ re-run
-    upstream). Prefer an explicit `recorder_backend` metadata field when present,
-    else fall back to structure detection (document the precedence).
-  - [ ] Generalize the engine: a `DependencyDiscovery` seam (current JSON reader
-    becomes the source-interpreted impl) and a `ShallowHasher` seam (current
-    extractor-based hasher becomes the source impl), both selected by backend.
-    `decide`/`record` route through the seams. The existing source path must be
-    byte-for-byte behaviourally identical (same hashes, same decisions).
+    source/interpreted; an `rr/` dir, a `.ct` CTFS container, OR a
+    `trace_db_metadata.json` ⇒ native; ambiguous (both shapes)/unknown/empty ⇒
+    `Err` (⇒ re-run upstream). An explicit `recorder_backend` metadata field
+    (`rr`/`mcr`/`ttd` ⇒ native, `interpreter` ⇒ source, `nim-instrumented` ⇒ the
+    reserved Nim path) is honoured OVER structure; an explicit-but-unrecognised
+    value fails safe (`Err`). Precedence (explicit metadata > structure) is
+    documented on `detectBackend`.
+  - [X] Generalize the engine: a `DependencyDiscovery` seam (the current JSON
+    reader `readExecutedFunctions` is the source-interpreted impl) and a
+    `ShallowHasher` seam (the extractor-based `shallowHashOfDepSource` is the
+    source impl), both objects-of-procs selected by `backendStrategies(backend)`.
+    `decide`/`record` detect the backend then route through its seams. For
+    `tbNativeDwarf`/`tbNimInstrumented` (nil seams until M7-M9) `record` returns a
+    "backend not yet supported" `Err` and `decide` returns `idRerunFailSafe` with
+    that reason — a guaranteed re-run, NEVER a skip. The source path is
+    byte-for-byte identical (same cache format, same hashes, same decisions).
 
-  Automated tests:
-  - test_name: detect_backend_source_vs_native
+  Automated tests (`tests/t_backend_abstraction.nim`; fixtures under
+  `tests/fixtures/m6_backends/`):
+  - [X] test_name: detect_backend_source_vs_native
     description: a canonical `trace.json` fixture ⇒ `tbSourceInterpreted`; an
-    `rr/`-dir and a `.ct`-container fixture ⇒ `tbNativeDwarf`; an empty/ambiguous
-    dir ⇒ `Err`.
-  - test_name: source_path_unchanged_through_abstraction
-    description: every Phase-1 decision (the M1/M3/M4 skip/rerun cases) yields the
-    IDENTICAL result when routed through the new strategy seams (no regression).
-  - test_name: backend_metadata_field_overrides_structure
-    description: an explicit `recorder_backend` in metadata is honoured over
-    structure detection.
+    `rr/`-dir, a `.ct`-container, and a `trace_db_metadata.json` fixture ⇒
+    `tbNativeDwarf`; an empty dir and a both-signals dir ⇒ `Err`.
+  - [X] test_name: source_path_unchanged_through_abstraction
+    description: the Phase-1 skip/rerun/fresh decisions over the real m0 fixture
+    yield the IDENTICAL result through the seams; a companion
+    `source_path_hashes_byte_for_byte_identical` asserts the recorded deep hash +
+    per-dep shallow hashes are unchanged (not just the decision).
+  - [X] test_name: backend_metadata_field_overrides_structure
+    description: a `trace.json` + `recorder_backend: "rr"` ⇒ native; an `rr/`
+    subdir + `recorder_backend: "interpreter"` ⇒ source.
+  - [X] Guards: `unimplemented_native_backend_reruns_never_skips` (native/Nim
+    seams unimplemented ⇒ `record` Errs, `decide` ⇒ `idRerunFailSafe`, never a
+    skip) and `ambiguous_trace_decide_is_failsafe_rerun`.
 
-  Acceptance: all Phase-1 tests pass unchanged; the seams exist and are selected
-  by `detectBackend`.
+  Acceptance: all Phase-1 tests pass unchanged (verified: the 7 lib suites +
+  `repro_cli_support` flag test + `nim check libs/repro_cli_support/...` exit 0);
+  the seams exist and are selected by `detectBackend`.
 
 * M7 — Native shallow hash (compiled instruction bytes)
   :STATUS: not started

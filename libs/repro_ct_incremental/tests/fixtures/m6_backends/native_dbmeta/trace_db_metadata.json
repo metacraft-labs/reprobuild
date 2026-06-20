@@ -1,0 +1,4 @@
+{
+  "format": "ctfs",
+  "note": "A trace_db_metadata.json sidecar (without a recorder_backend field) is itself a native-shape structural signal. No recorder_backend here, so detection falls through to structure -> tbNativeDwarf."
+}

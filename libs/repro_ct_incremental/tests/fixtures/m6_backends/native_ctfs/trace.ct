@@ -1,0 +1,5 @@
+CTFS-FIXTURE-CONTAINER
+This stands in for a CodeTracer CTFS binary container (`*.ct`). Its presence
+inside a trace dir is the structural marker of a native CTFS capture. M6
+detection keys on the `.ct` EXTENSION only and never parses the bytes; a real
+container is a binary trace-db file produced by the native recorder.

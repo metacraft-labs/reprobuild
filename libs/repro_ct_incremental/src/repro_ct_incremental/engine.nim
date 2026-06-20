@@ -59,9 +59,11 @@ import results
 
 import trace_reader
 import extractors
+import backends
 
 export trace_reader
 export extractors
+export backends
 
 type
   IncrementalDecisionKind* = enum
@@ -216,13 +218,19 @@ proc readSourceLines(path: string): Result[seq[string], string] =
     return err("failed to read " & path & ": " & e.msg)
   ok(raw.split('\n'))
 
-proc shallowHashOfDep(dep: ExecutedFunction; sourceRoot: string): string =
-  ## Compute the current shallow hash of a single executed function against the
-  ## source under `sourceRoot`. A missing file, a missing function, OR an
-  ## unsupported source extension yields the reserved `"missing"` shallow hash
-  ## (via `shallowHash` of an empty body), so a removed/unreadable dependency is
+proc shallowHashOfDepSource(dep: ExecutedFunction; sourceRoot: string): string
+    {.nimcall, gcsafe.} =
+  ## The source/interpreted `ShallowHasher` implementation (Phase 1). Compute
+  ## the current shallow hash of a single executed function against the source
+  ## under `sourceRoot`. A missing file, a missing function, OR an unsupported
+  ## source extension yields the reserved `"missing"` shallow hash (via
+  ## `shallowHash` of an empty body), so a removed/unreadable dependency is
   ## treated as changed — never silently skipped, never hashed with the wrong
   ## extractor. The extractor is chosen purely by `dep.file`'s extension.
+  ##
+  ## (M6: this is the `tbSourceInterpreted` shallow-hash seam. Its signature
+  ## matches `backends.ShallowHashProc` so it can be injected into a
+  ## `ShallowHasher`. The behaviour is BYTE-FOR-BYTE the Phase-1 hasher.)
   let path = resolveSourcePath(sourceRoot, dep.file)
   let linesRes = readSourceLines(path)
   if linesRes.isErr:
@@ -233,6 +241,37 @@ proc shallowHashOfDep(dep: ExecutedFunction; sourceRoot: string): string =
   if bodyRes.isErr:
     return shallowHash("")  # unknown ext / out-of-range / unmatched => "missing"
   shallowHash(bodyRes.value)
+
+# ---------------------------------------------------------------------------
+# Backend strategy selection (M6 seam)
+# ---------------------------------------------------------------------------
+#
+# The engine routes dependency discovery and shallow hashing through the
+# `backends` seams, selected by the detected `TraceBackend`. The
+# source/interpreted strategy is wired here from the Phase-1 implementations
+# (`trace_reader.readExecutedFunctions` + `shallowHashOfDepSource`), giving the
+# byte-for-byte identical behaviour Phase 1 had. Native (`tbNativeDwarf`) and
+# the reserved `tbNimInstrumented` are intentionally LEFT with nil seam procs
+# until M7-M9: `strategiesImplemented` reports them unimplemented and the
+# engine fails safe to a re-run (never a skip).
+
+let
+  sourceInterpretedStrategies = BackendStrategies(
+    backend: tbSourceInterpreted,
+    discovery: newDependencyDiscovery(readExecutedFunctions),
+    hasher: newShallowHasher(shallowHashOfDepSource))
+
+proc backendStrategies*(backend: TraceBackend): BackendStrategies =
+  ## Select the `(DependencyDiscovery, ShallowHasher)` pair for a backend. Only
+  ## `tbSourceInterpreted` is wired in M6; the native/Nim-instrumented backends
+  ## return a pair with nil seam procs (`strategiesImplemented == false`) so the
+  ## engine re-runs with `notImplementedReason`. M7-M9 replace the nil pairs.
+  case backend
+  of tbSourceInterpreted:
+    sourceInterpretedStrategies
+  of tbNativeDwarf, tbNimInstrumented:
+    # Reserved: discovery/hasher are nil until the native/Nim impls land.
+    BackendStrategies(backend: backend)
 
 # ---------------------------------------------------------------------------
 # Deep hash (§16.7.3)
@@ -256,10 +295,12 @@ proc deepHash*(funcs: seq[(string, string)]): string =
     buf.add '\x1f'
   hexOfHash(hash(buf))
 
-proc currentDeps(deps: seq[ExecutedFunction]; sourceRoot: string): seq[CachedDep] =
-  ## Compute the current per-dependency shallow hashes against `sourceRoot`.
+proc currentDeps(deps: seq[ExecutedFunction]; sourceRoot: string;
+                 hasher: ShallowHasher): seq[CachedDep] =
+  ## Compute the current per-dependency shallow hashes against `sourceRoot`
+  ## using the backend-selected `hasher` seam.
   for dep in deps:
-    result.add CachedDep(fn: dep, shallow: shallowHashOfDep(dep, sourceRoot))
+    result.add CachedDep(fn: dep, shallow: hasher.hashOf(dep, sourceRoot))
 
 func deepHashOfCachedDeps(deps: seq[CachedDep]): string =
   ## Deep hash of a recorded dependency set (uses the stored shallow hashes).
@@ -446,10 +487,26 @@ proc record*(cache: var IncrementalCache; testId, traceDir, sourceRoot: string;
   ## `deterministic` marks whether the test is reproducible. Pass `false` for a
   ## test known to be non-deterministic: it is persisted in the cache and makes
   ## every future `decide` re-run the test regardless of hashes (§16.7).
-  let execRes = readExecutedFunctions(traceDir)
+  ##
+  ## # Backend routing (M6)
+  ##
+  ## The trace's backend is detected (`detectBackend`) and dependency discovery +
+  ## shallow hashing go through that backend's seams. The source/interpreted
+  ## backend uses `readExecutedFunctions` + the source-text hasher exactly as
+  ## Phase 1 did (byte-for-byte identical results). A backend whose strategies
+  ## are not yet wired (native / Nim-instrumented, until M7-M9), or an
+  ## ambiguous/unknown trace shape, returns an `Err` — the caller MUST re-run,
+  ## never record a skip-eligible entry from an unsupported backend.
+  let backendRes = detectBackend(traceDir)
+  if backendRes.isErr:
+    return err("cannot record: " & backendRes.error)
+  let strategies = backendStrategies(backendRes.value)
+  if not strategiesImplemented(strategies):
+    return err("cannot record: " & notImplementedReason(backendRes.value))
+  let execRes = strategies.discovery.discover(traceDir)
   if execRes.isErr:
     return err(execRes.error)
-  let deps = currentDeps(execRes.value, sourceRoot)
+  let deps = currentDeps(execRes.value, sourceRoot, strategies.hasher)
   cache.entries[testId] = CachedTest(
     deepHash: deepHashOfCachedDeps(deps),
     deps: deps,
@@ -516,7 +573,7 @@ proc decide*(testId, traceDir, sourceRoot: string;
   ## only when (a) the test is deterministic, (b) its trace dir is readable, and
   ## (c) every recorded dependency's CURRENT shallow hash equals its recorded
   ## hash. An unreadable source file or an extraction/hashing failure yields the
-  ## reserved `"missing"` shallow hash (see `shallowHashOfDep`), which differs
+  ## reserved `"missing"` shallow hash (see `shallowHashOfDepSource`), which differs
   ## from any real recorded hash and therefore routes to `idRerunChanged` — so a
   ## hashing/extraction error is itself a re-run, never a skip. No error or
   ## non-deterministic condition can reach the skip branch.
@@ -527,19 +584,36 @@ proc decide*(testId, traceDir, sourceRoot: string;
   if not cached.deterministic:
     return rerunNonDeterministic()
   # Guard 2: the trace dir referenced for this test must be readable. If it is
-  # gone or unreadable, fail safe to a re-run with a diagnostic.
+  # gone or unreadable, fail safe to a re-run with a diagnostic. This probe is
+  # the source/interpreted backend's readability check; running it FIRST keeps
+  # the Phase-1 fail-safe reasons (``missing trace dir`` / ``missing trace
+  # file``) byte-for-byte, and a native trace (no canonical files) also trips it
+  # — re-running, never skipping, until M8 wires native readability.
   let traceRes = traceDirReadable(traceDir)
   if traceRes.isErr:
     return rerunFailSafe(traceRes.error)
+  # Guard 3 (M6 backend routing): detect the trace's backend and select its
+  # shallow-hashing seam. An ambiguous/unknown shape, or a backend whose
+  # strategies are not yet wired (native / Nim-instrumented until M7-M9), fails
+  # safe to a re-run with a clear reason — NEVER a skip. (A canonical trace.json
+  # that passed guard 2 normally detects as source/interpreted; an explicit
+  # `recorder_backend` metadata override to a native backend lands here and
+  # re-runs as not-yet-supported.)
+  let backendRes = detectBackend(traceDir)
+  if backendRes.isErr:
+    return rerunFailSafe(backendRes.error)
+  let strategies = backendStrategies(backendRes.value)
+  if not strategiesImplemented(strategies):
+    return rerunFailSafe(notImplementedReason(backendRes.value))
   # Recompute each dependency's CURRENT shallow hash against the current source
-  # and compare to the per-dep shallow hash recorded at `record` time. A dep is
-  # "changed" if its current shallow hash differs from the recorded one — this
-  # includes the case where the function was removed OR its source is unreadable
-  # (current hash == the `"missing"` sentinel), which is therefore reported as
-  # changed and never silently skipped.
+  # via the backend's hasher seam and compare to the per-dep shallow hash
+  # recorded at `record` time. A dep is "changed" if its current shallow hash
+  # differs from the recorded one — this includes the case where the function
+  # was removed OR its source is unreadable (current hash == the `"missing"`
+  # sentinel), which is therefore reported as changed and never silently skipped.
   var changed: seq[string]
   for dep in cached.deps:
-    let current = shallowHashOfDep(dep.fn, sourceRoot)
+    let current = strategies.hasher.hashOf(dep.fn, sourceRoot)
     if current != dep.shallow:
       changed.add dep.fn.name
   if changed.len == 0:

@@ -1,0 +1,2 @@
+both_ambiguous holds BOTH a canonical trace.json AND an rr/ subdir.
+Such a directory is genuinely ambiguous; detectBackend must Err.
