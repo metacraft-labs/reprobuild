@@ -120,22 +120,31 @@ suite "M5: robustness and correctness guards":
     var cache = initCache(root / "cache.json")
     check record(cache, testId, threeFuncsTrace, root).isOk
 
-    # A trace dir that does not exist at all.
+    # A trace dir that does not exist at all. As of M8 backend detection runs
+    # before the (now backend-specific) readability probe, so a missing dir is
+    # caught by `detectBackend` ("trace dir not found"); the decision is still a
+    # distinguishable fail-safe re-run, never a skip.
     let goneTrace = root / "no_such_trace_dir"
     check (not dirExists(goneTrace))
     let dMissingDir = decide(testId, goneTrace, root, cache)
     check dMissingDir.kind == idRerunFailSafe
     check dMissingDir.isRerun
-    check "missing trace dir" in dMissingDir.reason
+    check "trace dir not found" in dMissingDir.reason
 
-    # A trace dir that exists but is missing a required trace file.
+    # A trace dir that exists but carries no recognisable trace shape (here only
+    # `trace_paths.json`, no `trace.json` and no native signal). As of M8 this is
+    # caught by `detectBackend` ("unrecognised/empty trace shape") — still a
+    # fail-safe re-run, never a skip. (When the dir DOES detect as a source trace
+    # but a required file is unreadable, the source readability probe still
+    # reports "missing trace file"; that branch is exercised by the native
+    # counterpart in t_native_decision.nim's native_missing_calltrace_file_fails_safe.)
     let partialTrace = makeTempRoot("partialtrace")
     writeFile(partialTrace / TracePathsFile, "[]")
     # (no trace.json)
     let dMissingFile = decide(testId, partialTrace, root, cache)
     check dMissingFile.kind == idRerunFailSafe
     check dMissingFile.isRerun
-    check "missing trace file" in dMissingFile.reason
+    check "unrecognised/empty trace shape" in dMissingFile.reason
 
   test "unreadable_source_falls_back_to_rerun":
     ## A dependency whose source file is missing/unreadable must re-run. The

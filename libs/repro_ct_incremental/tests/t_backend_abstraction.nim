@@ -168,40 +168,47 @@ suite "M6: backend abstraction + detection":
     check overSource.value == tbSourceInterpreted # not native, despite rr/
 
   test "unimplemented_native_backend_reruns_never_skips":
-    ## The conservative invariant through the refactor: a native (or Nim-
-    ## instrumented) backend whose strategies are not yet wired must force a
-    ## RE-RUN, never a skip — both at record time (Err) and decide time
-    ## (idRerunFailSafe with a clear reason).
+    ## The conservative invariant through the refactor. As of M8 the NATIVE
+    ## backend IS wired (so it is no longer "not yet supported"); the ONLY backend
+    ## whose strategies remain unimplemented is the reserved `tbNimInstrumented`,
+    ## which must still force a RE-RUN, never a skip — both at record time (Err)
+    ## and decide time (idRerunFailSafe with a clear reason). The native backend's
+    ## fail-safety is now covered end-to-end by t_native_decision.nim; here we
+    ## additionally confirm a native-shaped trace LACKING its calltrace payload
+    ## still re-runs (never skips).
     let native = backendStrategies(tbNativeDwarf)
-    check (not strategiesImplemented(native))
+    check strategiesImplemented(native)            # M8: native IS wired now.
     let nim = backendStrategies(tbNimInstrumented)
-    check (not strategiesImplemented(nim))
+    check (not strategiesImplemented(nim))         # Nim-instrumented still reserved.
     let source = backendStrategies(tbSourceInterpreted)
     check strategiesImplemented(source)            # source IS wired.
 
-    # record() against a native-shaped trace ⇒ Err (cannot record a skip-
-    # eligible entry from an unsupported backend).
+    # record() against a native-shaped trace dir that carries NO native calltrace
+    # payload ⇒ Err (the native discovery cannot read an executed set), so nothing
+    # skip-eligible is recorded. (`native_rr` is just an `rr/` marker dir.)
     let root = makeSourceRoot()
     var cache = initCache(root / "cache.json")
     let rec = record(cache, testId, m6Backends / "native_rr", root)
     check rec.isErr
-    check "backend not yet supported" in rec.error
+    check "native calltrace file not found" in rec.error
     check (not cache.entries.hasKey(testId))       # nothing recorded.
 
-    # decide() with a cached source entry but a metadata-override-to-native
-    # trace ⇒ a fail-safe re-run (the override forces the native backend, which
-    # is unimplemented). First record a legit source baseline so a cache entry
-    # exists, then point decide at the override-native trace.
+    # decide() with a cached source entry but a metadata-override-to-native trace
+    # whose native calltrace payload is absent ⇒ a fail-safe re-run (the
+    # native readability guard fires), never a skip. First record a legit source
+    # baseline so a cache entry exists, then point decide at the override-native
+    # trace.
     var srcCache = initCache(root / "src_cache.json")
     check record(srcCache, testId, threeFuncsTrace, root).isOk
     # Sanity: against its own source trace it would skip.
     check decide(testId, threeFuncsTrace, root, srcCache).kind == idSkipUnchanged
-    # But the meta-override-native trace carries trace.json (so guard-2 readable)
-    # yet detects as native ⇒ unimplemented ⇒ idRerunFailSafe, never a skip.
+    # The meta-override-native trace carries trace.json but detects as native via
+    # the recorder_backend override; lacking native_calltrace.json it fail-safes
+    # to a re-run, never a skip.
     let d = decide(testId, m6Backends / "meta_override_native", root, srcCache)
     check d.kind == idRerunFailSafe
     check d.isRerun
-    check "backend not yet supported" in d.reason
+    check "native trace file" in d.reason
 
   test "ambiguous_trace_decide_is_failsafe_rerun":
     ## A cached test pointed at an ambiguous trace (both canonical + rr/) must

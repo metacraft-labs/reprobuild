@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M7 complete, M8 next
+#+STATUS: Phase 1 (M0-M5) complete; Phase 2 (M6-M10, all languages + native/MCR) — M8 complete, M9 next
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -518,43 +518,90 @@
   re-hash ⇒ a SAFE re-run, never a false skip).
 
 * M8 — Native dependency discovery + native incremental decision
-  :STATUS: not started
+  :STATUS: complete
 
   Goal: end-to-end native incremental testing — skip a native test when none of
   the native functions it executed changed at the instruction-byte level.
 
   Deliverables:
-  - [ ] `proc readExecutedFunctionsNative*(traceDir): Result[seq[ExecutedFunction], string]`
-    — the native `DependencyDiscovery` impl: read the executed-function set from
-    a native trace's calltrace (the MCR emulator CallRecord shape / the
-    native-trace layout). Hand-craft the fixture trace in that real shape where a
-    live MCR run isn't available in the dev shell; document the shape + how it
-    maps to the real native trace (cite the native-recorder source). The
-    `ExecutedFunction` carries the function name + the owning binary (not a
-    source defLine — native deps key on name+binary).
-  - [ ] Wire the native backend through the M6 seams so `decide`/`record` use
-    `readExecutedFunctionsNative` + `shallowHashNative` for `tbNativeDwarf`
-    traces. The cache stores the same `{deepHash, deps}` shape (deps carry the
-    binary path for re-hashing).
-  - [ ] `record` re-hashes deps against the CURRENT binary; `decide` re-hashes the
-    cached native deps against the current binary and skips iff all unchanged.
+  - [X] `proc readExecutedFunctionsNative*(traceDir): Result[seq[ExecutedFunction], string]`
+    — the native `DependencyDiscovery` impl in
+    `src/repro_ct_incremental/native_trace.nim`: reads the executed-function set
+    from a native trace's calltrace (`<traceDir>/native_calltrace.json`). The
+    fixture trace is hand-crafted (no live MCR/RR run in the dev shell, mirroring
+    Phase 1) in a JSON shape modeled on the real native-recorder calltrace —
+    `codetracer-native-recorder/ct_emulator/src/ct_emulator/`:
+    `write_log.nim`'s `CallRecord {tickEnter,tickExit,callerPc,calleePc}`,
+    `calltrace_collector.nim` (MCR/RR collection), and `calltrace.nim`'s
+    `buildCallTree`→`CallNode {functionName,sourceFile,sourceLine,calleePc}`
+    (PCs resolved to names via `source_index.resolvePCs`/addr2line over the ELF).
+    The JSON is a documented prototype projection (`binary` ⇐ the recorder's
+    `elfPath`; `calls[].functionName`/`calleePc` ⇐ `CallNode`'s fields); there is
+    no canonical on-disk JSON for the calltrace upstream, so the shape + mapping
+    are documented in `native_trace.nim` and the fixture README. The returned
+    `ExecutedFunction` carries the function NAME and, in `.file`, the BINARY path
+    (native deps key on name+binary, not a source line; `defLine` always 0) —
+    convention documented in `native_trace.nim`.
+  - [X] Native backend wired through the M6 seams: `backendStrategies(tbNativeDwarf)`
+    returns a real pair — discovery = `readExecutedFunctionsNative`, hasher =
+    `shallowHashOfDepNative` calling `shallowHashNative(dep.file (=binary),
+    dep.name)`. The native hasher IGNORES `sourceRoot` (deps carry the binary in
+    `.file`), so the source path is NEVER touched on the native route. The cache
+    stores the same `{deepHash, deps}` shape — the binary travels in the slot a
+    source path would, no schema change. `decide`'s readability/backend guards are
+    now backend-dispatched (backend detection runs FIRST; native traces probe
+    `native_calltrace.json`).
+  - [X] `record` hashes native deps against the CURRENT binary (the trace's
+    `binary`); `decide` rebinds the cached native deps to the CURRENT trace's
+    binary (`currentDepLocations`, the native analogue of the source path's
+    "re-hash cached deps under the current sourceRoot") and skips iff all
+    unchanged. A missing/unreadable binary, a function absent from the symbol
+    table, or any native-hash `Err` ⇒ the reserved `"missing"` shallow hash ⇒
+    re-run, never a skip.
 
-  Automated tests (real compiled binary + native-trace fixture):
-  - test_name: native_unchanged_binary_skips
+  Automated tests (`tests/t_native_decision.nim`; fixture
+  `tests/fixtures/m8_native_c/`; real compiled binary built at test time +
+  hand-crafted native calltrace pointing at it):
+  - [X] test_name: native_unchanged_binary_skips
     description: record() then decide() with the identical rebuilt binary ⇒
     `idSkipUnchanged`.
-  - test_name: native_changing_an_executed_function_reruns
-    description: edit + rebuild an EXECUTED native function ⇒ `idRerunChanged`
-    naming it.
-  - test_name: native_changing_an_unexecuted_function_skips
-    description: edit + rebuild a native function the test did NOT execute ⇒
-    `idSkipUnchanged` (function-level precision at the machine-code level).
-  - test_name: native_missing_binary_falls_back_to_rerun
-    description: a missing/unreadable binary ⇒ re-run, never skip.
+  - [X] test_name: native_changing_an_executed_function_reruns
+    description: edit + rebuild an EXECUTED native function (`used_a`) ⇒
+    `idRerunChanged` naming it (and NOT the unaffected sibling `used_b`).
+  - [X] test_name: native_changing_an_unexecuted_function_skips
+    description: edit + rebuild a native function the test did NOT execute
+    (`unused_c`) ⇒ `idSkipUnchanged` (function-level precision at the machine-code
+    level). A guard asserts the executed leaves' instruction-byte hashes are
+    GENUINELY unchanged across the edit (and unused_c's OWN hash DID change), so
+    the skip is real, not a coincidental re-run.
+  - [X] test_name: native_missing_binary_falls_back_to_rerun
+    description: a missing/unreadable binary ⇒ `idRerunChanged` (deps hash to
+    "missing") — re-run, never skip.
+  - [X] supporting guards: `native_executed_set_matches_fixture_calltrace`
+    (reader returns exactly {used_a,used_b}, file=binary, defLine=0),
+    `native_detect_routes_through_native_backend`, and
+    `native_missing_calltrace_file_fails_safe` (absent calltrace ⇒
+    `idRerunFailSafe` at decide, `Err` at record).
+
+  Native fixture layout (the skip-genuineness argument, empirically confirmed):
+  the executed set is exactly the two pure POSITION-INDEPENDENT leaves
+  {`used_a`,`used_b`} (main, the only call-containing function, is deliberately
+  excluded), so editing the unexecuted `unused_c` cannot change any executed
+  function's instruction bytes. Verified on this host (arm64 macOS): the unused_c
+  edit relocates used_a/used_b to lower addresses yet leaves their hashes
+  byte-identical (used_a `5b33e421faa53965`, used_b `69d8b6c436ed0ff9` before and
+  after) while unused_c's own hash changes — so
+  `native_changing_an_unexecuted_function_skips` truly skips.
 
   Acceptance: native skip/rerun precision demonstrated end-to-end on a real
-  compiled binary; `native_changing_an_unexecuted_function_skips` alongside
-  `native_changing_an_executed_function_reruns`.
+  compiled binary; `native_changing_an_unexecuted_function_skips` passes
+  alongside `native_changing_an_executed_function_reruns`. No native FALSE-SKIP
+  is possible: the only skip path is `idSkipUnchanged`, reached only when the
+  test is deterministic, the native calltrace is readable, the backend detects
+  native, and every executed function's CURRENT instruction-byte hash equals its
+  recorded hash; any binary/lookup error maps to the "missing" sentinel ⇒
+  re-run, and a relocated call-containing function (the M7 limitation) re-hashes
+  to a conservative re-run, never a skip.
 
 * M9 — Nim's dual recording path
   :STATUS: not started

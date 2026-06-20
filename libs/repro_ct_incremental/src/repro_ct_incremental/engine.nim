@@ -60,10 +60,14 @@ import results
 import trace_reader
 import extractors
 import backends
+import native_trace
+import native_hash
 
 export trace_reader
 export extractors
 export backends
+export native_trace
+export native_hash
 
 type
   IncrementalDecisionKind* = enum
@@ -242,6 +246,36 @@ proc shallowHashOfDepSource(dep: ExecutedFunction; sourceRoot: string): string
     return shallowHash("")  # unknown ext / out-of-range / unmatched => "missing"
   shallowHash(bodyRes.value)
 
+proc shallowHashOfDepNative(dep: ExecutedFunction; sourceRoot: string): string
+    {.nimcall, gcsafe.} =
+  ## The native/DWARF `ShallowHasher` implementation (M8). Compute the current
+  ## shallow hash of one executed native function from its CURRENT compiled
+  ## instruction bytes.
+  ##
+  ## # Why `sourceRoot` is IGNORED here (the seam design)
+  ##
+  ## For native dependencies `dep.file` already holds the OWNING BINARY path (the
+  ## convention `readExecutedFunctionsNative` establishes), and a native
+  ## function's identity is its instruction bytes located in that binary by
+  ## symbol name — there is NO source tree to resolve under `sourceRoot`. So this
+  ## hasher deliberately ignores `sourceRoot` and hashes `dep.file` (the binary)
+  ## directly via `shallowHashNative(dep.file, dep.name)`. This is exactly how
+  ## the M6 seam was designed to let native ignore `sourceRoot`: the source path
+  ## is NEVER touched on the native route.
+  ##
+  ## # Fail-safe
+  ##
+  ## A missing/unreadable binary, a function absent from the binary's symbol
+  ## table, or any native-hash tooling error makes `shallowHashNative` return an
+  ## `Err`; we map that to the reserved `"missing"` sentinel (via `shallowHash("")`)
+  ## so the dependency reads as CHANGED and the engine re-runs — never a silent
+  ## skip. This mirrors `shallowHashOfDepSource`'s treatment of an unreadable
+  ## source. (`shallowHash` of an empty body returns `"missing"`.)
+  let h = shallowHashNative(dep.file, dep.name)
+  if h.isErr:
+    return shallowHash("")  # missing/unreadable binary or absent function => "missing"
+  h.value
+
 # ---------------------------------------------------------------------------
 # Backend strategy selection (M6 seam)
 # ---------------------------------------------------------------------------
@@ -261,16 +295,30 @@ let
     discovery: newDependencyDiscovery(readExecutedFunctions),
     hasher: newShallowHasher(shallowHashOfDepSource))
 
+  nativeDwarfStrategies = BackendStrategies(
+    backend: tbNativeDwarf,
+    # M8: native dependency discovery reads the native calltrace; native shallow
+    # hashing reads the function's compiled instruction bytes from the owning
+    # binary carried in `dep.file` (sourceRoot is ignored — see
+    # `shallowHashOfDepNative`). Both seams are now real, so the native backend
+    # participates in incremental skipping exactly like the source backend, with
+    # the SAME `{deepHash, deps}` cache shape.
+    discovery: newDependencyDiscovery(readExecutedFunctionsNative),
+    hasher: newShallowHasher(shallowHashOfDepNative))
+
 proc backendStrategies*(backend: TraceBackend): BackendStrategies =
-  ## Select the `(DependencyDiscovery, ShallowHasher)` pair for a backend. Only
-  ## `tbSourceInterpreted` is wired in M6; the native/Nim-instrumented backends
-  ## return a pair with nil seam procs (`strategiesImplemented == false`) so the
-  ## engine re-runs with `notImplementedReason`. M7-M9 replace the nil pairs.
+  ## Select the `(DependencyDiscovery, ShallowHasher)` pair for a backend.
+  ## `tbSourceInterpreted` (Phase 1) and `tbNativeDwarf` (M8) are both wired; the
+  ## reserved `tbNimInstrumented` backend returns a pair with nil seam procs
+  ## (`strategiesImplemented == false`) so the engine re-runs with
+  ## `notImplementedReason`. M9 wires Nim's dual path.
   case backend
   of tbSourceInterpreted:
     sourceInterpretedStrategies
-  of tbNativeDwarf, tbNimInstrumented:
-    # Reserved: discovery/hasher are nil until the native/Nim impls land.
+  of tbNativeDwarf:
+    nativeDwarfStrategies
+  of tbNimInstrumented:
+    # Reserved: discovery/hasher are nil until the Nim instrumented impl lands.
     BackendStrategies(backend: backend)
 
 # ---------------------------------------------------------------------------
@@ -528,12 +576,12 @@ proc markNonDeterministic*(cache: var IncrementalCache; testId: string;
   cache.entries[testId].deterministic = deterministic
   ok()
 
-proc traceDirReadable(traceDir: string): Result[void, string] =
-  ## A conservative readability probe for a test's trace directory (M5
-  ## fail-safe). The directory must exist AND its two required JSON files
-  ## (`trace.json`, `trace_paths.json`) must be present and readable. We do NOT
-  ## fully parse them here — `record` does that — but a missing dir or file, or
-  ## a file we cannot open, is reported so `decide` re-runs rather than risk a
+proc sourceTraceDirReadable(traceDir: string): Result[void, string] =
+  ## A conservative readability probe for a SOURCE/interpreted test's trace
+  ## directory (M5 fail-safe). The directory must exist AND its two required JSON
+  ## files (`trace.json`, `trace_paths.json`) must be present and readable. We do
+  ## NOT fully parse them here — `record` does that — but a missing dir or file,
+  ## or a file we cannot open, is reported so `decide` re-runs rather than risk a
   ## skip against a trace it cannot even see.
   if not dirExists(traceDir):
     return err("missing trace dir: " & traceDir)
@@ -546,6 +594,73 @@ proc traceDirReadable(traceDir: string): Result[void, string] =
     except CatchableError as e:
       return err("unreadable trace file " & p & ": " & e.msg)
   ok()
+
+proc nativeTraceDirReadable(traceDir: string): Result[void, string] =
+  ## The native-backend readability probe (M8 fail-safe). A native trace dir
+  ## must exist and carry a readable native calltrace
+  ## (`native_calltrace.json`). The binary referenced by the calltrace is
+  ## probed later, by the native shallow hasher, which fail-safes to a re-run if
+  ## the binary is missing/unreadable — so a missing binary is ALWAYS a re-run,
+  ## never a skip (see `shallowHashOfDepNative`).
+  if not dirExists(traceDir):
+    return err("missing trace dir: " & traceDir)
+  let p = traceDir / NativeCalltraceFile
+  if not fileExists(p):
+    return err("missing native trace file: " & p)
+  try:
+    discard readFile(p)
+  except CatchableError as e:
+    return err("unreadable native trace file " & p & ": " & e.msg)
+  ok()
+
+proc traceDirReadable(traceDir: string; backend: TraceBackend):
+    Result[void, string] =
+  ## Backend-dispatched readability probe. Each backend has its own required
+  ## trace files (source: `trace.json`+`trace_paths.json`; native:
+  ## `native_calltrace.json`), so the probe must run AFTER backend detection.
+  case backend
+  of tbSourceInterpreted:
+    sourceTraceDirReadable(traceDir)
+  of tbNativeDwarf:
+    nativeTraceDirReadable(traceDir)
+  of tbNimInstrumented:
+    # The reserved Nim instrumented backend has no wired strategies; the
+    # caller's `strategiesImplemented` guard fail-safes before this is reached.
+    # A trivial existence probe keeps this total.
+    if dirExists(traceDir): ok() else: err("missing trace dir: " & traceDir)
+
+proc currentDepLocations(deps: seq[CachedDep]; traceDir: string;
+                         backend: TraceBackend): Result[seq[CachedDep], string] =
+  ## Rebind each cached dependency to the location it must be hashed against
+  ## GIVEN THE CURRENT TRACE DIR, per backend. The shallow hash recorded at
+  ## `record` time is preserved (it is what the current hash is compared against);
+  ## only the `fn.file` the hasher reads is updated where the backend needs it.
+  ##
+  ##   * SOURCE: identity — `fn.file` is a (relative) source path the hasher
+  ##     resolves under the CURRENT `sourceRoot`, so the cached deps already point
+  ##     at the current tree. (Byte-for-byte the Phase-1 behaviour.)
+  ##   * NATIVE: `fn.file` is the binary baked at record time; rebind it to the
+  ##     binary the CURRENT trace references so the hash is computed against the
+  ##     freshly-rebuilt binary (a real watch cycle rebuilds into a new path). If
+  ##     the current binary cannot be resolved, rebind to a guaranteed-absent
+  ##     path so the current hash becomes the `"missing"` sentinel ⇒ a re-run,
+  ##     never a skip.
+  case backend
+  of tbSourceInterpreted, tbNimInstrumented:
+    ok(deps)
+  of tbNativeDwarf:
+    let binRes = nativeTraceBinary(traceDir)
+    # A missing/unreadable current binary path forces every dep's hash to
+    # "missing" (re-run), rather than silently hashing a stale recorded binary.
+    let currentBinary =
+      if binRes.isOk: binRes.value
+      else: traceDir / "<unresolved-native-binary>"
+    var rebound: seq[CachedDep]
+    for dep in deps:
+      var f = dep.fn
+      f.file = currentBinary  # native deps key on name+binary; track the CURRENT binary
+      rebound.add CachedDep(fn: f, shallow: dep.shallow)
+    ok(rebound)
 
 proc decide*(testId, traceDir, sourceRoot: string;
              cache: IncrementalCache): IncrementalDecision =
@@ -583,28 +698,45 @@ proc decide*(testId, traceDir, sourceRoot: string;
   # Guard 1: a non-deterministic test is always re-run, before any hashing.
   if not cached.deterministic:
     return rerunNonDeterministic()
-  # Guard 2: the trace dir referenced for this test must be readable. If it is
-  # gone or unreadable, fail safe to a re-run with a diagnostic. This probe is
-  # the source/interpreted backend's readability check; running it FIRST keeps
-  # the Phase-1 fail-safe reasons (``missing trace dir`` / ``missing trace
-  # file``) byte-for-byte, and a native trace (no canonical files) also trips it
-  # — re-running, never skipping, until M8 wires native readability.
-  let traceRes = traceDirReadable(traceDir)
-  if traceRes.isErr:
-    return rerunFailSafe(traceRes.error)
-  # Guard 3 (M6 backend routing): detect the trace's backend and select its
-  # shallow-hashing seam. An ambiguous/unknown shape, or a backend whose
-  # strategies are not yet wired (native / Nim-instrumented until M7-M9), fails
-  # safe to a re-run with a clear reason — NEVER a skip. (A canonical trace.json
-  # that passed guard 2 normally detects as source/interpreted; an explicit
-  # `recorder_backend` metadata override to a native backend lands here and
-  # re-runs as not-yet-supported.)
+  # Guard 2 (M6/M8 backend routing): detect the trace's backend and select its
+  # strategies FIRST, because the readability probe (guard 3) is backend-specific
+  # — a source trace requires `trace.json`/`trace_paths.json`, a native trace
+  # requires `native_calltrace.json`. An ambiguous/unknown shape, or a backend
+  # whose strategies are not yet wired (Nim-instrumented until M9), fails safe to
+  # a re-run with a clear reason — NEVER a skip.
   let backendRes = detectBackend(traceDir)
   if backendRes.isErr:
     return rerunFailSafe(backendRes.error)
   let strategies = backendStrategies(backendRes.value)
   if not strategiesImplemented(strategies):
     return rerunFailSafe(notImplementedReason(backendRes.value))
+  # Guard 3: the trace dir referenced for this test must carry the backend's
+  # required, readable trace files. If they are gone or unreadable, fail safe to
+  # a re-run with a diagnostic — we re-run rather than trust a stale decision
+  # against a trace we cannot see. (Source backend keeps the Phase-1 fail-safe
+  # reasons ``missing trace dir`` / ``missing trace file`` byte-for-byte.) This
+  # guard intentionally fires only for a cached test: a never-recorded test
+  # already runs fresh.
+  let traceRes = traceDirReadable(traceDir, backendRes.value)
+  if traceRes.isErr:
+    return rerunFailSafe(traceRes.error)
+  # Resolve the CURRENT location each cached dependency must be hashed against,
+  # given the CURRENT trace dir. This is the native counterpart of the source
+  # path's "re-hash the cached deps against the CURRENT source under sourceRoot":
+  #   * SOURCE: a cached dep's `.file` is a (relative) source path; the hasher
+  #     resolves it under `sourceRoot`, which is already the CURRENT source tree.
+  #     No rebind is needed — `currentDeps` returns the cached deps unchanged.
+  #   * NATIVE: a cached dep's `.file` is the BINARY path baked at record time
+  #     (an old build in an old temp dir). The CURRENT binary is the one the
+  #     CURRENT trace references, so we rebind each cached dep's `.file` to the
+  #     current trace's binary before hashing. If the current binary cannot be
+  #     resolved (a malformed/empty current calltrace), every dep is rebound to a
+  #     guaranteed-absent path so its current hash becomes the `"missing"`
+  #     sentinel ⇒ a re-run, never a skip.
+  let currentDepsRes = currentDepLocations(cached.deps, traceDir, backendRes.value)
+  if currentDepsRes.isErr:
+    return rerunFailSafe(currentDepsRes.error)
+  let currentCachedDeps = currentDepsRes.value
   # Recompute each dependency's CURRENT shallow hash against the current source
   # via the backend's hasher seam and compare to the per-dep shallow hash
   # recorded at `record` time. A dep is "changed" if its current shallow hash
@@ -612,7 +744,7 @@ proc decide*(testId, traceDir, sourceRoot: string;
   # was removed OR its source is unreadable (current hash == the `"missing"`
   # sentinel), which is therefore reported as changed and never silently skipped.
   var changed: seq[string]
-  for dep in cached.deps:
+  for dep in currentCachedDeps:
     let current = strategies.hasher.hashOf(dep.fn, sourceRoot)
     if current != dep.shallow:
       changed.add dep.fn.name
