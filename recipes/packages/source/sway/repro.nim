@@ -279,6 +279,17 @@ package swaySource:
     ## resolver name (matches the sibling ``libinputSource``
     ## declaration).
     "libudev >=232"
+    ## libpng + libjpeg are transitive link-time dependencies of the
+    ## ``libgdk_pixbuf-2.0.so`` we link swaybar against. Without them
+    ## on the link search path, swaybar's link step short-fails with
+    ## ``undefined reference to png_*@PNG16_0`` /
+    ## ``undefined reference to jpeg_*@LIBJPEG_6.2`` (the linker
+    ## walks DT_NEEDED of libgdk_pixbuf-2.0.so and reports the
+    ## unresolved symbols when libpng16.so / libjpeg.so aren't on
+    ## the search path). Matches the gdk-pixbuf recipe's own
+    ## buildDeps declarations.
+    "libpng >=1.6"
+    "libjpeg >=2.0"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
