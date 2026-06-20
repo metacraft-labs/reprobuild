@@ -259,6 +259,30 @@ proc m9r14dPascalToKebab*(value: string): string =
     else:
       result.add(ch)
 
+proc m9r14dPascalToKebabWithDigits*(value: string): string =
+  ## DSL-port M9.R.14d.7d — extension of `m9r14dPascalToKebab` that
+  ## also inserts ``-`` at letter-↔-digit transitions. Pixman names its
+  ## SONAME ``libpixman-1.so`` while the recipe declares ``libpixman1``
+  ## (the trailing digit is the SOVERSION). Used as a fallback probe so
+  ## the existing kebab form (e.g. ``libwayland-client``) keeps its
+  ## priority.
+  result = ""
+  for i, ch in value:
+    if i > 0:
+      let prev = value[i - 1]
+      let prevAlpha = prev in {'a' .. 'z', 'A' .. 'Z'}
+      let prevDigit = prev in {'0' .. '9'}
+      let curUpper = ch in {'A' .. 'Z'}
+      let curDigit = ch in {'0' .. '9'}
+      if (curUpper and prevAlpha and prev notin {'-', '_'}) or
+         (curDigit and prevAlpha) or
+         (curUpper and prevDigit):
+        result.add('-')
+    if ch in {'A' .. 'Z'}:
+      result.add(chr(ord(ch) - ord('A') + ord('a')))
+    else:
+      result.add(ch)
+
 proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
                             buildDir, destdir, packageName, kind, name: string) =
   ## Emit a single stage-copy action that copies the installed
@@ -310,15 +334,19 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     #   6. lib<name>.a / lib<lowerName>.a (static archive fallbacks)
     let escapedLowerName = name.toLowerAscii.replace("\"", "\\\"")
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
+    let kebabDigitsName =
+      m9r14dPascalToKebabWithDigits(name).replace("\"", "\\\"")
     script.add("for candidate in ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & kebabName & ".so\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/" & escapedLowerName & ".so\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedName & ".a\" ")
     script.add("\"" & escapedSrcDir & "/lib" & escapedLowerName & ".a\" ")
-    script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\"; ")
+    script.add("\"" & escapedSrcDir & "/" & kebabName & ".a\" ")
+    script.add("\"" & escapedSrcDir & "/" & kebabDigitsName & ".a\"; ")
     script.add("do if [ -f \"$candidate\" ]; then cp -fL \"$candidate\" \"" & escapedOut & "\"; exit 0; fi; done; ")
     script.add("echo \"autotools_package stage-copy: no library candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1")
   else:

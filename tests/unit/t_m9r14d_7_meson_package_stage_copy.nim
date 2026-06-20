@@ -86,3 +86,15 @@ suite "DSL-port M9.R.14d.7 — meson_package stage-copy emission":
     # Adjacent uppercase characters collapse cleanly (KDE-style names).
     check m9r14dPascalToKebab("KDE6Service") == "k-d-e6-service"
     check m9r14dPascalToKebab("libGModule") == "lib-g-module"
+
+  test "PascalCase-with-digits inserts separators at digit transitions":
+    # Pixman ships its SONAME as `libpixman-1.so` while the recipe
+    # declares `library libpixman1:`. The digit-aware variant inserts
+    # `-` at the letter/digit boundary.
+    check m9r14dPascalToKebabWithDigits("libpixman1") == "libpixman-1"
+    check m9r14dPascalToKebabWithDigits("libpcre2") == "libpcre-2"
+    # Wayland still works in the digit-aware form too.
+    check m9r14dPascalToKebabWithDigits("libwaylandClient") ==
+      "libwayland-client"
+    # Trailing version numbers in PascalCase round-trip cleanly.
+    check m9r14dPascalToKebabWithDigits("libQt6Core") == "lib-qt-6-core"
