@@ -71,6 +71,14 @@ REPROBUILD_GIT_URL="${REPROBUILD_GIT_URL:-https://github.com/metacraft-labs/repr
 REPROBUILD_SPECS_GIT_URL="${REPROBUILD_SPECS_GIT_URL:-https://github.com/metacraft-labs/reprobuild-specs}"
 REPROBUILD_GIT_REF="${REPROBUILD_GIT_REF:-main}"
 
+# Shallow clone depth. ``main`` carries hundreds of MB of vendored
+# references/ + recipes/bootstrap/*/build trees that blow the default
+# git-over-https side-band buffer ("fetch-pack: unexpected disconnect" in
+# the cold-clone retry). Depth=1 keeps the bootstrap fast + reliable; the
+# campaign smoke does not need history. Override REPRO_CLONE_DEPTH=0 to
+# get a full clone if you need bisect.
+REPRO_CLONE_DEPTH="${REPRO_CLONE_DEPTH:-1}"
+
 # ----- Logging -------------------------------------------------------------
 
 # Compact, prefixed log lines so a failed step is grep-friendly in the
@@ -116,18 +124,78 @@ checkout_repo() {
       log "checkout: ${dest} has local changes; skipping ff (operator-managed checkout)"
     fi
   else
-    log "checkout: cloning ${url} -> ${dest}"
+    log "checkout: cloning ${url} -> ${dest} (depth=${REPRO_CLONE_DEPTH})"
     mkdir -p "$(dirname "${dest}")"
-    git clone --quiet --branch "${ref}" "${url}" "${dest}"
+    local depth_args=()
+    if [ "${REPRO_CLONE_DEPTH}" -gt 0 ]; then
+      depth_args+=(--depth "${REPRO_CLONE_DEPTH}" --single-branch)
+    fi
+    # ``http.postBuffer`` bump is belt-and-braces in case the
+    # CRLF-converting Windows-side gitconfig leaks via the WSL bind:
+    # large pack negotiations occasionally truncate without it.
+    # Retry once on sideband disconnect (intermittent github.com glitch
+    # on cold runs against the large reprobuild pack).
+    local attempt
+    for attempt in 1 2 3; do
+      if git -c http.postBuffer=524288000 \
+             clone --quiet --branch "${ref}" "${depth_args[@]}" \
+                   "${url}" "${dest}"; then
+        return 0
+      fi
+      log "checkout: clone attempt ${attempt}/3 failed for ${url}; retrying"
+      rm -rf "${dest}"
+    done
+    die "checkout: clone of ${url} failed after 3 attempts"
   fi
 }
 
 step_2_checkouts() {
   log "step 2: checkouts under ${REPRO_ROOT}"
   mkdir -p "${REPRO_ROOT}"
-  checkout_repo "${REPROBUILD_GIT_URL}"        "${REPROBUILD_DIR}"        "${REPROBUILD_GIT_REF}"
-  checkout_repo "${REPROBUILD_SPECS_GIT_URL}"  "${REPROBUILD_SPECS_DIR}"  "${REPROBUILD_GIT_REF}"
+  checkout_repo "${REPROBUILD_GIT_URL}" "${REPROBUILD_DIR}" "${REPROBUILD_GIT_REF}"
+
+  # reprobuild-specs is a PRIVATE github repo. The reprobuild build does NOT
+  # link against it (every reference in apps/ + libs/ + recipes/ is a doc
+  # comment); we clone it opportunistically when credentials are available
+  # so a sibling agent can browse the campaign milestone files, but a
+  # credential failure is NOT fatal for the smoke build. The build still
+  # produces ./build/bin/repro and the smoke step still runs.
+  if [ "${REPRO_SKIP_SPECS:-0}" = "1" ]; then
+    log "step 2: skipping reprobuild-specs (REPRO_SKIP_SPECS=1)"
+  else
+    log "step 2: attempting opportunistic reprobuild-specs clone (private repo; skips on auth failure)"
+    if ! checkout_repo_optional "${REPROBUILD_SPECS_GIT_URL}" \
+                                "${REPROBUILD_SPECS_DIR}" \
+                                "${REPROBUILD_GIT_REF}"; then
+      log "step 2: reprobuild-specs unavailable; continuing (specs only carries docs, the engine doesn't link them)"
+    fi
+  fi
+
   log "step 2: ok"
+}
+
+# Optional variant of checkout_repo: does NOT die on failure, returns
+# non-zero so the caller can continue. Single attempt because credentials
+# either work or they don't — retrying doesn't help.
+checkout_repo_optional() {
+  local url="$1" dest="$2" ref="$3"
+  if [ -d "${dest}/.git" ]; then
+    log "checkout: existing ${dest}; leaving as-is"
+    return 0
+  fi
+  log "checkout: trying ${url} -> ${dest} (optional)"
+  mkdir -p "$(dirname "${dest}")"
+  local depth_args=()
+  if [ "${REPRO_CLONE_DEPTH}" -gt 0 ]; then
+    depth_args+=(--depth "${REPRO_CLONE_DEPTH}" --single-branch)
+  fi
+  if GIT_TERMINAL_PROMPT=0 git -c http.postBuffer=524288000 \
+        clone --quiet --branch "${ref}" "${depth_args[@]}" \
+              "${url}" "${dest}" 2>/dev/null; then
+    return 0
+  fi
+  rm -rf "${dest}"
+  return 1
 }
 
 # ----- Step 3: Cache connectivity verification -----------------------------
