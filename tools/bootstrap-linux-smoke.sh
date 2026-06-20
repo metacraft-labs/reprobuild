@@ -171,7 +171,101 @@ step_2_checkouts() {
     fi
   fi
 
+  # ----- Source-only flake inputs config.nims looks up as siblings ------
+  #
+  # config.nims's addPackagePath() helper falls back to ``../<repo>`` when
+  # the corresponding env var isn't set. The reprobuild flake's source-only
+  # inputs (nimcrypto, nim-bearssl, runquota, ct-test-runner, test-adapters)
+  # are normally fed via env vars; outside the flake we clone them as
+  # siblings of ``${REPROBUILD_DIR}`` so config.nims resolves them.
+  #
+  # We do this OUTSIDE the flake because the flake's full closure pulls a
+  # private codetracer-native-recorder input that 404s without auth and
+  # blocks every Linux build (see step 4 comment). The Linux engine build
+  # doesn't import any ct_interpose / stackable_hooks symbols, so the
+  # five sibling sources below are sufficient.
+  #
+  # Revisions are pinned from ``flake.lock`` so the bootstrap matches what
+  # CI sees byte-for-byte. Update both places when bumping any input.
+  log "step 2: cloning source-only siblings at flake.lock-pinned revisions"
+
+  # nim-bearssl carries submodules (bearssl/csources); --recurse-submodules
+  # pulls the C tree the bindings link against. Revision lifted from
+  # flake.lock's ``bearssl-src`` node.
+  checkout_sibling_rev "https://github.com/status-im/nim-bearssl"  "nim-bearssl" \
+                       "9a4eed052abbded2d94feaf3f5bbd95a30ec4671" 1
+
+  # cheatfate/nimcrypto: rev from flake.lock's ``nimcrypto-src`` node.
+  # The repo uses ``master`` as default-but-not-HEAD branch ordering; we
+  # pin the rev directly.
+  checkout_sibling_rev "https://github.com/cheatfate/nimcrypto"   "nimcrypto" \
+                       "69eec0375dd146aede41f920c702c531bfe89c6b" 0
+
+  # metacraft-labs/runquota: rev from flake.lock's ``runquota-src`` node.
+  checkout_sibling_rev "https://github.com/metacraft-labs/runquota" "runquota" \
+                       "87524764128109d433d0c3356d9b1edb5a60cbc6" 0
+
+  # metacraft-labs/reprobuild-ct-test-runner: rev from flake.lock's
+  # ``reprobuild-ct-test-runner-src`` node.
+  checkout_sibling_rev "https://github.com/metacraft-labs/reprobuild-ct-test-runner" \
+                       "reprobuild-ct-test-runner" \
+                       "1a2fceae68cf7ac4f3352c8eb9897b2646dbcf08" 0
+
+  # metacraft-labs/reprobuild-test-adapters: rev from flake.lock's
+  # ``reprobuild-test-adapters-src`` node.
+  checkout_sibling_rev "https://github.com/metacraft-labs/reprobuild-test-adapters" \
+                       "reprobuild-test-adapters" \
+                       "517a484b3781d0132698394f451a11f52363e719" 0
+
   log "step 2: ok"
+}
+
+# Clone a sibling repo and check out a specific revision. Used to mirror
+# the flake.lock-pinned source-only inputs.
+#
+# A pinned rev clone requires a two-step dance (clone without --branch,
+# then ``git fetch <rev>`` + ``git checkout <rev>``) because GitHub's
+# smart-http server only serves named refs to ``git clone --branch``.
+# With shallow fetch we ask for just the single commit (``--depth 1
+# origin <rev>``) which all modern GitHubs support.
+checkout_sibling_rev() {
+  local url="$1" name="$2" rev="$3" recurse_submodules="$4"
+  local dest="${REPRO_ROOT}/${name}"
+  if [ -d "${dest}/.git" ]; then
+    local current
+    current=$(git -C "${dest}" rev-parse HEAD 2>/dev/null || echo unknown)
+    if [ "${current}" = "${rev}" ]; then
+      log "checkout: ${name} already at pinned rev ${rev}; leaving as-is"
+      return 0
+    fi
+    log "checkout: ${name} at ${current}, pinned needs ${rev}; fetching"
+    git -C "${dest}" fetch --depth 1 origin "${rev}" 2>/dev/null \
+      && git -C "${dest}" checkout --quiet "${rev}" \
+      && return 0 || true
+    log "checkout: in-place pin failed; re-cloning"
+    rm -rf "${dest}"
+  fi
+
+  log "checkout: cloning ${url} -> ${dest} @ ${rev:0:12} (recurse=${recurse_submodules})"
+  mkdir -p "${dest}"
+  pushd "${dest}" >/dev/null
+  git init --quiet
+  git remote add origin "${url}"
+  local attempt
+  for attempt in 1 2 3; do
+    if git -c http.postBuffer=524288000 fetch --quiet --depth 1 origin "${rev}"; then
+      git checkout --quiet FETCH_HEAD
+      if [ "${recurse_submodules}" = "1" ]; then
+        git submodule update --init --recursive --depth 1 --recommend-shallow
+      fi
+      popd >/dev/null
+      return 0
+    fi
+    log "checkout: sibling fetch attempt ${attempt}/3 failed for ${url} @ ${rev:0:12}; retrying"
+  done
+  popd >/dev/null
+  rm -rf "${dest}"
+  die "checkout: clone of ${url} @ ${rev} failed after 3 attempts"
 }
 
 # Optional variant of checkout_repo: does NOT die on failure, returns
@@ -225,13 +319,50 @@ step_3_cache_connectivity() {
 # the flake-provisioned nim2 + gcc + clingo. The bootstrap recipe is
 # idempotent — it skips the nim compile when ./build/bin/repro is up to date
 # (see justfile line 19).
+# Build toolchain provisioning: bypass ``nix develop`` against the
+# reprobuild flake because the flake pulls a private GitHub input
+# (``codetracer-native-recorder`` — 404 without auth). The Linux engine
+# build does NOT use that input (every CT_INTERPOSE_SRC / STACKABLE_HOOKS_SRC
+# importer is gated on Windows or macOS). We use ``nix-shell -p`` against
+# nixpkgs to provision just the leaf toolchain reprobuild needs.
+#
+# The list mirrors the flake's ``devShells.default.packages`` block minus
+# the Windows/macOS-only entries. Keep it in sync when adding new build
+# inputs to the engine.
+LINUX_TOOLCHAIN_PKGS=(
+  nim2
+  gcc
+  pkg-config
+  just
+  clingo
+  libblake3
+  sqlite
+  xxHash
+  openssl
+  zlib
+  curl
+  jq
+  cacert
+)
+
+# Env vars the flake sets that the Linux build also wants. We set
+# REPROBUILD_USE_SYSTEM_HASH_LIBS=1 so the build links against the nix-shell
+# libblake3 / xxHash rather than vendored sources, matching the flake's
+# behaviour.
+linux_build_env() {
+  echo "REPROBUILD_USE_SYSTEM_HASH_LIBS=1"
+  echo "BLAKE3_PREFIX=${BLAKE3_PREFIX:-}"
+  echo "XXHASH_PREFIX=${XXHASH_PREFIX:-}"
+  echo "SQLITE_PREFIX=${SQLITE_PREFIX:-}"
+}
+
 step_4_build_repro() {
-  log "step 4: build apps/repro/repro via nix develop + just bootstrap"
+  log "step 4: build apps/repro/repro via nix-shell -p + just bootstrap"
 
   pushd "${REPROBUILD_DIR}" >/dev/null
 
   # Skip-fast path: the just bootstrap recipe already does this, but we
-  # short-circuit ahead of ``nix develop`` (which warms the flake closure
+  # short-circuit ahead of ``nix-shell -p`` (which warms the package set
   # for ~30s on a cold cache) when the binary is already current.
   if [ -x ./build/bin/repro ] \
       && ! find apps libs config.nims flake.nix repro.nim -type f \
@@ -241,10 +372,42 @@ step_4_build_repro() {
     return 0
   fi
 
-  log "step 4: invoking nix develop --command just bootstrap (cold path: warms flake closure first)"
-  # --accept-flake-config quiets the substituter-prompt that some flakes
-  # raise on first contact.
-  nix develop --accept-flake-config --command just bootstrap
+  log "step 4: invoking nix-shell -p ${LINUX_TOOLCHAIN_PKGS[*]} --run 'just bootstrap'"
+
+  # The flake's nixpkgs input pin is what CI uses, so prefer it over the
+  # ambient channel. We extract the locked nixpkgs URL and route nix-shell
+  # at it via NIX_PATH=nixpkgs=<url>. If the lock can't be parsed, fall
+  # back to the ambient channel (operator may be on plain NixOS).
+  local nixpkgs_arg=""
+  if command -v jq >/dev/null 2>&1 \
+      && [ -r flake.lock ]; then
+    local pinned
+    pinned=$(jq -r '
+      .nodes
+      | to_entries[]
+      | select(.value.original.repo == "nixpkgs" and .value.original.owner == "NixOS")
+      | "github:" + .value.locked.owner + "/" + .value.locked.repo + "/" + .value.locked.rev
+    ' flake.lock 2>/dev/null | head -1 || true)
+    if [ -n "${pinned}" ]; then
+      nixpkgs_arg="nixpkgs=${pinned}"
+      log "step 4: pinning nixpkgs from flake.lock -> ${pinned}"
+    fi
+  fi
+
+  # ``nix-shell -p`` produces a shell whose PATH carries the requested
+  # packages. We feed REPROBUILD_USE_SYSTEM_HASH_LIBS so config.nims wires
+  # to the nix-shell-provided libblake3 + xxHash. ``--run`` makes the shell
+  # exit after ``just bootstrap`` completes.
+  if [ -n "${nixpkgs_arg}" ]; then
+    NIX_PATH="${nixpkgs_arg}" \
+    REPROBUILD_USE_SYSTEM_HASH_LIBS=1 \
+      nix-shell -I "${nixpkgs_arg}" -p "${LINUX_TOOLCHAIN_PKGS[@]}" \
+        --run "just bootstrap"
+  else
+    REPROBUILD_USE_SYSTEM_HASH_LIBS=1 \
+      nix-shell -p "${LINUX_TOOLCHAIN_PKGS[@]}" \
+        --run "just bootstrap"
+  fi
 
   if [ ! -x ./build/bin/repro ]; then
     die "step 4: just bootstrap completed but ./build/bin/repro is missing"
