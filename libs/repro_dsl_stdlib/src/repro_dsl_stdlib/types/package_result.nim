@@ -261,6 +261,110 @@ proc sanitizeStageCopyName(value: string): string =
   if result.len == 0:
     result = "x"
 
+proc m9r14fStripDepConstraint*(value: string): string =
+  ## DSL-port M9.R.14f.2 — strip a version-constraint suffix off a raw
+  ## dep constraint string so ``"wayland >=1.22"`` → ``"wayland"``.
+  ## Mirrors the equivalent helpers in meson_package.nim and
+  ## repro_tool_profiles.nim. Exported for unit-test introspection.
+  for i, ch in value:
+    if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+        ch == '~' or ch == '^':
+      return value[0 ..< i]
+  return value
+
+proc m9r14fAppendDepMirrorDir(dst: var seq[string]; recipeRoot, depRaw: string) =
+  let dep = m9r14fStripDepConstraint(depRaw)
+  if dep.len == 0: return
+  let libDir = recipeRoot / dep / ".repro" / "output" / "install" /
+    "usr" / "lib"
+  let lib64Dir = recipeRoot / dep / ".repro" / "output" / "install" /
+    "usr" / "lib64"
+  let posixLib = libDir.replace("\\", "/")
+  let posixLib64 = lib64Dir.replace("\\", "/")
+  if posixLib notin dst:
+    dst.add(posixLib)
+  if posixLib64 notin dst:
+    dst.add(posixLib64)
+
+proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
+    seq[string] =
+  ## DSL-port M9.R.14f.2 — enumerate the install-mirror ``lib/`` dirs
+  ## of every declared dep of ``packageName``. Each path joined as
+  ## ``<recipeRoot>/<depName>/.repro/output/install/usr/lib``. The
+  ## returned strings are POSIX-style with forward slashes so the
+  ## emitted shell script does not need additional escaping. Order is
+  ## (nativeBuildDeps, then buildDeps) in source-declaration order —
+  ## deterministic across runs.
+  let recipeRoot = parentDir(projectRoot)
+  if recipeRoot.len == 0:
+    return
+  for raw in registeredNativeBuildDeps(packageName):
+    m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
+  for raw in registeredBuildDeps(packageName):
+    m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
+
+proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
+                                 depMirrorLibDirs: seq[string]): string =
+  ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
+  ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin``
+  ## and runs ``patchelf --set-rpath`` on each. RPATH layout:
+  ## ``$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:<dep1>:<dep2>:...``.
+  ##
+  ## The ``$ORIGIN`` family covers same-directory + sibling-directory
+  ## SONAME chains (``libwayland-server.so`` next to
+  ## ``libwayland-client.so``; ``wayland-scanner`` in ``bin/`` reaching
+  ## ``../lib/libwayland-client.so``). Absolute dep paths cover
+  ## transitive runtime deps (libexpat for wayland-scanner; libffi for
+  ## libwayland-server; etc.).
+  ##
+  ## Idempotent: ``patchelf`` overwrites the existing RPATH every time,
+  ## so re-running the install-mirror produces the same final RPATH.
+  ##
+  ## Graceful skip: when ``patchelf`` is not on PATH (host orchestration
+  ## that builds the action graph but doesn't run it), the loop short-
+  ## circuits without failing. Inside the Linux smoke environment
+  ## (where patchelf IS provisioned via the bootstrap-linux-smoke.sh
+  ## nix-shell deps), the loop runs over every ELF.
+  var script = ""
+  script.add("if command -v patchelf >/dev/null 2>&1; then ")
+  # Build the RPATH string. Single-quote ``$ORIGIN`` so the shell does
+  # not expand it — ``$ORIGIN`` must reach patchelf verbatim so the
+  # dynamic linker interprets it at load time. Use a here-doc-free
+  # construction so the snippet stays compatible with /bin/sh.
+  var rpathParts: seq[string] = @[
+    "'$ORIGIN'",
+    "'$ORIGIN/../lib'",
+    "'$ORIGIN/../lib64'",
+  ]
+  for libDir in depMirrorLibDirs:
+    rpathParts.add("\"" & libDir.replace("\"", "\\\"") & "\"")
+  # Concatenate with ":" via printf so the variable holds a single
+  # colon-separated string when expanded.
+  script.add("rpath=$(printf '%s' " & rpathParts[0])
+  for i in 1 ..< rpathParts.len:
+    script.add("; printf ':%s' " & rpathParts[i])
+  script.add("); ")
+  # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
+  # Walk bin/ for executables.
+  script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
+    "/lib64\" \"" & escapedDstUsr & "/bin\"; do ")
+  script.add("if [ -d \"$d\" ]; then ")
+  script.add("find \"$d\" -maxdepth 2 -type f \\( ")
+  script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
+  script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
+  # ``patchelf --set-rpath`` is no-op for non-ELF files (it errors with
+  # ``not an ELF executable``); guard with file-magic check via ``head``
+  # before patching so non-ELF executables (shell scripts, etc.) don't
+  # pollute the log with errors. ``\\177ELF`` is the 4-byte magic.
+  script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
+  script.add("case \"$magic\" in 177ELF*) ")
+  script.add("patchelf --set-rpath \"$rpath\" \"$f\" 2>/dev/null || true; ")
+  script.add(";; esac; ")
+  script.add("done; ")
+  script.add("fi; done; ")
+  script.add("fi; ")
+  script
+
 proc emitInstallTreeMirror*(installEdge: BuildActionDef;
                             buildDir, destdir, packageName: string) =
   ## DSL-port M9.R.14e.2 — mirror the recipe's DESTDIR install tree
@@ -347,6 +451,11 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedDstUsr & "|; }' ")
   script.add("\"$pc\"; ")
   script.add("done; fi; done; ")
+  # M9.R.14f.2 — patch RPATH on every ELF under the mirror's lib/lib64/bin
+  # dirs so the resulting binaries can find their transitive deps without
+  # relying on LD_LIBRARY_PATH at runtime.
+  let depMirrorLibDirs = m9r14fCollectDepMirrorLibDirs(projectRoot, packageName)
+  script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs))
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)

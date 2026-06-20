@@ -343,6 +343,11 @@ LINUX_TOOLCHAIN_PKGS=(
   curl
   jq
   cacert
+  # M9.R.14f.2 — patchelf is used by the install-mirror RPATH patcher
+  # to embed transitive runtime lib dirs in every from-source ELF so
+  # the resulting binaries are self-contained (no LD_LIBRARY_PATH
+  # required at runtime).
+  patchelf
 )
 
 # Env vars the flake sets that the Linux build also wants. We set
