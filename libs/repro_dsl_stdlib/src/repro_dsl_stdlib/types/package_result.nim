@@ -322,6 +322,31 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add("if [ -d \"" & escapedSrcUsr & "\" ]; then ")
   script.add("cp -a -- \"" & escapedSrcUsr & "\" \"" & escapedDstUsrRoot & "/\"; ")
   script.add("fi; ")
+  # M9.R.14e.8 — rewrite the .pc files' ``prefix=`` line to point at the
+  # absolute path of the mirrored ``usr/`` tree so consumers that consult
+  # ``pkg-config --variable=...`` or ``pkg-config --cflags`` see real
+  # on-disk paths instead of the upstream-baked ``/usr``. Without this,
+  # meson's ``Program /usr/bin/wayland-scanner found: NO`` trip
+  # surfaces every time a downstream recipe asks pkg-config where the
+  # producer's binaries / headers live.
+  #
+  # The rewrite uses ``sed -i`` against every ``.pc`` file under
+  # ``lib/pkgconfig``, ``lib64/pkgconfig``, ``share/pkgconfig``. The
+  # pattern matches an exact ``prefix=/usr`` line at the top of the pc
+  # file (the standard autotools/meson layout). pc files that ship a
+  # non-``/usr`` prefix (e.g. ``prefix=/opt/foo``) get one extra sed
+  # invocation looking for ``prefix=`` at line start with any value —
+  # the second pass is idempotent and inert when the first already
+  # matched.
+  script.add("for pcdir in \"" & escapedDstUsr & "/lib/pkgconfig\" \"" &
+    escapedDstUsr & "/lib64/pkgconfig\" \"" & escapedDstUsr &
+    "/share/pkgconfig\"; do ")
+  script.add("if [ -d \"$pcdir\" ]; then ")
+  script.add("for pc in \"$pcdir\"/*.pc; do ")
+  script.add("[ -f \"$pc\" ] && sed -i ")
+  script.add("'1,/^prefix=/{ s|^prefix=.*$|prefix=" & escapedDstUsr & "|; }' ")
+  script.add("\"$pc\"; ")
+  script.add("done; fi; done; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
