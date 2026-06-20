@@ -31,6 +31,18 @@ import ./perl
 import ./rsync
 import ./swig
 import ./texinfo
+# M9.R.14d.4 — the bootstrap C/C++ toolchain + ninja + pkg-config
+# belong in the system-tools aggregator too: recipes whose only
+# `import` line is `repro_dsl_stdlib/packages/system_tools` (the
+# `from-source-custom` shell-script recipes like ninja itself, plus
+# every recipe whose build calls compose shell actions directly) need
+# the gcc / ninja / make / pkg-config provisioning blocks registered
+# at compile time so their `nativeBuildDeps: "gcc"` use-defs carry
+# the stdlib nix channel through to the cycle-break fall-through.
+import ./gcc
+import ./ninja
+import ./make
+import ./pkg_config
 import ./gmp
 import ./mpfr
 import ./mpc
@@ -64,6 +76,10 @@ export perl
 export rsync
 export swig
 export texinfo
+export gcc
+export ninja
+export make
+export pkg_config
 export gmp
 export mpfr
 export mpc
