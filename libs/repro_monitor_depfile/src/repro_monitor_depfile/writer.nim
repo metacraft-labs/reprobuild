@@ -31,17 +31,48 @@ const
 # (NEW), which stops at the first truncated frame instead of raising.
 # The fragment-log frame format already starts with a u32 length
 # prefix, so a partial write is detected by ``pos + length > bytes.len``.
+const FragmentDirBufLen = 4096
+
 type
   FragmentSlot = object
+    # M9.R.15c.3 — the slot is a threadvar; with ``--mm:orc`` + the
+    # ``--app:lib`` LD_PRELOAD shim build, a Nim ``string`` field on
+    # a threadvar can trip the orc collector when cmake spawns and
+    # tears down hundreds of worker threads (the qtbase configure
+    # forks aggressively to run feature probes). Storing the
+    # ``fragmentDir`` as a fixed-size POD char buffer plus a length
+    # counter keeps the threadvar free of any Nim-runtime heap
+    # pointer — every field is a flat value type whose destruction
+    # at thread exit is a no-op. The buffer is sized for typical
+    # absolute paths plus PATH_MAX headroom; an overrun aborts
+    # cleanly before writing anything.
     isOpen: bool
     file: File
-    fragmentDir: string
+    fragmentDirLen: int
+    fragmentDirBuf: array[FragmentDirBufLen, char]
     osPid: uint64
     threadId: uint64
 
 var
   fragmentSlot {.threadvar.}: FragmentSlot
   fragmentOpenCount: Atomic[uint64]
+
+proc slotFragmentDirEquals(slot: var FragmentSlot; s: string): bool =
+  if slot.fragmentDirLen != s.len:
+    return false
+  for i in 0 ..< s.len:
+    if slot.fragmentDirBuf[i] != s[i]:
+      return false
+  true
+
+proc slotFragmentDirAssign(slot: var FragmentSlot; s: string): bool =
+  if s.len >= FragmentDirBufLen:
+    return false
+  for i in 0 ..< s.len:
+    slot.fragmentDirBuf[i] = s[i]
+  slot.fragmentDirBuf[s.len] = '\0'
+  slot.fragmentDirLen = s.len
+  true
 
 proc fragmentLogOpenCount*(): uint64 =
   ## DSL-port M9.R.15c.1 — return the lifetime number of fragment-log
@@ -65,7 +96,8 @@ proc closeFragmentSlot*() =
     except IOError, OSError:
       discard
     fragmentSlot.isOpen = false
-    fragmentSlot.fragmentDir = ""
+    fragmentSlot.fragmentDirLen = 0
+    fragmentSlot.fragmentDirBuf[0] = '\0'
     fragmentSlot.osPid = 0
     fragmentSlot.threadId = 0
 
@@ -169,8 +201,13 @@ proc openFragmentSlot(fragmentDir: string; osPid, threadId: uint64;
                       path: string): bool =
   if not open(fragmentSlot.file, extendedPath(path), fmAppend):
     return false
+  if not slotFragmentDirAssign(fragmentSlot, fragmentDir):
+    # fragmentDir overflows the fixed-size buffer — close and bail out;
+    # the caller falls back to the no-cache (raise) path.
+    try: close(fragmentSlot.file)
+    except IOError, OSError: discard
+    return false
   fragmentSlot.isOpen = true
-  fragmentSlot.fragmentDir = fragmentDir
   fragmentSlot.osPid = osPid
   fragmentSlot.threadId = threadId
   discard fragmentOpenCount.fetchAdd(1, moRelaxed)
@@ -185,7 +222,7 @@ proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
   ## frames in the file. Truncated trailing bytes are tolerated by
   ## ``decodeFragmentRecordsTolerant`` (used by ``mergeFragments``).
   let needsReopen = not fragmentSlot.isOpen or
-    fragmentSlot.fragmentDir != fragmentDir or
+    not slotFragmentDirEquals(fragmentSlot, fragmentDir) or
     fragmentSlot.osPid != record.osPid or
     fragmentSlot.threadId != record.threadId
   if needsReopen:
