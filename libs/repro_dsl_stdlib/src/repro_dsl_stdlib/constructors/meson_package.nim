@@ -157,13 +157,27 @@ proc meson_package*(srcDir: string;
     nativeFile = nativeFile,
     after = setupAfter)
   let compileEdge = meson.compile(workDir = buildDir)
+  # M9.R.14d.7 — meson rejects relative ``--destdir`` (it tries to
+  # resolve `wayland/out` under the action's cwd at install time and
+  # fails with `No such file or directory`). In provider mode pass the
+  # absolute project-root path; in unit-test mode keep the legacy
+  # relative form so existing tests stay green. The absolute path
+  # does NOT enter the action's callIdentity (only ``call`` does), so
+  # the cache key stays stable across hosts with different filesystem
+  # layouts — same recipe + same source = same fingerprint.
+  let providerProjectRoot = activeProviderProjectRoot()
+  let effectiveDestdir =
+    if providerProjectRoot.len > 0:
+      providerProjectRoot / buildDir / destdir
+    else:
+      destdir
   let installEdge = meson.install(
     workDir = buildDir,
-    destdir = destdir,
+    destdir = effectiveDestdir,
     tags = @[])
   MesonPackageResult(
     buildEdge: setup,
     compileEdge: compileEdge,
     installEdge: installEdge,
-    destdir: destdir,
+    destdir: effectiveDestdir,
     components: standardComponents())
