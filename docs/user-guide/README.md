@@ -21,6 +21,9 @@ instead.
 - **Mixing languages in one workspace:** see
   [Cross-Language Builds](cross-language/README.md).
 - **Common patterns and recipes:** see [Recipes](recipes/README.md).
+- **Faster test watching:** see [Trace-Based Incremental Testing](incremental-testing.md)
+  for `repro watch --ct-incremental`, which skips re-running a test when the
+  functions it executed haven't changed *(experimental)*.
 
 ## What is reprobuild?
 
