@@ -1,7 +1,11 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#ifdef REPRO_VENDORED_HASH
+#include "vendor/blake3.h"
+#else
 #include <blake3.h>
+#endif
 
 void repro_blake3_hash(const void *input, size_t input_len, uint8_t out[32]) {
   blake3_hasher hasher;

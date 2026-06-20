@@ -73,6 +73,7 @@
 ## realization gap belongs to M69, not M68.
 
 import std/[strutils, unittest]
+import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 
 # The merged + auto-generated files all re-export ``packages_schema``
@@ -178,3 +179,37 @@ suite "M68 — baseline dev-tool catalog validates":
       check sawDigit
       if not sawDigit:
         echo "NO DIGIT: " & c.name & " version='" & entry.version & "'"
+
+  test "nim package and catalog cover macOS tarball platforms":
+    var sawDslMacArm = false
+    var sawDslMacX64 = false
+    for pkg in registeredPackages():
+      if pkg.packageName != "nim":
+        continue
+      for tb in pkg.tarballProvisioning:
+        if tb.os == "macos" and tb.cpu == "aarch64":
+          sawDslMacArm = tb.sha256.len == 64 and
+            tb.archiveType == "tar.xz" and
+            tb.executablePath == "bin/nim"
+        if tb.os == "macos" and tb.cpu == "x86_64":
+          sawDslMacX64 = tb.sha256.len == 64 and
+            tb.archiveType == "tar.xz" and
+            tb.executablePath == "bin/nim"
+    check sawDslMacArm
+    check sawDslMacX64
+
+    let selected = selectVersion(nimCatalog, "2.2.10")
+    check selected.found
+    if selected.found:
+      let arm = selectPlatformBinary(selected.entry, pcAArch64, poMacos)
+      let x64 = selectPlatformBinary(selected.entry, pcX86_64, poMacos)
+      check arm.found
+      check x64.found
+      if arm.found:
+        check arm.binary.sha256.len == 64
+        check arm.binary.archive_format_override == afTarXz
+        check "bin/nim" in arm.binary.bin_relpath_override
+      if x64.found:
+        check x64.binary.sha256.len == 64
+        check x64.binary.archive_format_override == afTarXz
+        check "bin/nim" in x64.binary.bin_relpath_override

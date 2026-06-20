@@ -207,6 +207,77 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       except CatchableError as exc:
         check not exc.msg.contains("no stdlib provisioning channel")
 
+  test "test_path_mode_keeps_matching_tarball_before_nix_fallback":
+    # Path-mode fallback historically preferred tarball metadata over
+    # other stdlib channels when the host PATH did not supply the tool.
+    # Keep that contract for tarballs that actually match the current
+    # host so direct-download tool pins (node/cargo/etc.) do not silently
+    # switch to Nix.
+    let scratch = createTempDir("repro-path-tarball-before-nix-", "")
+    defer: removeDir(scratch)
+    let nix = @[InterfaceNixProvisioning(
+      selector: "",
+      executablePath: "bin/fake-tool",
+      packageId: "fake-tool@nix")]
+    let tarball = @[InterfaceTarballProvisioning(
+      url: "file:///does/not/exist.tar.gz",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      archiveType: "tar.gz",
+      executablePath: "fake-tool",
+      packageId: "fake-tool@tarball",
+      cpu: "any",
+      os: "any",
+      lockIdentity: "tarball:fake-tool@tarball:sha256:0")]
+    let useDef = syntheticUseDef("repro-missing-path-tarball-first",
+      nix = nix, tarball = tarball)
+    let artifact = ProjectInterfaceArtifact(
+      projectInterface: ProjectInterface(
+        projectName: "t_path_tarball_before_nix",
+        toolUses: @[useDef]))
+    try:
+      discard toolBuildIdentity(artifact, tpmPathOnly,
+        pathValue = "", storeRoot = scratch / "tool-store")
+      check false  # expected to raise on the bogus tarball URL
+    except CatchableError as exc:
+      check exc.msg.contains("file URL does not exist")
+      check not exc.msg.contains("incomplete nixPackage metadata")
+
+  test "test_path_mode_uses_nix_when_tarball_does_not_match_host":
+    # Cap'n Proto declares an official Windows tools zip, but upstream
+    # does not publish an equivalent Linux/macOS binary tarball. When a
+    # package has Nix metadata and only non-host tarballs, path mode
+    # should fall through to Nix instead of surfacing the misleading
+    # "no tarball provisioning entry matches host" diagnostic.
+    when defined(linux) or defined(macosx):
+      let scratch = createTempDir("repro-path-nix-after-mismatched-tarball-", "")
+      defer: removeDir(scratch)
+      let nix = @[InterfaceNixProvisioning(
+        selector: "",
+        executablePath: "bin/fake-tool",
+        packageId: "fake-tool@nix")]
+      let tarball = @[InterfaceTarballProvisioning(
+        url: "file:///does/not/exist.zip",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        archiveType: "zip",
+        executablePath: "fake-tool.exe",
+        packageId: "fake-tool@windows",
+        cpu: "x86_64",
+        os: "windows",
+        lockIdentity: "tarball:fake-tool@windows:sha256:0")]
+      let useDef = syntheticUseDef("repro-missing-path-nix-fallback",
+        nix = nix, tarball = tarball)
+      let artifact = ProjectInterfaceArtifact(
+        projectInterface: ProjectInterface(
+          projectName: "t_path_nix_after_mismatched_tarball",
+          toolUses: @[useDef]))
+      try:
+        discard toolBuildIdentity(artifact, tpmPathOnly,
+          pathValue = "", storeRoot = scratch / "tool-store")
+        check false  # expected to raise on deliberately incomplete Nix metadata
+      except CatchableError as exc:
+        check exc.msg.contains("incomplete nixPackage metadata")
+        check not exc.msg.contains("no tarball provisioning entry")
+
   test "test_m9r9_hard_fail_when_both_recipe_and_stdlib_provisioning_missing":
     # The terminal case: no sibling recipe AND no provisioning channels
     # declared on the useDef. The fall-through chain runs to the end
