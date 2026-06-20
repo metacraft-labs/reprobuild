@@ -621,10 +621,30 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # ``executable waylandScanner`` while meson installs
     # ``wayland-scanner``).
     let kebabName = m9r14dPascalToKebab(name).replace("\"", "\\\"")
+    # M9.R.14f.11 — recipes sometimes append a disambiguating suffix
+    # like ``Bin`` / ``CLI`` / ``Cmd`` / ``Tool`` to the DSL artifact
+    # identifier so the slot doesn't collide with the recipe's library
+    # of the same upstream name (e.g. libinput recipe has
+    # ``library libinput`` + ``executable libinputBin`` but upstream
+    # installs the CLI as bare ``libinput``). Probe the suffix-
+    # stripped form as a fallback.
+    var strippedName = name
+    for suffix in ["Bin", "CLI", "Cmd", "Tool", "Exe"]:
+      if strippedName.endsWith(suffix) and strippedName.len > suffix.len:
+        strippedName = strippedName[0 ..< (strippedName.len - suffix.len)]
+        break
+    let strippedEscaped = strippedName.replace("\"", "\\\"")
+    let strippedKebab =
+      m9r14dPascalToKebab(strippedName).replace("\"", "\\\"")
     script.add("if [ -f \"" & escapedSrcDir & "/" & escapedName & "\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & escapedSrcDir & "/" & kebabName & "\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & kebabName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    if strippedName != name:
+      script.add("elif [ -f \"" & escapedSrcDir & "/" & strippedEscaped & "\" ]; then ")
+      script.add("cp -fL \"" & escapedSrcDir & "/" & strippedEscaped & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      script.add("elif [ -f \"" & escapedSrcDir & "/" & strippedKebab & "\" ]; then ")
+      script.add("cp -fL \"" & escapedSrcDir & "/" & strippedKebab & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
     script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedName & ".exe\" ]; then ")
     script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
     script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
