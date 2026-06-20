@@ -209,43 +209,71 @@ proc recordRubyLive*(program: string): RecorderOutcome =
   markCtfsInterpreted(outDir)  # interpreted CTFS ⇒ source-text hashing
   RecorderOutcome(kind: roSuccess, traceDir: outDir, ctPath: bundle)
 
+proc pythonVenvPython(): string =
+  ## The CPython interpreter inside the recorder's dev venv. `just venv 3.13 dev`
+  ## creates a top-level `.venv` in the repo root and installs the recorder into
+  ## it editable, so the `__main__` entry (`python -m codetracer_python_recorder`)
+  ## resolves from this interpreter.
+  PythonRecorderRepo / ".venv/bin/python"
+
 proc pythonRecorderBuilt(): bool =
-  ## The Python recorder is a maturin native extension installed into the repo's
-  ## uv venv by `just dev`. The built marker is the compiled `_codetracer_*` /
-  ## native module in the venv's site-packages, OR the uv venv with the recorder
-  ## importable. We conservatively probe for the venv + a built `.so`.
-  let venv = PythonRecorderRepo / "codetracer-python-recorder/.venv"
-  if dirExists(venv):
-    for path in walkDirRec(venv):
-      if path.toLowerAscii().endsWith(".so") and
-          "codetracer" in path.toLowerAscii():
+  ## The Python recorder is a maturin/PyO3 native extension installed editable
+  ## into the repo's `.venv` by `just venv 3.13 dev`. Two facts together prove a
+  ## successful prior build:
+  ##   * the venv interpreter exists (`<repo>/.venv/bin/python`), and
+  ##   * the compiled native extension is present in the (editable-linked) source
+  ##     tree — `codetracer-python-recorder/codetracer_python_recorder/
+  ##     codetracer_python_recorder.cpython-*.so`.
+  ## Probing the source-tree `.so` (rather than walking site-packages, which for
+  ## an editable install only contains a `.pth`) is the reliable built-marker.
+  if not fileExists(pythonVenvPython()):
+    return false
+  let pkgDir =
+    PythonRecorderRepo / "codetracer-python-recorder/codetracer_python_recorder"
+  if dirExists(pkgDir):
+    for kind, path in walkDir(pkgDir):
+      if kind in {pcFile, pcLinkToFile} and
+          path.toLowerAscii().endsWith(".so") and
+          "codetracer_python_recorder" in path.extractFilename.toLowerAscii():
         return true
   false
 
 proc ensurePythonRecorderBuilt*(): tuple[ok: bool, diagnostic: string] =
-  ## Build the Python recorder once (`just dev`). Idempotent.
+  ## Build the Python recorder once (idempotent via `pythonRecorderBuilt`). The
+  ## heavy maturin compile (~1-2 min) runs ONLY when the built-marker is absent;
+  ## the build command is `just venv 3.13 dev`, which provisions a Python 3.13
+  ## venv and installs the recorder editable into `<repo>/.venv`. The build was
+  ## previously WRONGLY reported as impossible on this host — that used the wrong
+  ## entry (`just dev` + `uv`); `just venv 3.13 dev` builds and records LIVE here
+  ## (after the recorder's flake fix gating `cargo-llvm-cov` off darwin, pushed
+  ## upstream).
   if pythonRecorderBuilt():
     return (true, "")
-  let (output, code) = runInRecorderShell(PythonRecorderRepo, "just dev")
+  let (output, code) = runInRecorderShell(PythonRecorderRepo, "just venv 3.13 dev")
   if code != 0 or not pythonRecorderBuilt():
     return (false, "failed to build the Python recorder (exit " & $code &
       "):\n" & output)
   (true, "")
 
 proc recordPythonLive*(program: string): RecorderOutcome =
-  ## Record a Python `program` LIVE with the maturin recorder into a fresh CTFS
-  ## bundle. The recorder runs as `python -m codetracer_python_recorder
-  ## --out-dir <dir> <prog>` inside the repo's uv venv (the `__main__` entry).
+  ## Record a Python `program` LIVE with the production maturin/PyO3 recorder into
+  ## a fresh CTFS bundle. The recorder runs as `python -m codetracer_python_recorder
+  ## --out-dir <dir> <prog>` using the venv interpreter (the `__main__` entry); it
+  ## writes `<out-dir>/<script-stem>.ct`. Any build/record failure returns a loud
+  ## `roGated` — but on this host this path is GENUINELY live (proven).
   let built = ensurePythonRecorderBuilt()
   if not built.ok:
     return RecorderOutcome(kind: roGated, diagnostic: built.diagnostic)
   let outDir = freshLiveDir("repro_ct_live_python_")
   let cmd =
-    "uv run --directory codetracer-python-recorder " &
-    "python -m codetracer_python_recorder --out-dir " & quoteShell(outDir) &
+    quoteShell(pythonVenvPython()) &
+    " -m codetracer_python_recorder --out-dir " & quoteShell(outDir) &
     " " & quoteShell(program)
   let (output, code) = runInRecorderShell(PythonRecorderRepo, cmd)
   let bundle = findCtBundle(outDir)
+  if code != 0 and bundle.len == 0:
+    return RecorderOutcome(kind: roGated,
+      diagnostic: "python recording failed (exit " & $code & "):\n" & output)
   if bundle.len == 0:
     return RecorderOutcome(kind: roGated,
       diagnostic: "python recording produced no .ct bundle (exit " & $code &

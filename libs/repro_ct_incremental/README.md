@@ -73,27 +73,36 @@ A recorder that genuinely cannot build/record on the host does NOT produce a
 real `.ct` (`roSuccess`) from a **documented gate** (`roGated`, carrying the
 EXACT captured failure); the per-language test then emits a LOUD, ASSERTED gate.
 
-### Validated LIVE vs platform-gated (this host: arm64 macOS)
+### Validated LIVE vs gated (this host: arm64 macOS)
+
+Two languages record **genuinely live** here (Ruby and Python); the other two are
+gated on **real, current upstream breaks that are RED on the recorders' OWN CI** —
+not on a wrong dev shell or a missing package install.
 
 | language | status on this host | how |
 |----------|---------------------|-----|
 | **Ruby** | ✅ **LIVE, end-to-end** (required, passes) | native Rust-extension recorder; `just build` then `codetracer-ruby-recorder --out-dir <dir> prog.rb` |
-| **Python** | ⛔ **GATED** (loud, asserted) | `just dev` fails: the recorder's pinned nixpkgs marks `cargo-llvm-cov-0.6.20` **broken**, so its dev shell will not evaluate and `uv` is unavailable. Records LIVE where the dev shell builds (Linux CI). |
-| **JavaScript** | ⛔ **GATED** (loud, asserted) | `just build` fails at `npx napi build` with `ENOVERSIONS` / "No versions available for napi" (the `@napi-rs/cli` package is unresolvable in this environment). |
-| **Native / Nim (MCR/RR)** | ⛔ **GATED** (loud, asserted) | `ct-mcr` BUILDS (`just build-ct-mcr` → `ct_cli`) but recording fails: `license check failed: could not load libct_license_ffi.dylib` (its `@rpath` dep `liblldb.dylib` / `libstdc++` is unresolvable outside the recorder dev shell). RR is Linux-only regardless. Gate message: *"native live recording requires a Linux/MCR-supporting platform"*. |
+| **Python** | ✅ **LIVE, end-to-end** (required, passes) | maturin/PyO3 recorder; `just venv 3.13 dev` (build once) then `.venv/bin/python -m codetracer_python_recorder --out-dir <dir> prog.py`. Now builds + records here after the recorder's **flake fix gating `cargo-llvm-cov` off darwin** (pushed upstream); the prior "dev shell won't build" gate used the WRONG entry (`just dev` + `uv`). |
+| **JavaScript** | ⛔ **GATED** — genuine upstream break (CI red) | `just build` fails compiling the napi addon (`recorder_native`): `NimTraceWriter` has no `enable_column_breakpoints_support` / `enable_column_motions_support` (a `codetracer-trace-format-nim` **column-aware-tracing API mismatch**; rustc even suggests `enable_column_aware_steps`). **JS recorder CI is RED on `dev`.** Not a missing `npm install`. |
+| **Native / Nim (MCR/RR)** | ⛔ **GATED** — genuine upstream break (CI red) + Linux-only | RR is **Linux-only**; and `codetracer-native-recorder` **CI is RED on `main`+`dev`** (Linux+Windows test suites failing), so even the supported Linux path is currently broken. On this host the record attempt fails: `license check failed: could not load libct_license_ffi.dylib` (its `@rpath` dep `liblldb.dylib` / `libstdc++` is unresolvable outside the recorder dev shell). |
 
 The real, validated commands per recorder live in `tests/live_record.nim`
 (`recordRubyLive` / `recordPythonLive` / `recordJsLive` / `recordNativeLive`).
-**Ruby is genuinely live** here: a real `.ct` is recorded at test time and the
-engine's skip/rerun decisions are made from that live bundle's executed set
-({`<top-level>`, `main`, `used_a`, `used_b`}; `unused_c` is never called and is
-absent). The gates are HONEST: each prints the underlying captured failure and
-asserts a documented gate — never a hidden skip, never a hand-crafted substitute.
+**Ruby and Python are genuinely live** here: a real `.ct` is recorded at test
+time and the engine's skip/rerun decisions are made from that live bundle's
+executed set — Ruby ({`<top-level>`, `main`, `used_a`, `used_b`}), Python
+({`<__main__>`, `main`, `used_a`, `used_b`}); `unused_c` is never called and is
+absent from both. The JS and native gates are HONEST: each ATTEMPTS the real
+build/record, prints the underlying captured failure (the JS compiler error / the
+native license-FFI load failure), and asserts a documented gate that states the
+VERIFIED upstream-break root cause — never a hidden skip, never a hand-crafted
+substitute, never the old "dev shell won't build" misdiagnosis.
 
-Tests: `t_live_ruby.nim` (live, must pass here), `t_live_python.nim`,
-`t_live_js.nim`, `t_live_native.nim` (attempt-or-gate), and
-`t_live_full_suite.nim` (`full_suite_green_with_live_recordings` — compiles and
-runs every campaign test file and asserts all exit 0).
+Tests: `t_live_ruby.nim` and `t_live_python.nim` (LIVE, must pass here),
+`t_live_js.nim`, `t_live_native.nim` (attempt-or-gate against verified CI-red
+upstream breaks), and `t_live_full_suite.nim`
+(`full_suite_green_with_live_recordings` — compiles and runs every campaign test
+file and asserts all exit 0).
 
 ## M11 — compile-time `symBodyHash` deep path (deep when reported; shallow retained)
 

@@ -965,28 +965,42 @@
         `.ct`; the engine decides over it. Executed set from the LIVE bundle is
         {`<top-level>`,`main`,`used_a`,`used_b`}; `unused_c` (never called) is
         absent.
-      * Python — ⛔ GATED (LOUD, asserted). `just dev` fails because the
-        recorder's pinned nixpkgs marks `cargo-llvm-cov-0.6.20` BROKEN, so its
-        dev shell will not evaluate and `uv` is unavailable. Captured verbatim;
-        gated to Linux CI where the shell builds. (Not a silent skip.)
-      * JavaScript — ⛔ GATED (LOUD, asserted). `just build` fails at
-        `npx napi build` with `ENOVERSIONS` / "No versions available for napi"
-        (the `@napi-rs/cli` package is unresolvable in this environment).
-      * Native / Nim via MCR/RR — ⛔ GATED (LOUD, asserted). `ct-mcr` BUILDS
-        (`just build-ct-mcr` → `ct_cli`) but a real record attempt fails:
-        `license check failed: could not load libct_license_ffi.dylib`
-        (its `@rpath` dep `liblldb.dylib` / `libstdc++` is unresolvable outside
-        the recorder dev shell). RR is Linux-only regardless. Gate message:
-        "native live recording requires a Linux/MCR-supporting platform". The
-        gate path asserts `roGated` + a non-empty diagnostic — never a
-        `unittest.skip`, never a hand-crafted substitute.
-  - [X] The interpreted group is validated with a GENUINE live CTFS recording
-    (Ruby) consumed by the engine. The hand-crafted Phase-1/2 fixtures are
-    RETAINED (their recorders are platform-unavailable here — Python/JS/native —
-    so a live migration is not achievable on this host); the README's M13
-    section marks exactly which languages are LIVE vs gated, with the real
-    commands. (Migrating M0/M3/M8/M9 to live recordings is gated on the same
-    Linux/MCR platform as the native arm — documented, not silently skipped.)
+      * Python — ✅ LIVE end-to-end. `just venv 3.13 dev` (build once; ~1-2 min
+        maturin compile, cached via the on-disk native extension built-marker)
+        then `.venv/bin/python -m codetracer_python_recorder --out-dir <dir>
+        prog.py` produces a real `.ct`; the engine decides over it. Executed set
+        from the LIVE bundle is {`<__main__>`,`main`,`used_a`,`used_b`};
+        `unused_c` (never called) is absent. NOTE: the prior M13 revision wrongly
+        gated Python as "the dev shell won't build" — that used the WRONG entry
+        (`just dev` + `uv`). After the recorder's FLAKE FIX gating
+        `cargo-llvm-cov` off darwin (pushed upstream to the recorder repo),
+        `just venv 3.13 dev` builds and records LIVE here, as the test proves.
+      * JavaScript — ⛔ GATED (LOUD, asserted) on a GENUINE upstream break.
+        `just build` fails compiling the napi addon (`recorder_native`):
+        `NimTraceWriter` has no `enable_column_breakpoints_support` /
+        `enable_column_motions_support` (a `codetracer-trace-format-nim`
+        column-aware-tracing API mismatch; rustc suggests `enable_column_aware_steps`).
+        The JS recorder's OWN CI is RED on `dev`. NOT a missing `npm install` or
+        wrong dev shell. Captured verbatim; the SAME test records live once the
+        upstream API mismatch is fixed.
+      * Native / Nim via MCR/RR — ⛔ GATED (LOUD, asserted) on a GENUINE upstream
+        break + Linux-only RR. RR is Linux-only; and `codetracer-native-recorder`
+        CI is RED on `main`+`dev` (Linux+Windows test suites failing), so even
+        the supported Linux path is currently broken. On this host the real
+        record attempt fails: `license check failed: could not load
+        libct_license_ffi.dylib` (its `@rpath` dep `liblldb.dylib` / `libstdc++`
+        is unresolvable outside the recorder dev shell). Gate message states the
+        verified root cause. The gate path asserts `roGated` + a non-empty
+        diagnostic — never a `unittest.skip`, never a hand-crafted substitute.
+  - [X] The interpreted group is validated with GENUINE live CTFS recordings
+    (Ruby AND Python) consumed by the engine. The hand-crafted Phase-1/2
+    fixtures are RETAINED for JS/native (those recorders are a verified current
+    upstream break — JS column-aware-tracing API mismatch, native CI red on
+    main+dev — so a live migration is not achievable until upstream is fixed);
+    the README's M13 section marks exactly which languages are LIVE vs gated,
+    with the real commands and the verified CI-red root causes. (Migrating
+    M0/M3/M8/M9 to live recordings is gated on the same upstream fixes —
+    documented, not silently skipped.)
 
   Automated tests:
   - [X] test_name: live_ruby_recording_decides_end_to_end
@@ -994,16 +1008,26 @@
     asserts the live executed set, then a correct SKIP (unchanged), a correct
     RERUN (edit executed `used_a` ⇒ `idRerunChanged` naming it, not `used_b`),
     and a correct SKIP (edit unexecuted `unused_c`). PASSES on this host.
-  - [X] test_name: live_python_recording_decides_end_to_end (and JS)
-    (`tests/t_live_python.nim`, `tests/t_live_js.nim`) — attempt the live
-    recording; on this host both emit a LOUD asserted gate with the exact
-    captured build failure (broken nixpkgs / napi). Where the recorder builds
-    (Linux CI) the SAME test records live and asserts skip/rerun.
+  - [X] test_name: live_python_recording_decides_end_to_end
+    (`tests/t_live_python.nim`) — writes a real 3-function `.py`, records it LIVE
+    with the production maturin recorder, asserts the live executed set
+    ({`<__main__>`,`main`,`used_a`,`used_b`}; `unused_c` absent), then a correct
+    SKIP (unchanged), a correct RERUN (edit executed `used_a` ⇒ `idRerunChanged`
+    naming it, not `used_b`), and a correct SKIP (edit unexecuted `unused_c`).
+    PASSES on this host. (Mirrors/edits the RECORDED source path from the trace,
+    not the local write path, so the macOS `/var/folders` ↔ `/private/var`
+    canonicalisation cannot misplace the mirror.)
+  - [X] test_name: live_js_recording_decides_end_to_end
+    (`tests/t_live_js.nim`) — attempts the live recording; on this host emits a
+    LOUD asserted gate with the exact captured compiler error proving the
+    `enable_column_*_support` API mismatch (JS recorder CI red on `dev`). Where
+    the recorder builds the SAME test records live and asserts skip/rerun.
   - [X] test_name: native_recording_runs_where_supported_else_gated
     (`tests/t_live_native.nim`) — compiles a real C binary, attempts a `ct-mcr`
-    recording; on this host emits the LOUD asserted platform-gate with the real
-    license-FFI load failure. On a supported platform it detects the native
-    backend and drives the engine over the live `.ct`.
+    recording; on this host emits the LOUD asserted gate citing the verified
+    upstream break (recorder CI red on main+dev) + Linux-only RR, with the real
+    license-FFI load failure. On a supported (green Linux) platform it detects
+    the native backend and drives the engine over the live `.ct`.
   - [X] test_name: full_suite_green_with_live_recordings
     (`tests/t_live_full_suite.nim`) — compiles and runs EVERY campaign test file
     (all 16 other lib test files, M0-M13) as subprocesses and asserts each exits
@@ -1011,5 +1035,9 @@
 
   Acceptance: at least the interpreted group validated with genuine live CTFS
   recordings consumed by the engine; native/Nim either demonstrated or honestly
-  platform-gated with a loud diagnostic. (Ruby is genuinely LIVE end-to-end here;
-  Python/JS/native are honestly gated with the EXACT observed failures.)
+  gated with a loud diagnostic. (Ruby AND Python are genuinely LIVE end-to-end
+  here; JS/native are honestly gated on VERIFIED current upstream breaks that are
+  RED on the recorders' own CI — JS = the `enable_column_*_support` API mismatch
+  from the column-aware-tracing rollout, native = recorder CI red on main+dev plus
+  Linux-only RR — each printing the EXACT observed failure, not a misdiagnosed
+  "dev shell won't build".)

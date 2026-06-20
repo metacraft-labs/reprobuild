@@ -6,16 +6,20 @@
 ## drives the engine over the resulting CTFS bundle. NO hand-crafted trace, NO
 ## `unittest.skip`.
 ##
-## # Loud platform/build gate — NOT a silent skip
+## # Loud gate — a GENUINE upstream break (CI red), NOT a silent skip
 ##
-## On a host where the JS recorder genuinely cannot build (observed on this
-## arm64-macOS host: `npx napi build` fails with `ENOVERSIONS` / "No versions
-## available for napi" because the npm registry cannot resolve the `@napi-rs/cli`
-## package in this environment), `recordJsLive` returns a `roGated` outcome with
-## the EXACT captured diagnostic. This test prints that diagnostic loudly and
-## ASSERTS the documented gate. Where the recorder DOES build, the SAME test
-## records live and asserts the engine's skip/rerun decisions over the live
-## bundle.
+## The JS recorder is currently broken at the source: its napi addon (the
+## `recorder_native` crate) FAILS TO COMPILE because `NimTraceWriter` no longer
+## exposes the `enable_column_breakpoints_support` / `enable_column_motions_support`
+## methods the addon calls — a `codetracer-trace-format-nim` API mismatch from the
+## column-aware-tracing rollout. This is a real, current upstream break, confirmed
+## RED on the recorder repo's OWN CI on `dev` (it is NOT a missing `npm install`
+## or a wrong dev shell). `recordJsLive` ATTEMPTS the build and, when it fails,
+## returns a `roGated` outcome carrying the EXACT captured compiler error. This
+## test prints that diagnostic loudly and ASSERTS the documented gate. Once the
+## column-aware-tracing API mismatch is fixed upstream and the recorder builds,
+## the SAME test records live and asserts the engine's skip/rerun decisions over
+## the live bundle (no test change needed).
 
 import std/[unittest, os, strutils]
 import repro_ct_incremental
@@ -69,9 +73,13 @@ suite "M13 live JavaScript recording":
 
     if rec.kind == roGated:
       echo "\n================ M13 JS LIVE-RECORDING GATE ================"
-      echo "The production JS recorder could not be built/run on this host."
-      echo "This is a DOCUMENTED platform/build gate, not a passing live test."
-      echo "Captured diagnostic:"
+      echo "The production JS recorder does not build: a GENUINE current upstream"
+      echo "break, RED on the recorder repo's own CI on `dev`. The napi addon"
+      echo "(recorder_native) fails to compile because NimTraceWriter lacks"
+      echo "enable_column_breakpoints_support / enable_column_motions_support"
+      echo "(a codetracer-trace-format-nim API mismatch from the column-aware-"
+      echo "tracing rollout). This is NOT a missing npm install or wrong dev shell."
+      echo "Captured diagnostic from the real build attempt:"
       echo rec.diagnostic
       echo "===========================================================\n"
       check rec.diagnostic.len > 0

@@ -5,25 +5,30 @@
 ## C binary the test compiles. There is NO hand-crafted substitute and NO
 ## `unittest.skip`.
 ##
-## # The native platform gate (explicit, asserted, loud)
+## # The native gate (explicit, asserted, loud) — a GENUINE upstream break (CI red)
 ##
-## RR is Linux-only, and the macOS MCR path does not record on this arm64-macOS
-## host. Two real, observed failure modes lead to the gate here:
+## The native recorder is gated for TWO independent, verified reasons:
 ##
-##   * `ct-mcr` records on Linux (RR-backed) ⇒ a real CTFS `.ct` ⇒ the engine
-##     decides over it (the supported path); OR
-##   * on this host the record attempt fails (observed: the licensing FFI
-##     dylib `libct_license_ffi.dylib` cannot be loaded because its `@rpath`
-##     dependency `liblldb.dylib` / `libstdc++` is not resolvable outside the
-##     recorder's dev shell — `error: license check failed: could not load ...`).
-##     RR itself is Linux-only regardless. Either way the recorder produces NO
-##     `.ct` on this host.
+##   * RR is LINUX-ONLY, so the RR-backed record path is unavailable on this
+##     arm64-macOS host regardless of build state; AND
+##   * the native recorder is currently broken upstream — `codetracer-native-recorder`
+##     CI is RED on BOTH `main` and `dev` (its Linux and Windows test suites are
+##     failing). This is a real current break, not a wrong dev shell.
+##
+## Concretely on this host the record attempt fails (observed: the licensing FFI
+## dylib `libct_license_ffi.dylib` cannot be loaded because its `@rpath`
+## dependency `liblldb.dylib` / `libstdc++` is not resolvable outside the
+## recorder's dev shell — `error: license check failed: could not load ...`), and
+## even on Linux the recorder's own CI is red, so the supported path is itself
+## broken at present. Where `ct-mcr` DOES record (a green Linux build) the SAME
+## test detects the native backend and drives the engine over the live `.ct`.
 ##
 ## When no `.ct` is produced, this test takes an EXPLICIT, ASSERTED gate path: it
 ## prints a LOUD diagnostic stating that native live recording requires a
-## Linux/MCR-supporting platform, and asserts (a) the outcome is a documented
-## gate and (b) the diagnostic is present. This is a real, visible signal — never
-## a `unittest.skip`, never a hand-crafted trace standing in for a live one.
+## Linux/MCR-supporting platform with a GREEN recorder build, and asserts (a) the
+## outcome is a documented gate and (b) the diagnostic is present. This is a real,
+## visible signal — never a `unittest.skip`, never a hand-crafted trace standing
+## in for a live one.
 
 import std/[unittest, os, osproc]
 import repro_ct_incremental
@@ -31,10 +36,14 @@ import live_record
 
 const
   NativeGateMessage* =
-    "native live recording requires a Linux/MCR-supporting platform " &
-    "(RR is Linux-only; ct-mcr does not record on this host)"
-    ## The asserted platform-gate diagnostic. Surfaced loudly when the native
-    ## recorder cannot record on this host.
+    "native live recording requires a Linux/MCR-supporting platform with a " &
+    "GREEN recorder build (RR is Linux-only; and the native recorder is a " &
+    "GENUINE current upstream break — codetracer-native-recorder CI is RED on " &
+    "main+dev, its Linux+Windows test suites failing — so even the supported " &
+    "Linux path is broken at present); ct-mcr does not record on this host"
+    ## The asserted gate diagnostic. Surfaced loudly when the native recorder
+    ## cannot record on this host. The message states the VERIFIED root cause: a
+    ## real upstream break (CI red on main+dev), not a wrong dev shell.
 
   nativeC = """#include <stdio.h>
 __attribute__((noinline)) int used_a(int x){ return x + 1; }
@@ -75,7 +84,9 @@ suite "M13 live native recording":
       # diagnostic present). NOT a unittest.skip; NOT a hand-crafted substitute.
       echo "\n================ M13 NATIVE LIVE-RECORDING GATE ================"
       echo NativeGateMessage
-      echo "Underlying captured diagnostic from the record attempt:"
+      echo "This is a GENUINE upstream break (recorder CI red on main+dev) plus"
+      echo "RR being Linux-only — NOT a wrong dev shell. Captured diagnostic from"
+      echo "the real record attempt:"
       echo rec.diagnostic
       echo "==============================================================\n"
       check rec.kind == roGated
