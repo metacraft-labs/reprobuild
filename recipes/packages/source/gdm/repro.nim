@@ -224,6 +224,11 @@ package gdmSource:
     ## M9.R.15e.12 — json-glib is gdm 47.x's GLib-style JSON parser
     ## library dep (meson.build:67), routed through nixpkgs#json-glib.
     "json-glib"
+    ## M9.R.15e.14 — gobject-introspection is required by gdm 47.x's
+    ## libgdm sub-tree (src/libgdm/meson.build:89) — there's no
+    ## ``-Dintrospection=disabled`` option to gate it. Backed by the
+    ## sibling gobjectIntrospectionSource recipe.
+    "gobject-introspection"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
