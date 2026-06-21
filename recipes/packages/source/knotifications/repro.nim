@@ -125,6 +125,12 @@ package knotificationsSource:
     ## knotifications uses to play the configured sound for an
     ## incoming KNotification.
     "libcanberra >=0.30"
+    ## M9.R.15p.2.6 — libcanberra.so links against ``libltdl.so.7``
+    ## (the dlopen wrapper). knotifications transitively pulls libltdl
+    ## through libcanberra at link time; declaring it as a buildDep
+    ## threads the libltdl install root onto the action's LIBRARY_PATH
+    ## so ld finds ``libltdl.so.7`` at link time.
+    "libltdl"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
