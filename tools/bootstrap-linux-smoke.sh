@@ -397,15 +397,17 @@ LINUX_TOOLCHAIN_PKGS=(
   # the resulting binaries are self-contained (no LD_LIBRARY_PATH
   # required at runtime).
   patchelf
-  # M9.R.15i.4 — python3 + iso-codes are required by the KF6 cascade
+  # M9.R.15i.4 — python3 + isocodes are required by the KF6 cascade
   # (ki18n's KF6I18nMacros caches Python3_EXECUTABLE at configure;
-  # iso-codes ships the country-and-language translation catalogs
+  # isocodes ships the country-and-language translation catalogs
   # ki18n's runtime tables depend on). Future M9.L work will hoist
   # these onto each affected recipe's nativeBuildDeps so the engine
   # can resolve them via from-source siblings rather than the
-  # nix-shell carry-on.
+  # nix-shell carry-on. NOTE: nixpkgs attr is ``isocodes`` (no hyphen,
+  # no underscore), NOT ``iso-codes`` (the latter is the package
+  # display name).
   python3
-  iso-codes
+  isocodes
 )
 
 # Env vars the flake sets that the Linux build also wants. We set
