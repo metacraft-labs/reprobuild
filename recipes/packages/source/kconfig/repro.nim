@@ -184,13 +184,11 @@ package kconfigSource:
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
     discard
-  library libKF6Config:
-    ## ``libKF6Config.so`` — umbrella shim ``find_package`` consumers
-    ## link against; aggregates ConfigCore + ConfigGui transparently
-    ## for upstream KF6 consumers that do ``find_package(KF6Config)``.
-    ## v1 records the artifact only; the per-artifact build body lands
-    ## in M9.L when the convention's ninja-spawn + install-glue closes.
-    discard
+  # M9.R.15i.3.2 — kconfig 6.10.0 does NOT ship an umbrella
+  # ``libKF6Config.so``; CMake's ``find_package(KF6Config)`` imports
+  # KF6::ConfigCore + KF6::ConfigGui targets directly. The legacy
+  # umbrella library declaration would cause stage-copy to fail
+  # looking for a library that doesn't exist.
 
   library libKF6ConfigCore:
     ## ``libKF6ConfigCore.so`` — the headless key-value store classes
@@ -221,7 +219,6 @@ package kconfigSource:
         "KCONFIG_USE_QML=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6Config")
       discard pkg.library("libKF6ConfigCore")
       discard pkg.library("libKF6ConfigGui")
     finally:
