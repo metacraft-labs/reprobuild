@@ -136,6 +136,8 @@ package kglobalaccelSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — XLib not in v1.
+        "WITH_X11=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6GlobalAccel")

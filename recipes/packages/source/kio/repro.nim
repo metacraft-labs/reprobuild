@@ -180,6 +180,11 @@ package kioSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — XLib + wayland-client surface gated out for v1
+        # KIO core. Wayland is in v1 closure but kio's WITH_WAYLAND
+        # adds X11-like extras.
+        "WITH_X11=OFF",
+        "WITH_WAYLAND=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6Kio")
