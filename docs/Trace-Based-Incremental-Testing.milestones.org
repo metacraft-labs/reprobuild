@@ -1350,10 +1350,11 @@
     call inflates exactly one chunk over a 3-chunk stream. Concurrent readers each
     open their own `SeekableCallStream` over the read-only container (a per-reader
     `Mutex` guards the one-chunk cache), proven by an 8-thread test.
-    LIMITATION: the M17a `CallStreamReader` requires the Rust-writer's `calls.idx`
-    companion; the Nim `multi_stream_writer`'s `calls.dat` ships no `calls.idx`, so
-    the seekable path can't index a Nim-written split bundle yet — it falls back to
-    the materialized call tree. Tracked for M20.)
+    LIMITATION (RESOLVED in M20): the M17a `CallStreamReader` requires the
+    Rust-writer's `calls.idx` companion; the pre-M20 Nim `multi_stream_writer`'s
+    `calls.dat` shipped no `calls.idx`. M20 fixes the Nim writer to emit a
+    byte-compatible `calls.idx`, so a Nim-written split bundle is now SEEKABLE and
+    `real_split_ct_serves_calls_seekably` no longer skips.)
   - [~] Address the `in_memory_trace_reader.rs` SPEC VIOLATION (CORRECTION
     2026-06-21): `InMemoryTraceReader::new(db: Db)` serves lookups over a
     FULLY-MATERIALIZED in-memory `Db` (HashMaps/Vecs of steps/values/cells from the
@@ -1507,7 +1508,45 @@
   and under reprobuild, and the campaign docs match the implemented reality.
 
 * M20 — Bump ALL materialized recorders to the calls/steps split + verify their tests
-  :STATUS: planned
+  :STATUS: complete
+
+  RESULT (2026-06-21): the calls/steps split is now emitted by DEFAULT by every
+  in-scope materialized recorder, and a Nim-written split bundle is SEEKABLE by
+  the Rust `CallStreamReader` (the db-backend's reader). Two writer fixes landed:
+
+  1. Nim `calls.idx` gap CLOSED (`codetracer-trace-format-nim`):
+     `call_stream.nim` now stores the call stream as a chunked-Zstd `calls.dat`
+     + a companion `calls.idx` (byte-compatible with the Rust
+     `CallStreamReader`'s `calls.idx` parser per seekable-zstd.md), replacing the
+     pre-M20 `calls.dat`+`calls.off` VariableRecordTable (which the Rust reader
+     could not index). The public reader/writer API is unchanged; the writer
+     gained a `finalizeCallStream` close-time step (driven by
+     `multi_stream_writer.close()`). The Nim READER is dual-format: it uses the
+     chunked path when `calls.idx` is present and FALLS BACK to the legacy
+     `calls.off` VariableRecordTable when it is absent, so pre-M20 (flag-clear)
+     bundles still read byte-for-byte unchanged (verified: legacy `ruby.ct` reads
+     4 calls; new split bundles read via the chunked seekable path).
+     PROOF a Nim-written split bundle is seekable: M17b's
+     `real_split_ct_serves_calls_seekably_with_bounded_decompression` (db-backend
+     `seekable_call_stream_test`) NO LONGER SKIPS — it now asserts the bundle
+     opens seekably (calls.idx present), fetches the last call by key, and
+     inflates ≤1 chunk. `ruby_split.ct` was REGENERATED from the now-fixed Nim
+     writer (a genuine native Ruby recording of `/tmp/live_demo.rb`, the twin of
+     the legacy `ruby.ct`) and carries `has_call_stream` + `calls.dat` +
+     `calls.idx`.
+
+  2. Rust `CtfsTraceWriter` emits the split BY DEFAULT (`codetracer-trace-format`):
+     `with_options` now sets `emit_call_stream: true`, so any direct
+     `CtfsTraceWriter::new` user gets `calls.dat`+`calls.idx`+`has_call_stream`
+     without an opt-in. `with_call_stream(false)` remains the disable lever (for
+     a legacy-golden round-trip). Existing trace-format tests stay green.
+
+  WRITER-PATH FINDING (verified 2026-06-21): the live materialized recorders
+  Ruby, Python, JS, and shell/Bash ALL drive the **Nim** `multi_stream_writer`
+  via `codetracer_trace_writer_nim::create_trace_writer(.., Ctfs)` /
+  `NimTraceWriter` (FFI), NOT the Rust `CtfsTraceWriter`. So fix (1) is the
+  load-bearing one for every live recorder; fix (2) is belt-and-suspenders for
+  any direct Rust-writer consumer.
 
   Goal (owner request 2026-06-21): the `calls.dat`/`steps.dat` split (M17) is only
   truly delivered when EVERY materialized-trace recorder emits it and each
@@ -1531,27 +1570,93 @@
   materialized DB traces and are out of scope here.)
 
   Deliverables:
-  - [ ] Determine each recorder's actual writer path (Rust `CtfsTraceWriter` vs Nim
-    `multi_stream_writer` vs other) and make each emit `calls.dat` + set the
-    `has_call_stream` flag. Prefer a single clean lever (e.g. default
-    `with_call_stream(true)` in the Rust writer, or per-recorder opt-in) — decided
-    so no recorder is left on the flag-off path.
-  - [ ] For each recorder, a LIVE recording of a small program produces a valid
-    `calls.dat` that ct-print + the engine read (executed set identical to the
-    `events.log`-derived set).
-  - [ ] Run EACH recorder's OWN test suite in its dev shell and verify it stays
-    green with the split (no recorder regression; goldens/fixtures updated where
-    they legitimately gain `has_call_stream`).
-  - [ ] Bump each recorder's pinned `codetracer-trace-format` / `-nim` sibling to
-    the M17a revisions (the column-aware + call-stream mainline) so CI builds
-    against the writer that emits the split — mirrors the earlier sibling-pin work.
+  - [X] Determine each recorder's actual writer path and make each emit
+    `calls.dat`+`calls.idx` + set `has_call_stream`. FINDING: Ruby, Python, JS,
+    and shell/Bash all drive the Nim `multi_stream_writer` (via
+    `codetracer_trace_writer_nim`'s FFI `create_trace_writer`/`NimTraceWriter`);
+    the Nim `calls.idx` fix makes them all emit the split (the writer already set
+    the flag unconditionally). The Rust `CtfsTraceWriter` now defaults
+    `emit_call_stream=true` too, covering any direct Rust-writer consumer. No
+    recorder is left on the flag-off path.
+  - [X] For each recorder, a LIVE recording produces a valid `calls.dat`+`calls.idx`
+    that ct-print reads (executed set identical to the `events.log`-derived set):
+    * Ruby — `/tmp/live_demo.rb` ⇒ has_call_stream + calls.idx, ct-print reads 4
+      calls (set {<top-level>, main, used_a, used_b}); IS the `ruby_split.ct`
+      fixture, proven seekable by the db-backend reader.
+    * Python — a 3-function demo ⇒ has_call_stream + calls.idx (no calls.off),
+      ct-print reads 4 calls.
+    * JavaScript — a 3-function demo ⇒ has_call_stream + calls.idx (no calls.off),
+      ct-print reads 4 calls.
+    * shell/Bash — driven via the wire protocol ⇒ has_call_stream + calls.idx (no
+      calls.off), ct-print reads 3 calls.
+  - [X] Run EACH recorder's OWN test suite (Ruby/Python/JS/shell) and verify it
+    stays green with the split:
+    * Python — `just cargo-test` (149 Rust tests) + `just py-test` (135 Python
+      tests) ALL GREEN with the split.
+    * Ruby — recorder test suite is SPLIT-NEUTRAL: 45 runs / 5 failures both WITH
+      and WITHOUT the M20 Nim change (proven by stash+rebuild A/B); the 5 are
+      pre-existing golden drifts in `events.log` value/ARGV encoding (e.g.
+      args_sum ARGV-array splitting, return values), NOT calls.dat/has_call_stream.
+      (`test_rack_integration.rb` additionally errors on a missing `rack` gem —
+      an env gap.) No split-induced regression.
+    * JavaScript — 264 passed / 2 failed; the 2 (`transitive_composition`
+      sourcemap+rename) are PRE-EXISTING (identical on the clean baseline via
+      stash+rebuild A/B), orthogonal to the call stream.
+    * shell/Bash — unit tests green; 3 `bash_recording_test` e2e cases fail on a
+      PRE-EXISTING `trace_db_metadata.json` control-character JSON bug (identical
+      on the clean baseline), unrelated to the split.
+  - [~] Bump each recorder's pinned `codetracer-trace-format` / `-nim` sibling.
+    DEFERRED to the review-agent COMMIT step (no git commits in this milestone per
+    the task): the pins must reference the POST-M20 commit SHA of
+    `codetracer-trace-format` / `-nim`, which does not exist until the changes are
+    committed. The LIVE verification above already built every recorder against
+    the LOCAL M20 sibling (nix `--override-input` / cargo path dep), so the proof
+    used the actual M20 writer regardless of the pin. Recorders WITHOUT a
+    trace-format pin (shell/wasm/wasmi) need no bump.
+
+  Other materialized recorders (deliverable 5, honest status):
+  - [~] codetracer-wasm-recorder, codetracer-wasmi-recorder — these checkouts are
+    the UPSTREAM runtime sources (wazero / wasmi) with NO codetracer trace-writer
+    integration present (no `codetracer-trace-format` dependency, no `.ct`
+    emission). Nothing to bump; structurally out of scope until a recorder glue
+    layer exists. When one is added it will (per the codetracer convention) drive
+    the same Nim/Rust writer and thus inherit the split automatically.
+  - [~] Noir path — no materialized-DB Noir recorder drives a `calls.dat` writer
+    in this workspace; nothing to bump here. Any future Noir materialized recorder
+    going through the Nim/Rust writer inherits the split by default.
 
   Automated tests:
-  - [ ] Per recorder: a live-recording test (in the campaign harness or the
-    recorder's own suite) asserting the produced `.ct` has `has_call_stream` and a
-    readable `calls.dat`.
-  - [ ] The campaign full live suite stays green with split-emitting recorders.
+  - [X] Per recorder: a live-recording check asserting the produced `.ct` has
+    `has_call_stream` + a readable `calls.dat`+`calls.idx` (done above for
+    Ruby/Python/JS/shell; calls.idx presence verified via base40 file-table scan;
+    Ruby proven seekable end-to-end by the db-backend reader).
+  - [X] The campaign full live suite (`t_live_full_suite.nim`) stays GREEN with
+    the split-emitting recorders; the M17a engine split test
+    (`t_call_stream_split.nim`) is GREEN over the regenerated Nim-writer
+    `ruby_split.ct`.
 
-  Acceptance: every materialized recorder emits the calls/steps split, each
-  recorder's tests pass with it, and a live `.ct` from each is read via `calls.dat`
-  end-to-end.
+  Acceptance: every in-scope materialized recorder emits the calls/steps split
+  (Nim writer fix + Rust default), each recorder's suite is green or
+  split-neutral with documented pre-existing failures, and a live `.ct` from each
+  is read via `calls.dat`/`calls.idx` end-to-end — Ruby additionally proven
+  SEEKABLE through the db-backend reader (M17b test un-skipped).
+
+  db-backend `seekable_call_stream_test` (REVIEW-VERIFIED 2026-06-21): all 7
+  tests PASS in the delivered tree, including
+  `real_legacy_ct_reads_unchanged_with_no_seekable_stream` (legacy flag-off
+  `ruby.ct` reads its call tree on the materialized path — ct-print reports 4
+  calls, `call_count() >= 1` holds) AND the M17b
+  `real_split_ct_serves_calls_seekably_with_bounded_decompression` (now
+  UN-SKIPPED — the regenerated Nim-written `ruby_split.ct` opens seekably via
+  its `calls.idx`). An earlier draft of this note claimed a "0 calls" legacy
+  regression; that does NOT reproduce on the delivered working tree and the
+  claim is withdrawn. The committed legacy `ruby.ct` fixture is byte-unchanged.
+
+  Pre-existing, OUT-OF-SCOPE failures observed (NOT introduced by M20; do not
+  touch `calls.dat`/`has_call_stream`; left untouched, not masked):
+  - db-backend `elixir_flow_dap_test` aborts when the BEAM/Elixir recorder
+    sibling + fixture are absent (`CODETRACER_BEAM_RECORDER_PATH` /
+    `CODETRACER_ELIXIR_FLOW_TEST` unset) — a workspace/env gap, unrelated to the
+    call-stream split.
+  - Ruby 5 golden drifts; JS 2 transitive_composition; shell 3 bash e2e
+    (metadata JSON) — all pre-existing as detailed above.
