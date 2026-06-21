@@ -112,6 +112,13 @@ package ksolidSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — ksolid is C++17.
     "gcc >=11"
+    ## M9.R.15k.4 — ksolid's CMakeLists generates the predicate-parser
+    ## lexer/parser through FLEX + BISON (find_package REQUIRED at
+    ## line 51). flex / bison are bootstrap tools; carry-on the
+    ## nix-shell when invoking ksolid until we have flex / bison
+    ## from-source recipes.
+    "flex"
+    "bison"
 
   buildDeps:
     "extra-cmake-modules >=6.0"
@@ -144,6 +151,14 @@ package ksolidSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15k.4 — disable UDev hardware-detection backend. The
+        # Linux UDev REQUIRED find_package (CMakeLists.txt:112) needs
+        # libudev headers + .so from systemd / eudev which v1 doesn't
+        # carry as a from-source recipe yet. ksolid's predicate / fake-
+        # hardware backends remain and are sufficient for v1 KF6 module-
+        # graph closure; full hot-plug detection comes when we add eudev
+        # / systemd from-source.
+        "UDEV_DISABLED=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6Solid")
