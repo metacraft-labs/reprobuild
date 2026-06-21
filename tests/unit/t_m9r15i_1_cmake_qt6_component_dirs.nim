@@ -35,7 +35,7 @@
 ##   6. Subdirs without ``Qt6<X>Config.cmake`` are skipped (e.g. random
 ##      cmake helper dirs).
 
-import std/[os, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/types/package_result
 import repro_project_dsl
