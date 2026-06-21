@@ -408,6 +408,14 @@ LINUX_TOOLCHAIN_PKGS=(
   # display name).
   python3
   isocodes
+  # M9.R.15i.5 — zstd is transitively present in the nix-shell closure
+  # (curl pulls it on NixOS 25.05) and karchive's pkg_check_modules
+  # finds it even with WITH_LIBZSTD=OFF, embedding libKF6Archive.so's
+  # ZSTD_* undefined symbols. Add zstd EXPLICITLY so downstream KF6
+  # consumers (kpackage, kio, ...) link cleanly. Future M9.L work
+  # will make karchive's recipe declare zstd as an optional from-
+  # source sibling.
+  zstd
 )
 
 # Env vars the flake sets that the Linux build also wants. We set

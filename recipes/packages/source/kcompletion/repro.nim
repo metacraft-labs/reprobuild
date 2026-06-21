@@ -34,6 +34,13 @@ package kcompletionSource:
     "qt6-tools >=6.6"
     "kconfig >=6.0"
     "kwidgetsaddons >=6.0"
+    ## M9.R.15j.2 — kcodecs supplies KCharsets / KCodecs / KEmailAddress
+    ## which kcompletion's KHistoryComboBox + KCompletion proper consume
+    ## for text-encoding helpers. The upstream kcompletion CMakeLists.txt
+    ## declares find_package(KF6Codecs REQUIRED) but the M9.R.15h.4
+    ## v1 recipe omitted the matching buildDep, so the configure step
+    ## fails until kcodecsSource publishes.
+    "kcodecs >=6.0"
 
   config:
     discard
