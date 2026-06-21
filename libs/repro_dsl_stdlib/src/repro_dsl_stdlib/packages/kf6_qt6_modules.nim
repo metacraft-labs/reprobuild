@@ -12,6 +12,7 @@
 
 import ./qt6_tools
 import ./qt6_declarative
+import ./qt6_svg
 import ./kf6_base
 import ./karchive
 import ./kbookmarks
@@ -29,6 +30,7 @@ import ./kwindowsystem
 
 export qt6_tools
 export qt6_declarative
+export qt6_svg
 export kf6_base
 export karchive
 export kbookmarks
