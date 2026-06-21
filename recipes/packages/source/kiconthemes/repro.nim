@@ -38,6 +38,10 @@ package kiconthemesSource:
     ## CMake-config threader needs the dep declaration to thread the
     ## qt6-svg install prefix into CMAKE_PREFIX_PATH.
     "qt6-svg >=6.6"
+    ## M9.R.15k.3 — kiconthemes' CMakeLists also REQUIREs KF6Archive
+    ## (zip-archive support for the .icons.kde-archive icon-theme
+    ## bundles); the M9.R.15j.4 buildDep set omitted it.
+    "karchive >=6.0"
     "kconfig >=6.0"
     "kcoreaddons >=6.0"
     "ki18n >=6.0"
