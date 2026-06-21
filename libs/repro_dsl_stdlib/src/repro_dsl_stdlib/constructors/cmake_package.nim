@@ -141,10 +141,40 @@ proc cmake_package*(srcDir: string;
   # package expects every requested component to live at the same
   # install prefix as Qt6Core and the probe fails. Inert in unit-test
   # mode (empty ``projectRoot``) and for non-Qt6 deps.
+  #
+  # M9.R.15i.5 — also auto-thread CMake-config dirs for EVERY declared
+  # dep's install-mirror (not just qt6-*). KF6 modules consume each
+  # other (kxmlgui declares find_package(KF6GlobalAccel REQUIRED);
+  # kpackage declares find_package(KF6KArchive REQUIRED); etc.) and
+  # each sibling installs to its own ``.repro/output/install/``
+  # prefix.  Without per-Config_DIR threading, cmake's find_package
+  # walks CMAKE_PREFIX_PATH alone and CMAKE_PREFIX_PATH (populated
+  # via M9.R.14e.* resolver work) is not always honoured because Qt6/KF6
+  # CMake-config packages frequently rely on a sibling-relative
+  # convention assumption that breaks under sibling install prefixes.
+  # Threading each ``<Component>_DIR`` explicitly is the surgical fix.
   var effectiveCacheVars = cacheVars
   if projectRoot.len > 0:
     let qt6CompDirs = m9r15iCollectQt6ComponentDirs(projectRoot, pkgName)
     for entry in m9r15iEmitQt6ComponentCacheVars(qt6CompDirs):
+      effectiveCacheVars.add(entry)
+    let allCmakeDirs = m9r15iCollectAllCmakeConfigDirs(projectRoot, pkgName)
+    # Dedup against qt6CompDirs (which we already emitted) to avoid
+    # double ``-D<Component>_DIR=`` flags. Use a per-component set.
+    var seen: seq[string] = @[]
+    for (comp, _) in qt6CompDirs:
+      seen.add(comp)
+    for entry in m9r15iEmitQt6ComponentCacheVars(allCmakeDirs):
+      let dEq = entry.find('=')
+      if dEq <= 0:
+        continue
+      let suffix = "_DIR"
+      if dEq < suffix.len:
+        continue
+      let component = entry[0 ..< dEq - suffix.len]
+      if component in seen:
+        continue
+      seen.add(component)
       effectiveCacheVars.add(entry)
   let configureEdge = cmake.configure(
     srcDir = srcDir,

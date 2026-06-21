@@ -222,3 +222,114 @@ suite "DSL-port M9.R.15i.1 — Qt6 component CMake-config dir threading":
     createDir(projectRoot)
     let collected = m9r15iCollectQt6ComponentDirs(projectRoot, pkgName)
     check collected.len == 0
+
+# ===========================================================================
+# DSL-port M9.R.15i.5 — generic CMake-config dir threading.
+# ===========================================================================
+
+proc layCmakeConfig(root, depName, componentName: string;
+                    lowercase = false) =
+  ## Lay down a synthetic ``<dep>/.repro/output/install/usr/lib/cmake
+  ## /<componentName>/<componentName>Config.cmake`` (or the lowercase
+  ## ``<component>-config.cmake`` form).
+  let cmakeRoot = root / depName / ".repro" / "output" / "install" /
+    "usr" / "lib" / "cmake" / componentName
+  createDir(cmakeRoot)
+  let cfg =
+    if lowercase: componentName.toLowerAscii & "-config.cmake"
+    else: componentName & "Config.cmake"
+  writeFile(cmakeRoot / cfg,
+    "# synthetic " & componentName & " config\n")
+
+suite "DSL-port M9.R.15i.5 — generic CMake-config dir threading":
+
+  test "scan_cmake_config_dirs_finds_pascal_case_config":
+    # KF6-style: <Component>Config.cmake
+    let scratch = createTempDir("repro-m9r15i-5-pascal-", "")
+    defer: removeDir(scratch)
+
+    layCmakeConfig(scratch, "kglobalaccel", "KF6GlobalAccel")
+    layCmakeConfig(scratch, "kglobalaccel", "KF6GlobalAccelComponent")
+
+    var found: seq[(string, string)] = @[]
+    m9r15iScanCmakeConfigDirs(scratch / "kglobalaccel", found)
+    check found.len == 2
+    var sawAccel = false
+    var sawComp = false
+    for (comp, _) in found:
+      if comp == "KF6GlobalAccel": sawAccel = true
+      if comp == "KF6GlobalAccelComponent": sawComp = true
+    check sawAccel
+    check sawComp
+
+  test "scan_cmake_config_dirs_finds_kebab_case_config":
+    # Autotools-style: <component>-config.cmake (lowercase)
+    let scratch = createTempDir("repro-m9r15i-5-kebab-", "")
+    defer: removeDir(scratch)
+
+    layCmakeConfig(scratch, "openssl", "OpenSSL", lowercase = true)
+
+    var found: seq[(string, string)] = @[]
+    m9r15iScanCmakeConfigDirs(scratch / "openssl", found)
+    check found.len == 1
+    check found[0][0] == "OpenSSL"
+
+  test "collect_all_cmake_config_dirs_walks_every_dep":
+    # Mixed deps: KF6 (PascalCase), Qt6 (PascalCase), ECM-style
+    # (PascalCase but starts with ECM not Qt6/KF6).
+    let scratch = createTempDir("repro-m9r15i-5-mixed-", "")
+    defer: removeDir(scratch)
+
+    layCmakeConfig(scratch, "kglobalaccel", "KF6GlobalAccel")
+    layCmakeConfig(scratch, "kconfig", "KF6Config")
+    layCmakeConfig(scratch, "qt6-base", "Qt6Core")
+    layCmakeConfig(scratch, "extra-cmake-modules", "ECM")
+
+    resetDslPortPackageDepsState()
+    let pkgName = "m9r15i5Pkg"
+    registerPackageDep(pkgName, "native", "extra-cmake-modules >=6.0")
+    registerPackageDep(pkgName, "build", "qt6-base >=6.6")
+    registerPackageDep(pkgName, "build", "kconfig >=6.0")
+    registerPackageDep(pkgName, "build", "kglobalaccel >=6.0")
+
+    let projectRoot = scratch / pkgName
+    createDir(projectRoot)
+    let collected = m9r15iCollectAllCmakeConfigDirs(projectRoot, pkgName)
+    check collected.len == 4
+    var components: seq[string] = @[]
+    for (comp, _) in collected:
+      components.add(comp)
+    check "KF6GlobalAccel" in components
+    check "KF6Config" in components
+    check "Qt6Core" in components
+    check "ECM" in components
+
+  test "collect_all_cmake_config_dirs_deterministic":
+    let scratch = createTempDir("repro-m9r15i-5-det-", "")
+    defer: removeDir(scratch)
+
+    layCmakeConfig(scratch, "kconfig", "KF6Config")
+    layCmakeConfig(scratch, "ki18n", "KF6I18n")
+    layCmakeConfig(scratch, "kcoreaddons", "KF6CoreAddons")
+
+    resetDslPortPackageDepsState()
+    let pkgName = "m9r15i5DetPkg"
+    registerPackageDep(pkgName, "build", "kconfig")
+    registerPackageDep(pkgName, "build", "ki18n")
+    registerPackageDep(pkgName, "build", "kcoreaddons")
+
+    let projectRoot = scratch / pkgName
+    createDir(projectRoot)
+    let first = m9r15iCollectAllCmakeConfigDirs(projectRoot, pkgName)
+    let second = m9r15iCollectAllCmakeConfigDirs(projectRoot, pkgName)
+    check first == second
+    let firstEntries = m9r15iEmitQt6ComponentCacheVars(first)
+    let secondEntries = m9r15iEmitQt6ComponentCacheVars(second)
+    check firstEntries == secondEntries
+
+  test "empty_project_root_returns_empty":
+    resetDslPortPackageDepsState()
+    let pkgName = "m9r15i5EmptyPkg"
+    registerPackageDep(pkgName, "build", "kglobalaccel")
+    let collected = m9r15iCollectAllCmakeConfigDirs("", pkgName)
+    check collected.len == 0
