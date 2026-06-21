@@ -32,6 +32,12 @@ package kiconthemesSource:
     "extra-cmake-modules >=6.0"
     "qt6-base >=6.6"
     "qt6-tools >=6.6"
+    ## M9.R.15k.2 — kiconthemes' CMakeLists makes Qt6Svg a REQUIRED
+    ## find_package (line 49). The M9.R.15j.4 buildDep set omitted it
+    ## because qt6-svg only landed in M9.R.15k.1; the M9.R.15i.5 sibling
+    ## CMake-config threader needs the dep declaration to thread the
+    ## qt6-svg install prefix into CMAKE_PREFIX_PATH.
+    "qt6-svg >=6.6"
     "kconfig >=6.0"
     "kcoreaddons >=6.0"
     "ki18n >=6.0"
