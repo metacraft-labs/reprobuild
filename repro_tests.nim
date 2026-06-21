@@ -3446,6 +3446,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/plasma-activities/test_plasma_activities_source.nim",
+    binary: "build/test-bin/test_plasma_activities_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/plasma-framework/test_plasma_framework_source.nim",
     binary: "build/test-bin/test_plasma_framework_source",
     defines: @[],
