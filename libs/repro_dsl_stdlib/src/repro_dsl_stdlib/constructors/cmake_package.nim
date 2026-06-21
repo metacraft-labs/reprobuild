@@ -176,6 +176,26 @@ proc cmake_package*(srcDir: string;
         continue
       seen.add(component)
       effectiveCacheVars.add(entry)
+    # M9.R.15o.1 — auto-thread Qt6Gui transitive find_dependency targets
+    # (libxkbcommon + mesa) into the CMake-config dir scan when any
+    # qt6-* dep is present. M9.R.15n.3..5 hand-patched per-recipe
+    # buildDeps for kcrash / kglobalaccel / kded; this constructor-
+    # level fix obviates that boilerplate for every future Qt6Gui
+    # consumer (ksvg / kio / plasma-framework / kwin / ...).
+    let qt6XtraDirs = m9r15oCollectQt6TransitiveCmakeConfigDirs(
+      projectRoot, pkgName)
+    for entry in m9r15iEmitQt6ComponentCacheVars(qt6XtraDirs):
+      let dEq = entry.find('=')
+      if dEq <= 0:
+        continue
+      let suffix = "_DIR"
+      if dEq < suffix.len:
+        continue
+      let component = entry[0 ..< dEq - suffix.len]
+      if component in seen:
+        continue
+      seen.add(component)
+      effectiveCacheVars.add(entry)
     # M9.R.15j.3 — inject ``-Wl,--copy-dt-needed-entries`` into the
     # default linker-flag cache vars so transitive DT_NEEDED dependencies
     # of sibling KF6 / Qt6 libraries resolve correctly.
@@ -317,6 +337,20 @@ proc cmake_package*(srcDir: string;
     depRefs.add(stripConstraint(raw))
   for raw in registeredBuildDeps(pkgName):
     depRefs.add(stripConstraint(raw))
+  # M9.R.15o.1 — virtually inject libxkbcommon + mesa as tool-identity
+  # refs whenever any qt6-* dep is in the recipe's deps, so the M9.R.14e
+  # search-path channels (PKG_CONFIG_PATH / CMAKE_PREFIX_PATH / CPATH /
+  # LIBRARY_PATH / LD_LIBRARY_PATH) reach the action env at fork time.
+  # Without this Qt6Gui's CMake config-package ``find_dependency(XKB)`` +
+  # ``find_dependency(GLESv2)`` walks miss the sibling install-mirrors
+  # at ``recipes/packages/source/{libxkbcommon,mesa}/.repro/output/...``
+  # and ``find_package(Qt6Gui REQUIRED)`` fails for every KF6 / Plasma
+  # consumer. The helper is inert when no qt6-* dep is present and
+  # silently skips deps the recipe already declared (so the M9.R.15n
+  # hand-patched recipes don't see duplicate refs).
+  if projectRoot.len > 0:
+    for extra in m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, pkgName):
+      depRefs.add(extra)
   appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
