@@ -46,6 +46,9 @@ package kiconthemesSource:
     "kcoreaddons >=6.0"
     "ki18n >=6.0"
     "kwidgetsaddons >=6.0"
+    ## M9.R.15k.3 — kiconthemes' CMakeLists also REQUIREs KF6ColorScheme
+    ## (CMakeLists.txt:70); the M9.R.15j.4 buildDep set omitted it.
+    "kcolorscheme >=6.0"
 
   config:
     discard
@@ -65,6 +68,13 @@ package kiconthemesSource:
         # (qt6-declarative is present but kiconthemes' QtQuick plugin
         # adds unused QML symbol dependency on Quick/Qml).
         "KICONTHEMES_USE_QTQUICK=OFF",
+        # M9.R.15k.3 — disable USE_BreezeIcons. The upstream CMakeLists
+        # makes KF6BreezeIcons a REQUIRED find_package when USE_BreezeIcons
+        # is ON (default); we don't carry a BreezeIcons recipe yet so
+        # disable the embed. kiconthemes resolves icon themes through the
+        # XDG icon-theme spec at runtime so this only skips the build-
+        # time embedded-fallback.
+        "USE_BreezeIcons=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6IconThemes")
