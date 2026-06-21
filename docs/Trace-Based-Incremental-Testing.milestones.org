@@ -2293,11 +2293,41 @@
   back to `events.log` when absent — so the transition never breaks), each
   individually implemented→adversarially-reviewed→committed.
 
-  - [ ] M23e-1 — ct-print `--json-events` reads the split streams (calls/steps/values/
+  - [X] M23e-1 — ct-print `--json-events` reads the split streams (calls/steps/values/
     events.dat/interning) when the `meta.dat` flags are present, producing BYTE-
     IDENTICAL output to the events.log path; falls back to `events.log` otherwise.
     This transparently covers the reprobuild ENGINE (it consumes `ct-print
     --json-events`). [codetracer-trace-format-nim]
+    NOTE (finding): the premise that ct-print "reads events.log today for
+    --json-events" was incorrect for the v4 path.  ct-print's v4 reader
+    (`NewTraceReader` → `printJsonEventsV4`) has ALWAYS sourced events from the
+    split per-kind streams (`steps.dat`/`calls.dat`/`values.dat`/`events.dat`
+    + interning) and NEVER from `events.log`; M23a–d only surfaced the flag
+    BITS.  So "prefer split when present" was already true (the canonical Rust
+    writer emits `events.log` + split additively; ct-print reads the split half).
+    The REAL gap fixed here: an `events.log`-only legacy bundle (no split
+    streams) was still opened by the v4 reader, whose lazy stream readers found
+    nothing and emitted an (almost) EMPTY event array.  Fix: ct-print now
+    inspects the on-disk layout (`steps.dat` present?  `events.log` present?)
+    and routes events.log-only bundles to the legacy reader so their events
+    surface; split-bearing bundles (with or without `events.log`) stay on the
+    v4 path byte-for-byte.
+    Tests: `tests/test_ct_print_events_log_fallback.nim` — (1) split bundle →
+    canonical lowercase `type`-tagged array; (2) a bundle carrying BOTH a
+    grafted `events.log` and the split streams reads via split, BYTE-IDENTICAL
+    to the split-only bundle (the achievable byte-identity oracle — both reads
+    go through the split path); (3) events.log-only bundle now yields a
+    populated event array (regression guard against the empty-fallback bug).
+    Golden `test_ct_print_full` green; reprobuild `t_call_stream_split` +
+    `t_ctfs_reader` green against a split bundle with the modified ct-print.
+    DIVERGENCE reported (per the STOP-and-report constraint): strict
+    byte-identity between the two READERS for an events.log-only bundle is NOT
+    achievable reader-side — the legacy reader emits a different format
+    generation (capitalized `Step`/`Call`, flat, no step indices / entry-exit
+    steps / interning declarations, values keyed by `variable_id` not
+    `varname_id`), and the flat `events.log` model lacks the `varname_id` /
+    `type_id` interning and call→step linkage the split `--json-events`
+    surfaces.  No golden was changed.
   - [ ] M23e-2 — db-backend FULL `Db` construction reads the split streams when
     present (the omniscient DB, flow preloader, step/expr/event loaders, AND the
     cell/compound history + `diff.rs` that M22 left on the full-load path), falling
