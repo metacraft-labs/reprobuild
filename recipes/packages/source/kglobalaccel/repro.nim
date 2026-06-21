@@ -115,6 +115,13 @@ package kglobalaccelSource:
     ## kcoreaddons is the KF6 foundation library kglobalaccel's
     ## ``KAboutData`` / ``KShortcut`` plumbing consumes.
     "kcoreaddons >=6.0"
+    ## M9.R.15n.4 — Qt6Gui's CMake config calls find_dependency(XKB) +
+    ## find_dependency(GLESv2); libxkbcommon + mesa MUST be on the
+    ## convention's PKG_CONFIG_PATH / CMAKE_PREFIX_PATH for those probes
+    ## to succeed. Without these deps Qt6Gui's find_package returns
+    ## NOT FOUND. See M9.R.15n.3 (kcrash) for the diagnostic.
+    "libxkbcommon >=1.5"
+    "mesa >=23.3"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
