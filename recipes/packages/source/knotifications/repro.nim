@@ -118,6 +118,13 @@ package knotificationsSource:
     ## kcoreaddons is the KF6 foundation library knotifications's
     ## ``KAboutData`` / ``KShell`` plumbing consumes.
     "kcoreaddons >=6.0"
+    ## M9.R.15l.1 — knotifications' CMakeLists.txt:83 invokes
+    ## ``find_package(Canberra REQUIRED)`` via the FindCanberra ECM
+    ## find-module bundled in extra-cmake-modules. libcanberra ships the
+    ## freedesktop sound-event dispatcher (``ca_context_play``)
+    ## knotifications uses to play the configured sound for an
+    ## incoming KNotification.
+    "libcanberra >=0.30"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
