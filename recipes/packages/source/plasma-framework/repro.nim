@@ -159,6 +159,40 @@ package plasmaFrameworkSource:
     ## ``Plasma::Containment`` surfaces ``KNotification`` events
     ## through.
     "knotifications >=6.0"
+    ## M9.R.15p.4.4 — libplasma's CMakeLists.txt:13 declares
+    ## ``find_package(ECM ${KF6_MIN_VERSION} REQUIRED NO_MODULE)``.
+    "extra-cmake-modules >=6.0"
+    ## M9.R.15p.4.4 — libplasma's CMakeLists.txt:46 declares
+    ## ``find_package(Qt6 ... COMPONENTS ... Svg ...)``; qt6-svg
+    ## supplies libQt6Svg.so + Qt6SvgConfig.cmake.
+    "qt6-svg >=6.6"
+    ## M9.R.15q.1.4 — libplasma's CMakeLists.txt:46 declares
+    ## ``find_package(KF6 ... COMPONENTS ... Archive ConfigWidgets
+    ## GuiAddons IconThemes KIO WindowSystem Package KirigamiPlatform
+    ## KCMUtils Svg)``; each KF6 component must be a buildDep so the
+    ## resolver discovers the corresponding ``KF6<X>Config.cmake``.
+    "karchive >=6.0"
+    "kconfigwidgets >=6.0"
+    "kguiaddons >=6.0"
+    "kiconthemes >=6.0"
+    "kio >=6.0"
+    "kwindowsystem >=6.0"
+    "kpackage >=6.0"
+    "kirigami >=6.0"
+    "kcmutils >=6.10"
+    "ksvg >=6.0"
+    ## M9.R.15q.1.4 — libplasma's CMakeLists.txt:68 declares
+    ## ``find_package(PlasmaActivities REQUIRED ${PROJECT_DEP_VERSION})``;
+    ## the plasmaActivitiesSource recipe ships
+    ## ``PlasmaActivitiesConfig.cmake``.
+    "plasma-activities >=6.2"
+    ## M9.R.15q.1.4 — libplasma's CMakeLists.txt:70-72 declares
+    ## ``find_package(PlasmaWaylandProtocols 1.10.0 REQUIRED)`` +
+    ## ``find_package(Qt6WaylandClient REQUIRED CONFIG)`` +
+    ## ``find_package(Wayland 1.9 REQUIRED Client)``. The first two
+    ## supply CMake configs; wayland-client comes via the wayland recipe.
+    "plasma-wayland-protocols"
+    "qt6-wayland >=6.6"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

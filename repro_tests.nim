@@ -2910,6 +2910,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/boost/test_boost_source.nim",
+    binary: "build/test-bin/test_boost_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
     binary: "build/test-bin/test_ca_certificates_source",
     defines: @[],
@@ -3112,6 +3120,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/json-c/test_json_c_source.nim",
     binary: "build/test-bin/test_json_c_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/kcmutils/test_kcmutils_source.nim",
+    binary: "build/test-bin/test_kcmutils_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -3432,6 +3448,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/pkgconf/test_pkgconf_source.nim",
     binary: "build/test-bin/test_pkgconf_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/plasma-activities/test_plasma_activities_source.nim",
+    binary: "build/test-bin/test_plasma_activities_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

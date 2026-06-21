@@ -112,66 +112,66 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
   when defined(linux):
     test "linux_end_to_end_patchelf_against_synthetic_elf":
       let patchelfPath = findExe("patchelf")
-      if patchelfPath.len == 0:
-        skip()
-        return
       let ccPath =
         if findExe("cc").len > 0: findExe("cc")
         elif findExe("gcc").len > 0: findExe("gcc")
         else: ""
-      if ccPath.len == 0:
+      # patchelf / cc may not be provisioned in the host-side action
+      # graph; skip (rather than fail) when the tools are absent. Written
+      # as if/else because std/unittest's `test` body disallows `return`.
+      if patchelfPath.len == 0 or ccPath.len == 0:
         skip()
-        return
+      else:
 
-      let scratch = createTempDir("repro-m9r14f-2-", "")
-      defer: removeDir(scratch)
+        let scratch = createTempDir("repro-m9r14f-2-", "")
+        defer: removeDir(scratch)
 
-      # Build a tiny shared library + executable so patchelf has real
-      # ELFs to operate on.
-      writeFile(scratch / "lib.c", "int foo(void) { return 42; }\n")
-      writeFile(scratch / "main.c",
-        "int foo(void); int main(void) { return foo(); }\n")
-      let compileLib = startProcess(ccPath,
-        args = ["-shared", "-fPIC", "-o", scratch / "libfoo.so",
-                scratch / "lib.c"],
-        options = {poUsePath, poParentStreams})
-      check waitForExit(compileLib) == 0
-      let compileExe = startProcess(ccPath,
-        args = ["-o", scratch / "main", scratch / "main.c",
-                "-L" & scratch, "-lfoo", "-Wl,-rpath,/will/overwrite"],
-        options = {poUsePath, poParentStreams})
-      check waitForExit(compileExe) == 0
+        # Build a tiny shared library + executable so patchelf has real
+        # ELFs to operate on.
+        writeFile(scratch / "lib.c", "int foo(void) { return 42; }\n")
+        writeFile(scratch / "main.c",
+          "int foo(void); int main(void) { return foo(); }\n")
+        let compileLib = startProcess(ccPath,
+          args = ["-shared", "-fPIC", "-o", scratch / "libfoo.so",
+                  scratch / "lib.c"],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(compileLib) == 0
+        let compileExe = startProcess(ccPath,
+          args = ["-o", scratch / "main", scratch / "main.c",
+                  "-L" & scratch, "-lfoo", "-Wl,-rpath,/will/overwrite"],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(compileExe) == 0
 
-      # Construct the same RPATH the install-mirror script generates.
-      let expectedRpath = "$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:" &
-        scratch & "/peerlib"
-      let patch = startProcess(patchelfPath,
-        args = ["--set-rpath", expectedRpath, scratch / "main"],
-        options = {poUsePath, poParentStreams})
-      check waitForExit(patch) == 0
+        # Construct the same RPATH the install-mirror script generates.
+        let expectedRpath = "$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:" &
+          scratch & "/peerlib"
+        let patch = startProcess(patchelfPath,
+          args = ["--set-rpath", expectedRpath, scratch / "main"],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(patch) == 0
 
-      # Read the RPATH back via `patchelf --print-rpath`.
-      let probe = startProcess(patchelfPath,
-        args = ["--print-rpath", scratch / "main"],
-        options = {poUsePath})
-      let probeOutput = probe.outputStream.readAll().strip()
-      check waitForExit(probe) == 0
-      check probeOutput == expectedRpath
-      check probeOutput.contains("$ORIGIN")
-      check probeOutput.contains(scratch & "/peerlib")
+        # Read the RPATH back via `patchelf --print-rpath`.
+        let probe = startProcess(patchelfPath,
+          args = ["--print-rpath", scratch / "main"],
+          options = {poUsePath})
+        let probeOutput = probe.outputStream.readAll().strip()
+        check waitForExit(probe) == 0
+        check probeOutput == expectedRpath
+        check probeOutput.contains("$ORIGIN")
+        check probeOutput.contains(scratch & "/peerlib")
 
-      # Idempotent: re-apply the same RPATH; the readback is
-      # byte-identical.
-      let patch2 = startProcess(patchelfPath,
-        args = ["--set-rpath", expectedRpath, scratch / "main"],
-        options = {poUsePath, poParentStreams})
-      check waitForExit(patch2) == 0
-      let probe2 = startProcess(patchelfPath,
-        args = ["--print-rpath", scratch / "main"],
-        options = {poUsePath})
-      let probe2Output = probe2.outputStream.readAll().strip()
-      check waitForExit(probe2) == 0
-      check probe2Output == expectedRpath
+        # Idempotent: re-apply the same RPATH; the readback is
+        # byte-identical.
+        let patch2 = startProcess(patchelfPath,
+          args = ["--set-rpath", expectedRpath, scratch / "main"],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(patch2) == 0
+        let probe2 = startProcess(patchelfPath,
+          args = ["--print-rpath", scratch / "main"],
+          options = {poUsePath})
+        let probe2Output = probe2.outputStream.readAll().strip()
+        check waitForExit(probe2) == 0
+        check probe2Output == expectedRpath
 
   else:
     test "non_linux_host_documents_runtime_skip":
