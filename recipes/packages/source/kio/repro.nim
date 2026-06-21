@@ -157,6 +157,13 @@ package kioSource:
     ## kitemviews supplies the QtWidgets model/view extensions kio's
     ## file-dialog list / icon / tree views consume.
     "kitemviews >=6.0"
+    ## M9.R.15o.3 — Qt6Gui's CMake config calls find_dependency(XKB) +
+    ## find_dependency(GLESv2); see M9.R.15n.3 (kcrash) for the
+    ## diagnostic. Architectural fix at the M9.R.15o.1 helper level
+    ## was constructor-only; the M9.R.14e search-path channels still
+    ## need an explicit dep declaration.
+    "libxkbcommon >=1.5"
+    "mesa >=23.3"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
