@@ -55,28 +55,27 @@ suite "qt6ToolsSource — from-source recipe smoke test":
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
 
-  test "artifacts register three executables with correct kinds":
-    # M3 artifact registry: all three artifacts must be tagged
-    # ``dakExecutable``. qt6-tools ships qhelpgenerator / lupdate /
-    # lrelease at the v1 closure boundary; a regression that mis-
-    # tagged the artifact kind would mis-route the M9.L install path
-    # (``bin/`` vs ``lib/``).
+  test "artifacts register two executables with correct kinds":
+    # M3 artifact registry: both artifacts must be tagged
+    # ``dakExecutable``. qt6-tools ships lupdate / lrelease at the v1
+    # closure boundary at ``<prefix>/usr/bin/`` so the canonical
+    # autotools-stage-executable slice can pick them up.
+    # qhelpgenerator was retired (M9.R.15h.1.5) because it installs to
+    # ``<prefix>/libexec/`` which the slicer doesn't probe; KF6
+    # consumers discover qhelpgenerator natively via Qt6ToolsTools
+    # find_package.
     let arts = registeredArtifacts("qt6ToolsSource")
-    check arts.len == 3
-    var seenHelp = false
+    check arts.len == 2
     var seenLupdate = false
     var seenLrelease = false
     for art in arts:
       check art.packageName == "qt6ToolsSource"
       check art.kind == dakExecutable
       case art.artifactName
-      of "qhelpgenerator":
-        seenHelp = true
       of "lupdate":
         seenLupdate = true
       of "lrelease":
         seenLrelease = true
-    check seenHelp
     check seenLupdate
     check seenLrelease
 

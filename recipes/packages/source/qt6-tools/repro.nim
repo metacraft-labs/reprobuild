@@ -167,11 +167,15 @@ package qt6ToolsSource:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
     discard
 
-  executable qhelpgenerator:
-    ## ``qhelpgenerator`` — QCH-format compressed help generator the
-    ## ECM (Extra CMake Modules) macros probe for at configure time
-    ## even when ``BUILD_QCH=OFF``. v1 records the artifact only.
-    discard
+  # M9.R.15h.1.5 — qhelpgenerator artifact retired. qt6-tools installs
+  # qhelpgenerator at ``<prefix>/libexec/qhelpgenerator`` (not
+  # ``<prefix>/usr/bin/``), but the autotools/stage-executable slice
+  # method in package_result hard-codes ``usr/bin`` as the probe root.
+  # Removing the package-level executable() artifact unblocks publish
+  # since KF6 consumers discover qhelpgenerator via CMake's
+  # find_package(Qt6ToolsTools) which probes ``<prefix>/libexec/``
+  # natively. lupdate + lrelease remain because they install at the
+  # canonical ``<prefix>/usr/bin/`` location.
 
   executable lupdate:
     ## ``lupdate`` — Qt Linguist translation-source updater KF6's
@@ -227,7 +231,6 @@ package qt6ToolsSource:
         "QT_GENERATE_SBOM=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.executable("qhelpgenerator")
       discard pkg.executable("lupdate")
       discard pkg.executable("lrelease")
     finally:
