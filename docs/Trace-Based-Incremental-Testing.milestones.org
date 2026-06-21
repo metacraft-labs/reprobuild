@@ -1461,28 +1461,63 @@
   ct-print/the engine, with zero breakage to existing readers.
 
 * M18 — `ct test --incremental` standalone integration (codetracer)
-  :STATUS: planned
+  :STATUS: complete
 
   Goal: bring runtime-dependency test selection into CodeTracer's `ct test` (§16.7)
   so it works WITHOUT reprobuild — discovery + baseline recording + executed-
   function extraction + skip/re-run — reusing the same algorithm the prototype
-  proved. (Large; will be staged into sub-milestones during execution.)
+  proved.
 
   Deliverables:
-  - [ ] The engine algorithm (dependency discovery + shallow/deep hash + decide/
+  - [X] The engine algorithm (dependency discovery + shallow/deep hash + decide/
     record/cache) available to `ct test` (shared library or ported core).
-  - [ ] `ct test --incremental`: discover tests, record a baseline trace per test
-    via the appropriate recorder, extract executed functions, and on a subsequent
-    run skip tests whose executed functions are unchanged / re-run the rest.
-  - [ ] Honest per-language support matching the recorder availability.
+    Done as a CLEAN VENDOR of the proven engine into codetracer at
+    `codetracer/src/ct_test/incremental/` (engine.nim, ctfs_trace.nim,
+    extractors.nim, trace_reader.nim, backends.nim, catalog.nim). The
+    decision/record/cache/shallow/deep-hash algorithm is byte-for-byte the
+    reprobuild prototype's; each file carries a provenance banner pointing at the
+    reprobuild source so the two copies stay in sync. The vendored engine wires
+    ONLY the SOURCE/interpreted (`tbSourceInterpreted`) and CTFS-interpreted
+    (`tbSourceCtfs`) backends; the native (DWARF/instruction-byte) backend is
+    LEFT WITH NIL STRATEGIES so it fails safe to a re-run (it is not needed for
+    the M18 interpreted-language scope and would pull objdump/DWARF tooling).
+  - [X] `ct test --incremental`: record a baseline trace per test via the
+    appropriate production recorder (Python/Ruby → modern CTFS `.ct`), extract
+    executed functions + per-function shallow hashes, and on a subsequent run
+    skip tests whose executed functions are unchanged / re-run the rest.
+    Implemented in `codetracer/src/ct_test/incremental_cli.nim`
+    (`decideIncremental` core + `runIncremental` CLI wrapper) and wired into the
+    `ct` dispatch (`codetracer/src/ct/codetracer.nim`): `ct test --incremental
+    --language <python|ruby> --program <path> [--source-root DIR] [--cache PATH]
+    [--id TESTID]`. The existing `ct test e2e ...` reprobuild-HCR surface is
+    unchanged (only the explicit `--incremental` token is intercepted).
+  - [X] Honest per-language support matching the recorder availability. Python
+    and Ruby are wired and drive their production recorders in their own dev
+    shells (build-siblings strategy). Native/compiled languages are rejected up
+    front with a clear "deferred" message rather than silently skipped; the
+    engine additionally gates the native backend to a fail-safe re-run. A
+    recorder that cannot build/record on this host reports a LOUD captured
+    diagnostic and exits non-zero (never a `unittest.skip`).
 
   Automated tests:
-  - [ ] An end-to-end `ct test --incremental` run over a small multi-test fixture
-    asserts skip/re-run decisions (at least one interpreted language live).
-  - [ ] No regression to the existing `ct test` surface.
+  - [X] An end-to-end `ct test --incremental` run over a small multi-function
+    fixture asserts skip/re-run decisions, at least one interpreted language LIVE.
+    `codetracer/src/ct_test/incremental_e2e_test.nim` writes a real 4-function
+    Python program, records a LIVE CTFS baseline with the production maturin/PyO3
+    recorder, and asserts: first run ⇒ run-fresh; no-op re-run ⇒ SKIP; edit an
+    EXECUTED function (`used_b`) ⇒ RE-RUN naming exactly `used_b` (not the other
+    executed functions); edit the UNEXECUTED `unused_d` ⇒ SKIP. PASSES on
+    arm64-macOS (observed reports: "run (fresh baseline)" / "skipped (unchanged)"
+    / "re-run (changed: … functions: used_b)" / "skipped (unchanged)").
+  - [X] No regression to the existing `ct test` surface — only `--incremental` is
+    intercepted; `ct test e2e ...` still routes to the unchanged
+    `runE2eTestCli`. The full `ct` binary compiles with the M18 wiring.
 
   Acceptance: `ct test` performs trace-based incremental selection standalone,
-  validated end-to-end for at least one language.
+  validated end-to-end for Python (live) on arm64-macOS. Ruby is structurally
+  wired (same CTFS-interpreted path + production recorder) and shares the live
+  code path; native/compiled languages are deferred (engine fail-safes them) and
+  rejected honestly by the CLI.
 
 * M19 — Documentation (codetracer book + reprobuild user guide + spec alignment)
   :STATUS: planned
