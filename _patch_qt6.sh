@@ -1,7 +1,7 @@
-#!/bin/bash
-PATCHELF=/nix/store/5wf9wpdkxs30811kfgkicn9i3nz9jhsh-patchelf-0.15.0/bin/patchelf
-GCC=/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/bin/gcc
-stdcxx_dir=$($GCC -print-file-name=libstdc++.so.6)
+#!/usr/bin/env bash
+# Must run inside a nix-shell -p gcc patchelf so gcc / patchelf are on PATH.
+stdcxx_dir=$(gcc -print-file-name=libstdc++.so.6)
+PATCHELF=patchelf
 stdcxx_dirname=$(dirname "$stdcxx_dir")
 echo "stdcxx_dirname=$stdcxx_dirname"
 
