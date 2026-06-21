@@ -25,11 +25,11 @@ package kdbusaddonsSource:
 
   nativeBuildDeps:
     "cmake >=3.16"
-    "extra-cmake-modules >=6.0"
     "ninja >=1.10"
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     "qt6-base >=6.6"
     "qt6-tools >=6.6"
 

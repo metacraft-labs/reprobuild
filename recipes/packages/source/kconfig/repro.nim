@@ -158,7 +158,6 @@ package kconfigSource:
     ## kconfig 6.x requires cmake 3.16 for the modern ECM + Qt6
     ## ``find_package`` semantics the KF6 ABI line depends on.
     "cmake >=3.16"
-    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux — the compile action
     ## invokes ``ninja`` (or ``cmake --build``) against the CMake build
     ## directory.
@@ -167,6 +166,7 @@ package kconfigSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtWidgets / QtXml which the
     ## three kconfig libraries wrap on top of. 6.6 is the minimum the
     ## 6.10 frameworks line targets.

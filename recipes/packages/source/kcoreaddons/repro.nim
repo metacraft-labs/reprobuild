@@ -165,7 +165,6 @@ package kcoreaddonsSource:
     ## ECM-as-found-package + ``add_library(... ALIAS ...)`` semantics
     ## the KF6 ABI line depends on.
     "cmake >=3.16"
-    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux — the compile action
     ## invokes ``ninja`` (or ``cmake --build``) against the CMake build
     ## directory.
@@ -174,6 +173,7 @@ package kcoreaddonsSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtConcurrent / QtNetwork the KF6
     ## helpers wrap on top of (KJob ~ QObject, KAboutData ~ QSettings,
     ## KPluginFactory ~ QPluginLoader, etc.). 6.6 is the minimum the

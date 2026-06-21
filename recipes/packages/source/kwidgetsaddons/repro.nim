@@ -92,13 +92,13 @@ package kwidgetsaddonsSource:
   nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
-    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kwidgetsaddons is C++17.
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtWidgets which the
     ## kwidgetsaddons surface extends.
     "qt6-base >=6.6"

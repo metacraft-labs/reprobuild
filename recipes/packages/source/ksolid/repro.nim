@@ -108,13 +108,13 @@ package ksolidSource:
   nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
-    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — ksolid is C++17.
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtXml / QtQml ksolid wraps
     ## for the udev / UPower / NetworkManager bridges.
     "qt6-base >=6.6"
