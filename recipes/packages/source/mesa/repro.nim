@@ -63,13 +63,19 @@
 ##                                 vendor backends; the swrast software
 ##                                 rasterizer satisfies compositor
 ##                                 startup probes without GPU).
-##   * ``gallium-drivers=swrast`` — software rasterizer ONLY. No
-##                                 hardware drivers (i915, iris, radeon,
-##                                 nouveau, etc.) — these would pull
-##                                 libpciaccess + LLVM + kernel-DRM
-##                                 deps far beyond v1 scope. swrast is
-##                                 enough for KF6 / GNOME / Qt6 to link
-##                                 + run their software-fallback paths.
+##   * ``gallium-drivers=softpipe`` — software rasterizer ONLY (no
+##                                 LLVM JIT). Mesa 24.2.x deprecates
+##                                 ``swrast`` as an alias for
+##                                 ``softpipe,llvmpipe`` (removed in
+##                                 25.0); ``softpipe`` is the pure
+##                                 C software rasterizer with no LLVM
+##                                 dependency. No hardware drivers
+##                                 (i915, iris, radeon, nouveau, etc.)
+##                                 — these would pull libpciaccess +
+##                                 LLVM + kernel-DRM deps far beyond
+##                                 v1 scope. softpipe is enough for
+##                                 KF6 / GNOME / Qt6 to link + run
+##                                 their software-fallback paths.
 ##   * ``platforms=wayland``     — Wayland platform support ONLY. No
 ##                                 X11 (xcb/xlib) — the v1 desktop is
 ##                                 Wayland-native.
@@ -147,9 +153,15 @@ package mesaSource:
     "ninja >=1.10"
     ## pkg-config is used by meson to discover dependencies.
     "pkg-config"
-    ## python3 drives mesa's many GLSL/GL spec code generators (over
-    ## a dozen .py scripts in src/).
-    "python3 >=3.8"
+    ## python3-with-modules drives mesa's many GLSL/GL spec code
+    ## generators (over a dozen .py scripts in src/). Mesa hard-requires
+    ## the ``mako`` template module (src/meson.build:958 errors with
+    ## "Python (3.x) mako module >= 0.8.0 required to build mesa" if
+    ## the bare python3 is used). We consume the
+    ## python3-with-modules stub (which bundles setuptools + mako +
+    ## markdown via nixpkgs' ``python3.withPackages``) to satisfy the
+    ## probe.
+    "python3-with-modules"
     ## bison generates the GLSL preprocessor parser
     ## (src/compiler/glsl/glcpp/glcpp-parse.y).
     "bison"
@@ -208,7 +220,7 @@ package mesaSource:
     try:
       let opts = @[
         "vulkan-drivers=",
-        "gallium-drivers=swrast",
+        "gallium-drivers=softpipe",
         "platforms=wayland",
         "glx=disabled",
         "gles1=disabled",
