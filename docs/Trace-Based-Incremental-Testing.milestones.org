@@ -1730,3 +1730,116 @@
     call-stream split.
   - Ruby 5 golden drifts; JS 2 transitive_composition; shell 3 bash e2e
     (metadata JSON) — all pre-existing as detailed above.
+
+# =============================================================================
+# Phase 5 — Follow-ups (owner: "implement all follow-ups", 2026-06-21)
+# =============================================================================
+# The follow-ups recorded at the end of Phase 4: (M21) the M18 engine is vendored
+# into codetracer as a second physical copy — guarantee a single source of truth;
+# (M22) retire the in_memory_trace_reader full-load by making the step/value
+# streams seekable too (completes the M17b spec-violation fix); (M23) finish the
+# trace-events.md "Event Stream Redesign" beyond calls.dat (compact step encoding,
+# value stream, events.dat, varint interning). M16 (Intel PT) stays deferred to an
+# x86+PT host (owner-approved) and is NOT part of Phase 5.
+
+* M21 — Single source of truth for the incremental engine (de-duplicate the vendor)
+  :STATUS: planned
+
+  Goal: M18 vendored the engine core from reprobuild's `repro_ct_incremental` into
+  `codetracer/src/ct_test/incremental/` as a SECOND physical copy (faithful, with
+  provenance banners). Two copies can silently drift. Establish a single source of
+  truth so a change to the algorithm cannot diverge between the two consumers.
+
+  Design constraint: `codetracer` must NOT acquire a build/runtime dependency on
+  `reprobuild` being present (codetracer ships standalone), and `reprobuild` must
+  NOT depend on `codetracer` — so a straight "move it to one repo and import across"
+  is rejected in BOTH directions. The pragmatic single-source-of-truth that
+  respects both independences: keep `reprobuild/libs/repro_ct_incremental` as the
+  CANONICAL source, treat the codetracer copy as GENERATED, and ENFORCE identity.
+  (A physical relocation into a shared package is a separate team architecture
+  decision, noted but out of scope.)
+
+  Deliverables:
+  - [ ] A deterministic sync mechanism: a script that regenerates the codetracer
+    vendored copy from the canonical reprobuild source (applying only the
+    provenance-banner + the documented `engine.nim` interpreted-only trim, as a
+    mechanical transform — no hand edits), so the copy is reproducible from canon.
+  - [ ] A DRIFT-CHECK test (lives where it can see BOTH — reprobuild, with
+    codetracer as a workspace sibling) that FAILS if the codetracer vendored files
+    are not identical to `sync(canonical)`. Not a silent skip: if the codetracer
+    sibling is absent it errors with a clear diagnostic (or is a reprobuild-CI
+    requirement), never a quiet pass.
+  - [ ] Regenerate the codetracer copy via the script (byte-identical to M18's, or
+    an explained improvement); both consumers keep building + their tests green.
+
+  Automated tests:
+  - [ ] The drift-check passes on the in-sync tree, and FAILS when a vendored file
+    is deliberately perturbed (prove it actually detects drift).
+  - [ ] reprobuild engine suite + codetracer `incremental_e2e_test` stay green.
+
+  Acceptance: the algorithm has ONE canonical home; the codetracer copy is
+  mechanically generated and drift-guarded, so the two cannot silently diverge.
+
+* M22 — Retire the in_memory_trace_reader full-load (seekable step/value streams)
+  :STATUS: planned
+
+  Goal: complete the M17b spec-violation fix. M17b made the CALL tree seekable
+  (`calls.dat`); the step/value/cell lookups still materialize a full in-memory
+  `Db` (`in_memory_trace_reader.rs`), and `diff.rs` still uses it. Make the
+  execution + value streams seekable too, so the db-backend never fully
+  materializes a (large/network-loaded) `.ct`, and the full-load reader is retired
+  (or bounded to an explicitly-labelled tiny-trace/test fallback only).
+
+  This depends on the materialized `.ct` carrying seekable `steps.dat` (+ value)
+  streams per trace-events.md (see M23) — so M22 and M23 are coordinated: M23
+  produces the seekable step/value streams; M22 consumes them in the db-backend
+  and routes the production read paths (DAP step/value/cell handlers, `diff.rs`)
+  through the seekable reader, retiring the `Db` full-load.
+
+  Deliverables:
+  - [ ] db-backend reads steps/values/cells on-demand from the seekable
+    `steps.dat` (+ value) streams via CTFS block seeking + the companion index +
+    an LRU, never the whole stream into memory.
+  - [ ] Route the remaining production read paths (DAP handlers, `diff.rs`, the
+    `dap_server` placeholder) off `InMemoryTraceReader`; retire it or bound it to a
+    clearly-labelled small-trace/test fallback.
+  - [ ] Bounded-decompression PROVEN by a counter test (as M17b did for calls),
+    and concurrent-reader + backward-compat tests; existing db-backend tests green.
+
+  Automated tests:
+  - [ ] Fetch a step/value by id with bounded decompression (counter-proven, not
+    argued); concurrent readers; legacy bundle reads unchanged.
+
+  Acceptance: no production read path fully materializes a `.ct`; the full-load
+  `Db` is retired/bounded; the seekable reader is the network/large-trace path.
+
+* M23 — Finish the trace-events.md Event Stream Redesign (steps/value/events.dat)
+  :STATUS: planned — LARGE, staged, product-wide
+
+  Goal: implement the remainder of `codetracer-trace-format-spec/trace-events.md`'s
+  "Event Stream Redesign" beyond the `calls.dat` split already shipped: the compact
+  execution stream (`steps.dat` with AbsoluteStep/DeltaStep), the parallel value
+  stream, the I/O `events.dat`, and varint interning tables (`paths.dat`/`funcs.dat`/
+  `types.dat`/`varnames.dat`) — replacing the legacy single combined `events.log`.
+
+  SCOPE WARNING: this is the deepest, product-WIDE change — it touches the writer
+  (all recorders), every reader (db-backend, ct-print, reprobuild engine, visual
+  replay), and the GUI. It MUST be staged + additive/gated like the calls.dat split
+  (M17a), never a flag-day break. Decompose during execution into sub-milestones,
+  one stream at a time, each additive behind a `meta.dat` capability flag with
+  backward-compatible readers and round-trip + seekable tests, validated across the
+  affected recorders before the next. Treat each sub-milestone with the same
+  implement→adversarial-review→commit process. (Sequencing: `steps.dat` first — it
+  unblocks M22 — then the value stream, then `events.dat`, then varint interning,
+  then retiring `events.log` once every reader consumes the split streams.)
+
+  Deliverables (high-level; refined per sub-milestone):
+  - [ ] `steps.dat` compact seekable execution stream (AbsoluteStep/DeltaStep) +
+    `steps.idx`, additive behind a meta.dat flag; readers updated; round-trip +
+    seekable tests; unblocks M22.
+  - [ ] Parallel value stream; I/O `events.dat`; varint interning tables.
+  - [ ] Retire the legacy `events.log` only AFTER every reader consumes the split
+    streams; backward-compat for old bundles retained.
+
+  Acceptance: materialized `.ct` is the spec's multi-stream format end-to-end,
+  read seekably by every consumer, with no regression and a clean legacy-read path.
