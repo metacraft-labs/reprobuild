@@ -55,6 +55,7 @@ import ./libudev
 import ./libgpg_error
 import ./libacl
 import ./libcrypt
+import ./libltdl
 import ./libseccomp
 import ./mtdev
 import ./pcre2
@@ -158,6 +159,7 @@ export libudev
 export libgpg_error
 export libacl
 export libcrypt
+export libltdl
 export libseccomp
 export mtdev
 export pcre2
