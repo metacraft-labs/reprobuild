@@ -3190,6 +3190,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/kitemmodels/test_kitemmodels_source.nim",
+    binary: "build/test-bin/test_kitemmodels_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/kmod/test_kmod_source.nim",
     binary: "build/test-bin/test_kmod_source",
     defines: @[],
