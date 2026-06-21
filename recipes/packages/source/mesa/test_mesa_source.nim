@@ -9,8 +9,11 @@
 ##
 ##   * ``fetch:`` block round-trip (M9.H) — URL + sha256 length +
 ##     algorithm + kind discriminant + extractStrip.
-##   * FOUR library artifact registration (M3) — libGL + libEGL +
-##     libGLESv2 + libGbm, all tagged ``dakLibrary``.
+##   * THREE library artifact registration (M3) — libEGL +
+##     libGLESv2 + libGbm, all tagged ``dakLibrary``. libGL is NOT
+##     declared: the v1 minimal config (glx=disabled, no libglvnd)
+##     does not produce a libGL.so — Qt6OpenGL links against
+##     libGLESv2 directly when libGL is absent.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
@@ -47,10 +50,9 @@ suite "mesaSource — from-source recipe smoke test":
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
 
-  test "library artifacts register all four shared objects":
+  test "library artifacts register all three shared objects":
     let arts = registeredArtifacts("mesaSource")
-    check arts.len == 4
-    var seenGL = false
+    check arts.len == 3
     var seenEGL = false
     var seenGLESv2 = false
     var seenGbm = false
@@ -58,8 +60,6 @@ suite "mesaSource — from-source recipe smoke test":
       check art.packageName == "mesaSource"
       check art.kind == dakLibrary
       case art.artifactName
-      of "libGL":
-        seenGL = true
       of "libEGL":
         seenEGL = true
       of "libGLESv2":
@@ -68,7 +68,6 @@ suite "mesaSource — from-source recipe smoke test":
         seenGbm = true
       else:
         discard
-    check seenGL
     check seenEGL
     check seenGLESv2
     check seenGbm

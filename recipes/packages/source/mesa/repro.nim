@@ -1,9 +1,13 @@
 ## Source-from-tarball mesa recipe — drives M9.R.15m.1 (the MAJOR
 ## OpenGL/EGL/GBM gap blocking the kwin + mutter compositors and the
 ## qt6-base OpenGL component). Mesa is the canonical open-source 3D
-## graphics stack: it provides libGL.so / libEGL.so / libGLESv2.so /
-## libgbm.so — the four ABIs Wayland compositors + Qt's OpenGL backend
-## hard-require from the host.
+## graphics stack: in the v1 minimal configuration (Wayland + swrast,
+## no GLX, no GLVND) it provides libEGL.so / libGLESv2.so / libgbm.so
+## — the three ABIs Wayland compositors hard-require from the host.
+## (The classic ``libGL.so`` desktop GL entry point requires either
+## GLX support or libglvnd as a vendor-neutral dispatch layer; neither
+## is in v1 scope. Qt6OpenGL links against libGLESv2 directly when no
+## libGL is present, so this is a viable subset.)
 ##
 ## ## Why mesa matters for the v1 desktop story
 ##
@@ -210,15 +214,6 @@ package mesaSource:
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
     discard
-  library libGL:
-    ## ``libGL.so`` — the desktop OpenGL ABI consumed by Qt6OpenGL
-    ## + legacy GL applications. Software-rasterized via swrast in
-    ## the v1 configuration.
-    ## v1 records the artifact only; the per-artifact build body
-    ## lands in M9.L when the convention's ninja-spawn + install-glue
-    ## closes.
-    discard
-
   library libEGL:
     ## ``libEGL.so`` — the EGL ABI consumed by kwin + mutter +
     ## Qt6OpenGL for Wayland-native GL context creation.
@@ -259,7 +254,6 @@ package mesaSource:
         "microsoft-clc=disabled",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
-      discard pkg.library("libGL")
       discard pkg.library("libEGL")
       discard pkg.library("libGLESv2")
       discard pkg.library("libGbm")
