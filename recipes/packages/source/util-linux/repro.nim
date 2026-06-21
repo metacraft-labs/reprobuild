@@ -302,6 +302,11 @@ package utilLinuxSource:
         "--disable-makeinstall-chown",
         "--disable-makeinstall-setuid",
         "--disable-bash-completion",
+        # M9.R.15l.2 — liblastlog2 needs sqlite3 (sql-backed lastlog
+        # replacement); the v1 desktop story does not consume lastlog
+        # so disable to avoid a sqlite3-dev-headers gap. systemd-logind
+        # consumes wtmpdb instead of lastlog on modern stacks.
+        "--disable-liblastlog2",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("mount")

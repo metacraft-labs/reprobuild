@@ -12,11 +12,14 @@
 
 import ./qt6_tools
 import ./qt6_declarative
+import ./qt6_svg
 import ./kf6_base
 import ./karchive
 import ./kbookmarks
 import ./kcodecs
+import ./kcolorscheme
 import ./kcompletion
+import ./kconfigwidgets
 import ./kcrash
 import ./kdbusaddons
 import ./kguiaddons
@@ -27,11 +30,14 @@ import ./kwindowsystem
 
 export qt6_tools
 export qt6_declarative
+export qt6_svg
 export kf6_base
 export karchive
 export kbookmarks
 export kcodecs
+export kcolorscheme
 export kcompletion
+export kconfigwidgets
 export kcrash
 export kdbusaddons
 export kguiaddons
