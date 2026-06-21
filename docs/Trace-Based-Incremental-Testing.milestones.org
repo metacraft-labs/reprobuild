@@ -2328,19 +2328,43 @@
     `varname_id`), and the flat `events.log` model lacks the `varname_id` /
     `type_id` interning and call→step linkage the split `--json-events`
     surfaces.  No golden was changed.
-  - [ ] M23e-2 — db-backend FULL `Db` construction reads the split streams when
-    present (the omniscient DB, flow preloader, step/expr/event loaders, AND the
-    cell/compound history + `diff.rs` that M22 left on the full-load path), falling
-    back to `events.log`. Parity with the materialized path proven; DAP suite green.
-    This subsumes the M22 `[~]` remainder. [codetracer/src/db-backend] — the big one.
-  - [ ] M23e-3 — visual replay / any other `.ct` consumer reads split when present
-    (audit first: confirm whether it consumes `events.log` at all). [codetracer-visual-replay]
-  - [ ] M23e-4 — the writer DEFAULT-emits all split streams (events.log still present
-    for one transition release); every materialized recorder now produces the full
-    split. Additive — readers (now split-preferring) use them. [codetracer-trace-format(+nim)]
-  - [ ] M23e-5 — the writer drops `events.log` (split-only); confirm EVERY reader is
-    green without `events.log`; remove the legacy combined-stream write path. The
-    capstone. [codetracer-trace-format(+nim)]
+  AUDIT FINDING (2026-06-21, read-only audit after M23e-1) — production `.ct` is
+  ALREADY split-only, so most of the originally-feared migration does not exist:
+   * The Nim `MultiStreamTraceWriter` (v4), which ALL live recorders (Ruby/Python/
+     JS/shell) drive via FFI, emits ONLY the split streams (`steps.dat`/`calls.dat`/
+     `values.dat`/`events.dat` + interning) — NO `events.log`. Production bundles
+     are split-only TODAY.
+   * The db-backend already SERVES split-only bundles: `CTFSTraceReader::open` routes
+     on `steps.dat` presence → `open_new_format_nim` (Nim FFI, reads the split
+     streams, never `events.log`); the full `Db` (omniscient DB, flow preloader,
+     loaders, cells) is built from that. The `events.log` path (`open_old_format` /
+     `load_events`) is the LEGACY/Rust-writer/test fallback only.
+   * Visual/browser replay reads through the db-backend abstraction — it does NOT
+     read `events.log` directly.
+   * `events.log` therefore survives only as: (a) the SECONDARY Rust `CtfsTraceWriter`'s
+     combined format (not used by live recording), (b) the db-backend's legacy-bundle
+     fallback reader, (c) test fixtures, and (d) possibly the streaming/follow-mode
+     reader. So the spec's redesign GOAL — production materialized `.ct` is the
+     split-stream format read seekably by every consumer — is ACHIEVED.
+  Re-scoped remaining work (the genuine, smaller pieces):
+  - [X] M23e-1 — ct-print (done above).
+  - [ ] M23e-3 — visual/browser replay: confirmed (audit) NOT a direct `events.log`
+    consumer — reads via the db-backend. NO CODE CHANGE; verify + document only.
+  - [ ] M23e-2 — db-backend: VERIFY the full `Db` (incl. the M22 `[~]` cell/compound
+    remainder) is correctly served for a production split-only bundle (it already is,
+    via `open_new_format_nim`); EXPLICITLY BOUND + document the `events.log` reading
+    (`open_old_format`/`load_events`) as the legacy-bundle/test fallback (not the
+    production path). Subsumes M22's `[~]` by confirming cells work on split bundles.
+  - [ ] M23e-4 — make the SECONDARY Rust `CtfsTraceWriter` default-emit the split
+    streams too (so even non-production Rust-writer bundles are spec-format), keeping
+    `events.log` as the legacy combined stream. Additive.
+  - [ ] M23e-5 — physically remove `events.log`: assess the streaming/follow-mode
+    reader (`streaming_ctfs_reader.rs`) — if it still needs `events.log`, migrate it
+    to the split streams or KEEP `events.log` as an explicitly-bounded streaming/legacy
+    format (honest: "retired from production, bounded for streaming/legacy") rather
+    than a risky hard-break. Drop the Rust writer's `events.log` + the db-backend
+    legacy reader only once nothing depends on them.
 
-  Acceptance: `events.log` is gone; materialized `.ct` is split-stream-only; every
-  consumer reads the spec's multi-stream format; no regression anywhere.
+  Acceptance: production materialized `.ct` is split-stream-only and served by every
+  consumer (ACHIEVED); `events.log` is removed or explicitly bounded to legacy/
+  streaming with no production dependency; no regression anywhere.
