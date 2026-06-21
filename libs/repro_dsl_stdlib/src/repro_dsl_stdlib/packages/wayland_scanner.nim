@@ -23,10 +23,12 @@ import repro_project_dsl
 
 package `wayland-scanner`:
   provisioning:
-    # nixpkgs ships wayland-scanner as part of the wayland package
-    # (alongside libwayland-client / libwayland-server / etc.). Same
-    # nixpkgsRev pinned to match wayland_protocols.nim + qt6_tools.nim
-    # so the cross-package fetch graph stays shareable.
-    nixPackage "nixpkgs#wayland", executablePath = "bin/wayland-scanner",
+    # nixpkgs ships wayland-scanner as its OWN top-level derivation
+    # (the host-side code generator is split from the target-side
+    # libwayland-client / libwayland-server / etc. so cross-compilers
+    # can pull the scanner without the runtime libs). Same nixpkgsRev
+    # pinned to match wayland_protocols.nim + qt6_tools.nim so the
+    # cross-package fetch graph stays shareable.
+    nixPackage "nixpkgs#wayland-scanner", executablePath = "bin/wayland-scanner",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
