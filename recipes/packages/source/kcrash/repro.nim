@@ -33,17 +33,10 @@ package kcrashSource:
     "qt6-base >=6.6"
     "qt6-tools >=6.6"
     "kcoreaddons >=6.0"
-    ## M9.R.15n.3 — Qt6Gui's CMake config calls find_dependency(XKB)
-    ## via its Qt6GuiDependencies.cmake. The FindXKB.cmake module lives
-    ## at qt6-base/.../lib/cmake/Qt6/3rdparty/kwin/FindXKB.cmake and
-    ## uses pkg-config to locate libxkbcommon. Without libxkbcommon as
-    ## a transitive buildDep the convention's PKG_CONFIG_PATH wiring
-    ## doesn't include xkbcommon's pkgconfig dir, so the FindXKB probe
-    ## fails and Qt6Gui itself comes back "not found" — even though
-    ## Qt6GuiConfig.cmake exists. mesa supplies GLESv2 via the same
-    ## channel.
-    "libxkbcommon >=1.5"
-    "mesa >=23.3"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive`` in macros_a.nim); the explicit
+    ## per-recipe declarations M9.R.15n.3 added are retired.
 
   config:
     discard

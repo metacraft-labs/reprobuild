@@ -38,11 +38,10 @@ package kwindowsystemSource:
     ## M9.R.15o.4 — qt6-declarative supplies Qt6Qml which kwindowsystem
     ## uses for its QML compatibility surface (KWindowSystem.qml).
     "qt6-declarative >=6.6"
-    ## M9.R.15o.4 — same Qt6Gui-transitive pattern as M9.R.15n.3
-    ## (kcrash) → M9.R.15o.2/3 (ksvg/kio): libxkbcommon + mesa cover
-    ## find_dependency(XKB)/find_dependency(GLESv2) in Qt6Gui.
-    "libxkbcommon >=1.5"
-    "mesa >=23.3"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
+    ## declarations M9.R.15o.4 added are retired.
 
   config:
     discard
