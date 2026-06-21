@@ -2910,6 +2910,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/boost/test_boost_source.nim",
+    binary: "build/test-bin/test_boost_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/ca-certificates/test_ca_certificates_source.nim",
     binary: "build/test-bin/test_ca_certificates_source",
     defines: @[],
