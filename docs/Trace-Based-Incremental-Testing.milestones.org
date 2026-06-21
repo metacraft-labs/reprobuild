@@ -2462,3 +2462,46 @@
   Acceptance: production materialized `.ct` is split-stream-only and served by every
   consumer (ACHIEVED); `events.log` is removed or explicitly bounded to legacy/
   streaming with no production dependency; no regression anywhere.
+
+* M24 — Make PRODUCTION reads actually seekable (reconcile the two split formats)
+  :STATUS: planned — significant; the genuine "don't fully materialize" fix for production
+
+  CRITICAL FINDING (M23e-4 review, code + cross-read experiment, 2026-06-21): the
+  seekable infrastructure (M17b/M22) does NOT engage on PRODUCTION bundles, so every
+  production `.ct` is STILL FULLY MATERIALIZED at open via `open_new_format_nim`. The
+  spec's "random-access seeking / never fully materialize a network-loaded `.ct`"
+  property is real today ONLY for the call stream (M17b cross-matches) and for
+  Rust-writer fixtures — NOT for production step/value reads. (This is a scalability /
+  spec-compliance gap, not a correctness bug — the debugger works on production via
+  materialization.) TWO root causes, both verified:
+   1. WIRE-FORMAT DIVERGENCE — the Nim `MultiStreamTraceWriter` (production) and the
+      Rust `CtfsTraceWriter` (M23a/b/c) write INCOMPATIBLE step/value/event streams:
+      Nim `steps.idx` has a `total_events` header+trailer + a per-chunk u32 count and
+      content-size-pledged zstd; Rust `.idx` is bare `[chunk_size][offsets]`, chunks
+      are header-less, zstd omits the content size. The Nim VALUE stream is a
+      `.dat`+`.off` VariableRecordTable; the Rust one is `.idx` chunked-zstd. Only
+      `calls.dat` (M20) + interning tables (M23d) cross-match. So the Rust seekable
+      readers (used by M22) cannot read production Nim step/value streams.
+   2. FLAGS UNSET — `multi_stream_writer.close()` sets only `has_call_stream`, not
+      `has_step_stream`/`has_value_stream`/`has_io_event_stream`/`has_interning_tables`,
+      so the flag-gated seekable overlays return `None` on production anyway.
+
+  Deliverables (an architecture decision + a core-read-path change — do deliberately):
+  - [ ] Decide the ONE canonical split wire format (production is Nim + ct-print's v4
+    reader + the GUI all read the Nim format, so the Nim format is the natural canon)
+    and RECONCILE: align the Rust encoders/readers (`step_stream.rs`/`value_stream.rs`/
+    `event_stream.rs` + their readers) to the canonical format (header/trailer,
+    per-chunk count, content-size zstd, the value-stream container), so ONE format is
+    written + read everywhere. Keep calls/interning (already cross-matched).
+  - [ ] `multi_stream_writer.close()` sets ALL the stream flags it emits.
+  - [ ] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
+    overlays engage on production Nim bundles (now readable + flagged), AND
+    `open_new_format_nim` no longer eagerly materializes the full step/value tables
+    (serve them on-demand through the overlays). Bounded-decompression PROVEN on a
+    real production bundle; DAP suite green; parity with the materialized result.
+  - [ ] No regression: legacy + Rust-writer + production bundles all read correctly;
+    ct-print byte-identical.
+
+  Acceptance: opening a PRODUCTION `.ct` does NOT fully materialize steps/values; a
+  step/value fetch decompresses only the needed chunk (counter-proven) on a genuine
+  production bundle; every consumer reads the single canonical split format.
