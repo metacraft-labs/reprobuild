@@ -179,6 +179,36 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # body in a beginBuildBlock/endBuildBlock try/finally so helper-proc
   # call sites (and unknown preserved top-level statements) can find
   # the active package via `currentBuildState()` / `tryCurrentBuildState()`.
+  # M9.R.15q.2.1 — chicken-and-egg fix for from-source-custom convention:
+  #
+  # ``from_source_custom.fromSourceCustomRecognize`` consults
+  # ``registeredShellActions(packageName)`` to decide whether to claim a
+  # recipe. The registry is populated by ``shell(...)`` calls inside the
+  # recipe's ``build:`` body, which only runs INSIDE ``buildXxxPackage()``.
+  # Under ``reproProviderMode`` the M4 emitters gate the body splice off
+  # (so the legacy provider chain is the sole executor), but the legacy
+  # chain only runs ``buildXxxPackage`` AFTER the convention's
+  # ``emitFragment`` has been called -- which is downstream of
+  # ``recognise``. The result is that ``recognise`` always sees an empty
+  # shell registry at provider startup and rejects the recipe, leaving
+  # boost / ninja / meson / gcc with ``scheduler:actions=0`` and no graph
+  # fragment.
+  #
+  # The fix is to emit a ``when defined(reproProviderMode):
+  # buildXxxPackage()`` invocation at module-init time so the shell
+  # registry is populated BEFORE ``recognise`` runs. An idempotency guard
+  # checks ``registeredShellActions(pkg).len == 0`` before invoking so
+  # the body never runs twice (the legacy ``runPackageProvider`` chain
+  # also calls ``buildXxxPackage`` later via ``buildPackageFragment``;
+  # without the guard, ``shell(...)`` rows would accumulate twice).
+  let providerModeInitCall =
+    if buildBody.len > 0:
+      quote do:
+        when defined(reproProviderMode):
+          if registeredShellActions(`pkgNameLit`).len == 0:
+            `procName`()
+    else:
+      newStmtList()
   if lifted.lifts.len == 0:
     let rootBody = lifted.rootBody
     result = quote do:
@@ -190,6 +220,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             `rootBody`
           finally:
             endBuildBlock(buildStateHandle)
+        `providerModeInitCall`
         when defined(reproProviderMode) and isMainModule:
           when compiles(`devEnvProcName`()):
             quit runPackageProvider(`pkgLiteral`, `procName`,
@@ -213,6 +244,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             `rootBody`
           finally:
             endBuildBlock(buildStateHandle)
+        `providerModeInitCall`
         when defined(reproProviderMode):
           `dispatchProc`
           when isMainModule:
