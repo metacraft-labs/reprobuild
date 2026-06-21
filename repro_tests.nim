@@ -3214,6 +3214,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libcanberra/test_libcanberra_source.nim",
+    binary: "build/test-bin/test_libcanberra_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/kwidgetsaddons/test_kwidgetsaddons_source.nim",
     binary: "build/test-bin/test_kwidgetsaddons_source",
     defines: @[],
