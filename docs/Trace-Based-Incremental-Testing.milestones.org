@@ -2348,13 +2348,50 @@
      split-stream format read seekably by every consumer — is ACHIEVED.
   Re-scoped remaining work (the genuine, smaller pieces):
   - [X] M23e-1 — ct-print (done above).
-  - [ ] M23e-3 — visual/browser replay: confirmed (audit) NOT a direct `events.log`
-    consumer — reads via the db-backend. NO CODE CHANGE; verify + document only.
-  - [ ] M23e-2 — db-backend: VERIFY the full `Db` (incl. the M22 `[~]` cell/compound
-    remainder) is correctly served for a production split-only bundle (it already is,
-    via `open_new_format_nim`); EXPLICITLY BOUND + document the `events.log` reading
-    (`open_old_format`/`load_events`) as the legacy-bundle/test fallback (not the
-    production path). Subsumes M22's `[~]` by confirming cells work on split bundles.
+  - [X] M23e-3 — visual/browser replay: confirmed (audit + grep) NOT a direct
+    `events.log` consumer — reads via the db-backend abstraction. NO CODE CHANGE.
+    VERIFIED: zero `events.log` references in `codetracer-visual-replay` and
+    `codetracer-browser-extension`. The visual player reads its OWN dedicated CTFS
+    visual streams (`gfxmeta.dat` + per-class gfx streams in
+    `src/gfx_stream/ctfs_visual.nim`); step/variable/debug data flows through the
+    db-backend `TraceReader` (DAP), which serves split-only bundles via
+    `open_new_format_nim` and never touches `events.log`. Documented here + in the
+    db-backend doc-comments (see M23e-2).
+  - [X] M23e-2 — db-backend: VERIFIED the full `Db` is correctly served for a
+    production split-only bundle, INCLUDING the M22 `[~]` cell/compound remainder,
+    and EXPLICITLY BOUNDED + documented the legacy `events.log` reader.
+    FINDINGS:
+     * The production split-stream `.ct` is served end-to-end by `open_new_format_nim`
+       (steps, calls, per-step inline values) — `events.log` is never read. Verified
+       by a NEW genuine events.log-FREE split bundle (Nim `MultiStreamTraceWriter`):
+       `tests/ctfs_split_only_full_db_test.rs` asserts `steps.dat` present + `events.log`
+       ABSENT, then checks steps/calls/values all populated.
+     * M22's `[~]` cell/compound remainder is RESOLVED for split bundles (no fix
+       needed). The split format records INLINE FULL VALUES per step (Nim writer's
+       `register_variable_with_full_value` → `values.dat` `StepValues`), NOT
+       `Cell`/`Assign` references — the Nim multi-stream writer's cell/compound/
+       variable-cell methods are deliberate no-ops ("not exposed in the Nim C API").
+       So the cell-change index / per-step cell+compound maps / variable→place maps
+       are LEGITIMATELY EMPTY, and the debugger's locals view is fully served from
+       the per-step variable snapshot (`variables_at` → `full_value_locals`). The
+       cell machinery (`load_value_for_place` / `value_tracking_locals`) is only the
+       value-loading fallback for `ValueRecord::Cell` references, which split bundles
+       never emit. An empty cell history is the COMPLETE, correct answer here. Test
+       `split_only_bundle_cell_history_is_correctly_empty` pins this.
+     * PARITY (A/B) proven: `split_only_and_events_log_bundles_agree` writes the SAME
+       recording as an `events.log` bundle (Rust `CtfsTraceWriter`, split streams off
+       ⇒ forces `open_old_format`/`postprocess`) and asserts identical steps + per-step
+       locals vs the split-only bundle. Debugger shows identical data on either format.
+     * Legacy `events.log` reader EXPLICITLY BOUNDED + documented (NOT removed):
+       doc-comments on `is_new_format`, `CTFSTraceReader::open`, `open_old_format`,
+       `load_events` (ctfs_trace_reader/mod.rs) and `is_codetracer_ctfs_file`
+       (dap_server.rs) now mark `events.log` as the legacy/secondary-Rust-writer/test
+       (and possibly streaming, per M23e-5) fallback — NOT the production path.
+     * Safety net green: `cargo test --lib` (378 passed), `dap_variables_e2e` (3),
+       `dap_column_flow` (3), real-trace `python_flow_ctfs_integration` +
+       `ruby_flow_ctfs_integration` (recorders present, not skipped — exercise genuine
+       production split-only bundles through DAP). `cargo clippy --lib` + new test
+       file clean. No existing test weakened/skipped/deleted.
   - [ ] M23e-4 — make the SECONDARY Rust `CtfsTraceWriter` default-emit the split
     streams too (so even non-production Rust-writer bundles are spec-format), keeping
     `events.log` as the legacy combined stream. Additive.
