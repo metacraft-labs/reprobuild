@@ -119,6 +119,13 @@ package kxmlguiSource:
     ## (KMessageBox / KSeparator / KColorButton / ...) kxmlgui's
     ## action presenters wrap.
     "kwidgetsaddons >=6.0"
+    ## M9.R.15i.5 — kglobalaccel supplies the KGlobalAccel singleton
+    ## kxmlgui's KActionCollection wires for cross-app shortcut
+    ## registration. The upstream CMakeLists makes it a REQUIRED
+    ## find_package; the recipe was missing this dep declaration so
+    ## the M9.R.15i.5 sibling-CMake-config threader couldn't find
+    ## the kglobalaccel install prefix.
+    "kglobalaccel >=6.0"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
