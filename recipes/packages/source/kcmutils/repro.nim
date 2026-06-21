@@ -114,6 +114,10 @@ package kcmutilsSource:
     ## kitemviews supplies the QtWidgets model/view extensions kcmutils's
     ## module-browser dialog consumes for the KCModule list view.
     "kitemviews >=6.0"
+    ## M9.R.15q.1.7 — kcmutils's KPluginProxyModel inherits from
+    ## KCategorizedSortFilterProxyModel which lives in kitemmodels
+    ## (kcmutils/src/quick/kpluginproxymodel.h:14).
+    "kitemmodels >=6.0"
     ## kconfigwidgets supplies the QtWidgets KConfig-aware widgets
     ## kcmutils's KCModule API exposes for settings UI composition.
     "kconfigwidgets >=6.0"
