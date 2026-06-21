@@ -2541,3 +2541,60 @@
   reconciled; `has_value_stream`/`has_io_event_stream`/`has_interning_tables` flags are
   not yet all set by `close()`; and the db-backend production read path is not yet
   made seekable / non-materializing (M24b/M24c). M24's checkboxes stay unchecked.
+
+** M24a-2 — Nim VALUE stream on the SPEC-canonical chunked format (done, 2026-06-22)
+  :STATUS: done — second slice of the wire-format reconciliation (value stream only)
+
+  Resolves the VALUE half of root cause #1 (wire-format divergence) and part of root
+  cause #2 (flags unset), for the value stream specifically. As with M24a-1, the Nim
+  writer was brought ONTO the Rust `ValueStreamReader` layout, so there is now ONE
+  value wire format written + read by both toolchains.
+
+  - The Nim value stream was previously a `.dat` + `.off` VARIABLE-SIZE RECORD TABLE
+    (uncompressed records + a u64 offset table) with a Nim-specific per-record framing
+    (`varint count`, then `varnameId, typeId, dataLen, data` per value). It now emits the
+    SPEC-canonical chunked layout: `values.dat` = `[zstd(chunk_0)][zstd(chunk_1)]...`
+    (each chunk a Zstd-compressed concatenation of LENGTH-PREFIXED per-step records) and
+    `values.idx` = `[chunk_size:u32][offset:u64]...` (no `total_events`). Each record is
+    a tag-0 `StepValues` event — `u8 0x00, varint count, count × (varint name_id, varint
+    value_len, CBOR value)` — byte-identical to the Rust
+    `value_stream::ValueStreamEvent::StepValues` encoding. This is BYTE-COMPATIBLE with
+    the Rust `codetracer_trace_writer::value_stream::encode_value_stream` writer /
+    `codetracer_trace_reader::value_stream_reader::ValueStreamReader`.
+  - The redundant per-value `typeId` field was dropped from the wire (the Rust format
+    carries no separate type id — it is already inside the CBOR `ValueRecord`). The Nim
+    reader reconstructs `VariableValue.typeId` from the CBOR value's top-level `type_id`,
+    keeping the public Nim API and ct-print output unchanged. `ValueRecord`/CBOR was NOT
+    redesigned.
+  - Parallel-index invariant preserved: record N ↔ step N, with an EMPTY record (zero
+    bytes) for value-less steps. `writeStepValues(@[])` per value-less step keeps the
+    1:1 alignment the reader relies on.
+  - `multi_stream_writer.close()` now flushes the partial value chunk + finalizes
+    `values.idx`, and sets the `has_value_stream` (bit 10) meta.dat flag (it previously
+    did NOT). The flag gates the Rust/db-backend seekable value path AND marks the bundle
+    as SPEC-framed for the Nim FFI reader.
+  - BACKWARD COMPAT kept: pre-M24a-2 Nim-v4 bundles never set `has_value_stream`, so the
+    Nim FFI reader (`new_trace_reader.ensureValueReader`) selects the legacy `.off` VRT
+    framing when the flag is clear and the SPEC chunked framing when set
+    (`initValueStreamReader(legacy = not has_value_stream)`). A hand-built legacy `.off`
+    bundle still reads correctly (`test_value_stream.test_value_stream_legacy_back_compat`).
+  - GENUINE cross-read proof (load-bearing): a NEW Nim production bundle's `values.dat`
+    is read by the canonical RUST `ValueStreamReader`, and the decoded per-step
+    `(name_id, CBOR)` pairs equal the recorded values — including the parallel-index
+    invariant (empty records for value-less steps). `tests/test_nim_value_stream_crossread.nim`
+    (Nim) drives `codetracer-trace-format/codetracer_trace_reader/tests/
+    nim_value_stream_crossread.rs` (Rust). Verified passing (600-step bundle spanning
+    multiple value chunks, 120 value-less steps, values equal).
+  - ct-print `--json-events` VALUE output is byte-identical; the only `ct_print_full`
+    golden change is the `has_value_stream` flag flipping false→true. db-backend green
+    (`cargo test --lib`: 378 passed; `dap_variables_e2e` 3/3 + `python_flow_ctfs_integration`
+    1/1 + CTFS integration tests pass — values served correctly from the SPEC value stream
+    via `open_new_format_nim`).
+  - Pre-existing failures `test_column_aware_steps` (meta.dat unknown-flag-bit-8 rejection)
+    and `test_ram_cache` (a perf-threshold timing assertion) are unrelated and confirmed
+    A/B against baseline.
+
+  STILL OPEN (M24 not complete): the EVENT stream (`events.dat`, M24a-3) is not yet
+  reconciled; `has_io_event_stream`/`has_interning_tables` flags are not yet all set by
+  `close()`; and the db-backend production read path is not yet made seekable /
+  non-materializing (M24b/M24c). M24's checkboxes stay unchecked.
