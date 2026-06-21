@@ -1835,9 +1835,10 @@
   `Db` is retired/bounded; the seekable reader is the network/large-trace path.
 
 * M23 — Finish the trace-events.md Event Stream Redesign (steps/value/events.dat)
-  :STATUS: M23a complete (steps.dat compact seekable execution stream — writer +
-  seekable reader + ct-print flag + meta.dat flag across Rust/Nim/db-backend +
-  round-trip/seek/bounded-decompression tests). M23b+ (value stream, events.dat,
+  :STATUS: M23a complete (steps.dat compact seekable execution stream) and M23b
+  complete (values.dat parallel value stream — writer + seekable reader +
+  ct-print flag + meta.dat flag across Rust/Nim/db-backend +
+  round-trip/parallel-index/seek/bounded-decompression tests). M23c+ (events.dat,
   varint interning, events.log retirement) PENDING. M23 NOT complete.
 
   Goal: implement the remainder of `codetracer-trace-format-spec/trace-events.md`'s
@@ -1862,7 +1863,12 @@
     (AbsoluteStep/DeltaStep + Raise/Catch/ThreadSwitch) + `steps.idx`, additive
     behind the new `meta.dat` flag bit 9 `has_step_stream`; round-trip + seek +
     bounded-decompression tests; unblocks M22.
-  - [ ] Parallel value stream; I/O `events.dat`; varint interning tables.
+  - [X] (M23b) Parallel value stream (`values.dat` + `values.idx`),
+    parallel-indexed to `steps.dat` (value record N ↔ step N, empty record for
+    value-less steps), additive behind the new `meta.dat` flag bit 10
+    `has_value_stream`; round-trip + parallel-index + seek + bounded-decompression
+    tests; consumer migration deferred to M22.
+  - [ ] I/O `events.dat`; varint interning tables.
   - [ ] Retire the legacy `events.log` only AFTER every reader consumes the split
     streams; backward-compat for old bundles retained.
 
@@ -1935,6 +1941,93 @@
      read seekably by the Rust `StepStreamReader`; every meta_dat parser accepts
      the new flag so a split bundle opens in the GUI. Value stream / events.dat /
      varint interning / events.log retirement are LEFT for M23b+.
+
+  ** M23b — values.dat parallel value stream (DONE)
+     :STATUS: complete
+
+     The second sub-milestone of M23, mirroring the M23a `steps.dat` split and
+     the M17a `calls.dat` split exactly: a dedicated, seekable parallel VALUE
+     stream split additively out of the unified `events.log`, gated behind a new
+     `meta.dat` capability flag, WITHOUT migrating any reader's value consumption
+     (the GUI/db-backend keeps reading `events.log` — that consumer migration is
+     M22). `events.log` is unchanged byte-for-byte; old readers ignore
+     `values.dat`/`values.idx`.
+
+     File-naming decision: trace-events.md's summary table labels BOTH the
+     execution and value streams `steps.dat`, but execution records are tiny
+     (2-4 B) and value records are large (50-500 B) with different Zstd chunk
+     sizing, and a CTFS internal file is a single seekable byte range with one
+     companion `.idx` — so two streams cannot share one file. The value stream
+     therefore ships as its OWN CTFS file pair `values.dat` + `values.idx`,
+     PARALLEL-INDEXED to `steps.dat` (value record N ↔ step N, empty record for
+     value-less steps). This decision + the parallel-index invariant are
+     documented in `value_stream.rs`/`value_stream_reader.rs` module docs, the
+     Nim `FlagHasValueStream` doc-comment, the db-backend `FLAG_HAS_VALUE_STREAM`
+     doc-comment, and an implementation note in
+     `codetracer-trace-format-spec/trace-events.md` §"Value Stream".
+
+     Deliverables:
+     - [X] Writer (`codetracer-trace-format/codetracer_trace_writer`): a new
+       `value_stream.rs` module derives, from the SAME value events that feed
+       `events.log` (StepValues from `Value`, plus BindVariable / DropVariable /
+       DropVariables / CellValue / CompoundValue / AssignCell / AssignCompoundItem
+       / VariableCell / Assignment — the value-stream tag set per trace-events.md),
+       a `values.dat` parallel value stream as chunked-Zstd with a companion
+       `values.idx`. Records are parallel-indexed to the step stream; each per-step
+       record reuses the existing `ValueRecord`/`RValue` CBOR encoding from
+       `codetracer_trace_types` for value payloads (NOT redesigned). Emission is
+       OPT-IN via `CtfsTraceWriter::with_value_stream(true)` and gated behind the
+       new `meta.dat` flag `FLAG_HAS_VALUE_STREAM` (bit 10). ADDITIVE: `events.log`
+       UNCHANGED (a byte-identity test proves it); the call/step/value-stream flags
+       coexist in one `meta.dat`.
+     - [X] Seekable reader (`codetracer_trace_reader`): a new
+       `value_stream_reader.rs` `ValueStreamReader` honoring the `has_value_stream`
+       flag, fetching step N's value record by chunk (decompresses only that
+       chunk). Mirrors `StepStreamReader`'s shape (count / chunk_size /
+       cached_chunk probe / read / read_all). A legacy (flag-off) `.ct` exposes no
+       value stream and still reads.
+     - [X] ct-print mirror (`codetracer-trace-format-nim`): the `has_value_stream`
+       flag is surfaced in `--meta-json` and `--full` (alongside `has_call_stream`
+       / `has_step_stream`); `--json-events` output UNCHANGED; the nim
+       `meta_dat.nim` writer/reader knows bit 10 (`FlagHasValueStream`) and
+       includes it in `KnownFlags` so a value-split bundle opens.
+     - [X] meta_dat new-flag in EVERY known-flags mask: Rust trace-format
+       (`meta_dat::FLAG_HAS_VALUE_STREAM`), Nim (`FlagHasValueStream` +
+       `KnownFlags`), AND the db-backend `ctfs_trace_reader::meta_dat` (bit 10
+       added to `KNOWN_FLAGS_MASK`), so a `has_value_stream` bundle still OPENS in
+       the GUI (the M17b/M23a diligence repeated here).
+
+     Automated tests (all green on arm64-macOS):
+     - [X] Rust round-trip (`value_stream_tests::values_dat_matches_events_log`):
+       the per-step value records decoded from `values.dat` EQUAL the records
+       re-derived from `events.log` via the same `ValueStreamBuilder` (small chunk
+       size so records span multiple chunks); parallel-index invariant asserted
+       (record count == step count, empty records present, StepValues present).
+     - [X] Seek across a chunk boundary
+       (`seek_to_step_values_across_chunk_boundary`): chunk_size 4, seek into a
+       later chunk and back into chunk 0, value-less step decodes empty,
+       out-of-range errors not panics.
+     - [X] Bounded decompression
+       (`fetching_one_step_decompresses_only_its_chunk`): counter-proven via the
+       reader's `cached_chunk()` probe — fetching one step's values inflates only
+       its own chunk.
+     - [X] Backward compat:
+       `events_log_byte_identical_with_and_without_value_stream` (events.log
+       byte-for-byte identical) + `legacy_trace_has_no_value_stream` (flag-off ⇒
+       no value stream, still reads).
+     - [X] meta_dat known-flag acceptance in all three parsers: Rust
+       `meta_dat::tests::meta_dat_value_stream_flag_roundtrip`, db-backend
+       `accepts_has_value_stream_flag` (value-alone AND call+step+value), Nim
+       `test_meta_dat_strict_unknown_flag_rejection` (bit 10 round-trips; the
+       unknown-bit probe retargeted to bit 11). Nim `ct_print_full` golden updated
+       to carry `has_value_stream: false`.
+
+     Acceptance: a seekable `values.dat` parallel value stream ships additively
+     behind `has_value_stream`, consistent with `events.log` (which is unchanged)
+     and parallel-indexed to `steps.dat`, read seekably by the Rust
+     `ValueStreamReader`; every meta_dat parser accepts the new flag so a split
+     bundle opens in the GUI. events.dat / varint interning / events.log
+     retirement are LEFT for M23c+.
 
   Acceptance: materialized `.ct` is the spec's multi-stream format end-to-end,
   read seekably by every consumer, with no regression and a clean legacy-read path.
