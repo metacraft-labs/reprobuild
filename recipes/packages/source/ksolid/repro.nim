@@ -130,6 +130,14 @@ package ksolidSource:
     ## qt6-declarative supplies QtQml type registration ksolid's
     ## hardware-abstraction QML surface exposes.
     "qt6-declarative >=6.6"
+    ## M9.R.15l.2 — ksolid's Linux backend invokes
+    ## ``find_package(LibMount)`` (CMakeLists.txt:118-ish via the
+    ## Linux/UDev branch) to bind mount/umount system calls. The
+    ## FindLibMount ECM find-module probes for ``libmount.so`` + the
+    ## ``mount/libmount.h`` header which util-linux's install-mirror
+    ## ships under ``.repro/output/install/usr/lib/`` and
+    ## ``.repro/output/install/usr/include/libmount/`` respectively.
+    "util-linux >=2.40"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -158,6 +166,21 @@ package ksolidSource:
         # hardware backends remain and are sufficient for v1 KF6 module-
         # graph closure; full hot-plug detection comes when we add eudev
         # / systemd from-source.
+        #
+        # M9.R.15l.2 follow-up: UDEV_DISABLED=ON only gates the
+        # find_package(UDev REQUIRED) call; it does NOT remove the
+        # udisks2 / upower backends from the build's
+        # ENABLED_DEVICE_BACKENDS list. Both backends include source
+        # files that hard-#error out on non-UDev Linux platforms
+        # (udisksstoragedrive.cpp:46 ``#error Implement this or stub
+        # this out for your platform``). Closing the full ksolid build
+        # gate needs either eudev-from-source (so UDev is found and
+        # both backends compile) or a backend-list override
+        # (``ENABLED_DEVICE_BACKENDS=fakehw;fstab;shared``). Deferred
+        # to a follow-up milestone when one of those lands; the
+        # ``libmount.so`` discovery via the M9.R.15l.2 util-linux
+        # buildDep edge is exercised at the CMake configure stage,
+        # which is the M9.R.15l.2 deliverable.
         "UDEV_DISABLED=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
