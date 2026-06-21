@@ -1835,7 +1835,10 @@
   `Db` is retired/bounded; the seekable reader is the network/large-trace path.
 
 * M23 — Finish the trace-events.md Event Stream Redesign (steps/value/events.dat)
-  :STATUS: planned — LARGE, staged, product-wide
+  :STATUS: M23a complete (steps.dat compact seekable execution stream — writer +
+  seekable reader + ct-print flag + meta.dat flag across Rust/Nim/db-backend +
+  round-trip/seek/bounded-decompression tests). M23b+ (value stream, events.dat,
+  varint interning, events.log retirement) PENDING. M23 NOT complete.
 
   Goal: implement the remainder of `codetracer-trace-format-spec/trace-events.md`'s
   "Event Stream Redesign" beyond the `calls.dat` split already shipped: the compact
@@ -1855,12 +1858,83 @@
   then retiring `events.log` once every reader consumes the split streams.)
 
   Deliverables (high-level; refined per sub-milestone):
-  - [ ] `steps.dat` compact seekable execution stream (AbsoluteStep/DeltaStep) +
-    `steps.idx`, additive behind a meta.dat flag; readers updated; round-trip +
-    seekable tests; unblocks M22.
+  - [X] (M23a) `steps.dat` compact seekable execution stream
+    (AbsoluteStep/DeltaStep + Raise/Catch/ThreadSwitch) + `steps.idx`, additive
+    behind the new `meta.dat` flag bit 9 `has_step_stream`; round-trip + seek +
+    bounded-decompression tests; unblocks M22.
   - [ ] Parallel value stream; I/O `events.dat`; varint interning tables.
   - [ ] Retire the legacy `events.log` only AFTER every reader consumes the split
     streams; backward-compat for old bundles retained.
+
+  ** M23a — steps.dat compact seekable execution stream (DONE)
+     :STATUS: complete
+
+     The first sub-milestone of M23, mirroring the M17a `calls.dat` split
+     exactly: a dedicated compact, seekable execution stream split additively out
+     of the unified `events.log`, gated behind a new `meta.dat` capability flag,
+     WITHOUT migrating any reader's step consumption (the GUI/db-backend keeps
+     reading `events.log` — that consumer migration is M22). `events.log` is
+     unchanged byte-for-byte; old readers ignore `steps.dat`/`steps.idx`.
+
+     Deliverables:
+     - [X] Writer (`codetracer-trace-format/codetracer_trace_writer`): a new
+       `step_stream.rs` module derives, from the SAME Step/Call/Return/ThreadSwitch
+       events that feed `events.log`, a compact `steps.dat` execution stream
+       (AbsoluteStep tag 0 / DeltaStep tag 1 + Raise/Catch/ThreadSwitch tags 2/3/4
+       per trace-events.md §"Compact Step Encoding") as chunked-Zstd with a
+       companion `steps.idx`. Encoding rules: first step + post-call + post-return
+       (+ post-thread-switch) are AbsoluteStep; first record of every chunk is
+       AbsoluteStep so chunks decode independently; others DeltaStep when the
+       signed zigzag delta fits ±1048575. `global_line_index` is derived by a
+       reversible `(path_id, line)` packing (the canonical `funcs.dat` interning is
+       M23b+). Emission is OPT-IN via `CtfsTraceWriter::with_step_stream(true)` and
+       gated behind the new `meta.dat` flag `FLAG_HAS_STEP_STREAM` (bit 9). ADDITIVE:
+       `events.log` UNCHANGED (a byte-identity test proves it); the call-stream and
+       step-stream flags coexist in one `meta.dat`.
+     - [X] Seekable reader (`codetracer_trace_reader`): a new
+       `step_stream_reader.rs` `StepStreamReader` honoring the `has_step_stream`
+       flag, seeking to step N by chunk (decompresses only that chunk), decoding
+       AbsoluteStep/DeltaStep back to absolute `global_line_index` (running absolute
+       resets per chunk). Mirrors `CallStreamReader`'s shape (count / chunk_size /
+       cached_chunk probe / read / read_all). A legacy (flag-off) `.ct` exposes no
+       step stream and still reads.
+     - [X] ct-print mirror (`codetracer-trace-format-nim`): the `has_step_stream`
+       flag is surfaced in `--meta-json` and `--full` (alongside `has_call_stream`);
+       `--json-events` output UNCHANGED; the nim `meta_dat.nim` writer/reader knows
+       bit 9 (`FlagHasStepStream`) and includes it in `KnownFlags` so a split bundle
+       opens.
+     - [X] meta_dat new-flag in EVERY known-flags mask: Rust trace-format
+       (`meta_dat::FLAG_HAS_STEP_STREAM`), Nim (`FlagHasStepStream` + `KnownFlags`),
+       AND the db-backend `ctfs_trace_reader::meta_dat` (bit 9 added to
+       `KNOWN_FLAGS_MASK`), so a `has_step_stream` bundle still OPENS in the GUI
+       (the M17b diligence — db-backend rejecting an unknown flag — repeated here).
+
+     Automated tests (all green on arm64-macOS):
+     - [X] Rust round-trip (`step_stream_tests.rs::steps_dat_matches_events_log`):
+       the decoded absolute `global_line_index` sequence EQUALS the Step sequence
+       derived from `events.log` (small chunk_size so steps span multiple chunks).
+     - [X] Seek across a chunk boundary
+       (`seek_to_step_across_chunk_boundary`): chunk_size 4, seek into a later
+       chunk and back into chunk 0, out-of-range errors not panics.
+     - [X] Bounded decompression
+       (`fetching_one_step_decompresses_only_its_chunk`): counter-proven via the
+       reader's `cached_chunk()` probe — fetching one step inflates only its own
+       chunk (the M17b calls bounded-decompression analogue).
+     - [X] Backward compat: `events_log_byte_identical_with_and_without_step_stream`
+       (events.log byte-for-byte identical) + `legacy_trace_has_no_step_stream`
+       (flag-off ⇒ no step stream, still reads).
+     - [X] meta_dat known-flag acceptance in all three parsers: Rust
+       `meta_dat::tests::meta_dat_step_stream_flag_roundtrip`, db-backend
+       `accepts_has_step_stream_flag` (step-alone AND call+step), Nim
+       `test_meta_dat_strict_unknown_flag_rejection` (bit 9 round-trips; the
+       unknown-bit probe retargeted to bit 10). Nim `ct_print_full` golden updated
+       to carry `has_step_stream: false`.
+
+     Acceptance: a compact seekable `steps.dat` execution stream ships additively
+     behind `has_step_stream`, consistent with `events.log` (which is unchanged),
+     read seekably by the Rust `StepStreamReader`; every meta_dat parser accepts
+     the new flag so a split bundle opens in the GUI. Value stream / events.dat /
+     varint interning / events.log retirement are LEFT for M23b+.
 
   Acceptance: materialized `.ct` is the spec's multi-stream format end-to-end,
   read seekably by every consumer, with no regression and a clean legacy-read path.
