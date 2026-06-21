@@ -4160,34 +4160,27 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     for shareRoot in shareRoots:
       if not dirExists(extendedPath(shareRoot)):
         continue
-      # ECM-style canonical: e.g. share/ECM/cmake/ECMConfig.cmake.  The
-      # uppercase form is the most common upstream convention.
-      let upperForm = name.toUpperAscii
-      let upperConfig = shareRoot / upperForm / "cmake" / (upperForm & "Config.cmake")
-      if fileExists(extendedPath(upperConfig)):
-        resolved = absolutePath(upperConfig)
-        break
-      # Lower-cased package-name form: e.g. share/extra-cmake-modules/.
-      let nameConfig = shareRoot / name / "cmake" / (name & "Config.cmake")
-      if fileExists(extendedPath(nameConfig)):
-        resolved = absolutePath(nameConfig)
-        break
-      # share/cmake/<NAME>/<NAME>Config.cmake (Debian-style layout).
-      let cmakeConfig = shareRoot / "cmake" / upperForm / (upperForm & "Config.cmake")
-      if fileExists(extendedPath(cmakeConfig)):
-        resolved = absolutePath(cmakeConfig)
-        break
-      # Marker file: presence of the named share dir is enough (some
-      # CMake packages drop config to share/<NAME>/ without nesting in
-      # a cmake/ subdir).
-      let shareNamedDir = shareRoot / upperForm
-      if dirExists(extendedPath(shareNamedDir)):
-        resolved = absolutePath(shareNamedDir)
-        break
-      let shareLowerDir = shareRoot / name
-      if dirExists(extendedPath(shareLowerDir)):
-        resolved = absolutePath(shareLowerDir)
-        break
+      # Generic walk: enumerate every subdir of share/ and probe each
+      # for a CMake config file.  This covers ECM (share/ECM/cmake/
+      # ECMConfig.cmake), as well as any future share-only package
+      # whose subdir name doesn't mechanically derive from the dep name
+      # (ECM's name is "ECM" but the dep selector is
+      # "extra-cmake-modules", so name-based UPPER/lower probes miss).
+      block shareWalk:
+        for kindPc, walked in walkDir(extendedPath(shareRoot)):
+          if kindPc != pcDir and kindPc != pcLinkToDir:
+            continue
+          var subdir = walked
+          when defined(windows):
+            if subdir.startsWith("\\\\?\\"):
+              subdir = subdir[4 .. ^1]
+          let subdirName = lastPathPart(subdir)
+          let cmakeConfig = subdir / "cmake" / (subdirName & "Config.cmake")
+          if fileExists(extendedPath(cmakeConfig)):
+            resolved = absolutePath(cmakeConfig)
+            break shareWalk
+        if resolved.len > 0:
+          break
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
