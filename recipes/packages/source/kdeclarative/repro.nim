@@ -32,6 +32,12 @@ package kdeclarativeSource:
     "extra-cmake-modules >=6.0"
     "qt6-base >=6.6"
     "qt6-tools >=6.6"
+    ## M9.R.15l.4 — kdeclarative is fundamentally a Qt6Qml binding
+    ## package: every public class wraps a QML type. CMakeLists.txt
+    ## declares ``find_package(Qt6 ... Qml REQUIRED)`` at the top.
+    ## qt6-declarative is the package shipping ``libQt6Qml.so`` +
+    ## ``cmake/Qt6Qml/Qt6QmlConfig.cmake``.
+    "qt6-declarative >=6.6"
     "kconfig >=6.0"
     "kcoreaddons >=6.0"
     "kguiaddons >=6.0"
