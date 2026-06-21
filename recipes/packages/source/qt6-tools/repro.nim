@@ -217,6 +217,14 @@ package qt6ToolsSource:
         "FEATURE_clang=OFF",
         "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
         "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
+        # M9.R.15h.1.4 — Qt6's SBOM module hard-codes ``/usr/local/Qt-6.8.1``
+        # as the canonical install prefix when computing per-artifact
+        # checksums (same trip as qt6-base M9.R.15f.3). The
+        # ``cmake --install --prefix <buildDir>/out/usr`` we emit doesn't
+        # match the baked-in prefix, so install fails at
+        # ``SPDXRef-PackagedFile-qt-module-UiTools.cmake:5`` with "Cannot
+        # find <file> to compute its checksum". Disable SBOM gen for v1.
+        "QT_GENERATE_SBOM=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.executable("qhelpgenerator")
