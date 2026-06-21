@@ -209,6 +209,17 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             `procName`()
     else:
       newStmtList()
+  # M9.R.15q.2.1 — translate shell-action rows into BuildActionDef rows.
+  # Per-project providers don't dispatch through ``from_source_custom``'s
+  # ``emitFragment``, so ``shell(...)`` rows registered by the user's
+  # ``build:`` body never become BuildActionDef rows on their own.
+  # ``synthesizeCustomShellBuildActions`` consumes the in-process shell
+  # + fetch registries and emits the fetch + shell chain via
+  # ``buildAction(...)`` directly into the per-thread registry
+  # ``buildPackageFragment`` queries at fragment-emit time. The call is
+  # a no-op when the shell registry is empty (the recipe drove a typed
+  # constructor instead) or when no project root is active (the recipe
+  # was imported by a test fixture outside provider mode).
   if lifted.lifts.len == 0:
     let rootBody = lifted.rootBody
     result = quote do:
@@ -218,6 +229,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
           let buildStateHandle = beginBuildBlock(`pkgNameLit`)
           try:
             `rootBody`
+            synthesizeCustomShellBuildActions(`pkgNameLit`)
           finally:
             endBuildBlock(buildStateHandle)
         `providerModeInitCall`
@@ -242,6 +254,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
           let buildStateHandle = beginBuildBlock(`pkgNameLit`)
           try:
             `rootBody`
+            synthesizeCustomShellBuildActions(`pkgNameLit`)
           finally:
             endBuildBlock(buildStateHandle)
         `providerModeInitCall`

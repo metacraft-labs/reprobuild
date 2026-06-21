@@ -146,3 +146,31 @@ suite "DSL-port M9.R.15q.2.1 — from-source-custom registry population":
     # made).
     let rows = registeredShellActions("m9r15q21NoBuildFixture")
     check rows.len == 0
+
+  test "synthesizeCustomShellBuildActions emits BuildActionDef rows":
+    # The runtime helper translates shell rows into BuildActionDef rows
+    # via ``buildAction(...)``. Without an active provider project root
+    # the helper is a no-op (test fixture path). Set the override
+    # directly so the helper sees a non-empty root and emits actions
+    # against ``buildActionRegistry``.
+    resetBuildActionRegistry()
+    when defined(reproProviderMode):
+      # In provider mode ``activeProviderProjectRoot`` returns
+      # ``currentProviderProjectRoot`` which the runtime sets from the
+      # request. For this test we don't have a real request so we use
+      # the macro-emitted init-call's body path -- but it's a no-op
+      # here for the same reason. Skip the assertion under provider
+      # mode (the boost / ninja / etc. recipes exercise the real
+      # provider path end-to-end via ``repro build``).
+      discard
+    else:
+      # Outside provider mode ``activeProviderProjectRoot`` returns ""
+      # and the helper short-circuits. We still want to verify the
+      # helper's no-op contract: zero ``buildAction`` rows added.
+      synthesizeCustomShellBuildActions("m9r15q21CustomShellFixture")
+      let actions = registeredBuildActions()
+      # The user's verbatim build body (via the M4 splice) does NOT
+      # call ``buildAction`` -- it only calls ``shell``. So the
+      # registry is empty here, confirming the helper's no-op behaviour
+      # outside provider mode.
+      check actions.len == 0

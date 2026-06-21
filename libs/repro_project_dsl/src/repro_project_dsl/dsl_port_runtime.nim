@@ -3917,6 +3917,186 @@ proc registeredShellActions*(packageName: string): seq[DslShellAction] =
   return @[]
 
 # ---------------------------------------------------------------------------
+# M9.R.15q.2.1 — shell-row → BuildActionDef translator.
+#
+# The ``from-source-custom`` convention (in repro_standard_provider) walks
+# ``registeredShellActions`` + ``registeredFetchSpec`` to emit a chain of
+# ``BuildActionDef`` rows: fetch → shell1 → ... → shellN → stage-copy(per
+# member). The convention only fires when a recipe is routed through the
+# standard provider; per-project providers don't dispatch through the
+# convention, so a custom-shell recipe (boost / ninja / meson / gcc)
+# compiled with ``-d:reproProviderMode`` ends up with the shell registry
+# populated by the recipe's ``build:`` body but NO ``BuildActionDef``
+# rows -- ``buildPackageFragment`` queries ``registeredBuildActions()``
+# and returns an empty fragment (``scheduler:actions=0``).
+#
+# ``synthesizeCustomShellBuildActions`` is the recipe-side mirror of the
+# convention's emission: it consumes the in-process shell-action +
+# fetch-spec registries and emits the same fetch + shell chain as
+# ``BuildActionDef`` rows so ``buildPackageFragment`` sees them at
+# fragment-construction time. The macro layer emits a call from the
+# generated ``buildXxxPackage*()`` proc AFTER the user's ``build:`` body
+# has run, so the rows the body registered via ``shell(...)`` are
+# observable at the time the helper runs.
+#
+# Stage-copy emission is deliberately omitted at this layer: the per-
+# project provider doesn't know the artifact-member list at runtime
+# (that lives in the macro-time ``PackageDef``). The fetch + shell
+# chain alone is enough to drive the recipe's build steps -- the
+# install-tree's contents live under ``$out`` after the chain runs;
+# downstream consumption already happens via the binary-cache publisher
+# (the last shell action stamps the cache identity).
+# ---------------------------------------------------------------------------
+
+proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
+                                   stamp: string): string =
+  ## Compose the fetch-script body. Mirrors the autotools / cmake /
+  ## meson constructors' fetch-script shape: curl → hash-verify → tar
+  ## --force-local extract → touch stamp. ``file://`` URLs work natively
+  ## via curl.
+  let escapedUrl = spec.url.replace("\"", "\\\"")
+  let escapedHash = spec.hashHex.replace("\"", "\\\"")
+  let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
+  var script = "set -e; "
+  script.add("mkdir -p \"" & escapedExtracted & "\"; ")
+  script.add("if [ ! -f \"" & escapedTarball & "\" ]; then ")
+  script.add("curl -fsSL -o \"" & escapedTarball & "\" \"" & escapedUrl &
+    "\"; fi; ")
+  case spec.hashAlg
+  of dshaSha256:
+    script.add("echo \"" & escapedHash & "  " & escapedTarball &
+      "\" | sha256sum -c -; ")
+  of dshaBlake3:
+    script.add("echo \"" & escapedHash & "  " & escapedTarball &
+      "\" | b2sum -a blake3 -c - || ")
+    script.add("echo \"" & escapedHash & "  " & escapedTarball &
+      "\" | blake3sum -c -; ")
+  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+    escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
+  script.add("touch \"" & escapedStamp & "\"")
+  script
+
+proc dslPortSubstituteShellPlaceholders(command, fetchPath, extractedPath,
+                                       outPath: string): string =
+  ## Replace ``$fetch`` / ``$extracted`` / ``$out`` in ``command``.
+  ## Mirrors ``from_source_custom.substitutePlaceholders`` byte-for-byte
+  ## so a recipe routed through the per-project provider gets the same
+  ## substituted argv as one routed through the standard provider.
+  result = command.replace("$extracted", extractedPath)
+  result = result.replace("$fetch", fetchPath)
+  result = result.replace("$out", outPath)
+
+proc dslPortSanitizeIdPart(value: string): string =
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "x"
+
+proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
+  ## M9.R.15q.2.1 — translate ``registeredShellActions(packageName)``
+  ## (and the package's ``registeredFetchSpec``) into ``BuildActionDef``
+  ## rows via ``buildAction(...)`` so the per-project provider's
+  ## ``buildPackageFragment`` picks them up.
+  ##
+  ## NO-OP when the shell registry is empty for ``packageName`` -- the
+  ## recipe didn't drive the from-source-custom path, so the regular
+  ## constructors (``cmake_package`` / ``autotools_package`` / etc.)
+  ## already emitted the appropriate buildAction rows during the user's
+  ## ``build:`` body.
+  ##
+  ## The macro emits a call from ``buildXxxPackage*()``'s tail so the
+  ## helper runs AFTER the user's ``shell(...)`` calls have populated
+  ## the registry.
+  let rows = registeredShellActions(packageName)
+  if rows.len == 0:
+    return
+  let projectRoot = activeProviderProjectRoot()
+  if projectRoot.len == 0:
+    # Outside provider mode (test fixtures importing the recipe) the
+    # project root is empty; the helper is a no-op so the recipe
+    # macro's verbatim-body splice path stays uncontested.
+    return
+  # Pool registration -- mirrors from_source_custom's pool declarations.
+  discard buildPool("compile", 8'u32)
+  let spec = registeredFetchSpec(packageName)
+  let scratch = projectRoot / ".repro" / "fetch"
+  let outPath = projectRoot / ".repro" / "build" / "from-source-custom" /
+    packageName
+  let stampDir = outPath / ".stamps"
+  let extracted = projectRoot / "src"
+  createDir(extendedPath(stampDir))
+  # Per-package fetch action (when a fetch spec was registered).
+  var fetchId = ""
+  var fetchStamp = ""
+  var fetchPath = ""
+  if spec.url.len > 0 and spec.hashHex.len > 0:
+    discard buildPool("fetch", 2'u32)
+    createDir(extendedPath(scratch))
+    fetchPath = scratch / (spec.hashHex & ".tar")
+    fetchStamp = scratch / (spec.hashHex & ".stamp")
+    let hashAlgTag =
+      case spec.hashAlg
+      of dshaSha256: "sha256"
+      of dshaBlake3: "blake3"
+    let fetchScript = dslPortCustomFetchScriptShell(spec, fetchPath,
+      extracted, fetchStamp)
+    fetchId = "ccpp-fetch-" & dslPortSanitizeIdPart(packageName)
+    discard buildAction(
+      id = fetchId,
+      call = inlineExecCall(@["sh", "-c", fetchScript], projectRoot),
+      inputs = @[],
+      outputs = @[fetchStamp],
+      pool = "fetch",
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "from-source-custom.fetch." & hashAlgTag,
+      toolIdentityRefs = @["sh"])
+  # Shell-action chain: action[0] depends on the fetch action (or no
+  # deps when no fetch); action[i>0] depends on action[i-1].
+  var prevId = ""
+  var prevStamp = ""
+  for i, row in rows:
+    let actionId = "from-source-custom-shell-" & $(i + 1) & "-" &
+      dslPortSanitizeIdPart(packageName)
+    let stamp = stampDir / (actionId & ".stamp")
+    let substituted = dslPortSubstituteShellPlaceholders(
+      row.command, fetchPath, extracted, outPath)
+    let escapedExtracted = extracted.replace("\\", "/").
+      replace("\"", "\\\"")
+    let escapedOut = outPath.replace("\\", "/").replace("\"", "\\\"")
+    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+    let escapedStampDir = stampDir.replace("\\", "/").
+      replace("\"", "\\\"")
+    let script = "set -e; mkdir -p \"" & escapedExtracted &
+      "\"; mkdir -p \"" & escapedOut & "\"; mkdir -p \"" &
+      escapedStampDir & "\"; cd \"" & escapedExtracted & "\"; " &
+      substituted & "; touch \"" & escapedStamp & "\""
+    var deps: seq[string] = @[]
+    var inputs: seq[string] = @[]
+    if prevId.len > 0:
+      deps.add(prevId)
+      inputs.add(prevStamp)
+    elif fetchId.len > 0:
+      deps.add(fetchId)
+      inputs.add(fetchStamp)
+    discard buildAction(
+      id = actionId,
+      call = inlineExecCall(@["sh", "-c", script], projectRoot),
+      deps = deps,
+      inputs = inputs,
+      outputs = @[stamp],
+      pool = "compile",
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "from-source-custom.shell",
+      toolIdentityRefs = @["sh"])
+    prevId = actionId
+    prevStamp = stamp
+
+# ---------------------------------------------------------------------------
 # DSL-port M9.R.3 — ``library <name>: api:`` block surface.
 # ---------------------------------------------------------------------------
 ##
