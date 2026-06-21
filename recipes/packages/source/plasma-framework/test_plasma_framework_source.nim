@@ -35,7 +35,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/plasma-framework/vendor/libplasma-6.2.5.tar.xz"
+  "https://download.kde.org/stable/plasma/6.2.5/libplasma-6.2.5.tar.xz"
 
 const ExpectedHash =
   "af770f5fef978512c70491889516fb769d340f00a02270987d2d1d17753658ec"

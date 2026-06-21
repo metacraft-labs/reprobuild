@@ -785,6 +785,44 @@ proc flushStatsAfterTerminal(config: UserDaemonConfig; sessionId: string) =
     logLine(config.logPath, "stats flush failed session=" & sessionId &
       " error=" & flush.lastError)
 
+when defined(posix):
+  template spawnDetachedDaemonWorker(config: UserDaemonConfig;
+                                     label, sessionId: string;
+                                     sock: IpcConn; body: untyped) =
+    ## Run a detached daemon worker via a double-fork so the worker is
+    ## reparented to the init/subreaper and auto-reaped on exit — the
+    ## daemon is long-lived, and a single fork left every finished worker
+    ## as a zombie (the parent never waited on it). A global
+    ## SIGCHLD/``waitpid(-1)`` reaper is not an option here because the
+    ## daemon parent also drives ``osproc`` children (binary staging,
+    ## launchctl/systemctl); reaping with ``-1`` would steal their exit
+    ## statuses. Double-forking sidesteps that: the parent only waits on
+    ## the short-lived intermediate (a known pid, never an osproc child),
+    ## and the grandchild worker is auto-reaped after re-parenting. The
+    ## body runs in the grandchild; ``sock`` is closed there afterwards,
+    ## matching the previous single-fork path.
+    let firstPid = fork()
+    if firstPid < 0:
+      raise newException(UserDaemonRuntimeError, "failed to fork " & label)
+    if firstPid == 0:
+      let secondPid = fork()
+      if secondPid == 0:
+        signal(SIGCHLD, SIG_DFL)
+        logLine(config.logPath,
+          label & " started session=" & sessionId & " pid=" &
+            $getCurrentProcessId())
+        try:
+          body
+        except CatchableError as err:
+          logLine(config.logPath,
+            label & " fatal session=" & sessionId & " error=" & err.msg)
+        try: sock.closeIpcConn() except CatchableError: discard
+        quit(0)
+      quit(0)
+    var workerStatus: cint
+    while waitpid(firstPid, workerStatus, 0) < 0 and errno == EINTR:
+      discard
+
 proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
                            request: UserDaemonBuildRequest;
                            session: var UserDaemonSession) =
@@ -896,21 +934,8 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
         logLine(config.logPath, "build prewarm skipped session=" &
           sessionId & " error=" & err.msg)
     when defined(posix):
-      let pid = fork()
-      if pid < 0:
-        raise newException(UserDaemonRuntimeError,
-          "failed to fork daemon build worker")
-      if pid == 0:
-        try:
-          signal(SIGCHLD, SIG_DFL)
-          runBuildRequestWorker(socket, config, request, session)
-        except CatchableError as err:
-          logLine(config.logPath, "build worker fatal session=" & sessionId &
-            " error=" & err.msg)
-        try: socket.closeIpcConn() except CatchableError: discard
-        quit(0)
-      logLine(config.logPath, "build worker started session=" & sessionId &
-        " pid=" & $pid)
+      spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
+        runBuildRequestWorker(socket, config, request, session)
     else:
       runBuildRequestWorker(socket, config, request, session)
   finally:
@@ -1088,24 +1113,9 @@ proc handleWatchStart(socket: IpcConn; config: UserDaemonConfig;
   appendWatchEventRecord(config, sessionId, accepted)
   socket.writeFrame(udkWatchEvent, buildEventBody(accepted))
   when defined(posix):
-    let pid = fork()
-    if pid < 0:
-      raise newException(UserDaemonRuntimeError,
-        "failed to fork daemon watch worker")
-    if pid == 0:
-      try:
-        signal(SIGCHLD, SIG_DFL)
-        runWatchRequestWorker(socket, config, request, session,
-          streamToSocket = request.attached and not request.detached)
-      except CatchableError as err:
-        logLine(config.logPath, "watch worker fatal session=" & sessionId &
-          " error=" & err.msg)
-      try: socket.closeIpcConn() except CatchableError: discard
-      quit(0)
-    logLine(config.logPath, "watch worker started session=" & sessionId &
-      " pid=" & $pid)
-    if request.detached:
-      discard
+    spawnDetachedDaemonWorker(config, "watch worker", sessionId, socket):
+      runWatchRequestWorker(socket, config, request, session,
+        streamToSocket = request.attached and not request.detached)
   else:
     runWatchRequestWorker(socket, config, request, session,
       streamToSocket = request.attached and not request.detached)
@@ -1117,20 +1127,9 @@ proc handleWatchAttach(socket: IpcConn; config: UserDaemonConfig;
     socket.writeFrame(udkError, errorBody("watch attach requires a session id"))
     return
   when defined(posix):
-    let pid = fork()
-    if pid < 0:
-      raise newException(UserDaemonRuntimeError,
-        "failed to fork daemon watch attach worker")
-    if pid == 0:
-      try:
-        signal(SIGCHLD, SIG_DFL)
-        streamWatchSession(socket, config, request.sessionId,
-          request.cancelOnDisconnect)
-      except CatchableError as err:
-        logLine(config.logPath, "watch attach fatal session=" &
-          request.sessionId & " error=" & err.msg)
-      try: socket.closeIpcConn() except CatchableError: discard
-      quit(0)
+    spawnDetachedDaemonWorker(config, "watch attach", request.sessionId, socket):
+      streamWatchSession(socket, config, request.sessionId,
+        request.cancelOnDisconnect)
   else:
     streamWatchSession(socket, config, request.sessionId,
       request.cancelOnDisconnect)

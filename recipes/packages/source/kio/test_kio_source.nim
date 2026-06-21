@@ -31,7 +31,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kio/vendor/kio-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kio-6.10.0.tar.xz"
 
 const ExpectedHash =
   "7eb454438f149e7ed513c3bbd526b67e3e3ecfe32ae7c986168baa59600b699c"
@@ -74,18 +74,32 @@ suite "kioSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "cmakeFlags does not leak into the configure channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register a single library":
-    # M3 artifact registry: ``libKF6Kio`` is the only artifact and
-    # must be tagged ``dakLibrary``. A regression that all-cased the
-    # KIO acronym in the artifact identifier (``libKF6KIO`` instead
-    # of ``libKF6Kio``) would not match the assertion below — that
-    # mis-casing would also mis-route any consumer recipe that
-    # depends on the artifact by identifier.
+  test "artifacts register the four KIO libraries":
+    # M9.R.15i.3.3 — KIO ships FOUR libraries upstream (Core, Gui,
+    # Widgets, FileWidgets), not one umbrella ``libKF6Kio``. The
+    # recipe matches what upstream actually builds; this assertion
+    # pins the per-library kind + identifier-casing (``Kio`` not
+    # ``KIO`` — that mis-casing would also mis-route any consumer
+    # recipe that depends on an artifact by identifier).
     let arts = registeredArtifacts("kioSource")
-    check arts.len == 1
-    check arts[0].packageName == "kioSource"
-    check arts[0].artifactName == "libKF6Kio"
-    check arts[0].kind == dakLibrary
+    check arts.len == 4
+    var seenCore = false
+    var seenGui = false
+    var seenWidgets = false
+    var seenFileWidgets = false
+    for art in arts:
+      check art.packageName == "kioSource"
+      check art.kind == dakLibrary
+      case art.artifactName
+      of "libKF6KIOCore": seenCore = true
+      of "libKF6KIOGui": seenGui = true
+      of "libKF6KIOWidgets": seenWidgets = true
+      of "libKF6KIOFileWidgets": seenFileWidgets = true
+      else: discard
+    check seenCore
+    check seenGui
+    check seenWidgets
+    check seenFileWidgets
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry.

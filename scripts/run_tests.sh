@@ -32,6 +32,40 @@ case "$(uname -s)" in
     ;;
 esac
 
+# Controlled, throwaway repro-daemon for the whole test run.
+#
+# The spec mandates that `repro build` auto-launches the per-user daemon
+# and keeps it alive across invocations. That is correct for real use,
+# but a CI / local test run that lets daemon-hosted tests fall through to
+# the default per-user endpoint (`~/.local/state/repro/daemon`) leaves a
+# live daemon behind after the suite finishes — it accumulates across
+# runs and on a shared host shows up as a leaked, sometimes busy, daemon
+# process. Point the whole run at an isolated endpoint + state dir so any
+# daemon a test auto-launches is OUR throwaway instance, then stop it and
+# remove its state on exit. Tests that drive their own daemon lifecycle
+# (the daemon control-plane / watch / dev-session suites) set their own
+# REPRO_DAEMON_ENDPOINT per invocation and are unaffected.
+REPRO_TEST_DAEMON_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repro-test-daemon.XXXXXX")"
+export REPRO_DAEMON_STATE_DIR="${REPRO_TEST_DAEMON_DIR}/state"
+mkdir -p "${REPRO_DAEMON_STATE_DIR}"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    export REPRO_DAEMON_ENDPOINT="\\\\.\\pipe\\repro-daemon-test-$$"
+    ;;
+  *)
+    export REPRO_DAEMON_ENDPOINT="${REPRO_TEST_DAEMON_DIR}/d.sock"
+    ;;
+esac
+_repro_test_daemon_cleanup() {
+  # Best-effort: stop the controlled daemon (no-op if none was launched)
+  # then drop its isolated state dir. Never fail the run on cleanup.
+  if [[ -x "build/bin/repro${exe_ext}" ]]; then
+    "build/bin/repro${exe_ext}" daemon stop >/dev/null 2>&1 || true
+  fi
+  rm -rf "${REPRO_TEST_DAEMON_DIR}" 2>/dev/null || true
+}
+trap _repro_test_daemon_cleanup EXIT
+
 # Step 1 (B5): bootstrap ./build/bin/repro from nim when missing.
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
