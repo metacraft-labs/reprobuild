@@ -15,6 +15,7 @@ import ./qt6_declarative
 import ./kf6_base
 import ./karchive
 import ./kbookmarks
+import ./kcodecs
 import ./kcompletion
 import ./kcrash
 import ./kdbusaddons
@@ -29,6 +30,7 @@ export qt6_declarative
 export kf6_base
 export karchive
 export kbookmarks
+export kcodecs
 export kcompletion
 export kcrash
 export kdbusaddons

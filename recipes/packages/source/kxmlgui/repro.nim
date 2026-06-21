@@ -126,6 +126,13 @@ package kxmlguiSource:
     ## the M9.R.15i.5 sibling-CMake-config threader couldn't find
     ## the kglobalaccel install prefix.
     "kglobalaccel >=6.0"
+    ## M9.R.15j.2 — kitemviews supplies the KCategorizedView /
+    ## KExtendableItemDelegate / KCategoryDrawer item-view widgets
+    ## kxmlgui's KToolBarPopupAction + KCommand list use. The upstream
+    ## CMakeLists makes it a REQUIRED find_package; the M9.R.15h.13
+    ## recipe omitted the buildDep so M9.R.15i.5's sibling threader had
+    ## nothing to find. Closes the kxmlgui configure trip.
+    "kitemviews >=6.0"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
