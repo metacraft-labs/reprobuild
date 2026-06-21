@@ -2281,3 +2281,36 @@
 
   Acceptance: materialized `.ct` is the spec's multi-stream format end-to-end,
   read seekably by every consumer, with no regression and a clean legacy-read path.
+
+* M23e — Retire the legacy `events.log` (decomposed reader-migration sub-milestones)
+  :STATUS: in progress — decomposed below
+
+  The additive multi-stream foundation is complete (M17a calls.dat, M23a steps.dat,
+  M23b values.dat, M23c events.dat, M23d interning tables — all shipped, gated,
+  seekable). Retiring `events.log` is a PRODUCT-WIDE consumer migration: every reader
+  must consume the split streams, THEN the writer drops `events.log`. Done as
+  fallback-safe sub-milestones (each reader PREFERS split streams when present, falls
+  back to `events.log` when absent — so the transition never breaks), each
+  individually implemented→adversarially-reviewed→committed.
+
+  - [ ] M23e-1 — ct-print `--json-events` reads the split streams (calls/steps/values/
+    events.dat/interning) when the `meta.dat` flags are present, producing BYTE-
+    IDENTICAL output to the events.log path; falls back to `events.log` otherwise.
+    This transparently covers the reprobuild ENGINE (it consumes `ct-print
+    --json-events`). [codetracer-trace-format-nim]
+  - [ ] M23e-2 — db-backend FULL `Db` construction reads the split streams when
+    present (the omniscient DB, flow preloader, step/expr/event loaders, AND the
+    cell/compound history + `diff.rs` that M22 left on the full-load path), falling
+    back to `events.log`. Parity with the materialized path proven; DAP suite green.
+    This subsumes the M22 `[~]` remainder. [codetracer/src/db-backend] — the big one.
+  - [ ] M23e-3 — visual replay / any other `.ct` consumer reads split when present
+    (audit first: confirm whether it consumes `events.log` at all). [codetracer-visual-replay]
+  - [ ] M23e-4 — the writer DEFAULT-emits all split streams (events.log still present
+    for one transition release); every materialized recorder now produces the full
+    split. Additive — readers (now split-preferring) use them. [codetracer-trace-format(+nim)]
+  - [ ] M23e-5 — the writer drops `events.log` (split-only); confirm EVERY reader is
+    green without `events.log`; remove the legacy combined-stream write path. The
+    capstone. [codetracer-trace-format(+nim)]
+
+  Acceptance: `events.log` is gone; materialized `.ct` is split-stream-only; every
+  consumer reads the spec's multi-stream format; no regression anywhere.
