@@ -105,6 +105,12 @@ package ksvgSource:
     "qt6-base >=6.6"
     ## qt6-tools supplies ``qhelpgenerator`` for QCH generation.
     "qt6-tools >=6.6"
+    ## M9.R.15k.5 — qt6-svg supplies libQt6Svg.so for SVG rendering.
+    "qt6-svg >=6.6"
+    ## M9.R.15k.5 — qt6-declarative supplies Qt6Qml + Qt6Quick which
+    ## ksvg's SvgItem QML wrapper consumes (ECMQmlModule includes
+    ## Qt6::Qml unconditionally on Qt6).
+    "qt6-declarative >=6.6"
     ## kconfig is the KF6 configuration-storage library ksvg uses to
     ## persist theme-asset cache validation cookies.
     "kconfig >=6.0"
