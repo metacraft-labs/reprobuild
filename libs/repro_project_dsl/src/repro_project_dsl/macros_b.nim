@@ -38,6 +38,20 @@ proc foreachParts(stmt: NimNode): tuple[matched: bool; iteratorName: string;
   result.matched = true
 
 proc collectBuildStatements(pkgBody: NimNode): NimNode =
+  ## Aggregate every ``build:`` block in the package body — both the
+  ## top-level ``build:`` and any per-artifact ``build:`` nested inside
+  ## an ``executable`` or ``library`` member — into a single flat
+  ## ``StmtList``. M9.N Batch C.1 introduced the per-``executable`` form
+  ## (ninja / meson / gcc); M9.R.15q.1.10 extended the same shape to
+  ## ``library`` so multi-library custom-shell recipes (e.g. boost's
+  ## five-library bootstrap.sh + b2 pipeline) can anchor their build
+  ## body on a library artifact instead of forcing a synthetic
+  ## executable. Without this extension, ``library X: build: shell ...``
+  ## silently dropped its body — the smoke test was the only path
+  ## populating the shell-action registry (via macro module-init
+  ## evaluation that briefly touched the body); the provider mode
+  ## emitted no graph fragment and crashed with "provider did not write
+  ## a response file".
   result = newStmtList()
   for stmt in pkgBody:
     if calleeName(stmt).normalize == "build":
@@ -48,6 +62,18 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
       for exeStmt in exeBody:
         if calleeName(exeStmt).normalize == "build":
           for buildStmt in exeStmt[1]:
+            result.add(buildStmt)
+    elif calleeName(stmt).normalize == "library":
+      # ``library X:`` with a body has the same shape as ``executable X:``
+      # — a Call/Command node whose third child is the body StmtList. A
+      # bare ``library X`` command (no body) has only two children; skip
+      # it so we don't index out of bounds.
+      if stmt.len < 3:
+        continue
+      let libBody = stmt[2]
+      for libStmt in libBody:
+        if calleeName(libStmt).normalize == "build":
+          for buildStmt in libStmt[1]:
             result.add(buildStmt)
 
 proc collectDevEnvStatements(pkgBody: NimNode): NimNode =
