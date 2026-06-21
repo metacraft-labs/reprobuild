@@ -959,6 +959,9 @@ proc cmakeRegenerationFingerprint(meta: CmakeRegenerationMetadata;
   payload.addCmakeFingerprintField(meta.providerStateFile)
   weakFingerprintFromText(payload)
 
+proc resolveMonitorShimLibPath(): string  # defined below; used by the
+  # CMake regeneration edge so the automatic monitor can locate the shim.
+
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
   var env: seq[string] = @[]
@@ -970,6 +973,19 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
     env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
+  # The regeneration edge runs under the automatic fs-snoop monitor
+  # (dependencyPolicy below). ``repro internal fs-snoop`` needs to locate
+  # librepro_monitor_shim.{so,dylib,dll}; when this action runs daemon-hosted
+  # — or the inner ``repro build`` is invoked by the forked CMake, which
+  # sanitizes the environment — the shim path is not inherited, so fs-snoop
+  # fails with "cannot find librepro_monitor_shim". Bake the resolved path
+  # into the action env so the monitor finds it regardless of how the edge
+  # is launched. Resolution anchors on the running ``repro`` binary's repo,
+  # so this captures the develop-mode build tree even though the action may
+  # execute from the project's CMake binary dir.
+  let monitorShim = resolveMonitorShimLibPath()
+  if monitorShim.len > 0:
+    env.add("REPRO_MONITOR_SHIM_LIB=" & monitorShim)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
   action("__repro_cmake_regenerate", @[
     publicCliPath,
@@ -1032,24 +1048,37 @@ proc resolveMonitorShimLibPath(): string =
   ##    checkout (the develop-mode default — equivalent to how the
   ##    sibling-repo path resolver in repro_interface_artifacts walks
   ##    up from ``getAppFilename()``).
-  ## 3. Empty string when neither path matches; the caller (the engine's
-  ##    monitor launcher) treats that as "monitor not configured" and
-  ##    falls back to ``REPRO_MONITOR_BYPASS=1`` semantics.
+  ## 3. ``$REPROBUILD_SOURCE_ROOT/build/lib/librepro_monitor_shim.<ext>``.
+  ##    The daemon-hosted build path re-derives the build graph (including
+  ##    the CMake regeneration edge) from a *staged* daemon binary whose
+  ##    ``getAppFilename`` sits under the daemon state dir, not the source
+  ##    checkout — so step (2) returns empty there. ``repro develop``
+  ##    threads the user's checkout through ``REPROBUILD_SOURCE_ROOT`` (and
+  ##    the daemon forwards it), so this fallback recovers the shim in the
+  ##    daemon-hosted CMake develop flow.
+  ## 4. Empty string when none match; the caller (the engine's monitor
+  ##    launcher) treats that as "monitor not configured" and falls back
+  ##    to ``REPRO_MONITOR_BYPASS=1`` semantics.
   let override = getEnv("REPRO_MONITOR_SHIM_LIB")
   if override.len > 0:
     return override
-  let exePath = getAppFilename()
-  if exePath.len == 0:
-    return ""
   const dllExt =
     when defined(windows): "dll"
     elif defined(macosx):  "dylib"
     else:                  "so"
-  # exePath: <reprobuild-root>/build/bin/repro.exe
-  let candidate = exePath.parentDir.parentDir / "lib" /
-    ("librepro_monitor_shim." & dllExt)
-  if fileExists(extendedPath(candidate)):
-    return candidate
+  let exePath = getAppFilename()
+  if exePath.len > 0:
+    # exePath: <reprobuild-root>/build/bin/repro.exe
+    let candidate = exePath.parentDir.parentDir / "lib" /
+      ("librepro_monitor_shim." & dllExt)
+    if fileExists(extendedPath(candidate)):
+      return candidate
+  let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
+  if sourceRoot.len > 0:
+    let candidate = sourceRoot / "build" / "lib" /
+      ("librepro_monitor_shim." & dllExt)
+    if fileExists(extendedPath(candidate)):
+      return candidate
   ""
 
 proc moduleHasBuildBlock(modulePath: string): bool =
