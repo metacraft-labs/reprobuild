@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 4 — native LIVE via compile-time instrumentation (M14/M15), dedicated calls.dat stream (M17/M20), ct test --incremental standalone (M18), docs (M19) all DONE; only the OS-level Intel PT / MCR native path (M16) remains planned
+#+STATUS: Phase 4 COMPLETE except M16. Native LIVE via compile-time instrumentation (M14/M15), dedicated seekable calls.dat stream end-to-end incl. db-backend (M17a/M17b) + all materialized recorders (M20), ct test --incremental standalone (M18), docs (M19) — all DONE, reviewed, pushed. M16 (OS-level Intel PT) is DEFERRED to an x86+PT Linux host (no PT hardware on the arm64-macOS dev host to implement/validate it).
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -1248,7 +1248,22 @@
   native row in the README/matrix moves from gated to live.
 
 * M16 — Intel PT native discovery (OS-level, recorder-independent; honest gate)
-  :STATUS: planned
+  :STATUS: deferred — requires an x86 + Intel-PT Linux host
+
+  DEFERRAL NOTE (2026-06-21, owner-approved): Intel PT requires an x86 CPU with
+  Processor Trace, Linux `perf_event` (or RR's PT capture), and `libipt` to
+  decode — none available on the arm64-macOS dev host, and there is no real
+  raw-PT trace to develop or validate against here. Per the campaign's standard
+  (genuine live validation, no weak/unvalidated tests, reuse not duplicate),
+  M16 is deferred to an x86+PT Linux host. Implementation guidance when picked
+  up there: reuse the EXISTING RR `ProcessorTraceDecoder` (codetracer-rr,
+  behind the `INTEL_PT_DECODING` build flag) rather than a fresh libipt binding;
+  capture a real PT trace via `perf record -e intel_pt//` (recorder-independent —
+  no MCR/RR recording required, per Intel-PT-Call-Trace-Research.md); decode →
+  classify CALL/RET → reconstruct the call tree → resolve PCs to functions via
+  DWARF → executed-function set; commit a real captured raw-PT fixture so the
+  decode logic is unit-tested everywhere. On arm64-macOS the live native path
+  stays M14/M15 instrumentation. (Deliverables below are unchanged.)
 
   Goal: derive the executed-function set from an **Intel PT control-flow trace**,
   decoded into call/return events. CORRECTION (2026-06-21): Intel PT is NOT tied
