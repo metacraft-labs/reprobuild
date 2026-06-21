@@ -117,6 +117,7 @@ package kdedSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtNetwork the kded daemon
     ## consumes for the IPC service-bus + sycoca refresher loop.
     "qt6-base >=6.6"
@@ -146,14 +147,8 @@ package kdedSource:
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
     discard
-  library libKF6Ded:
-    ## ``libKF6Ded.so`` — ``KDEDModule`` base class library downstream
-    ## kded modules (solidautoeject, networkmanagement, kfilemetadata,
-    ## ksysguard, …) link against. Camel-cased from the upstream
-    ## SONAME ``KF6Ded``. v1 records the artifact only; the per-
-    ## artifact build body lands in M9.L when the convention's
-    ## ninja-spawn + install-glue closes.
-    discard
+  # M9.R.15i.3.3 — kded 6.10.0 only ships the kded6 executable; the
+  # KDEDModule base-class lives in kcoreaddons. No libKF6Ded.so exists.
 
   executable kded6:
     ## ``/usr/bin/kded6`` — the long-running KF6 module-host daemon
@@ -179,7 +174,6 @@ package kdedSource:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6Ded")
       discard pkg.executable("kded6")
     finally:
       clearCurrentOwningPackageOverride()

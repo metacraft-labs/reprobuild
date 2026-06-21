@@ -4139,6 +4139,49 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     if mirrorHit.len > 0:
       resolved = mirrorHit
   if resolved.len == 0:
+    # DSL-port M9.R.15h.14 — share-only-package fast-path.
+    #
+    # Some CMake packages ship NO compiled libraries — they're pure
+    # CMake module collections installed under ``<prefix>/share/cmake/``
+    # or ``<prefix>/share/<NAME>/``.  Canonical example: KDE's
+    # extra-cmake-modules (ECM), which every KF6 module declares as a
+    # buildDep but which has no ``.so`` or executable to probe.
+    #
+    # Probe both the install-mirror and the build/out trees for the
+    # canonical CMake-config locations.  We use the canonical-name +
+    # raw-name forms to match upstream-style installs (``share/ECM/``
+    # for ``extra-cmake-modules``) AND the lower-cased package-name
+    # form (``share/extra-cmake-modules/``).
+    var shareRoots: seq[string] = @[]
+    for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      let prefixRoot = recipeDir / prefixSubdir
+      if dirExists(extendedPath(prefixRoot)):
+        shareRoots.add(prefixRoot / "share")
+    for shareRoot in shareRoots:
+      if not dirExists(extendedPath(shareRoot)):
+        continue
+      # Generic walk: enumerate every subdir of share/ and probe each
+      # for a CMake config file.  This covers ECM (share/ECM/cmake/
+      # ECMConfig.cmake), as well as any future share-only package
+      # whose subdir name doesn't mechanically derive from the dep name
+      # (ECM's name is "ECM" but the dep selector is
+      # "extra-cmake-modules", so name-based UPPER/lower probes miss).
+      block shareWalk:
+        for kindPc, walked in walkDir(extendedPath(shareRoot)):
+          if kindPc != pcDir and kindPc != pcLinkToDir:
+            continue
+          var subdir = walked
+          when defined(windows):
+            if subdir.startsWith("\\\\?\\"):
+              subdir = subdir[4 .. ^1]
+          let subdirName = lastPathPart(subdir)
+          let cmakeConfig = subdir / "cmake" / (subdirName & "Config.cmake")
+          if fileExists(extendedPath(cmakeConfig)):
+            resolved = absolutePath(cmakeConfig)
+            break shareWalk
+        if resolved.len > 0:
+          break
+  if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
       expectedArtifact: baseCandidate,

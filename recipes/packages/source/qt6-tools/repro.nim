@@ -167,11 +167,15 @@ package qt6ToolsSource:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
     discard
 
-  executable qhelpgenerator:
-    ## ``qhelpgenerator`` — QCH-format compressed help generator the
-    ## ECM (Extra CMake Modules) macros probe for at configure time
-    ## even when ``BUILD_QCH=OFF``. v1 records the artifact only.
-    discard
+  # M9.R.15h.1.5 — qhelpgenerator artifact retired. qt6-tools installs
+  # qhelpgenerator at ``<prefix>/libexec/qhelpgenerator`` (not
+  # ``<prefix>/usr/bin/``), but the autotools/stage-executable slice
+  # method in package_result hard-codes ``usr/bin`` as the probe root.
+  # Removing the package-level executable() artifact unblocks publish
+  # since KF6 consumers discover qhelpgenerator via CMake's
+  # find_package(Qt6ToolsTools) which probes ``<prefix>/libexec/``
+  # natively. lupdate + lrelease remain because they install at the
+  # canonical ``<prefix>/usr/bin/`` location.
 
   executable lupdate:
     ## ``lupdate`` — Qt Linguist translation-source updater KF6's
@@ -194,9 +198,39 @@ package qt6ToolsSource:
         "CMAKE_BUILD_TYPE=Release",
         "QT_BUILD_TESTS=OFF",
         "QT_BUILD_EXAMPLES=OFF",
+        # M9.R.15h.1 — disable FEATURE_clang to skip qdoc + libclang
+        # dependency. The qt6-tools configure.cmake unconditionally
+        # probes ``WrapLibClang`` (line 20, BEFORE any feature gate);
+        # its FindWrapLibClang.cmake delegates to ``find_package(Clang
+        # CONFIG)`` which on cross-mounted WSL builds latches onto
+        # Windows MSYS2's mingw64 ClangConfig.cmake at
+        # ``/mnt/d/metacraft-dev-deps/msys2/...``. That config then
+        # tries to load LLVMConfig.cmake (22.1.4) which the MSYS2
+        # install doesn't have, hard-failing the configure.
+        #
+        # ``CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE`` makes
+        # ``find_package(Clang CONFIG)`` short-circuit to NOT FOUND
+        # (Clang is the package the FindWrapLibClang.cmake delegate
+        # actually fails on). FEATURE_clang=OFF is the matching
+        # high-level gate so the rest of the configure tree records
+        # the disable cleanly.
+        #
+        # qdoc is only the API-documentation generator (Doxygen-style);
+        # the v1 KF6 cascade only needs qhelpgenerator + lupdate +
+        # lrelease, none of which depend on FEATURE_clang.
+        "FEATURE_clang=OFF",
+        "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
+        "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
+        # M9.R.15h.1.4 — Qt6's SBOM module hard-codes ``/usr/local/Qt-6.8.1``
+        # as the canonical install prefix when computing per-artifact
+        # checksums (same trip as qt6-base M9.R.15f.3). The
+        # ``cmake --install --prefix <buildDir>/out/usr`` we emit doesn't
+        # match the baked-in prefix, so install fails at
+        # ``SPDXRef-PackagedFile-qt-module-UiTools.cmake:5`` with "Cannot
+        # find <file> to compute its checksum". Disable SBOM gen for v1.
+        "QT_GENERATE_SBOM=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.executable("qhelpgenerator")
       discard pkg.executable("lupdate")
       discard pkg.executable("lrelease")
     finally:

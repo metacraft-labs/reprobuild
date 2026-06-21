@@ -133,11 +133,24 @@ proc cmake_package*(srcDir: string;
   var configureAfter: seq[BuildActionDef] = @[]
   if fetchActOpt.isSome:
     configureAfter.add(fetchActOpt.get())
+  # M9.R.15i.1 — auto-thread Qt6 component cmake-config dirs from every
+  # ``qt6-*`` dep's install-mirror so KF6 / Plasma recipes consuming
+  # qt6-tools transitively can resolve ``find_package(Qt6 ...
+  # LinguistTools REQUIRED)`` even though qt6-base + qt6-tools install
+  # to separate sibling prefixes. Without this, Qt6's CMake-config-
+  # package expects every requested component to live at the same
+  # install prefix as Qt6Core and the probe fails. Inert in unit-test
+  # mode (empty ``projectRoot``) and for non-Qt6 deps.
+  var effectiveCacheVars = cacheVars
+  if projectRoot.len > 0:
+    let qt6CompDirs = m9r15iCollectQt6ComponentDirs(projectRoot, pkgName)
+    for entry in m9r15iEmitQt6ComponentCacheVars(qt6CompDirs):
+      effectiveCacheVars.add(entry)
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,
     generator = generator,
-    cacheVars = cacheVars,
+    cacheVars = effectiveCacheVars,
     after = configureAfter)
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand

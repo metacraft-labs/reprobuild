@@ -196,6 +196,7 @@ package kwinSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## kcoreaddons is the KF6 foundation library kwin links against
     ## for KJob / KAboutData / KPluginFactory plumbing. The sibling
     ## ``kcoreaddonsSource`` recipe vendors 6.10.0 to match the KF6

@@ -361,6 +361,95 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
   for raw in registeredBuildDeps(packageName):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
 
+# ---------------------------------------------------------------------------
+# M9.R.15i.1 — Qt6 component CMake-config dir threading.
+# ---------------------------------------------------------------------------
+
+proc m9r15iScanQt6CmakeDirs*(qt6DepRecipeDir: string;
+                              dst: var seq[(string, string)]) =
+  ## DSL-port M9.R.15i.1 — scan a qt6-* dep's install-mirror cmake/
+  ## tree for ``Qt6*Config.cmake`` files and emit ``(Component, dir)``
+  ## pairs. ``dir`` is the absolute path to the directory holding the
+  ## config file (what CMake expects as ``<Component>_DIR``).
+  ##
+  ## Exported for unit-test introspection.
+  let cmakeRoot = qt6DepRecipeDir / ".repro" / "output" / "install" /
+    "usr" / "lib" / "cmake"
+  if not dirExists(cmakeRoot):
+    return
+  # Sort kinds + names so the output is deterministic across host file-
+  # system enumeration order.
+  var entries: seq[string] = @[]
+  for kindPc, walked in walkDir(cmakeRoot):
+    if kindPc != pcDir and kindPc != pcLinkToDir:
+      continue
+    var subdir = walked
+    when defined(windows):
+      if subdir.startsWith("\\\\?\\"):
+        subdir = subdir[4 .. ^1]
+    entries.add(subdir)
+  # std/algorithm sort would pull a transitive import; the entries
+  # collected from a single walkDir round are already deterministic
+  # for a fixed filesystem state, but the M9.R.15i.1 unit test pins
+  # a sorted contract so a future filesystem-order shift cannot
+  # silently flip the emitted ``-D`` order. Manual insertion-sort
+  # keeps the import surface narrow.
+  for i in 1 ..< entries.len:
+    let cur = entries[i]
+    var j = i
+    while j > 0 and entries[j - 1] > cur:
+      entries[j] = entries[j - 1]
+      dec j
+    entries[j] = cur
+  for subdir in entries:
+    let component = lastPathPart(subdir)
+    if not component.startsWith("Qt6"):
+      continue
+    let configFile = subdir / (component & "Config.cmake")
+    if not fileExists(configFile):
+      continue
+    dst.add((component, subdir.replace("\\", "/")))
+
+proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
+    seq[(string, string)] =
+  ## DSL-port M9.R.15i.1 — enumerate every ``Qt6*Config.cmake`` found
+  ## in the install-mirror cmake/ trees of every declared ``qt6-*``
+  ## dep of ``packageName``. Returns ``(Component, dir)`` pairs; the
+  ## emitter wraps each as ``-DComponent_DIR=dir``.
+  ##
+  ## Qt6's CMake-config-package structure expects every dependent
+  ## ``find_package(Qt6 ... LinguistTools REQUIRED)`` to resolve all
+  ## requested components from a SINGLE install prefix. Because we
+  ## build qt6-base + qt6-tools + future qt6-* as siblings each with
+  ## its own ``.repro/output/install/`` prefix, KF6 / Plasma recipes'
+  ## probes fail until each component's ``Qt6<X>_DIR`` is pre-pointed
+  ## at the right sibling.
+  ##
+  ## Order: deterministic across runs. Each qt6-* dep is walked in
+  ## (nativeBuildDeps, then buildDeps) declaration order; within a
+  ## dep, component names are sorted.
+  let recipeRoot = parentDir(projectRoot)
+  if recipeRoot.len == 0:
+    return
+  proc visitDep(raw: string; sink: var seq[(string, string)]) =
+    let dep = m9r14fStripDepConstraint(raw)
+    if not dep.startsWith("qt6-"):
+      return
+    let depRecipeDir = recipeRoot / dep
+    m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
+  for raw in registeredNativeBuildDeps(packageName):
+    visitDep(raw, result)
+  for raw in registeredBuildDeps(packageName):
+    visitDep(raw, result)
+
+proc m9r15iEmitQt6ComponentCacheVars*(componentDirs: seq[(string, string)]):
+    seq[string] =
+  ## DSL-port M9.R.15i.1 — emit ``Component_DIR=dir`` cache-var entries
+  ## suitable for ``cmake.configure(cacheVars = ...)``. The configure
+  ## CLI lowering prefixes each with ``-D``.
+  for (component, dir) in componentDirs:
+    result.add(component & "_DIR=" & dir)
+
 proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  depMirrorLibDirs: seq[string]): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
@@ -402,6 +491,28 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   for i in 1 ..< rpathParts.len:
     script.add("; printf ':%s' " & rpathParts[i])
   script.add("); ")
+  # DSL-port M9.R.15h.14.4 — preserve the toolchain libstdc++ / libgcc_s
+  # path. Without a from-source gcc recipe, the C++ compiler is the
+  # nix-shell-provisioned gcc-wrapper which links against libstdc++.so.6
+  # at e.g. ``/nix/store/<gcc-lib>-gcc-N.M.0-lib/lib/libstdc++.so.6``.
+  # The plain $ORIGIN + dep-mirror rpath chain doesn't reach this path,
+  # so executables that need C++ runtime (qtpaths, lupdate, lrelease,
+  # KF6 binaries) hit ``error while loading shared libraries:
+  # libstdc++.so.6: cannot open shared object file`` at run time even
+  # when launched from inside the originating nix-shell.
+  #
+  # Append the gcc-wrapper's resolved libstdc++ dirname to the rpath
+  # so the dynamic loader finds it without LD_LIBRARY_PATH. We resolve
+  # the path at install-mirror time via ``gcc -print-file-name=...``,
+  # which echoes the absolute path of the named library file even when
+  # the compiler isn't on PATH. The directory of that path is what we
+  # want on rpath.
+  script.add(
+    "stdcxx_dir=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
+  script.add("if [ -n \"$stdcxx_dir\" ] && [ \"$stdcxx_dir\" != " &
+    "\"libstdc++.so.6\" ]; then ")
+  script.add("rpath=\"$rpath:$(dirname \"$stdcxx_dir\")\"; ")
+  script.add("fi; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
   # Walk bin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &

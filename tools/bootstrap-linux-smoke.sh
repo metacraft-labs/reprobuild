@@ -87,6 +87,55 @@ REPRO_CLONE_DEPTH="${REPRO_CLONE_DEPTH:-1}"
 log() { echo "[bootstrap-linux-smoke] $*" >&2; }
 die() { echo "[bootstrap-linux-smoke][FATAL] $*" >&2; exit 1; }
 
+# ----- M9.R.15i.2 — strip /mnt/<drive>/ entries from PATH ------------------
+#
+# Inside WSL2 the host Windows PATH bleeds through as a sequence of
+# /mnt/c/, /mnt/d/, etc. mounts (the WSL interop layer's appendWindowsPath
+# default). These entries point at the Windows-mounted 9p reflector which
+# is significantly slower than native Linux paths — cmake's ``find_program``
+# walk visits every PATH entry probing for the program name + the
+# CMAKE_EXECUTABLE_SUFFIX, and the Windows-mount probes can dominate the
+# configure time for cmake-driven recipes (qt6-base, KF6, etc.) by ~4x.
+#
+# Additionally, having Windows MSVC + MSYS2 paths on PATH inside the nix-
+# shell occasionally surfaces the wrong toolchain — cmake's gcc detection
+# probe can pick up the Windows ``gcc.exe`` shim if the wrapper is hit
+# before the nix-store one (unlikely but possible if scoop ships a
+# ``gcc.exe`` alias).
+#
+# We strip them at the smoke-script level (vs. engine-level) per the
+# task brief: scoping the change to the workflow keeps native Linux
+# CI runs (where /mnt/* legitimately means real filesystems) untouched.
+#
+# Idempotent: re-running strip_wsl_mnt_paths leaves the PATH unchanged.
+strip_wsl_mnt_paths() {
+  # No-op on non-WSL hosts. The canonical WSL marker is
+  # ``microsoft`` in ``/proc/version`` — the WSL2 kernel banner
+  # always contains either ``microsoft-standard-WSL2`` or
+  # ``-microsoft-standard``. The earlier ``/proc/sys/fs/binfmt_misc/
+  # WSLInterop`` probe was unreliable: NixOS-WSL doesn't register
+  # the WSLInterop binfmt entry by default (NIXOS-WSL gates it via
+  # the wsl.interop.register option, off by default in
+  # eli-wsl-class distros), so the marker check returned false on
+  # the very hosts that need the strip.
+  if ! grep -qi microsoft /proc/version 2>/dev/null; then
+    return 0
+  fi
+  local cleaned=""
+  local IFS=":"
+  for entry in $PATH; do
+    case "${entry}" in
+      /mnt/[a-zA-Z]/*) continue ;;
+    esac
+    if [ -z "${cleaned}" ]; then
+      cleaned="${entry}"
+    else
+      cleaned="${cleaned}:${entry}"
+    fi
+  done
+  export PATH="${cleaned}"
+}
+
 # ----- Step 1: NixOS sanity checks -----------------------------------------
 
 step_1_nixos_prereqs() {
@@ -348,6 +397,17 @@ LINUX_TOOLCHAIN_PKGS=(
   # the resulting binaries are self-contained (no LD_LIBRARY_PATH
   # required at runtime).
   patchelf
+  # M9.R.15i.4 — python3 + isocodes are required by the KF6 cascade
+  # (ki18n's KF6I18nMacros caches Python3_EXECUTABLE at configure;
+  # isocodes ships the country-and-language translation catalogs
+  # ki18n's runtime tables depend on). Future M9.L work will hoist
+  # these onto each affected recipe's nativeBuildDeps so the engine
+  # can resolve them via from-source siblings rather than the
+  # nix-shell carry-on. NOTE: nixpkgs attr is ``isocodes`` (no hyphen,
+  # no underscore), NOT ``iso-codes`` (the latter is the package
+  # display name).
+  python3
+  isocodes
 )
 
 # Env vars the flake sets that the Linux build also wants. We set
@@ -462,6 +522,11 @@ step_5_smoke() {
 # ----- Driver --------------------------------------------------------------
 
 main() {
+  # M9.R.15i.2 — strip /mnt/<drive>/ entries from PATH on WSL hosts so
+  # the cmake configure probe walks don't traverse the Windows-mount
+  # 9p reflector (~4x slowdown for cmake-driven recipes). No-op on
+  # native Linux hosts.
+  strip_wsl_mnt_paths
   step_1_nixos_prereqs
   step_2_checkouts
   step_3_cache_connectivity

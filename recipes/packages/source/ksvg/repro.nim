@@ -99,6 +99,7 @@ package ksvgSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtSvg / QtQml ksvg wraps for
     ## the scalable-asset surface.
     "qt6-base >=6.6"

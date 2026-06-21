@@ -103,6 +103,7 @@ package kglobalaccelSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtGui the kglobalaccel
     ## client + daemon proxy classes consume.
     "qt6-base >=6.6"
@@ -135,6 +136,8 @@ package kglobalaccelSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — XLib not in v1.
+        "WITH_X11=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6GlobalAccel")

@@ -123,6 +123,7 @@ package ki18nSource:
     "gettext >=0.21"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtQml / QtTest the ki18n surface
     ## wraps. 6.6 is the minimum the 6.10 frameworks line targets.
     "qt6-base >=6.6"
@@ -151,6 +152,10 @@ package ki18nSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — qt6-declarative not in v1; BUILD_WITH_QML wires
+        # the scripted-translations Qml surface (ki18nLocaleData) that
+        # we don't need for non-Qml KF6 consumers.
+        "BUILD_WITH_QML=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6I18n")

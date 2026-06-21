@@ -104,6 +104,7 @@ package kserviceSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtXml the kservice surface
     ## consumes (KService / KSycoca / KApplicationTrader / ...).
     "qt6-base >=6.6"

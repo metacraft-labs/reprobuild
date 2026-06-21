@@ -98,6 +98,7 @@ package kwidgetsaddonsSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtWidgets which the
     ## kwidgetsaddons surface extends.
     "qt6-base >=6.6"

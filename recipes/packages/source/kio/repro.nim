@@ -106,6 +106,7 @@ package kioSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtGui / QtNetwork / QtWidgets
     ## / QtXml the kio surface consumes for protocol slaves +
     ## file-dialog UI.
@@ -160,14 +161,24 @@ package kioSource:
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
     discard
-  library libKF6Kio:
-    ## ``libKF6Kio.so`` — KIO transparent-network-IO surface (KIO::Job
-    ## + KIO::CopyJob + KIO::FileCopyJob + KIO::TransferJob + KFileItem
-    ## + KFileWidget + KDirOperator + KUrlNavigator + the ``smb://`` /
-    ## ``sftp://`` / ``trash:/`` / ``recently:/`` / ``man:/`` slave
-    ## dispatch table). v1 records the artifact only; the per-
-    ## artifact build body lands in M9.L when the convention's
-    ## ninja-spawn + install-glue closes.
+  # M9.R.15i.3.3 — KIO ships FOUR libraries, not one umbrella
+  # ``libKF6Kio``. Match what upstream actually builds.
+  library libKF6KIOCore:
+    ## ``libKF6KIOCore.so`` — KIO::Job + KIO::CopyJob + KIO::TransferJob
+    ## core dispatch + the KIO slave protocol IPC. Headless half of
+    ## the KIO public surface.
+    discard
+  library libKF6KIOGui:
+    ## ``libKF6KIOGui.so`` — KIO::CommandLauncherJob + thumbnail +
+    ## drag-and-drop helpers that only need QtGui (not QtWidgets).
+    discard
+  library libKF6KIOWidgets:
+    ## ``libKF6KIOWidgets.so`` — KFileItem + KDirOperator + KUrlNavigator
+    ## + every KIO widget that needs QtWidgets at link time.
+    discard
+  library libKF6KIOFileWidgets:
+    ## ``libKF6KIOFileWidgets.so`` — KFileWidget + KFileFilterCombo +
+    ## KFilePreviewGenerator: the file-picker dialog surface.
     discard
 
   build:
@@ -179,9 +190,17 @@ package kioSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — XLib + wayland-client surface gated out for v1
+        # KIO core. Wayland is in v1 closure but kio's WITH_WAYLAND
+        # adds X11-like extras.
+        "WITH_X11=OFF",
+        "WITH_WAYLAND=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6Kio")
+      discard pkg.library("libKF6KIOCore")
+      discard pkg.library("libKF6KIOGui")
+      discard pkg.library("libKF6KIOWidgets")
+      discard pkg.library("libKF6KIOFileWidgets")
     finally:
       clearCurrentOwningPackageOverride()
 

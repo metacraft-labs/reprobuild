@@ -97,6 +97,7 @@ package kxmlguiSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtWidgets / QtXml / QtNetwork
     ## the kxmlgui surface consumes.
     "qt6-base >=6.6"

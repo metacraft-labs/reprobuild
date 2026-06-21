@@ -104,6 +104,7 @@ package knotificationsSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtGui / QtNetwork +
     ## QtMultimedia the knotifications surface consumes (action
     ## buttons, sound playback, popup widgets, fallback channels).

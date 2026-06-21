@@ -114,6 +114,7 @@ package ksolidSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtDBus / QtXml / QtQml ksolid wraps
     ## for the udev / UPower / NetworkManager bridges.
     "qt6-base >=6.6"

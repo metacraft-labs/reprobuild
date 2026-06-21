@@ -166,6 +166,7 @@ package kconfigSource:
     "gcc >=11"
 
   buildDeps:
+    "extra-cmake-modules >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtWidgets / QtXml which the
     ## three kconfig libraries wrap on top of. 6.6 is the minimum the
     ## 6.10 frameworks line targets.
@@ -183,13 +184,11 @@ package kconfigSource:
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
     discard
-  library libKF6Config:
-    ## ``libKF6Config.so`` — umbrella shim ``find_package`` consumers
-    ## link against; aggregates ConfigCore + ConfigGui transparently
-    ## for upstream KF6 consumers that do ``find_package(KF6Config)``.
-    ## v1 records the artifact only; the per-artifact build body lands
-    ## in M9.L when the convention's ninja-spawn + install-glue closes.
-    discard
+  # M9.R.15i.3.2 — kconfig 6.10.0 does NOT ship an umbrella
+  # ``libKF6Config.so``; CMake's ``find_package(KF6Config)`` imports
+  # KF6::ConfigCore + KF6::ConfigGui targets directly. The legacy
+  # umbrella library declaration would cause stage-copy to fail
+  # looking for a library that doesn't exist.
 
   library libKF6ConfigCore:
     ## ``libKF6ConfigCore.so`` — the headless key-value store classes
@@ -213,9 +212,13 @@ package kconfigSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — qt6-declarative isn't in the v1 closure; ECM's
+        # ECMQmlModule does find_package(Qt6 Qml Quick REQUIRED) when
+        # KCONFIG_USE_QML is on. Disable the optional Qml component;
+        # the KCoreAddons / KConfig core libraries don't need it.
+        "KCONFIG_USE_QML=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6Config")
       discard pkg.library("libKF6ConfigCore")
       discard pkg.library("libKF6ConfigGui")
     finally:
