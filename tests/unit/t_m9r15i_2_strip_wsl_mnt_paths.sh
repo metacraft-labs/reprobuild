@@ -21,6 +21,12 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "${SCRIPT_DIR}/../.." && pwd )"
 SMOKE_SH="${REPO_ROOT}/tools/bootstrap-linux-smoke.sh"
 
+# Snapshot the host PATH so trap handlers + the marker-probe test
+# (which exercises real ``grep``) can find their executables. The
+# strip tests below blow away PATH on purpose; we reset it between
+# tests via _HOST_PATH.
+_HOST_PATH="${PATH}"
+
 if [ ! -f "${SMOKE_SH}" ]; then
   echo "FAIL: ${SMOKE_SH} not found" >&2
   exit 1
@@ -30,7 +36,10 @@ fi
 # The smoke script's ``main "$@"`` is the last line; we read up to it
 # (exclusive) into a temp file and source THAT.
 tmp_lib=$(mktemp)
-trap 'rm -f "${tmp_lib}"' EXIT
+# Use absolute path for ``rm`` because the test body overrides ``PATH``;
+# the EXIT trap runs in whatever PATH the last test left behind.
+_RM_BIN=$(command -v rm)
+trap '"${_RM_BIN}" -f "${tmp_lib}"' EXIT
 awk '/^main "\$@"/ { exit } { print }' "${SMOKE_SH}" > "${tmp_lib}"
 
 # Stub the WSLInterop check so the function exercises the strip path
@@ -113,7 +122,8 @@ echo "OK test 5: only /mnt/<drive>/ entries matched (not /mnt-fake/)"
 # ----- Test 6: marker probe lives in the real function ------------------
 # The actual smoke-script function must gate on /proc/sys/fs/binfmt_misc
 # /WSLInterop so it's a no-op on non-WSL hosts. Pin this contract by
-# grepping the source.
+# grepping the source. Restore the host PATH so ``grep`` resolves.
+PATH="${_HOST_PATH}"
 if ! grep -q "WSLInterop" "${SMOKE_SH}"; then
   echo "FAIL test 6: strip_wsl_mnt_paths missing WSLInterop marker probe" >&2
   exit 1
