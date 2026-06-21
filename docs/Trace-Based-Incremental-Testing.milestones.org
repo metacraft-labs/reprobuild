@@ -2392,9 +2392,66 @@
        `ruby_flow_ctfs_integration` (recorders present, not skipped — exercise genuine
        production split-only bundles through DAP). `cargo clippy --lib` + new test
        file clean. No existing test weakened/skipped/deleted.
-  - [ ] M23e-4 — make the SECONDARY Rust `CtfsTraceWriter` default-emit the split
+  - [X] M23e-4 — make the SECONDARY Rust `CtfsTraceWriter` default-emit the split
     streams too (so even non-production Rust-writer bundles are spec-format), keeping
-    `events.log` as the legacy combined stream. Additive.
+    `events.log` as the legacy combined stream. Additive. DONE + passing.
+    WHAT CHANGED (writer): the four splits that were OPT-IN are now DEFAULT-ON,
+    joining the M20 `calls.dat` default — `emit_step_stream`, `emit_value_stream`,
+    `emit_io_event_stream`, `emit_interning_tables` flipped `false`→`true` in
+    `CtfsTraceWriter::with_options` (`codetracer_trace_writer/src/ctfs_writer.rs`).
+    A DEFAULT bundle now ships all five splits (`calls`/`steps`/`values`/
+    `events.dat`/interning) + their `.idx`/`.off` indices + a `meta.dat` with all
+    flags, PLUS `events.log` (additive — M23e-5 removes it). Each `with_*_stream(false)`
+    stays the explicit DISABLE lever (tests of the legacy path use it). New test
+    `codetracer_trace_reader/tests/default_split_streams_tests.rs` pins the
+    default-on layout, the events.log round-trip, and the splits-off legacy-only
+    bundle.
+    Rust↔db-backend SPLIT INTEROP GAP FOUND (the milestone's anticipated risk) —
+    INVESTIGATED + FIXED, not papered over. A Rust-writer split bundle routed
+    through the Nim FFI (`open_new_format_nim`) yields ZERO steps/calls: the Nim
+    exec/value/event readers and zstd decompressor are matched ONLY to the Nim
+    `MultiStreamTraceWriter`'s wire formats, and the Rust encoders DIVERGE for
+    steps/values/events — Rust `steps.idx`/`values.idx`/`events.idx` carry a bare
+    `[chunk_size][offsets…]` index (no `total_events` header+trailer the Nim exec
+    reader expects), Rust chunks are header-less (no per-chunk u32 count), and Rust
+    `zstd::encode_all` omits the pledged content size the Nim `zstdDecompress`
+    REQUIRES (`ZSTD_getFrameContentSize` → UNKNOWN → "zstd: unknown frame content
+    size"). Only `calls.dat` (M20) and the binary interning tables (M23d) are
+    cross-matched (verified: a Rust bundle's interning reads correctly via the Nim
+    FFI; calls fail only on the zstd content-size). FIX (minimal, honest, and
+    consistent across consumers): bound the Nim-FFI path to the PRODUCTION
+    (events.log-FREE, Nim-written) split bundles it was matched to. A Rust-writer
+    bundle ALWAYS carries `events.log` (the Rust writer writes it unconditionally),
+    so `is_new_format` now requires `steps.dat` present AND `events.log` ABSENT
+    (`codetracer/src/db-backend/src/ctfs_trace_reader/mod.rs`): a both-present bundle
+    is the secondary Rust-writer combined format and reads via the LEGACY
+    `events.log` postprocessing path (which builds the correct full Db), while the
+    Rust-side SEEKABLE readers (`calls.dat`/`steps.dat`/`values.dat`, written by and
+    matched to the same Rust crate) still attach for on-demand reads. ct-print's
+    M23e-1 layout router was aligned the same way (`codetracer_ct_print.nim`):
+    `events.log` present ⇒ legacy reader, regardless of split markers; production
+    Nim split bundles are events.log-free and stay on the v4 path byte-for-byte.
+    DEFAULT-BUNDLE END-TO-END read result: a default Rust-writer bundle is served
+    CORRECTLY by the Rust readers (round-trip + seekable calls/steps/values), by
+    ct-print (`--json-events` via its events.log path — populated legacy array),
+    and by the db-backend (correct steps/calls/per-step values via the legacy path;
+    seekable call stream attaches and agrees). LEGACY-PATH-STILL-WORKS: a
+    `with_*_stream(false)` bundle is events.log-only and reads via the old path
+    (trace-format + db-backend tests). NOTE for M23e-5: a Rust-writer split-ONLY
+    bundle (no events.log) is NOT yet Nim-FFI-readable for steps/values/events —
+    the residual wire-format divergence above. M23e-5 (or a dedicated interop
+    milestone) must either align the Rust step/value/event encoders to the Nim
+    reader (idx header+trailer, per-chunk count, content-size-pledged zstd) or keep
+    routing Rust-writer bundles via events.log. Tests added:
+    `db-backend/tests/ctfs_default_rust_writer_bundle_test.rs` (default bundle
+    end-to-end + seekable attach), updated `test_is_new_format_detection`
+    (combined-bundle routing), updated `test_ct_print_events_log_fallback.nim`
+    (combined ⇒ legacy). Suites green: trace-format `cargo test -p
+    codetracer_trace_writer -p codetracer_trace_reader`; db-backend `cargo test
+    --lib` (378) + `dap_variables_e2e` (3) + seekable call/step-value + split-only
+    full-db + default-rust-writer-bundle + dap_column_flow + formatted-view
+    step-in/out; `cargo clippy --lib` clean; ct-print `--full` golden + events.log
+    fallback green. No existing test weakened/skipped/deleted.
   - [ ] M23e-5 — physically remove `events.log`: assess the streaming/follow-mode
     reader (`streaming_ctfs_reader.rs`) — if it still needs `events.log`, migrate it
     to the split streams or KEEP `events.log` as an explicitly-bounded streaming/legacy
