@@ -206,6 +206,12 @@ package kcoreaddonsSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15h.14.6 — disable the optional KCoreAddons-Qml plugin.
+        # v1 qt6-base ships without QtDeclarative (qt6-declarative is
+        # not in the closure); the library proper builds fine without
+        # Qml. KF6 consumers that need Qml will get it from
+        # qt6-declarative when it lands in a future milestone.
+        "KCOREADDONS_USE_QML=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6CoreAddons")
