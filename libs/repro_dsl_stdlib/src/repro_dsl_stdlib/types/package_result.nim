@@ -1099,18 +1099,31 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     let strippedEscaped = strippedName.replace("\"", "\\\"")
     let strippedKebab =
       m9r14dPascalToKebab(strippedName).replace("\"", "\\\"")
-    script.add("if [ -f \"" & escapedSrcDir & "/" & escapedName & "\" ]; then ")
-    script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
-    script.add("elif [ -f \"" & escapedSrcDir & "/" & kebabName & "\" ]; then ")
-    script.add("cp -fL \"" & escapedSrcDir & "/" & kebabName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
-    if strippedName != name:
-      script.add("elif [ -f \"" & escapedSrcDir & "/" & strippedEscaped & "\" ]; then ")
-      script.add("cp -fL \"" & escapedSrcDir & "/" & strippedEscaped & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
-      script.add("elif [ -f \"" & escapedSrcDir & "/" & strippedKebab & "\" ]; then ")
-      script.add("cp -fL \"" & escapedSrcDir & "/" & strippedKebab & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
-    script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedName & ".exe\" ]; then ")
-    script.add("cp -fL \"" & escapedSrcDir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
-    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
+    # M9.R.15m.6 — system daemons (udevd, sshd, kmodd, etc.) install
+    # to ``usr/sbin`` rather than ``usr/bin``. Build the candidate dir
+    # list as ``usr/bin`` first (canonical), then fall back to
+    # ``usr/sbin`` so recipes don't need to special-case the install
+    # path. The destdir-relative install root is ``effectiveDestRoot``;
+    # we already used ``installPrefix = effectiveDestRoot & "/usr/bin"``
+    # above, so derive ``sbinSrcDir`` parallel to it here.
+    let sbinSrcDir = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
+    let candidateDirs = @[escapedSrcDir, sbinSrcDir]
+    var first = true
+    for dir in candidateDirs:
+      let leader = (if first: "if" else: "elif")
+      script.add(leader & " [ -f \"" & dir & "/" & escapedName & "\" ]; then ")
+      script.add("cp -fL \"" & dir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      script.add("elif [ -f \"" & dir & "/" & kebabName & "\" ]; then ")
+      script.add("cp -fL \"" & dir & "/" & kebabName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      if strippedName != name:
+        script.add("elif [ -f \"" & dir & "/" & strippedEscaped & "\" ]; then ")
+        script.add("cp -fL \"" & dir & "/" & strippedEscaped & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+        script.add("elif [ -f \"" & dir & "/" & strippedKebab & "\" ]; then ")
+        script.add("cp -fL \"" & dir & "/" & strippedKebab & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
+      script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
+      first = false
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(name)
