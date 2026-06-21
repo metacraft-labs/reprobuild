@@ -431,12 +431,12 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
   let recipeRoot = parentDir(projectRoot)
   if recipeRoot.len == 0:
     return
-  proc visitDep(raw: string; out_: var seq[(string, string)]) =
+  proc visitDep(raw: string; sink: var seq[(string, string)]) =
     let dep = m9r14fStripDepConstraint(raw)
     if not dep.startsWith("qt6-"):
       return
     let depRecipeDir = recipeRoot / dep
-    m9r15iScanQt6CmakeDirs(depRecipeDir, out_)
+    m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
   for raw in registeredNativeBuildDeps(packageName):
     visitDep(raw, result)
   for raw in registeredBuildDeps(packageName):
