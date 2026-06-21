@@ -38,6 +38,22 @@ package kwindowsystemSource:
     ## M9.R.15o.4 — qt6-declarative supplies Qt6Qml which kwindowsystem
     ## uses for its QML compatibility surface (KWindowSystem.qml).
     "qt6-declarative >=6.6"
+    ## M9.R.15p.1.5 — qt6-wayland supplies Qt6WaylandClient which
+    ## kwindowsystem's ``find_package(Qt6WaylandClient REQUIRED)`` resolves
+    ## against when ``KWINDOWSYSTEM_WAYLAND=ON`` (the default for v1's
+    ## Wayland-only desktop story).
+    "qt6-wayland >=6.6"
+    ## M9.R.15p.1.5 — wayland-protocols supplies the upstream Wayland
+    ## protocol XML descriptions kwindowsystem's wayland backend
+    ## consumes through wayland-scanner. ``find_package(WaylandProtocols
+    ## 1.21 REQUIRED)``.
+    "wayland-protocols >=1.21"
+    ## M9.R.15p.1.5 — plasma-wayland-protocols supplies the
+    ## Plasma-specific Wayland protocol XML descriptions (org_kde_kwin_*,
+    ## org_kde_plasma_*) kwindowsystem's wayland backend uses for
+    ## KDE-specific window-manager hints. ``find_package(
+    ## PlasmaWaylandProtocols REQUIRED)``.
+    "plasma-wayland-protocols >=1.10"
     ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
     ## package macro for every qt6-* consumer (see
     ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
