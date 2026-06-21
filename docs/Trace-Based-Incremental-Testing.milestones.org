@@ -1282,7 +1282,7 @@
   (recorder-independent), unit-tested everywhere, live path honestly gated.
 
 * M17 — Dedicated `calls.dat` call stream in materialized `.ct` (additive, compat)
-  :STATUS: M17a complete (writer + ct-print + engine flag-detection + round-trip/engine tests); M17b pending (db-backend seekable reader + engine reading calls.dat + in_memory_trace_reader)
+  :STATUS: M17a complete (writer + ct-print + engine flag-detection + round-trip/engine tests); M17b db-backend SEEKABLE reader DONE (calls.dat served on-demand, call-tree routed off the full-load path, in_memory_trace_reader bounded+documented); engine calls.dat-preferring read path still deferred
 
   NOTE (2026-06-21): M17 is split into M17a (the dedicated `calls.dat` call
   stream in materialized `.ct` traces plus the format-level readers, and engine
@@ -1332,12 +1332,29 @@
     added to the canonical Nim writer (`meta_dat.nim` bit 8 `FlagHasCallStream`),
     and the Nim `multi_stream_writer` — which always emits a v4 `calls.dat` —
     now stamps it.)
-  - [ ] db-backend SEEKABLE reader (`codetracer/src/db-backend/src/ctfs_trace_reader`):
+  - [X] db-backend SEEKABLE reader (`codetracer/src/db-backend/src/ctfs_trace_reader`):
     read `calls.dat` via CTFS block seeking + the Seekable-Zstd seek table + the
     companion index — on-demand, NOT fully into memory — so a network-loaded `.ct`
     materializes only the call records a request needs. Honor the
     not-fully-in-memory + concurrent-reader properties from Trace-Files-Overview.md.
-  - [ ] Address the `in_memory_trace_reader.rs` SPEC VIOLATION (CORRECTION
+    (M17b: new `ctfs_trace_reader::call_stream_source::SeekableCallStream` REUSES
+    the M17a `codetracer_trace_reader::call_stream_reader::CallStreamReader`
+    (it does NOT reimplement the format) to fetch a call by `call_key`,
+    decompressing ONLY that call's Zstd chunk. `CTFSTraceReader::open` attaches it
+    when `meta.dat` carries the `has_call_stream` flag (bit 8 — also added to the
+    db-backend `meta_dat.rs` KNOWN_FLAGS_MASK so a split bundle's meta.dat is
+    accepted, not rejected as "newer writer"). The db-backend `meta.dat` parser
+    previously REJECTED bit 8 as unknown, so without this fix a split `.ct` failed
+    to open at all. A `SeekableCallStream::chunk_decompressions()` counter makes
+    the bounded-decompression property observable; the test asserts fetching one
+    call inflates exactly one chunk over a 3-chunk stream. Concurrent readers each
+    open their own `SeekableCallStream` over the read-only container (a per-reader
+    `Mutex` guards the one-chunk cache), proven by an 8-thread test.
+    LIMITATION: the M17a `CallStreamReader` requires the Rust-writer's `calls.idx`
+    companion; the Nim `multi_stream_writer`'s `calls.dat` ships no `calls.idx`, so
+    the seekable path can't index a Nim-written split bundle yet — it falls back to
+    the materialized call tree. Tracked for M20.)
+  - [~] Address the `in_memory_trace_reader.rs` SPEC VIOLATION (CORRECTION
     2026-06-21): `InMemoryTraceReader::new(db: Db)` serves lookups over a
     FULLY-MATERIALIZED in-memory `Db` (HashMaps/Vecs of steps/values/cells from the
     whole trace) — it does not seek. The spec mandates CTFS files are NOT fully
@@ -1352,6 +1369,35 @@
     explicitly-labelled small-trace/test fallback — never the network/large-trace
     path). The call tree must "load independently" via `calls.dat`, never by
     materializing the whole event stream into a `Db`.
+    (M17b — DONE in part, HONESTLY bounded `[~]`:
+     (1) The CALL TREE is now routed off the full-load path: `Calltrace::new`
+         prefers the seekable `calls.dat` stream when the reader exposes one (new
+         default-`None` `TraceReader::seekable_call_count`/`seekable_call` hooks,
+         overridden by `CTFSTraceReader`); a `has_call_stream` `.ct` serves its
+         call tree on-demand from `calls.dat`, NOT from a fully-materialized `Db`.
+         Legacy readers return `None` and keep the exact prior behaviour.
+     (2) `InMemoryTraceReader` is now explicitly DOCUMENTED + SCOPED (doc comment)
+         as a small-trace / test / placeholder adapter ONLY — never the
+         network/large-trace path; the production materialized read path is
+         `CTFSTraceReader::open`, exactly as `trace_processor.rs` already
+         mandates. The `dap_server.rs` MCR/emulator `InMemoryTraceReader` is an
+         EMPTY `Db` placeholder (the emulator owns its state machine and never
+         reads the `Db`), so it was already not a full-materialization of a large
+         trace; this is now documented at the construction site too.
+     WHAT REMAINS on the full-load path (and why, honestly):
+       - The `TraceReader` trait's `call`/`step`/`variables_at`/... return
+         BORROWED `&Db…` references, so `CTFSTraceReader` still materializes a
+         `Db` for the non-call-tree lookups (steps, values, cells). A truly lazy
+         seekable `steps.dat`/value path is the larger multi-stream migration the
+         M17 goal explicitly scopes OUT ("beyond this campaign"). M17b lands the
+         CALL-TREE seek (the one stream M17 actually split) and leaves the rest
+         materialized — SAFE and non-regressing.
+       - `diff.rs::index_diff` (a batch CLI subcommand, NOT the live DAP/network
+         path) still calls `load_and_postprocess_trace` → `InMemoryTraceReader`.
+         Re-routing it through the seekable reader is a larger refactor of
+         `MaterializedReplaySession`/`FlowPreloader` and was left for a later
+         pass to avoid regressing the diff-indexing path; it is not the
+         network/large-trace GUI read path.)
   - [X] ct-print (codetracer-trace-format-nim): when the flag is set, read calls
     from `calls.dat` via the existing dormant `call_stream` reader; otherwise the
     legacy path. `--json-events` output is unchanged for consumers.
@@ -1384,9 +1430,24 @@
     `seek_to_call_by_key` seeks across a chunk boundary (chunk_size 2);
     `legacy_trace_has_no_call_stream` confirms a flag-off trace exposes no call
     stream and still reads.)
-  - [ ] db-backend seekable read: fetch a call record by `call_key` WITHOUT
+  - [X] db-backend seekable read: fetch a call record by `call_key` WITHOUT
     materializing the whole trace (assert bounded decompression / only the needed
     chunk is read), and verify concurrent-reader access.
+    (M17b: `codetracer/src/db-backend/tests/seekable_call_stream_test.rs` —
+    `fetch_call_by_key_decompresses_only_its_chunk` writes a 5-call,
+    chunk_size-2 (⇒ 3-chunk) split bundle and asserts fetching one call inflates
+    EXACTLY one chunk (via the `SeekableCallStream::chunk_decompressions()`
+    counter, which observes the M17a reader's one-chunk cache) — so the
+    bounded-decompression / not-fully-materialized property is PROVEN by a test,
+    not just argued. `ctfs_reader_serves_call_tree_from_calls_dat` proves the
+    `CTFSTraceReader` serves the tree via the seekable hooks;
+    `seekable_and_materialized_call_trees_agree` proves the seekable tree equals
+    the materialized one structurally; `concurrent_readers_over_same_ct` drives 8
+    threads over the same `.ct`; `flag_off_trace_exposes_no_seekable_stream` +
+    `real_legacy_ct_reads_unchanged_with_no_seekable_stream` (the real flag-off
+    `ruby.ct`) prove backward compat. Plus `meta_dat.rs::accepts_has_call_stream_flag`
+    and `call_stream_source` unit tests. The whole existing db-backend lib + bin
+    suite (732 tests) stays green.)
   - [X] Engine extracts the SAME executed set from a split bundle and a legacy
     bundle; backward compat — a legacy (no calls.dat) `.ct` still reads.
     (M17a: `repro_ct_incremental/tests/t_call_stream_split.nim` — over a
