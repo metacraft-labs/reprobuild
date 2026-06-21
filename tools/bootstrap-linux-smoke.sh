@@ -87,6 +87,50 @@ REPRO_CLONE_DEPTH="${REPRO_CLONE_DEPTH:-1}"
 log() { echo "[bootstrap-linux-smoke] $*" >&2; }
 die() { echo "[bootstrap-linux-smoke][FATAL] $*" >&2; exit 1; }
 
+# ----- M9.R.15i.2 — strip /mnt/<drive>/ entries from PATH ------------------
+#
+# Inside WSL2 the host Windows PATH bleeds through as a sequence of
+# /mnt/c/, /mnt/d/, etc. mounts (the WSL interop layer's appendWindowsPath
+# default). These entries point at the Windows-mounted 9p reflector which
+# is significantly slower than native Linux paths — cmake's ``find_program``
+# walk visits every PATH entry probing for the program name + the
+# CMAKE_EXECUTABLE_SUFFIX, and the Windows-mount probes can dominate the
+# configure time for cmake-driven recipes (qt6-base, KF6, etc.) by ~4x.
+#
+# Additionally, having Windows MSVC + MSYS2 paths on PATH inside the nix-
+# shell occasionally surfaces the wrong toolchain — cmake's gcc detection
+# probe can pick up the Windows ``gcc.exe`` shim if the wrapper is hit
+# before the nix-store one (unlikely but possible if scoop ships a
+# ``gcc.exe`` alias).
+#
+# We strip them at the smoke-script level (vs. engine-level) per the
+# task brief: scoping the change to the workflow keeps native Linux
+# CI runs (where /mnt/* legitimately means real filesystems) untouched.
+#
+# Idempotent: re-running strip_wsl_mnt_paths leaves the PATH unchanged.
+strip_wsl_mnt_paths() {
+  # No-op on non-WSL hosts. /proc/sys/fs/binfmt_misc/WSLInterop is the
+  # canonical marker for a WSL distro (the kernel module registers a
+  # binfmt entry for ``.exe`` files on every WSL2 distro).
+  if [ ! -e /proc/sys/fs/binfmt_misc/WSLInterop ] \
+      && [ ! -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
+    return 0
+  fi
+  local cleaned=""
+  local IFS=":"
+  for entry in $PATH; do
+    case "${entry}" in
+      /mnt/[a-zA-Z]/*) continue ;;
+    esac
+    if [ -z "${cleaned}" ]; then
+      cleaned="${entry}"
+    else
+      cleaned="${cleaned}:${entry}"
+    fi
+  done
+  export PATH="${cleaned}"
+}
+
 # ----- Step 1: NixOS sanity checks -----------------------------------------
 
 step_1_nixos_prereqs() {
@@ -462,6 +506,11 @@ step_5_smoke() {
 # ----- Driver --------------------------------------------------------------
 
 main() {
+  # M9.R.15i.2 — strip /mnt/<drive>/ entries from PATH on WSL hosts so
+  # the cmake configure probe walks don't traverse the Windows-mount
+  # 9p reflector (~4x slowdown for cmake-driven recipes). No-op on
+  # native Linux hosts.
+  strip_wsl_mnt_paths
   step_1_nixos_prereqs
   step_2_checkouts
   step_3_cache_connectivity
