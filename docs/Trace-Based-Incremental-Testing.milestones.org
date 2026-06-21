@@ -1905,11 +1905,12 @@
   remainder.
 
 * M23 — Finish the trace-events.md Event Stream Redesign (steps/value/events.dat)
-  :STATUS: M23a complete (steps.dat compact seekable execution stream) and M23b
-  complete (values.dat parallel value stream — writer + seekable reader +
-  ct-print flag + meta.dat flag across Rust/Nim/db-backend +
-  round-trip/parallel-index/seek/bounded-decompression tests). M23c+ (events.dat,
-  varint interning, events.log retirement) PENDING. M23 NOT complete.
+  :STATUS: M23a complete (steps.dat compact seekable execution stream), M23b
+  complete (values.dat parallel value stream), and M23c complete (events.dat I/O
+  event stream — writer + seekable/paginated reader + ct-print flag + meta.dat
+  flag across Rust/Nim/db-backend + round-trip/paginated-read/bounded-decompression
+  tests). M23d+ (varint interning, events.log retirement) PENDING. M23 NOT
+  complete.
 
   Goal: implement the remainder of `codetracer-trace-format-spec/trace-events.md`'s
   "Event Stream Redesign" beyond the `calls.dat` split already shipped: the compact
@@ -1938,7 +1939,12 @@
     value-less steps), additive behind the new `meta.dat` flag bit 10
     `has_value_stream`; round-trip + parallel-index + seek + bounded-decompression
     tests; consumer migration deferred to M22.
-  - [ ] I/O `events.dat`; varint interning tables.
+  - [X] (M23c) I/O `events.dat` event-log stream (`events.dat` + `events.idx`),
+    holding the `EventLogKind`-tagged I/O / log events split out of `events.log`
+    (each record: kind / step_id cross-ref / metadata / content), additive behind
+    the new `meta.dat` flag bit 11 `has_io_event_stream`; round-trip +
+    paginated-read + bounded-decompression tests; consumer migration deferred.
+  - [ ] Varint interning tables (`paths.dat`/`funcs.dat`/`types.dat`/`varnames.dat`).
   - [ ] Retire the legacy `events.log` only AFTER every reader consumes the split
     streams; backward-compat for old bundles retained.
 
@@ -2098,6 +2104,91 @@
      `ValueStreamReader`; every meta_dat parser accepts the new flag so a split
      bundle opens in the GUI. events.dat / varint interning / events.log
      retirement are LEFT for M23c+.
+
+  ** M23c — events.dat I/O event stream (DONE)
+     :STATUS: complete
+
+     The third sub-milestone of M23, mirroring the M23a `steps.dat` split, the
+     M23b `values.dat` split, and the M17a `calls.dat` split exactly: a
+     dedicated, seekable I/O event-log stream split additively out of the
+     unified `events.log`, gated behind a new `meta.dat` capability flag, WITHOUT
+     migrating any reader's I/O-event consumption (the GUI/db-backend keeps
+     reading `events.log` — that consumer migration is later). `events.log` is
+     unchanged byte-for-byte; old readers ignore `events.dat`/`events.idx`.
+
+     File-naming note: the legacy COMBINED stream file (every event tag) is
+     `events.log`; this NEW I/O stream is the DISTINCT `events.dat` (+
+     `events.idx`), holding only the `EventLogKind`-tagged I/O / log events
+     (stdout/stderr/file/network/error/log). The two coexist in one container and
+     must never collide. Per `codetracer-trace-format-spec/trace-events.md`
+     §"IO Event Stream (`events.dat`)" the records are NOT tagged — each is a
+     fixed `kind` (u8 EventLogKind) / `step_id` (varint cross-reference to the
+     execution stream) / `metadata` (length-prefixed bytes) / `content`
+     (length-prefixed bytes); the access pattern is a paginated scan.
+
+     Deliverables:
+     - [X] Writer (`codetracer-trace-format/codetracer_trace_writer`): a new
+       `event_stream.rs` module derives, from the SAME `Event(RecordEvent)`
+       records that feed `events.log`, an `events.dat` I/O event stream as
+       chunked-Zstd with a companion `events.idx`. Each record carries kind /
+       step_id / metadata / content; `step_id` is the index of the
+       most-recently-emitted `Step` (pre-first-step events attribute to step 0),
+       cross-referencing the execution stream. Emission is OPT-IN via
+       `CtfsTraceWriter::with_io_event_stream(true)` and gated behind the new
+       `meta.dat` flag `FLAG_HAS_IO_EVENT_STREAM` (bit 11). ADDITIVE: `events.log`
+       UNCHANGED (a byte-identity test proves it); the call/step/value/io-event
+       flags coexist in one `meta.dat`.
+     - [X] Seekable/paginated reader (`codetracer_trace_reader`): a new
+       `io_event_stream_reader.rs` `IoEventStreamReader` honoring the
+       `has_io_event_stream` flag, reading a PAGE of records by chunk
+       (decompresses only the needed chunk(s)) plus a single-record `read`.
+       Mirrors `ValueStreamReader`'s shape (count / chunk_size / cached_chunk
+       probe / read / read_all) and adds `read_page(start, len)` for the
+       event-log pane's paginated access. A legacy (flag-off) `.ct` exposes no
+       I/O event stream and still reads.
+     - [X] ct-print mirror (`codetracer-trace-format-nim`): the
+       `has_io_event_stream` flag is surfaced in `--meta-json` and `--full`
+       (alongside `has_call_stream` / `has_step_stream` / `has_value_stream`);
+       `--json-events` output UNCHANGED; the nim `meta_dat.nim` writer/reader knows
+       bit 11 (`FlagHasIoEventStream`) and includes it in `KnownFlags` so an
+       io-event-split bundle opens.
+     - [X] meta_dat new-flag in EVERY known-flags mask: Rust trace-format
+       (`meta_dat::FLAG_HAS_IO_EVENT_STREAM`), Nim (`FlagHasIoEventStream` +
+       `KnownFlags`), AND the db-backend `ctfs_trace_reader::meta_dat` (bit 11
+       added to `KNOWN_FLAGS_MASK`), so a `has_io_event_stream` bundle still OPENS
+       in the GUI (the M17b/M23a/M23b diligence repeated here).
+
+     Automated tests (all green on arm64-macOS):
+     - [X] Rust round-trip (`io_event_stream_tests::events_dat_matches_events_log`):
+       the I/O event records decoded from `events.dat` (kind/step_id/metadata/
+       content) EQUAL the records re-derived from `events.log` via the same
+       `IoEventStreamBuilder` (small chunk size so records span multiple chunks);
+       record count == Event count, step-id attribution and kind variety asserted.
+     - [X] Paginated read across a chunk boundary
+       (`paginated_read_across_chunk_boundary`): pages straddling two and three
+       chunks equal the expected slice, clamped/empty pages handled, out-of-range
+       single read errors not panics.
+     - [X] Bounded decompression
+       (`fetching_one_event_decompresses_only_its_chunk`): counter-proven via the
+       reader's `cached_chunk()` probe — fetching one I/O event (and a
+       single-chunk page) inflates only its own chunk.
+     - [X] Backward compat:
+       `events_log_byte_identical_with_and_without_io_event_stream` (events.log
+       byte-for-byte identical, events.dat distinct and present only when on) +
+       `legacy_trace_has_no_io_event_stream` (flag-off ⇒ no I/O event stream,
+       still reads).
+     - [X] meta_dat known-flag acceptance in all three parsers: Rust
+       `meta_dat::tests::meta_dat_io_event_stream_flag_roundtrip`, db-backend
+       `accepts_has_io_event_stream_flag` (io-event-alone AND
+       call+step+value+io-event), Nim `test_meta_dat_strict_unknown_flag_rejection`
+       (bit 11 round-trips; the unknown-bit probe retargeted to bit 12). Nim
+       `ct_print_full` golden updated to carry `has_io_event_stream: false`.
+
+     Acceptance: a seekable, paginated `events.dat` I/O event stream ships
+     additively behind `has_io_event_stream`, consistent with `events.log` (which
+     is unchanged), read by the Rust `IoEventStreamReader`; every meta_dat parser
+     accepts the new flag so a split bundle opens in the GUI. Varint interning /
+     events.log retirement are LEFT for M23d+.
 
   Acceptance: materialized `.ct` is the spec's multi-stream format end-to-end,
   read seekably by every consumer, with no regression and a clean legacy-read path.
