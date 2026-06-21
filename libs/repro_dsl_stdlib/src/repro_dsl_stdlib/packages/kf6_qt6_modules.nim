@@ -16,7 +16,9 @@ import ./kf6_base
 import ./karchive
 import ./kbookmarks
 import ./kcodecs
+import ./kcolorscheme
 import ./kcompletion
+import ./kconfigwidgets
 import ./kcrash
 import ./kdbusaddons
 import ./kguiaddons
@@ -31,7 +33,9 @@ export kf6_base
 export karchive
 export kbookmarks
 export kcodecs
+export kcolorscheme
 export kcompletion
+export kconfigwidgets
 export kcrash
 export kdbusaddons
 export kguiaddons

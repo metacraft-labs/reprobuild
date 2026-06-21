@@ -27,6 +27,10 @@ package kcodecsSource:
     "cmake >=3.16"
     "ninja >=1.10"
     "gcc >=11"
+    ## M9.R.15j.2 — kcodecs's CMakeLists.txt requires gperf at configure
+    ## time (FindGperf.cmake probe; perfect-hash generator for the
+    ## KEmailAddress encoder tables).
+    "gperf >=3.1"
 
   buildDeps:
     "extra-cmake-modules >=6.0"

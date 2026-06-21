@@ -133,6 +133,12 @@ package kxmlguiSource:
     ## recipe omitted the buildDep so M9.R.15i.5's sibling threader had
     ## nothing to find. Closes the kxmlgui configure trip.
     "kitemviews >=6.0"
+    ## M9.R.15j.4 — kxmlgui's CMakeLists also REQUIREs KF6ConfigWidgets,
+    ## KF6GuiAddons, and KF6IconThemes; the recipe was missing all
+    ## three buildDep declarations.
+    "kconfigwidgets >=6.0"
+    "kguiaddons >=6.0"
+    "kiconthemes >=6.0"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

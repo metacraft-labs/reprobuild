@@ -1,0 +1,12 @@
+## DSL-port M9.R.15j.4 — stdlib provisioning stub for ``kconfigwidgets``.
+##
+## Lifted to support the kxmlgui cascade; the package surfaces as a
+## ``buildDeps:`` entry on kxmlgui.
+
+import repro_project_dsl
+
+package `kconfigwidgets`:
+  provisioning:
+    nixPackage "nixpkgs#kdePackages.kconfigwidgets", executablePath = "lib/libKF6ConfigWidgets.so",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
