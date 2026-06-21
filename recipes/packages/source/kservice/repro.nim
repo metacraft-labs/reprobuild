@@ -98,6 +98,7 @@ package kserviceSource:
   nativeBuildDeps:
     ## cmake is the build-system driver.
     "cmake >=3.16"
+    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kservice is C++17.

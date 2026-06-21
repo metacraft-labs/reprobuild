@@ -113,6 +113,7 @@ package ki18nSource:
     ## ki18n 6.x requires cmake 3.16 for the modern ECM + Qt6
     ## ``find_package`` semantics the KF6 ABI line depends on.
     "cmake >=3.16"
+    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux.
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — ki18n is C++17.

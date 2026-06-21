@@ -26,6 +26,7 @@ package kwindowsystemSource:
 
   nativeBuildDeps:
     "cmake >=3.16"
+    "extra-cmake-modules >=6.0"
     "ninja >=1.10"
     "gcc >=11"
     "wayland-scanner >=1.22"

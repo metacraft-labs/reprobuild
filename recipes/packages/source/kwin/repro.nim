@@ -188,6 +188,7 @@ package kwinSource:
     ## kwin 6.x requires cmake 3.16 for the modern ECM + Qt6
     ## ``find_package`` semantics the Plasma 6.x ABI line depends on.
     "cmake >=3.16"
+    "extra-cmake-modules >=6.0"
     ## ninja is CMake's preferred backend on Linux — the compile action
     ## invokes ``ninja`` (or ``cmake --build``) against the CMake build
     ## directory.
