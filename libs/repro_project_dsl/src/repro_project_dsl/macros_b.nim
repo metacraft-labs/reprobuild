@@ -220,12 +220,23 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # a no-op when the shell registry is empty (the recipe drove a typed
   # constructor instead) or when no project root is active (the recipe
   # was imported by a test fixture outside provider mode).
+  #
+  # The proc resets ``dslPortShellActions`` for THIS package at entry so
+  # repeat invocations don't accumulate duplicate rows. Without the
+  # reset: the module-init invocation (the ``providerModeInitCall``
+  # above) runs the body once, populating the shell registry; then
+  # ``runPackageProvider`` invokes the same proc a SECOND time via
+  # ``buildPackageFragment`` (which resets ``buildActionRegistry`` but
+  # NOT ``dslPortShellActions``), so the body's ``shell(...)`` calls
+  # double-register. The reset is per-package so other packages' rows
+  # (imported via cross-recipe ``buildDeps:`` chains) survive.
   if lifted.lifts.len == 0:
     let rootBody = lifted.rootBody
     result = quote do:
       when not defined(reproInterfaceMode):
         `devEnvProc`
         proc `procName`*() =
+          resetDslPortShellStateForPackage(`pkgNameLit`)
           let buildStateHandle = beginBuildBlock(`pkgNameLit`)
           try:
             `rootBody`
@@ -251,6 +262,7 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
         `devEnvProc`
         `liftedProcs`
         proc `procName`*() =
+          resetDslPortShellStateForPackage(`pkgNameLit`)
           let buildStateHandle = beginBuildBlock(`pkgNameLit`)
           try:
             `rootBody`

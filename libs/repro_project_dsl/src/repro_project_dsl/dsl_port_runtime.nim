@@ -3844,6 +3844,25 @@ proc resetDslPortShellState*() =
   dslPortShellActions.clear()
   dslPortShellSequence.clear()
 
+proc resetDslPortShellStateForPackage*(packageName: string) =
+  ## M9.R.15q.2.1 — drop the shell-action rows + counter for
+  ## ``packageName`` only. Called from ``buildXxxPackage*()`` at entry
+  ## so repeat invocations don't double-register the same body's
+  ## ``shell(...)`` rows (module-init + ``runPackageProvider`` both
+  ## invoke the proc). Per-package scope keeps other packages' rows
+  ## (imported via cross-recipe ``buildDeps:`` chains) alive.
+  if packageName.len == 0:
+    return
+  if packageName in dslPortShellActions:
+    dslPortShellActions.del(packageName)
+  # Clear every seq counter whose seqKey is prefixed with this package.
+  var keysToDel: seq[string] = @[]
+  for key in dslPortShellSequence.keys:
+    if key.startsWith(packageName & "\x00"):
+      keysToDel.add(key)
+  for key in keysToDel:
+    dslPortShellSequence.del(key)
+
 proc shell*(command: string;
             id: string = "";
             deps: seq[string] = @[];
