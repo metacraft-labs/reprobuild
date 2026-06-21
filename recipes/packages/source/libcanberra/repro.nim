@@ -98,14 +98,13 @@
 ##                                the null back-end is sufficient for
 ##                                v1 — knotifications only needs the
 ##                                symbol set linkable).
-##   * ``--disable-null``      — disabled by default; the null back-end
-##                                is unconditional. Listed explicitly
-##                                below as ``--enable-null`` to pin the
-##                                null back-end ON (so the library has
-##                                at least one back-end built in).
-##   * ``--without-gtk-doc``   — skip the gtk-doc API documentation
-##                                build (heavy XSLT dependency; not
-##                                needed at runtime).
+##   * ``--enable-null``       — pin the null back-end ON (its default
+##                                is already ``yes`` but the explicit
+##                                pin guards against an upstream
+##                                regression that flips the default).
+##                                Required so the library has at least
+##                                one back-end built in for the
+##                                knotifications link path.
 ##
 ## Downstream configuration knobs would live here when the per-distro
 ## variants need different strategies (e.g. a Plasma-edition variant
@@ -208,7 +207,6 @@ package libcanberraSource:
         "--disable-alsa",
         "--disable-oss",
         "--enable-null",
-        "--without-gtk-doc",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libCanberra")
