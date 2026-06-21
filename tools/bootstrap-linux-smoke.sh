@@ -109,11 +109,16 @@ die() { echo "[bootstrap-linux-smoke][FATAL] $*" >&2; exit 1; }
 #
 # Idempotent: re-running strip_wsl_mnt_paths leaves the PATH unchanged.
 strip_wsl_mnt_paths() {
-  # No-op on non-WSL hosts. /proc/sys/fs/binfmt_misc/WSLInterop is the
-  # canonical marker for a WSL distro (the kernel module registers a
-  # binfmt entry for ``.exe`` files on every WSL2 distro).
-  if [ ! -e /proc/sys/fs/binfmt_misc/WSLInterop ] \
-      && [ ! -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
+  # No-op on non-WSL hosts. The canonical WSL marker is
+  # ``microsoft`` in ``/proc/version`` — the WSL2 kernel banner
+  # always contains either ``microsoft-standard-WSL2`` or
+  # ``-microsoft-standard``. The earlier ``/proc/sys/fs/binfmt_misc/
+  # WSLInterop`` probe was unreliable: NixOS-WSL doesn't register
+  # the WSLInterop binfmt entry by default (NIXOS-WSL gates it via
+  # the wsl.interop.register option, off by default in
+  # eli-wsl-class distros), so the marker check returned false on
+  # the very hosts that need the strip.
+  if ! grep -qi microsoft /proc/version 2>/dev/null; then
     return 0
   fi
   local cleaned=""

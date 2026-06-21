@@ -120,15 +120,17 @@ fi
 echo "OK test 5: only /mnt/<drive>/ entries matched (not /mnt-fake/)"
 
 # ----- Test 6: marker probe lives in the real function ------------------
-# The actual smoke-script function must gate on /proc/sys/fs/binfmt_misc
-# /WSLInterop so it's a no-op on non-WSL hosts. Pin this contract by
+# The actual smoke-script function must gate on /proc/version (the
+# canonical WSL marker — the kernel banner contains 'microsoft' on
+# every WSL2 distro, INCLUDING NixOS-WSL which doesn't register
+# WSLInterop in binfmt_misc by default). Pin this contract by
 # grepping the source. Restore the host PATH so ``grep`` resolves.
 PATH="${_HOST_PATH}"
-if ! grep -q "WSLInterop" "${SMOKE_SH}"; then
-  echo "FAIL test 6: strip_wsl_mnt_paths missing WSLInterop marker probe" >&2
+if ! grep -q "/proc/version" "${SMOKE_SH}"; then
+  echo "FAIL test 6: strip_wsl_mnt_paths missing /proc/version marker probe" >&2
   exit 1
 fi
-echo "OK test 6: smoke script function gates on WSLInterop marker"
+echo "OK test 6: smoke script function gates on /proc/version 'microsoft' marker"
 
 echo
 echo "M9.R.15i.2: all 6 PATH-strip tests passed"
