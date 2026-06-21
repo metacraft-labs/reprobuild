@@ -176,6 +176,40 @@ proc cmake_package*(srcDir: string;
         continue
       seen.add(component)
       effectiveCacheVars.add(entry)
+    # M9.R.15j.3 — inject ``-Wl,--copy-dt-needed-entries`` into the
+    # default linker-flag cache vars so transitive DT_NEEDED dependencies
+    # of sibling KF6 / Qt6 libraries resolve correctly.
+    #
+    # Symptom: kpackage's link line for ``bin/kpackagetool6`` references
+    # ``-lKF6Archive`` (from the karchive sibling install-mirror). gcc's
+    # default ``ld --as-needed`` walks libKF6Archive.so's DT_NEEDED
+    # entries (libzstd.so.1, ...) but DROPS them from the resulting
+    # binary's NEEDED set unless ``--copy-dt-needed-entries`` is set.
+    # The drop causes ld to then complain that ZSTD_* symbols are
+    # undefined references when libKF6Archive.so itself USES those
+    # symbols transitively at link time.
+    #
+    # ``--copy-dt-needed-entries`` is the binutils-ld flag (the
+    # historical default before ld changed to ``--no-copy-dt-needed-
+    # entries`` in 2010). Re-enabling it via CMAKE_EXE_LINKER_FLAGS +
+    # CMAKE_SHARED_LINKER_FLAGS_INIT lets ld pull the indirect zstd
+    # SONAME entries into the final binary's NEEDED.
+    #
+    # We append to the cache var list (not _INIT) so this flag persists
+    # across re-configures. Recipes that need different link flags can
+    # still override via their own cacheVars entries — CMake honours
+    # the LAST -D<var>=<value> wins.
+    var hasExeLinkerFlags = false
+    var hasSharedLinkerFlags = false
+    for v in effectiveCacheVars:
+      if v.startsWith("CMAKE_EXE_LINKER_FLAGS="):
+        hasExeLinkerFlags = true
+      if v.startsWith("CMAKE_SHARED_LINKER_FLAGS="):
+        hasSharedLinkerFlags = true
+    if not hasExeLinkerFlags:
+      effectiveCacheVars.add("CMAKE_EXE_LINKER_FLAGS=-Wl,--copy-dt-needed-entries")
+    if not hasSharedLinkerFlags:
+      effectiveCacheVars.add("CMAKE_SHARED_LINKER_FLAGS=-Wl,--copy-dt-needed-entries")
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,
