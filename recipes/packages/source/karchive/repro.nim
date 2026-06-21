@@ -48,6 +48,14 @@ package karchiveSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — bzip2 / liblzma / libzstd aren't in the v1 dep
+        # closure; karchive's CMakeLists makes all three REQUIRED by
+        # default. Disable each so the build narrows to zlib-only
+        # (gzip), matching the apt-jammy stub coverage. Future
+        # milestone: thread bzip2 / xz / zstd as from-source siblings.
+        "WITH_BZIP2=OFF",
+        "WITH_LIBLZMA=OFF",
+        "WITH_LIBZSTD=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6Archive")

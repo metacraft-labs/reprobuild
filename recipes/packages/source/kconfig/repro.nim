@@ -214,6 +214,11 @@ package kconfigSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15i.3 — qt6-declarative isn't in the v1 closure; ECM's
+        # ECMQmlModule does find_package(Qt6 Qml Quick REQUIRED) when
+        # KCONFIG_USE_QML is on. Disable the optional Qml component;
+        # the KCoreAddons / KConfig core libraries don't need it.
+        "KCONFIG_USE_QML=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6Config")
