@@ -2505,3 +2505,39 @@
   Acceptance: opening a PRODUCTION `.ct` does NOT fully materialize steps/values; a
   step/value fetch decompresses only the needed chunk (counter-proven) on a genuine
   production bundle; every consumer reads the single canonical split format.
+
+** M24a-1 — Nim STEP stream on the SPEC-canonical wire format (done, 2026-06-22)
+  :STATUS: done — first slice of the wire-format reconciliation (step stream only)
+
+  Resolves the STEP half of root cause #1 (wire-format divergence) and part of root
+  cause #2 (flags unset), for the step stream specifically. The canonical direction
+  chosen is the SPEC format (`codetracer-trace-format-spec/seekable-zstd.md`), i.e. the
+  Nim writer was brought ONTO the Rust `StepStreamReader` layout — not the reverse — so
+  there is now ONE step wire format written + read by both toolchains.
+
+  - The Nim `MultiStreamTraceWriter` now emits `steps.dat`/`steps.idx` in the
+    SPEC-canonical layout: `steps.idx` = `[chunk_size:u32][offset:u64]...` (NO
+    `total_events` header/trailer) and each `steps.dat` chunk's uncompressed payload is
+    header-less (NO per-chunk u32 count). This is BYTE-COMPATIBLE with the Rust
+    `codetracer_trace_writer::step_stream` writer / `codetracer_trace_reader::
+    step_stream_reader::StepStreamReader`.
+  - `multi_stream_writer.close()` now sets the `has_step_stream` (bit 9) meta.dat flag.
+    The flag both gates the Rust/db-backend seekable step path AND, for the Nim FFI
+    reader, marks the bundle as SPEC-framed.
+  - BACKWARD COMPAT kept: pre-M24a-1 Nim-v4 bundles never set `has_step_stream`, so the
+    Nim FFI reader (`new_trace_reader.ensureExecReader`) selects legacy framing
+    (per-chunk u32 count + `total_events` trailer) when the flag is clear and SPEC
+    framing when set (`initExecStreamReader(legacy = not has_step_stream)`).
+  - GENUINE cross-read proof (load-bearing): a NEW Nim production bundle's `steps.dat`
+    is read by the canonical RUST `StepStreamReader`, and the decoded `global_line_index`
+    sequence equals the recorded steps — `tests/test_nim_step_stream_crossread.nim`
+    (Nim) drives `codetracer-trace-format/codetracer_trace_reader/tests/
+    nim_step_stream_crossread.rs` (Rust). Verified passing (26-step bundle, GLIs equal).
+  - ct-print `--json-events` STEP output is byte-identical; the only `ct_print_full`
+    golden change is the `has_step_stream` flag flipping false→true. db-backend green
+    (`cargo test --lib`: 378 passed; CTFS/step-stream/seekable integration tests pass).
+
+  STILL OPEN (M24 not complete): the VALUE stream and the EVENT stream are not yet
+  reconciled; `has_value_stream`/`has_io_event_stream`/`has_interning_tables` flags are
+  not yet all set by `close()`; and the db-backend production read path is not yet
+  made seekable / non-materializing (M24b/M24c). M24's checkboxes stay unchecked.
