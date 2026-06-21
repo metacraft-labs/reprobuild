@@ -131,6 +131,13 @@ package ki18nSource:
     ## disable QCH via ``BUILD_QCH=OFF`` but the ECM module still
     ## probes for the tool at configure time).
     "qt6-tools >=6.6"
+    ## M9.R.15q.1.6 — qt6-declarative supplies QtQml + QML compiler the
+    ## ki18n KLocalizedQmlContext + KLocalizedTranslator(QML side) wrap;
+    ## consumers like kcmutils, kirigami, and plasma-framework depend on
+    ## the KLocalizedQmlContext header. The previous ``BUILD_WITH_QML=OFF``
+    ## comment claimed qt6-declarative was not yet in v1; this is no
+    ## longer true (qt6-declarative publishes since M9.R.15n).
+    "qt6-declarative >=6.6"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -152,10 +159,11 @@ package ki18nSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
-        # M9.R.15i.3 — qt6-declarative not in v1; BUILD_WITH_QML wires
-        # the scripted-translations Qml surface (ki18nLocaleData) that
-        # we don't need for non-Qml KF6 consumers.
-        "BUILD_WITH_QML=OFF",
+        # M9.R.15q.1.6 — qt6-declarative is now in v1 (publishes since
+        # M9.R.15n). Enable BUILD_WITH_QML so the KLocalizedQmlContext
+        # header + libKF6I18nQml.so ship; downstream consumers (kcmutils,
+        # kirigami, plasma-framework) depend on the QML surface.
+        "BUILD_WITH_QML=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6I18n")
