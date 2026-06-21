@@ -60,16 +60,20 @@ import results
 import trace_reader
 import extractors
 import backends
+#@ctvendor strip  -- native modules are not vendored into codetracer (M21/M18 trim)
 import native_trace
 import native_hash
+#@ctvendor end
 import ctfs_trace
 import catalog
 
 export trace_reader
 export extractors
 export backends
+#@ctvendor strip  -- native re-exports dropped with the native imports above
 export native_trace
 export native_hash
+#@ctvendor end
 export ctfs_trace
 export catalog
 
@@ -264,6 +268,7 @@ proc shallowHashOfDepSource(dep: ExecutedFunction; sourceRoot: string): string
     return shallowHash("")  # unknown ext / out-of-range / unmatched => "missing"
   shallowHash(bodyRes.value)
 
+#@ctvendor strip  -- native shallow hasher (needs native_hash, not vendored)
 proc shallowHashOfDepNative(dep: ExecutedFunction; sourceRoot: string): string
     {.nimcall, gcsafe.} =
   ## The native/DWARF `ShallowHasher` implementation (M8). Compute the current
@@ -293,6 +298,7 @@ proc shallowHashOfDepNative(dep: ExecutedFunction; sourceRoot: string): string
   if h.isErr:
     return shallowHash("")  # missing/unreadable binary or absent function => "missing"
   h.value
+#@ctvendor end
 
 # ---------------------------------------------------------------------------
 # Backend strategy selection (M6 seam)
@@ -313,6 +319,7 @@ let
     discovery: newDependencyDiscovery(readExecutedFunctions),
     hasher: newShallowHasher(shallowHashOfDepSource))
 
+  #@ctvendor strip  -- native backend strategies (nil in the vendored copy)
   nativeDwarfStrategies = BackendStrategies(
     backend: tbNativeDwarf,
     # M8/M15: native dependency discovery reads whichever native trace flavour the
@@ -326,6 +333,7 @@ let
     # the SAME `{deepHash, deps}` cache shape.
     discovery: newDependencyDiscovery(readExecutedFunctionsNativeAny),
     hasher: newShallowHasher(shallowHashOfDepNative))
+  #@ctvendor end
 
   sourceCtfsStrategies = BackendStrategies(
     backend: tbSourceCtfs,
@@ -348,6 +356,7 @@ proc backendStrategies*(backend: TraceBackend): BackendStrategies =
   case backend
   of tbSourceInterpreted:
     sourceInterpretedStrategies
+  #@ctvendor replace
   of tbNativeDwarf:
     nativeDwarfStrategies
   of tbSourceCtfs:
@@ -355,6 +364,14 @@ proc backendStrategies*(backend: TraceBackend): BackendStrategies =
   of tbNimInstrumented:
     # Reserved: discovery/hasher are nil until the Nim instrumented impl lands.
     BackendStrategies(backend: backend)
+  #@ctvendor with
+  #@|   of tbSourceCtfs:
+  #@|     sourceCtfsStrategies
+  #@|   of tbNativeDwarf, tbNimInstrumented:
+  #@|     # Vendored trim: native + reserved Nim backends have nil seam procs, so the
+  #@|     # engine fails safe to a re-run (`strategiesImplemented == false`).
+  #@|     BackendStrategies(backend: backend)
+  #@ctvendor end
 
 # ---------------------------------------------------------------------------
 # Deep hash (§16.7.3)
@@ -680,6 +697,7 @@ proc sourceTraceDirReadable(traceDir: string): Result[void, string] =
       return err("unreadable trace file " & p & ": " & e.msg)
   ok()
 
+#@ctvendor strip  -- native trace-dir probe (needs native_trace, not vendored)
 proc nativeTraceDirReadable(traceDir: string): Result[void, string] =
   ## The native-backend readability probe (M8/M15 fail-safe). A native trace dir
   ## must exist and carry a readable native trace artifact of a recognised
@@ -689,6 +707,7 @@ proc nativeTraceDirReadable(traceDir: string): Result[void, string] =
   ## fail-safes to a re-run if the binary is missing/unreadable — so a missing
   ## binary is ALWAYS a re-run, never a skip (see `shallowHashOfDepNative`).
   nativeTraceDirReadableAny(traceDir)
+#@ctvendor end
 
 proc ctfsTraceDirReadable(traceDir: string): Result[void, string] =
   ## The CTFS-backend readability probe (M12 fail-safe). A CTFS trace dir must
@@ -717,6 +736,7 @@ proc traceDirReadable(traceDir: string; backend: TraceBackend):
   case backend
   of tbSourceInterpreted:
     sourceTraceDirReadable(traceDir)
+  #@ctvendor replace
   of tbNativeDwarf:
     nativeTraceDirReadable(traceDir)
   of tbSourceCtfs:
@@ -726,6 +746,15 @@ proc traceDirReadable(traceDir: string; backend: TraceBackend):
     # caller's `strategiesImplemented` guard fail-safes before this is reached.
     # A trivial existence probe keeps this total.
     if dirExists(traceDir): ok() else: err("missing trace dir: " & traceDir)
+  #@ctvendor with
+  #@|   of tbSourceCtfs:
+  #@|     ctfsTraceDirReadable(traceDir)
+  #@|   of tbNativeDwarf, tbNimInstrumented:
+  #@|     # Vendored trim: native + reserved Nim backends have no wired strategies; the
+  #@|     # caller's `strategiesImplemented` guard fail-safes before this is reached.
+  #@|     # A trivial existence probe keeps this total.
+  #@|     if dirExists(traceDir): ok() else: err("missing trace dir: " & traceDir)
+  #@ctvendor end
 
 proc currentDepLocations(deps: seq[CachedDep]; traceDir: string;
                          backend: TraceBackend): Result[seq[CachedDep], string] =
@@ -743,6 +772,7 @@ proc currentDepLocations(deps: seq[CachedDep]; traceDir: string;
   ##     the current binary cannot be resolved, rebind to a guaranteed-absent
   ##     path so the current hash becomes the `"missing"` sentinel ⇒ a re-run,
   ##     never a skip.
+  #@ctvendor replace
   case backend
   of tbSourceInterpreted, tbSourceCtfs, tbNimInstrumented:
     # CTFS-interpreted deps carry a source path + defLine (resolved from the
@@ -762,6 +792,15 @@ proc currentDepLocations(deps: seq[CachedDep]; traceDir: string;
       f.file = currentBinary  # native deps key on name+binary; track the CURRENT binary
       rebound.add CachedDep(fn: f, shallow: dep.shallow)
     ok(rebound)
+  #@ctvendor with
+  #@|   case backend
+  #@|   of tbSourceInterpreted, tbSourceCtfs, tbNativeDwarf, tbNimInstrumented:
+  #@|     # Vendored trim: only the source/CTFS-interpreted deps reach here (native is
+  #@|     # gated to a fail-safe re-run before decide() rebinds), and they carry a
+  #@|     # source path + defLine the source hasher resolves under the CURRENT
+  #@|     # `sourceRoot` — so no rebind is needed.
+  #@|     ok(deps)
+  #@ctvendor end
 
 proc decide*(testId, traceDir, sourceRoot: string;
              cache: IncrementalCache): IncrementalDecision =

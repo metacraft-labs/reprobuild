@@ -1743,7 +1743,7 @@
 # x86+PT host (owner-approved) and is NOT part of Phase 5.
 
 * M21 — Single source of truth for the incremental engine (de-duplicate the vendor)
-  :STATUS: planned
+  :STATUS: complete
 
   Goal: M18 vendored the engine core from reprobuild's `repro_ct_incremental` into
   `codetracer/src/ct_test/incremental/` as a SECOND physical copy (faithful, with
@@ -1760,22 +1760,43 @@
   decision, noted but out of scope.)
 
   Deliverables:
-  - [ ] A deterministic sync mechanism: a script that regenerates the codetracer
-    vendored copy from the canonical reprobuild source (applying only the
-    provenance-banner + the documented `engine.nim` interpreted-only trim, as a
-    mechanical transform — no hand edits), so the copy is reproducible from canon.
-  - [ ] A DRIFT-CHECK test (lives where it can see BOTH — reprobuild, with
-    codetracer as a workspace sibling) that FAILS if the codetracer vendored files
-    are not identical to `sync(canonical)`. Not a silent skip: if the codetracer
-    sibling is absent it errors with a clear diagnostic (or is a reprobuild-CI
-    requirement), never a quiet pass.
-  - [ ] Regenerate the codetracer copy via the script (byte-identical to M18's, or
-    an explained improvement); both consumers keep building + their tests green.
+  - [X] A deterministic sync mechanism: `tools/sync_ct_test_vendor.nim` (+ the
+    `tools/sync_ct_test_vendor.sh` dev-shell wrapper) regenerates the codetracer
+    vendored copy from the canonical reprobuild source by MECHANICAL transforms
+    only: it prepends each module's provenance banner (data files under
+    `tools/banners/`, with `{{PROVENANCE}}` bound to the canonical path) and
+    applies the documented `engine.nim` interpreted-only trim. The trim is
+    expressed by inert `#@ctvendor strip/replace/with/end` marker comments living
+    in the CANONICAL `engine.nim` (so canonical still compiles + its tests pass),
+    plus one auditable global literal sub `.repro-ct-incremental` → `.ct-incremental`
+    (the codetracer cache-dir name). No hand edits; idempotent (a second run on an
+    in-sync tree yields no diff). The codetracer checkout defaults to the workspace
+    sibling, overridable by arg or `$CODETRACER_CHECKOUT`.
+  - [X] A DRIFT-CHECK test `tests/t_ct_test_vendor_sync.nim` lives in reprobuild
+    (sees both trees via the workspace sibling, like `live_record.WorkspaceRoot`).
+    It runs the generator in `--check` mode against the REAL codetracer checkout
+    and fails if any vendored file differs from `sync(canonical)`; it is auto-run
+    by the campaign suite (`t_live_full_suite` walks every `t_*.nim`). NOT a silent
+    skip — a missing checkout/vendored dir FAILS with a clear diagnostic. It also
+    self-tests the detector: it copies the vendored tree to a scratch dir, perturbs
+    `engine.nim`, and asserts `--check` then exits non-zero (so the pass is not
+    vacuous), never touching the real tree.
+  - [X] Regenerated the codetracer copy via the script. The four self-contained
+    modules + `backends.nim` regenerate BYTE-IDENTICAL to the M18 committed copy.
+    `engine.nim` is an EXPLAINED IMPROVEMENT: the regenerated form keeps the
+    canonical's CURRENT (richer) doc/inline comments instead of M18's hand-shortened
+    ones and adds the missing `currentDepLocations` rebind comments — same
+    algorithm, just the canonical text — and the committed codetracer `engine.nim`
+    was updated to this generated form. Both consumers build + test green.
 
   Automated tests:
-  - [ ] The drift-check passes on the in-sync tree, and FAILS when a vendored file
-    is deliberately perturbed (prove it actually detects drift).
-  - [ ] reprobuild engine suite + codetracer `incremental_e2e_test` stay green.
+  - [X] The drift-check passes on the in-sync tree, and FAILS when a vendored file
+    is deliberately perturbed — proven both via the test's embedded scratch
+    self-test and by perturbing the REAL vendored `engine.nim` (the `--check`
+    wrapper exited 1 naming `engine.nim`; regenerating restored byte-identity).
+  - [X] reprobuild engine suite (`t_live_full_suite`) green WITH the new
+    drift-check; codetracer `incremental_e2e_test` green against the regenerated
+    engine.
 
   Acceptance: the algorithm has ONE canonical home; the codetracer copy is
   mechanically generated and drift-guarded, so the two cannot silently diverge.

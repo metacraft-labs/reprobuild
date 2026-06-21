@@ -1,0 +1,32 @@
+## VENDORED from reprobuild's proven incremental-testing engine.
+## Provenance: {{PROVENANCE}}
+## (Trace-Based-Incremental-Testing campaign, milestone M18 productionisation.)
+##
+## CLEAN VENDOR with ONE deliberate trim (documented below) — keep in sync with
+## the reprobuild source above. The decision/record/cache/hash algorithm is
+## byte-for-byte the prototype's; only the BACKEND WIRING is reduced.
+##
+## # The M18 trim: source/CTFS backends only (native gated, never a false skip)
+##
+## The full reprobuild engine additionally wires the NATIVE (DWARF / compiled-
+## instruction-byte) backend, which pulls in `native_trace`/`native_hash`/
+## `native_instrument` (objdump/DWARF/compile-time-instrumentation tooling). M18
+## productionises trace-based incremental selection for INTERPRETED languages
+## that record live in `ct test` (Python/Ruby via the modern CTFS `.ct` bundle),
+## so this vendor wires ONLY:
+##   * `tbSourceInterpreted` — legacy JSON trace + source-text hashing, and
+##   * `tbSourceCtfs`        — modern CTFS `.ct` bundle (via `ct-print`) + the
+##                            SAME source-text hashing.
+## The NATIVE and reserved Nim-instrumented backends are LEFT WITH NIL STRATEGIES
+## (`strategiesImplemented == false`), so `record`/`decide` fail safe to a re-run
+## with a clear "backend not yet supported" reason for a native trace — NEVER a
+## false skip. Bringing native into `ct test` is a follow-up that vendors the
+## native modules too; until then native is honestly gated here.
+##
+## Everything below this banner is the prototype engine, with the native imports,
+## the native shallow hasher, the native trace-dir readability probe, and the
+## native dep-location rebind removed (they are unreachable once the native
+## strategies are nil). The original module documentation follows.
+##
+## ---------------------------------------------------------------------------
+##
