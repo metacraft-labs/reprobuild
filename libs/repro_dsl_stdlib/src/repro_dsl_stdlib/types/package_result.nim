@@ -442,11 +442,91 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
   for raw in registeredBuildDeps(packageName):
     visitDep(raw, result)
 
+# ---------------------------------------------------------------------------
+# M9.R.15i.5 — Generic CMake-config dir threading for sibling install
+# prefixes (KF6 modules + ECM + any future cmake-config-package dep).
+# ---------------------------------------------------------------------------
+
+proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
+                                 dst: var seq[(string, string)]) =
+  ## DSL-port M9.R.15i.5 — scan a dep's install-mirror cmake/ tree for
+  ## ``<Component>Config.cmake`` (and lowercase
+  ## ``<component>-config.cmake``) files and emit ``(Component, dir)``
+  ## pairs. Unlike ``m9r15iScanQt6CmakeDirs`` this helper does NOT
+  ## filter on ``Component.startsWith("Qt6")`` — it surfaces every
+  ## CMake-config package found in the dep's prefix.
+  let cmakeRoot = depRecipeDir / ".repro" / "output" / "install" /
+    "usr" / "lib" / "cmake"
+  if not dirExists(cmakeRoot):
+    return
+  var entries: seq[string] = @[]
+  for kindPc, walked in walkDir(cmakeRoot):
+    if kindPc != pcDir and kindPc != pcLinkToDir:
+      continue
+    var subdir = walked
+    when defined(windows):
+      if subdir.startsWith("\\\\?\\"):
+        subdir = subdir[4 .. ^1]
+    entries.add(subdir)
+  for i in 1 ..< entries.len:
+    let cur = entries[i]
+    var j = i
+    while j > 0 and entries[j - 1] > cur:
+      entries[j] = entries[j - 1]
+      dec j
+    entries[j] = cur
+  for subdir in entries:
+    let component = lastPathPart(subdir)
+    # Try the camelCase ``<Component>Config.cmake`` form first
+    # (canonical for KF6 / Qt6 / most modern CMake-config packages).
+    let configPascal = subdir / (component & "Config.cmake")
+    if fileExists(configPascal):
+      dst.add((component, subdir.replace("\\", "/")))
+      continue
+    # Fall back to lowercase ``<component>-config.cmake`` form
+    # (autotools-style packages that ship one).
+    let configKebab = subdir / (component.toLowerAscii & "-config.cmake")
+    if fileExists(configKebab):
+      dst.add((component, subdir.replace("\\", "/")))
+
+proc m9r15iCollectAllCmakeConfigDirs*(projectRoot, packageName: string):
+    seq[(string, string)] =
+  ## DSL-port M9.R.15i.5 — enumerate every CMake-config package
+  ## available in EVERY declared dep's install-mirror cmake/ tree.
+  ## Unlike ``m9r15iCollectQt6ComponentDirs`` this covers KF6 modules
+  ## (kconfig, ki18n, kglobalaccel, ...), ECM-style cmake-only deps,
+  ## and any future cmake-config-package dep — not just qt6-*.
+  ##
+  ## Without this fix, a KF6 module that declares ``kglobalaccel`` as
+  ## a buildDep cannot resolve ``find_package(KF6GlobalAccel REQUIRED)``
+  ## because the sibling install prefix isn't on CMAKE_PREFIX_PATH at
+  ## configure time. The fix is to scan every dep's lib/cmake/ subdir
+  ## and emit ``-D<Component>_DIR=...`` for each Config.cmake found.
+  ##
+  ## Order: deterministic across runs. Each dep is walked in
+  ## (nativeBuildDeps, then buildDeps) declaration order; within a
+  ## dep, component names are sorted alphabetically.
+  let recipeRoot = parentDir(projectRoot)
+  if recipeRoot.len == 0:
+    return
+  proc visitDep(raw: string; sink: var seq[(string, string)]) =
+    let dep = m9r14fStripDepConstraint(raw)
+    if dep.len == 0:
+      return
+    let depRecipeDir = recipeRoot / dep
+    m9r15iScanCmakeConfigDirs(depRecipeDir, sink)
+  for raw in registeredNativeBuildDeps(packageName):
+    visitDep(raw, result)
+  for raw in registeredBuildDeps(packageName):
+    visitDep(raw, result)
+
 proc m9r15iEmitQt6ComponentCacheVars*(componentDirs: seq[(string, string)]):
     seq[string] =
   ## DSL-port M9.R.15i.1 — emit ``Component_DIR=dir`` cache-var entries
   ## suitable for ``cmake.configure(cacheVars = ...)``. The configure
   ## CLI lowering prefixes each with ``-D``.
+  ##
+  ## Also used by M9.R.15i.5's generic config-dir emitter.
   for (component, dir) in componentDirs:
     result.add(component & "_DIR=" & dir)
 
