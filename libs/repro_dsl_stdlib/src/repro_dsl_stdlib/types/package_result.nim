@@ -402,6 +402,28 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   for i in 1 ..< rpathParts.len:
     script.add("; printf ':%s' " & rpathParts[i])
   script.add("); ")
+  # DSL-port M9.R.15h.14.4 — preserve the toolchain libstdc++ / libgcc_s
+  # path. Without a from-source gcc recipe, the C++ compiler is the
+  # nix-shell-provisioned gcc-wrapper which links against libstdc++.so.6
+  # at e.g. ``/nix/store/<gcc-lib>-gcc-N.M.0-lib/lib/libstdc++.so.6``.
+  # The plain $ORIGIN + dep-mirror rpath chain doesn't reach this path,
+  # so executables that need C++ runtime (qtpaths, lupdate, lrelease,
+  # KF6 binaries) hit ``error while loading shared libraries:
+  # libstdc++.so.6: cannot open shared object file`` at run time even
+  # when launched from inside the originating nix-shell.
+  #
+  # Append the gcc-wrapper's resolved libstdc++ dirname to the rpath
+  # so the dynamic loader finds it without LD_LIBRARY_PATH. We resolve
+  # the path at install-mirror time via ``gcc -print-file-name=...``,
+  # which echoes the absolute path of the named library file even when
+  # the compiler isn't on PATH. The directory of that path is what we
+  # want on rpath.
+  script.add(
+    "stdcxx_dir=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
+  script.add("if [ -n \"$stdcxx_dir\" ] && [ \"$stdcxx_dir\" != " &
+    "\"libstdc++.so.6\" ]; then ")
+  script.add("rpath=\"$rpath:$(dirname \"$stdcxx_dir\")\"; ")
+  script.add("fi; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
   # Walk bin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
