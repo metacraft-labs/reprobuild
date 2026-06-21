@@ -147,6 +147,13 @@ package qt6DeclarativeSource:
     ## the Qml/Quick/QuickControls2 libraries. The sibling
     ## ``qt6BaseSource`` recipe vendors 6.8.1.
     "qt6-base >=6.8"
+    ## M9.R.15n.2 — qt6-shadertools supplies the ``qsb`` shader-bundle
+    ## tool qt6-declarative's configure probes for at build time. Without
+    ## qsb the configure prints "Qt Quick modules not built due to not
+    ## finding the qtshadertools 'qsb' tool" and SKIPS libQt6Quick.so +
+    ## libQt6QuickControls2.so artifacts entirely. The sibling
+    ## ``qt6ShaderToolsSource`` recipe vendors 6.8.1.
+    "qt6-shadertools >=6.8"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

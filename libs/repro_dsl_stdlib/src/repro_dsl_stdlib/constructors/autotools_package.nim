@@ -93,12 +93,11 @@ import ../packages/pkg_config as pkg_config_module
 
 const FetchScratchSubdir = ".repro/fetch"
 
-proc autotoolsFetchActionId(packageName: string): string =
-  ## Stable per-package fetch action id. Distinct from the
-  ## ``ccpp-fetch-<pkg>`` id used by the standard-provider's convention
-  ## layer so the two emitters can coexist (e.g. a recipe routed through
-  ## both a convention sentinel + an autotools_package constructor body
-  ## won't collide on the action registry).
+proc sanitizedPackageName(packageName: string): string =
+  ## Lower the package name to the limited character set the build
+  ## engine's action-id slot accepts (alphanumerics + ``-``/``_``/``.``).
+  ## Used by every autotools_package-emitted action id to derive a
+  ## stable per-package suffix.
   var sanitized = ""
   for ch in packageName:
     if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
@@ -107,7 +106,15 @@ proc autotoolsFetchActionId(packageName: string): string =
       sanitized.add('_')
   if sanitized.len == 0:
     sanitized = "x"
-  "autotools-fetch-" & sanitized
+  sanitized
+
+proc autotoolsFetchActionId(packageName: string): string =
+  ## Stable per-package fetch action id. Distinct from the
+  ## ``ccpp-fetch-<pkg>`` id used by the standard-provider's convention
+  ## layer so the two emitters can coexist (e.g. a recipe routed through
+  ## both a convention sentinel + an autotools_package constructor body
+  ## won't collide on the action registry).
+  "autotools-fetch-" & sanitizedPackageName(packageName)
 
 proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     Option[BuildActionDef] =
@@ -186,7 +193,8 @@ proc autotools_package*(srcDir: string;
                         configureOptions: seq[string] = @[];
                         installTarget = "install";
                         configureScriptName = "configure";
-                        prefixFlagFormat = "--prefix="): AutotoolsPackageResult =
+                        prefixFlagFormat = "--prefix=";
+                        patchHardcodedFile = false): AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
   ## the engine skips path-mode profile lookup for ``sh`` (recipes
@@ -244,7 +252,61 @@ proc autotools_package*(srcDir: string;
   # M9.R.15a.3 — ``configureScriptName`` defaults to ``configure`` for
   # vanilla autotools; openssl-style projects pass ``"Configure"``
   # (uppercase, Perl-driven). The shape stays out-of-tree.
+  # M9.R.15p.2.5 — optional ``autoreconf -fi`` bootstrap. Some upstream
+  # tarballs (e.g. libcanberra 0.30 from 2012) ship a pre-generated
+  # ``configure`` script whose libtool macros hardcode ``/usr/bin/file``
+  # and other ancient distro paths that fail in sandboxed builds. Re-
+  # running ``autoreconf -fi`` against the recipe's host autoconf +
+  # automake + libtool regenerates ``configure`` with up-to-date
+  # libtool macros that probe ``$PATH`` for the file/magic utility
+  # instead. The bootstrap runs FROM ``srcDir`` (the extracted source
+  # tree) via a subshell, then control returns to the recipe root for
+  # the out-of-tree configure pattern.
+  # M9.R.15p.2.5 — when ``patchHardcodedFile`` is true, regenerate the
+  # bundled configure script via ``autoreconf -fi`` with the host
+  # toolchain's autoconf/automake/libtool/pkg-config macros. Old
+  # upstream tarballs (e.g. libcanberra 0.30 from 2012) ship a
+  # pre-generated ``configure`` script whose libtool macros hardcode
+  # ``/usr/bin/file`` and whose pkg.m4 macros (``PKG_PROG_PKG_CONFIG``
+  # / ``PKG_CHECK_MODULES``) were left unexpanded. Without the
+  # bootstrap they fail in sandboxed builds with literal
+  # "command not found" + "syntax error" — the macros never expanded
+  # to portable shell.
+  #
+  # We thread ``ACLOCAL_PATH`` through every aclocal m4 dir we can
+  # find under the host toolchain (pkg.m4, libtool.m4, gtk-doc.m4
+  # if present, etc.) so autoconf sees them at re-bootstrap time. The
+  # GTK_DOC_CHECK macro is satisfied by planting a small inline
+  # ``gtkdocize`` stub (and a corresponding empty
+  # ``gtkdoc/gtk-doc.make``) when the real gtkdocize isn't on PATH,
+  # mirroring the upstream ``autogen.sh``'s own fallback path.
+  let bootstrapPrefix =
+    if patchHardcodedFile:
+      "( cd " & srcDir & " && " &
+      "aclocal_dirs=$(find $(dirname $(which automake) 2>/dev/null)/../../../*/share/aclocal -maxdepth 0 -type d 2>/dev/null | tr '\\n' ':'); " &
+      "for tool in pkg-config libtool autoconf automake; do " &
+      "  bin=$(which $tool 2>/dev/null); " &
+      "  if [ -n \"$bin\" ]; then " &
+      "    ad=$(dirname $bin)/../share/aclocal; " &
+      "    if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
+      "  fi; " &
+      "done; " &
+      "for sp in /nix/store/*-pkg-config-*/share/aclocal /nix/store/*-libtool-*/share/aclocal /nix/store/*-gtk-doc-*/share/aclocal; do " &
+      "  if [ -d \"$sp\" ]; then aclocal_dirs=\"$sp:$aclocal_dirs\"; fi; " &
+      "done; " &
+      "export ACLOCAL_PATH=\"$aclocal_dirs\"; " &
+      "if ! command -v gtkdocize >/dev/null 2>&1; then " &
+      "  mkdir -p gtkdoc && [ -f gtkdoc/gtk-doc.make ] || echo 'EXTRA_DIST =' > gtkdoc/gtk-doc.make; " &
+      "  stubdir=$(mktemp -d); " &
+      "  printf '#!/bin/sh\\nexit 0\\n' > \"$stubdir/gtkdocize\"; " &
+      "  chmod +x \"$stubdir/gtkdocize\"; " &
+      "  export PATH=\"$stubdir:$PATH\"; " &
+      "fi && " &
+      "autoreconf -fi ) && "
+    else:
+      ""
   let configureScript =
+    bootstrapPrefix &
     "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
     srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
@@ -373,6 +435,36 @@ proc autotools_package*(srcDir: string;
     vars = installVars,
     after = @[configureEdge, buildEdge],
     extraEnv = installEnv)
+  # M9.R.15p.2.4 — post-install .la-file cleanup. libtool's
+  # ``libXXX.la`` archive files embed the upstream ``--prefix`` install
+  # path verbatim (e.g. ``/usr/lib/libfoo.la``) but our DESTDIR-staged
+  # installs land them at ``<DESTDIR>/usr/lib/libfoo.la``. Downstream
+  # consumers' libtool dereferences the prefix-baked path and aborts:
+  #   ``/usr/lib/libfoo.la: No such file or directory``
+  #   ``libtool: link: `/usr/lib/libfoo.la' is not a valid libtool archive``
+  # Modern shared-library linking does NOT need .la files — pkg-config
+  # carries the necessary -L/-l flags + Requires: chain — so the
+  # standard distro practice (Gentoo, Arch, NixOS) is to strip them
+  # from staged installs. The cleanup runs after the install
+  # action's outputs land, before any downstream consumer pulls in
+  # the multi-output install tree, so libcanberra (and any future
+  # autotools recipe that consumes a sibling autotools recipe's
+  # libraries) never sees the broken .la references.
+  let laCleanupScript =
+    "find \"" & installDestdir & "\" -name '*.la' -type f -delete 2>/dev/null; " &
+    "true"
+  let laCleanupArgv = @["sh", "-c", laCleanupScript]
+  let laCleanupCall = inlineExecCall(laCleanupArgv)
+  let laCleanupId = "autotools-la-cleanup-" & sanitizedPackageName(pkgName)
+  let laCleanupEdge = buildAction(
+    id = laCleanupId,
+    call = laCleanupCall,
+    deps = @[installEdge.id],
+    inputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "autotools_package.la_cleanup",
+    toolIdentityRefs = @["sh"])
   # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
   # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
   # from-source search-path channels reach the action env at fork time.
@@ -393,10 +485,11 @@ proc autotools_package*(srcDir: string;
   appendRegisteredActionToolIdentityRefs(configureEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(buildEdge.id, depRefs)
   appendRegisteredActionToolIdentityRefs(installEdge.id, depRefs)
+  appendRegisteredActionToolIdentityRefs(laCleanupEdge.id, depRefs)
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
-    installEdge: installEdge,
+    installEdge: laCleanupEdge,
     destdir: destdir,
     buildDir: buildDir,
     components: standardComponents())

@@ -115,6 +115,10 @@ package kglobalaccelSource:
     ## kcoreaddons is the KF6 foundation library kglobalaccel's
     ## ``KAboutData`` / ``KShortcut`` plumbing consumes.
     "kcoreaddons >=6.0"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
+    ## declarations M9.R.15n.4 added are retired.
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

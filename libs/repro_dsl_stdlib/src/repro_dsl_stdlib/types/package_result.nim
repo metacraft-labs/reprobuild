@@ -530,6 +530,114 @@ proc m9r15iEmitQt6ComponentCacheVars*(componentDirs: seq[(string, string)]):
   for (component, dir) in componentDirs:
     result.add(component & "_DIR=" & dir)
 
+# ---------------------------------------------------------------------------
+# M9.R.15o.1 — Auto-thread Qt6Gui transitive find_dependency targets
+# (libxkbcommon + mesa) for every qt6-* consumer.
+# ---------------------------------------------------------------------------
+
+const m9r15oQt6GuiTransitiveDeps* = [
+  ## DSL-port M9.R.15o.1 — recipes Qt6Gui's CMake config calls
+  ## ``find_dependency(...)`` for that are NOT shipped by any qt6-* dep
+  ## itself. Without these on CMAKE_PREFIX_PATH + threaded as tool refs,
+  ## every Qt6Gui consumer (KF6 modules / Plasma / KWin / ...) fails
+  ## ``find_package(Qt6Gui REQUIRED)``.
+  ##
+  ## Diagnosed M9.R.15n.3 (kcrash) → M9.R.15n.5 (kded): every Qt6Gui
+  ## consumer needed an identical per-recipe ``libxkbcommon`` + ``mesa``
+  ## buildDeps annotation. M9.R.15o.1 moves that to the constructor.
+  ##
+  ## ``libxkbcommon`` supplies ``XKB`` (Qt6 GUI text-input dependency);
+  ## ``mesa`` supplies ``GLESv2`` + ``EGL`` + ``gbm`` (Qt6 GUI OpenGL
+  ## backend). Both are pinned at the same constraint floors the M9.R.15n
+  ## hand-patched recipes used (``libxkbcommon >=1.5``, ``mesa >=23.3``).
+  "libxkbcommon",
+  "mesa",
+]
+
+proc m9r15oCollectQt6TransitiveCmakeDeps*(projectRoot, packageName: string):
+    seq[string] =
+  ## DSL-port M9.R.15o.1 — when any ``qt6-*`` dep is present in
+  ## ``packageName``'s nativeBuildDeps + buildDeps AND the corresponding
+  ## sibling install-mirror directory exists, return the recipe-dep
+  ## names from ``m9r15oQt6GuiTransitiveDeps`` whose install-mirror
+  ## ``usr/`` tree is on disk. The caller virtually injects them as
+  ## additional tool-identity refs (so the from-source search-path
+  ## channels reach the action env) and re-runs the generic CMake-config
+  ## dir scan against them.
+  ##
+  ## ``projectRoot`` is the active recipe's project-root directory;
+  ## ``parentDir(projectRoot)`` is the sibling-recipe directory
+  ## (``recipes/packages/source/``) — matches the convention in
+  ## ``m9r14fCollectDepMirrorLibDirs`` + ``m9r15iCollectQt6ComponentDirs``.
+  ##
+  ## Inert in unit-test mode when ``projectRoot`` is empty, and inert
+  ## when no qt6-* dep is declared. Order: matches the declaration order
+  ## in ``m9r15oQt6GuiTransitiveDeps``; idempotent across runs.
+  if projectRoot.len == 0:
+    return
+  var hasQt6 = false
+  for raw in registeredNativeBuildDeps(packageName):
+    if m9r14fStripDepConstraint(raw).startsWith("qt6-"):
+      hasQt6 = true
+      break
+  if not hasQt6:
+    for raw in registeredBuildDeps(packageName):
+      if m9r14fStripDepConstraint(raw).startsWith("qt6-"):
+        hasQt6 = true
+        break
+  if not hasQt6:
+    return
+  # Don't double-inject a dep the recipe already declared by hand —
+  # the M9.R.15n hand-patched recipes (kcrash / kglobalaccel / kded)
+  # still carry the explicit annotations; injecting again would
+  # duplicate the entry on every search-path channel + dep-ref list.
+  var declared: seq[string] = @[]
+  for raw in registeredNativeBuildDeps(packageName):
+    declared.add(m9r14fStripDepConstraint(raw))
+  for raw in registeredBuildDeps(packageName):
+    declared.add(m9r14fStripDepConstraint(raw))
+  let siblingsRoot = parentDir(projectRoot)
+  if siblingsRoot.len == 0:
+    return
+  for dep in m9r15oQt6GuiTransitiveDeps:
+    if dep in declared:
+      continue
+    # Only inject when the sibling install-mirror exists on disk so
+    # the helper is inert in unit-test fixtures + host-orchestration
+    # mode that builds the action graph without populating mirrors.
+    let mirrorUsr = siblingsRoot / dep / ".repro" / "output" /
+      "install" / "usr"
+    if not dirExists(mirrorUsr):
+      continue
+    result.add(dep)
+
+proc m9r15oCollectQt6TransitiveCmakeConfigDirs*(projectRoot, packageName: string):
+    seq[(string, string)] =
+  ## DSL-port M9.R.15o.1 — for every virtually-injected transitive
+  ## Qt6Gui dep returned by ``m9r15oCollectQt6TransitiveCmakeDeps``,
+  ## scan its install-mirror ``cmake/`` tree (same shape
+  ## ``m9r15iScanCmakeConfigDirs`` walks) and return the ``(Component,
+  ## dir)`` pairs so the cmake_package constructor can thread
+  ## ``-D<Component>_DIR=...`` cache vars without the recipe author
+  ## listing the dep manually.
+  ##
+  ## ``mesa`` ships no CMake config files (it's pkg-config / raw
+  ## ``find_library`` consumed) so the scan returns 0 entries for it —
+  ## the value of the injection is the search-path channel side (which
+  ## is what reaches Qt6Gui's ``find_dependency(GLESv2)`` probe).
+  ## ``libxkbcommon`` similarly is pkg-config consumed. Returning an
+  ## empty seq is the expected shape today; the helper exists so
+  ## future cmake-config-bearing transitive deps slot in without a
+  ## constructor edit.
+  let extraDeps = m9r15oCollectQt6TransitiveCmakeDeps(projectRoot, packageName)
+  if extraDeps.len == 0:
+    return
+  let siblingsRoot = parentDir(projectRoot)
+  if siblingsRoot.len == 0:
+    return
+  for dep in extraDeps:
+    m9r15iScanCmakeConfigDirs(siblingsRoot / dep, result)
+
 proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  depMirrorLibDirs: seq[string]): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every

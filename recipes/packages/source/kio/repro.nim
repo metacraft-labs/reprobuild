@@ -157,6 +157,28 @@ package kioSource:
     ## kitemviews supplies the QtWidgets model/view extensions kio's
     ## file-dialog list / icon / tree views consume.
     "kitemviews >=6.0"
+    ## M9.R.15p.4.3 — kio's src/CMakeLists.txt:91 declares
+    ## ``if (UNIX AND NOT ANDROID) find_package(KF6Auth REQUIRED)``;
+    ## kauth published M9.R.15p.4.1 and supplies
+    ## ``KF6AuthConfig.cmake`` + ``libKF6AuthCore.so``.
+    "kauth >=6.10"
+    ## M9.R.15p.4.3 — kio's src/CMakeLists.txt:78 declares
+    ## ``find_package(KF6ColorScheme REQUIRED)``; kcolorscheme already
+    ## publishes (kded / kxmlgui / kio share it).
+    "kcolorscheme >=6.0"
+    ## M9.R.15p.4.3 — kio transitively links libcanberra via
+    ## knotifications which links libltdl.so.7. ld looks for libltdl
+    ## through LIBRARY_PATH at the linking of libKF6KIOWidgets.so;
+    ## the libltdl stdlib stub (M9.R.15p.2.1) supplies the path.
+    ## Same fix as kjobwidgets (M9.R.15p.2.7).
+    "libltdl"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
+    ## declarations M9.R.15o.3 added are retired. The auto-injection
+    ## reaches the M9.R.14e search-path channels at macro-expansion
+    ## time, closing the gap M9.R.15o.1's constructor-level helper
+    ## left open.
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

@@ -1250,6 +1250,82 @@ proc collectConfigSection(body: NimNode; output: var seq[VariantDecl]) =
     parseVariantDeclaration(stmt, pendingDoc, output)
     pendingDoc = ""
 
+proc m9r15pAutoInjectQt6Transitive(pkg: var PackageDef) =
+  ## DSL-port M9.R.15p.0.1 — auto-inject ``libxkbcommon`` + ``mesa`` as
+  ## buildDeps whenever any ``qt6-*`` dep is declared on the package
+  ## (in either ``buildDeps:`` / ``uses:`` or ``nativeBuildDeps:``).
+  ##
+  ## Why at macro-expansion time? The from-source resolver allocates
+  ## tool identities from ``pkg.toolUses`` at macro expansion (the
+  ## ``packageUseSeqLiteral`` fold at line ~1487 feeds
+  ## ``ProjectInterface.toolUses``). The runtime-only
+  ## ``m9r15oCollectQt6TransitiveCmakeDeps`` helper (M9.R.15o.1) reaches
+  ## the cache-vars channel but the search-path channel silently drops
+  ## because that channel is populated from tool identities established
+  ## at expansion time, not when the constructor runs in the ``build:``
+  ## body.
+  ##
+  ## Adding the deps here means every Qt6Gui consumer (KF6 modules /
+  ## Plasma / KWin / qt6-wayland / ...) gets the FindXKB +
+  ## find_dependency(GLESv2) channels wired transparently without
+  ## per-recipe boilerplate. M9.R.15n.3-5 + M9.R.15o.2-4 hand-patched
+  ## six recipes; M9.R.15p.0.2 retires that boilerplate.
+  ##
+  ## Dedup is by ``executableName`` (the first whitespace-split token
+  ## of the constraint, e.g. ``"libxkbcommon"``). A recipe that already
+  ## declares ``libxkbcommon`` by hand (any constraint, any kind) is
+  ## NOT double-injected; a recipe that declares one of the two but
+  ## not the other gets only the missing one. Determinism: the two
+  ## auto-injected entries always land in the same (``libxkbcommon``,
+  ## then ``mesa``) order at the END of ``pkg.toolUses``, AFTER any
+  ## user-declared entries.
+  var hasQt6 = false
+  for use in pkg.toolUses:
+    if use.executableName.toLowerAscii().startsWith("qt6"):
+      hasQt6 = true
+      break
+  if not hasQt6:
+    for use in pkg.nativeBuildDeps:
+      if use.executableName.toLowerAscii().startsWith("qt6"):
+        hasQt6 = true
+        break
+  if not hasQt6:
+    return
+  var hasXkb = false
+  var hasMesa = false
+  for use in pkg.toolUses:
+    let name = use.executableName.toLowerAscii()
+    if name == "libxkbcommon":
+      hasXkb = true
+    elif name == "mesa":
+      hasMesa = true
+  for use in pkg.nativeBuildDeps:
+    let name = use.executableName.toLowerAscii()
+    if name == "libxkbcommon":
+      hasXkb = true
+    elif name == "mesa":
+      hasMesa = true
+  if not hasXkb:
+    pkg.toolUses.add(PackageUseDef(
+      rawConstraint: "libxkbcommon >=1.5",
+      packageSelector: "libxkbcommon",
+      executableName: "libxkbcommon",
+      policyPath: @[],
+      sourceFile: pkg.sourceFile,
+      sourceLine: pkg.sourceLine,
+      gateVariant: "",
+      gateValue: ""))
+  if not hasMesa:
+    pkg.toolUses.add(PackageUseDef(
+      rawConstraint: "mesa >=23.3",
+      packageSelector: "mesa",
+      executableName: "mesa",
+      policyPath: @[],
+      sourceFile: pkg.sourceFile,
+      sourceLine: pkg.sourceLine,
+      gateVariant: "",
+      gateValue: ""))
+
 proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
   let loc = lineFile(name)
   result.packageName = identText(name)
@@ -1336,6 +1412,13 @@ proc parsePackageDef(name: NimNode; body: NimNode): PackageDef =
       # ``$out-doc`` / ``$out-dev``). Empty / absent ``outputs:``
       # keeps legacy single-output behavior.
       parseOutputsBlock(result.packageName, stmt, result.outputs)
+  # DSL-port M9.R.15p.0.1 — after all user-declared deps are
+  # collected, auto-inject the Qt6Gui transitive ``find_dependency``
+  # targets (``libxkbcommon`` + ``mesa``) into ``toolUses`` so every
+  # Qt6Gui consumer gets the search-path channels wired transparently.
+  # See ``m9r15pAutoInjectQt6Transitive`` for the architectural
+  # rationale + dedup semantics. Inert for non-qt6 recipes.
+  m9r15pAutoInjectQt6Transitive(result)
 
 proc escForCode(text: string): string =
   text.escape()

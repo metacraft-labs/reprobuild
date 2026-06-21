@@ -143,6 +143,10 @@ package kdedSource:
     ## kcrash supplies the SIGSEGV/SIGABRT handler kded installs at
     ## startup so a faulting kded module produces a usable backtrace.
     "kcrash >=6.0"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
+    ## declarations M9.R.15n.5 added are retired.
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

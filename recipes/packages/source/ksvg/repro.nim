@@ -123,6 +123,23 @@ package ksvgSource:
     ## kguiaddons supplies the QtGui extensions ksvg's renderer wraps
     ## (KColorUtils + KModifierKeyInfo glue).
     "kguiaddons >=6.0"
+    ## M9.R.15p.4.1 — ksvg's CMakeLists.txt:47 declares
+    ## ``find_package(KF6 ... COMPONENTS ... ColorScheme ...)``;
+    ## kcolorscheme published M9.R.15h.x and supplies
+    ## ``KF6ColorSchemeConfig.cmake``.
+    "kcolorscheme >=6.0"
+    ## M9.R.15p.4.1 — ksvg's CMakeLists.txt:47 declares
+    ## ``find_package(KF6 ... COMPONENTS ... KirigamiPlatform ...)``;
+    ## kirigami published M9.R.15p.3.1 and supplies
+    ## ``KF6KirigamiPlatformConfig.cmake`` (the platform-abstraction
+    ## sub-library of the kirigami 7-artifact aggregate).
+    "kirigami >=6.10"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
+    ## declarations M9.R.15o.2 added are retired. The auto-injection
+    ## happens at macro-expansion time so both search-path AND
+    ## cache-vars channels are wired transparently.
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.

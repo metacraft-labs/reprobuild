@@ -4147,27 +4147,36 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     # extra-cmake-modules (ECM), which every KF6 module declares as a
     # buildDep but which has no ``.so`` or executable to probe.
     #
+    # M9.R.15p.1.6 — widened to also probe ``<prefix>/lib/cmake/`` and
+    # ``<prefix>/lib64/cmake/``.  Canonical example: KDE's
+    # plasma-wayland-protocols, whose CMake config installs at
+    # ``lib/cmake/PlasmaWaylandProtocols/PlasmaWaylandProtocolsConfig.
+    # cmake`` (one less nesting level than the share/-rooted form, and
+    # under lib/, not share/).  Two layout shapes covered:
+    #
+    #   * share-rooted with extra ``cmake/`` nesting:
+    #         <share>/<Pkg>/cmake/<Pkg>Config.cmake     (ECM)
+    #   * lib-rooted without the extra cmake/ nesting:
+    #         <lib>/cmake/<Pkg>/<Pkg>Config.cmake       (plasma-wayland-
+    #                                                    protocols, every
+    #                                                    standard CMake
+    #                                                    package-config
+    #                                                    install)
+    #
     # Probe both the install-mirror and the build/out trees for the
-    # canonical CMake-config locations.  We use the canonical-name +
-    # raw-name forms to match upstream-style installs (``share/ECM/``
-    # for ``extra-cmake-modules``) AND the lower-cased package-name
-    # form (``share/extra-cmake-modules/``).
-    var shareRoots: seq[string] = @[]
+    # canonical CMake-config locations.
+    var probeRoots: seq[tuple[root: string, layout: string]] = @[]
     for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
       let prefixRoot = recipeDir / prefixSubdir
       if dirExists(extendedPath(prefixRoot)):
-        shareRoots.add(prefixRoot / "share")
-    for shareRoot in shareRoots:
-      if not dirExists(extendedPath(shareRoot)):
-        continue
-      # Generic walk: enumerate every subdir of share/ and probe each
-      # for a CMake config file.  This covers ECM (share/ECM/cmake/
-      # ECMConfig.cmake), as well as any future share-only package
-      # whose subdir name doesn't mechanically derive from the dep name
-      # (ECM's name is "ECM" but the dep selector is
-      # "extra-cmake-modules", so name-based UPPER/lower probes miss).
-      block shareWalk:
-        for kindPc, walked in walkDir(extendedPath(shareRoot)):
+        probeRoots.add((root: prefixRoot / "share", layout: "share"))
+        probeRoots.add((root: prefixRoot / "lib" / "cmake", layout: "lib"))
+        probeRoots.add((root: prefixRoot / "lib64" / "cmake", layout: "lib"))
+    block configWalk:
+      for probe in probeRoots:
+        if not dirExists(extendedPath(probe.root)):
+          continue
+        for kindPc, walked in walkDir(extendedPath(probe.root)):
           if kindPc != pcDir and kindPc != pcLinkToDir:
             continue
           var subdir = walked
@@ -4175,12 +4184,17 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             if subdir.startsWith("\\\\?\\"):
               subdir = subdir[4 .. ^1]
           let subdirName = lastPathPart(subdir)
-          let cmakeConfig = subdir / "cmake" / (subdirName & "Config.cmake")
+          # Layout-specific probe paths:
+          #   share: <share>/<Pkg>/cmake/<Pkg>Config.cmake
+          #   lib:   <lib>/cmake/<Pkg>/<Pkg>Config.cmake
+          let cmakeConfig =
+            if probe.layout == "share":
+              subdir / "cmake" / (subdirName & "Config.cmake")
+            else:
+              subdir / (subdirName & "Config.cmake")
           if fileExists(extendedPath(cmakeConfig)):
             resolved = absolutePath(cmakeConfig)
-            break shareWalk
-        if resolved.len > 0:
-          break
+            break configWalk
   if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,

@@ -114,6 +114,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
+import repro_dsl_stdlib/packages/system_tools
 
 # ---------------------------------------------------------------------------
 # Package declaration
@@ -180,9 +181,33 @@ package libcanberraSource:
     ## light use of autoconf macros.
     "gcc >=11"
     ## pkg-config is used by the configure script to probe for the
-    ## optional vorbisfile back-end (we disable it below but pkg-config
-    ## still needs to be on PATH for the probe to fire).
+    ## mandatory vorbisfile back-end.
     "pkg-config"
+    ## M9.R.15p.2.1 — ``file`` (the libmagic CLI) is invoked by the
+    ## configure script at ``configure:8701`` for binary-layout probing.
+    ## Sandboxed builds can't reach ``/usr/bin/file`` from the host.
+    ## The ``patchHardcodedFile = true`` autoreconf-bootstrap path
+    ## regenerates configure with modern macros that probe PATH for
+    ## ``file`` instead.
+    "file"
+    ## M9.R.15p.2.5 — m4 is required by ``autoreconf -fi`` (libtoolize
+    ## aborts with "One of these is required: gm4 gnum4 m4" otherwise).
+    "m4"
+
+  buildDeps:
+    ## M9.R.15p.2.1 — libltdl is the dynamic-module loader libcanberra's
+    ## configure script REQUIRES (configure.ac:144
+    ## ``AC_CHECK_LIB([ltdl], [lt_dladvise_init])`` + immediate abort).
+    ## The stdlib stub points at nixpkgs#libtool^* which ships
+    ## libltdl.so + ltdl.h in the ``lib`` output.
+    "libltdl"
+    ## M9.R.15p.2.2 — libvorbis is libcanberra's MANDATORY vorbisfile
+    ## back-end (configure.ac:586 ``PKG_CHECK_MODULES(VORBIS,
+    ## [ vorbisfile ])`` — comment reads "### Vorbis (mandatory) ###";
+    ## no ``--disable-vorbis`` flag exists). vorbisfile.pc Requires:
+    ## ogg so libogg is pulled in transitively.
+    "libvorbis >=1.3"
+    "libogg >=1.3"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
@@ -199,6 +224,11 @@ package libcanberraSource:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `autotools_package(...)` constructor.
     setCurrentOwningPackageOverride("libcanberraSource")
     try:
+      # M9.R.15p.2.1 — ``--with-systemdsystemunitdir=no`` silences the
+      # systemd pkg-config probe (configure.ac:552-559). systemd is
+      # optional; ``=no`` skips the probe entirely so the v1 build
+      # doesn't emit the "Package systemd was not found" warning in
+      # clean sandboxes.
       let opts = @[
         "--disable-static",
         "--disable-gtk",
@@ -207,8 +237,21 @@ package libcanberraSource:
         "--disable-alsa",
         "--disable-oss",
         "--enable-null",
+        "--with-systemdsystemunitdir=no",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # M9.R.15p.2.5 — ``patchHardcodedFile = true`` triggers the
+      # autoreconf-bootstrap path in autotools_package. libcanberra
+      # 0.30's bundled configure (from 2012) hardcodes ``/usr/bin/file``
+      # in its libtool object-architecture probe AND ships an
+      # unexpanded ``PKG_PROG_PKG_CONFIG`` / ``PKG_CHECK_MODULES`` (the
+      # release tarball was built without pkg.m4 in ACLOCAL_PATH).
+      # The bootstrap path runs ``autoreconf -fi`` with ACLOCAL_PATH
+      # wired to the host autoconf/automake/libtool/pkg-config aclocal
+      # dirs + a gtkdocize stub when gtk-doc isn't installed, mirroring
+      # the upstream ``autogen.sh``'s own fallback.
+      let pkg = autotools_package(srcDir = "./src",
+                                  configureOptions = opts,
+                                  patchHardcodedFile = true)
       discard pkg.library("libCanberra")
     finally:
       clearCurrentOwningPackageOverride()

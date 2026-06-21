@@ -33,6 +33,10 @@ package kcrashSource:
     "qt6-base >=6.6"
     "qt6-tools >=6.6"
     "kcoreaddons >=6.0"
+    ## M9.R.15p.0.2 — libxkbcommon + mesa are auto-injected by the
+    ## package macro for every qt6-* consumer (see
+    ## ``m9r15pAutoInjectQt6Transitive`` in macros_a.nim); the explicit
+    ## per-recipe declarations M9.R.15n.3 added are retired.
 
   config:
     discard

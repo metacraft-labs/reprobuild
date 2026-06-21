@@ -34,6 +34,17 @@ package kjobwidgetsSource:
     "qt6-tools >=6.6"
     "kcoreaddons >=6.0"
     "kwidgetsaddons >=6.0"
+    ## M9.R.15p.2.7 — kjobwidgets' CMakeLists.txt:49 declares
+    ## ``find_package(KF6Notifications ${KF_DEP_VERSION} REQUIRED)``;
+    ## the recipe was missing this buildDep, so cmake couldn't locate
+    ## KF6NotificationsConfig.cmake at configure time. Now that
+    ## knotifications publishes (M9.R.15p.2.6) the dep is wirable.
+    "knotifications >=6.0"
+    ## M9.R.15p.2.7 — knotifications transitively links libcanberra
+    ## which links libltdl.so.7. ld looks for libltdl through
+    ## LIBRARY_PATH at the linking of libKF6JobWidgets.so; the libltdl
+    ## stdlib stub (M9.R.15p.2.1) supplies the path.
+    "libltdl"
 
   config:
     discard

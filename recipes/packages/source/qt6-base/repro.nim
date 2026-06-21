@@ -263,6 +263,14 @@ package qt6BaseSource:
     ## QtNetwork consume for HTTP compression + QFile transparent
     ## decompression.
     "zlib >=1.2.11"
+    ## M9.R.15n.1 — mesa supplies libEGL + libGLESv2 + libgbm + the
+    ## EGL/GLES2 headers. Once present in the from-source closure the
+    ## qt6-base configure can find the EGL/GLES libs via the M9.R.14e
+    ## LIBRARY_PATH / CPATH / PKG_CONFIG_PATH wiring populated from the
+    ## sibling install mirror, so FEATURE_opengl can be flipped back ON
+    ## (see ``build:`` below). M9.R.15m landed mesa-from-source publishing
+    ## those three artifacts; we now lift the M9.R.15a.7 disable.
+    "mesa >=23.3"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -302,6 +310,16 @@ package qt6BaseSource:
     ## ``FEATURE_sql_sqlite=ON``). v1 records the artifact only.
     discard
 
+  library libQt6OpenGL:
+    ## M9.R.15n.1 — ``libQt6OpenGL.so`` lights up once
+    ## ``FEATURE_opengl=ON`` + ``FEATURE_opengles2=ON``. KF6's
+    ## ``kcrash`` and ``ksvg`` linkers depend on Qt6OpenGL targets;
+    ## downstream Plasma + kwin consume the QtOpenGL helpers (QOpenGLWidget,
+    ## QOpenGLBuffer, QOpenGLFunctions) for the QPlatformBackingStore
+    ## fallback path. Record the artifact so the M3 registry advertises
+    ## it to dependents.
+    discard
+
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
     setCurrentOwningPackageOverride("qt6BaseSource")
@@ -314,16 +332,20 @@ package qt6BaseSource:
         "FEATURE_dbus=ON",
         "FEATURE_sql_sqlite=ON",
         "FEATURE_widgets=ON",
-        # M9.R.15a.7 — disable OpenGL entirely. qt6-base's gui configure
-        # runs a TEST_opengl_egl probe that requires libGL + EGL headers;
-        # without a mesa from-source recipe in cache the test fails with
-        # ``ERROR: The OpenGL functionality tests failed!``. Plasma's
-        # default render path is QtQuick scene-graph via QRhi which can
-        # fall back to software / vulkan when GL is absent. The v1
-        # minimal-desktop story is GL-less for now; a future M9.R.15c+
-        # milestone landing mesa-from-source will flip this back on.
-        "INPUT_opengl=no",
-        "FEATURE_opengl=OFF",
+        # M9.R.15n.1 — OpenGL ES2 + EGL via mesa-from-source. M9.R.15m
+        # landed mesa publishing libEGL.so + libGLESv2.so + libgbm.so
+        # plus the EGL/GLES2/KHR headers; the M9.R.14e LIBRARY_PATH /
+        # CPATH / PKG_CONFIG_PATH wiring threads those onto qt6-base's
+        # configure-time env. Mesa is built swrast-only (no full libGL),
+        # so we select the ``es2`` OpenGL backend rather than the desktop
+        # ``desktop`` backend; this is what KDE Plasma's QRhi scene-graph
+        # actually consumes on Wayland (QSG_RHI_BACKEND=gl uses GLES via
+        # QRhiGles2). The eglfs/wayland-egl QPA plugins activate once
+        # ``FEATURE_egl=ON`` is detected from the libEGL.so probe.
+        "INPUT_opengl=es2",
+        "FEATURE_opengl=ON",
+        "FEATURE_opengles2=ON",
+        "FEATURE_egl=ON",
         # M9.R.15c.2 — pcre2 is not yet vendored from-source, so fall
         # back to qtbase's bundled copy under src/3rdparty/pcre2. Qt's
         # default auto-FORCES ``system_pcre2=ON`` once a system pcre2
@@ -381,6 +403,7 @@ package qt6BaseSource:
       discard pkg.library("libQt6Network")
       discard pkg.library("libQt6DBus")
       discard pkg.library("libQt6Sql")
+      discard pkg.library("libQt6OpenGL")
     finally:
       clearCurrentOwningPackageOverride()
 

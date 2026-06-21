@@ -55,6 +55,7 @@ import ./libudev
 import ./libgpg_error
 import ./libacl
 import ./libcrypt
+import ./libltdl
 import ./libseccomp
 import ./mtdev
 import ./pcre2
@@ -62,6 +63,11 @@ import ./fribidi
 import ./gjs
 import ./shared_mime_info
 import ./wayland_protocols
+# M9.R.15o.3 — wayland-scanner is the protocol-stub code generator
+# kio's transitive dep kwindowsystem invokes at build time. The
+# sibling wayland recipe ships the binary; this stub exposes it via
+# the Nix channel for recipes that don't already have a sibling.
+import ./wayland_scanner
 import ./linux_headers
 import ./python3
 import ./runquotad
@@ -153,6 +159,7 @@ export libudev
 export libgpg_error
 export libacl
 export libcrypt
+export libltdl
 export libseccomp
 export mtdev
 export pcre2
@@ -160,6 +167,7 @@ export fribidi
 export gjs
 export shared_mime_info
 export wayland_protocols
+export wayland_scanner
 export linux_headers
 export python3
 export runquotad
