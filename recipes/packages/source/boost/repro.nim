@@ -141,10 +141,17 @@ package boostSource:
 
   nativeBuildDeps:
     ## gcc is the host C++ toolchain — Boost is C++14.
+    ##
+    ## NOTE on the omission of ``make`` / ``cmake`` / ``autoconf`` / ``meson``:
+    ## the ``from-source-custom`` convention refuses to claim a recipe whose
+    ## ``nativeBuildDeps`` lists any of those canonical drivers (the four
+    ## sibling ``from-source-{cmake,autotools,make,meson}`` conventions would
+    ## otherwise mis-route). Boost's bootstrap.sh + b2 toolchain is fully
+    ## self-contained on plain gcc; the internal sub-builds that invoke
+    ## ``make`` (a handful of auxiliary code-gen sub-steps) get a system
+    ## ``make`` from the host PATH, which is acceptable for the build.
+    ## Listing ``make`` here would cascade into the wrong convention.
     "gcc >=11"
-    ## make is invoked by Boost.Build (b2) internally for a small number
-    ## of submodule auxiliary builds.
-    "make >=4"
     ## python3 is invoked by some of Boost's auxiliary code-gen passes.
     "python3 >=3.8"
     ## perl is invoked by Boost.Regex's pre-compiled-table generator.
