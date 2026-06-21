@@ -4139,6 +4139,56 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
     if mirrorHit.len > 0:
       resolved = mirrorHit
   if resolved.len == 0:
+    # DSL-port M9.R.15h.14 — share-only-package fast-path.
+    #
+    # Some CMake packages ship NO compiled libraries — they're pure
+    # CMake module collections installed under ``<prefix>/share/cmake/``
+    # or ``<prefix>/share/<NAME>/``.  Canonical example: KDE's
+    # extra-cmake-modules (ECM), which every KF6 module declares as a
+    # buildDep but which has no ``.so`` or executable to probe.
+    #
+    # Probe both the install-mirror and the build/out trees for the
+    # canonical CMake-config locations.  We use the canonical-name +
+    # raw-name forms to match upstream-style installs (``share/ECM/``
+    # for ``extra-cmake-modules``) AND the lower-cased package-name
+    # form (``share/extra-cmake-modules/``).
+    var shareRoots: seq[string] = @[]
+    for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+      let prefixRoot = recipeDir / prefixSubdir
+      if dirExists(extendedPath(prefixRoot)):
+        shareRoots.add(prefixRoot / "share")
+    for shareRoot in shareRoots:
+      if not dirExists(extendedPath(shareRoot)):
+        continue
+      # ECM-style canonical: e.g. share/ECM/cmake/ECMConfig.cmake.  The
+      # uppercase form is the most common upstream convention.
+      let upperForm = name.toUpperAscii
+      let upperConfig = shareRoot / upperForm / "cmake" / (upperForm & "Config.cmake")
+      if fileExists(extendedPath(upperConfig)):
+        resolved = absolutePath(upperConfig)
+        break
+      # Lower-cased package-name form: e.g. share/extra-cmake-modules/.
+      let nameConfig = shareRoot / name / "cmake" / (name & "Config.cmake")
+      if fileExists(extendedPath(nameConfig)):
+        resolved = absolutePath(nameConfig)
+        break
+      # share/cmake/<NAME>/<NAME>Config.cmake (Debian-style layout).
+      let cmakeConfig = shareRoot / "cmake" / upperForm / (upperForm & "Config.cmake")
+      if fileExists(extendedPath(cmakeConfig)):
+        resolved = absolutePath(cmakeConfig)
+        break
+      # Marker file: presence of the named share dir is enough (some
+      # CMake packages drop config to share/<NAME>/ without nesting in
+      # a cmake/ subdir).
+      let shareNamedDir = shareRoot / upperForm
+      if dirExists(extendedPath(shareNamedDir)):
+        resolved = absolutePath(shareNamedDir)
+        break
+      let shareLowerDir = shareRoot / name
+      if dirExists(extendedPath(shareLowerDir)):
+        resolved = absolutePath(shareLowerDir)
+        break
+  if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
       expectedArtifact: baseCandidate,
