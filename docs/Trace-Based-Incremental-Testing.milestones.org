@@ -1906,11 +1906,15 @@
 
 * M23 — Finish the trace-events.md Event Stream Redesign (steps/value/events.dat)
   :STATUS: M23a complete (steps.dat compact seekable execution stream), M23b
-  complete (values.dat parallel value stream), and M23c complete (events.dat I/O
+  complete (values.dat parallel value stream), M23c complete (events.dat I/O
   event stream — writer + seekable/paginated reader + ct-print flag + meta.dat
   flag across Rust/Nim/db-backend + round-trip/paginated-read/bounded-decompression
-  tests). M23d+ (varint interning, events.log retirement) PENDING. M23 NOT
-  complete.
+  tests), and M23d complete (binary varint interning tables paths/funcs/types/
+  varnames `.dat`+`.off` — writer + InterningTablesReader (O(1) random access by
+  id via the `.off` index) + ct-print flag + meta.dat flag bit 12 across
+  Rust/Nim/db-backend + round-trip/random-access-by-id/byte-identity tests). Only
+  events.log retirement + the consumer migration off the legacy interning remain.
+  M23 NOT complete.
 
   Goal: implement the remainder of `codetracer-trace-format-spec/trace-events.md`'s
   "Event Stream Redesign" beyond the `calls.dat` split already shipped: the compact
@@ -1944,7 +1948,7 @@
     (each record: kind / step_id cross-ref / metadata / content), additive behind
     the new `meta.dat` flag bit 11 `has_io_event_stream`; round-trip +
     paginated-read + bounded-decompression tests; consumer migration deferred.
-  - [ ] Varint interning tables (`paths.dat`/`funcs.dat`/`types.dat`/`varnames.dat`).
+  - [X] (M23d) Varint interning tables (`paths.dat`/`funcs.dat`/`types.dat`/`varnames.dat`).
   - [ ] Retire the legacy `events.log` only AFTER every reader consumes the split
     streams; backward-compat for old bundles retained.
 
@@ -2189,6 +2193,91 @@
      is unchanged), read by the Rust `IoEventStreamReader`; every meta_dat parser
      accepts the new flag so a split bundle opens in the GUI. Varint interning /
      events.log retirement are LEFT for M23d+.
+
+  ** M23d — binary varint interning tables (DONE)
+     :STATUS: complete
+
+     The fourth sub-milestone of M23, mirroring the M23a/M23b/M23c splits but
+     using the Variable-Size Record Table (`.dat` + `.off`) storage pattern from
+     `codetracer-trace-format-spec/internal-files.md` §"Interning Tables" rather
+     than chunked-Zstd: the four interning tables `paths.dat`+`paths.off`,
+     `funcs.dat`+`funcs.off`, `types.dat`+`types.off`, `varnames.dat`+`varnames.off`
+     are emitted ADDITIVELY out of the SAME Path/Function/Type/VariableName
+     interning the writer already does for `events.log` / `paths.json`, gated
+     behind a new `meta.dat` capability flag, WITHOUT migrating any consumer off
+     the existing interning (that is the later events.log-retirement step).
+     `events.log` / `paths.json` are unchanged byte-for-byte; old readers ignore
+     the eight new files. The current `.ct` keeps carrying `paths.json`; M23d adds
+     the BINARY varint tables alongside (does not remove `paths.json`).
+
+     Storage / record layout (per `internal-files.md`): each table is a `.dat` of
+     sequentially-appended variable-length records plus a `.off` u64-LE offset
+     index (`record_count + 1` entries; the trailing sentinel is the total data
+     length, so record `i`'s length is `off[i+1] - off[i]` uniformly). All ids are
+     0-based varints. `paths.dat`/`varnames.dat` records are raw bytes;
+     `funcs.dat` record = `global_line_index: varint` (the reversible M23a
+     `(path_id, line)` packing) + `name_len: varint` + `name: bytes`; `types.dat`
+     record = `kind: u8` + `lang_type_len: varint` + `lang_type: bytes` +
+     `specific_info` (CBOR of `TypeSpecificInfo`).
+
+     Deliverables:
+     - [X] Writer (`codetracer-trace-format/codetracer_trace_writer`): a new
+       `interning_tables.rs` module derives, from the SAME
+       Path/Function/Type/VariableName events that intern into `events.log` /
+       `paths.json`, the four `.dat`+`.off` tables. Emission is OPT-IN via
+       `CtfsTraceWriter::with_interning_tables(true)` and gated behind the new
+       `meta.dat` flag `FLAG_HAS_INTERNING_TABLES` (bit 12). ADDITIVE:
+       `events.log` / `paths.json` UNCHANGED (a byte-identity test proves it); the
+       call/step/value/io-event/interning flags coexist in one `meta.dat`.
+     - [X] Reader (`codetracer_trace_reader`): a new `interning_tables_reader.rs`
+       `InterningTablesReader` honoring the `has_interning_tables` flag, resolving
+       by id — `path(path_id)`, `func(function_id)` (→ global_line_index + name),
+       `type_record(type_id)`, `varname(name_id)` — via the `.off` offset index
+       with O(1) RANDOM ACCESS (read off[i]/off[i+1], slice the `.dat`; no scan). A
+       legacy (flag-off) `.ct` exposes no interning tables and still reads.
+     - [X] ct-print mirror (`codetracer-trace-format-nim`): the
+       `has_interning_tables` flag is surfaced in `--meta-json` and `--full`
+       (alongside the other stream flags); `--json-events` output UNCHANGED; the
+       nim `meta_dat.nim` writer/reader knows bit 12 (`FlagHasInterningTables`) and
+       includes it in `KnownFlags` so an interning-tables bundle opens.
+     - [X] meta_dat new-flag in EVERY known-flags mask: Rust trace-format
+       (`meta_dat::FLAG_HAS_INTERNING_TABLES`), Nim (`FlagHasInterningTables` +
+       `KnownFlags`), AND the db-backend `ctfs_trace_reader::meta_dat` (bit 12
+       added to `KNOWN_FLAGS_MASK`), so a `has_interning_tables` bundle still OPENS
+       in the GUI (the M17b/M23a/M23b/M23c diligence repeated here).
+
+     Automated tests (all green on arm64-macOS):
+     - [X] Rust round-trip
+       (`interning_tables_tests::interning_tables_resolve_by_id_matching_events_and_paths_json`):
+       every table resolved by id via `InterningTablesReader` EQUALS what the
+       writer interned and what `events.log` (the Path/Function/Type/VariableName
+       events) / `paths.json` reference for the same ids — incl. the funcs
+       `global_line_index` decoding back to the Function event's `(path_id, line)`
+       and the types `specific_info` round-tripping.
+     - [X] Random access by a mid-table id (`random_access_by_mid_table_id`):
+       resolving a single interior id (and the last id) DIRECTLY, with no
+       preceding sequential read, equals the events.log-derived ground truth —
+       proving the `.off` index gives true random access, not a scan;
+       out-of-range ids error not panic.
+     - [X] Backward compat:
+       `legacy_trace_has_no_interning_tables_and_files_byte_identical` (events.log
+       AND paths.json byte-for-byte identical with/without the flag; flag-off ⇒ no
+       `.dat`/`.off` files and `open_interning_tables` returns None; flag-on
+       carries all eight files).
+     - [X] meta_dat known-flag acceptance in all three parsers: Rust
+       `meta_dat::tests::meta_dat_interning_tables_flag_roundtrip`, db-backend
+       `accepts_has_interning_tables_flag` (interning-alone AND
+       call+step+value+io-event+interning), Nim
+       `test_meta_dat_strict_unknown_flag_rejection` (bit 12 round-trips; the
+       unknown-bit probe retargeted to bit 13). Nim `ct_print_full` golden updated
+       to carry `has_interning_tables: false`.
+
+     Acceptance: the binary varint interning tables ship additively behind
+     `has_interning_tables`, consistent with `events.log` / `paths.json` (which are
+     unchanged), resolved by id with O(1) random access by the Rust
+     `InterningTablesReader`; every meta_dat parser accepts the new flag so a
+     split bundle opens in the GUI. Only events.log retirement + the consumer
+     migration off the legacy interning are LEFT.
 
   Acceptance: materialized `.ct` is the spec's multi-stream format end-to-end,
   read seekably by every consumer, with no regression and a clean legacy-read path.
