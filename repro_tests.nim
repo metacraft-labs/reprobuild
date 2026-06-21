@@ -3126,6 +3126,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/kcmutils/test_kcmutils_source.nim",
+    binary: "build/test-bin/test_kcmutils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/kconfig/test_kconfig_source.nim",
     binary: "build/test-bin/test_kconfig_source",
     defines: @[],
