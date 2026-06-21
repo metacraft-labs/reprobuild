@@ -123,6 +123,15 @@ package ksvgSource:
     ## kguiaddons supplies the QtGui extensions ksvg's renderer wraps
     ## (KColorUtils + KModifierKeyInfo glue).
     "kguiaddons >=6.0"
+    ## M9.R.15o.2 — Qt6Gui's CMake config calls find_dependency(XKB) +
+    ## find_dependency(GLESv2); see M9.R.15n.3 (kcrash) for the
+    ## diagnostic. The M9.R.15o.1 constructor-level cacheVars auto-
+    ## thread covers the transitive Config.cmake side, but the
+    ## search-path channels still need an explicit dep declaration
+    ## because the M9.R.14e resolver allocates tool identities at
+    ## macro-expansion time, not at provider runtime.
+    "libxkbcommon >=1.5"
+    "mesa >=23.3"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
