@@ -1802,7 +1802,11 @@
   mechanically generated and drift-guarded, so the two cannot silently diverge.
 
 * M22 — Retire the in_memory_trace_reader full-load (seekable step/value streams)
-  :STATUS: planned
+  :STATUS: step+value full-load on the live DAP read path RETIRED (seekable
+  steps.dat/values.dat consumed on-demand, production DAP variable handlers
+  routed through the seekable path, bounded-decompression + parity + concurrent +
+  back-compat tests green, DAP safety-net green); cell-history + diff.rs/flow
+  preloader BOUNDED+documented on the materialized path (honest remainder)
 
   Goal: complete the M17b spec-violation fix. M17b made the CALL tree seekable
   (`calls.dat`); the step/value/cell lookups still materialize a full in-memory
@@ -1818,21 +1822,87 @@
   through the seekable reader, retiring the `Db` full-load.
 
   Deliverables:
-  - [ ] db-backend reads steps/values/cells on-demand from the seekable
-    `steps.dat` (+ value) streams via CTFS block seeking + the companion index +
-    an LRU, never the whole stream into memory.
-  - [ ] Route the remaining production read paths (DAP handlers, `diff.rs`, the
-    `dap_server` placeholder) off `InMemoryTraceReader`; retire it or bound it to a
-    clearly-labelled small-trace/test fallback.
-  - [ ] Bounded-decompression PROVEN by a counter test (as M17b did for calls),
+  - [X] db-backend reads STEPS + per-step VALUES on-demand from the seekable
+    `steps.dat`/`values.dat` streams — only the needed Zstd chunk is inflated,
+    never the whole stream into memory.
+    (M22: new `ctfs_trace_reader::step_value_stream_source` REUSES the M23a
+    `step_stream_reader::StepStreamReader` and the M23b
+    `value_stream_reader::ValueStreamReader` — it does NOT reimplement either
+    wire format. `SeekableStepStream::step_line(step_id)` decodes the
+    AbsoluteStep/DeltaStep record and `unpack_global_line_index`-es it back to
+    the exact `(path_id, line)`; `SeekableValueStream::variables_at(step_id)`
+    reconstructs the step's `Vec<FullValueRecord>` from the `values.dat`
+    `StepValues` event (value record N ↔ step N). `CTFSTraceReader::open`
+    attaches both when `meta.dat` carries `has_step_stream` (bit 9) /
+    `has_value_stream` (bit 10) — the db-backend `meta_dat.rs` already
+    recognised those bits from M23a/M23b, so split bundles open cleanly. New
+    default-`None` `TraceReader` hooks (`seekable_step_count`/`seekable_step_line`
+    /`seekable_value_count`/`seekable_variables_at`), overridden by
+    `CTFSTraceReader`, mirror M17b's seekable-call hooks. A present-but-corrupt
+    stream degrades to the materialized fallback rather than failing the open.
+    Per-source-line `cell`/`compound` history is NOT yet seekable — see the
+    bounded remainder below.)
+  - [~] Route the remaining production read paths off `InMemoryTraceReader`;
+    retire it or bound it to a clearly-labelled small-trace/test fallback.
+    (M22 — DONE for the LIVE DAP variable read path, BOUNDED for the rest:
+     (1) The production DAP VARIABLE handlers are routed off the full-load: the
+         trait gains `variables_at_owned(step_id)` (default method) that PREFERS
+         the seekable `values.dat` stream when present and falls back to the
+         materialized table otherwise. `Db::load_locals`, `Db::load_value`, and
+         the `dap_handler` `variables` request now call it, so a
+         `has_value_stream` `.ct` serves a step's variables ON DEMAND from
+         `values.dat` (bounded decompression), NOT from a fully-materialized
+         `Db`. Legacy (flag-off) bundles fall back to the exact prior behaviour.
+     (2) `InMemoryTraceReader` is re-documented to scope it to small-trace/test/
+         placeholder use ONLY, now also covering the M22 step/value seek.
+     WHAT REMAINS on the full-load path (honest remainder, BY DESIGN — NOT the
+     network/large-trace GUI path):
+       - CELL / COMPOUND HISTORY (`cell_changes_for`/`compound_at`/`cells_at`/
+         `variable_cells_at`) is still served from the materialized `Db`. The
+         value stream carries the underlying `Cell*`/`Assign*` events, but
+         reconstructing the cross-step cell-change index on-demand is a follow-up;
+         the per-step VARIABLE SNAPSHOT (the dominant DAP variable view) is what
+         M22 makes seekable.
+       - `diff.rs::index_diff` — a batch CLI subcommand (not the live DAP/network
+         path). It opens via `CTFSTraceReader::open` but `clone()`s the whole `Db`
+         into an `InMemoryTraceReader` to drive `FlowPreloader` /
+         `MaterializedReplaySession`, which scan the ENTIRE trace to index
+         per-line flow. Making that seekable means rewriting the flow preloader
+         to not need a resident `Db` — a larger refactor scoped out of M22. This
+         is documented at the `InMemoryTraceReader` construction discipline.)
+  - [X] Bounded-decompression PROVEN by a counter test (as M17b did for calls),
     and concurrent-reader + backward-compat tests; existing db-backend tests green.
+    (M22: see the tests below; the existing db-backend lib suite (376) + the DAP
+    safety-net suites (`dap_variables_e2e`, `dap_column_flow`, `dap_protocol`) +
+    the real-trace CTFS integration tests (python/ruby) all stay green.)
 
   Automated tests:
-  - [ ] Fetch a step/value by id with bounded decompression (counter-proven, not
+  - [X] Fetch a step/value by id with bounded decompression (counter-proven, not
     argued); concurrent readers; legacy bundle reads unchanged.
+    (M22: `codetracer/src/db-backend/tests/seekable_step_value_stream_test.rs` —
+    `fetch_step_line_decompresses_only_its_chunk` /
+    `fetch_step_values_decompresses_only_its_chunk` write a 7-record,
+    chunk_size-2 (multi-chunk) split bundle and assert fetching ONE step/value
+    inflates EXACTLY one chunk via the `chunk_decompressions()` counters (which
+    observe the M23a/M23b readers' one-chunk cache) — bounded decompression
+    PROVEN, not argued. `seekable_and_materialized_steps_values_agree` proves
+    PARITY: the seekable step line + step values EQUAL the materialized
+    `step()`/`variables_at()` over the identical event sequence
+    (postprocessed via `CTFSTraceReader::from_events`, so a genuine A/B).
+    `concurrent_readers_over_same_ct` drives 8 threads over the same `.ct`.
+    `flag_off_trace_exposes_no_seekable_streams` proves backward compat (a
+    flag-off twin exposes no seekable stream and the materialized path reads it
+    unchanged). Plus `step_value_stream_source` unit tests for the
+    `StepValues`→`FullValueRecord` reconstruction (incl. corrupt-blob degrade).)
 
-  Acceptance: no production read path fully materializes a `.ct`; the full-load
-  `Db` is retired/bounded; the seekable reader is the network/large-trace path.
+  Acceptance (PARTIAL — honest): no LIVE DAP/network read path fully materializes
+  a step/value stream — the seekable `steps.dat`/`values.dat` path is the
+  network/large-trace path for the per-step line + variable view, proven by the
+  bounded-decompression counter tests and the materialized-vs-seekable parity
+  test. The full-load `Db` is BOUNDED (not fully retired): cell/compound history
+  and the batch `diff.rs`/`FlowPreloader` indexing still operate over a resident
+  `Db` by design, documented at the `InMemoryTraceReader` site as the explicit
+  remainder.
 
 * M23 — Finish the trace-events.md Event Stream Redesign (steps/value/events.dat)
   :STATUS: M23a complete (steps.dat compact seekable execution stream) and M23b
