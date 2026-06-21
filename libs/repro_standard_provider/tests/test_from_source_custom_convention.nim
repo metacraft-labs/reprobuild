@@ -42,14 +42,17 @@ import "../../../recipes/packages/source/meson/repro"
 # Provider-mode bridge: under reproProviderMode the M4 emitter gates
 # the build-body splice behind ``when not defined(reproProviderMode)``
 # so the legacy ``buildMesonSourcePackage*()`` proc is the sole
-# executor. The convention test runs with ``reproProviderMode`` defined
-# (so the convention's emitFragment compiles); we therefore have to
-# call the build proc ourselves to populate the M9.N Batch C.1
-# shell-action registry. Outside provider mode the body already ran at
-# module-init time; calling the proc again would double-register, so
-# the call is gated on the same define the M4 emitter uses.
+# executor. M9.R.15q.2.1 adds an idempotent module-init invocation to
+# the package macro that runs the build body once at module-load time
+# under ``reproProviderMode`` (gated by ``registeredShellActions(pkg)
+# .len == 0``) so the shell-action registry is populated BEFORE any
+# downstream consumer queries it. The defensive idempotent call below
+# remains for forward compatibility with macro-layer changes that
+# might temporarily disable the M9.R.15q.2.1 emission; the guard
+# matches the macro's so a double-registration never happens.
 when defined(reproProviderMode):
-  buildMesonSourcePackage()
+  if registeredShellActions("mesonSource").len == 0:
+    buildMesonSourcePackage()
 
 const
   ## parentDir four times from
