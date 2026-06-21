@@ -29,7 +29,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/ksvg/vendor/ksvg-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/ksvg-6.10.0.tar.xz"
 
 const ExpectedHash =
   "173e151f6ef8360149f835b1fc7494e97a33f9056d294ab213c9ef9e6d84d0c8"
