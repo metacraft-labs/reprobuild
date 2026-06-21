@@ -1,5 +1,5 @@
 #+TITLE: Trace-Based Incremental Testing for `repro watch` (Prototype)
-#+STATUS: Phase 4 in progress (M14-M19) — spec-faithful native discovery, dedicated call stream, ct test integration
+#+STATUS: Phase 4 — native LIVE via compile-time instrumentation (M14/M15), dedicated calls.dat stream (M17/M20), ct test --incremental standalone (M18), docs (M19) all DONE; only the OS-level Intel PT / MCR native path (M16) remains planned
 
 # Phase 1 (M0-M5): the source/interpreted path — DONE.
 # Phase 2 (M6-M10): generalize to ALL CodeTracer languages, including the
@@ -1019,10 +1019,12 @@
     (Ruby, Python AND JavaScript) consumed by the engine. JS is live once the
     workspace siblings (`codetracer-trace-format` + `-trace-format-nim`) are
     synced to mainline — the earlier "JS upstream break" was a stale-sibling
-    misdiagnosis, now corrected. The hand-crafted Phase-1/2 fixtures are
-    RETAINED for the native path (Linux-only RR; on arm64-macOS the record path
-    is platform-gated); the README's M13 section marks exactly which languages
-    are LIVE vs gated, with the real commands and verified root causes.
+    misdiagnosis, now corrected. (Native was subsequently brought LIVE on
+    arm64-macOS via compile-time instrumentation in M14/M15; the hand-crafted
+    Phase-1/2 native fixtures remain only as schema anchors, and the OS-level
+    Intel PT / MCR path stays gated to a Linux PT/MCR host — see M16.) The
+    README's M13 section marks exactly which languages are LIVE vs gated, with
+    the real commands and verified root causes.
 
   Automated tests:
   - [X] test_name: live_ruby_recording_decides_end_to_end
@@ -1063,12 +1065,15 @@
 
   Acceptance: at least the interpreted group validated with genuine live CTFS
   recordings consumed by the engine; native/Nim either demonstrated or honestly
-  gated with a loud diagnostic. (Ruby AND Python are genuinely LIVE end-to-end
-  here; JS/native are honestly gated on VERIFIED current upstream breaks that are
-  RED on the recorders' own CI — JS = the `enable_column_*_support` API mismatch
-  from the column-aware-tracing rollout, native = recorder CI red on main+dev plus
-  Linux-only RR — each printing the EXACT observed failure, not a misdiagnosed
-  "dev shell won't build".)
+  gated with a loud diagnostic. (CORRECTED status, verified later in Phase 4:
+  Ruby, Python AND JavaScript are all genuinely LIVE end-to-end here — the
+  earlier "JS upstream break / `enable_column_*_support` API mismatch" was a
+  STALE-SIBLING misdiagnosis, fixed by syncing `codetracer-trace-format` +
+  `-nim` to mainline. Native is also LIVE here via compile-time instrumentation
+  (M14/M15, the `ct_instrument` call-trace facet); the only remaining native
+  gate is the OS-level Intel PT / MCR path, which is recorder-independent and
+  needs a Linux PT/MCR host — see M16. Each gate prints the EXACT observed
+  reason, never a misdiagnosed "dev shell won't build".)
 
 # =============================================================================
 # Phase 4 — Spec-faithful native discovery, dedicated call stream, ct integration
@@ -1520,24 +1525,39 @@
   rejected honestly by the CLI.
 
 * M19 — Documentation (codetracer book + reprobuild user guide + spec alignment)
-  :STATUS: planned
+  :STATUS: complete
 
   Goal: ship the user-facing documentation and correct the campaign docs to the
   spec-accurate framing.
 
   Deliverables:
-  - [ ] codetracer book: a `usage_guide/incremental-testing.md` page for
+  - [X] codetracer book: a `usage_guide/incremental-testing.md` page for
     `ct test --incremental` (the standalone, productized feature), added to the
-    book `SUMMARY.md` TOC.
-  - [ ] reprobuild user guide (docs/user-guide/incremental-testing.md): update the
-    native row to LIVE-via-instrumentation, note the Intel-PT/MCR Linux path, and
-    correct the support matrix.
-  - [ ] This milestones file + the engine README: correct any residual stale
-    "native = recorder CI red on main+dev" / "Linux-only RR" gate language to the
-    verified spec-accurate framing (instrumentation / PT / MCR / calls.dat).
+    book `SUMMARY.md` TOC. Created at
+    `codetracer/docs/book/src/usage_guide/incremental-testing.md`, linked under
+    the Usage guide section (after Tracepoints). Covers what it does (skip a test
+    when none of the functions it executed changed), the CLI
+    (`ct test --incremental --language <python|ruby> --program <path> …`), the
+    per-language reality (Python live, Ruby wired, native via instrumentation,
+    fail-safe never-false-skip), and the executed-set + per-function-hash
+    decision. `mdbook build` succeeds (no broken SUMMARY link).
+  - [X] reprobuild user guide (docs/user-guide/incremental-testing.md): native
+    row updated to LIVE-via-compile-time-instrumentation (`ct_instrument` facet);
+    a new row notes the OS-level, recorder-independent Intel-PT/MCR path is
+    PLANNED (needs a Linux PT/MCR host); the dedicated `calls.dat`/`calls.idx`
+    seekable call stream and the standalone `ct test --incremental` are both
+    documented. Status banner and "See also" updated accordingly.
+  - [X] This milestones file + the engine README: corrected the residual stale
+    "native = recorder CI red on main+dev" / "Linux-only RR" / "JS upstream
+    break" framing in M13's acceptance + deliverable prose to the verified
+    reality (JS live after the stale-sibling fix; native live via
+    instrumentation; OS-level PT/MCR the only remaining native gate). The engine
+    README's M13 section was already spec-accurate and is left as the canonical
+    LIVE-vs-gated matrix.
 
   Automated tests:
-  - [ ] Docs build / link-check where the repos provide one (book `mdbook build`).
+  - [X] Docs build / link-check: `mdbook build` succeeds for the codetracer book
+    with the new page and SUMMARY entry (alerts preprocessor optional/skipped).
 
   Acceptance: a user can read how to use the feature both standalone (`ct test`)
   and under reprobuild, and the campaign docs match the implemented reality.
