@@ -435,6 +435,27 @@ package kwinSource:
         " -isystem " & qt6DeclInc
       if xcbCursorInc.len > 0:
         globalIncFlags.add(" -isystem " & xcbCursorInc)
+      # M9.R.15q.7.7 — libinput.so DT_NEEDED references libmtdev.so.1 +
+      # libevdev.so.2 which live in nix-store mtdev/libevdev prefixes.
+      # The from-source libinput recipe does not propagate those rpaths
+      # via its install-mirror, so the linker emits "libmtdev.so.1: not
+      # found" warnings and ld then fails on libkwin.so.6.2.5. Stop-gap:
+      # walkPattern + -Wl,-rpath-link on the per-recipe link.
+      var linkRpathDirs: seq[string] = @[]
+      for store in walkPattern("/nix/store/*mtdev-*"):
+        let p = store / "lib"
+        if dirExists(p) and fileExists(p / "libmtdev.so.1"):
+          linkRpathDirs.add(p)
+          break
+      for store in walkPattern("/nix/store/*libevdev-*"):
+        let p = store / "lib"
+        if dirExists(p) and fileExists(p / "libevdev.so.2"):
+          linkRpathDirs.add(p)
+          break
+      var linkFlags = ""
+      for d in linkRpathDirs:
+        if linkFlags.len > 0: linkFlags.add(" ")
+        linkFlags.add("-Wl,-rpath-link," & d & " -L" & d)
       let opts = @[
         "BUILD_TESTING=OFF",
         "KWIN_BUILD_TABBOX=OFF",
@@ -452,6 +473,10 @@ package kwinSource:
         # M9.R.15q.6.5 — global -I flags for libwayland + Qt6 (see above).
         "CMAKE_C_FLAGS=" & globalIncFlags,
         "CMAKE_CXX_FLAGS=" & globalIncFlags,
+        # M9.R.15q.7.7 — link-time rpath-link for libinput's transitive
+        # DT_NEEDED (libmtdev + libevdev).
+        "CMAKE_EXE_LINKER_FLAGS=-Wl,--copy-dt-needed-entries " & linkFlags,
+        "CMAKE_SHARED_LINKER_FLAGS=-Wl,--copy-dt-needed-entries " & linkFlags,
       ]
       # M9.R.15q.6.3 — explicit PKG_CONFIG_PATH_FOR_TARGET injection.
       #
