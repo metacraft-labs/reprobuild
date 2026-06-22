@@ -173,7 +173,8 @@ proc meson_package*(srcDir: string;
                     buildtype = "release";
                     configureOptions: seq[string] = @[];
                     crossFile = "";
-                    nativeFile = ""): MesonPackageResult =
+                    nativeFile = "";
+                    srcPatches: seq[string] = @[]): MesonPackageResult =
   ## Configure → build → install pipeline for an upstream meson
   ## project. v1 ignores ``--tags`` filtering at install time — the
   ## ``.files("man")`` slicer returns the whole install edge and the
@@ -182,6 +183,17 @@ proc meson_package*(srcDir: string;
   ## M9.R.12.4: when the active package declares ``fetch:`` the setup
   ## action gains a dep on an auto-emitted fetch action so the engine
   ## sequences source extraction before ``meson setup``.
+  ##
+  ## ``srcPatches`` (M9.R.15q.12.2): list of ``sed -i`` expressions to
+  ## apply to files inside the extracted source tree BEFORE meson setup
+  ## runs. Each entry is a self-contained ``sh -c`` argv body (e.g.
+  ## ``"sed -i 's/old/new/' src/foo.txt"``). Use this when a recipe
+  ## needs to patch the upstream source — for example, the systemd
+  ## recipe patches its vendored ``src/basic/linux/input-event-codes.h``
+  ## to add ``KEY_LINK_PHONE`` (defined in linux 6.10 but missing from
+  ## the v6.10-rc1 shim systemd v257 ships). Mirrors the cmake_package
+  ## srcPatches channel (M9.R.15q.10.5) so meson recipes have the same
+  ## per-recipe escape hatch the cmake recipes do.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let extractedRel = block:
@@ -191,6 +203,38 @@ proc meson_package*(srcDir: string;
   var setupAfter: seq[BuildActionDef] = @[]
   if fetchActOpt.isSome:
     setupAfter.add(fetchActOpt.get())
+  # M9.R.15q.12.2 — when ``srcPatches`` is non-empty, emit a per-recipe
+  # source-patch action that runs every ``sed -i`` expression against
+  # the extracted source tree, ordered AFTER the fetch action +
+  # BEFORE the meson setup action. Mirrors cmake_package's pattern.
+  if srcPatches.len > 0 and projectRoot.len > 0:
+    let patchStamp = projectRoot / ".repro" / "build" / "meson-patch.stamp"
+    createDir(parentDir(patchStamp))
+    let escapedStamp = patchStamp.replace("\\", "/").replace("\"", "\\\"")
+    var script = "set -e; "
+    for sedExpr in srcPatches:
+      # ``sedExpr`` is a complete ``sh -c`` argv body (e.g.
+      # ``sed -i 's/X/Y/' src/foo.txt``). Append in declaration order
+      # so subsequent patches see prior edits.
+      script.add(sedExpr & "; ")
+    script.add("touch \"" & escapedStamp & "\"")
+    var patchDeps: seq[string] = @[]
+    var patchInputs: seq[string] = @[]
+    if fetchActOpt.isSome:
+      patchDeps.add(fetchActOpt.get().id)
+      for out0 in fetchActOpt.get().outputs:
+        patchInputs.add(out0)
+    let patchEdge = buildAction(
+      id = "meson-patch-" & pkgName,
+      call = inlineExecCall(@["sh", "-c", script]),
+      deps = patchDeps,
+      inputs = patchInputs,
+      outputs = @[patchStamp],
+      pool = "fetch",
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "meson_package.patch",
+      toolIdentityRefs = @["sh"])
+    setupAfter.add(patchEdge)
   let setup = meson.setup(
     srcDir = srcDir,
     buildDir = buildDir,
