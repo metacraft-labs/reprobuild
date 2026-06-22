@@ -78,6 +78,10 @@ const NewStubNames = @[
   # non-KF6 find_package deps.
   "libnl",
   "lm-sensors",
+  # M9.R.15q.11.3 — ffmpeg + libva are kpipewire's REQUIRED non-KF6
+  # pkg_check_modules deps.
+  "ffmpeg",
+  "libva",
 ]
 
 const PriorWaveStubNames = @[
@@ -108,6 +112,8 @@ const StubSelectors = {
   "sonnet":                  "nixpkgs#kdePackages.sonnet",
   "libnl":                   "nixpkgs#libnl^*",
   "lm-sensors":              "nixpkgs#lm_sensors^*",
+  "ffmpeg":                  "nixpkgs#ffmpeg^*",
+  "libva":                   "nixpkgs#libva^*",
 }.toTable
 
 suite "DSL-port M9.R.15q.9.2 — Plasma / KF6 stdlib stubs":

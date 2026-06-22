@@ -76,6 +76,13 @@ import ./qrencode
 ## ``TYPE REQUIRED``).
 import ./libnl
 import ./lm_sensors
+# M9.R.15q.11.3 — ffmpeg + libva are kpipewire's REQUIRED non-KF6
+# deps (kpipewire's CMakeLists.txt declares pkg_check_modules
+## probes for ``libavcodec`` / ``libavutil`` / ``libavformat`` /
+## ``libavfilter`` / ``libswscale`` (ffmpeg) + ``libva`` / ``libva-drm``
+## (Intel VA-API)).
+import ./ffmpeg
+import ./libva
 
 export qt6_tools
 export qt6_declarative
@@ -122,3 +129,5 @@ export sonnet
 export qrencode
 export libnl
 export lm_sensors
+export ffmpeg
+export libva
