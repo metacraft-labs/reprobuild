@@ -10,7 +10,7 @@
 ##   for "libx11" (package "libx11") but no sibling recipe ... and no
 ##   stdlib provisioning channel ... declared.
 ##
-## The thirteen stubs cover:
+## The fourteen stubs cover:
 ##   * libx11           — canonical Xlib client library
 ##   * libxcb           — modern XCB client library
 ##   * xcb-util-keysyms — keysym helpers
@@ -24,6 +24,7 @@
 ##   * libxrender       — X Render extension
 ##   * xorgproto        — X protocol headers (X11/X.h)
 ##   * libxau           — X authentication (libxcb's Requires.private)
+##   * libxdmcp         — X DM Control Protocol (libxcb's Requires.private)
 ##
 ## Each stub points at a ``nixpkgs#xorg.*^*`` (or ``nixpkgs#xorg.libX*^*``)
 ## selector with the ``^*`` multi-output suffix so the M9.R.14f.10
@@ -62,6 +63,8 @@ const StubNames = @[
   # M9.R.15q.4.3 — libxau is xcb.pc's Requires.private dep; without
   # it pkg-config probes through xcb fail.
   "libxau",
+  # M9.R.15q.4.6 — libxdmcp is xcb.pc's other Requires.private dep.
+  "libxdmcp",
 ]
 
 const StubSelectors = {
@@ -78,11 +81,12 @@ const StubSelectors = {
   "libxrender":          "nixpkgs#xorg.libXrender^*",
   "xorgproto":           "nixpkgs#xorg.xorgproto",
   "libxau":              "nixpkgs#xorg.libXau^*",
+  "libxdmcp":            "nixpkgs#xorg.libXdmcp^*",
 }.toTable
 
 suite "DSL-port M9.R.15q.4.1 — X11 stdlib stubs":
 
-  test "all thirteen X11 stubs register as packages":
+  test "all fourteen X11 stubs register as packages":
     for name in StubNames:
       let pkg = findPackage(name)
       check pkg.packageName == name
