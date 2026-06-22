@@ -6638,6 +6638,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r15q_4_x11_stubs.nim",
+    binary: "build/test-bin/t_m9r15q_4_x11_stubs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
+    binary: "build/test-bin/t_m9r15q_5_rpath_nix_stub_deps",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r1_deps_package_level.nim",
     binary: "build/test-bin/t_m9r1_deps_package_level",
     defines: @[],

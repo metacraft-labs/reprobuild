@@ -797,19 +797,48 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # not expand it — ``$ORIGIN`` must reach patchelf verbatim so the
   # dynamic linker interprets it at load time. Use a here-doc-free
   # construction so the snippet stays compatible with /bin/sh.
-  var rpathParts: seq[string] = @[
-    "'$ORIGIN'",
-    "'$ORIGIN/../lib'",
-    "'$ORIGIN/../lib64'",
-  ]
-  for libDir in depMirrorLibDirs:
-    rpathParts.add("\"" & libDir.replace("\"", "\\\"") & "\"")
-  # Concatenate with ":" via printf so the variable holds a single
-  # colon-separated string when expanded.
-  script.add("rpath=$(printf '%s' " & rpathParts[0])
-  for i in 1 ..< rpathParts.len:
-    script.add("; printf ':%s' " & rpathParts[i])
+  #
+  # M9.R.15q.5.1 — existence-check each dep mirror lib dir before
+  # appending it to RPATH. Recipes routinely declare nix-stub deps
+  # (libltdl, hwdata, libxdmcp, ...) whose ``<recipeRoot>/<depName>/
+  # .repro/output/install/usr/lib`` path NEVER exists on disk — those
+  # are resolved via ``/nix/store/...`` at engine fork time. Without
+  # the existence-check, every such dep contributed a dangling RPATH
+  # entry; ``patchelf`` happily bakes it into the ELF and the dynamic
+  # loader silently skips it at run time, masking the resolution gap
+  # until something later trips a missing-SONAME error.
+  #
+  # In ADDITION to the existence-check, fold every directory present
+  # in ``$LD_LIBRARY_PATH`` into the rpath. The engine's
+  # ``applyResolvedAuxPaths`` populates ``LD_LIBRARY_PATH`` from each
+  # tool-identity-ref's ``libraryPathList`` (nix-store lib dirs for
+  # nix-stub deps; sibling install-mirror lib dirs for from-source
+  # deps). This is the load-bearing channel that carries the nix-store
+  # paths the install-mirror script has no other way to discover.
+  script.add("rpath=$(printf '%s' '$ORIGIN'")
+  script.add("; printf ':%s' '$ORIGIN/../lib'")
+  script.add("; printf ':%s' '$ORIGIN/../lib64'")
   script.add("); ")
+  # Append every existing sibling-recipe install-mirror lib dir. The
+  # ``[ -d ... ]`` guard skips nix-stub deps whose mirror path doesn't
+  # exist (M9.R.15q.5.1).
+  for libDir in depMirrorLibDirs:
+    let escapedLibDir = libDir.replace("\"", "\\\"")
+    script.add("if [ -d \"" & escapedLibDir & "\" ]; then ")
+    script.add("rpath=\"$rpath:" & escapedLibDir & "\"; ")
+    script.add("fi; ")
+  # Append every directory present in ``$LD_LIBRARY_PATH``. Splits on
+  # ``:`` via IFS; existence-check via ``[ -d ... ]`` so empty
+  # segments + stale entries don't pollute the embedded RPATH.
+  script.add("if [ -n \"$LD_LIBRARY_PATH\" ]; then ")
+  script.add("OLD_IFS=$IFS; IFS=':'; ")
+  script.add("for ldp in $LD_LIBRARY_PATH; do ")
+  script.add("if [ -n \"$ldp\" ] && [ -d \"$ldp\" ]; then ")
+  script.add("rpath=\"$rpath:$ldp\"; ")
+  script.add("fi; ")
+  script.add("done; ")
+  script.add("IFS=$OLD_IFS; ")
+  script.add("fi; ")
   # DSL-port M9.R.15h.14.4 — preserve the toolchain libstdc++ / libgcc_s
   # path. Without a from-source gcc recipe, the C++ compiler is the
   # nix-shell-provisioned gcc-wrapper which links against libstdc++.so.6
@@ -991,6 +1020,23 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
+  # M9.R.15q.5.1 — thread every declared dep onto the install-mirror's
+  # tool-identity-ref list so the engine populates ``LD_LIBRARY_PATH``
+  # (and the rest of the auxiliary search-path channels) from each
+  # dep's ``libraryPathList`` at fork time. The RPATH patch script
+  # (``m9r14fEmitRpathPatchScript``) consumes ``$LD_LIBRARY_PATH`` and
+  # folds every existing dir into the embedded RPATH so nix-stub-resolved
+  # deps (libltdl, hwdata, libxdmcp, ...) reach the patched ELF without
+  # the install-mirror having to enumerate ``/nix/store`` paths itself.
+  var mirrorToolRefs = @["sh"]
+  for raw in registeredNativeBuildDeps(packageName):
+    let dep = m9r14fStripDepConstraint(raw)
+    if dep.len > 0 and dep notin mirrorToolRefs:
+      mirrorToolRefs.add(dep)
+  for raw in registeredBuildDeps(packageName):
+    let dep = m9r14fStripDepConstraint(raw)
+    if dep.len > 0 and dep notin mirrorToolRefs:
+      mirrorToolRefs.add(dep)
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),
@@ -1000,7 +1046,7 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.install_mirror",
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = mirrorToolRefs)
 
 proc m9r14dPascalToKebab*(value: string): string =
   ## DSL-port M9.R.14d.7c — convert ``libwaylandClient`` → ``libwayland-client``.
