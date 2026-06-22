@@ -36,6 +36,19 @@ package kpartsSource:
     "kservice >=6.0"
     "kconfig >=6.0"
     "kcoreaddons >=6.0"
+    ## M9.R.15q.10.5 — kwindowsystem's KF6WindowSystemConfig.cmake calls
+    ## find_dependency(X11) which fails without these declared (same
+    ## fix as the M9.R.15q.9.9 plasma-workspace X11 expansion).
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     discard

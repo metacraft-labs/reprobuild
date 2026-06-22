@@ -34,6 +34,17 @@ package krunnerSource:
     "kcoreaddons >=6.0"
     "kconfig >=6.0"
     "kitemmodels >=6.0"
+    ## M9.R.15q.10.5 — X11 transitive.
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     discard

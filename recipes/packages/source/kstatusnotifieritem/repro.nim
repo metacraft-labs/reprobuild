@@ -33,6 +33,17 @@ package kstatusnotifieritemSource:
     "ki18n >=6.0"
     "knotifications >=6.0"
     "kwindowsystem >=6.0"
+    ## M9.R.15q.10.5 — X11 transitive via kwindowsystem.
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     discard
