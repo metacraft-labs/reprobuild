@@ -438,6 +438,17 @@ package plasmaWorkspaceSource:
         # sibling; flipping it to OPTIONAL keeps the build going +
         # users get C-locale group names (a soft degradation).
         "sed -i '/^find_package(ICU/,/^)$/{s|TYPE REQUIRED|TYPE OPTIONAL|}' src/CMakeLists.txt",
+        # M9.R.15q.12.14 — the digital-clock plugin's
+        # ``target_link_libraries`` unconditionally links ``ICU::i18n``
+        # + ``ICU::uc``; cmake fails the Generate step with
+        # ``Target "digitalclockplugin" links to: ICU::i18n but the
+        # target was not found`` when ICU is absent. Strip the two ICU
+        # link entries — the timezonesi18n.h code in the digital-clock
+        # plugin uses ICU only for some country-name pretty-printing
+        # in tooltips, which silently degrades to bare en_US strings
+        # when the ICU symbols aren't linked (the QtCore i18n stack
+        # provides a fallback).
+        "sed -i '/^        ICU::i18n$/d; /^        ICU::uc$/d' src/applets/digital-clock/plugin/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
