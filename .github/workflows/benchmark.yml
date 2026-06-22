@@ -59,11 +59,12 @@ jobs:
           path: reprobuild-cmake
           token: ${{ steps.ci_token.outputs.token }}
 
-      - uses: cachix/install-nix-action@v30
+      - name: Setup Nix
+        uses: metacraft-labs/nixos-modules/.github/setup-nix@main
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          nix-github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Reprobuild CMake fork
         run: |
           nix develop ./reprobuild --command bash -c '
