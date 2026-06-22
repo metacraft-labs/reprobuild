@@ -190,6 +190,11 @@ package systemdSource:
     ## the libcap / libmount / libacl / libcrypt / kmod / libseccomp
     ## dependencies.
     "pkg-config"
+    ## M9.R.15q.11.6 — gperf (perfect hash generator) is required by
+    ## systemd's src/meson.build:743 for the keyword-token table
+    ## generation. Without it meson setup aborts with
+    ## "Program 'gperf' not found or not executable".
+    "gperf"
 
   buildDeps:
     ## libcap supplies the POSIX capabilities library systemd consumes

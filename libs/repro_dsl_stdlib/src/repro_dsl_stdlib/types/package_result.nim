@@ -1248,6 +1248,17 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # version-sort so ``so.10`` doesn't sort before ``so.2``.
     script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+    # M9.R.15q.11.6 — dot-versioned strippedName variant. The recipe
+    # spells the artifact ``libKGlobalAccelD`` (with the ``lib`` prefix)
+    # which combined with the literal ``lib`` prefix in
+    # ``escapedSrcDir/lib<escapedName>.so.*`` produces
+    # ``liblibKGlobalAccelD.so.*`` -- the DOUBLE-lib-prefix isn't what
+    # upstream installs.  The strippedName drops one of the two libs
+    # so the glob becomes ``libKGlobalAccelD.so.*`` and matches the
+    # real install.
+    if strippedName != name:
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+      script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
     if strippedName != name:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
