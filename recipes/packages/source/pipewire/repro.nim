@@ -188,6 +188,17 @@ package pipewireSource:
     ## pkg-config is used by the meson configure step to probe for
     ## the alsa-lib + glib2 + dbus + udev + libudev dependencies.
     "pkg-config"
+    ## M9.R.15q.12.5 — python3 is required by the wireplumber subproject
+    ## (pipewire embeds wireplumber as a meson subproject when the
+    ## ``wireplumber=enabled`` option is set). wireplumber's
+    ## ``po/meson.build`` declares ``find_program('python3', required:
+    ## true)`` for its gettext message-catalog regeneration step.
+    ## Without this, ``meson setup`` aborts with
+    ## "ERROR: python3 not found". The bare python3 stub (vs the
+    ## python3-with-modules stub gobject-introspection / systemd use)
+    ## is sufficient because wireplumber's po/ only needs the bare
+    ## interpreter, not any specific module set.
+    "python3"
 
   buildDeps:
     ## alsa-lib supplies ``libasound`` — pipewire's ALSA source +
