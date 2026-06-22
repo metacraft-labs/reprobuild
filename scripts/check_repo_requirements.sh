@@ -110,7 +110,7 @@ for pattern in "repomix/" "bench-results/" "nimcache/" "result"; do
   require_contains .gitignore "${pattern}"
 done
 
-for forbidden in .github/sibling-pins .github/sibling-pins.json .github/sibling-repos .repo-workspaces.env; do
+for forbidden in .github/sibling-pins .github/sibling-pins.json .github/rr-backend-pin.txt .repo-workspaces.env; do
   [ ! -e "${forbidden}" ] || fail "forbidden workspace pin file present: ${forbidden}"
 done
 
