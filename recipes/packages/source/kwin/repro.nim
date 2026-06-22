@@ -313,6 +313,51 @@ package kwinSource:
     "kauth >=6.0"
     "kcolorscheme >=6.0"
     "kidletime >=6.0"
+    ## M9.R.15q.5.11 — kwin 6.2.5's top-level CMakeLists.txt:85 declares
+    ## ``find_package(KF6 ... COMPONENTS ... WindowSystem ...)`` which
+    ## is the always-required KF6 component list (separate from the
+    ## KCMS-gated list at line 104). kwindowsystem is the sibling
+    ## from-source recipe.
+    "kwindowsystem >=6.0"
+    ## M9.R.15q.5.11 — kwin's CMakeLists.txt also declares Crash +
+    ## DBusAddons + GlobalAccel + GuiAddons + I18n + Service + Svg
+    ## as KF6 components. Add the missing siblings.
+    "kcrash >=6.0"
+    "kdbusaddons >=6.0"
+    "kglobalaccel >=6.0"
+    "kguiaddons >=6.0"
+    "ki18n >=6.0"
+    "kservice >=6.0"
+    "ksvg >=6.0"
+    "kconfig >=6.0"
+    "kcoreaddons >=6.0"
+    "kwidgetsaddons >=6.0"
+    ## M9.R.15q.5.11.b — kwindowsystem was built with KWINDOWSYSTEM_X11=ON
+    ## so its CMake Config does ``find_dependency(X11)`` at consumer
+    ## time. cmake's ``FindX11`` looks for X11/X.h (xorgproto) + libX11
+    ## + libxcb on the standard system paths; since we're in a
+    ## hermetic nix-shell, we thread the X11 client libs onto kwin's
+    ## env via the M9.R.14e search-path channels (same shape
+    ## kwindowsystem itself uses).
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
+    ## M9.R.15q.5.12 — kwin 6.2.5's CMakeLists.txt:340 declares
+    ## ``pkg_check_modules(libxcvt>=0.1.1 REQUIRED)`` for the DRM
+    ## backend's modeline-fallback computation. libxcvt is a nix-stub.
+    "libxcvt"
+    ## M9.R.15q.5.12 — libepoxy.pc declares ``Requires: gl``, so
+    ## pkg-config recursively probes for ``gl.pc`` (libglvnd's desktop
+    ## OpenGL pkg-config file). The ``gl`` nix-stub points at
+    ## ``nixpkgs#libglvnd``'s gl.pc.
+    "gl"
     ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
     ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
     ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
