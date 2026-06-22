@@ -168,6 +168,10 @@ suite "from-source-meson convention M9.R.6.1 — dbus-broker":
     for arg in fetch.call.arguments:
       if arg.name == "argv":
         argvJoined = arg.encodedValue.replace("\x1f", " ")
-    check argvJoined.contains("dbus-broker-v36.tar.gz")
+    # M9.R.14d.2 swept the recipe off the vendored ``file://`` tarball
+    # onto the upstream GitHub archive URL, whose filename is the bare
+    # ``v36.tar.gz`` tag archive (no ``dbus-broker-`` prefix).
+    check argvJoined.contains(
+      "github.com/bus1/dbus-broker/archive/refs/tags/v36.tar.gz")
     check argvJoined.contains(
       "5058a81eea8086636ef09a670d103e35e650a6f0200aadc2f59f3fb6e76c37b8")
