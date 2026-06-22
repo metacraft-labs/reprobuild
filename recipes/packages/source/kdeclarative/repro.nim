@@ -42,6 +42,14 @@ package kdeclarativeSource:
     "kcoreaddons >=6.0"
     "kguiaddons >=6.0"
     "ki18n >=6.0"
+    ## M9.R.15q.5.6 — kdeclarative 6.10.0's CMakeLists.txt:35 declares
+    ## ``find_package(KF6GlobalAccel ... REQUIRED)`` on non-WIN32 /
+    ## non-APPLE / non-ANDROID platforms (i.e. Linux). Without this
+    ## the cmake configure trips with "Could not find ... KF6GlobalAccel".
+    "kglobalaccel >=6.0"
+    ## M9.R.15q.5.6 — kdeclarative 6.10.0's CMakeLists.txt:42 declares
+    ## ``find_package(KF6WidgetsAddons ... REQUIRED)`` on non-Android.
+    "kwidgetsaddons >=6.0"
 
   config:
     discard
