@@ -1393,6 +1393,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # above, so derive ``sbinSrcDir`` parallel to it here.
     let sbinSrcDir = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
     let candidateDirs = @[escapedSrcDir, sbinSrcDir]
+    # M9.R.15q.7.9 — also probe snake_case form. The kebab probe
+    # covers ``kwinWayland`` → ``kwin-wayland`` but kwin upstream
+    # installs ``kwin_wayland`` (snake_case underscore). The library
+    # case at line ~1361 already probes m9r14fPascalToSnake; mirror
+    # that here for executables.
+    let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
+    let strippedSnake = m9r14fPascalToSnake(strippedName).replace("\"", "\\\"")
     var first = true
     for dir in candidateDirs:
       let leader = (if first: "if" else: "elif")
@@ -1400,11 +1407,17 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("cp -fL \"" & dir & "/" & escapedName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
       script.add("elif [ -f \"" & dir & "/" & kebabName & "\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & kebabName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      if snakeName != kebabName and snakeName != name:
+        script.add("elif [ -f \"" & dir & "/" & snakeName & "\" ]; then ")
+        script.add("cp -fL \"" & dir & "/" & snakeName & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
       if strippedName != name:
         script.add("elif [ -f \"" & dir & "/" & strippedEscaped & "\" ]; then ")
         script.add("cp -fL \"" & dir & "/" & strippedEscaped & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
         script.add("elif [ -f \"" & dir & "/" & strippedKebab & "\" ]; then ")
         script.add("cp -fL \"" & dir & "/" & strippedKebab & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+        if strippedSnake != strippedKebab and strippedSnake != strippedName:
+          script.add("elif [ -f \"" & dir & "/" & strippedSnake & "\" ]; then ")
+          script.add("cp -fL \"" & dir & "/" & strippedSnake & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
       first = false
