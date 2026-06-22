@@ -2784,7 +2784,7 @@
     matters.
 
 * M25 — Unified, access-pattern-aware lazy map population (owner guidance 2026-06-22)
-  :STATUS: planned
+  :STATUS: done
 
   Owner guidance refining M24c's lazy population:
    (1) "Most likely we can end up with the SAME code that builds the omniscient DB
@@ -2864,13 +2864,54 @@
     sequential incl. per-line ORDER, across thread counts and repeated runs) and the
     `split_disjoint_ranges` tiling unit test; the M24c lazy point-lookup tests
     (`ctfs_lazy_production_steps_test`) and the M25a engine test stay green.
-  - [ ] M25c — NETWORK access: when the `.ct` is fetched over the network, populate
+  - [X] M25c — NETWORK access: when the `.ct` is fetched over the network, populate
     FORWARD from the search START POINT toward the next breakpoint/tracepoint hit only —
     do not touch the whole file. (Audit whether a network/remote `.ct` loading mode
     exists in the db-backend; if it's not yet built, design the population engine with a
     pluggable access strategy + a local default, and implement the forward-from-search
     strategy behind the same seam so it's ready when network loading lands.)
+    AUDIT: NO network/remote `.ct` LOADER exists in the db-backend yet (only an HTTP
+    omniscient-PREP trigger) — so M25c cannot be validated against a live streamed `.ct`;
+    that path does not exist. DONE: the FORWARD-FROM-SEARCH population STRATEGY is
+    implemented as a primitive on the SAME M25a engine and wired behind the existing
+    `StepBuildStrategy::NetworkForward` seam, TESTED IN ISOLATION over a local seekable
+    stream (the chunk-fetch pattern is identical regardless of where the bytes come from):
+      • `replay_forward_until(stream, call_keys, start_step, predicate, sink) -> Option<StepId>`
+        replays the seekable `steps.dat` FORWARD from `start_step`, reconstructing each
+        `DbStep` ONCE (via the M25a `reconstruct_db_step`), feeding `sink` incrementally
+        (chunk by chunk, bounded), and STOPPING as soon as `predicate(step)` holds —
+        returns the FIRST matching step (the next breakpoint/tracepoint hit) or `None` at
+        end-of-trace, WITHOUT replaying the whole trace. An ascending forward scan inflates
+        each touched chunk at most once and touches ONLY the chunks spanning
+        `[start_step, hit]`.
+      • `find_next_line_hit(stream, call_keys, path_id, line, from_step, strategy)` drives
+        that primitive so a "find next line-L hit from P" search forward-scans from `P`
+        populating incrementally until it lands on `(path_id, line)`. Under
+        `NetworkForward` it fetches ONLY the chunks from `from_step` up to the hit; under
+        `Local` the existing whole-table / `steps_on_line` path is still available — the
+        RESULT is strategy-independent.
+      • `LazyStepCache::find_next_line_hit` exposes it on the reader's lazy step cache.
+    Implemented in `db-backend/src/ctfs_trace_reader/step_value_stream_source.rs`
+    (`replay_forward_until`, `find_next_line_hit`, `DiscardStepSink`,
+    `LazyStepCache::find_next_line_hit`) behind the `NetworkForward` seam (default stays
+    `Local`, so current local opens are bit-for-bit unchanged). Proven in
+    `db-backend/tests/m25c_forward_step_search_test.rs` against a REAL Nim production
+    split-only bundle: BOUNDED-FETCH (an early hit inflates exactly ONE chunk vs the
+    whole-table build's many — strictly fewer; the scan stops at the hit, never running to
+    end), PARITY (`NetworkForward` next-hit == the `Local` whole-table `steps_on_line`
+    next hit for several (line, from) cases incl. the no-further-hit `None` case), and the
+    no-match / past-end edge cases (no chunk fetched past end). The M25a engine, M25b
+    parallel build, M24c lazy point-lookup tests, the DAP suite, and the origin/omniscient
+    tests all stay green; full `cargo clippy` clean.
+    HONEST NOTE: the LIVE network wiring (a streamed `.ct` loader feeding the search
+    integration in `flow_preloader.rs`/`dap_handler.rs`) is GATED on a future network
+    `.ct` loader, which does not exist yet. M25c delivers the strategy primitive +
+    isolation tests + the seam, ready to wire when network loading lands.
 
   Acceptance: one population engine shared with the omniscient build; local traces
   populate maps in parallel over disjoint ranges; network traces populate forward from
   the search start; breakpoint/tracepoint resolution is identical to today; no regression.
+  STATUS: M25 (a/b/c) complete — engine unified (M25a), LOCAL parallel disjoint-range
+  whole-table build (M25b), and the NETWORK forward-from-search strategy primitive +
+  seam wiring + isolation tests (M25c). Live network wiring awaits a network `.ct` loader
+  (documented under M25c).
