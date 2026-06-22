@@ -376,6 +376,17 @@ package plasmaWorkspaceSource:
       let patches = @[
         "sed -i 's/ TextEditor StatusNotifierItem/ StatusNotifierItem/' src/CMakeLists.txt",
         "sed -i 's|^add_subdirectory(interactiveconsole)$|# M9.R.15q.10.5: dropped — needs ktexteditor / qt6-speech\\n# add_subdirectory(interactiveconsole)|' src/CMakeLists.txt",
+        # M9.R.15q.12.9 — drop the libqalculate REQUIRED probe. The
+        # only consumer is the calculator-runner KRunner plugin
+        # (``src/runners/calculator/``) which is wrapped in
+        # ``if (QALCULATE_FOUND)`` at the runners CMakeLists, so
+        # dropping the top-level probe simply skips the runner
+        # subdir at configure time. v1 ships without the calculator
+        # KRunner; users get other Plasma calculators (e.g. KCalc
+        # standalone). A future fullbuild milestone can add
+        # libqalculate as an explicit from-source recipe + restore
+        # the runner.
+        "sed -i 's|^pkg_check_modules(QALCULATE libqalculate>2.0 REQUIRED IMPORTED_TARGET)$|# M9.R.15q.12.9: dropped — libqalculate not in from-source corpus|' src/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
