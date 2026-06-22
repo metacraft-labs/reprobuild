@@ -359,6 +359,18 @@ package plasmaWorkspaceSource:
         # IMAGE component), and the v1 Plasma path is pure-Wayland.
         # Disable to take the no-X11 branch.
         "WITH_X11=OFF",
+        # M9.R.15q.12.13 — disable glibc locale-gen integration. The
+        # plasma-workspace ``regional & language`` KCM ships an
+        # SUID-style ``localegen`` helper that uses PolkitQt6-1 +
+        # glibc's locale-gen tool to dynamically install OS locales.
+        # ``GLIBC_LOCALE_GEN`` defaults ON; flipping it OFF skips the
+        # ``REGION_LANG_GENERATE_LOCALE_HELPER`` branch which in turn
+        # skips the ``find_package(PolkitQt6-1 ... REQUIRED)`` probe.
+        # We don't ship PolkitQt6-1 as a from-source sibling; the v1
+        # Plasma session uses statically-installed locales (set via
+        # /etc/locale.conf / LANG env vars). A future fullbuild
+        # milestone can add PolkitQt6-1 + restore the helper.
+        "GLIBC_LOCALE_GEN=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
       # M9.R.15q.7.1 — cap cmake's internal compile parallelism to match
@@ -415,6 +427,17 @@ package plasmaWorkspaceSource:
         # legacy tray icons (the modern path is the StatusNotifierItem
         # D-Bus interface).
         "sed -i 's|^ecm_optional_add_subdirectory(xembed-sni-proxy)$|if(WITH_X11)\\n    ecm_optional_add_subdirectory(xembed-sni-proxy)\\nendif()|' src/CMakeLists.txt",
+        # M9.R.15q.12.13 — relax the ICU package TYPE from REQUIRED to
+        # OPTIONAL. ICU is used by Kicker (application-launcher applet)
+        # for better-localised group names and by clock applets for
+        # timezone display; both gracefully fall back when ICU is
+        # absent (the code is wrapped in ``if(HAVE_ICU)``). The
+        # feature_summary FATAL_ON_MISSING_REQUIRED_PACKAGES at the
+        # bottom of CMakeLists fails the configure when ICU is marked
+        # REQUIRED-but-missing. We don't ship ICU as a from-source
+        # sibling; flipping it to OPTIONAL keeps the build going +
+        # users get C-locale group names (a soft degradation).
+        "sed -i '/^find_package(ICU/,/^)$/{s|TYPE REQUIRED|TYPE OPTIONAL|}' src/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
