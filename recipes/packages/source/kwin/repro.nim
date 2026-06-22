@@ -425,7 +425,7 @@ package kwinSource:
       # Resolves nix-store path via walkPattern (same pattern as
       # libdisplay-info / wayland-protocols resolution below).
       var xcbCursorInc = ""
-      for store in walkPattern("/nix/store/*-xcb-util-cursor-*-dev"):
+      for store in walkPattern("/nix/store/*xcb-util-cursor*-dev"):
         let p = store / "include"
         if dirExists(p):
           xcbCursorInc = p
