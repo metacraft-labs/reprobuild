@@ -24,8 +24,16 @@ suite "t_smoke_ct_test_unittest_parallel":
         check entry.line > 0
     check found
 
-  test "default_mode_runs_normally":
-    # In the absence of --list / --run, currentProtocolMode is
-    # pmDefault and the body runs identically to std/unittest.
-    check currentProtocolMode() == pmDefault
+  test "body_runs_under_any_protocol_mode":
+    # The test body executes identically regardless of how the binary
+    # was invoked. Run directly (no protocol flag) the mode is
+    # pmDefault; run through the parallel harness the binary is invoked
+    # with ``--run`` so the mode is pmRunOne. Either way the body runs
+    # and ordinary ``check`` assertions behave like std/unittest. (The
+    # pmDefault → std/unittest delegation contract is verified
+    # end-to-end against a dedicated fixture in
+    # ``t_backward_compat_std_unittest_test_runs_unchanged``; asserting
+    # this binary's OWN mode here would wrongly fail under the harness.)
+    let mode = currentProtocolMode()
+    check mode in {pmDefault, pmRunOne}
     check 1 + 1 == 2
