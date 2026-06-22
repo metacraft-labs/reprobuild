@@ -15339,6 +15339,9 @@ proc installUserDaemonBuildPrewarmer() =
   setUserDaemonBuildPrewarmer(proc(request: UserDaemonBuildRequest) =
     let previousCwd = getCurrentDir()
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
+    proc setRestorableEnv(key, value: string) =
+      previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
+      putEnv(key, value)
     try:
       for item in request.environment:
         let split = item.find('=')
@@ -15346,8 +15349,20 @@ proc installUserDaemonBuildPrewarmer() =
           continue
         let key = item[0 ..< split]
         let value = item[split + 1 .. ^1]
-        previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
-        putEnv(key, value)
+        setRestorableEnv(key, value)
+      # Prewarm is a daemon-internal cache-warming pass, not user-scheduled
+      # work, so it must NOT contend for RunQuota leases. Forcing the documented
+      # full-bypass switch makes the nested provider-compile `runBuild` here run
+      # its actions as plain children instead of through the inline-RunQuota
+      # lease/exec path. That path, driven from inside the detached daemon
+      # worker, could deadlock: the worker launched a leased compile, the child
+      # exited, but the worker never reaped it / never sent LeaseFinished, so the
+      # lease stayed `running`, runquotad's connection worker blocked reading the
+      # next request, and the attached client blocked reading the build response.
+      # Bypassing here both avoids that hang and keeps the prewarm cheap; the
+      # subsequent real build reuses the provider-compile artifact this pass
+      # writes, so build output and scheduling are unaffected.
+      setRestorableEnv("REPROBUILD_NO_RUNQUOTA", "1")
       if request.workingDir.len > 0:
         setCurrentDir(request.workingDir)
       let cliPath =
