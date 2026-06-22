@@ -195,10 +195,11 @@ package systemdSource:
     ## generation. Without it meson setup aborts with
     ## "Program 'gperf' not found or not executable".
     "gperf"
-    ## M9.R.15q.11.9 — python3 is required for systemd's meson
-    ## generators (xml-helpers, dbus-introspect, etc.). Without it
-    ## meson setup aborts with "python3 not found".
-    "python3 >=3.10"
+    ## M9.R.15q.11.9 — python3-with-modules carries the jinja2 module
+    ## systemd's meson generators (tools/generate-*) require. The bare
+    ## python3 stub doesn't bundle jinja2 and meson setup aborts with
+    ## "ERROR: python3 is missing modules: jinja2".
+    "python3-with-modules"
 
   buildDeps:
     ## libcap supplies the POSIX capabilities library systemd consumes

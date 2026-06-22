@@ -38,4 +38,4 @@ package `python3-with-modules`:
     nixPackage "reprobuild-stdlib-python3-with-modules-1.0.0",
       executablePath = "bin/python3",
       expressionFile = "nix/python3-with-modules-1.0.0/default.nix",
-      lockIdentity = "nix:python3-with-modules@1.0.0:setuptools+mako+markdown+pyyaml"
+      lockIdentity = "nix:python3-with-modules@1.0.0:setuptools+mako+markdown+pyyaml+jinja2"

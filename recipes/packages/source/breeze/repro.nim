@@ -69,6 +69,11 @@ package breezeSource:
       let opts = @[
         "BUILD_TESTING=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        ## v1 ships pure Qt6 — disable the Qt5 build branch so the
+        ## ``find_package(Qt5 5.15.2 REQUIRED ...)`` probe doesn't run
+        ## (we don't ship Qt5 from-source).
+        "BUILD_QT5=OFF",
+        "BUILD_QT6=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libbreezecommon6")
