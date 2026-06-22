@@ -463,6 +463,20 @@ package plasmaWorkspaceSource:
         # Watcher ctor; these are stable anchors in 6.2.5.
         "sed -i 's|^X11OutputOrderWatcher::X11OutputOrderWatcher(QObject \\*parent)$|#if HAVE_X11\\nX11OutputOrderWatcher::X11OutputOrderWatcher(QObject *parent)|' src/libkworkspace/outputorderwatcher.cpp",
         "sed -i 's|^WaylandOutputOrderWatcher::WaylandOutputOrderWatcher(QObject \\*parent)$|#endif // HAVE_X11\\nWaylandOutputOrderWatcher::WaylandOutputOrderWatcher(QObject *parent)|' src/libkworkspace/outputorderwatcher.cpp",
+        # M9.R.15q.12.16 — drop the digital-clock and kicker applet
+        # subdirs; both ``#include`` ICU's ``<unicode/*.h>`` headers
+        # (kicker for transliteration in search-result matching; the
+        # digital-clock plugin for timezone-name i18n). We don't ship
+        # ICU as a from-source sibling and patching out the include +
+        # call sites in each TU is more invasive than the v1 surface
+        # justifies. Both are Plasma applets (per-applet QML packages
+        # that plasmashell loads at runtime). plasmashell itself +
+        # libPlasmaWorkspace.so (the two artifacts this recipe ships)
+        # build + ship without them; users get a Plasma session with
+        # fewer panel applets out of the box. A future plasma-
+        # fullbuild milestone can add ICU + restore both applets.
+        "sed -i 's|^add_subdirectory(digital-clock)$|# M9.R.15q.12.16: dropped — needs ICU (unicode/tznames.h)|' src/applets/CMakeLists.txt",
+        "sed -i 's|^add_subdirectory(kicker)$|# M9.R.15q.12.16: dropped — needs ICU (unicode/translit.h)|' src/applets/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
