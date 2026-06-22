@@ -445,18 +445,32 @@ package kwinSource:
           if dirExists(pShare):
             pkgCfgDirs.add(pShare)
       # Nix-stub pkg-config dirs (wayland-protocols + libdisplay-info).
-      for store in walkDir("/nix/store", relative = false):
-        if store.kind == pcDir:
-          let n = extractFilename(store.path)
-          if "wayland-protocols-" in n or "libdisplay-info-" in n:
-            if not n.endsWith(".drv") and not n.endsWith(".tar.xz") and
-                not n.endsWith(".tar.gz"):
-              let pShare = store.path / "share" / "pkgconfig"
-              if dirExists(pShare):
-                pkgCfgDirs.add(pShare)
-              let pLib = store.path / "lib" / "pkgconfig"
-              if dirExists(pLib):
-                pkgCfgDirs.add(pLib)
+      # /nix/store is huge (~33k entries) so walkDir is prohibitively slow;
+      # walkPattern only opens entries matching the glob.
+      for store in walkPattern("/nix/store/*-wayland-protocols-*"):
+        let n = extractFilename(store)
+        if n.endsWith(".drv") or n.endsWith(".tar.xz") or
+            n.endsWith(".tar.gz") or n.endsWith(".patch"):
+          continue
+        if not dirExists(store): continue
+        let pShare = store / "share" / "pkgconfig"
+        if dirExists(pShare):
+          pkgCfgDirs.add(pShare)
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      for store in walkPattern("/nix/store/*-libdisplay-info-*"):
+        let n = extractFilename(store)
+        if n.endsWith(".drv") or n.endsWith(".tar.xz") or
+            n.endsWith(".tar.gz") or n.endsWith(".patch"):
+          continue
+        if not dirExists(store): continue
+        let pShare = store / "share" / "pkgconfig"
+        if dirExists(pShare):
+          pkgCfgDirs.add(pShare)
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
       let pkgCfgPath = pkgCfgDirs.join(":")
       let env = @[
         ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
