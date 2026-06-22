@@ -52,6 +52,16 @@ package sonnetSource:
         "BUILD_TESTING=OFF",
         "BUILD_QCH=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15q.10.3 — sonnet's CMakeLists FATAL_ERRORs in
+        # ``src/plugins/CMakeLists.txt:58`` when no spell-check backend
+        # (aspell/hspell/hunspell/voikko) is found. Our v1 dep closure
+        # carries none of those backends yet; ``SONNET_NO_BACKENDS=ON``
+        # tells sonnet to ship the API library + UI widgets without a
+        # spell-check engine (callers see "no dictionary available" at
+        # runtime). plasma-workspace's TextWidgets + TextEditor probes
+        # only need the libraries to exist; the optional backends can
+        # land in a follow-up milestone.
+        "SONNET_NO_BACKENDS=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6SonnetCore")
