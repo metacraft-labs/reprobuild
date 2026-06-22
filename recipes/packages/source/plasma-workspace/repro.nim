@@ -239,6 +239,33 @@ package plasmaWorkspaceSource:
     "qt6-shadertools >=6.6"
     "qt6-wayland >=6.6"
     "qt6-positioning >=6.6"
+    ## M9.R.15q.9.2 — plasma-workspace's CMakeLists.txt pulls a long
+    ## tail of KF6 + Plasma + Qt6 modules via find_package probes
+    ## (QCoro6, KF6Parts, KF6Runner, KF6NotifyConfig, KF6Wallet,
+    ## KF6Prison, KF6TextWidgets, KSysGuard, LayerShellQt, Phonon4Qt6,
+    ## Plasma5Support, PlasmaActivitiesStats, KScreen, Breeze).
+    ## Each maps to a sibling stdlib stub registered through the
+    ## kf6_qt6_modules aggregator; --tool-provisioning=nix surfaces
+    ## the prebuilt nixpkgs derivation for each.
+    "qcoro6 >=0.10"
+    "kparts >=6.0"
+    "krunner >=6.0"
+    "knotifyconfig >=6.0"
+    "kwallet >=6.0"
+    "kprison >=6.0"
+    "ktextwidgets >=6.0"
+    "ksysguard >=6.0"
+    "layer-shell-qt >=6.0"
+    "phonon4qt6 >=4.12"
+    "plasma5support >=6.0"
+    "plasma-activities-stats >=6.0"
+    "kscreen >=6.0"
+    "breeze >=6.0"
+    ## M9.R.15q.4.5 wave — Plasma session-leader deps already lifted
+    ## in earlier stubs (kpipewire / kglobalacceld / kscreenlocker).
+    "kpipewire >=6.0"
+    "kglobalacceld >=6.0"
+    "kscreenlocker >=6.0"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
