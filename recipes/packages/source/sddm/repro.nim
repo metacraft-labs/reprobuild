@@ -131,6 +131,8 @@
 ## variant that flips ``ENABLE_JOURNALD=ON`` for journal-aware logging
 ## bundles).
 
+import std/[os, strutils]
+
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
@@ -272,7 +274,70 @@ package sddmSource:
         "ENABLE_JOURNALD=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.15q.8.2 — explicit PKG_CONFIG_PATH plumbing. sddm's
+      # CMakeLists declares `pkg_check_modules(LIBXAU REQUIRED "xau")`
+      # which consults pkg-config at configure time. The M9.R.14e
+      # search-path channels populate PKG_CONFIG_PATH_FOR_TARGET via
+      # the resolver but the cmake-bin configure action's actionEnv
+      # has an empty pkgConfigSearchList (verified in
+      # from-source-tool-identities.inspect.json) — the dep tool
+      # identities have the right paths but they're not propagated to
+      # the configure action's env.
+      #
+      # Threading the known-good paths explicitly via extraEnv mirrors
+      # the kwin recipe's pattern (M9.R.15q.6.3): walk sibling source-
+      # recipe install mirrors + glob /nix/store for libxau / libxcb /
+      # libxkbcommon dev outputs supplied by the stdlib stubs.
+      var pkgCfgDirs: seq[string] = @[]
+      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
+        "/opt/repro/reprobuild/recipes/packages/source")
+      # Sibling from-source pkg-config dirs.
+      for sib in walkDir(recipeRoot, relative = false):
+        if sib.kind == pcDir:
+          let p = sib.path / ".repro" / "output" / "install" / "usr" / "lib" / "pkgconfig"
+          if dirExists(p):
+            pkgCfgDirs.add(p)
+          let p64 = sib.path / ".repro" / "output" / "install" / "usr" / "lib64" / "pkgconfig"
+          if dirExists(p64):
+            pkgCfgDirs.add(p64)
+          let pShare = sib.path / ".repro" / "output" / "install" / "usr" / "share" / "pkgconfig"
+          if dirExists(pShare):
+            pkgCfgDirs.add(pShare)
+      # Nix-stub pkg-config dirs (libxau / libxcb dev outputs).
+      # /nix/store is huge (~33k entries) so walkDir is prohibitively slow;
+      # walkPattern only opens entries matching the glob.
+      for store in walkPattern("/nix/store/*-libxau-*-dev"):
+        if not dirExists(store): continue
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      for store in walkPattern("/nix/store/*-libxcb-*-dev"):
+        if not dirExists(store): continue
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      # xcb-proto + libpthread-stubs are transitive deps of libxcb's .pc
+      # (xcb-proto's "Requires" line references them via pcre/xcb-proto).
+      for store in walkPattern("/nix/store/*-xcb-proto-*"):
+        if not dirExists(store): continue
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+        let pShare = store / "share" / "pkgconfig"
+        if dirExists(pShare):
+          pkgCfgDirs.add(pShare)
+      for store in walkPattern("/nix/store/*-libpthread-stubs-*"):
+        if not dirExists(store): continue
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      let pkgCfgPath = pkgCfgDirs.join(":")
+      let env = @[
+        ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
+        ("PKG_CONFIG_PATH", pkgCfgPath),
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              extraEnv = env)
       discard pkg.executable("sddm")
       discard pkg.executable("sddmGreeter")
       discard pkg.library("libSddmCommon")
