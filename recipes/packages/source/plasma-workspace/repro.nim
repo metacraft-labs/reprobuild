@@ -395,6 +395,17 @@ package plasmaWorkspaceSource:
         # libqalculate as an explicit from-source recipe + restore
         # the runner.
         "sed -i 's|^pkg_check_modules(QALCULATE libqalculate>2.0 REQUIRED IMPORTED_TARGET)$|# M9.R.15q.12.9: dropped — libqalculate not in from-source corpus|' src/CMakeLists.txt",
+        # M9.R.15q.12.10 — wrap ``add_subdirectory(ksmserver)`` in
+        # ``if(WITH_X11)``. ksmserver (the KDE session manager) uses
+        # X11_ICE_LIB via ``check_library_exists`` at the top of its
+        # CMakeLists; the variable resolves to NOTFOUND when WITH_X11
+        # is OFF (which we set above). We don't ship libICE/libSM as
+        # from-source siblings (they're part of the legacy X11
+        # session-management protocol, not load-bearing for a pure-
+        # Wayland Plasma session). Skip the subdir entirely; the
+        # plasmashell + libPlasmaWorkspace artifacts the recipe
+        # registers don't depend on ksmserver targets.
+        "sed -i 's|^add_subdirectory(ksmserver)$|if(WITH_X11)\\n    add_subdirectory(ksmserver)\\nendif()|' src/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
