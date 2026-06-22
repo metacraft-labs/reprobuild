@@ -6,12 +6,12 @@
 ## on plasma-workspace's CMakeLists.txt ``find_package(QCoro6 ...)``
 ## probe.
 ##
-## ## Provisioning channel — nixpkgs#qcoro
+## ## Provisioning channel — nixpkgs#kdePackages.qcoro
 
 import repro_project_dsl
 
 package `qcoro6`:
   provisioning:
-    nixPackage "nixpkgs#qcoro", executablePath = "lib/libQCoro6Core.so",
+    nixPackage "nixpkgs#kdePackages.qcoro", executablePath = "lib/libQCoro6Core.so",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
