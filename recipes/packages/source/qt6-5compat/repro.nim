@@ -58,15 +58,15 @@ package qt6Core5CompatSource:
   build:
     setCurrentOwningPackageOverride("qt6Core5CompatSource")
     try:
+      # Same SBOM disable as siblings (qt6-base / qt6-tools /
+      # qt6-declarative / qt6-svg). SBOM gen hard-codes the canonical
+      # Qt-6.8.1 prefix which doesn't match our buildDir/out/usr
+      # install layout.
       let opts = @[
         "BUILD_TESTING=OFF",
         "CMAKE_BUILD_TYPE=Release",
         "QT_BUILD_TESTS=OFF",
         "QT_BUILD_EXAMPLES=OFF",
-        ## Same SBOM disable as siblings (qt6-base / qt6-tools /
-        ## qt6-declarative / qt6-svg). SBOM gen hard-codes the
-        ## canonical Qt-6.8.1 prefix which doesn't match our
-        ## buildDir/out/usr install layout.
         "QT_GENERATE_SBOM=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
