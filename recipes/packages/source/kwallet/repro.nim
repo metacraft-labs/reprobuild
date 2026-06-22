@@ -35,6 +35,7 @@ package kwalletSource:
     "kconfigwidgets >=6.0"
     "kdbusaddons >=6.0"
     "knotifications >=6.0"
+    "kcrash >=6.0"
     "kwidgetsaddons >=6.0"
     "kwindowsystem >=6.0"
     "kiconthemes >=6.0"
