@@ -369,8 +369,59 @@ proc cmake_package*(srcDir: string;
     buildArgv.add(target)
   let buildStamp = projectRoot / ".repro" / "build" / "cmake-build.stamp"
   createDir(parentDir(buildStamp))
+  # M9.R.15q.13 — explicitly bake LD_LIBRARY_PATH into the build script
+  # so sibling-recipe helper binaries the cmake-spawned build invokes
+  # at compile time (e.g. kcmutils' ``kcmdesktopfilegenerator`` from
+  # plasma-workspace's KCM codegen) can dlopen their own transitive
+  # Qt6/KF6 runtime deps even when those binaries' RUNPATH points at
+  # the legacy ``/usr/local/lib`` install prefix.
+  #
+  # The build engine's action-env resolver populates LD_LIBRARY_PATH
+  # from ``toolIdentityRefs`` via the M9.R.14e.* search-path channels,
+  # but that env reaches the cmake-build sh process only — when ninja /
+  # make spawn a sibling helper binary, the child inherits LD_LIBRARY_
+  # PATH from the parent shell.  Empirically that propagation drops the
+  # sibling install-mirror lib dirs on KDE recipes (the helper binaries
+  # exit 127 with ``libQt6Core.so.6 not found``).  Baking the same set
+  # of paths into the build script via ``export LD_LIBRARY_PATH`` makes
+  # the channel bulletproof.  Inert in unit-test mode (empty
+  # ``projectRoot``).
+  proc m9r15q13StripDepConstraint(value: string): string =
+    for i, ch in value:
+      if ch == ' ' or ch == '>' or ch == '<' or ch == '=' or
+          ch == '~' or ch == '^':
+        return value[0 ..< i]
+    return value
+  var ldLibraryDirs: seq[string] = @[]
+  if projectRoot.len > 0:
+    let recipesRoot = parentDir(parentDir(projectRoot))
+    var allDeps: seq[string] = @[]
+    for raw in registeredNativeBuildDeps(pkgName):
+      allDeps.add(m9r15q13StripDepConstraint(raw))
+    for raw in registeredBuildDeps(pkgName):
+      allDeps.add(m9r15q13StripDepConstraint(raw))
+    for dep in allDeps:
+      if dep.len == 0:
+        continue
+      let sibRoot = recipesRoot / dep / ".repro" / "output" / "install" / "usr"
+      for sub in @["lib", "lib64"]:
+        let candidate = sibRoot / sub
+        if dirExists(candidate):
+          var present = false
+          for p in ldLibraryDirs:
+            if p == candidate:
+              present = true
+              break
+          if not present:
+            ldLibraryDirs.add(candidate)
   let buildScript = block:
     var s = "set -e; "
+    if ldLibraryDirs.len > 0:
+      s.add("export LD_LIBRARY_PATH=\"")
+      for i, d in ldLibraryDirs:
+        if i > 0: s.add(":")
+        s.add(d.replace("\\", "/").replace("\"", "\\\""))
+      s.add(":${LD_LIBRARY_PATH:-}\"; ")
     var quoted: seq[string] = @[]
     for a in buildArgv:
       quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
