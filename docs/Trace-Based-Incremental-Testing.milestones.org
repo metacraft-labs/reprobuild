@@ -2903,10 +2903,20 @@
     no-match / past-end edge cases (no chunk fetched past end). The M25a engine, M25b
     parallel build, M24c lazy point-lookup tests, the DAP suite, and the origin/omniscient
     tests all stay green; full `cargo clippy` clean.
-    HONEST NOTE: the LIVE network wiring (a streamed `.ct` loader feeding the search
-    integration in `flow_preloader.rs`/`dap_handler.rs`) is GATED on a future network
-    `.ct` loader, which does not exist yet. M25c delivers the strategy primitive +
-    isolation tests + the seam, ready to wire when network loading lands.
+    CORRECTION (2026-06-22, owner): the earlier "no streamed `.ct` loader exists" claim
+    was WRONG. A STREAMING `.ct` reader DOES exist + is tested: `StreamingCtfsReader`
+    (codetracer-trace-format/codetracer_trace_reader) live-tails a growing `.ct` during
+    recording (`live_replay_test.rs` passes — reader sees events before recording
+    finishes); `ConcurrentCtfsReader` does concurrent read-while-write (CTFS-Binary-Format
+    M2 `:status: completed`); the `*_mcr_streaming_flow_test.rs` + GUI `tests/streaming/`
+    suites exercise it E2E; spec'd in `Streaming-Zstd.md` ("Implemented Phases 1-4") +
+    `Seek-Based-CTFS-Reader.md §1`. CAVEAT: that streaming reader follows the LEGACY
+    `events.log`, not the split streams. The genuinely-unbuilt piece is the NETWORK/HTTP
+    range-request loader for a REMOTE `.ct` (`Seek-Based-CTFS-Reader.md §3.6` Approach A/B;
+    only the omniscient-PREP HTTP trigger exists). So M25c's forward primitive is correct +
+    ready; the LIVE wiring needs (i) the remote-`.ct` loader and/or (ii) the streaming
+    reader extended to the split streams — both tracked as future work, NOT "nothing
+    exists". See M26 for the immediately-actionable, spec-aligned piece (`step-map.ns`).
 
   Acceptance: one population engine shared with the omniscient build; local traces
   populate maps in parallel over disjoint ranges; network traces populate forward from
@@ -2915,3 +2925,32 @@
   whole-table build (M25b), and the NETWORK forward-from-search strategy primitive +
   seam wiring + isolation tests (M25c). Live network wiring awaits a network `.ct` loader
   (documented under M25c).
+
+* M26 — Consume the prepopulated `step-map.ns` breakpoint namespace
+  :STATUS: planned
+
+  The spec's prepopulated breakpoint index — `step-map.ns`, a CTFS namespace mapping
+  `(path_id, line) → step_id` ranges (`Seek-Based-CTFS-Reader.md §4.1`, the spec's
+  Approach A for "continue to breakpoint") — is WRITTEN by the Nim
+  `MultiStreamTraceWriter` at recording end but is NOT READ by the db-backend (zero
+  consumers; it rebuilds `steps_on_line` on demand via the M24c/M25b whole-table build).
+  This is exactly the owner's "use the prepopulated tables when available" guidance for
+  breakpoint resolution: when `step-map.ns` is present, resolve a breakpoint's line→step
+  directly from it WITHOUT building the whole step table — the prepopulated namespace is
+  the same data the lazy build would produce, computed at recording time.
+
+  Deliverables:
+  - [ ] A reader for the `step-map.ns` CTFS namespace (per the spec's header/path-table/
+    line-entry/step-id-list layout) in the db-backend, behind the `TraceReader`.
+  - [ ] `steps_on_line` / `step_map_for_path` / the DAP `find_next_step` breakpoint
+    resolver PREFER `step-map.ns` when present (O(unique lines) lookup, no whole-table
+    build / no step-stream scan); fall back to the M24c lazy / M25b parallel build when
+    the namespace is absent (legacy/older bundles). For a streaming/network source this
+    is the index-accelerated path (spec Approach A) — and the M25c forward-from-search
+    is the Approach-B fallback when neither the namespace nor cheap random access exists.
+  - [ ] Parity: breakpoint resolution from `step-map.ns` returns IDENTICAL steps to the
+    whole-table build; DAP/breakpoint suites green. Audit that the namespace the Nim
+    writer emits matches the spec layout the reader expects (write↔read round-trip).
+
+  Acceptance: when a `.ct` carries `step-map.ns`, breakpoint line→step resolution uses it
+  directly (no whole-table materialization), identical results, with a clean fallback.
