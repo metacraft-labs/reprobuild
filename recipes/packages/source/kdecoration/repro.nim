@@ -42,6 +42,11 @@ package kdecorationSource:
     ## qt6-base supplies QtCore + QtGui kdecoration's abstract API
     ## consumes (find_package(Qt6 ... COMPONENTS Core Gui)).
     "qt6-base >=6.6"
+    ## M9.R.15q.5.3 — kdecoration 6.2.0's CMakeLists.txt:53 declares
+    ## ``find_package(KF6I18n ${KF6_MIN_VERSION} CONFIG REQUIRED)``
+    ## (KF6_MIN_VERSION = 6.5.0). ki18n is the KF6 internationalization
+    ## framework (gettext wrapper + KLocalizedString).
+    "ki18n >=6.5"
 
   config:
     discard
