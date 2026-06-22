@@ -474,6 +474,16 @@ proc cmake_package*(srcDir: string;
   createDir(parentDir(installStamp))
   let installScript = block:
     var s = "set -e; "
+    # M9.R.15q.13.1 — same LD_LIBRARY_PATH baking as the build script,
+    # so cmake --install's helper binaries (e.g. plugin-registration
+    # binaries, ELF strippers from sibling toolchain recipes) inherit
+    # the sibling install-mirror lib dirs.
+    if ldLibraryDirs.len > 0:
+      s.add("export LD_LIBRARY_PATH=\"")
+      for i, d in ldLibraryDirs:
+        if i > 0: s.add(":")
+        s.add(d.replace("\\", "/").replace("\"", "\\\""))
+      s.add(":${LD_LIBRARY_PATH:-}\"; ")
     var quoted: seq[string] = @[]
     for a in installArgv:
       quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
