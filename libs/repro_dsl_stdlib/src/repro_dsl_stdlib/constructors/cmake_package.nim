@@ -111,7 +111,8 @@ proc cmake_package*(srcDir: string;
                     generator = "";
                     cacheVars: seq[string] = @[];
                     target = "";
-                    extraEnv: seq[(string, string)] = @[]): CmakePackageResult =
+                    extraEnv: seq[(string, string)] = @[];
+                    srcPatches: seq[string] = @[]): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
   ## (``component`` field on the install call); the standard layout
@@ -147,6 +148,21 @@ proc cmake_package*(srcDir: string;
   ## positional (with a warning), and reworking the configure shape
   ## would require fixing the broader cmake.nim subcommand surface
   ## (cross-cutting + outside this milestone's scope).
+  ## ``srcPatches`` (M9.R.15q.10.5): list of ``sed -i`` expressions to
+  ## apply to files inside the extracted source tree BEFORE cmake
+  ## configure runs. Each entry is a self-contained ``sed -i`` argv
+  ## (e.g. ``"sed -i 's/old/new/' src/CMakeLists.txt"``). Use this when
+  ## a recipe needs to disable an upstream-required feature that pulls
+  ## in a dep we don't ship from-source (the plasma-workspace v1 trip
+  ## drops the ``TextEditor`` component from the umbrella
+  ## ``find_package(KF6 ... REQUIRED COMPONENTS ...)`` probe + the
+  ## ``add_subdirectory(interactiveconsole)`` glue to sidestep
+  ## ktexteditor → qt6-speech → qt6-multimedia recipe inflation).
+  ##
+  ## The patch action runs in the recipe's project root (NOT inside
+  ## srcDir), depends on the fetch action's stamp, and writes its own
+  ## stamp under ``.repro/build/cmake-patch.stamp`` so the engine's
+  ## action-cache fingerprint stays stable across rebuilds.
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let extractedRel = block:
@@ -156,6 +172,38 @@ proc cmake_package*(srcDir: string;
   var configureAfter: seq[BuildActionDef] = @[]
   if fetchActOpt.isSome:
     configureAfter.add(fetchActOpt.get())
+  # M9.R.15q.10.5 — when ``srcPatches`` is non-empty, emit a per-recipe
+  # source-patch action that runs every ``sed -i`` expression against
+  # the extracted source tree, ordered AFTER the fetch action +
+  # BEFORE the configure action.
+  if srcPatches.len > 0 and projectRoot.len > 0:
+    let patchStamp = projectRoot / ".repro" / "build" / "cmake-patch.stamp"
+    createDir(parentDir(patchStamp))
+    let escapedStamp = patchStamp.replace("\\", "/").replace("\"", "\\\"")
+    var script = "set -e; "
+    for sedExpr in srcPatches:
+      # ``sedExpr`` is a complete ``sh -c`` argv body (e.g.
+      # ``sed -i 's/X/Y/' src/foo.txt``). Append in declaration order
+      # so subsequent patches see prior edits.
+      script.add(sedExpr & "; ")
+    script.add("touch \"" & escapedStamp & "\"")
+    var patchDeps: seq[string] = @[]
+    var patchInputs: seq[string] = @[]
+    if fetchActOpt.isSome:
+      patchDeps.add(fetchActOpt.get().id)
+      for out0 in fetchActOpt.get().outputs:
+        patchInputs.add(out0)
+    let patchEdge = buildAction(
+      id = "cmake-patch-" & pkgName,
+      call = inlineExecCall(@["sh", "-c", script]),
+      deps = patchDeps,
+      inputs = patchInputs,
+      outputs = @[patchStamp],
+      pool = "fetch",
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "cmake_package.patch",
+      toolIdentityRefs = @["sh"])
+    configureAfter.add(patchEdge)
   # M9.R.15i.1 — auto-thread Qt6 component cmake-config dirs from every
   # ``qt6-*`` dep's install-mirror so KF6 / Plasma recipes consuming
   # qt6-tools transitively can resolve ``find_package(Qt6 ...

@@ -233,7 +233,16 @@ package plasmaWorkspaceSource:
     "kitemmodels >=6.0"
     "kcrash >=6.0"
     "kunitconversion >=6.0"
-    "ktexteditor >=6.0"
+    ## M9.R.15q.10.5 — ktexteditor dropped because its only consumer in
+    ## plasma-workspace is the ``interactiveconsole`` Plasma-script
+    ## debug widget (loads katepart via KPluginFactory). That widget is
+    ## not a v1 desktop-runtime path, and ktexteditor's transitive deps
+    ## (qt6-speech ← qt6-multimedia ← ...) inflate the recipe count
+    ## beyond what the M9.R.15q.10 4-hour budget can absorb.  The
+    ## ``srcPatches`` field on the cmake_package call drops the
+    ## TextEditor component from the umbrella probe AND skips the
+    ## interactiveconsole subdir so the ``find_package(KF6 ...
+    ## REQUIRED COMPONENTS ... TextEditor ...)`` no longer fails.
     "kstatusnotifieritem >=6.0"
     ## M9.R.15q.9.9 — sonnet is ktextwidgets's transitive
     ## find_package dep; without it the KF6TextWidgets find_package
@@ -357,8 +366,19 @@ package plasmaWorkspaceSource:
       let env = @[
         ("CMAKE_BUILD_PARALLEL_LEVEL", "8"),
       ]
+      # M9.R.15q.10.5 — drop the ``TextEditor`` umbrella component +
+      # the ``add_subdirectory(interactiveconsole)`` glue.
+      # interactiveconsole is the only consumer of KF6::TextEditor in
+      # plasma-workspace's source tree and is a debug widget that loads
+      # katepart at runtime; v1 ships without it so the umbrella probe
+      # doesn't need ktexteditor (which in turn requires qt6-speech +
+      # qt6-multimedia, neither yet a from-source recipe).
+      let patches = @[
+        "sed -i 's/ TextEditor StatusNotifierItem/ StatusNotifierItem/' src/CMakeLists.txt",
+        "sed -i 's|^add_subdirectory(interactiveconsole)$|# M9.R.15q.10.5: dropped — needs ktexteditor / qt6-speech\\n# add_subdirectory(interactiveconsole)|' src/CMakeLists.txt",
+      ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
-                              extraEnv = env)
+                              extraEnv = env, srcPatches = patches)
       discard pkg.executable("plasmashell")
       discard pkg.library("libPlasmaWorkspace")
     finally:

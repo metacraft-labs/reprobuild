@@ -34,6 +34,10 @@ package qt6SpeechSource:
 
   buildDeps:
     "qt6-base >=6.8"
+    ## M9.R.15q.10.5 — qt6-speech REQUIREs Qt6::Multimedia (returns early
+    ## from its CMakeLists when the target is missing). Sibling
+    ## qt6-multimedia recipe at the matching 6.8.1 pin.
+    "qt6-multimedia >=6.8"
 
   config:
     discard
