@@ -517,7 +517,22 @@ package plasmaWorkspaceSource:
         # fontconfig defaults; the fonts-KCM (font-rendering tweaks /
         # subpixel hinting UI) can be restored when qt6-base picks up
         # the xcb private headers in a fullbuild milestone.
-        "sed -i 's|^add_subdirectory(fonts)$|# M9.R.15q.13.8: dropped — needs Qt6 private/qtx11extras_p.h|' src/kcms/CMakeLists.txt",
+        "sed -i 's|^    add_subdirectory( fonts )$|    # M9.R.15q.13.8: dropped — needs Qt6 private/qtx11extras_p.h|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.9 — drop krdb. kcms/krdb/krdb.cpp #includes
+        # ``<X11/Xlib.h>`` + ``<private/qtx11extras_p.h>`` and links
+        # against ``X11::X11``. krdb is the legacy X11 resource-database
+        # KCM that propagated X11-resource colour/font settings; modern
+        # Plasma session uses fontconfig + Qt theming. Drop the subdir;
+        # the plasmashell target doesn't link against libkrdb.
+        "sed -i 's|^add_subdirectory(krdb)$|# M9.R.15q.13.9: dropped — needs X11/Xlib.h + qtx11extras|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.10 — drop cursortheme.  kcmcursortheme.cpp #includes
+        # ``<X11/Xlib.h>`` + ``<X11/Xcursor/Xcursor.h>`` for X11 cursor
+        # propagation; the umbrella gate ``if(X11_Xcursor_FOUND)`` is
+        # supposed to skip it but X11_Xcursor_FOUND may resolve via the
+        # cmake transitive walk even with WITH_X11=OFF.  Pre-emptive
+        # skip.  Plasma Wayland session uses XDG cursor themes; the
+        # cursortheme KCM can be restored when xcb/X11 are added.
+        "sed -i 's|^    add_subdirectory(cursortheme)$|    # M9.R.15q.13.10: dropped — needs X11/Xcursor|' src/kcms/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
