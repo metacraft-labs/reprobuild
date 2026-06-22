@@ -118,6 +118,13 @@ package plasmaActivitiesSource:
     ## helper consumes Boost.System + Boost.Filesystem; the v1 boost
     ## recipe (1.86.0) widely satisfies the floor.
     "boost >=1.49"
+    ## M9.R.15q.3.2 — KF6 modules consumed by the QML imports subtree
+    ## (``src/imports/CMakeLists.txt``):
+    ##   * ``find_package (KF6Config     ${KF6_MIN_VERSION} CONFIG REQUIRED)``
+    ##   * ``find_package (KF6CoreAddons ${KF6_MIN_VERSION} CONFIG REQUIRED)``
+    ## Without these the configure step fails before any sources compile.
+    "kconfig >=6.0"
+    "kcoreaddons >=6.0"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the
