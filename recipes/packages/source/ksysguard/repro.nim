@@ -47,6 +47,8 @@ package ksysguardSource:
     "kconfigwidgets >=6.0"
     "kcompletion >=6.0"
     "knewstuff >=6.0"
+    "kservice >=6.0"
+    "ksolid >=6.0"
     ## X11 transitives.
     "xorgproto"
     "libx11"
