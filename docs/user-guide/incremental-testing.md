@@ -80,8 +80,8 @@ The per-function hash adapts to the language so the comparison is precise:
 - **Native (compiled C/C++/Rust):** a hash of the function's **compiled
   instruction bytes**, so a change that alters codegen is caught even when the
   source line is untouched. The executed-function set is captured by
-  compile-time instrumentation (`-finstrument-functions`, via CodeTracer's
-  existing `ct_instrument` call-trace facet); the hash runs over a clean,
+  compile-time instrumentation (`-finstrument-functions`, via reprobuild's own
+  self-contained call-recorder runtime); the hash runs over a clean,
   non-instrumented build of the same source.
 
 The decision is conservative by design: any ambiguity (a function that cannot
@@ -95,7 +95,7 @@ can prove the executed functions are unchanged.
 |----------|--------|
 | Ruby, Python, JavaScript/TypeScript | ✅ Validated live, end-to-end (record → decide → skip/re-run). |
 | Nim (source) | ✅ Source-text shallow hash; deep `symBodyHash` when the test library reports it. |
-| Native — C/C++/Rust | ✅ Live, end-to-end via **compile-time instrumentation** (the `ct_instrument` call-trace facet); executed set captured by `-finstrument-functions`, hash over a clean non-instrumented build. |
+| Native — C/C++/Rust | ✅ Live, end-to-end via **compile-time instrumentation** (reprobuild's own self-contained call-recorder runtime); executed set captured by `-finstrument-functions`, hash over a clean non-instrumented build. |
 | Native via Intel PT / MCR (OS-level) | 🚧 Planned. Intel PT is a recorder-independent, OS-level capture of the executed-function set; it does not require the compile-time instrumentation above. Validating it needs a Linux PT/MCR host. |
 
 ## Caveats (prototype)
