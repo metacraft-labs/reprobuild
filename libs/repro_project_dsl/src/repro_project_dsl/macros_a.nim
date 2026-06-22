@@ -2180,6 +2180,7 @@ proc usesImportCode(pkg: PackageDef): string =
     # entry under repro_dsl_stdlib/packages/ is discoverable via a
     # plain ``uses:`` line in reprobuild.nim.
     selector in [
+      "attic-client",
       "autoconf",
       "automake",
       "bash",
