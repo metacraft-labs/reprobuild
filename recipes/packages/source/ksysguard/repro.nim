@@ -72,7 +72,22 @@ package ksysguardSource:
   config:
     discard
 
-  library libKSysGuard:
+  ## ksysguard's CMake build emits FOUR shared libraries:
+  ##   * libKSysGuardFormatter   - numeric / human-readable sensor formatting
+  ##   * libKSysGuardSensors     - sensor enumeration + sampling surface
+  ##   * libKSysGuardSensorFaces - QML/Quick sensor-face plumbing
+  ##   * libKSysGuardSystemStats - shared client lib for the SystemStats
+  ##                                D-Bus service
+  library libKSysGuardFormatter:
+    discard
+
+  library libKSysGuardSensors:
+    discard
+
+  library libKSysGuardSensorFaces:
+    discard
+
+  library libKSysGuardSystemStats:
     discard
 
   build:
@@ -83,7 +98,10 @@ package ksysguardSource:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKSysGuard")
+      discard pkg.library("libKSysGuardFormatter")
+      discard pkg.library("libKSysGuardSensors")
+      discard pkg.library("libKSysGuardSensorFaces")
+      discard pkg.library("libKSysGuardSystemStats")
     finally:
       clearCurrentOwningPackageOverride()
 

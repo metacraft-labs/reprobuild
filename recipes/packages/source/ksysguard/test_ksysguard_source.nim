@@ -13,7 +13,13 @@ suite "ksysguardSource — from-source recipe smoke test":
     check spec.hashHex.len == 64
     check spec.url.endsWith("libksysguard-6.2.5.tar.xz")
 
-  test "artifact libKSysGuard registered":
+  test "four library artifacts registered (M9.R.15q.11.1 split)":
     let arts = registeredArtifacts("ksysguardSource")
-    check arts.len == 1
-    check arts[0].artifactName == "libKSysGuard"
+    check arts.len == 4
+    var names: seq[string] = @[]
+    for a in arts:
+      names.add(a.artifactName)
+    check "libKSysGuardFormatter" in names
+    check "libKSysGuardSensors" in names
+    check "libKSysGuardSensorFaces" in names
+    check "libKSysGuardSystemStats" in names
