@@ -36,6 +36,7 @@ var
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
 
 long repro_linux_gettid(void) {
   return syscall(SYS_gettid);
@@ -51,9 +52,49 @@ void repro_linux_set_errno(int value) {
 
 extern int repro_monitor_shim_init(char *configPath);
 
+/* M9.R.15f.1 made the fragment-log writer batch frames in a per-thread,
+ * in-memory buffer that is only written out on overflow / 100ms staleness /
+ * an explicit flush. A short-lived monitored process (or thread) therefore
+ * left its last partial batch unwritten — the regression that produced empty
+ * fragment files. Flush every thread's batch at thread exit (pthread_key
+ * destructor) and the process's at unload (library destructor). */
+extern void repro_monitor_flush_current_thread(void);
+
+static pthread_key_t repro_monitor_flush_key;
+static int repro_monitor_flush_key_ready = 0;
+
+static void repro_monitor_thread_exit_flush(void *unused) {
+  (void)unused;
+  repro_monitor_flush_current_thread();
+}
+
+void repro_monitor_install_thread_flush_key(void) {
+  if (pthread_key_create(&repro_monitor_flush_key,
+                         repro_monitor_thread_exit_flush) == 0) {
+    repro_monitor_flush_key_ready = 1;
+  }
+}
+
+/* Arm the current thread so its destructor fires on thread exit. The value
+ * is only a non-NULL marker; pthread runs the destructor for any thread that
+ * has set a non-NULL value for the key. */
+void repro_monitor_arm_thread_flush(void) {
+  if (repro_monitor_flush_key_ready) {
+    if (pthread_getspecific(repro_monitor_flush_key) == NULL) {
+      pthread_setspecific(repro_monitor_flush_key, (void *)1);
+    }
+  }
+}
+
 __attribute__((constructor))
 static void repro_linux_monitor_constructor(void) {
   repro_monitor_shim_init(NULL);
+}
+
+__attribute__((destructor))
+static void repro_linux_monitor_destructor(void) {
+  /* Flush the (main / unloading) thread's batch on normal process exit. */
+  repro_monitor_flush_current_thread();
 }
 """.}
 
@@ -96,11 +137,29 @@ proc baseRecord(kind: MonitorRecordKind;
     threadId: currentThreadId(),
     probeResult: prUnknown)
 
+proc c_arm_thread_flush() {.importc: "repro_monitor_arm_thread_flush", raises: [].}
+proc c_install_thread_flush_key() {.importc: "repro_monitor_install_thread_flush_key", raises: [].}
+
 proc emitRecord(record: MonitorRecord) {.raises: [].} =
   if not initialized or fragmentDir.len == 0 or shouldBypass():
     return
   withShimMuted:
+    # Arm this thread's pthread_key destructor so its batched fragment is
+    # flushed when the thread exits (the batch lives only in thread-local
+    # memory until then). Idempotent per thread.
+    c_arm_thread_flush()
     appendFragmentRecord(fragmentDir, record)
+
+proc repro_monitor_flush_current_thread() {.exportc, raises: [].} =
+  ## Called from the pthread_key destructor (thread exit) and the library
+  ## destructor (process exit). Flush and close the calling thread's batched
+  ## fragment slot so its buffered records reach disk. Muted so the flush's
+  ## own filesystem calls aren't re-recorded, and guarded against running
+  ## before init.
+  if not initialized:
+    return
+  withShimMuted:
+    closeFragmentSlot()
 
 proc recordProcessStart() {.raises: [].} =
   var record = baseRecord(mrProcessStart, moProcessStart)
@@ -188,12 +247,26 @@ proc repro_monitor_shim_init*(configPath: cstring): cint
     fragmentDir = getEnv("REPRO_MONITOR_FRAGMENT_DIR")
     if fragmentDir.len > 0:
       createDir(extendedPath(fragmentDir))
+    # Create the pthread_key whose destructor flushes each thread's batched
+    # fragment on thread exit. Done once, under the init lock.
+    c_install_thread_flush_key()
   initialized = true
   recordProcessStart()
   result = 0
 
-proc repro_monitor_shim_flush*(): cint {.exportc, dynlib, raises: [].} = 0
-proc repro_monitor_shim_shutdown*(): cint {.exportc, dynlib, raises: [].} = 0
+proc repro_monitor_shim_flush*(): cint {.exportc, dynlib, raises: [].} =
+  ## Flush the calling thread's in-flight batched fragment to disk without
+  ## closing the slot. Now that the writer batches frames in memory, an
+  ## explicit flush is the host's sync point.
+  if initialized:
+    withShimMuted:
+      flushFragmentBatch()
+  0
+
+proc repro_monitor_shim_shutdown*(): cint {.exportc, dynlib, raises: [].} =
+  ## Flush and close the calling thread's batched fragment slot.
+  repro_monitor_flush_current_thread()
+  0
 proc repro_monitor_shim_disable_current_thread*() {.exportc, dynlib, raises: [].} =
   inc disabled
 proc repro_monitor_shim_enable_current_thread*() {.exportc, dynlib, raises: [].} =
