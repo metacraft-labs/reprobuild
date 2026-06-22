@@ -2967,19 +2967,25 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # per-output isolation.
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
-  let scratchRoot = buildScratchRoot(workDir, scratchDir)
-  # Windows: nimcache lives in a short system-temp tree because Nim's
-  # mkdir does not use the \\?\ extended-length prefix. CMake TryCompile
-  # roots already overflow MAX_PATH by themselves, so the legacy
-  # `scratchRoot / "nimcache-provider"` layout cannot be created at all
-  # in that context. The same key is reused across every provider
-  # compile with matching toolchain + library set, so we still get the
-  # cache-sharing benefit within the same `repro` process.
-  let nimcacheRoot =
-    when defined(windows):
-      getTempDir() / "repro-nimcache-provider"
-    else:
-      scratchRoot / "nimcache-provider"
+  # The nimcache root MUST be independent of the per-recipe scratch/out
+  # tree, otherwise every recipe's provider compile lands in its own
+  # directory and the cross-recipe `.o` sharing M9.R.13a delivers never
+  # materialises (auto-recurse fires one scratchDir per recipe). Anchor
+  # it under a stable system-temp root on every platform; the full path
+  # is then `<temp>/repro-nimcache-provider/<sharedKey>` where the
+  # `sharedKey` already scopes by workDir + toolchain + library set +
+  # session token, so:
+  #   * recipes A and B of the same `repro` session/project share a
+  #     nimcache (different scratchDir, identical key) — the speedup;
+  #   * different projects / toolchains get different keys (no collision);
+  #   * concurrent independent sessions get different session tokens
+  #     (the M9.R.12 ENOTEMPTY-collision safety property).
+  # Using system-temp rather than the workDir also keeps this working
+  # when workDir is a read-only immutable store path, and on Windows the
+  # short temp root avoids the MAX_PATH overflow that nested CMake
+  # TryCompile scratch trees hit (Nim's mkdir does not use the \\?\
+  # extended-length prefix).
+  let nimcacheRoot = getTempDir() / "repro-nimcache-provider"
   let nimcache =
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)
