@@ -496,11 +496,17 @@ package kwinSource:
       # generator (ninja/make); on a 32-core 64 GiB WSL host that
       # spawned 343 simultaneous cc1plus processes for kwin's
       # template-heavy C++ during M9.R.15q.6/.7 reproducer runs and
-      # OOM-killed the WSL VM mid-compile (two back-to-back crashes
-      # documented). Pin to 8 (matches the build engine's standard
-      # ``compile=8`` pool budget); CMAKE_BUILD_PARALLEL_LEVEL is the
-      # documented env var cmake's ``--parallel`` defers to when no
-      # numeric argument follows.
+      # OOM-killed the WSL VM mid-compile (five back-to-back crashes
+      # observed during M9.R.15q.7).
+      #
+      # M9.R.15q.7.4 — pinning via CMAKE_BUILD_PARALLEL_LEVEL alone was
+      # insufficient: ninja ignores the env var and falls back to nproc
+      # (verified 13:14 WSL: 343 cc1plus spawned despite env=8). M9.R.15q.7.3
+      # adds the cmake_package constructor's opt-in ``--parallel <N>`` bake
+      # which the recipe activates via the same env-var entry below — when
+      # extraEnv carries ``CMAKE_BUILD_PARALLEL_LEVEL`` the buildArgv
+      # appends the numeric value, hard-capping ninja regardless of env-var
+      # honoring.
       let env = @[
         ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
         ("PKG_CONFIG_PATH", pkgCfgPath),

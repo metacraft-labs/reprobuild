@@ -259,6 +259,10 @@ package plasmaWorkspaceSource:
       # Without this, cmake's bare ``--parallel`` defers to nproc and on
       # a 32-core / 64 GiB WSL host the resulting cc1plus stampede OOMs
       # the VM mid-compile (M9.R.15q.7 wsl-crash observation, see kwin).
+      #
+      # M9.R.15q.7.4 — env-var alone is insufficient (ninja ignores it);
+      # the recipe activates the M9.R.15q.7.3 cmake_package opt-in
+      # ``--parallel <N>`` bake via the same env-var entry below.
       let env = @[
         ("CMAKE_BUILD_PARALLEL_LEVEL", "8"),
       ]
