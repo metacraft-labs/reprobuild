@@ -491,9 +491,20 @@ package kwinSource:
         if dirExists(pLib):
           pkgCfgDirs.add(pLib)
       let pkgCfgPath = pkgCfgDirs.join(":")
+      # M9.R.15q.7.1 — cap cmake's internal compile parallelism. cmake's
+      # bare ``--build --parallel`` defers to nproc on the host
+      # generator (ninja/make); on a 32-core 64 GiB WSL host that
+      # spawned 343 simultaneous cc1plus processes for kwin's
+      # template-heavy C++ during M9.R.15q.6/.7 reproducer runs and
+      # OOM-killed the WSL VM mid-compile (two back-to-back crashes
+      # documented). Pin to 8 (matches the build engine's standard
+      # ``compile=8`` pool budget); CMAKE_BUILD_PARALLEL_LEVEL is the
+      # documented env var cmake's ``--parallel`` defers to when no
+      # numeric argument follows.
       let env = @[
         ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
         ("PKG_CONFIG_PATH", pkgCfgPath),
+        ("CMAKE_BUILD_PARALLEL_LEVEL", "8"),
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env)
