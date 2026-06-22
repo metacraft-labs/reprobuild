@@ -97,6 +97,19 @@ jobs:
           path: ${{ github.workspace }}/../runquota
           gh-token: ${{ steps.ci_token.outputs.token }}
 
+      # reprobuild-cmake is the CMake fork carrying the Reprobuild
+      # generator. The cmake-develop e2e tests (tests/e2e/cmake-develop/)
+      # hard-require its built ``cmake`` binary (no graceful skip), so the
+      # test job must clone it and scripts/run_tests.sh builds it as a
+      # prerequisite. Pinned to the ``reprobuild`` branch (the fork).
+      - name: Clone reprobuild-cmake sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
+        with:
+          repo: metacraft-labs/reprobuild-cmake
+          ref: reprobuild
+          path: ${{ github.workspace }}/../reprobuild-cmake
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
       # reprobuild-examples carries the canonical M71 reference home.nim
       # under m71-home-profile-walkthrough/ + a number of hello-binary
       # fixtures (haskell-cabal, crystal-shards, nim/mode3-pilot, …) that

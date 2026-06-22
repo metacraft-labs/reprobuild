@@ -93,6 +93,29 @@ if [[ -d "../runquota" ]]; then
   export PATH="${RUNQUOTA_BIN_ABS}:${PATH}"
 fi
 
+# Step 2b: build the reprobuild-cmake fork so the cmake-develop e2e tests
+# (tests/e2e/cmake-develop/) have their forked ``cmake`` carrying the
+# Reprobuild generator. Those tests hard-require it (``check
+# forkedCMake.len > 0`` — no graceful skip), so the fork is a real test
+# prerequisite, not a benchmark-only artifact. Mirror the runquota
+# prerequisite above; idempotent — skip when already built (warm
+# self-hosted checkout). The CMake self-build is heavy, so cap parallelism
+# on shared runners.
+if [[ -d "../reprobuild-cmake" ]]; then
+  if [[ ! -x "../reprobuild-cmake/build/bin/cmake${exe_ext}" ]]; then
+    printf 'Building prerequisite sibling: ../reprobuild-cmake (CMake fork)\n' >&2
+    cmake_jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+    if (( cmake_jobs > 16 )); then cmake_jobs=16; fi
+    (cd ../reprobuild-cmake \
+        && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        && cmake --build build --target cmake --parallel "${cmake_jobs}") \
+        > test-logs/reprobuild-cmake-build.log 2>&1 || {
+      echo "reprobuild-cmake build failed; see test-logs/reprobuild-cmake-build.log" >&2
+      exit 1
+    }
+  fi
+fi
+
 # Step 3 (B5): build the apps, test helpers, and test binaries through
 # the engine. Replaces steps 1 (build_apps.sh) + 3 (build_test_helper
 # x 3) + 4 (./build/bin/repro build test) + 5 (HCR rebuild loop) of
