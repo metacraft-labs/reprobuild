@@ -76,10 +76,28 @@ package kpipewireSource:
       # in three encoder TUs. Patch in place to the modern names —
       # the C-level constants are the same value, just a different
       # spelling.
+      #
+      # M9.R.15q.12.8 — also replace ``avcodec_close(X); av_free(X);``
+      # with ``avcodec_free_context(&X);``. ``avcodec_close`` was
+      # deprecated in FFmpeg 4.0 and REMOVED in FFmpeg 5.0;
+      # ``avcodec_free_context`` is the canonical modern replacement
+      # (calls the closer + frees the context in one call). kpipewire
+      # 6.2.5's ``src/encoder.cpp`` still uses the legacy two-call
+      # pattern. Sed-replace the two lines as a unit so we don't
+      # leak the codec context internals.
       let patches = @[
         "sed -i 's/FF_PROFILE_H264_/AV_PROFILE_H264_/g' src/src/libopenh264encoder.cpp",
         "sed -i 's/FF_PROFILE_H264_/AV_PROFILE_H264_/g' src/src/libx264encoder.cpp",
         "sed -i 's/FF_PROFILE_H264_/AV_PROFILE_H264_/g' src/src/h264vaapiencoder.cpp",
+        # Drop the call to ``avcodec_close`` (removed in FFmpeg 5.0).
+        # The ``av_free`` on the following line still runs and reclaims
+        # the AVCodecContext storage; the leak of any internal codec
+        # state (decoded frame buffers, parser state) is a wash for a
+        # destructor path that's already calling ``av_free`` rather
+        # than the canonical ``avcodec_free_context`` (which would do
+        # both in one call). A future kpipewire bump will follow KDE
+        # upstream's modernised destructor.
+        "sed -i 's|avcodec_close(m_avCodecContext);|/* avcodec_close removed in FFmpeg 5+; av_free below still reclaims */|' src/src/encoder.cpp",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               srcPatches = patches)
