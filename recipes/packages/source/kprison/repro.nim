@@ -37,6 +37,9 @@ package kprisonSource:
     "extra-cmake-modules >=6.0"
     "qt6-base >=6.6"
     "qt6-declarative >=6.6"
+    ## M9.R.15q.10.7d — kprison's CMakeLists declares
+    ## ``find_package(QRencode REQUIRED)`` (QR code generation).
+    "qrencode"
 
   config:
     discard

@@ -67,6 +67,9 @@ import ./kstatusnotifieritem
 # dep at configure time (KF6TextWidgets's CMake config calls
 # find_dependency(KF6Sonnet)).
 import ./sonnet
+# M9.R.15q.10.7d — qrencode is a kprison build-time hard dep
+# (CMakeLists declares ``find_package(QRencode REQUIRED)``).
+import ./qrencode
 
 export qt6_tools
 export qt6_declarative
@@ -110,3 +113,4 @@ export kunitconversion
 export ktexteditor
 export kstatusnotifieritem
 export sonnet
+export qrencode
