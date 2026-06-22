@@ -508,6 +508,16 @@ package plasmaWorkspaceSource:
         # added).  Drop the add_subdirectory(users) entry from the kcms
         # umbrella CMakeLists.
         "sed -i 's|^add_subdirectory(users)$|# M9.R.15q.13.5: dropped — needs libcrypt (kcm_users links -lcrypt)|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.8 — drop the kcm_fonts sub-target.  kxftconfig.cpp
+        # ``#include <private/qtx11extras_p.h>`` (a Qt5 X11 compat
+        # header) which we don't ship as a from-source sibling (qt6 base
+        # ships qtx11extras only when QT_FEATURE_xcb is enabled, which
+        # is off in our qt6-base recipe to avoid pulling in libX11/libxcb
+        # at the Qt layer).  v1 Plasma session can run with system
+        # fontconfig defaults; the fonts-KCM (font-rendering tweaks /
+        # subpixel hinting UI) can be restored when qt6-base picks up
+        # the xcb private headers in a fullbuild milestone.
+        "sed -i 's|^add_subdirectory(fonts)$|# M9.R.15q.13.8: dropped — needs Qt6 private/qtx11extras_p.h|' src/kcms/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
