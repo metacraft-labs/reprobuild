@@ -372,6 +372,19 @@ package plasmaWorkspaceSource:
         # milestone can add PolkitQt6-1 + restore the helper.
         "GLIBC_LOCALE_GEN=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15q.13.6 — disable cmake's multithreaded AUTOGEN to work
+        # around a cmake 4.1 bug where ``cmake -E cmake_autogen`` keeps
+        # the moc-pipe write end open in the parent after forking moc
+        # children, then blocks forever on a read(7) when moc exits.
+        # Empirically the wedge fires non-deterministically (different
+        # autogen target each run), creates 6+ moc zombies, and stalls
+        # the build past the WSL killer timeout.  Serialising autogen
+        # (1 moc at a time) prevents the multi-pipe race that triggers
+        # the bug.  CMAKE_AUTOGEN_PARALLEL=1 forces sequential moc
+        # invocation per target; the rest of the build still parallelises
+        # at the make/--parallel level so the impact on wall-time is
+        # bounded.
+        "CMAKE_AUTOGEN_PARALLEL=1",
       ]
       # M9.R.15q.7.1 — cap cmake's internal compile parallelism to match
       # the build engine's standard ``compile=8`` pool budget (mirrors
