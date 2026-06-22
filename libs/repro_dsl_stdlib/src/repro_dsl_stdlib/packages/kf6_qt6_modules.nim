@@ -27,6 +27,13 @@ import ./kiconthemes
 import ./kitemviews
 import ./kjobwidgets
 import ./kwindowsystem
+# M9.R.15q.4.5 — kwin's Plasma-stack dependency family.
+import ./kdecoration2
+import ./kwayland
+import ./kscreenlocker
+import ./kglobalacceld
+import ./kpipewire
+import ./libqaccessibilityclient
 
 export qt6_tools
 export qt6_declarative
@@ -45,3 +52,9 @@ export kiconthemes
 export kitemviews
 export kjobwidgets
 export kwindowsystem
+export kdecoration2
+export kwayland
+export kscreenlocker
+export kglobalacceld
+export kpipewire
+export libqaccessibilityclient
