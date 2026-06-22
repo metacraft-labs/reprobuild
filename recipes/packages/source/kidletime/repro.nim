@@ -52,6 +52,18 @@ package kidletimeSource:
         "CMAKE_BUILD_TYPE=Release",
         # WITH_X11=OFF: drop X11 XScreensaver backend; v1 is Wayland.
         "WITH_X11=OFF",
+        # M9.R.15q.5.5 — WITH_WAYLAND=OFF: drop the Wayland backend too
+        # because the Wayland backend pulls in
+        # ``find_package(Qt6WaylandClient REQUIRED)`` +
+        # ``find_package(PlasmaWaylandProtocols REQUIRED)``. Neither
+        # has a from-source sibling recipe yet (qt6-wayland is the
+        # blocker; plasma-wayland-protocols would follow). With BOTH
+        # backends off the library compiles a stub that returns
+        # idleTime() = 0 — the public API is preserved + the SONAME
+        # ships, so downstream consumers (kwin's idle-management
+        # plugin) link successfully; the v1 deliverable doesn't need
+        # the runtime idle-detection backend wired up yet.
+        "WITH_WAYLAND=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6IdleTime")
