@@ -2464,7 +2464,10 @@
   streaming with no production dependency; no regression anywhere.
 
 * M24 — Make PRODUCTION reads actually seekable (reconcile the two split formats)
-  :STATUS: planned — significant; the genuine "don't fully materialize" fix for production
+  :STATUS: DONE (2026-06-22) — production open materializes NEITHER values (M24c) nor steps
+           (M24c-steps); wire-format reconciliation complete; range-aware lazy step path +
+           omniscient-`linehits.tc` tier-where-present. Only the empty per-step scaffolding +
+           cheap call-key arrays remain at open on the lazy step path (no decode/decompress).
 
   CRITICAL FINDING (M23e-4 review, code + cross-read experiment, 2026-06-21): the
   seekable infrastructure (M17b/M22) does NOT engage on PRODUCTION bundles, so every
@@ -2501,29 +2504,61 @@
     `has_step_stream` (bit 9, M24a-1) + `has_value_stream` (bit 10, M24a-2) +
     `has_io_event_stream` (bit 11, M24a-3). REMAINS: `has_interning_tables` (a separate
     slice).
-  - [~] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
+  - [X] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
     overlays engage on production Nim bundles (now readable + flagged), AND
     `open_new_format_nim` no longer eagerly materializes the full step/value tables
     (serve them on-demand through the overlays). Bounded-decompression PROVEN on a
     real production bundle; DAP suite green; parity with the materialized result.
-    DONE for VALUES (M24c): the value table is no longer materialized at open — a
-    `LazyValueCache` over the seekable `values.dat` serves each step's values on first
-    borrow (one chunk per fetch, counter-proven). The step + value OVERLAYS both engage
-    on a production bundle. STEPS (`db.steps` + the `step_map` line→step index) are
-    STILL materialized at open — see M24c for the honest scope reason.
-  - [~] No regression: legacy + Rust-writer + production bundles all read correctly;
-    ct-print byte-identical. Reader-side regression bar met (M24c: full DAP + flow
-    suite green, split/log parity holds). ct-print byte-identical was proven for the
-    M24a writer slices.
+    DONE for VALUES (M24c) AND STEPS (M24c-steps, 2026-06-22).
+    - VALUES (M24c): a `LazyValueCache` over the seekable `values.dat` serves each
+      step's values on first borrow (one chunk per fetch, counter-proven).
+    - STEPS (M24c-steps): `open_new_format_nim` no longer materializes `db.steps`
+      NOR the `step_map` line→step index on a PRODUCTION (non-column-aware) split
+      bundle. A new RANGE-AWARE `LazyStepCache` (db-backend
+      `ctfs_trace_reader/step_value_stream_source.rs`) over the seekable `steps.dat`
+      stream reconstructs each `DbStep` on first borrow, filling only the requested
+      step's chunk-aligned RANGE (4096-record `steps.dat` chunk) — a point `step()`
+      lookup inflates AT MOST ONE chunk (counter-proven via `cached_chunk`). The
+      cheap O(steps) integer call-key arrays stay resident; the seekable stream
+      supplies `(path_id, line)` (the packed GLI ↔ the eager bulk-FFI line path,
+      byte-identical). The slice / line-map accessors (`steps_from`,
+      `steps_on_line`, `step_map_for_path`) — which back genuinely O(trace)
+      breakpoint-resolution Continue / step-over / history scans — memoize the
+      whole-table view ONCE on first such demand (each chunk inflated at most once),
+      so point-lookup navigation stays lazy/bounded while the inherently whole-table
+      operations stay correct and IDENTICAL to the eager path.
+    - OMNISCIENT `linehits.tc`: the engine ALREADY consults the omniscient line→tick
+      table (`OmniscientDb::source_line_hits` / `mcrOmniscientSourceLineHits`) for
+      breakpoint / origin resolution in the MCR omniscient mode WHEN the bundle ships
+      `linehits.tc`. That namespace is emitted ONLY by the MCR omniscient recorder
+      pipeline (`ct_emulator`), NOT by the `MultiStreamTraceWriter` every live
+      Python/Ruby/JS/shell recorder drives — so typical PRODUCTION split bundles do
+      NOT carry it. The range-aware lazy step path is therefore the PRIMARY deliverable
+      (it serves `step()` + line→step resolution on every production bundle); the
+      omniscient table is the optimization tier the engine already uses where it exists
+      (origin_omniscient / origin_mcr_omniscient suites green).
+    - DETECT + ROUTE: column-aware traces (whose eager path overrides `(path_id,line)`
+      via the pure-Rust `GlobalPositionDecoder` and sets `DbStep.column`), value-less /
+      pre-M24a / legacy / corrupt-stream bundles fall back to EAGER step materialization
+      — correctness first.
+  - [X] No regression: legacy + Rust-writer + production bundles all read correctly;
+    ct-print byte-identical. Reader-side regression bar met (M24c + M24c-steps: full
+    `cargo test --lib` (379) + DAP variables/column/breakpoint + python/ruby flow +
+    origin/omniscient suites green; split/log full-DB parity holds; `cargo clippy --lib
+    --tests` clean). ct-print byte-identical was proven for the M24a writer slices.
 
-  Acceptance (PARTIALLY MET): opening a PRODUCTION `.ct` does NOT fully materialize
-  VALUES (M24c) — a value fetch decompresses only the needed chunk (counter-proven) on
-  a genuine production bundle, and step+value overlays engage. STEPS are still
-  materialized at open (reader-side scope limit, M24c). The wire-format reconciliation
-  is now COMPLETE across all production chunked streams — steps (M24a-1) + values
-  (M24a-2) + events (M24a-3), plus calls (M20) and interning — all on the single spec
-  format, byte-compatible with the Rust readers. So M24's steps+values acceptance is met
-  for VALUES; the steps-lazy remainder is a documented M24c reader-side remainder.
+  Acceptance (MET): opening a PRODUCTION `.ct` materializes NEITHER VALUES (M24c) NOR
+  STEPS (M24c-steps) — a value fetch and a step fetch each decompress only the one
+  needed chunk (both counter-proven on genuine production bundles), and the step+value
+  overlays engage. The wire-format reconciliation is COMPLETE across all production
+  chunked streams — steps (M24a-1) + values (M24a-2) + events (M24a-3), plus calls
+  (M20) and interning — all on the single spec format, byte-compatible with the Rust
+  readers. M24's steps+values "don't fully materialize" acceptance is now met for BOTH
+  steps and values on production (non-column-aware) bundles. The only remaining
+  at-open materialization on the lazy step path is the EMPTY per-step scaffolding
+  (`instructions`/`compound`/`cells`/`variable_cells` HashMaps — no decode, no
+  decompression, required for split-bundle full-DB accessor parity) and the cheap
+  O(steps) integer call-key arrays; column-aware bundles keep eager steps by design.
 
 ** M24a-1 — Nim STEP stream on the SPEC-canonical wire format (done, 2026-06-22)
   :STATUS: done — first slice of the wire-format reconciliation (step stream only)
