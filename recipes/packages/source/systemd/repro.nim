@@ -195,6 +195,10 @@ package systemdSource:
     ## generation. Without it meson setup aborts with
     ## "Program 'gperf' not found or not executable".
     "gperf"
+    ## M9.R.15q.11.9 — python3 is required for systemd's meson
+    ## generators (xml-helpers, dbus-introspect, etc.). Without it
+    ## meson setup aborts with "python3 not found".
+    "python3 >=3.10"
 
   buildDeps:
     ## libcap supplies the POSIX capabilities library systemd consumes
