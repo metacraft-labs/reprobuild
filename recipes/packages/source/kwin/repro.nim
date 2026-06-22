@@ -351,6 +351,12 @@ package kwinSource:
     "libxext"
     "libxfixes"
     "libxrender"
+    ## M9.R.15q.6.6 — kwin's src/cursor.cpp:33 unconditionally declares
+    ## ``#include <xcb/xcb_cursor.h>`` (NOT gated on KWIN_BUILD_X11), so
+    ## the xcb-util-cursor headers must be on the C include path even
+    ## when X11 client glue is disabled. xcb-util-cursor ships
+    ## ``libxcb-cursor.so`` + the ``xcb/xcb_cursor.h`` header.
+    "xcb-util-cursor"
     ## M9.R.15q.5.12 — kwin 6.2.5's CMakeLists.txt:340 declares
     ## ``pkg_check_modules(libxcvt>=0.1.1 REQUIRED)`` for the DRM
     ## backend's modeline-fallback computation. libxcvt is a nix-stub.
