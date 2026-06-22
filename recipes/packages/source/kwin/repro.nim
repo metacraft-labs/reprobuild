@@ -332,6 +332,23 @@ package kwinSource:
     "kconfig >=6.0"
     "kcoreaddons >=6.0"
     "kwidgetsaddons >=6.0"
+    ## M9.R.15q.5.11.b — kwindowsystem was built with KWINDOWSYSTEM_X11=ON
+    ## so its CMake Config does ``find_dependency(X11)`` at consumer
+    ## time. cmake's ``FindX11`` looks for X11/X.h (xorgproto) + libX11
+    ## + libxcb on the standard system paths; since we're in a
+    ## hermetic nix-shell, we thread the X11 client libs onto kwin's
+    ## env via the M9.R.14e search-path channels (same shape
+    ## kwindowsystem itself uses).
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
     ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
     ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
     ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
