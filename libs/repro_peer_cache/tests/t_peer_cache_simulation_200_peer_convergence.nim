@@ -4,8 +4,12 @@
 ## Spawns 200 peers via the M5 `spawnSimFleet` harness, drives SWIM
 ## with a 50 ms protocol period, and asserts that the membership view
 ## of every peer reaches `peerCount - 1` within a generous wall-clock
-## budget. The 50-peer test (M0) takes ~800 ms at 100 ms periods; 200
-## peers at 50 ms periods should land well inside the 15 s budget.
+## budget. Convergence is monotonic, so the budget only needs to be
+## wide enough to absorb the per-period wall-clock inflation a loaded
+## CI runner imposes (the dispatcher cannot service the 50 ms probe
+## timers on schedule under CPU oversubscription). On a quiet machine
+## the fleet converges in ~8 s (165 periods); the budget is sized for
+## heavy contention. See the `ConvergenceBudgetMs` note below.
 ##
 ## Beyond the strict "all converge" check, the test asserts that the
 ## simulation harness's `collectReport` returns a non-zero
@@ -20,7 +24,23 @@ const
   NumPeers = 200
   SeedsPerPeer = 5
   ProbePeriodMs = 50
-  ConvergenceBudgetMs = 15_000
+  ConvergenceBudgetMs = 90_000
+    ## Wall-clock budget for full SWIM convergence (every peer sees all
+    ## `peerCount - 1` others). The correctness property the test
+    ## guards is *that the fleet converges*, not the wall-clock it takes
+    ## to do so: convergence is monotonic (verified directly — the
+    ## min-alive count only ever rises). On a quiet machine the fleet
+    ## converges in ~8 s (165 protocol periods at 50 ms, per the
+    ## Peer-Cache-Scale M5 demonstration report). The wall-clock per
+    ## protocol period, however, inflates linearly with CPU
+    ## oversubscription: a shared CI runner at 4x load needs ~30-35 s,
+    ## because the async dispatcher cannot service the 50 ms probe
+    ## timers on schedule and probes spuriously time out. A 15 s budget
+    ## flakes under that contention while adding no extra regression-
+    ## detection power (a real convergence ceiling shows up as a
+    ## non-monotonic or stalled min-alive count, which `aliveMembers`
+    ## below still catches). 90 s gives ample headroom above the
+    ## heaviest observed contention without masking a genuine stall.
   TargetMembership = NumPeers - 1
 
 suite "peer-cache simulation 200-peer convergence":
