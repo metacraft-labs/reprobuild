@@ -68,9 +68,15 @@ package breezeSource:
   config:
     discard
 
-  library libbreezecommon6:
-    discard
-
+  ## breeze 6.2.5 ships only Qt plugins (under
+  ## ``lib/plugins/styles/`` + ``lib/plugins/org.kde.kdecoration2/``)
+  ## NOT a top-level ``libbreezecommon6.so``. The plugin set is the
+  ## primary artifact plasma-workspace consumes via QStyle's plugin
+  ## probe.
+  ##
+  ## v1 records the install-tree as a whole rather than a single
+  ## library artifact (cmake_package's library stage-copy probes
+  ## $libdir for the literal SONAME — there isn't one).
   build:
     setCurrentOwningPackageOverride("breezeSource")
     try:
@@ -83,8 +89,12 @@ package breezeSource:
         "BUILD_QT5=OFF",
         "BUILD_QT6=ON",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libbreezecommon6")
+      # M9.R.15q.11.15 — no .library() call: breeze installs only Qt
+      # plugins, not a top-level library. The cmake_package configure
+      # + build + install + install-mirror chain runs and publishes
+      # the install-tree under .repro/output/install/ for downstream
+      # plasma-workspace consumption.
+      discard cmake_package(srcDir = "./src", cacheVars = opts)
     finally:
       clearCurrentOwningPackageOverride()
 
