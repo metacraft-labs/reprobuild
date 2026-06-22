@@ -67,7 +67,12 @@ package kwindowsystemSource:
     "xorgproto"
     "libx11"
     "libxcb"
+    "libxau"
     "xcb-util-keysyms"
+    ## M9.R.15q.4.3 — kwindowsystem's CMakeLists.txt:62 declares
+    ## ``find_package(XCB COMPONENTS REQUIRED XCB KEYSYMS RES ICCCM)``.
+    ## ICCCM lives in xcb-util-wm (libxcb-icccm.so).
+    "xcb-util-wm"
     "libxext"
     "libxfixes"
     "libxrender"

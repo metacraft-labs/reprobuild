@@ -155,6 +155,9 @@ import ./libxrender
 # FindX11.cmake probes ``X11/X.h`` (in xorgproto), NOT
 ## ``X11/Xlib.h`` (in libX11), to set X11_X11_INCLUDE_PATH.
 import ./xorgproto
+# M9.R.15q.4.3 — libxau ships libXau.so + xau.pc; libxcb's xcb.pc has
+# Requires.private: xau so any pkg-config probe through xcb needs it.
+import ./libxau
 
 export bc
 export bison
@@ -225,3 +228,4 @@ export libxext
 export libxfixes
 export libxrender
 export xorgproto
+export libxau
