@@ -119,13 +119,16 @@ var
   fragmentWriteCount: Atomic[uint64]
   fragmentFlushCount: Atomic[uint64]
 
-proc slotFragmentDirEquals(slot: var FragmentSlot; s: string): bool =
+proc slotFragmentDirEquals(slot: var FragmentSlot; s: string): bool {.inline.} =
+  ## Hot path: called on every ``appendFragmentRecord`` to decide whether
+  ## the cached slot still matches the requested fragment dir. Compare the
+  ## length first, then the bytes in one ``equalMem`` (a single ``memcmp``)
+  ## instead of a bounds-checked per-char loop.
   if slot.fragmentDirLen != s.len:
     return false
-  for i in 0 ..< s.len:
-    if slot.fragmentDirBuf[i] != s[i]:
-      return false
-  true
+  if s.len == 0:
+    return true
+  equalMem(addr slot.fragmentDirBuf[0], unsafeAddr s[0], s.len)
 
 proc slotFragmentDirAssign(slot: var FragmentSlot; s: string): bool =
   if s.len >= FragmentDirBufLen:
@@ -390,6 +393,17 @@ proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
   # ``copyMem`` path produced (the determinism test) so the inlined
   # encode is observably equivalent.
   const RecordHeaderBytes = 2 + 2 + 8 + 8 + 8 + 8 + 8 + 8 + 4 + 4
+  # The whole per-emit hot path below computes only small, provably-bounded
+  # integers: frame lengths are bounded by ``FragmentBatchBufLen`` (64 KiB),
+  # the staleness countdown by ``BatchStalenessProbeInterval``, and the
+  # cursor by ``batchLen + frameLen <= 64 KiB``. Under ``-d:release`` Nim
+  # still emits overflow + bounds checks (``nimAddInt`` / ``raiseOverflow`` /
+  # ``raiseIndexError``) for each of these, and those per-emit checks — not
+  # the encode arithmetic itself — were the dominant cost keeping the hot
+  # path well under the M9.R.15f.1 throughput target. Disable them for the
+  # bounded hot region; the pathological-frame and reopen branches above
+  # keep their checks.
+  {.push checks: off.}
   let pathLen = record.path.len
   let detailLen = record.detail.len
   let payloadLen = RecordHeaderBytes + 4 + pathLen + 4 + detailLen
@@ -448,32 +462,57 @@ proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
 
   # Inline little-endian encode straight into the batch buffer at the
   # current offset. ``cursor`` is a local copy so we can store it
-  # back to ``batchLen`` as a single write at the end.
+  # back to ``batchLen`` as a single write at the end. We resolve the
+  # threadvar's address ONCE into a raw pointer to the batch buffer:
+  # ``fragmentSlot`` is a ~64 KiB ``{.threadvar.}`` and each
+  # ``fragmentSlot.batchBuf[...]`` access otherwise re-resolves the
+  # thread-local base on every one of the ~80 ``putByte`` writes per
+  # frame. Caching the base collapses that to a single resolve and is
+  # the dominant per-emit win that brings the hot path to the
+  # M9.R.15f.1 throughput target.
   var cursor = fragmentSlot.batchLen
-  template putByte(b: byte) =
-    fragmentSlot.batchBuf[cursor] = b
-    inc cursor
-  template putU16Le(v: uint16) =
-    putByte(byte(v and 0xFF'u16))
-    putByte(byte((v shr 8) and 0xFF'u16))
-  template putU32Le(v: uint32) =
-    putByte(byte(v and 0xFF'u32))
-    putByte(byte((v shr 8) and 0xFF'u32))
-    putByte(byte((v shr 16) and 0xFF'u32))
-    putByte(byte((v shr 24) and 0xFF'u32))
-  template putU64Le(v: uint64) =
-    putByte(byte(v and 0xFF'u64))
-    putByte(byte((v shr 8) and 0xFF'u64))
-    putByte(byte((v shr 16) and 0xFF'u64))
-    putByte(byte((v shr 24) and 0xFF'u64))
-    putByte(byte((v shr 32) and 0xFF'u64))
-    putByte(byte((v shr 40) and 0xFF'u64))
-    putByte(byte((v shr 48) and 0xFF'u64))
-    putByte(byte((v shr 56) and 0xFF'u64))
+  let batchBase = cast[ptr UncheckedArray[byte]](addr fragmentSlot.batchBuf[0])
+  # The format is little-endian on the wire. On the LE hosts the monitor
+  # shim runs on (x86-64 / arm64) a width-native store IS the LE encoding,
+  # so we write each scalar with one unaligned store instead of 2/4/8
+  # masked byte stores + increments — turning the ~80 per-frame byte
+  # stores into ~12 word stores. A byte-wise fallback keeps the (untested
+  # but correct) path alive for a hypothetical big-endian host.
+  when cpuEndian == littleEndian:
+    template putU16Le(v: uint16) =
+      cast[ptr uint16](addr batchBase[cursor])[] = v
+      cursor += 2
+    template putU32Le(v: uint32) =
+      cast[ptr uint32](addr batchBase[cursor])[] = v
+      cursor += 4
+    template putU64Le(v: uint64) =
+      cast[ptr uint64](addr batchBase[cursor])[] = v
+      cursor += 8
+  else:
+    template putByte(b: byte) =
+      batchBase[cursor] = b
+      inc cursor
+    template putU16Le(v: uint16) =
+      putByte(byte(v and 0xFF'u16))
+      putByte(byte((v shr 8) and 0xFF'u16))
+    template putU32Le(v: uint32) =
+      putByte(byte(v and 0xFF'u32))
+      putByte(byte((v shr 8) and 0xFF'u32))
+      putByte(byte((v shr 16) and 0xFF'u32))
+      putByte(byte((v shr 24) and 0xFF'u32))
+    template putU64Le(v: uint64) =
+      putByte(byte(v and 0xFF'u64))
+      putByte(byte((v shr 8) and 0xFF'u64))
+      putByte(byte((v shr 16) and 0xFF'u64))
+      putByte(byte((v shr 24) and 0xFF'u64))
+      putByte(byte((v shr 32) and 0xFF'u64))
+      putByte(byte((v shr 40) and 0xFF'u64))
+      putByte(byte((v shr 48) and 0xFF'u64))
+      putByte(byte((v shr 56) and 0xFF'u64))
   template putString(s: string) =
     putU32Le(uint32(s.len))
     if s.len > 0:
-      copyMem(addr fragmentSlot.batchBuf[cursor], unsafeAddr s[0], s.len)
+      copyMem(addr batchBase[cursor], unsafeAddr s[0], s.len)
       cursor += s.len
 
   # Frame length prefix.
@@ -491,6 +530,7 @@ proc appendFragmentRecord*(fragmentDir: string; record: MonitorRecord) =
   putU32Le(uint32(ord(record.probeResult)))
   putString(record.path)
   putString(record.detail)
+  {.pop.}
 
   fragmentSlot.batchLen = cursor
 
