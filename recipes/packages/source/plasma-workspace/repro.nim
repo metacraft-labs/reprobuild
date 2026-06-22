@@ -485,6 +485,16 @@ package plasmaWorkspaceSource:
         # Plasma::Menu QML; the gmenu-dbusmenu-proxy bridge only
         # surfaces GTK-app global menus for X11 sessions.
         "sed -i 's|^ecm_optional_add_subdirectory(gmenu-dbusmenu-proxy)$|if(WITH_X11)\\n    ecm_optional_add_subdirectory(gmenu-dbusmenu-proxy)\\nendif()|' src/CMakeLists.txt",
+        # M9.R.15q.13.5 — drop the kcm_users sub-target.  kcm_users links
+        # against libcrypt for /etc/shadow password hashing in the
+        # account-management KCM; we don't ship libxcrypt as a from-
+        # source sibling and the v1 Plasma session doesn't need the
+        # user-management KCM at the shell layer (users can change
+        # passwords via ``passwd`` from a terminal, or distributions can
+        # add the kcm_users glue in a fullbuild milestone with libxcrypt
+        # added).  Drop the add_subdirectory(users) entry from the kcms
+        # umbrella CMakeLists.
+        "sed -i 's|^add_subdirectory(users)$|# M9.R.15q.13.5: dropped — needs libcrypt (kcm_users links -lcrypt)|' src/kcms/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
