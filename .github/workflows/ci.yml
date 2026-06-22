@@ -93,7 +93,10 @@ jobs:
         uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
           repo: metacraft-labs/runquota
-          ref: main
+          # runquota's mainline is ``dev`` (its default branch); ``main`` is
+          # stale and lacks the b0 config.nims closure fix + the forking-lease
+          # completion fix the reprobuild b0 / cmake-develop tests depend on.
+          ref: dev
           path: ${{ github.workspace }}/../runquota
           gh-token: ${{ steps.ci_token.outputs.token }}
 
