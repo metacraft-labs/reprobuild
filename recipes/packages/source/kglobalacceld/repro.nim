@@ -64,9 +64,17 @@ package kglobalacceldSource:
   config:
     discard
 
-  library libKF6GlobalAccelD:
+  ## kglobalacceld emits ``libKGlobalAccelD.so`` (note: NO KF6 prefix —
+  ## this is the PLASMA-line library, distinct from the KF6 framework
+  ## ``libKF6GlobalAccel.so`` shipped by the sibling ``kglobalaccel``
+  ## from-source recipe).
+  library libKGlobalAccelD:
     discard
 
+  ## ``libexec/kglobalacceld`` (under ``$libdir/libexec/`` — not the
+  ## $bindir). The Plasma session script launches it as a long-running
+  ## D-Bus service; KDE's CMake glue installs it under the Qt6
+  ## INSTALL_LIBEXECDIR rather than INSTALL_BINDIR by convention.
   executable kglobalacceld:
     discard
 
@@ -78,7 +86,7 @@ package kglobalacceldSource:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6GlobalAccelD")
+      discard pkg.library("libKGlobalAccelD")
       discard pkg.executable("kglobalacceld")
     finally:
       clearCurrentOwningPackageOverride()

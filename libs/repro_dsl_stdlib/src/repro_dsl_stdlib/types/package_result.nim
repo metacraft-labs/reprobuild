@@ -1406,7 +1406,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # we already used ``installPrefix = effectiveDestRoot & "/usr/bin"``
     # above, so derive ``sbinSrcDir`` parallel to it here.
     let sbinSrcDir = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
-    let candidateDirs = @[escapedSrcDir, sbinSrcDir]
+    # M9.R.15q.11.4 — KDE Plasma daemons (kglobalacceld, kactivitymanagerd,
+    # etc.) install under ``$libdir/libexec/`` per Qt6's INSTALL_LIBEXECDIR
+    # convention; some upstreams use ``$prefix/libexec/`` directly. Probe
+    # both shapes after the canonical $bindir + $sbindir.
+    let libexecSrcDir = (effectiveDestRoot & "/usr/libexec").replace("\\", "/").replace("\"", "\\\"")
+    let libLibexecSrcDir = (effectiveDestRoot & "/usr/lib/libexec").replace("\\", "/").replace("\"", "\\\"")
+    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir]
     # M9.R.15q.7.9 — also probe snake_case form. The kebab probe
     # covers ``kwinWayland`` → ``kwin-wayland`` but kwin upstream
     # installs ``kwin_wayland`` (snake_case underscore). The library
@@ -1435,7 +1441,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
       first = false
-    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & "\" >&2; exit 1; fi")
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(name)

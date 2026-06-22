@@ -207,7 +207,8 @@ proc autotools_package*(srcDir: string;
                         installTarget = "install";
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
-                        patchHardcodedFile = false): AutotoolsPackageResult =
+                        patchHardcodedFile = false;
+                        skipConfigure = false): AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
   ## the engine skips path-mode profile lookup for ``sh`` (recipes
@@ -318,10 +319,24 @@ proc autotools_package*(srcDir: string;
       "autoreconf -fi ) && "
     else:
       ""
+  # M9.R.15q.11.4 — ``skipConfigure = true`` for raw-Makefile packages
+  # (libcap, linux-kernel, busybox etc.) that ship NO ``configure``
+  # script but DO use ``make`` against a Makefile in the source tree
+  # itself. The configure edge becomes a stamp-only ``mkdir -p buildDir
+  ## && cp -r src/* buildDir/`` so the downstream ``make -C buildDir``
+  ## sees the source-tree Makefile in-place; configureOptions are then
+  ## passed as ``make`` command-line ``VAR=VALUE`` overrides via the
+  ## downstream build/install action's ``vars`` slot (recipe sets them
+  ## via ``configureOptions`` which we forward).
   let configureScript =
-    bootstrapPrefix &
-    "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
-    srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
+    if skipConfigure:
+      bootstrapPrefix &
+      "set -e; mkdir -p " & buildDir & " && cp -aL " & srcFromBuild &
+        "/. " & buildDir & "/"
+    else:
+      bootstrapPrefix &
+      "mkdir -p " & buildDir & " && cd " & buildDir & " && " &
+      srcFromBuild & "/" & configureScriptName & " " & configureArgs.join(" ")
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
@@ -392,7 +407,16 @@ proc autotools_package*(srcDir: string;
   # would vary with N — defeating determinism.
   let jobs = max(1, min(countProcessors(), 8))
   let makeflags = "-j" & $jobs
-  let buildEdge = make(workDir = buildDir, vars = @[], targets = @[],
+  # M9.R.15q.11.4 — when ``skipConfigure`` is true, ``configureOptions``
+  # are passed as command-line ``VAR=VALUE`` overrides to ``make``
+  # (libcap's BUILD_CC=gcc / prefix=/usr / GOLANG=no etc. all flow into
+  # the make invocation rather than into a configure script that doesn't
+  # exist).
+  var buildVars: seq[string] = @[]
+  if skipConfigure:
+    for o in configureOptions:
+      buildVars.add(o)
+  let buildEdge = make(workDir = buildDir, vars = buildVars, targets = @[],
     after = @[configureEdge],
     extraEnv = @[("MAKEFLAGS", makeflags)])
   # M9.R.14b.3b: install must wait for compile to finish; the prior
@@ -442,6 +466,12 @@ proc autotools_package*(srcDir: string;
       destdir
   installEnv.add(("DESTDIR", installDestdir))
   installVars.add("DESTDIR=" & installDestdir)
+  # M9.R.15q.11.4 — propagate skipConfigure VAR overrides into install
+  # as well (the install target re-evaluates the Makefile and needs the
+  # same prefix=/usr / lib=lib / RAISE_SETFCAP=no etc. assignments).
+  if skipConfigure:
+    for o in configureOptions:
+      installVars.add(o)
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],

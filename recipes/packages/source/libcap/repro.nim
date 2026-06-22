@@ -243,7 +243,13 @@ package libcapSource:
         "prefix=/usr",
         "GOLANG=no",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      # M9.R.15q.11.4 — libcap has NO ``configure`` script (raw
+      # Makefile build); the autotools_package constructor's
+      # ``skipConfigure=true`` mode stamps a ``cp -aL src/. build/``
+      # action in place of the configure step + threads the
+      # ``configureOptions`` through as ``make VAR=VALUE`` overrides.
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  skipConfigure = true)
       discard pkg.library("libCap")
       discard pkg.executable("capsh")
       discard pkg.executable("getcap")
