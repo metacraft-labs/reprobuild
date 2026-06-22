@@ -153,9 +153,15 @@ suite "M7 native shallow hash (instruction bytes)":
   #   * a CALL-CONTAINING function whose callee DISTANCE changes re-hashes even
   #     with unchanged source — a CONSERVATIVE SAFE re-run, never a false skip.
   #
-  # `gap` is present only in the "shifted" build and sits BETWEEN `callee` and
-  # `caller_d`, so it both relocates `callee` (a leaf) and changes the
-  # `caller_d → callee` distance (so caller_d's `bl`/`call` operand bytes move).
+  # Two gaps appear only in the "shifted" build. `gap0` sits BEFORE `callee` and
+  # `gap` sits BETWEEN `callee` and `caller_d`. Toolchains that emit functions in
+  # source order (e.g. Linux/GCC at -O0) place each function at a higher address
+  # than the one declared before it, so:
+  #   * `gap0` relocates `callee` (a leaf moves to a higher address), and
+  #   * `gap` changes the `caller_d → callee` distance (so caller_d's `bl`/`call`
+  #     operand bytes move) AND further relocates `caller_d`.
+  # A single gap between `callee` and `caller_d` is NOT enough on a source-order
+  # toolchain: `callee` is declared first, so nothing inserted after it moves it.
 
   const relocBaseSrc = """
 __attribute__((noinline)) int callee(int x) { return x * 2 + 7; }
@@ -163,14 +169,15 @@ __attribute__((noinline)) int caller_d(void) { return callee(5); }
 int main(void) { return caller_d(); }
 """
   const relocShiftedSrc = """
+__attribute__((noinline)) int gap0(void) { volatile int s=0; for(int i=0;i<40;i++) s+=i*i; return s; }
 __attribute__((noinline)) int callee(int x) { return x * 2 + 7; }
 __attribute__((noinline)) int gap(void) { volatile int s=0; for(int i=0;i<80;i++) s+=i*i*i; return s; }
 __attribute__((noinline)) int caller_d(void) { return callee(5); }
-int main(void) { return caller_d() + gap(); }
+int main(void) { return caller_d() + gap() + gap0(); }
 """
 
   test "relocated_leaf_function_keeps_its_instruction_hash":
-    # `callee` is a pure leaf. Inserting `gap` before `caller_d` relocates
+    # `callee` is a pure leaf. Inserting `gap0` before `callee` relocates
     # `callee` (its address shifts) but its source is unchanged ⇒ its
     # position-independent bytes — and thus its hash — are identical. This is the
     # genuine "unedited function whose ADDRESS moved stays stable" demonstration.
@@ -193,7 +200,9 @@ int main(void) { return caller_d() + gap(); }
 
   test "relocated_call_containing_function_rehashes_safely":
     # `caller_d` contains a call to `callee`. Inserting `gap` between them
-    # changes the caller→callee DISTANCE, so the pc-relative call operand bytes
+    # changes the caller→callee DISTANCE (gap0 before callee shifts both equally,
+    # but gap between them changes their relative distance), so the pc-relative
+    # call operand bytes
     # change ⇒ caller_d's instruction hash CHANGES despite identical source.
     # This is the documented precision LIMITATION. It is SAFE: a changed shallow
     # hash drives the engine to a conservative RE-RUN (idRerunChanged), never a
