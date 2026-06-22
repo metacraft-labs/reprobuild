@@ -138,7 +138,20 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
-  let escapedUrl = spec.url.replace("\"", "\\\"")
+  # M9.R.15q.5.4 — support a relative ``file:./vendor/...`` URL form so
+  # recipes that vendor a tarball can reference it without baking the
+  # host's absolute path into the recipe. The relative path is resolved
+  # against ``projectRoot`` (the recipe directory). curl rejects bare
+  # ``./`` paths in ``file://`` URLs, so the resolution happens at
+  # emission time -- the rewritten URL is a normal ``file:///`` URL
+  # with an absolute filesystem path.
+  var resolvedUrl = spec.url
+  if resolvedUrl.startsWith("file:./") or resolvedUrl.startsWith("file:../"):
+    let relPath = resolvedUrl[5 .. ^1]  # strip "file:" prefix
+    let absPath = projectRoot / relPath
+    let posixAbs = absPath.replace("\\", "/")
+    resolvedUrl = "file://" & posixAbs
+  let escapedUrl = resolvedUrl.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")

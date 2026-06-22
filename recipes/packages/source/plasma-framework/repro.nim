@@ -193,6 +193,27 @@ package plasmaFrameworkSource:
     ## supply CMake configs; wayland-client comes via the wayland recipe.
     "plasma-wayland-protocols"
     "qt6-wayland >=6.6"
+    ## M9.R.15q.4.2 — libplasma's CMakeLists.txt:74 calls
+    ## ``find_package(X11)`` (optional but consumed when present);
+    ## src/plasma/private/theme_p.cpp + src/plasmaquick/*.cpp
+    ## unconditionally ``#include <KX11Extras>`` so plasma-framework
+    ## needs KX11Extras to be published (M9.R.15q.4.2 flips
+    ## KWINDOWSYSTEM_X11=ON on the sibling kwindowsystem recipe) AND
+    ## needs the X11 client libs on its own resolver path so the
+    ## resulting libplasma.so can link against them. The eleven X11
+    ## stubs land via the M9.R.15q.4.1 system_tools aggregator.
+    ## M9.R.15q.4.3 — xorgproto added: CMake's FindX11 probes
+    ## X11/X.h which ships in xorgproto, NOT in libX11.
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -215,6 +236,13 @@ package plasmaFrameworkSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15q.3.4 — kwindowsystem must be built with
+        # KWINDOWSYSTEM_X11=ON so KX11Extras ships; plasma-framework's
+        # src/plasma/private/theme_p.cpp + src/plasmaquick/*.cpp
+        # unconditionally ``#include <KX11Extras>`` and the
+        # ``WITHOUT_X11=ON`` flag does NOT suppress the includes
+        # (only the optional X11 link surface). Tracked separately as
+        # M9.R.15q.3.5 (from-source X11 recipes pending).
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libPlasma")

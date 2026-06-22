@@ -132,6 +132,40 @@ import ./itstool
 # Pinned via nixpkgs#systemdMinimal.dev so the include path picks up
 # ``systemd/sd-login.h`` + the rest of the ``sd-*`` headers.
 import ./libsystemd
+# M9.R.15q.4.1 — X11 stdlib stubs (nix-backed) so KF6 / Plasma modules
+# that opt into the X11 backend (KX11Extras on kwindowsystem,
+# plasma-framework's KX11Extras include) can resolve their X11
+# buildDeps. Includes the core libX11 + libxcb client libraries, the
+# xcb-util-* family (keysyms/wm/renderutil/image/cursor/util) and the
+# canonical xorg extension libraries (libXext + libXfixes + libXrender)
+# that kwin's X11 glue + Qt6's X11 platform plugin need.
+import ./libx11
+import ./libxcb
+import ./xcb_util_keysyms
+import ./xcb_util_wm
+import ./xcb_util_renderutil
+import ./xcb_util_image
+import ./xcb_util_cursor
+import ./xcb_util
+import ./libxext
+import ./libxfixes
+import ./libxrender
+# M9.R.15q.4.3 — xorgproto ships the protocol headers (X11/X.h,
+# X11/Xatom.h, X11/keysymdef.h, X11/extensions/*). CMake's
+# FindX11.cmake probes ``X11/X.h`` (in xorgproto), NOT
+## ``X11/Xlib.h`` (in libX11), to set X11_X11_INCLUDE_PATH.
+import ./xorgproto
+# M9.R.15q.4.3 — libxau ships libXau.so + xau.pc; libxcb's xcb.pc has
+# Requires.private: xau so any pkg-config probe through xcb needs it.
+import ./libxau
+# M9.R.15q.4.6 — libxdmcp ships xdmcp.pc; xcb.pc has
+# Requires.private: xau xdmcp so probes through xcb need it.
+import ./libxdmcp
+# M9.R.15q.4.5 — kwin system-level deps.
+import ./libcanberra
+import ./libepoxy
+import ./libdisplayinfo
+import ./hwdata
 
 export bc
 export bison
@@ -190,3 +224,21 @@ export accountsservice
 export json_glib
 export itstool
 export libsystemd
+export libx11
+export libxcb
+export xcb_util_keysyms
+export xcb_util_wm
+export xcb_util_renderutil
+export xcb_util_image
+export xcb_util_cursor
+export xcb_util
+export libxext
+export libxfixes
+export libxrender
+export xorgproto
+export libxau
+export libxdmcp
+export libcanberra
+export libepoxy
+export libdisplayinfo
+export hwdata
