@@ -394,7 +394,11 @@ proc cmake_package*(srcDir: string;
     return value
   var ldLibraryDirs: seq[string] = @[]
   if projectRoot.len > 0:
-    let recipesRoot = parentDir(parentDir(projectRoot))
+    # ``projectRoot`` is the recipe's package dir
+    # (``recipes/packages/source/<pkg>``).  ``parentDir`` is the sibling
+    # recipes' container (``recipes/packages/source``); siblings live
+    # alongside as ``<recipesRoot>/<dep>/.repro/output/install/usr``.
+    let recipesRoot = parentDir(projectRoot)
     var allDeps: seq[string] = @[]
     for raw in registeredNativeBuildDeps(pkgName):
       allDeps.add(m9r15q13StripDepConstraint(raw))
