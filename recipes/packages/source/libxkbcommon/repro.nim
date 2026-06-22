@@ -252,6 +252,13 @@ package libxkbcommonSource:
         "enable-x11=true",
         "enable-wayland=true",
         "enable-tools=true",
+        # M9.R.15q.4.7 — force libdir=lib (not the meson default
+        # lib64 on x86_64). The sibling wayland + qt6-base recipes
+        # install to lib/, and CMake's FindXKBcommon.cmake's
+        # find_library probe doesn't find /usr/lib64 when the install
+        # mirror's PKG_XKB_LIBRARY_DIRS resolves through the install-
+        # mirror layout. Hardcoding lib/ matches the convention.
+        "libdir=lib",
         # M9.R.14f.3 — upstream 1.13.2 references
         # ``DFLT_XKB_CONFIG_UNVERSIONED_EXTENSIONS_PATH`` /
         # ``DFLT_XKB_CONFIG_VERSIONED_EXTENSIONS_PATH`` from
