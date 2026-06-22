@@ -215,15 +215,13 @@ package plasmaFrameworkSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
-        # M9.R.15q.3.4 — v1 is Wayland-only. kwindowsystem is built
-        # with ``KWINDOWSYSTEM_X11=OFF`` so it ships no ``KX11Extras``
-        # header. plasma-framework's ``src/plasma/private/theme_p.cpp``
-        # unconditionally ``#include <KX11Extras>`` when ``HAVE_X11`` is
-        # set, so we MUST suppress the X11 detection at configure time
-        # via plasma-framework's ``WITHOUT_X11`` option. Without this,
-        # the build trips on ``fatal error: KX11Extras: No such file
-        # or directory`` even though the configure step succeeded.
-        "WITHOUT_X11=ON",
+        # M9.R.15q.3.4 — kwindowsystem must be built with
+        # KWINDOWSYSTEM_X11=ON so KX11Extras ships; plasma-framework's
+        # src/plasma/private/theme_p.cpp + src/plasmaquick/*.cpp
+        # unconditionally ``#include <KX11Extras>`` and the
+        # ``WITHOUT_X11=ON`` flag does NOT suppress the includes
+        # (only the optional X11 link surface). Tracked separately as
+        # M9.R.15q.3.5 (from-source X11 recipes pending).
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libPlasma")
