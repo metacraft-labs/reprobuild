@@ -449,6 +449,20 @@ package plasmaWorkspaceSource:
         # when the ICU symbols aren't linked (the QtCore i18n stack
         # provides a fallback).
         "sed -i '/^        ICU::i18n$/d; /^        ICU::uc$/d' src/applets/digital-clock/plugin/CMakeLists.txt",
+        # M9.R.15q.12.15 — bracket the X11OutputOrderWatcher method
+        # definitions (ctor + refresh + nativeEventFilter + roundtrip,
+        # lines 134-312 in upstream 6.2.5) with ``#if HAVE_X11`` /
+        # ``#endif``.  The upstream source has the class declaration
+        # in the header gated by HAVE_X11 + has the factory branch in
+        # the .cpp gated (line 88), but the four method definitions
+        # below the WaylandOutputOrderWatcher factory branch are NOT
+        # guarded, which trips compile with ``'X11OutputOrderWatcher'
+        # does not name a type`` when WITH_X11=OFF.
+        # Insert ``#if HAVE_X11`` right BEFORE the X11OutputOrderWatcher
+        # ctor and ``#endif`` right BEFORE the WaylandOutputOrder-
+        # Watcher ctor; these are stable anchors in 6.2.5.
+        "sed -i 's|^X11OutputOrderWatcher::X11OutputOrderWatcher(QObject \\*parent)$|#if HAVE_X11\\nX11OutputOrderWatcher::X11OutputOrderWatcher(QObject *parent)|' src/libkworkspace/outputorderwatcher.cpp",
+        "sed -i 's|^WaylandOutputOrderWatcher::WaylandOutputOrderWatcher(QObject \\*parent)$|#endif // HAVE_X11\\nWaylandOutputOrderWatcher::WaylandOutputOrderWatcher(QObject *parent)|' src/libkworkspace/outputorderwatcher.cpp",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
