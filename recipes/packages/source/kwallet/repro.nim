@@ -64,6 +64,13 @@ package kwalletSource:
         "BUILD_TESTING=OFF",
         "BUILD_QCH=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15q.10.7 — disable the kwalletd daemon build. It pulls in
+        # Qca-qt6 (cryptographic abstraction) which we don't ship from-
+        # source yet and have no nix-stub for. plasma-workspace's
+        # umbrella probe only needs ``libKF6Wallet.so`` + the cmake
+        # config, not the daemon binary.
+        "BUILD_KWALLETD=OFF",
+        "BUILD_KWALLET_QUERY=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6Wallet")
