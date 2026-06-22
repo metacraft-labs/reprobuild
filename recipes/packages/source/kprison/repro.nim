@@ -51,6 +51,11 @@ package kprisonSource:
         "BUILD_TESTING=OFF",
         "BUILD_QCH=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15q.10.7c — disable barcode-scanner (Qt6Multimedia). v1
+        # ships the BARCODE GENERATOR side only (which plasma's "share
+        # via QR code" widget consumes); the scanner needs camera+
+        # multimedia plumbing we don't ship from-source.
+        "WITH_MULTIMEDIA=OFF",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6Prison")
