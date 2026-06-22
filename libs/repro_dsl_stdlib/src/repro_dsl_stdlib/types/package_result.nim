@@ -89,13 +89,27 @@ type
 
   AutotoolsPackageResult* = object
     ## Returned by ``autotools_package(...)``. ``configureEdge`` is the
-    ## ``./configure`` invocation; ``compileEdge`` is ``make``;
-    ## ``installEdge`` is ``make install DESTDIR=...``. Recipes that
-    ## need a separate ``make check`` edge wire it through the
-    ## low-level ``make.run`` Layer-3 surface.
+    ## ``./configure`` invocation; ``compileEdge`` is ``make``.
+    ##
+    ## ``installEdge`` is the TERMINAL install-stage edge that downstream
+    ## stage-copy / mirror actions depend on for ordering. When the
+    ## constructor emits the M9.R.15p.2.4 post-install ``.la``-cleanup
+    ## edge (the standard distro practice of stripping libtool archives
+    ## from staged installs), ``installEdge`` is that cleanup edge so
+    ## stage-copy runs after the ``.la`` files are gone. The underlying
+    ## ``make install DESTDIR=...`` action — the one that carries the
+    ## M9.R.14c.1 parallel-make ``MAKEFLAGS=-jN`` hint and the
+    ## ``DESTDIR`` var — is exposed separately as ``installMakeEdge``.
+    ## Recipes that need a separate ``make check`` edge wire it through
+    ## the low-level ``make.run`` Layer-3 surface.
     buildEdge*: BuildActionDef
     compileEdge*: BuildActionDef
     installEdge*: BuildActionDef
+    installMakeEdge*: BuildActionDef
+      ## The raw ``make install DESTDIR=...`` action. Distinct from
+      ## ``installEdge`` whenever a post-install cleanup edge is the
+      ## terminal node; identical to ``installEdge`` otherwise. Carries
+      ## the ``MAKEFLAGS=-jN`` parallel-make hint + the ``DESTDIR`` var.
     destdir*: string
       ## DESTDIR-style staging path. Relative to ``buildDir`` for
       ## autotools recipes (``make install DESTDIR=out`` from a

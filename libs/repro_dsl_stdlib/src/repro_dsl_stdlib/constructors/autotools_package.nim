@@ -502,7 +502,12 @@ proc autotools_package*(srcDir: string;
   AutotoolsPackageResult(
     buildEdge: configureEdge,
     compileEdge: buildEdge,
+    # ``installEdge`` is the terminal install-stage node (the .la
+    # cleanup) so downstream stage-copy/mirror deps chain through it.
+    # ``installMakeEdge`` exposes the raw ``make install`` action that
+    # carries the parallel-make MAKEFLAGS hint + DESTDIR var.
     installEdge: laCleanupEdge,
+    installMakeEdge: installEdge,
     destdir: destdir,
     buildDir: buildDir,
     components: standardComponents())

@@ -82,7 +82,11 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
   test "install edge carries the same MAKEFLAGS":
     # ``make install`` benefits from the same parallel-job hint
     # (most autotools install scripts honour MAKEFLAGS for recursive
-    # ``make -C subdir install`` sub-invocations).
+    # ``make -C subdir install`` sub-invocations). The parallel-make
+    # hint lives on the raw ``make install`` action, exposed as
+    # ``installMakeEdge``; ``installEdge`` is the terminal .la-cleanup
+    # node (an ``sh -c find`` invocation) that downstream stage-copy
+    # deps chain through — see AutotoolsPackageResult's doc comment.
     resetDslPortFetchState()
     setCurrentOwningPackageOverride("parallelInstallPkg")
     try:
@@ -92,7 +96,7 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
       for (k, v) in pkg.compileEdge.env:
         if k == "MAKEFLAGS":
           compileFlags = v
-      for (k, v) in pkg.installEdge.env:
+      for (k, v) in pkg.installMakeEdge.env:
         if k == "MAKEFLAGS":
           installFlags = v
       check compileFlags.len > 0
@@ -109,8 +113,8 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     # parallelism via ``extraEnv`` (which does not enter
     # ``callIdentity``) rather than via the typed ``jobs`` flag
     # (which would). Both edges produce nonempty ids and a distinct
-    # compile vs install pair (install carries a ``DESTDIR=...`` var
-    # + an ``install`` target, both of which enter callIdentity).
+    # compile vs install pair (``installEdge`` is the terminal
+    # .la-cleanup node, a distinct action from the compile ``make``).
     resetDslPortFetchState()
     setCurrentOwningPackageOverride("stableIdPkg")
     try:
