@@ -137,6 +137,52 @@ proc collectBuildBindingsFromBody(body: NimNode;
               rhs: rhs.copyNimTree(),
               typeAnnot: annot)
 
+proc referencesAnyIdent(node: NimNode; names: seq[string]): bool =
+  ## True if `node` contains a free identifier whose name is in `names`.
+  ## Used to detect a binding RHS that reads a SIBLING build-local
+  ## binding (e.g. ``deps = @[binary.id]`` referencing the earlier
+  ## ``let binary = ...``).
+  if node.kind in {nnkIdent, nnkSym}:
+    return $node in names
+  for child in node:
+    if referencesAnyIdent(child, names):
+      return true
+  return false
+
+proc dropSiblingReferencingBindings(bindings: seq[CrossProjectBuildBinding]):
+                                    seq[CrossProjectBuildBinding] =
+  ## A non-annotated binding becomes a module-level cross-project storage
+  ## var via ``var <storage>*: typeof(<rhs>)`` guarded by
+  ## ``when compiles(typeof(<rhs>))`` (see ``generatedCrossProjectStorage``).
+  ## That ``typeof`` is evaluated at MODULE scope. If the RHS reads a
+  ## SIBLING build-local binding by name, that name does NOT resolve to
+  ## the build-local ``let`` at module scope — instead it resolves to the
+  ## sibling's own accessor template (``template <name>*(b: PackageBuild
+  ## [...]): auto``). Forcing the ``auto`` return type of that accessor
+  ## from inside the ``typeof`` re-enters template expansion without a
+  ## terminating base case, so Nim aborts with "template instantiation
+  ## too nested" (the runaway surfaces wherever the slicing methods that
+  ## the accessor's body reaches bottom out — e.g. ``package_result``).
+  ## ``compiles`` does not rescue this: the cycle happens *during* the
+  ## ``typeof`` elaboration, not as a clean, catchable compile failure.
+  ##
+  ## Such a binding cannot back a module-level storage var anyway (its
+  ## RHS is only meaningful inside the build block where the sibling
+  ## ``let`` is live), so we exclude it from the cross-project set. It
+  ## stays an ordinary build-local ``let`` — still preserved verbatim by
+  ## the lowered builder and the init-time body splice — it just isn't
+  ## reachable as ``<pkg>.build.<binding>``. Annotated bindings are kept:
+  ## their storage var is emitted from the annotation, so the RHS is never
+  ## evaluated at module scope and the runaway expansion cannot arise.
+  var names: seq[string] = @[]
+  for b in bindings:
+    names.add b.name
+  result = @[]
+  for b in bindings:
+    if b.typeAnnot == nil and referencesAnyIdent(b.rhs, names):
+      continue
+    result.add b
+
 proc collectTopLevelBuildBindings(body: NimNode):
                                   seq[CrossProjectBuildBinding] =
   result = @[]
@@ -149,6 +195,7 @@ proc collectTopLevelBuildBindings(body: NimNode):
        $stmt[0] == "build" and
        stmt[^1].kind == nnkStmtList:
       collectBuildBindingsFromBody(stmt[^1], result)
+  result = dropSiblingReferencingBindings(result)
 
 # ---------------------------------------------------------------------------
 # Emission helpers (v8 lines 1227-1346).

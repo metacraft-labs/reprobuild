@@ -1827,6 +1827,11 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
       ".." / "nim-ssz-serialization",
     ]), "ssz_serialization.nim"),
     ("NIMCRYPTO_SRC", anchored([
+      # Vendored source-only slice under reprobuild's own libs/, listed
+      # first so the recipe-compile is self-contained and does not depend
+      # on a consumer's sibling nimcrypto checkout. Mirrors config.nims.
+      # Marker is nimcrypto/hash.nim.
+      "libs" / "nimcrypto",
       ".." / "codetracer" / "libs" / "nimcrypto",
       ".." / "nimcrypto",
     ]), "nimcrypto" / "hash.nim"),
@@ -2432,6 +2437,11 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
     ".." / "nim-ssz-serialization",
   ], "ssz_serialization.nim")
   result.addExternalPackagePath(workDir, "NIMCRYPTO_SRC", [
+    # Vendored source-only slice under reprobuild's own libs/, listed
+    # first so the recipe-compile is self-contained and does not depend on
+    # a consumer's sibling nimcrypto checkout. Mirrors config.nims. Marker
+    # is nimcrypto/hash.nim.
+    "libs" / "nimcrypto",
     ".." / "codetracer" / "libs" / "nimcrypto",
     ".." / "nimcrypto",
   ], "nimcrypto" / "hash.nim")

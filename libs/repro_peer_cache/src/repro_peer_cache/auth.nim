@@ -62,26 +62,24 @@ import bearssl/abi/bearssl_hash as bsslHashAbi
 import blake3
 
 import ./types
+import ./key_types
+export key_types
 
 # ---------------------------------------------------------------------------
 # Key + signature types.
+#
+# The plain byte-array key / signature types and their P256 length
+# constants live in the BearSSL-free `key_types` module (re-exported
+# above) so downstream type-only consumers — `repro_binary_cache_server/
+# types`, `repro_binary_cache_client/cache_key`, the project DSL — do not
+# pull in the BearSSL FFI that this module's sign / verify procedures use.
+# Only the BearSSL-dependent curve handle stays here.
 # ---------------------------------------------------------------------------
 
 const
-  P256PrivLen* = 32
-  P256PubLen*  = 65
-  P256SigLen*  = 64
   P256Curve    = cint(bsslEcAbi.EC_secp256r1)
 
 type
-  PrivateKeyBytes* = array[P256PrivLen, byte]
-  PublicKeyBytes*  = array[P256PubLen, byte]
-  SignatureBytes*  = array[P256SigLen, byte]
-
-  PeerKeypair* = object
-    publicKey*: PublicKeyBytes
-    privateKey*: PrivateKeyBytes
-
   TrustAnchors* = ref object
     ## Per-tenant trust anchor: every allowed peer's ECDSA-P256
     ## public key. Real asymmetric verify uses pubkey only; the M3

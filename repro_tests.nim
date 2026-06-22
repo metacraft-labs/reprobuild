@@ -3422,6 +3422,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/kwayland/test_kwayland_source.nim",
+    binary: "build/test-bin/test_kwayland_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/kwin/test_kwin_source.nim",
     binary: "build/test-bin/test_kwin_source",
     defines: @[],
