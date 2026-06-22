@@ -242,6 +242,15 @@ package kwinSource:
     ## qt6-svg supplies the Qt6Svg dependency kwin's QML scene loader
     ## consumes for vector icons.
     "qt6-svg >=6.6"
+    ## M9.R.15q.5.10 — kwin 6.2.5's CMakeLists.txt:60 declares
+    ## ``find_package(Qt6 ... COMPONENTS ... Core5Compat ...)``.
+    ## qt6-5compat ships ``libQt6Core5Compat.so``.
+    "qt6-5compat >=6.8"
+    ## M9.R.15q.5.10 — kwin 6.2.5's CMakeLists.txt:60 declares
+    ## ``find_package(Qt6 ... COMPONENTS ... Sensors ...)`` for
+    ## auto-rotation on convertible / tablet form factors.
+    ## qt6-sensors ships ``libQt6Sensors.so``.
+    "qt6-sensors >=6.8"
     ## libdrm is the kernel DRM client library kwin's DRM backend uses
     ## to drive direct-rendering on tty consoles. The sibling
     ## ``libdrmSource`` recipe vendors a compatible version.
@@ -304,9 +313,13 @@ package kwinSource:
     "kauth >=6.0"
     "kcolorscheme >=6.0"
     "kidletime >=6.0"
-    "kdeclarative >=6.0"
-    "kcmutils >=6.0"
-    "knewstuff >=6.0"
+    ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
+    ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
+    ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
+    ## the cacheVars below set) these are NOT looked up and so the
+    ## from-source auto-recurse should not need to build them. We keep
+    ## kpackage + kirigami because the QML side of kwin's effects
+    ## still uses them.
     "kpackage >=6.0"
     "kirigami >=6.0"
     ## hwdata (RUNTIME) for monitor vendor-ID mapping.

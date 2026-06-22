@@ -166,6 +166,8 @@ import ./libcanberra
 import ./libepoxy
 import ./libdisplayinfo
 import ./hwdata
+# M9.R.15q.5.7 — attica is the OCS client knewstuff needs.
+import ./attica
 
 export bc
 export bison
@@ -242,3 +244,4 @@ export libcanberra
 export libepoxy
 export libdisplayinfo
 export hwdata
+export attica

@@ -32,6 +32,12 @@ package knewstuffSource:
     "extra-cmake-modules >=6.0"
     "qt6-base >=6.6"
     "qt6-tools >=6.6"
+    ## M9.R.15q.5.7 — knewstuff's CMakeLists declares
+    ## ``find_package(Qt6 ... Qml REQUIRED)`` for the QML-bound
+    ## ``KNSCore::QtQuickDialogWrapper`` shim that wraps the C++
+    ## back-end into a QML-accessible model. Qt6Qml is in the
+    ## qt6-declarative recipe.
+    "qt6-declarative >=6.6"
     "kcoreaddons >=6.0"
     "kconfig >=6.0"
     "ki18n >=6.0"
@@ -39,6 +45,13 @@ package knewstuffSource:
     "kxmlgui >=6.0"
     "karchive >=6.0"
     "kpackage >=6.0"
+    ## M9.R.15q.5.7 — knewstuff's CMakeLists.txt:43 declares
+    ## ``find_package(KF6Attica ... CONFIG REQUIRED)`` for the OCS
+    ## (Open Collaboration Services) client back-end. attica is a
+    ## nix-stub (no from-source sibling yet; only consumer is
+    ## knewstuff which is itself only exercised by kwin's "Get New
+    ## Window Decorations" feature, no v1 runtime path).
+    "attica >=6.0"
 
   config:
     discard

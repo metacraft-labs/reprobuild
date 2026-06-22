@@ -60,7 +60,14 @@ package kdeclarativeSource:
   config:
     discard
 
-  library libKF6Declarative:
+  library libKF6CalendarEvents:
+    ## M9.R.15q.5.6.c — kdeclarative 6.10.0 actually installs the
+    ## ``libKF6CalendarEvents.so`` shared library plus a private
+    ## ``libkquickcontrolsprivate.so``. There's no
+    ## ``libKF6Declarative.so`` -- the "KF6Declarative" name is the
+    ## historical package name from the merged ECM era. We claim
+    ## libKF6CalendarEvents (the public one) as the recipe's artifact;
+    ## the private library is consumed via the QML plugins.
     discard
 
   build:
@@ -73,7 +80,7 @@ package kdeclarativeSource:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6Declarative")
+      discard pkg.library("libKF6CalendarEvents")
     finally:
       clearCurrentOwningPackageOverride()
 
