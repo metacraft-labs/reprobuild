@@ -13,6 +13,9 @@
 import ./qt6_tools
 import ./qt6_declarative
 import ./qt6_svg
+# M9.R.15q.9.2 — qt6-positioning prebuilt-nix channel; from-source
+# sibling lives at recipes/packages/source/qt6-positioning.
+import ./qt6_positioning
 import ./kf6_base
 import ./karchive
 import ./kbookmarks
@@ -34,10 +37,31 @@ import ./kscreenlocker
 import ./kglobalacceld
 import ./kpipewire
 import ./libqaccessibilityclient
+# M9.R.15q.9.2 — plasma-workspace's KF6 + Plasma dep family
+# (CMakeLists.txt find_package probes). qcoro6 + kparts + krunner +
+# knotifyconfig + kwallet + kprison + ktextwidgets + ksysguard +
+# layer-shell-qt + phonon4qt6 + plasma5support + plasma-activities-
+# stats + kscreen + breeze; kpipewire + kglobalacceld + kscreenlocker
+# already lifted in earlier M9.R.15q.4 / M9.R.15q.6 waves.
+import ./qcoro6
+import ./kparts
+import ./krunner
+import ./knotifyconfig
+import ./kwallet
+import ./kprison
+import ./ktextwidgets
+import ./ksysguard
+import ./layer_shell_qt
+import ./phonon4qt6
+import ./plasma5support
+import ./plasma_activities_stats
+import ./kscreen
+import ./breeze
 
 export qt6_tools
 export qt6_declarative
 export qt6_svg
+export qt6_positioning
 export kf6_base
 export karchive
 export kbookmarks
@@ -58,3 +82,17 @@ export kscreenlocker
 export kglobalacceld
 export kpipewire
 export libqaccessibilityclient
+export qcoro6
+export kparts
+export krunner
+export knotifyconfig
+export kwallet
+export kprison
+export ktextwidgets
+export ksysguard
+export layer_shell_qt
+export phonon4qt6
+export plasma5support
+export plasma_activities_stats
+export kscreen
+export breeze
