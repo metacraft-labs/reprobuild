@@ -2836,10 +2836,34 @@
     `m22_data_breakpoint_test` (8), `m25a_unified_engine_test` (3), `python_flow_dap_test`
     (1); `cargo clippy --lib` clean. Pre-existing env SIGABRT failures
     (`ruby_flow_dap_test` etc., recorder-on-PATH) confirmed A/B against clean `dev`.
-  - [ ] M25b — LOCAL (filesystem) access: when the `.ct` is on local disk, populate the
+  - [X] M25b — LOCAL (filesystem) access: when the `.ct` is on local disk, populate the
     maps with MULTIPLE THREADS over DISJOINT step/chunk RANGES (parallel fill), since
     random access is cheap. Track which ranges are populated (range-aware, builds on
     M24c's range awareness). Correctness identical; measurably parallel.
+    DONE: the on-first-demand WHOLE-TABLE build (`lazy_full_steps` → `db.steps` +
+    line→step map, triggered by `steps_on_line` / `step_map_for_path` / `steps_from` /
+    `materialized_db`) now splits `[0, count)` into N disjoint contiguous ranges
+    (N = bounded available parallelism) and replays each on its OWN `std::thread::scope`
+    thread over an INDEPENDENT per-thread `SeekableStepStream` (its own one-chunk
+    decompression cache, so threads neither contend on the shared source's `Mutex` nor
+    thrash one cached chunk), then MERGES the per-thread `WholeStepTableSink` partials in
+    range order — `DbStep` array concatenated by index, each line's step list concatenated
+    in range order so per-line step ORDER is identical to the sequential build. All shards
+    drive the SAME M25a `replay_steps_into_sinks` engine; only WHICH ranges run on WHICH
+    threads changed. An ACCESS-STRATEGY SEAM (`StepBuildStrategy::Local { threads }` vs the
+    `NetworkForward` M25c placeholder, default `Local`) selects the path; `threads == 1` /
+    tiny traces / a non-reopenable source fall back to the sequential single-stream build.
+    Point lookups stay single-chunk lazy (M24c unchanged — only the already-on-demand
+    whole-table build went parallel; open stays lazy). Implemented in
+    `db-backend/src/ctfs_trace_reader/step_value_stream_source.rs`
+    (`StepBuildStrategy`, `split_disjoint_ranges`, `build_whole_step_table`,
+    `build_partials_parallel`, `merge_partials`, `SeekableStepStream::open_sibling`,
+    `LazyStepCache::build_whole_table`) wired through `mod.rs` `lazy_full_steps`.
+    Parity + laziness + determinism + multi-chunk-shard coverage proven in
+    `db-backend/tests/m25b_parallel_step_build_test.rs` (parallel build byte-identical to
+    sequential incl. per-line ORDER, across thread counts and repeated runs) and the
+    `split_disjoint_ranges` tiling unit test; the M24c lazy point-lookup tests
+    (`ctfs_lazy_production_steps_test`) and the M25a engine test stay green.
   - [ ] M25c — NETWORK access: when the `.ct` is fetched over the network, populate
     FORWARD from the search START POINT toward the next breakpoint/tracepoint hit only —
     do not touch the whole file. (Audit whether a network/remote `.ct` loading mode
