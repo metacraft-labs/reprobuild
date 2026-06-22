@@ -217,6 +217,12 @@ package sddmSource:
     ## the X11 authentication cookie generation in the greeter's
     ## display-server-handshake glue.
     "libxau >=1.0"
+    ## M9.R.15q.8.4 — xorgproto supplies `xproto.pc` which `xau.pc`
+    ## requires transitively (libxau's xau.pc declares
+    ## `Requires: xproto`). Without xorgproto on PKG_CONFIG_PATH the
+    ## libxau probe fails with "Package 'xproto', required by 'xau',
+    ## not found".
+    "xorgproto"
     ## M9.R.15q.8.1 — libxcb supplies XCB which sddm's
     ## `find_package(XCB REQUIRED)` consumes via ECM's `FindXCB.cmake`
     ## for the X11 display backend.
@@ -328,6 +334,21 @@ package sddmSource:
           pkgCfgDirs.add(pShare)
       for store in walkPattern("/nix/store/*-libpthread-stubs-*"):
         if not dirExists(store): continue
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      # xorgproto ships xproto.pc which xau.pc requires transitively
+      # (libxau-1.0.12/xau.pc: "Requires: xproto"). Without xorgproto on
+      # PKG_CONFIG_PATH, pkg_check_modules(LIBXAU REQUIRED "xau") fails
+      # with "Package 'xproto', required by 'xau', not found".
+      for store in walkPattern("/nix/store/*-xorgproto-*"):
+        let n = extractFilename(store)
+        if n.endsWith(".drv") or n.endsWith(".tar.xz"):
+          continue
+        if not dirExists(store): continue
+        let pShare = store / "share" / "pkgconfig"
+        if dirExists(pShare):
+          pkgCfgDirs.add(pShare)
         let pLib = store / "lib" / "pkgconfig"
         if dirExists(pLib):
           pkgCfgDirs.add(pLib)
