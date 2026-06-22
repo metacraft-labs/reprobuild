@@ -2782,3 +2782,44 @@
     full decompression) — a deliberate trade for clean per-path chunk-decompression
     accounting; can be collapsed to one shared `Arc` later if the extra index parse ever
     matters.
+
+* M25 — Unified, access-pattern-aware lazy map population (owner guidance 2026-06-22)
+  :STATUS: planned
+
+  Owner guidance refining M24c's lazy population:
+   (1) "Most likely we can end up with the SAME code that builds the omniscient DB
+       tables and populates the local in-memory tables during replay by processing the
+       events in the other regular CTFS streams until a breakpoint is hit." → UNIFY the
+       lazy on-demand population with the omniscient-DB build into one "replay the
+       regular CTFS streams forward, processing events, populating the maps until a
+       breakpoint/tracepoint is hit" engine — not two parallel implementations.
+   (2) "The code can behave differently when the full trace is available locally vs
+       fetched over the network. When local, launch multiple threads populating disjoint
+       RANGES of the file. When over the internet, process events only from the starting
+       point of the search going forward (toward the next breakpoint/tracepoint hit)."
+
+  Current state: M24c populates the step/value maps with a per-point chunk-range fill
+  (`LazyStepCache`/`LazyValueCache`); the omniscient-DB build (`omniscient_db.rs`,
+  `lazy_omniscient_prep_trigger.rs`) is a separate path; breakpoint/tracepoint search is
+  in `flow_preloader.rs`/`dap_handler.rs`.
+
+  Deliverables (decomposed):
+  - [ ] M25a — Unify the population engine: one routine that replays the regular CTFS
+    streams (steps/values/events) over a step range, processing events to populate the
+    in-memory maps (line→step / `step_map`, place→change-history) AND/OR the omniscient
+    tables (`linehits.tc`/`memwrites.tc`) — the lazy on-demand path and the omniscient
+    prep both call it. Identical results to today; DAP + omniscient suites green.
+  - [ ] M25b — LOCAL (filesystem) access: when the `.ct` is on local disk, populate the
+    maps with MULTIPLE THREADS over DISJOINT step/chunk RANGES (parallel fill), since
+    random access is cheap. Track which ranges are populated (range-aware, builds on
+    M24c's range awareness). Correctness identical; measurably parallel.
+  - [ ] M25c — NETWORK access: when the `.ct` is fetched over the network, populate
+    FORWARD from the search START POINT toward the next breakpoint/tracepoint hit only —
+    do not touch the whole file. (Audit whether a network/remote `.ct` loading mode
+    exists in the db-backend; if it's not yet built, design the population engine with a
+    pluggable access strategy + a local default, and implement the forward-from-search
+    strategy behind the same seam so it's ready when network loading lands.)
+
+  Acceptance: one population engine shared with the omniscient build; local traces
+  populate maps in parallel over disjoint ranges; network traces populate forward from
+  the search start; breakpoint/tracepoint resolution is identical to today; no regression.
