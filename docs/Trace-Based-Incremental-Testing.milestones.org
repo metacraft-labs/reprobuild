@@ -2927,30 +2927,73 @@
   (documented under M25c).
 
 * M26 — Consume the prepopulated `step-map.ns` breakpoint namespace
-  :STATUS: planned
+  :STATUS: DONE (2026-06-22) — CONSUMER wired; breakpoint resolution prefers the
+           prepopulated table when present, falls back to the M24c/M25b whole-table
+           build when absent. Production EMISSION is a separate writer-side toggle
+           (no writer emits the table today — see reality note below).
 
   The spec's prepopulated breakpoint index — `step-map.ns`, a CTFS namespace mapping
   `(path_id, line) → step_id` ranges (`Seek-Based-CTFS-Reader.md §4.1`, the spec's
-  Approach A for "continue to breakpoint") — is WRITTEN by the Nim
-  `MultiStreamTraceWriter` at recording end but is NOT READ by the db-backend (zero
-  consumers; it rebuilds `steps_on_line` on demand via the M24c/M25b whole-table build).
-  This is exactly the owner's "use the prepopulated tables when available" guidance for
-  breakpoint resolution: when `step-map.ns` is present, resolve a breakpoint's line→step
-  directly from it WITHOUT building the whole step table — the prepopulated namespace is
-  the same data the lazy build would produce, computed at recording time.
+  Approach A for "continue to breakpoint") — is now READ by the db-backend: when a
+  `.ct` carries it, a breakpoint's line→step resolves directly from the index WITHOUT
+  building the whole step table; the index holds exactly the data the lazy build would
+  produce, computed at recording time.
+
+  *** REALITY CHECK (the earlier plan was wrong — corrected here)
+  The original plan claimed `step-map.ns` "is WRITTEN by the Nim `MultiStreamTraceWriter`
+  at recording end". That is FALSE. Investigation (file:line evidence):
+  - `step-map.ns` (magic `STMP`, `Seek-Based-CTFS-Reader.md §4.1`) has NO emitter
+    anywhere — it is documented-but-unbuilt.
+  - The Nim writer instead has a SEPARATE, OPT-IN `LinehitsBuilder`
+    (`codetracer-trace-format-nim/src/codetracer_trace_writer/linehits_builder.nim`),
+    wired into `multi_stream_writer.nim` (`enableLinehits` :309, `recordHit` :534/:601/
+    :650, `finalize` :996). It records the SAME `(globalLineIndex → [step_id])` mapping
+    into a `linehits` CTFS namespace. BUT: (a) `enableLinehits` is called ONLY from that
+    repo's own tests (`tests/test_linehits_builder.nim`), never by any live recorder, and
+    (b) even when enabled, the finalized namespace is NEVER serialized into the container
+    in `close()` — so `linehits.tc` is not consumable from a `.ct` either.
+  - The omniscient `linehits.tc` the db-backend already wraps (`omniscient_db.rs`
+    `source_line_hits`, M24c) is a DIFFERENT store: it is keyed by the MCR conditional-
+    branch TICK (not step_id), lives in the native/emulator FFI path, and is unrelated to
+    the materialized-trace `steps_on_line` breakpoint path.
+  Conclusion: NO production `.ct` bundle carries ANY prepopulated line→step breakpoint
+  table today. M26 therefore wires the CONSUMER (the immediately-actionable, spec-aligned
+  piece) against the spec's flat `STMP` layout — which is self-contained and trivially
+  seekable, unlike the complex B-tree `Namespace` format the Nim `LinehitsBuilder` uses —
+  and gates it on the table's actual PRESENCE. Production emission is left as a separate
+  writer-side toggle.
 
   Deliverables:
-  - [ ] A reader for the `step-map.ns` CTFS namespace (per the spec's header/path-table/
-    line-entry/step-id-list layout) in the db-backend, behind the `TraceReader`.
-  - [ ] `steps_on_line` / `step_map_for_path` / the DAP `find_next_step` breakpoint
-    resolver PREFER `step-map.ns` when present (O(unique lines) lookup, no whole-table
-    build / no step-stream scan); fall back to the M24c lazy / M25b parallel build when
-    the namespace is absent (legacy/older bundles). For a streaming/network source this
-    is the index-accelerated path (spec Approach A) — and the M25c forward-from-search
-    is the Approach-B fallback when neither the namespace nor cheap random access exists.
-  - [ ] Parity: breakpoint resolution from `step-map.ns` returns IDENTICAL steps to the
-    whole-table build; DAP/breakpoint suites green. Audit that the namespace the Nim
-    writer emits matches the spec layout the reader expects (write↔read round-trip).
+  - [X] A reader for the `step-map.ns` namespace per the spec §4.1 header/path-table/
+    line-entry/step-id-list layout, in `ctfs_trace_reader::step_map_namespace`
+    (`StepMapNamespace::parse`), defensive against every malformed-blob case. (Note: the
+    spec prose's "~28 bytes" for a line entry is a SIZE ESTIMATE; the on-disk record
+    stride is 32 bytes — line:u32 + step_count:u32 + first:i64 + last:i64 + steps_off:u64.)
+  - [X] New `TraceReader::step_ids_on_line(path_id, line) -> Option<Vec<StepId>>` —
+    the breakpoint primitive `find_next_step` needs (just the step ids). Default derives
+    it from `steps_on_line` (every reader correct out of the box). The CTFS reader
+    OVERRIDES it to PREFER the prepopulated `step-map.ns` (O(unique-lines) HashMap lookup,
+    NO step-stream access, NO whole-table build), falling back to the whole-table
+    derivation when no index is attached. The DAP `find_next_step` now resolves through it.
+  - [X] Attach the index at `CTFSTraceReader::open` (`load_step_map_namespace`): tries a
+    container-internal `step-map.ns`, then a `<ct>.step-map.ns` SIDECAR; a malformed/absent
+    table cleanly falls back (logged, never a hard open failure, never wrong breakpoints).
+  - [X] Parity + no-build + fallback proven in `tests/m26_step_map_namespace_test.rs`:
+    the index resolves IDENTICALLY to the whole-table build for every recorded line; a
+    table-bearing bundle resolves every breakpoint with `lazy_full_steps_materialized()
+    == false` and zero `steps.dat` chunk inflations; a bundle WITHOUT the table resolves
+    via the whole-table build (and that build IS triggered — the distinguishing proof).
+    The test DERIVES the index from the same recorded steps the whole-table build
+    reconstructs (via the production `serialize_step_map`) — the table is real, not faked.
+  - [X] Safety net green: `cargo test --lib` (387 passed), `dap_column_breakpoint`,
+    `dap_column_breakpoint_with_condition`, `dap_column_flow`, `dap_variables_e2e`,
+    `origin_omniscient_test`, `origin_mcr_omniscient_test`, `origin_dap_test`,
+    `m22_data_breakpoint_test`, `ctfs_lazy_production_steps_test` all pass. `cargo clippy`
+    and `cargo clippy --tests` clean (no `expect_used`/`unwrap_used` in new bin code).
 
-  Acceptance: when a `.ct` carries `step-map.ns`, breakpoint line→step resolution uses it
-  directly (no whole-table materialization), identical results, with a clean fallback.
+  Acceptance (MET for the CONSUMER): when a `.ct` carries `step-map.ns`, breakpoint
+  line→step resolution uses it directly (no whole-table materialization), identical
+  results, with a clean fallback. NOT YET wired: a production writer that EMITS the
+  table — that is a follow-up writer-side toggle (the Nim writer would need to serialize
+  its `linehits`/a new `step-map.ns` namespace into the container, or `serialize_step_map`
+  could be reused recorder-side).
