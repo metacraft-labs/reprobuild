@@ -396,6 +396,22 @@ package kwinSource:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `cmake_package(...)` constructor.
     setCurrentOwningPackageOverride("kwinSource")
     try:
+      # M9.R.15q.6.5 — global -I flags for libwayland, libwayland-server
+      # (used by Qt6's qt6_generate_wayland_protocol_client_sources auto-
+      # generated <protocol>-protocol.c which #include's wayland-util.h)
+      # and Qt6 prefix dirs used by some kwin sub-targets (killer, aurorae
+      # plugins, kpackage plugins) whose CMakeLists do NOT add wayland-
+      # client to target_link_libraries. Per-target target_include_dirs is
+      # the upstream-correct fix but requires patching kwin's source;
+      # plumbing the include via CMAKE_{C,CXX}_FLAGS is a stop-gap that
+      # threads the include path globally without touching the recipe-eval
+      # vendored source tree.
+      let waylandInc = "/opt/repro/reprobuild/recipes/packages/source/wayland/.repro/output/install/usr/include"
+      let qt6CoreInc = "/opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include"
+      let qt6DeclInc = "/opt/repro/reprobuild/recipes/packages/source/qt6-declarative/.repro/output/install/usr/include"
+      let globalIncFlags = "-isystem " & waylandInc &
+        " -isystem " & qt6CoreInc &
+        " -isystem " & qt6DeclInc
       let opts = @[
         "BUILD_TESTING=OFF",
         "KWIN_BUILD_TABBOX=OFF",
@@ -410,6 +426,9 @@ package kwinSource:
         "KWIN_BUILD_SCREENLOCKER=OFF",
         "KWIN_BUILD_RUNNERS=OFF",
         "CMAKE_BUILD_TYPE=Release",
+        # M9.R.15q.6.5 — global -I flags for libwayland + Qt6 (see above).
+        "CMAKE_C_FLAGS=" & globalIncFlags,
+        "CMAKE_CXX_FLAGS=" & globalIncFlags,
       ]
       # M9.R.15q.6.3 — explicit PKG_CONFIG_PATH_FOR_TARGET injection.
       #
