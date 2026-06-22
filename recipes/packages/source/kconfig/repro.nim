@@ -180,6 +180,13 @@ package kconfigSource:
     ## plumbing. The sibling ``kcoreaddonsSource`` recipe vendors a
     ## compatible 6.x version.
     "kcoreaddons >=6.0"
+    ## M9.R.15q.3.4 — qt6-declarative supplies Qt6Qml/Qt6Quick which
+    ## the ``KF6::ConfigQml`` extension target wraps when
+    ## ``KCONFIG_USE_QML`` is on. plasma-framework's
+    ## ``Plasma`` / ``PlasmaQuick`` targets link directly against
+    ## ``KF6::ConfigQml`` so leaving it off would crater the entire
+    ## Plasma 6 chain (see commit message).
+    "qt6-declarative >=6.6"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -212,11 +219,15 @@ package kconfigSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
-        # M9.R.15i.3 — qt6-declarative isn't in the v1 closure; ECM's
-        # ECMQmlModule does find_package(Qt6 Qml Quick REQUIRED) when
-        # KCONFIG_USE_QML is on. Disable the optional Qml component;
-        # the KCoreAddons / KConfig core libraries don't need it.
-        "KCONFIG_USE_QML=OFF",
+        # M9.R.15q.3.4 — qt6-declarative IS in the v1 closure (M9.R.15
+        # campaign closed it). plasma-framework consumes
+        # ``KF6::ConfigQml`` — the Qml-aware extension target that
+        # kconfig emits only when ``KCONFIG_USE_QML`` is on.  M9.R.15i.3
+        # disabled it because qt6-declarative wasn't yet in the closure;
+        # that disable is the actual root cause of the plasma-framework
+        # link-error chain found while driving M9.R.15q.3 (see commit
+        # message).  Flip it back on so the KF6ConfigQml target ships.
+        "KCONFIG_USE_QML=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6ConfigCore")
