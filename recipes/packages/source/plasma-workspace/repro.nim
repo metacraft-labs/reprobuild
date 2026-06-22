@@ -351,6 +351,14 @@ package plasmaWorkspaceSource:
       let opts = @[
         "BUILD_TESTING=OFF",
         "KWIN_BUILD_X11=OFF",
+        # M9.R.15q.12.10 — plasma-workspace's top-level CMakeLists
+        # declares ``option(WITH_X11 ... ON)`` with WITH_X11 ON by
+        # default, which gates the X11 ``find_package(XCB ... COMPONENTS
+        # XCB RANDR IMAGE)`` REQUIRED probe. We don't ship xcb-image as
+        # a from-source recipe (libxcb covers the base XCB but not the
+        # IMAGE component), and the v1 Plasma path is pure-Wayland.
+        # Disable to take the no-X11 branch.
+        "WITH_X11=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
       # M9.R.15q.7.1 — cap cmake's internal compile parallelism to match
