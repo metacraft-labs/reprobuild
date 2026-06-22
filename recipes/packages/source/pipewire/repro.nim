@@ -233,14 +233,14 @@ package pipewireSource:
     ## the convention's ninja-spawn + install-glue closes.
     discard
 
-  executable pwCat:
-    ## ``/usr/bin/pw-cat`` — the audio capture + playback CLI (with
-    ## ``pw-record`` / ``pw-play`` symlinks). Used by NDE-K1's audio
-    ## probes + by desktop notifications (mako / dunst) for the
-    ## "beep on critical notification" path. The hyphenated upstream
-    ## binary name ``pw-cat`` is camelCased to ``pwCat``. v1 records
-    ## the artifact only.
-    discard
+  # M9.R.15q.12.5 — pwCat artifact REMOVED for the v1 desktop story.
+  # pw-cat builds only when libsndfile is reachable; we don't ship a
+  # sibling sndfile from-source recipe (and the kpipewire / Plasma DE
+  # path doesn't consume pw-cat — only the pipewire daemon +
+  # libpipewire-0.3.so are load-bearing for the screen-capture path
+  # kpipewire wraps). A future pipewire-fullbuild milestone can add
+  # sndfile + restore the pwCat artifact when the audio CLI gets
+  # wired into the NDE-K1 audio-probe flow.
 
   library libPipewire:
     ## ``libpipewire-0.3.so`` — the C library every consumer
@@ -265,7 +265,9 @@ package pipewireSource:
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("pipewireDaemon")
-      discard pkg.executable("pwCat")
+      # M9.R.15q.12.5 — pwCat dropped; pw-cat requires libsndfile which
+      # isn't a from-source sibling and the v1 Plasma DE path doesn't
+      # consume the pipewire audio CLI.
       discard pkg.library("libPipewire")
     finally:
       clearCurrentOwningPackageOverride()
