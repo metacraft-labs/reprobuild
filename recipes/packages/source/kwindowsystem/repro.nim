@@ -73,10 +73,17 @@ package kwindowsystemSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
-        # KWINDOWSYSTEM_X11=OFF: drop X11 backend (XLib + XCB). v1 is
-        # Wayland-only; the X11 backend pulls libXfixes + xcb-keysyms +
-        # libxcb-record into the closure with no v1 from-source recipe.
-        "KWINDOWSYSTEM_X11=OFF",
+        # M9.R.15q.3.5 — re-enable the X11 backend so the
+        # ``KX11Extras`` header ships in the install-mirror.
+        # plasma-framework unconditionally ``#include <KX11Extras>``
+        # in src/plasma/private/theme_p.cpp + src/plasmaquick/dialog.cpp
+        # + ... even when WITHOUT_X11=ON is set (the symbol uses are
+        # guarded by isPlatformX11() but the header include is not),
+        # so the v1 Wayland-only build trips on a missing-header.
+        # The X11 libs the build needs (libX11 + libxcb + xcb-util-*)
+        # are nix-shell-provisioned at build time via the
+        # ``bootstrap-linux-smoke.sh`` packs.
+        "KWINDOWSYSTEM_X11=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6WindowSystem")
