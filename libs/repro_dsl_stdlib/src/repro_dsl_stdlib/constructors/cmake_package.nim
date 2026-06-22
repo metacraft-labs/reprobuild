@@ -291,11 +291,31 @@ proc cmake_package*(srcDir: string;
   # the generator's default which for ``make`` is ``-j1``; qt6-base
   # is hundreds of compile units, so the serial default turns a
   # ~5 minute compile into an hour. cmake's ``--parallel`` without a
-  # number defers job-count to the CMAKE_BUILD_PARALLEL_LEVEL env
-  # var, falling back to the build engine's pool budget. The
-  # build-engine's compile pool already caps parallelism so we get
-  # deterministic scheduling.
+  # number reads CMAKE_BUILD_PARALLEL_LEVEL only when the underlying
+  # generator (ninja/make) honors it; in practice ninja still ignores
+  # CMAKE_BUILD_PARALLEL_LEVEL and falls back to nproc on a vanilla
+  # cmake-4 build (verified M9.R.15q.7.1 on Linux: kwin spawned 343
+  # cc1plus on a 32-core host even with extraEnv CMAKE_BUILD_PARALLEL_LEVEL=8).
+  #
+  # M9.R.15q.7.3 — opt-in numeric cap. When the recipe's extraEnv
+  # carries an explicit ``CMAKE_BUILD_PARALLEL_LEVEL`` entry, we bake
+  # ``--parallel <N>`` into the action argv. This keeps the action
+  # fingerprint stable for recipes that DO NOT opt in (no env entry =
+  # bare ``--parallel`` as before), and lets memory-bound recipes
+  # (kwin / plasma-workspace / sddm) hard-cap parallelism without
+  # changing the cmake_package signature. The argv mutation IS picked
+  # up by the action-cache fingerprint, which is exactly the
+  # invalidation we want for the opt-in recipes (the recipe's own
+  # change already invalidates its cache, so the additional argv
+  # mutation is free).
+  var explicitParallel = ""
+  for entry in extraEnv:
+    if entry[0] == "CMAKE_BUILD_PARALLEL_LEVEL":
+      explicitParallel = entry[1]
+      break
   var buildArgv = @["cmake", "--build", buildDir, "--parallel"]
+  if explicitParallel.len > 0:
+    buildArgv.add(explicitParallel)
   if target.len > 0:
     buildArgv.add("--target")
     buildArgv.add(target)
