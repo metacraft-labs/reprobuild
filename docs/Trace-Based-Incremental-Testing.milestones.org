@@ -2997,3 +2997,84 @@
   table — that is a follow-up writer-side toggle (the Nim writer would need to serialize
   its `linehits`/a new `step-map.ns` namespace into the container, or `serialize_step_map`
   could be reused recorder-side).
+
+* M26b — EMIT the prepopulated `step-map.ns` from the Nim production writer
+  :STATUS: DONE (2026-06-22) — the Nim `MultiStreamTraceWriter` now BUILDS and
+           SERIALIZES the `step-map.ns` breakpoint namespace into the CTFS container
+           by DEFAULT on the line-only production write path. Production `.ct` bundles
+           now carry the prepopulated table; the M26 consumer's no-whole-table-build
+           breakpoint path is LIVE for production. Round-trip proven (Nim write → Rust
+           M26 read, identical to the whole-table build).
+
+  M26 wired the CONSUMER but no writer emitted the table, so the no-whole-table path was
+  dormant in production. M26b closes the round-trip: the writer now emits the spec §4.1
+  `STMP` namespace itself, so every line-only `.ct` carries the index and the consumer's
+  O(unique-lines) breakpoint lookup is served from real on-disk data.
+
+  How the writer builds + serializes the map:
+  - New `codetracer-trace-format-nim/src/codetracer_trace_writer/step_map_builder.nim`
+    (`StepMapBuilder`): accumulates `(path_id, line) → [step_id]` during recording and
+    serializes it into the spec §4.1 `STMP` byte layout — 18-byte header (magic `STMP`,
+    version u16, path_count u32, path_table_offset u64), 20-byte path entries (path_id
+    u64, line_count u32, lines_offset u64), 32-byte line entries (line u32, step_count
+    u32, first_step_id i64, last_step_id i64, steps_offset u64), and ascending i64
+    step-id lists. Paths sorted by id, lines ascending, step ids ascending — byte-for-byte
+    matching the canonical Rust `serialize_step_map` / `StepMapNamespace::parse`.
+  - KEY DERIVATION: the builder keys off the SAME `global_line_index` the exec stream
+    encoded, unpacked via `(gli >> 32, gli & 0xFFFF_FFFF)` — IDENTICAL to the db-backend's
+    `unpack_global_line_index` that the M26 whole-table build keys on
+    (`step_value_stream_source.rs` `reconstruct_db_step`/`step_line`). This guarantees the
+    Nim-written index agrees with the whole-table derivation by construction.
+  - `multi_stream_writer.nim`: a `stepMapBuilder` records each step at `registerStep`
+    time (alongside the existing optional linehits), and `close()` serializes it into a
+    container-internal `step-map.ns` file via `addFile`/`writeToFile`, after the
+    source-views block and before meta.dat.
+
+  Emission is DEFAULT-ON, but GATED to line-only traces: `enableColumnAwareSteps` (and the
+  column capability opt-ins) clear `emitStepMap`. Column-aware traces encode a byte-offset
+  `global_position_index` that the db-backend decodes via the column-aware path, NOT
+  `unpack_global_line_index`; a gli-derived `step-map.ns` would not agree with that
+  decode, and column-aware traces eager-materialize steps anyway (the lazy/seekable
+  no-whole-table path M26 serves is line-only). Most production recorders are line-only,
+  so the table ships in production by default.
+
+  Additive + back-compat: the extra internal file is ignored by every reader except the
+  M26 consumer; `events`/`steps`/`values`/`calls` streams and meta.dat are byte-identical;
+  legacy bundles (no `step-map.ns`) still read via the M26 whole-table fallback. ct-print
+  (`--json-events` unchanged) reads named streams, not a root-entry enumeration, so it is
+  unaffected (ct-print golden green).
+
+  Round-trip proof (the load-bearing gate): `tests/m26_step_map_namespace_test.rs` now
+  drives a REAL Nim-written `step-map.ns` (the FFI `NimTraceWriter` = the exact live-
+  recorder write path), not a Rust `serialize_step_map` sidecar. The Nim-emitted bytes are
+  parsed by the Rust M26 `StepMapNamespace::parse` and resolve breakpoints IDENTICALLY to
+  the whole-table `step_map_for_path` derivation, line by line, with
+  `lazy_full_steps_materialized() == false` and zero `steps.dat` chunk inflations. The
+  no-index / malformed scenarios synthesize a legacy bundle by stripping the internal
+  `step-map.ns` root entry (`strip_internal_step_map`).
+
+  Deliverables:
+  - [X] `StepMapBuilder` (build + STMP serialize), byte-matching `serialize_step_map`.
+  - [X] `MultiStreamTraceWriter` builds the map during recording and emits `step-map.ns`
+    into the container at `close()`, default-on for line-only traces (gated off for
+    column-aware; documented).
+  - [X] Nim test `tests/test_step_map_builder.nim`: standalone serialize↔parse round-trip
+    (Nim STMP reader), empty-trace well-formedness, writer emits `step-map.ns` by default
+    with content == the gli-derived map, and column-aware writers suppress it. Added to
+    the nimble `test` task.
+  - [X] Cross test `m26_step_map_namespace_test.rs` rewired to the REAL Nim-written
+    internal index — write↔read loop closed. 6/6 pass.
+  - [X] Safety net green: trace-format-nim writer/reader/ct-print/golden suites pass
+    (pre-existing, unrelated flakes: `test_new_trace_reader` navigation BENCHMARK threshold
+    — passes on re-run; `test_column_aware_steps` reserved-bit-8 assertion — fails
+    identically on baseline `dev` without these changes). db-backend `cargo test --lib`
+    (387 passed) + `m26_step_map_namespace_test` (6) + `ctfs_lazy_production_steps_test` /
+    `ctfs_split_only_full_db_test` / `ctfs_step_locations_bulk_test` all pass.
+    `cargo clippy --tests` clean on touched Rust (only pre-existing warnings in unrelated
+    `reprobuild_hcr_*` tests).
+
+  Acceptance (MET): production `.ct` bundles produced by the Nim writer now carry the
+  prepopulated `step-map.ns` breakpoint table; the M26 consumer reads it back identically
+  to the whole-table build, so the no-whole-table-build breakpoint path is LIVE in
+  production for line-only traces. Emission is gated to line-only traces (column-aware
+  suppressed, by design).
