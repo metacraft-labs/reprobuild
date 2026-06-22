@@ -2804,11 +2804,38 @@
   in `flow_preloader.rs`/`dap_handler.rs`.
 
   Deliverables (decomposed):
-  - [ ] M25a — Unify the population engine: one routine that replays the regular CTFS
+  - [X] M25a — Unify the population engine: one routine that replays the regular CTFS
     streams (steps/values/events) over a step range, processing events to populate the
     in-memory maps (line→step / `step_map`, place→change-history) AND/OR the omniscient
     tables (`linehits.tc`/`memwrites.tc`) — the lazy on-demand path and the omniscient
     prep both call it. Identical results to today; DAP + omniscient suites green.
+    DONE (2026-06-22). One range-scoped engine `replay_steps_into_sinks(stream,
+    call_keys, global_call_keys, range, sinks)` in
+    `db-backend/src/ctfs_trace_reader/step_value_stream_source.rs`, plus the single
+    reconstruction core `reconstruct_db_step`. A `StepReplaySink` trait routes each
+    reconstructed `DbStep` to a target: `SlotFillSink` (M24c per-slot lazy fill —
+    `LazyStepCache::fill_range_for` now drives the engine), `WholeStepTableSink` (the
+    on-first-demand whole-table `step_map`/`steps` build — `lazy_full_steps` now drives
+    the engine over `[0,count)`), and `LineHitSink` (the omniscient `linehits.tc`
+    line→step/tick build — same engine, omniscient sink). No duplicated event-processing
+    logic remains: the per-slot lazy fill, the whole-table build, and the omniscient
+    line-hit build are all just sinks over the one engine. RANGE-PARAMETERIZED: the engine
+    walks any `Range<usize>` (one chunk for a point lookup, `[0,count)` for the whole
+    table, or a disjoint shard later), so M25b (local parallel-over-disjoint-ranges) and
+    M25c (network forward-from-search) plug in by choosing WHICH ranges to replay on WHICH
+    threads — the per-step processing core is untouched. That access-strategy seam is left
+    open for M25b/M25c. Parity proven in `db-backend/tests/m25a_unified_engine_test.rs`:
+    the engine-built whole-table line→step map equals an INDEPENDENT eager
+    `TraceProcessor::postprocess` (`from_events`) reference for the same logical trace;
+    the per-slot `step()` path and the whole-table `steps_on_line` path agree; and the
+    `LineHitSink` (omniscient build) reproduces the in-memory line→step map exactly,
+    proving lazy + omniscient share the engine. Safety net green: `cargo test --lib` (379),
+    `ctfs_lazy_production_steps_test` (6), `ctfs_lazy_production_values_test` (5),
+    `dap_variables_e2e` (3), `dap_column_flow` (3), `dap_column_breakpoint` (3),
+    `origin_omniscient_test` (9), `origin_mcr_omniscient_test` (9), `origin_dap_test` (21),
+    `m22_data_breakpoint_test` (8), `m25a_unified_engine_test` (3), `python_flow_dap_test`
+    (1); `cargo clippy --lib` clean. Pre-existing env SIGABRT failures
+    (`ruby_flow_dap_test` etc., recorder-on-PATH) confirmed A/B against clean `dev`.
   - [ ] M25b — LOCAL (filesystem) access: when the `.ct` is on local disk, populate the
     maps with MULTIPLE THREADS over DISJOINT step/chunk RANGES (parallel fill), since
     random access is cheap. Track which ranges are populated (range-aware, builds on
