@@ -2902,6 +2902,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/attica/test_attica_source.nim",
+    binary: "build/test-bin/test_attica_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/autoconf/test_autoconf_source.nim",
     binary: "build/test-bin/test_autoconf_source",
     defines: @[],
