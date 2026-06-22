@@ -4115,6 +4115,71 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     prevId = actionId
     prevStamp = stamp
 
+  # M9.R.15q.2.4 — install-tree mirror.
+  #
+  # The engine's tool-identity resolver probes the canonical
+  # ``<recipeDir>/.repro/output/install/usr/lib*/lib<name>*.so*`` path
+  # to locate a sibling recipe's published artifacts (see
+  # ``m9r14hProbeInstallMirrorLibrary`` in ``repro_tool_profiles``).
+  # The from-source-custom convention's shell sequence typically lands
+  # under ``$out/install/usr/`` (the boost recipe's last shell does
+  # exactly this); some custom-shell recipes write directly under
+  # ``$out/lib/`` + ``$out/include/`` without the ``install/usr/``
+  # nesting. The mirror action probes BOTH layouts: it copies
+  # ``$out/install/usr/`` when present, OR falls back to mirroring
+  # ``$out/lib`` + ``$out/include`` + ``$out/bin`` under
+  # ``.repro/output/install/usr/`` so the resolver's probe finds the
+  # SONAME chain at the canonical path.
+  #
+  # Only emitted when the recipe has at least one shell action and a
+  # fetch spec (proxy for "this is a from-source-custom recipe"); the
+  # action chains off the last shell action's stamp so it runs after
+  # the install body completes.
+  if prevId.len > 0:
+    let mirrorRoot = projectRoot / ".repro" / "output" / "install"
+    let mirrorUsr = mirrorRoot / "usr"
+    createDir(extendedPath(mirrorRoot))
+    let mirrorStamp = mirrorRoot / ".m9r15q21_install_mirror.stamp"
+    let escapedMirrorRoot = mirrorRoot.replace("\\", "/").
+      replace("\"", "\\\"")
+    let escapedMirrorUsr = mirrorUsr.replace("\\", "/").
+      replace("\"", "\\\"")
+    let escapedMirrorStamp = mirrorStamp.replace("\\", "/").
+      replace("\"", "\\\"")
+    let escapedOutPath = outPath.replace("\\", "/").
+      replace("\"", "\\\"")
+    var script = "set -e; "
+    script.add("rm -rf \"" & escapedMirrorUsr & "\"; ")
+    script.add("mkdir -p \"" & escapedMirrorRoot & "\"; ")
+    # Primary path: $out/install/usr/ tree (the canonical destdir
+    # shape custom-shell recipes like boost emit). Copy verbatim into
+    # the mirror.
+    script.add("if [ -d \"" & escapedOutPath & "/install/usr\" ]; then ")
+    script.add("cp -a -- \"" & escapedOutPath & "/install/usr\" \"" &
+      escapedMirrorRoot & "/\"; ")
+    script.add("else ")
+    # Fallback: bare $out/lib + $out/include + $out/bin (recipes that
+    # didn't relocate to install/usr/). Compose a synthetic usr/ tree.
+    script.add("mkdir -p \"" & escapedMirrorUsr & "\"; ")
+    for sub in ["lib", "lib64", "include", "bin", "share"]:
+      script.add("if [ -d \"" & escapedOutPath & "/" & sub &
+        "\" ]; then cp -a -- \"" & escapedOutPath & "/" & sub &
+        "\" \"" & escapedMirrorUsr & "/\"; fi; ")
+    script.add("fi; ")
+    script.add("touch \"" & escapedMirrorStamp & "\"")
+    let mirrorActionId = "from-source-custom-mirror-" &
+      dslPortSanitizeIdPart(packageName)
+    discard buildAction(
+      id = mirrorActionId,
+      call = inlineExecCall(@["sh", "-c", script], projectRoot),
+      deps = @[prevId],
+      inputs = @[prevStamp],
+      outputs = @[mirrorStamp],
+      pool = "compile",
+      dependencyPolicy = automaticMonitorPolicy(),
+      commandStatsId = "from-source-custom.mirror",
+      toolIdentityRefs = @["sh"])
+
 # ---------------------------------------------------------------------------
 # DSL-port M9.R.3 — ``library <name>: api:`` block surface.
 # ---------------------------------------------------------------------------
