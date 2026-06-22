@@ -247,24 +247,22 @@ package sddmSource:
     ## convention's ninja-spawn + install-glue closes.
     discard
 
-  executable sddmGreeter:
-    ## ``/usr/lib/sddm/sddm-greeter`` — the PAM-authenticated greeter
+  executable `sddm-greeter-qt6`:
+    ## ``/usr/bin/sddm-greeter-qt6`` — the PAM-authenticated greeter
     ## binary sddm spawns as the login-screen UI; runs as the
     ## unprivileged ``sddm`` system user, displays the QML-driven
     ## login form, hands off to the user session on successful
-    ## authentication. The hyphenated upstream binary name
-    ## ``sddm-greeter`` is camelCased to ``sddmGreeter`` per the
-    ## gdk-pixbuf precedent.
-    discard
-
-  library libSddmCommon:
-    ## ``libSDDMCommon.so`` — the shared library both binaries link
-    ## against for theme loading + display-server-handshake +
-    ## session-launcher glue. The upstream SONAME ``SDDMCommon`` is
-    ## camelCased to ``libSddmCommon`` — preserving the leading
-    ## ``lib`` prefix and reducing the SDDM acronym to ``Sddm`` to
-    ## match the kwin/libKWin precedent of brand-conventional casing
-    ## in artifact identifiers.
+    ## authentication.
+    ##
+    ## M9.R.15q.8.6 — the binary name is suffixed with the Qt major
+    ## version (`sddm-greeter-qt6` under BUILD_WITH_QT6=ON, plain
+    ## `sddm-greeter` under Qt5). sddm 0.21's
+    ## ``src/greeter/CMakeLists.txt`` declares
+    ## ``set(GREETER_TARGET sddm-greeter-qt${QT_MAJOR_VERSION})`` for
+    ## the v2/Qt6 configuration. Recipe identifier matches the actual
+    ## installed filename via the backticked quoted-form so the
+    ## convention layer's stage-copy probe finds the executable at
+    ## ``build/out/usr/bin/sddm-greeter-qt6``.
     discard
 
   build:
@@ -380,8 +378,7 @@ package sddmSource:
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env)
       discard pkg.executable("sddm")
-      discard pkg.executable("sddmGreeter")
-      discard pkg.library("libSddmCommon")
+      discard pkg.executable("sddm-greeter-qt6")
     finally:
       clearCurrentOwningPackageOverride()
 

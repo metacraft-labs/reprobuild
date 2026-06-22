@@ -14,16 +14,15 @@
 ## any of the three individual kind discriminants (exec vs lib) would
 ## surface too.
 ##
-## Coverage (13 check assertions across 8 tests):
+## Coverage (12 check assertions across 8 tests):
 ##
 ##   * ``fetch:`` block round-trip (M9.H) — URL + sha256 length +
 ##     algorithm + kind discriminant + extractStrip.
 ##   * ``cmakeFlags:`` block round-trip (M9.I) — exact-order
 ##     sequence equality on the production flag set + channel-isolation
 ##     spot-check (meson + configure channels MUST be empty).
-##   * THREE artifact registration (M3) — ``sddm`` + ``sddmGreeter``
-##     tagged ``dakExecutable`` and ``libSddmCommon`` tagged
-##     ``dakLibrary`` within the same package's artifact set.
+##   * TWO artifact registration (M3) — ``sddm`` + ``sddm-greeter-qt6``
+##     tagged ``dakExecutable`` within the same package's artifact set.
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
@@ -82,38 +81,43 @@ suite "sddmSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "cmakeFlags does not leak into the configure channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register two executables + a library with correct kinds":
-    # M3 artifact registry: ``sddm`` + ``sddmGreeter`` are tagged
-    # ``dakExecutable`` while ``libSddmCommon`` is tagged
-    # ``dakLibrary``. The unique coverage of THIS recipe is that it's
-    # the first recipe to ship THREE artifacts from a single package.
-    # A regression that flattened the kind discriminator would
-    # mis-route the M9.L install path (``lib/`` vs ``bin/``); a
-    # regression that collapsed the artifact-name partitioning at
-    # the three-artifact cardinality would not produce three
-    # distinct entries with the expected names below.
+  test "artifacts register two executables with correct kinds":
+    # M3 artifact registry: ``sddm`` + ``sddm-greeter-qt6`` are
+    # tagged ``dakExecutable``.
+    #
+    # M9.R.15q.8.6 — correction: sddm 0.21 does NOT ship a
+    # ``libSDDMCommon.so`` shared library. The original recipe (and
+    # this test) assumed three artifacts including a common library,
+    # but inspection of the actual build tree (no lib/ dir at
+    # /opt/.../sddm/build/out/usr/) shows the daemon + greeter link
+    # against a STATIC libcommon embedded into each binary, never
+    # exposed as a shared object. The recipe now declares the actual
+    # ABI surface (two executables only).
+    #
+    # The greeter binary's installed name varies by Qt major version:
+    # under ``BUILD_WITH_QT6=ON`` it's ``sddm-greeter-qt6``; under the
+    # Qt5 default it's plain ``sddm-greeter``. The recipe pins Qt6
+    # for the v2 Plasma story, so the artifact identifier matches the
+    # installed filename exactly via the backticked quoted-form so
+    # the convention layer's stage-copy probe finds the binary at
+    # ``build/out/usr/bin/sddm-greeter-qt6``.
     let arts = registeredArtifacts("sddmSource")
-    check arts.len == 3
+    check arts.len == 2
     var seenDaemon = false
     var seenGreeter = false
-    var seenLib = false
     for art in arts:
       check art.packageName == "sddmSource"
       case art.artifactName
       of "sddm":
         seenDaemon = true
         check art.kind == dakExecutable
-      of "sddmGreeter":
+      of "sddm-greeter-qt6":
         seenGreeter = true
         check art.kind == dakExecutable
-      of "libSddmCommon":
-        seenLib = true
-        check art.kind == dakLibrary
       else:
         discard
     check seenDaemon
     check seenGreeter
-    check seenLib
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream GitHub release tag is
