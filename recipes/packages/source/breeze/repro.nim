@@ -49,6 +49,10 @@ package breezeSource:
     ## breeze's CMakeLists declares find_package(KF6KirigamiPlatform
     ## ${KF6_MIN_VERSION} REQUIRED) when Qt6Quick is found.
     "kirigami >=6.0"
+    ## M9.R.15q.11.14 — kcmutils ships the kcmutils_generate_desktop_file
+    ## CMake helper macro the breeze kdecoration/config subdir calls.
+    ## Without KF6KCMUtils config visible the helper macro is undefined.
+    "kcmutils >=6.0"
     ## X11 transitives (kwindowsystem's X11 backend probe).
     "xorgproto"
     "libx11"
