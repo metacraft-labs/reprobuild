@@ -1415,7 +1415,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # installs the CLI as bare ``libinput``). Probe the suffix-
     # stripped form as a fallback.
     var strippedName = name
-    for suffix in ["Bin", "CLI", "Cmd", "Tool", "Exe"]:
+    # M9.R.15q.12.4 — also strip ``Init`` so ``systemdInit`` (the
+    # systemd recipe's renamed slot for the bare-``systemd`` upstream
+    # init binary) probes for ``systemd`` under the candidate dirs.
+    # The recipe renames the slot to avoid colliding with the
+    # ``systemd`` package-name prefix (per the sddm / sddmGreeter
+    # disambiguation convention).
+    for suffix in ["Bin", "CLI", "Cmd", "Tool", "Exe", "Init"]:
       if strippedName.endsWith(suffix) and strippedName.len > suffix.len:
         strippedName = strippedName[0 ..< (strippedName.len - suffix.len)]
         break
@@ -1436,7 +1442,17 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # both shapes after the canonical $bindir + $sbindir.
     let libexecSrcDir = (effectiveDestRoot & "/usr/libexec").replace("\\", "/").replace("\"", "\\\"")
     let libLibexecSrcDir = (effectiveDestRoot & "/usr/lib/libexec").replace("\\", "/").replace("\"", "\\\"")
-    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir]
+    # M9.R.15q.12.4 — systemd's daemons (``systemd``, ``systemd-logind``,
+    # ``systemd-journald``, ``systemd-udevd``) install under
+    # ``$libdir/systemd/`` (the systemd-private libexec convention).
+    # Without this entry, the autotools_package executable stage-copy
+    # for systemdInit/systemdLogind fails with "no executable candidate"
+    # even though the binary IS in the install tree. Probe this AFTER
+    # the canonical $bindir + $sbindir + $libexec dirs so non-systemd
+    # recipes that happen to ship a same-named file under $libdir/X/
+    # don't get mis-routed.
+    let libSystemdSrcDir = (effectiveDestRoot & "/usr/lib/systemd").replace("\\", "/").replace("\"", "\\\"")
+    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir]
     # M9.R.15q.7.9 — also probe snake_case form. The kebab probe
     # covers ``kwinWayland`` → ``kwin-wayland`` but kwin upstream
     # installs ``kwin_wayland`` (snake_case underscore). The library
@@ -1465,7 +1481,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
       first = false
-    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & "\" >&2; exit 1; fi")
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(name)
