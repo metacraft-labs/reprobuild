@@ -201,6 +201,13 @@ package libxkbcommonSource:
     ## ``enable-wayland`` flags — it's used to parse the keymap
     ## compose-tables data files at build time.
     "libxml2 >=2.9"
+    ## M9.R.15q.4.6 — X11 stdlib stubs required when enable-x11=true
+    ## (see ``build:`` below). qt6-base's XCB plugin requires the
+    ## libxkbcommon-x11 helper library, which is gated on enable-x11
+    ## on libxkbcommon. xcb-xkb is part of libxcb itself; the
+    ## ``libxcb`` stub realizes the dev output containing xcb/xkb.h.
+    "libxcb"
+    "xorgproto"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -211,6 +218,13 @@ package libxkbcommonSource:
     ## X11 toolkits. v1 records the artifact only; the per-artifact
     ## build body lands in M9.L when the convention's ninja-spawn +
     ## install-glue closes.
+    discard
+
+  library libxkbcommonX11:
+    ## M9.R.15q.4.6 — ``libxkbcommon-x11.so``: the X11-side helper
+    ## library Qt6's XCB QPA plugin (libqxcb.so) and kwin's X11
+    ## backend link against to keymap-aware translate XCB keyboard
+    ## events. Built only when ``enable-x11=true``.
     discard
 
   executable xkbcli:
@@ -227,7 +241,12 @@ package libxkbcommonSource:
     try:
       let opts = @[
         "enable-docs=false",
-        "enable-x11=false",
+        # M9.R.15q.4.6 — enable-x11=true so libxkbcommon-x11.so ships;
+        # qt6-base's XCB QPA plugin (libqxcb.so) and kwin's X11 backend
+        # link against it for keymap-aware translation of XCB keyboard
+        # events. v1 still ships the Wayland session story; X11 here
+        # is the compile-time fallback surface KF6 components require.
+        "enable-x11=true",
         "enable-wayland=true",
         "enable-tools=true",
         # M9.R.14f.3 — upstream 1.13.2 references
@@ -244,6 +263,7 @@ package libxkbcommonSource:
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libxkbcommon")
+      discard pkg.library("libxkbcommonX11")
       discard pkg.executable("xkbcli")
     finally:
       clearCurrentOwningPackageOverride()
