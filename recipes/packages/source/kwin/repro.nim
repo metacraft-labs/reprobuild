@@ -304,9 +304,13 @@ package kwinSource:
     "kauth >=6.0"
     "kcolorscheme >=6.0"
     "kidletime >=6.0"
-    "kdeclarative >=6.0"
-    "kcmutils >=6.0"
-    "knewstuff >=6.0"
+    ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
+    ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
+    ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
+    ## the cacheVars below set) these are NOT looked up and so the
+    ## from-source auto-recurse should not need to build them. We keep
+    ## kpackage + kirigami because the QML side of kwin's effects
+    ## still uses them.
     "kpackage >=6.0"
     "kirigami >=6.0"
     ## hwdata (RUNTIME) for monitor vendor-ID mapping.
