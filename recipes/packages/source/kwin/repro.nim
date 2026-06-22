@@ -313,6 +313,25 @@ package kwinSource:
     "kauth >=6.0"
     "kcolorscheme >=6.0"
     "kidletime >=6.0"
+    ## M9.R.15q.5.11 — kwin 6.2.5's top-level CMakeLists.txt:85 declares
+    ## ``find_package(KF6 ... COMPONENTS ... WindowSystem ...)`` which
+    ## is the always-required KF6 component list (separate from the
+    ## KCMS-gated list at line 104). kwindowsystem is the sibling
+    ## from-source recipe.
+    "kwindowsystem >=6.0"
+    ## M9.R.15q.5.11 — kwin's CMakeLists.txt also declares Crash +
+    ## DBusAddons + GlobalAccel + GuiAddons + I18n + Service + Svg
+    ## as KF6 components. Add the missing siblings.
+    "kcrash >=6.0"
+    "kdbusaddons >=6.0"
+    "kglobalaccel >=6.0"
+    "kguiaddons >=6.0"
+    "ki18n >=6.0"
+    "kservice >=6.0"
+    "ksvg >=6.0"
+    "kconfig >=6.0"
+    "kcoreaddons >=6.0"
+    "kwidgetsaddons >=6.0"
     ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
     ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
     ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
