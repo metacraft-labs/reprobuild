@@ -160,3 +160,77 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
     let v = envValue(result, "PKG_CONFIG_PATH")
     check v.startsWith("/synth/wayland/lib/pkgconfig" & Sep &
       "/synth/expat/lib/pkgconfig")
+
+# ===========================================================================
+# DSL-port M9.R.15q.3.3 — env-var dedup against ARG_MAX explosion.
+# ===========================================================================
+
+suite "DSL-port M9.R.15q.3.3 — aux-env dedup keeps argv under ARG_MAX":
+
+  test "prependEnvDirsToArgvEnv dedupes duplicate dirs within input list":
+    # plasma-framework's 25+ buildDeps' transitive walks emit the same
+    # /opt/repro/.../qt6-base/.repro/output/install/usr prefix root from
+    # multiple refs. The first wins; duplicates are dropped.
+    let env = @["PATH=/usr/bin"]
+    let paths = ResolvedAuxPaths(
+      cmakePrefixDirs: @[
+        "/synth/qt6-base/usr",
+        "/synth/kconfig/usr",
+        "/synth/qt6-base/usr",  # dup from another ref's transitive walk
+        "/synth/kconfig/usr",   # dup
+        "/synth/kcoreaddons/usr"])
+    let result = applyResolvedAuxPathsArgv(env, paths)
+    let v = envValue(result, "CMAKE_PREFIX_PATH")
+    # First occurrence wins; the resulting list has each path ONCE.
+    check v.count("/synth/qt6-base/usr") == 1
+    check v.count("/synth/kconfig/usr") == 1
+    check v.count("/synth/kcoreaddons/usr") == 1
+    # Order preserved (first occurrence).
+    let parts = v.split(Sep)
+    let idxQt = parts.find("/synth/qt6-base/usr")
+    let idxKc = parts.find("/synth/kconfig/usr")
+    let idxKca = parts.find("/synth/kcoreaddons/usr")
+    check idxQt < idxKc
+    check idxKc < idxKca
+
+  test "prependEnvDirsToArgvEnv dedupes against existing env value":
+    # Host env (e.g. nix-shell) already has /A and /B on CMAKE_PREFIX_PATH.
+    # A new ref contributing /B + /C must not duplicate /B in the
+    # rendered list.
+    let env = @["CMAKE_PREFIX_PATH=/A" & Sep & "/B"]
+    let result = prependEnvDirsToArgvEnv(env, "CMAKE_PREFIX_PATH",
+      @["/B", "/C"])
+    let v = envValue(result, "CMAKE_PREFIX_PATH")
+    let parts = v.split(Sep)
+    check parts.len == 3
+    check parts == @["/B", "/C", "/A"]
+
+  test "prependEnvDirs (StringTable) dedupes against existing value":
+    let table = newStringTable(modeCaseSensitive)
+    table["CMAKE_PREFIX_PATH"] = "/A" & Sep & "/B"
+    prependEnvDirs(table, "CMAKE_PREFIX_PATH", @["/B", "/C"])
+    let v = table["CMAKE_PREFIX_PATH"]
+    let parts = v.split(Sep)
+    check parts.len == 3
+    check parts == @["/B", "/C", "/A"]
+
+  test "prependEnvDirs dedupes duplicate dirs within input list":
+    let table = newStringTable(modeCaseSensitive)
+    prependEnvDirs(table, "CPATH", @["/x/include", "/x/include", "/y/include"])
+    let parts = table["CPATH"].split(Sep)
+    check parts.len == 2
+    check parts == @["/x/include", "/y/include"]
+
+  test "prependEnvDirs idempotent — re-running yields the same value":
+    # Two consecutive merges with the same dir list must NOT keep
+    # growing the env var. This is the ARG_MAX-killing pattern: an
+    # action that gets re-prepended on every retry would otherwise
+    # double its env each time.
+    let table = newStringTable(modeCaseSensitive)
+    table["CMAKE_PREFIX_PATH"] = "/host/sysroot"
+    prependEnvDirs(table, "CMAKE_PREFIX_PATH", @["/synth/qt6-base/usr"])
+    let firstValue = table["CMAKE_PREFIX_PATH"]
+    prependEnvDirs(table, "CMAKE_PREFIX_PATH", @["/synth/qt6-base/usr"])
+    let secondValue = table["CMAKE_PREFIX_PATH"]
+    check firstValue == secondValue
+    check firstValue.split(Sep).len == 2
