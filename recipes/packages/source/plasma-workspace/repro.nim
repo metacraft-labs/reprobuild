@@ -406,6 +406,15 @@ package plasmaWorkspaceSource:
         # plasmashell + libPlasmaWorkspace artifacts the recipe
         # registers don't depend on ksmserver targets.
         "sed -i 's|^add_subdirectory(ksmserver)$|if(WITH_X11)\\n    add_subdirectory(ksmserver)\\nendif()|' src/CMakeLists.txt",
+        # M9.R.15q.12.11 — wrap ``ecm_optional_add_subdirectory(xembed-
+        # sni-proxy)`` in ``if(WITH_X11)``. xembed-sni-proxy bridges
+        # legacy XEmbed system-tray icons into the Plasma system tray;
+        # it ``find_package(XCB ... COMPONENTS UTIL IMAGE REQUIRED)``
+        # at the top of its CMakeLists. We don't ship xcb-util / xcb-
+        # util-image and a pure-Wayland v1 session doesn't load XEmbed
+        # legacy tray icons (the modern path is the StatusNotifierItem
+        # D-Bus interface).
+        "sed -i 's|^ecm_optional_add_subdirectory(xembed-sni-proxy)$|if(WITH_X11)\\n    ecm_optional_add_subdirectory(xembed-sni-proxy)\\nendif()|' src/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
