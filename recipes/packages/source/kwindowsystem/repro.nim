@@ -62,6 +62,9 @@ package kwindowsystemSource:
     ## restored below) so KX11Extras ships for plasma-framework's
     ## unconditional include. Each X11 client lib resolves through
     ## the M9.R.15q.4.1 stdlib stubs (^*-multi-output nix channels).
+    ## M9.R.15q.4.3 — xorgproto added: CMake's FindX11 looks for
+    ## ``X11/X.h`` which lives in xorgproto, NOT in libX11.
+    "xorgproto"
     "libx11"
     "libxcb"
     "xcb-util-keysyms"

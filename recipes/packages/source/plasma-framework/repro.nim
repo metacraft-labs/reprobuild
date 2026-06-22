@@ -202,6 +202,9 @@ package plasmaFrameworkSource:
     ## needs the X11 client libs on its own resolver path so the
     ## resulting libplasma.so can link against them. The eleven X11
     ## stubs land via the M9.R.15q.4.1 system_tools aggregator.
+    ## M9.R.15q.4.3 — xorgproto added: CMake's FindX11 probes
+    ## X11/X.h which ships in xorgproto, NOT in libX11.
+    "xorgproto"
     "libx11"
     "libxcb"
     "xcb-util-keysyms"

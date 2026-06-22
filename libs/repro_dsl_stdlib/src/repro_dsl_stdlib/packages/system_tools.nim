@@ -150,6 +150,11 @@ import ./xcb_util
 import ./libxext
 import ./libxfixes
 import ./libxrender
+# M9.R.15q.4.3 — xorgproto ships the protocol headers (X11/X.h,
+# X11/Xatom.h, X11/keysymdef.h, X11/extensions/*). CMake's
+# FindX11.cmake probes ``X11/X.h`` (in xorgproto), NOT
+## ``X11/Xlib.h`` (in libX11), to set X11_X11_INCLUDE_PATH.
+import ./xorgproto
 
 export bc
 export bison
@@ -219,3 +224,4 @@ export xcb_util
 export libxext
 export libxfixes
 export libxrender
+export xorgproto
