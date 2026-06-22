@@ -68,7 +68,21 @@ package kpipewireSource:
         "BUILD_TESTING=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.15q.12.7 — modernise the FFmpeg profile-constant names.
+      # FFmpeg 6.0 deprecated the bare ``FF_PROFILE_*`` constants in
+      # favour of the ``AV_PROFILE_*`` rename; FFmpeg 7.x dropped the
+      # legacy aliases entirely (the nix-shell pin we resolve to is
+      # ffmpeg 7.1.1). kpipewire 6.2.5 still references the old names
+      # in three encoder TUs. Patch in place to the modern names —
+      # the C-level constants are the same value, just a different
+      # spelling.
+      let patches = @[
+        "sed -i 's/FF_PROFILE_H264_/AV_PROFILE_H264_/g' src/src/libopenh264encoder.cpp",
+        "sed -i 's/FF_PROFILE_H264_/AV_PROFILE_H264_/g' src/src/libx264encoder.cpp",
+        "sed -i 's/FF_PROFILE_H264_/AV_PROFILE_H264_/g' src/src/h264vaapiencoder.cpp",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              srcPatches = patches)
       discard pkg.library("libKPipeWire")
       discard pkg.library("libKPipeWireRecord")
       discard pkg.library("libKPipeWireDmaBuf")
