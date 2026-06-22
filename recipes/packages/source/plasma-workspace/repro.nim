@@ -214,13 +214,29 @@ package plasmaWorkspaceSource:
     "kio >=6.0"
     "kded >=6.0"
     "plasma-framework >=6.0"
-    ## qt6-base supplies QtCore / QtGui / QtQml / QtQuick which the
-    ## QML-driven Plasma shell uses for its entire UI surface.
+    ## qt6-base supplies QtCore / QtGui / QtWidgets / QtConcurrent /
+    ## QtNetwork / QtDBus which the Plasma shell uses for its base UI +
+    ## IPC surface.
     "qt6-base >=6.6"
     ## qt6-tools supplies the lupdate/lrelease/qhelpgenerator tooling
     ## ECM's per-module find_package(Qt6 ... LinguistTools) probe
     ## requires at configure time even when translations are disabled.
     "qt6-tools >=6.6"
+    ## M9.R.15q.8.3 — plasma-workspace's CMakeLists explicitly
+    ## `find_package(Qt6 ... COMPONENTS Svg Widgets Quick QuickWidgets
+    ## Concurrent Network Core5Compat DBus ShaderTools Positioning)`.
+    ## The components beyond qt6-base + qt6-tools split across these
+    ## sibling Qt6 from-source recipes:
+    ##   * qt6-svg          - Qt6Svg
+    ##   * qt6-declarative  - Qt6Qml + Qt6Quick + Qt6QuickWidgets
+    ##   * qt6-5compat      - Qt6Core5Compat
+    ##   * qt6-shadertools  - Qt6ShaderTools
+    ##   * qt6-wayland      - Qt6WaylandCompositor + Qt6WaylandClient
+    "qt6-svg >=6.6"
+    "qt6-declarative >=6.6"
+    "qt6-5compat >=6.6"
+    "qt6-shadertools >=6.6"
+    "qt6-wayland >=6.6"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
