@@ -415,9 +415,26 @@ package kwinSource:
       let waylandInc = "/opt/repro/reprobuild/recipes/packages/source/wayland/.repro/output/install/usr/include"
       let qt6CoreInc = "/opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include"
       let qt6DeclInc = "/opt/repro/reprobuild/recipes/packages/source/qt6-declarative/.repro/output/install/usr/include"
-      let globalIncFlags = "-isystem " & waylandInc &
+      # M9.R.15q.7.5 — kwin's src/cursor.cpp:33 unconditionally
+      # ``#include <xcb/xcb_cursor.h>`` (NOT gated on KWIN_BUILD_X11).
+      # xcb-util-cursor's tool stub IS resolved but its include dir
+      # (.../include) is not added to the kwin CMakeLists target's
+      # target_include_dirs because the upstream CMakeLists conditions
+      # the find_package on KWIN_BUILD_X11=ON. Plumb the dir globally
+      # via CMAKE_{C,CXX}_FLAGS isystem just like wayland/qt6 above.
+      # Resolves nix-store path via walkPattern (same pattern as
+      # libdisplay-info / wayland-protocols resolution below).
+      var xcbCursorInc = ""
+      for store in walkPattern("/nix/store/*-xcb-util-cursor-*-dev"):
+        let p = store / "include"
+        if dirExists(p):
+          xcbCursorInc = p
+          break
+      var globalIncFlags = "-isystem " & waylandInc &
         " -isystem " & qt6CoreInc &
         " -isystem " & qt6DeclInc
+      if xcbCursorInc.len > 0:
+        globalIncFlags.add(" -isystem " & xcbCursorInc)
       let opts = @[
         "BUILD_TESTING=OFF",
         "KWIN_BUILD_TABBOX=OFF",
