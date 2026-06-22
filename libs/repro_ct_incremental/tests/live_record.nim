@@ -39,21 +39,32 @@ import std/[os, osproc, strutils, times]
 
 import repro_ct_incremental  # M14 native instrumentation: instrumentAndRun, etc.
 
-const
-  # Recorder sibling repos, resolved relative to this checkout's parent. The
-  # reprobuild checkout and the recorder checkouts are siblings in the workspace
-  # (see CodeTracer build-siblings strategy), so `../<recorder>` from the
-  # reprobuild repo root is the canonical location.
-  WorkspaceRoot* = "/Users/zahary/m/dev"
-    ## The metacraft workspace root that holds reprobuild + the recorder repos as
-    ## siblings. The recorders live at `<WorkspaceRoot>/<recorder-repo>`.
+proc detectWorkspaceRoot(): string =
+  ## The metacraft workspace root that holds reprobuild + the recorder repos as
+  ## siblings (CodeTracer build-siblings strategy). Resolution order:
+  ##   1. ``$REPRO_WORKSPACE_ROOT`` (explicit override — set by CI or when the
+  ##      reprobuild checkout is a worktree outside the workspace tree).
+  ##   2. The parent of the reprobuild checkout root, located by walking up from
+  ##      this file (``<workspaceRoot>/<reprobuild>/libs/repro_ct_incremental/
+  ##      tests/live_record.nim``) — the canonical sibling layout on any machine.
+  ## This replaces the former hardcoded ``/Users/zahary/m/dev`` which only
+  ## resolved on the author's macOS checkout.
+  let override = getEnv("REPRO_WORKSPACE_ROOT")
+  if override.len > 0:
+    return override
+  result = currentSourcePath()
+  for _ in 0 ..< 5:
+    result = result.parentDir
 
+let
+  WorkspaceRoot* = detectWorkspaceRoot()
   RubyRecorderRepo* = WorkspaceRoot / "codetracer-ruby-recorder"
   PythonRecorderRepo* = WorkspaceRoot / "codetracer-python-recorder"
   JsRecorderRepo* = WorkspaceRoot / "codetracer-js-recorder"
   NativeRecorderRepo* = WorkspaceRoot / "codetracer-native-recorder"
   TraceFormatRepo* = WorkspaceRoot / "codetracer-trace-format-nim"
 
+const
   CtPrintKnownBuildPath* = "/tmp/ctprint_build/ct-print"
     ## The known build path the harness builds `ct-print` into (shared with the
     ## M12 test). `readExecutedFunctionsCtfs` falls back to this path when neither

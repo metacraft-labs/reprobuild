@@ -34,7 +34,12 @@ const
   # the leading slash and resolves it under `sourceRoot`, so the source must live
   # at `<sourceRoot>/tmp/live_demo.rb`.
   relSourcePath = "tmp/live_demo.rb"
-  traceFormatRepo = "/Users/zahary/m/dev/codetracer-trace-format-nim"
+
+let traceFormatRepo = (if getEnv("REPRO_WORKSPACE_ROOT").len > 0:
+    getEnv("REPRO_WORKSPACE_ROOT")
+  else:
+    currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir) /
+  "codetracer-trace-format-nim"
 
 var tempCounter = 0
 
