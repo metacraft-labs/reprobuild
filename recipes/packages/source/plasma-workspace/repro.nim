@@ -245,6 +245,21 @@ package plasmaWorkspaceSource:
     "plasma-activities >=6.0"
     "plasma-wayland-protocols >=1.14"
     "kwayland >=6.0"
+    ## M9.R.15q.9.8 — X11 transitive deps for KF6KIO ->
+    ## KF6WindowSystem find_package probe at configure time. Even
+    ## though plasma-workspace is pure-Wayland at runtime, the
+    ## ``find_package(KF6WindowSystem)`` config-time probe (driven
+    ## by KIO's CMake config) verifies X11 client libs are reachable.
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
     ## qt6-base supplies QtCore / QtGui / QtWidgets / QtConcurrent /
     ## QtNetwork / QtDBus which the Plasma shell uses for its base UI +
     ## IPC surface.
