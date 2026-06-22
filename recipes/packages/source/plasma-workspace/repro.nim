@@ -253,7 +253,17 @@ package plasmaWorkspaceSource:
         "KWIN_BUILD_X11=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.15q.7.1 — cap cmake's internal compile parallelism to match
+      # the build engine's standard ``compile=8`` pool budget (mirrors
+      # the kwin recipe; same template-heavy KDE C++ memory profile).
+      # Without this, cmake's bare ``--parallel`` defers to nproc and on
+      # a 32-core / 64 GiB WSL host the resulting cc1plus stampede OOMs
+      # the VM mid-compile (M9.R.15q.7 wsl-crash observation, see kwin).
+      let env = @[
+        ("CMAKE_BUILD_PARALLEL_LEVEL", "8"),
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              extraEnv = env)
       discard pkg.executable("plasmashell")
       discard pkg.library("libPlasmaWorkspace")
     finally:
