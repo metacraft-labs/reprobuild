@@ -243,6 +243,13 @@ package sddmSource:
     setCurrentOwningPackageOverride("sddmSource")
     try:
       let opts = @[
+        # M9.R.15q.8.1 — sddm 0.21.0's top-level CMakeLists declares
+        # `cmake_minimum_required(VERSION 3.0.2)`. CMake 4.x (the cache's
+        # cmake-4.1.2) removed compatibility with CMake < 3.5 and
+        # hard-errors at configure time. Set the policy-version-minimum
+        # flag so the build proceeds against the modern CMake without
+        # touching upstream sources.
+        "CMAKE_POLICY_VERSION_MINIMUM=3.5",
         "BUILD_TESTING=OFF",
         "BUILD_MAN_PAGES=OFF",
         "ENABLE_JOURNALD=OFF",
