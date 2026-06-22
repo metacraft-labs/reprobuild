@@ -15,10 +15,14 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "https://download.kde.org/stable/plasma/6.2.0/kdecoration-6.2.0.tar.xz"
+  ## M9.R.15q.5.13 bumped kdecoration to 6.2.5 to match kwin's
+  ## PROJECT_DEP_VERSION; the smoke test follows. Attic URL because
+  ## download.kde.org redirects ``stable/plasma/6.2.5/`` for the
+  ## kdecoration-6.2.5 tarball to the ``Attic/`` subtree.
+  "https://download.kde.org/Attic/plasma/6.2.5/kdecoration-6.2.5.tar.xz"
 
 const ExpectedHash =
-  "05d0d38ee55c922db135fd864e35c4742988a7b26516a341b824e9804960c919"
+  "726c58cd4b34fc49546578727a447c76242938add577292cd334bd60bf9d8f26"
 
 suite "kdecorationSource — from-source recipe smoke test":
 
