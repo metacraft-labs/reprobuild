@@ -158,6 +158,9 @@ import ./xorgproto
 # M9.R.15q.4.3 — libxau ships libXau.so + xau.pc; libxcb's xcb.pc has
 # Requires.private: xau so any pkg-config probe through xcb needs it.
 import ./libxau
+# M9.R.15q.4.6 — libxdmcp ships xdmcp.pc; xcb.pc has
+# Requires.private: xau xdmcp so probes through xcb need it.
+import ./libxdmcp
 # M9.R.15q.4.5 — kwin system-level deps.
 import ./libcanberra
 import ./libepoxy
@@ -234,6 +237,7 @@ export libxfixes
 export libxrender
 export xorgproto
 export libxau
+export libxdmcp
 export libcanberra
 export libepoxy
 export libdisplayinfo

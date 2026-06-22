@@ -206,7 +206,10 @@ package libxkbcommonSource:
     ## libxkbcommon-x11 helper library, which is gated on enable-x11
     ## on libxkbcommon. xcb-xkb is part of libxcb itself; the
     ## ``libxcb`` stub realizes the dev output containing xcb/xkb.h.
+    ## libxau + libxdmcp are xcb.pc Requires.private chain deps.
     "libxcb"
+    "libxau"
+    "libxdmcp"
     "xorgproto"
 
   config:
