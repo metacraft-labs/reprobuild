@@ -2487,24 +2487,43 @@
       so the flag-gated seekable overlays return `None` on production anyway.
 
   Deliverables (an architecture decision + a core-read-path change — do deliberately):
-  - [ ] Decide the ONE canonical split wire format (production is Nim + ct-print's v4
+  - [~] Decide the ONE canonical split wire format (production is Nim + ct-print's v4
     reader + the GUI all read the Nim format, so the Nim format is the natural canon)
     and RECONCILE: align the Rust encoders/readers (`step_stream.rs`/`value_stream.rs`/
     `event_stream.rs` + their readers) to the canonical format (header/trailer,
     per-chunk count, content-size zstd, the value-stream container), so ONE format is
     written + read everywhere. Keep calls/interning (already cross-matched).
-  - [ ] `multi_stream_writer.close()` sets ALL the stream flags it emits.
-  - [ ] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
+    DONE for STEP (M24a-1) + VALUE (M24a-2) + EVENT (M24a-3): the Nim writer was brought
+    ONTO the SPEC (Rust) layout for all three production chunked streams (byte-compatible,
+    cross-read proven in both directions). With calls (M20) and interning already
+    cross-matching, ALL production chunked streams now share the SINGLE spec format.
+  - [~] `multi_stream_writer.close()` sets ALL the stream flags it emits. DONE for
+    `has_step_stream` (bit 9, M24a-1) + `has_value_stream` (bit 10, M24a-2) +
+    `has_io_event_stream` (bit 11, M24a-3). REMAINS: `has_interning_tables` (a separate
+    slice).
+  - [~] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
     overlays engage on production Nim bundles (now readable + flagged), AND
     `open_new_format_nim` no longer eagerly materializes the full step/value tables
     (serve them on-demand through the overlays). Bounded-decompression PROVEN on a
     real production bundle; DAP suite green; parity with the materialized result.
-  - [ ] No regression: legacy + Rust-writer + production bundles all read correctly;
-    ct-print byte-identical.
+    DONE for VALUES (M24c): the value table is no longer materialized at open — a
+    `LazyValueCache` over the seekable `values.dat` serves each step's values on first
+    borrow (one chunk per fetch, counter-proven). The step + value OVERLAYS both engage
+    on a production bundle. STEPS (`db.steps` + the `step_map` line→step index) are
+    STILL materialized at open — see M24c for the honest scope reason.
+  - [~] No regression: legacy + Rust-writer + production bundles all read correctly;
+    ct-print byte-identical. Reader-side regression bar met (M24c: full DAP + flow
+    suite green, split/log parity holds). ct-print byte-identical was proven for the
+    M24a writer slices.
 
-  Acceptance: opening a PRODUCTION `.ct` does NOT fully materialize steps/values; a
-  step/value fetch decompresses only the needed chunk (counter-proven) on a genuine
-  production bundle; every consumer reads the single canonical split format.
+  Acceptance (PARTIALLY MET): opening a PRODUCTION `.ct` does NOT fully materialize
+  VALUES (M24c) — a value fetch decompresses only the needed chunk (counter-proven) on
+  a genuine production bundle, and step+value overlays engage. STEPS are still
+  materialized at open (reader-side scope limit, M24c). The wire-format reconciliation
+  is now COMPLETE across all production chunked streams — steps (M24a-1) + values
+  (M24a-2) + events (M24a-3), plus calls (M20) and interning — all on the single spec
+  format, byte-compatible with the Rust readers. So M24's steps+values acceptance is met
+  for VALUES; the steps-lazy remainder is a documented M24c reader-side remainder.
 
 ** M24a-1 — Nim STEP stream on the SPEC-canonical wire format (done, 2026-06-22)
   :STATUS: done — first slice of the wire-format reconciliation (step stream only)
@@ -2541,3 +2560,190 @@
   reconciled; `has_value_stream`/`has_io_event_stream`/`has_interning_tables` flags are
   not yet all set by `close()`; and the db-backend production read path is not yet
   made seekable / non-materializing (M24b/M24c). M24's checkboxes stay unchecked.
+
+** M24a-2 — Nim VALUE stream on the SPEC-canonical chunked format (done, 2026-06-22)
+  :STATUS: done — second slice of the wire-format reconciliation (value stream only)
+
+  Resolves the VALUE half of root cause #1 (wire-format divergence) and part of root
+  cause #2 (flags unset), for the value stream specifically. As with M24a-1, the Nim
+  writer was brought ONTO the Rust `ValueStreamReader` layout, so there is now ONE
+  value wire format written + read by both toolchains.
+
+  - The Nim value stream was previously a `.dat` + `.off` VARIABLE-SIZE RECORD TABLE
+    (uncompressed records + a u64 offset table) with a Nim-specific per-record framing
+    (`varint count`, then `varnameId, typeId, dataLen, data` per value). It now emits the
+    SPEC-canonical chunked layout: `values.dat` = `[zstd(chunk_0)][zstd(chunk_1)]...`
+    (each chunk a Zstd-compressed concatenation of LENGTH-PREFIXED per-step records) and
+    `values.idx` = `[chunk_size:u32][offset:u64]...` (no `total_events`). Each record is
+    a tag-0 `StepValues` event — `u8 0x00, varint count, count × (varint name_id, varint
+    value_len, CBOR value)` — byte-identical to the Rust
+    `value_stream::ValueStreamEvent::StepValues` encoding. This is BYTE-COMPATIBLE with
+    the Rust `codetracer_trace_writer::value_stream::encode_value_stream` writer /
+    `codetracer_trace_reader::value_stream_reader::ValueStreamReader`.
+  - The redundant per-value `typeId` field was dropped from the wire (the Rust format
+    carries no separate type id — it is already inside the CBOR `ValueRecord`). The Nim
+    reader reconstructs `VariableValue.typeId` from the CBOR value's top-level `type_id`,
+    keeping the public Nim API and ct-print output unchanged. `ValueRecord`/CBOR was NOT
+    redesigned.
+  - Parallel-index invariant preserved: record N ↔ step N, with an EMPTY record (zero
+    bytes) for value-less steps. `writeStepValues(@[])` per value-less step keeps the
+    1:1 alignment the reader relies on.
+  - `multi_stream_writer.close()` now flushes the partial value chunk + finalizes
+    `values.idx`, and sets the `has_value_stream` (bit 10) meta.dat flag (it previously
+    did NOT). The flag gates the Rust/db-backend seekable value path AND marks the bundle
+    as SPEC-framed for the Nim FFI reader.
+  - BACKWARD COMPAT kept: pre-M24a-2 Nim-v4 bundles never set `has_value_stream`, so the
+    Nim FFI reader (`new_trace_reader.ensureValueReader`) selects the legacy `.off` VRT
+    framing when the flag is clear and the SPEC chunked framing when set
+    (`initValueStreamReader(legacy = not has_value_stream)`). A hand-built legacy `.off`
+    bundle still reads correctly (`test_value_stream.test_value_stream_legacy_back_compat`).
+  - GENUINE cross-read proof (load-bearing): a NEW Nim production bundle's `values.dat`
+    is read by the canonical RUST `ValueStreamReader`, and the decoded per-step
+    `(name_id, CBOR)` pairs equal the recorded values — including the parallel-index
+    invariant (empty records for value-less steps). `tests/test_nim_value_stream_crossread.nim`
+    (Nim) drives `codetracer-trace-format/codetracer_trace_reader/tests/
+    nim_value_stream_crossread.rs` (Rust). Verified passing (600-step bundle spanning
+    multiple value chunks, 120 value-less steps, values equal).
+  - ct-print `--json-events` VALUE output is byte-identical; the only `ct_print_full`
+    golden change is the `has_value_stream` flag flipping false→true. db-backend green
+    (`cargo test --lib`: 378 passed; `dap_variables_e2e` 3/3 + `python_flow_ctfs_integration`
+    1/1 + CTFS integration tests pass — values served correctly from the SPEC value stream
+    via `open_new_format_nim`).
+  - Pre-existing failures `test_column_aware_steps` (meta.dat unknown-flag-bit-8 rejection)
+    and `test_ram_cache` (a perf-threshold timing assertion) are unrelated and confirmed
+    A/B against baseline.
+
+  STILL OPEN (M24 not complete): the EVENT stream (`events.dat`, M24a-3) is not yet
+  reconciled; `has_io_event_stream`/`has_interning_tables` flags are not yet all set by
+  `close()`; and the db-backend production read path is not yet made seekable /
+  non-materializing (M24b/M24c). M24's checkboxes stay unchecked.
+
+** M24a-3 — Nim EVENT stream (`events.dat`) on the SPEC-canonical chunked format (done, 2026-06-22)
+  :STATUS: done — third (final) slice of the wire-format reconciliation (I/O event stream)
+
+  Resolves the EVENT half of root cause #1 (wire-format divergence) and the matching part
+  of root cause #2 (flags unset), for the I/O event stream specifically. As with M24a-1
+  (steps) and M24a-2 (values), the Nim writer was brought ONTO the Rust
+  `IoEventStreamReader` layout, so there is now ONE I/O-event wire format written + read by
+  both toolchains.
+
+  - The Nim I/O event stream was previously a `.dat` + `.off` VARIABLE-SIZE RECORD TABLE
+    (`events.dat` + `events.off`, uncompressed records + a u64 offset table) with a
+    Nim-specific per-record framing (`u8 kind, varint stepId, varint data_len, data` — NO
+    metadata, and `kind` was the 4-value `IOEventKind` ordinal, NOT the `EventLogKind`
+    ordinal). It now emits the SPEC-canonical chunked layout: `events.dat` =
+    `[zstd(chunk_0)][zstd(chunk_1)]...` (each chunk a Zstd-compressed concatenation of
+    LENGTH-PREFIXED records) and `events.idx` = `[chunk_size:u32][offset:u64]...` (no
+    `total_events`). Each record is `u8 kind (EventLogKind ordinal), varint step_id,
+    varint metadata_len + metadata, varint content_len + content` — byte-identical to the
+    Rust `event_stream::IoEventRecord::encode`. This is BYTE-COMPATIBLE with the Rust
+    `codetracer_trace_writer::event_stream::encode_io_event_stream` writer /
+    `codetracer_trace_reader::io_event_stream_reader::IoEventStreamReader`.
+  - The on-disk `kind` byte is now the `EventLogKind` ordinal (the SAME u8 `events.log`
+    carries). The Nim convenience API still surfaces the coarse `IOEventKind`
+    (stdout/stderr/file_op/error); `ioEventKindToOrdinal`/`ordinalToIOEventKind`
+    round-trip every `IOEventKind` (stdout↔Write(0), stderr↔TraceLogEvent(12),
+    file_op↔ReadFile(4), error↔Error(11)), so ct-print's `io_kind` output is unchanged.
+    The previously-dropped `metadata` is now carried verbatim on the wire (the FFI
+    `register_special_event` passes it through on the multi-stream path).
+  - `multi_stream_writer.close()` now flushes the partial events chunk + finalizes
+    `events.idx`, and sets the `has_io_event_stream` (bit 11) meta.dat flag (it previously
+    did NOT). The flag gates the Rust/db-backend event-log path AND marks the bundle as
+    SPEC-framed for the Nim FFI reader.
+  - BACKWARD COMPAT kept: pre-M24a-3 Nim-v4 bundles never set `has_io_event_stream`, so the
+    Nim FFI reader (`new_trace_reader.ensureIOEventReader`) selects the legacy `.off` VRT
+    framing when the flag is clear and the SPEC chunked framing when set
+    (`initIOEventStreamReader(legacy = not has_io_event_stream)`). A hand-built legacy `.off`
+    bundle still reads correctly
+    (`test_io_event_stream.test_io_event_stream_legacy_back_compat`).
+  - GENUINE cross-read proof (load-bearing): a NEW Nim production bundle's `events.dat`
+    is read by the canonical RUST `IoEventStreamReader`, and the decoded
+    `(kind, step_id, metadata, content)` records equal the recorded events.
+    `tests/test_nim_io_event_stream_crossread.nim` (Nim) drives
+    `codetracer-trace-format/codetracer_trace_reader/tests/
+    nim_io_event_stream_crossread.rs` (Rust). Verified passing (a ~250-step bundle whose
+    I/O event stream spans multiple chunks, all four IOEventKinds, varied/empty metadata
+    and binary content, per-record + paginated `read_all` decode equal).
+  - ct-print `--json-events` I/O-event output is byte-identical; the only `ct_print_full`
+    golden change is the `has_io_event_stream` flag flipping false→true. db-backend green
+    (`cargo test --lib`: 379 passed; the Nim FFI `event_fields` contract is unchanged —
+    it still returns the coarse `IOEventKind` ordinal {0,1,2,3} the db-backend maps to
+    `EventLogKind`, because the Nim reader reconstructs the coarse kind from the on-disk
+    `EventLogKind` ordinal). `cargo clippy --lib` clean.
+  - Pre-existing failures `test_reader_ffi` (a link error) and `test_ram_cache` (a
+    perf-threshold timing assertion) are unrelated and confirmed A/B against baseline.
+
+  WIRE-FORMAT RECONCILIATION COMPLETE: with M24a-1 (steps) + M24a-2 (values) + M24a-3
+  (events) done — and calls (`calls.dat`/`calls.idx`, M20) and the interning tables
+  already cross-matching — ALL of the production chunked streams (steps / values / events)
+  plus calls and interning are now the SINGLE SPEC format, byte-compatible with the Rust
+  readers in BOTH directions. Root cause #1 (wire-format divergence) is fully closed for
+  the production streams. REMAINING for M24: the db-backend production read path's
+  steps-lazy remainder (steps are still materialized at open) is documented in M24c; the
+  `has_interning_tables` flag slice is separate. M24's checkboxes stay as scoped there.
+
+** M24c — PRODUCTION read path made SEEKABLE for VALUES; overlays engage; lazy open (done, 2026-06-22)
+  :STATUS: done — the steps+values seekable-on-production deliverable, for the VALUE half
+
+  Closes the M23e-4 CRITICAL FINDING for VALUES: the M22/M17b seekable overlays now
+  ENGAGE on a real PRODUCTION Nim bundle, and `open_new_format_nim` no longer eagerly
+  materializes the value table. The STEP overlay also engages on production; the step
+  TABLE is still materialized (scope reason below).
+
+  - OVERLAYS ENGAGE ON PRODUCTION (deliverable 1, verified): a `.ct` written by the
+    Nim `MultiStreamTraceWriter` (the live-recorder write path) now reports
+    `seekable_step_count() == Some(n)` AND `seekable_value_count() == Some(n)`. This
+    works because M24a-1/a-2 (a) brought `steps.dat`/`values.dat` onto the SPEC-canonical
+    wire format the Rust `StepStreamReader`/`ValueStreamReader` read, and (b) made
+    `close()` set `has_step_stream` (bit 9) + `has_value_stream` (bit 10) that the
+    flag-gated overlays require. NO new diagnosis/fix was needed in M24c — the M24a
+    writer slices were exactly what unblocked engagement; M24c proves it end-to-end.
+  - LAZY VALUE OPEN (deliverable 2, done): `open_new_format_nim` no longer decodes the
+    whole value table. When a `has_value_stream` `values.dat` is present it attaches a
+    `LazyValueCache` (new, `ctfs_trace_reader::step_value_stream_source`) over the
+    seekable stream and leaves `db.variables` EMPTY. The borrowing
+    `TraceReader::variables_at(step) -> Option<&[FullValueRecord]>` is served from the
+    cache: a fixed-length `Vec<OnceCell<Box<[FullValueRecord]>>>` (one empty slot per
+    step, allocated at open — no decode) whose slot is filled on first borrow by
+    decompressing ONLY that step's chunk. The OWNED hot path
+    (`variables_at_owned`/`seekable_variables_at`, M22) already preferred the
+    `value_stream` overlay. A value-less / pre-M24a-2 (flag-off) bundle, or an
+    unreadable stream, falls back to the original eager FFI materialization, so older
+    bundles stay bit-for-bit correct.
+  - BOUNDED DECOMPRESSION ON A PRODUCTION BUNDLE (deliverable 3, proven): a 602-step
+    production bundle spanning 3 `values.dat` chunks (chunk size 256). At open,
+    `lazy_values_populated() == 0` and `lazy_values_chunk_decompressions() == 0` (NOT
+    materialized). Borrowing step 400's values inflates EXACTLY ONE chunk (counter-proven
+    via the reader's `cached_chunk()` probe) and decodes exactly one slot; re-reading the
+    same step inflates nothing; touching a step in another chunk inflates exactly one
+    more. `db().variables.is_empty()` holds after open.
+  - PARITY (deliverable 4, proven): the lazily-served per-step values EQUAL the recorded
+    values (user step i ⇒ `var = i`) AND the OWNED and BORROWED accessors agree at every
+    step across chunk boundaries — the debugger shows identical data on the lazy path.
+  - Tests (real, passing): `tests/ctfs_lazy_production_values_test.rs` (overlays-engage,
+    lazy-open, bounded-decompression, parity, owned/borrowed agreement — 5/5).
+  - DAP SAFETY NET GREEN (the critical bar — these now exercise the LAZY production value
+    path): `cargo test --lib` 378/378; `dap_variables_e2e` 3/3; `dap_column_flow` 3/3;
+    `ctfs_split_only_full_db_test` 3/3 (split/log parity holds); real-trace
+    `python_flow_ctfs_integration` 1/1 + `ruby_flow_ctfs_integration` 1/1; adjacent CTFS
+    integration tests green. `cargo clippy --lib` clean.
+
+  HONEST REMAINDER — what STILL materializes at open and WHY:
+  - STEPS (`db.steps` + the `step_map` line→step index) are still built at open. The
+    borrowing `TraceReader::step(id) -> Option<&DbStep>` is woven through the navigation /
+    location logic (`load_location`, `step_over_depths_step_id`, the full-trace history
+    scans in `db.rs`), and `step_map`/`steps_on_line` is the breakpoint-resolution index.
+    De-materializing those is a navigation rewrite, not a reader-side-only change, and
+    would risk the DAP safety net — out of M24c's "reader-side only / SAFE" scope. The
+    STEP overlay nonetheless engages and the format is reconciled (M24a-1), so the step
+    table can be made lazy in a follow-up with the same `OnceCell`-slot pattern once the
+    borrowing step consumers are migrated to an owned/seekable accessor. The step records
+    are small (a few ints each) vs the value records (CBOR-decoded `ValueRecord`s), so the
+    value table was the dominant materialization cost this milestone removes.
+  - The EVENT stream (`events.dat`) is still on the Nim-specific format (M24a-3); the
+    event table is materialized at open (small relative to values).
+  - The lazy cache opens its OWN `SeekableValueStream` (separate from the `value_stream`
+    overlay), so a production open performs two `values.dat` index parses (bounded, no
+    full decompression) — a deliberate trade for clean per-path chunk-decompression
+    accounting; can be collapsed to one shared `Arc` later if the extra index parse ever
+    matters.

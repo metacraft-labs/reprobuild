@@ -176,6 +176,27 @@ proc cmake_package*(srcDir: string;
         continue
       seen.add(component)
       effectiveCacheVars.add(entry)
+    # M9.R.15q.3.1 — synthesize a virtual KF6 umbrella config when one
+    # or more KF6 module configs are visible across the dep's install-
+    # mirror cmake/ trees. cmake's ``find_package(KF6 REQUIRED COMPONENTS
+    # Config CoreAddons I18n ...)`` umbrella form needs a top-level
+    # ``KF6Config.cmake`` dispatcher; the per-module ``-DKF6<X>_DIR=...``
+    # threading alone does not satisfy the umbrella probe. Emit the
+    # dispatcher under ``.repro/build/cmake/KF6/`` and add
+    # ``-DKF6_DIR=...`` so cmake routes the umbrella through our synth.
+    let kf6Components = m9r15q31KF6Components(allCmakeDirs)
+    if kf6Components.len > 0:
+      let umbrellaDir = m9r15q31SynthesizeKF6UmbrellaConfig(projectRoot,
+        kf6Components)
+      if umbrellaDir.len > 0:
+        # Don't double-emit if a recipe already pinned KF6_DIR.
+        var hasKf6Dir = false
+        for v in effectiveCacheVars:
+          if v.startsWith("KF6_DIR="):
+            hasKf6Dir = true
+            break
+        if not hasKf6Dir:
+          effectiveCacheVars.add("KF6_DIR=" & umbrellaDir)
     # M9.R.15o.1 — auto-thread Qt6Gui transitive find_dependency targets
     # (libxkbcommon + mesa) into the CMake-config dir scan when any
     # qt6-* dep is present. M9.R.15n.3..5 hand-patched per-recipe

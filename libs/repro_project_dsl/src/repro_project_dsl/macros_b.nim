@@ -179,17 +179,71 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # body in a beginBuildBlock/endBuildBlock try/finally so helper-proc
   # call sites (and unknown preserved top-level statements) can find
   # the active package via `currentBuildState()` / `tryCurrentBuildState()`.
+  # M9.R.15q.2.1 — chicken-and-egg fix for from-source-custom convention:
+  #
+  # ``from_source_custom.fromSourceCustomRecognize`` consults
+  # ``registeredShellActions(packageName)`` to decide whether to claim a
+  # recipe. The registry is populated by ``shell(...)`` calls inside the
+  # recipe's ``build:`` body, which only runs INSIDE ``buildXxxPackage()``.
+  # Under ``reproProviderMode`` the M4 emitters gate the body splice off
+  # (so the legacy provider chain is the sole executor), but the legacy
+  # chain only runs ``buildXxxPackage`` AFTER the convention's
+  # ``emitFragment`` has been called -- which is downstream of
+  # ``recognise``. The result is that ``recognise`` always sees an empty
+  # shell registry at provider startup and rejects the recipe, leaving
+  # boost / ninja / meson / gcc with ``scheduler:actions=0`` and no graph
+  # fragment.
+  #
+  # The fix is to emit a ``when defined(reproProviderMode):
+  # buildXxxPackage()`` invocation at module-init time so the shell
+  # registry is populated BEFORE ``recognise`` runs. An idempotency guard
+  # checks ``registeredShellActions(pkg).len == 0`` before invoking so
+  # the body never runs twice (the legacy ``runPackageProvider`` chain
+  # also calls ``buildXxxPackage`` later via ``buildPackageFragment``;
+  # without the guard, ``shell(...)`` rows would accumulate twice).
+  let providerModeInitCall =
+    if buildBody.len > 0:
+      quote do:
+        when defined(reproProviderMode):
+          if registeredShellActions(`pkgNameLit`).len == 0:
+            `procName`()
+    else:
+      newStmtList()
+  # M9.R.15q.2.1 — translate shell-action rows into BuildActionDef rows.
+  # Per-project providers don't dispatch through ``from_source_custom``'s
+  # ``emitFragment``, so ``shell(...)`` rows registered by the user's
+  # ``build:`` body never become BuildActionDef rows on their own.
+  # ``synthesizeCustomShellBuildActions`` consumes the in-process shell
+  # + fetch registries and emits the fetch + shell chain via
+  # ``buildAction(...)`` directly into the per-thread registry
+  # ``buildPackageFragment`` queries at fragment-emit time. The call is
+  # a no-op when the shell registry is empty (the recipe drove a typed
+  # constructor instead) or when no project root is active (the recipe
+  # was imported by a test fixture outside provider mode).
+  #
+  # The proc resets ``dslPortShellActions`` for THIS package at entry so
+  # repeat invocations don't accumulate duplicate rows. Without the
+  # reset: the module-init invocation (the ``providerModeInitCall``
+  # above) runs the body once, populating the shell registry; then
+  # ``runPackageProvider`` invokes the same proc a SECOND time via
+  # ``buildPackageFragment`` (which resets ``buildActionRegistry`` but
+  # NOT ``dslPortShellActions``), so the body's ``shell(...)`` calls
+  # double-register. The reset is per-package so other packages' rows
+  # (imported via cross-recipe ``buildDeps:`` chains) survive.
   if lifted.lifts.len == 0:
     let rootBody = lifted.rootBody
     result = quote do:
       when not defined(reproInterfaceMode):
         `devEnvProc`
         proc `procName`*() =
+          resetDslPortShellStateForPackage(`pkgNameLit`)
           let buildStateHandle = beginBuildBlock(`pkgNameLit`)
           try:
             `rootBody`
+            synthesizeCustomShellBuildActions(`pkgNameLit`)
           finally:
             endBuildBlock(buildStateHandle)
+        `providerModeInitCall`
         when defined(reproProviderMode) and isMainModule:
           when compiles(`devEnvProcName`()):
             quit runPackageProvider(`pkgLiteral`, `procName`,
@@ -208,11 +262,14 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
         `devEnvProc`
         `liftedProcs`
         proc `procName`*() =
+          resetDslPortShellStateForPackage(`pkgNameLit`)
           let buildStateHandle = beginBuildBlock(`pkgNameLit`)
           try:
             `rootBody`
+            synthesizeCustomShellBuildActions(`pkgNameLit`)
           finally:
             endBuildBlock(buildStateHandle)
+        `providerModeInitCall`
         when defined(reproProviderMode):
           `dispatchProc`
           when isMainModule:
