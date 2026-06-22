@@ -508,6 +508,18 @@ package plasmaWorkspaceSource:
         # added).  Drop the add_subdirectory(users) entry from the kcms
         # umbrella CMakeLists.
         "sed -i 's|^add_subdirectory(users)$|# M9.R.15q.13.5: dropped — needs libcrypt (kcm_users links -lcrypt)|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
+        # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
+        # KX11Extras include at the top is already gated on HAVE_X11
+        # (line 27-28), but the runtime-X11 ``if (KWindowSystem::
+        # isPlatformX11()) { KX11Extras::setType(...); KX11Extras::set
+        # State(...); }`` block on lines 107-110 is NOT gated, which
+        # trips the compile with ``KX11Extras has not been declared``
+        # when WITH_X11=OFF.  Wrap the inner KX11Extras calls (NOT the
+        # outer ``isPlatformX11()`` if-statement, which is still
+        # conceptually correct as a runtime no-op when X11 is unbuilt).
+        "sed -i 's|^        KX11Extras::setType(winId(), NET::Dock);$|#if HAVE_X11\\n        KX11Extras::setType(winId(), NET::Dock);|' src/shell/panelconfigview.cpp",
+        "sed -i 's|^        KX11Extras::setState(winId(), NET::KeepAbove);$|        KX11Extras::setState(winId(), NET::KeepAbove);\\n#endif|' src/shell/panelconfigview.cpp",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
