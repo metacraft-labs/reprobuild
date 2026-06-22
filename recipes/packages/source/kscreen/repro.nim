@@ -1,13 +1,15 @@
 ## Source-from-tarball kscreen recipe — M9.R.15q.11.4 Plasma cascade
-## module. ``kscreen-6.2.5.tar.xz`` is the upstream tarball for
-## ``libkscreen`` (the project + tarball name is ``kscreen`` for the
-## main system-settings module; the lower-level multi-monitor config
-## library inside ships as ``libKF6Screen.so`` providing
-## ``KF6Screen`` cmake-config). kwin, plasma-workspace + kscreenlocker
-## all link against libKF6Screen for monitor enumeration + per-output
-## config.
+## module. We build the lower-level ``libkscreen-6.2.5.tar.xz`` (the
+## libKF6Screen.so multi-monitor-config library plasma-workspace +
+## kscreenlocker + kwin all link against), NOT the higher-level
+## kscreen-6.2.5.tar.xz (the System Settings KCM which needs
+## qt6-sensors + Plasma + PlasmaQuick + LayerShellQt + libkscreen). The
+## recipe directory keeps the canonical ``kscreen`` name so the dep
+## declarations on plasma-workspace (``"kscreen >=6.0"``) match the
+## same recipe-dir lookup pattern ksysguard uses (recipe dir named
+## ``ksysguard`` while tarball is ``libksysguard-6.2.5.tar.xz``).
 ##
-## sha256 = 6237c47fe70384d10e6f20d7f058c6aacca51a493da928077fcec91b0ef69642
+## sha256 = 5edaf6fa2eed6ddcef4bc479f4bb15d3481acb60adf0150e9f9a1382607bbcb8
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -17,12 +19,12 @@ package kscreenSource:
   versions:
     "6.2.5":
       sourceRevision = "v6.2.5"
-      sourceUrl = "https://download.kde.org/stable/plasma/6.2.5/kscreen-6.2.5.tar.xz"
+      sourceUrl = "https://download.kde.org/stable/plasma/6.2.5/libkscreen-6.2.5.tar.xz"
       sourceRepository = "https://invent.kde.org/plasma/libkscreen"
 
   fetch:
-    url: "https://download.kde.org/stable/plasma/6.2.5/kscreen-6.2.5.tar.xz"
-    sha256: "6237c47fe70384d10e6f20d7f058c6aacca51a493da928077fcec91b0ef69642"
+    url: "https://download.kde.org/stable/plasma/6.2.5/libkscreen-6.2.5.tar.xz"
+    sha256: "5edaf6fa2eed6ddcef4bc479f4bb15d3481acb60adf0150e9f9a1382607bbcb8"
     extractStrip: 1
 
   nativeBuildDeps:

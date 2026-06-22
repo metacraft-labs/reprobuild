@@ -41,6 +41,11 @@ package plasma5supportSource:
     "kguiaddons >=6.0"
     "kwidgetsaddons >=6.0"
     "kwindowsystem >=6.0"
+    ## M9.R.15q.11.5 — plasma5support's CMakeLists.txt declares
+    ## ``find_package(KSysGuard REQUIRED)`` for the sensor-data
+    ## Plasma 5 -> 6 compatibility surface. Without it the configure
+    ## edge dies with 'Could not find KSysGuard'.
+    "ksysguard >=6.0"
     ## X11 transitives.
     "xorgproto"
     "libx11"

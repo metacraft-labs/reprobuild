@@ -1235,6 +1235,19 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     script.add("first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); ")
     script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
     script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/" & kebabName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")
+    # M9.R.15q.11.5 — dot-versioned SONAME fallback. The DASH-version
+    # globs above match ``lib<name>-2.0.so`` (meson soversion +
+    # libfoo-2.0 family) but the canonical Linux SONAME convention is
+    # ``lib<name>.so.<X>[.Y[.Z]]`` (e.g. libKGlobalAccelD.so.6.2.5,
+    # libwayland-client.so.0.25.0). Many KDE/Plasma upstreams install
+    # ONLY the dot-versioned ``lib<name>.so.<X>`` symlink + the real
+    # ``lib<name>.so.<X>.<Y>.<Z>`` file WITHOUT a bare ``lib<name>.so``
+    # — so the literal probe AND the dash-version glob both miss it.
+    # Prefer the shortest (typically the major-version symlink, e.g.
+    # ``libKGlobalAccelD.so.6``) for the staged copy. We use ``-V`` for
+    # version-sort so ``so.10`` doesn't sort before ``so.2``.
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
+    script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & escapedLowerName & ".so.\"* 2>/dev/null | LC_ALL=C sort -V | head -n1); fi; ")
     # M9.R.14g.7 — stripped-prefix glob variants (libgmodule-2.0.so etc.)
     if strippedName != name:
       script.add("if [ -z \"$first\" ]; then first=$(ls -1 \"" & escapedSrcDir & "/lib" & strippedName & "\"-*.so 2>/dev/null | LC_ALL=C sort | head -n1); fi; ")

@@ -328,10 +328,15 @@ proc autotools_package*(srcDir: string;
   ## passed as ``make`` command-line ``VAR=VALUE`` overrides via the
   ## downstream build/install action's ``vars`` slot (recipe sets them
   ## via ``configureOptions`` which we forward).
+  ##
+  ## The script runs in the RECIPE ROOT (same pwd as the configure
+  ## script does pre-cd), so the copy source is ``srcDir`` verbatim
+  ## (e.g. ``src/`` -- NOT ``../src/`` which is the path from inside
+  ## buildDir that the configure path uses).
   let configureScript =
     if skipConfigure:
       bootstrapPrefix &
-      "set -e; mkdir -p " & buildDir & " && cp -aL " & srcFromBuild &
+      "set -e; mkdir -p " & buildDir & " && cp -aL " & srcDir &
         "/. " & buildDir & "/"
     else:
       bootstrapPrefix &
