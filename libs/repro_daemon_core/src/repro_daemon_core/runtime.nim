@@ -842,6 +842,21 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
   proc cancelCheck(): bool =
     request.attached and request.cancelOnDisconnect and socket.clientDisconnected()
 
+  when defined(posix):
+    # Prewarm in the worker, not the daemon parent. This warms the on-disk
+    # action / file-metadata caches the build below reads, but does so in this
+    # short-lived forked process so its (potentially multi-GB) build-graph and
+    # provider-compile allocations are reclaimed on `quit` instead of
+    # accumulating in the long-lived daemon. Best-effort: a prewarm failure
+    # (e.g. tool-resolution not yet satisfiable) must never abort the build —
+    # the executor below re-derives everything authoritatively.
+    if userDaemonBuildPrewarmer != nil:
+      try:
+        userDaemonBuildPrewarmer(request)
+      except CatchableError as err:
+        logLine(config.logPath, "build prewarm skipped session=" &
+          sessionId & " error=" & err.msg)
+
   try:
     updateSessionState(config, session, "running",
       message = "daemon-hosted build running")
@@ -927,12 +942,20 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
         updateSessionState(config, session, "cancelled", 130,
           "daemon-hosted build cancelled before scheduling")
         return
-    if userDaemonBuildPrewarmer != nil:
-      try:
-        userDaemonBuildPrewarmer(request)
-      except CatchableError as err:
-        logLine(config.logPath, "build prewarm skipped session=" &
-          sessionId & " error=" & err.msg)
+    # NOTE: the prewarm step (build-graph inspection + file-metadata cache
+    # warming) is intentionally NOT run here in the long-lived daemon parent.
+    # It used to be, but `prepareBuildGraphInspection` does heavyweight work
+    # (interface extraction, tool-identity resolution, and a nested
+    # provider-compile `runBuild`); running it in the single-threaded parent
+    # serialised every incoming build request behind a multi-minute warm-up
+    # and — because the parent never exits — leaked its large graph/ORC
+    # allocations into the daemon, growing RSS without bound across requests
+    # (observed wedging the `develop --cmake` inner-build path for tens of
+    # minutes with a multi-GB daemon). The worker repeats the same inspection
+    # anyway, so prewarming there is sufficient: it still warms the on-disk
+    # caches the build reads, runs in a short-lived process that frees
+    # everything on exit, and keeps the parent free to fork the next request
+    # immediately. See `runBuildRequestWorker`.
     when defined(posix):
       spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
         runBuildRequestWorker(socket, config, request, session)
