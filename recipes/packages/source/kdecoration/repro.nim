@@ -51,10 +51,17 @@ package kdecorationSource:
   config:
     discard
 
-  library libKDecoration2:
-    ## ``libKDecoration2.so`` — abstract window-decoration framework
+  library libkdecorations2:
+    ## ``libkdecorations2.so`` — abstract window-decoration framework
     ## kwin 6.2.5 + Plasma 6.2.x decoration plugins (Breeze) link
     ## against. v1 records the artifact only.
+    ##
+    ## M9.R.15q.5.3 — upstream kdecoration 6.2.0 ships SONAME
+    ## ``libkdecorations2.so.6`` (note the trailing ``s``: the CMake
+    ## namespace is ``KDecoration2`` (singular) but the actual library
+    ## file uses ``kdecorations2`` (plural). The stage-copy probe
+    ## anchors on the file name, not the CMake namespace, so the
+    ## artifact identifier MUST match the on-disk file.
     discard
 
   build:
@@ -66,7 +73,7 @@ package kdecorationSource:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKDecoration2")
+      discard pkg.library("libkdecorations2")
     finally:
       clearCurrentOwningPackageOverride()
 
