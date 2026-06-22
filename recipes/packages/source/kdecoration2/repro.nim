@@ -43,7 +43,10 @@ package kdecoration2Source:
   config:
     discard
 
-  library libkdecorations3:
+  library libkdecorations2:
+    discard
+
+  library libkdecorations2private:
     discard
 
   build:
@@ -54,7 +57,8 @@ package kdecoration2Source:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libkdecorations3")
+      discard pkg.library("libkdecorations2")
+      discard pkg.library("libkdecorations2private")
     finally:
       clearCurrentOwningPackageOverride()
 
