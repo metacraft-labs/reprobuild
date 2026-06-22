@@ -58,21 +58,31 @@ proc ensureCtPrint() =
   ## skipping is not acceptable) — never a silent skip.
   if resolveCtPrint().isOk:
     return
-  # Build into the documented known path. We invoke the build through the
-  # trace-format-nim dev shell (`direnv exec`) so `nim` + the zstd pkg-config
-  # flags are available, exactly as documented in the fixture README.
+  # Build into the documented known path in the AMBIENT shell (the reprobuild Nix
+  # dev shell the test already runs in), which supplies both `nim` and the zstd
+  # dev headers/library. The build mirrors the canonical `buildCtPrint` nimble
+  # task (`codetracer_trace_format.nimble`):
+  #   nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
+  # zstd linking/headers are handled IN THE SOURCE (`zstd_bindings.nim` carries
+  # `{.passL: "-lzstd".}` + `{.importc, header: "<zstd.h>".}`), so no external
+  # `pkg-config` flags are needed.
+  #
+  # This deliberately does NOT wrap the build in `direnv exec <traceFormatRepo>`:
+  # that sibling has no `.envrc` of its own, so `direnv exec` loads the WORKSPACE
+  # `.envrc` whose dev shell provides `nim` but NOT zstd — yielding `zstd.h: No
+  # such file or directory`. The earlier `--passC:"$(pkg-config --cflags libzstd)"
+  # --passL:"$(pkg-config --libs libzstd)"` flags were an attempt to patch that
+  # missing zstd in the inner shell, but `pkg-config` is absent there too, so the
+  # empty command-substitutions left bare `--passL:`/`--passC:` tokens that gcc
+  # rejected with `unrecognized command-line option '--passL:'`.
   doAssert dirExists(traceFormatRepo),
     "codetracer-trace-format-nim sibling not found at " & traceFormatRepo &
     " — cannot build ct-print for the M12 tests"
   createDir("/tmp/ctprint_build")
   let buildCmd =
-    "direnv exec " & quoteShell(traceFormatRepo) & " bash -c " &
-    quoteShell(
-      "cd " & quoteShell(traceFormatRepo) & " && " &
-      "nim c -d:release --mm:arc -p:src " &
-      "--passC:\"$(pkg-config --cflags libzstd)\" " &
-      "--passL:\"$(pkg-config --libs libzstd)\" " &
-      "-o:/tmp/ctprint_build/ct-print src/codetracer_ct_print.nim")
+    "cd " & quoteShell(traceFormatRepo) & " && " &
+    "nim c -d:release --mm:arc -p:src " &
+    "-o:/tmp/ctprint_build/ct-print src/codetracer_ct_print.nim"
   let (output, code) = execCmdEx(buildCmd)
   doAssert code == 0,
     "failed to build ct-print for the M12 tests (exit " & $code & "):\n" & output

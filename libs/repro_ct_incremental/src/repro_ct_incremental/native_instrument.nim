@@ -95,16 +95,27 @@ const
 
 proc nativeRecorderRepo*(): string =
   ## Absolute path to the `codetracer-native-recorder` checkout that hosts the
-  ## `ct_instrument` plugin. Honour `CT_NATIVE_RECORDER_REPO` if set; otherwise
-  ## resolve the sibling relative to THIS module's source file.
+  ## `ct_instrument` plugin. Resolution order:
+  ##   1. ``$CT_NATIVE_RECORDER_REPO`` (explicit override).
+  ##   2. ``$REPRO_WORKSPACE_ROOT / codetracer-native-recorder`` — the workspace
+  ##      root that holds reprobuild + the recorder repos as siblings (matches
+  ##      `live_record.nim`'s `detectWorkspaceRoot`). This is essential when the
+  ##      reprobuild checkout is a WORKTREE outside the workspace tree (e.g. CI),
+  ##      where the source-relative walk below would otherwise resolve to a
+  ##      non-existent sibling next to the worktree.
+  ##   3. The sibling resolved relative to THIS module's source file (the
+  ##      canonical in-workspace layout).
   ##
-  ## Layout: this file is
+  ## Layout for (3): this file is
   ## `<workspace>/reprobuild/libs/repro_ct_incremental/src/repro_ct_incremental/native_instrument.nim`;
   ## the native recorder is a workspace sibling `<workspace>/codetracer-native-recorder`.
   ## That is six parents up from this module's directory, then the sibling name.
   let fromEnv = getEnv(NativeRecorderRepoEnvVar)
   if fromEnv.len > 0:
     return fromEnv
+  let workspaceRoot = getEnv("REPRO_WORKSPACE_ROOT")
+  if workspaceRoot.len > 0:
+    return workspaceRoot / "codetracer-native-recorder"
   let here = currentSourcePath()
   # …/repro_ct_incremental/src/repro_ct_incremental  → up to the reprobuild root.
   let reproRoot = here.parentDir.parentDir.parentDir.parentDir.parentDir

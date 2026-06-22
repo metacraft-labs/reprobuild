@@ -63,14 +63,19 @@ proc ensureCtPrint() =
     "codetracer-trace-format-nim sibling not found at " & traceFormatRepo &
     " — cannot build ct-print for the M17a tests"
   createDir("/tmp/ctprint_build")
+  # Build in the AMBIENT shell (the reprobuild Nix dev shell), which supplies both
+  # `nim` and zstd dev headers/library. Mirrors the canonical `buildCtPrint`
+  # nimble task; zstd is linked from the source (`zstd_bindings.nim`:
+  # `{.passL: "-lzstd".}` + `header: "<zstd.h>"`), so no external `pkg-config`
+  # flags are needed. NOT wrapped in `direnv exec <traceFormatRepo>`: that sibling
+  # has no `.envrc`, so direnv loads the workspace shell (nim but no zstd ⇒
+  # `zstd.h: No such file or directory`); and the former `--passC/--passL
+  # $(pkg-config ...)` flags broke on hosts without `pkg-config`, leaving bare
+  # `--passL:` tokens gcc rejects.
   let buildCmd =
-    "direnv exec " & quoteShell(traceFormatRepo) & " bash -c " &
-    quoteShell(
-      "cd " & quoteShell(traceFormatRepo) & " && " &
-      "nim c -d:release --mm:arc -p:src " &
-      "--passC:\"$(pkg-config --cflags libzstd)\" " &
-      "--passL:\"$(pkg-config --libs libzstd)\" " &
-      "-o:/tmp/ctprint_build/ct-print src/codetracer_ct_print.nim")
+    "cd " & quoteShell(traceFormatRepo) & " && " &
+    "nim c -d:release --mm:arc -p:src " &
+    "-o:/tmp/ctprint_build/ct-print src/codetracer_ct_print.nim"
   let (output, code) = execCmdEx(buildCmd)
   doAssert code == 0,
     "failed to build ct-print for the M17a tests (exit " & $code & "):\n" & output

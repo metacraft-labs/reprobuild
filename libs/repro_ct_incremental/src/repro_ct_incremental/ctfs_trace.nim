@@ -221,12 +221,54 @@ proc runCtPrintJsonEvents(ctPrint, bundle: string): Result[string, string] =
       " on " & bundle & ":\n" & output)
   ok(output)
 
+const
+  MetaDatMagic = "CTMD"
+    ## meta.dat header magic (codetracer-trace-format-nim
+    ## `codetracer_trace_writer/meta_dat.nim`). meta.dat layout:
+    ##   [4] magic "CTMD" | [2] version u16 LE | [2] flags u16 LE | ...
+    ## meta.dat is stored UNCOMPRESSED inside the `.ct` container, so the magic +
+    ## flags word are locatable by a raw scan of the bundle bytes.
+  HasCallStreamFlagBit = 0x100'u16
+    ## The reprobuild `has_call_stream` capability flag: bit 8 of the meta.dat
+    ## `flags` u16. This is the bit the M17a/M20 split-bundle fixtures set (see
+    ## `t_call_stream_split.nim`'s regeneration recipe), marking a bundle that
+    ## carries a DEDICATED `calls.dat` call stream.
+
+proc readMetaDatCallStreamFlag(bundle: string): Result[bool, string] =
+  ## Read the `has_call_stream` capability flag (meta.dat flags bit 8) DIRECTLY
+  ## from the `.ct` bundle bytes. This is the authoritative source: the
+  ## production `ct-print --meta-json` does NOT surface this reprobuild-side
+  ## convention bit under `metadata.flags`, so probing ct-print can never
+  ## distinguish a split bundle from a legacy one. The flag lives in meta.dat's
+  ## uncompressed header (magic "CTMD" + version u16 + flags u16 LE), so we
+  ## locate the magic and test bit 8 of the flags word.
+  var data: string
+  try:
+    data = readFile(bundle)
+  except CatchableError as e:
+    return err("failed to read CTFS bundle " & bundle & ": " & e.msg)
+  let magicPos = data.find(MetaDatMagic)
+  if magicPos < 0:
+    return err("CTFS bundle " & bundle & " has no meta.dat (CTMD) header")
+  # flags u16 LE sits at magicPos + 4 (magic) + 2 (version) = magicPos + 6.
+  let flagsLo = magicPos + 6
+  let flagsHi = magicPos + 7
+  if flagsHi >= data.len:
+    return err("CTFS bundle " & bundle & " meta.dat header is truncated")
+  let flags = uint16(ord(data[flagsLo])) or (uint16(ord(data[flagsHi])) shl 8)
+  ok((flags and HasCallStreamFlagBit) != 0)
+
 proc ctfsHasCallStream*(traceDirOrCtFile: string): Result[bool, string] =
   ## M17a: report whether the bundle carries a DEDICATED `calls.dat` call
   ## stream — i.e. whether its `meta.dat` has the `has_call_stream` capability
-  ## flag (bit 8) set.  Probes `ct-print --meta-json` (the metadata-only fast
-  ## path; it does NOT decode the event streams) and reads
-  ## `metadata.flags.has_call_stream`.
+  ## flag (bit 8) set.
+  ##
+  ## The flag is read DIRECTLY from the bundle's uncompressed meta.dat header
+  ## (`readMetaDatCallStreamFlag`). It is deliberately NOT probed via `ct-print
+  ## --meta-json`: the production `ct-print` does not surface this reprobuild-side
+  ## convention bit under `metadata.flags` (only the column/source-view capability
+  ## flags), so a ct-print probe would always report `false` and could never
+  ## distinguish a split bundle from a legacy one.
   ##
   ## When true, the engine PREFERS the dedicated call stream for executed-
   ## function discovery: the call tree is split out of the unified step/value
@@ -234,43 +276,12 @@ proc ctfsHasCallStream*(traceDirOrCtFile: string): Result[bool, string] =
   ## stream.  When false (a legacy bundle), discovery falls back to the unified
   ## stream.  EITHER WAY the executed SET is identical — the split is purely a
   ## storage/locality optimisation (the call records are derived from the same
-  ## Call/Return events).  A missing/old `ct-print`, or a flag field absent from
-  ## the JSON, yields `ok(false)` (treat as legacy), never a crash; a failed
-  ## subprocess launch is an `Err` (⇒ re-run upstream, never a silent skip).
+  ## Call/Return events).  An unresolvable/unreadable bundle is an `Err`
+  ## (⇒ re-run upstream, never a silent skip).
   let bundleRes = resolveCtBundle(traceDirOrCtFile)
   if bundleRes.isErr:
     return err(bundleRes.error)
-  let bundle = bundleRes.value
-  let ctPrintRes = resolveCtPrint()
-  if ctPrintRes.isErr:
-    return err(ctPrintRes.error)
-  var output: string
-  var code: int
-  try:
-    (output, code) = execCmdEx(
-      quoteShell(ctPrintRes.value) & " --meta-json " & quoteShell(bundle))
-  except CatchableError as e:
-    return err("failed to run ct-print --meta-json: " & e.msg)
-  except Exception as e:
-    return err("failed to run ct-print --meta-json: " & e.msg)
-  if code != 0:
-    return err("ct-print --meta-json exited with code " & $code &
-      " on " & bundle & ":\n" & output)
-  # --meta-json output is pure ASCII (metadata only, no value bytes), so a
-  # straight std/json parse is safe here.
-  var root: JsonNode
-  try:
-    root = parseJson(output)
-  except CatchableError as e:
-    return err("malformed ct-print --meta-json for " & bundle & ": " & e.msg)
-  if root.kind == JObject and root.hasKey("metadata") and
-      root["metadata"].kind == JObject and root["metadata"].hasKey("flags") and
-      root["metadata"]["flags"].kind == JObject and
-      root["metadata"]["flags"].hasKey("has_call_stream") and
-      root["metadata"]["flags"]["has_call_stream"].kind == JBool:
-    return ok(root["metadata"]["flags"]["has_call_stream"].getBool())
-  # Older ct-print that does not surface the flag ⇒ treat as legacy (no split).
-  ok(false)
+  readMetaDatCallStreamFlag(bundleRes.value)
 
 func extractFromEvents(root: JsonNode): Result[seq[ExecutedFunction], string] =
   ## Parse the modern `type`-tagged event array into the executed-function set.

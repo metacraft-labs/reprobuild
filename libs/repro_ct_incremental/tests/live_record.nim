@@ -127,12 +127,27 @@ proc ensureCtPrintBuilt*(): tuple[ok: bool, diagnostic: string] =
     return (false, "codetracer-trace-format-nim sibling not found at " &
       TraceFormatRepo)
   createDir(CtPrintKnownBuildPath.parentDir)
+  # Build ct-print in the AMBIENT shell (the reprobuild Nix dev shell the test
+  # runs in), which supplies both `nim` and the zstd dev headers/library. Mirror
+  # the canonical `buildCtPrint` nimble task (`codetracer_trace_format.nimble`):
+  #   nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
+  # zstd linking/headers are handled IN THE SOURCE: `zstd_bindings.nim` carries
+  # `{.passL: "-lzstd".}` and `{.importc, header: "<zstd.h>".}`, so the build
+  # needs no external `pkg-config` flags.
+  #
+  # This deliberately does NOT use `runInRecorderShell` (which wraps in `direnv
+  # exec <TraceFormatRepo>`): that sibling has no `.envrc`, so `direnv exec` loads
+  # the WORKSPACE `.envrc` whose dev shell provides `nim` but NOT zstd — yielding
+  # `zstd.h: No such file or directory`. The previous `--passC:"$(pkg-config
+  # --cflags libzstd)" --passL:"$(pkg-config --libs libzstd)"` flags tried to
+  # patch the missing zstd in that inner shell, but `pkg-config` is absent there
+  # too, so the empty command-substitutions left bare `--passL:`/`--passC:` tokens
+  # gcc rejected with `unrecognized command-line option '--passL:'`.
   let buildCmd =
+    "cd " & quoteShell(TraceFormatRepo) & " && " &
     "nim c -d:release --mm:arc -p:src " &
-    "--passC:\"$(pkg-config --cflags libzstd)\" " &
-    "--passL:\"$(pkg-config --libs libzstd)\" " &
     "-o:" & quoteShell(CtPrintKnownBuildPath) & " src/codetracer_ct_print.nim"
-  let (output, code) = runInRecorderShell(TraceFormatRepo, buildCmd)
+  let (output, code) = execCmdEx(buildCmd)
   if code != 0 or not fileExists(CtPrintKnownBuildPath):
     return (false, "failed to build ct-print (exit " & $code & "):\n" & output)
   (true, "")
