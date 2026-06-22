@@ -77,7 +77,7 @@ const PriorWaveStubNames = @[
 ]
 
 const StubSelectors = {
-  "qcoro6":                  "nixpkgs#qcoro",
+  "qcoro6":                  "nixpkgs#kdePackages.qcoro",
   "kparts":                  "nixpkgs#kdePackages.kparts",
   "krunner":                 "nixpkgs#kdePackages.krunner",
   "knotifyconfig":           "nixpkgs#kdePackages.knotifyconfig",
