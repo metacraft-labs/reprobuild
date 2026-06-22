@@ -196,6 +196,14 @@ package kwinSource:
     "ninja >=1.10"
     ## gcc is the host C/C++ toolchain — kwin is C++20.
     "gcc >=11"
+    ## M9.R.15q.7.8 — kwin's CMake plugin build chain runs
+    ## ``python3 .../strip-metadata.py`` to strip Plasma plugin
+    ## ``metadata.json`` files to ``metadata.json.stripped`` at compile
+    ## time. Without python3 on PATH every plugin (fallapart /
+    ## backgroundcontrast / colorpicker / zoom / blur / ...) hits
+    ## ``env: 'python3': No such file or directory`` Error 127 and the
+    ## link step fails.
+    "python3"
 
   buildDeps:
     "extra-cmake-modules >=6.0"
