@@ -336,10 +336,10 @@ package kwinSource:
         "KWIN_BUILD_TABBOX=OFF",
         "KWIN_BUILD_X11=OFF",
         "KWIN_BUILD_KCMS=OFF",
-        # M9.R.15q.4.5 — disable optional kwin subsystems whose deps
+        # M9.R.15q.4.7 — disable optional kwin subsystems whose deps
         # ship under nix as runtime daemons without CMake config
-        ## files (kglobalacceld has no KGlobalAccelDConfig.cmake).
-        ## Re-enable later if we ship the matching from-source recipe.
+        # files (kglobalacceld has no KGlobalAccelDConfig.cmake).
+        # Re-enable later if we ship the matching from-source recipe.
         "KWIN_BUILD_GLOBALSHORTCUTS=OFF",
         "KWIN_BUILD_NOTIFICATIONS=OFF",
         "KWIN_BUILD_SCREENLOCKER=OFF",
