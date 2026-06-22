@@ -227,6 +227,10 @@ package sddmSource:
     ## `find_package(XCB REQUIRED)` consumes via ECM's `FindXCB.cmake`
     ## for the X11 display backend.
     "libxcb >=1.13"
+    ## M9.R.15q.8.6 — libxdmcp supplies xdmcp.pc which libxcb.pc
+    ## requires transitively (libxcb.pc declares
+    ## `Requires.private: pthread-stubs xau xdmcp`).
+    "libxdmcp"
     ## M9.R.15q.8.1 — libxkbcommon supplies XKB which sddm's
     ## `find_package(XKB REQUIRED)` consumes for keyboard layout
     ## handling in the greeter.
@@ -275,6 +279,13 @@ package sddmSource:
         # flag so the build proceeds against the modern CMake without
         # touching upstream sources.
         "CMAKE_POLICY_VERSION_MINIMUM=3.5",
+        # M9.R.15q.8.6 — sddm 0.21's CMakeLists defaults to Qt5
+        # (`option(BUILD_WITH_QT6 "Build with Qt 6" OFF)`); the
+        # NDE-K1 v2 Plasma story requires Qt6, and the cache only
+        # publishes qt6-base + qt6-tools + qt6-declarative (no Qt5).
+        # Flip BUILD_WITH_QT6=ON so the find_package(Qt6 ...) probe
+        # routes to the from-source Qt6 cache.
+        "BUILD_WITH_QT6=ON",
         "BUILD_TESTING=OFF",
         "BUILD_MAN_PAGES=OFF",
         "ENABLE_JOURNALD=OFF",
@@ -333,6 +344,15 @@ package sddmSource:
         if dirExists(pShare):
           pkgCfgDirs.add(pShare)
       for store in walkPattern("/nix/store/*-libpthread-stubs-*"):
+        if not dirExists(store): continue
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      # libxdmcp ships xdmcp.pc which libxcb.pc requires transitively
+      # (libxcb.pc declares "Requires.private: pthread-stubs xau xdmcp").
+      # Without xdmcp on PKG_CONFIG_PATH the XCB find_package fails with
+      # "Package 'xdmcp', required by 'xcb', not found".
+      for store in walkPattern("/nix/store/*-libxdmcp-*-dev"):
         if not dirExists(store): continue
         let pLib = store / "lib" / "pkgconfig"
         if dirExists(pLib):
