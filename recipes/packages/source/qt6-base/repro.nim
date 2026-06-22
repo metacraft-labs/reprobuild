@@ -281,6 +281,7 @@ package qt6BaseSource:
     "libx11"
     "libxcb"
     "libxau"
+    "libxdmcp"
     "xcb-util-keysyms"
     "xcb-util-wm"
     "xcb-util-renderutil"

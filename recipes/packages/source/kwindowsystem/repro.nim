@@ -68,6 +68,7 @@ package kwindowsystemSource:
     "libx11"
     "libxcb"
     "libxau"
+    "libxdmcp"
     "xcb-util-keysyms"
     ## M9.R.15q.4.3 — kwindowsystem's CMakeLists.txt:62 declares
     ## ``find_package(XCB COMPONENTS REQUIRED XCB KEYSYMS RES ICCCM)``.

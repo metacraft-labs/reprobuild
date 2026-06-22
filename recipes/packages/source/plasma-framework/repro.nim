@@ -208,6 +208,7 @@ package plasmaFrameworkSource:
     "libx11"
     "libxcb"
     "libxau"
+    "libxdmcp"
     "xcb-util-keysyms"
     "xcb-util-wm"
     "libxext"
