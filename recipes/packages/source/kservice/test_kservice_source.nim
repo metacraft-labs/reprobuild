@@ -30,7 +30,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kservice/vendor/kservice-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kservice-6.10.0.tar.xz"
 
 const ExpectedHash =
   "04ad53850967e38822f8af1652b118992cd1bfa382e2718278bb6de03a0bdbb3"

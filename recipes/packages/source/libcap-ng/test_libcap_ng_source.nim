@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libcap-ng/vendor/libcap-ng-0.8.5.tar.gz"
+  "https://people.redhat.com/sgrubb/libcap-ng/libcap-ng-0.8.5.tar.gz"
 
 const ExpectedHash =
   "3ba5294d1cbdfa98afaacfbc00b6af9ed2b83e8a21817185dfd844cc8c7ac6ff"

@@ -29,7 +29,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/ki18n/vendor/ki18n-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/ki18n-6.10.0.tar.xz"
 
 const ExpectedHash =
   "2f59f093f8ce340ab46c556b35c2ead2b96dfeb2ff0024c553ac8c53e9b8a11a"

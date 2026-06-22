@@ -35,7 +35,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/cairo/vendor/cairo-1.18.4.tar.xz"
+  "https://www.cairographics.org/releases/cairo-1.18.4.tar.xz"
 
 const ExpectedHash =
   "445ed8208a6e4823de1226a74ca319d3600e83f6369f99b14265006599c32ccb"

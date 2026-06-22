@@ -47,3 +47,15 @@ libs/stint
   nimble: stint 0.8.1
   included: stint.nim, stint/
   license: MIT or Apache-2.0
+
+libs/nimcrypto
+  source: https://github.com/cheatfate/nimcrypto
+  revision: 423ea4fed8de6f4544b7e3b30d868f527ed3b947
+  nimble: nimcrypto 0.7.3
+  included: nimcrypto.nim, nimcrypto/
+  license: MIT
+  note: |
+    Imported by repro_project_dsl (import nimcrypto/sha2). Previously
+    resolved only via a consumer's sibling nimcrypto checkout; vendored
+    here so the recipe-compile (--define:reproInterfaceMode) is
+    self-contained and does not require that checkout to be present.

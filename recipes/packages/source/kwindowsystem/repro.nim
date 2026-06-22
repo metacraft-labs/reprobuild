@@ -58,6 +58,25 @@ package kwindowsystemSource:
     ## package macro for every qt6-* consumer (see
     ## ``m9r15pAutoInjectQt6Transitive``); the explicit per-recipe
     ## declarations M9.R.15o.4 added are retired.
+    ## M9.R.15q.4.2 — X11 backend re-enabled (KWINDOWSYSTEM_X11=ON
+    ## restored below) so KX11Extras ships for plasma-framework's
+    ## unconditional include. Each X11 client lib resolves through
+    ## the M9.R.15q.4.1 stdlib stubs (^*-multi-output nix channels).
+    ## M9.R.15q.4.3 — xorgproto added: CMake's FindX11 looks for
+    ## ``X11/X.h`` which lives in xorgproto, NOT in libX11.
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    ## M9.R.15q.4.3 — kwindowsystem's CMakeLists.txt:62 declares
+    ## ``find_package(XCB COMPONENTS REQUIRED XCB KEYSYMS RES ICCCM)``.
+    ## ICCCM lives in xcb-util-wm (libxcb-icccm.so).
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     discard
@@ -73,16 +92,15 @@ package kwindowsystemSource:
         "BUILD_QCH=OFF",
         "BUILD_PYTHON_BINDINGS=OFF",
         "CMAKE_BUILD_TYPE=Release",
-        # KWINDOWSYSTEM_X11=OFF: drop X11 backend (XLib + XCB). v1 is
-        # Wayland-only; the X11 backend pulls libXfixes + xcb-keysyms +
-        # libxcb-record into the closure with no v1 from-source recipe.
-        #
-        # M9.R.15q.3.5 NOTE: plasma-framework cannot link without
-        # ``KX11Extras`` so flipping this on is the eventual fix; it
-        # requires adding from-source X11 lib recipes (xorg.libX11 +
-        # xorg.libxcb + xcb-util-* family). Tracked separately —
-        # outside M9.R.15q.3 scope.
-        "KWINDOWSYSTEM_X11=OFF",
+        # M9.R.15q.4.2: KWINDOWSYSTEM_X11=ON — re-enable the X11
+        # backend so ``KX11Extras`` ships, unblocking plasma-framework's
+        # unconditional ``#include <KX11Extras>`` (which the
+        # WITHOUT_X11 toggle does NOT suppress; only the optional X11
+        # link surface is gated by that). The X11 client libs
+        # (libX11 + libxcb + xcb-util-keysyms + libXfixes + libXrender +
+        # libXext) come via the M9.R.15q.4.1 stdlib stubs registered in
+        # buildDeps above.
+        "KWINDOWSYSTEM_X11=ON",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
       discard pkg.library("libKF6WindowSystem")

@@ -38,7 +38,7 @@ const ExpectedUrl =
 # Real sha256 over the upstream automake-1.17.tar.xz tarball; see
 # ``repro.nim``'s sha256 strategy section.
 const ExpectedHash =
-  "b069564d4361e50dfe31956fb1982f43201c558588fd1f9142a00b3db6aeecc2"
+  "8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990"
 
 const ExpectedConfigureFlags = @[
   "--disable-static",

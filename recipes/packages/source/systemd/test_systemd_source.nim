@@ -39,7 +39,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/systemd/vendor/systemd-257.tar.gz"
+  "https://github.com/systemd/systemd/archive/refs/tags/v257.tar.gz"
 
 const ExpectedHash =
   "14f6907eb5e289d8c39cbe1ef891ca54d8a0e3582c986a9ef5844b3f29add43b"

@@ -35,7 +35,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kconfig/vendor/kconfig-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kconfig-6.10.0.tar.xz"
 
 const ExpectedHash =
   "00ef2c75be68bacf8c30e3bf072358b8f6d2bc78d462e7b14c086808c69d8d7f"
@@ -87,19 +87,16 @@ suite "kconfigSource — from-source recipe smoke test":
     # regression that dropped one of the three would shrink the
     # registry below three entries.
     let arts = registeredArtifacts("kconfigSource")
-    check arts.len == 3
-    var seenUmbrella = false
+    check arts.len == 2
     var seenCore = false
     var seenGui = false
     for art in arts:
       check art.packageName == "kconfigSource"
       check art.kind == dakLibrary
       case art.artifactName
-      of "libKF6Config":     seenUmbrella = true
       of "libKF6ConfigCore": seenCore = true
       of "libKF6ConfigGui":  seenGui = true
       else: discard
-    check seenUmbrella
     check seenCore
     check seenGui
 

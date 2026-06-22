@@ -131,6 +131,8 @@
 ## variants need different strategies (e.g. an X11-supporting variant
 ## that flips ``KWIN_BUILD_X11=ON`` for legacy bundles).
 
+import std/[os, strutils]
+
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
@@ -233,6 +235,24 @@ package kwinSource:
     ## ECM's per-module find_package(Qt6 ... LinguistTools) probe
     ## requires at configure time even when translations are disabled.
     "qt6-tools >=6.6"
+    ## qt6-declarative supplies Qt6Qml + Qt6Quick the QML-based effect
+    ## runtime + Plasma's QtQuick-driven UI consume.
+    "qt6-declarative >=6.6"
+    ## qt6-wayland supplies Qt6WaylandClient for kwin's Wayland client
+    ## glue (find_package(Qt6 ... COMPONENTS WaylandClient REQUIRED)).
+    "qt6-wayland >=6.6"
+    ## qt6-svg supplies the Qt6Svg dependency kwin's QML scene loader
+    ## consumes for vector icons.
+    "qt6-svg >=6.6"
+    ## M9.R.15q.5.10 — kwin 6.2.5's CMakeLists.txt:60 declares
+    ## ``find_package(Qt6 ... COMPONENTS ... Core5Compat ...)``.
+    ## qt6-5compat ships ``libQt6Core5Compat.so``.
+    "qt6-5compat >=6.8"
+    ## M9.R.15q.5.10 — kwin 6.2.5's CMakeLists.txt:60 declares
+    ## ``find_package(Qt6 ... COMPONENTS ... Sensors ...)`` for
+    ## auto-rotation on convertible / tablet form factors.
+    ## qt6-sensors ships ``libQt6Sensors.so``.
+    "qt6-sensors >=6.8"
     ## libdrm is the kernel DRM client library kwin's DRM backend uses
     ## to drive direct-rendering on tty consoles. The sibling
     ## ``libdrmSource`` recipe vendors a compatible version.
@@ -247,6 +267,110 @@ package kwinSource:
     ## pixman is the software 2D rendering backend kwin's
     ## compositor uses for fallback paths.
     "pixman >=0.40"
+    ## M9.R.15q.4.5 — kwin's CMakeLists.txt requires:
+    ##  - KDecoration2 (server-side decoration framework)
+    ##  - KWayland (KDE Wayland client/server)
+    ##  - kscreenlocker (lock-screen daemon, KWIN_BUILD_SCREENLOCKER=ON)
+    ##  - kglobalacceld (global-shortcut daemon, KWIN_BUILD_GLOBALSHORTCUTS=ON)
+    ##  - libcanberra (event-sound)
+    ##  - libepoxy (GL dispatch)
+    ##  - libdisplay-info (EDID parser)
+    ##  - libei (emulated-input handling, optional but on)
+    ##  - mesa (gbm + EGL + GL fallbacks)
+    ##  - lcms2 (color management)
+    ##  - freetype + fontconfig (QPA plugin)
+    ##  - libsystemd (service watchdog)
+    ##  - dbus (DBus client library)
+    ##  - kactivities equivalent → plasma-activities
+    ##  - plasma-wayland-protocols (Plasma-specific Wayland XML)
+    ##  - wayland-protocols (upstream Wayland XML)
+    ## M9.R.15q.4.8 — kdecoration source recipe at 6.2.0 ships the
+    ## legacy KDecoration2 CMake namespace kwin 6.2.5 looks up via
+    ## find_package(KDecoration2). nixpkgs's
+    ## kdePackages.kdecoration is at 6.3+ which renamed to
+    ## KDecoration3 — incompatible.
+    "kdecoration"
+    "kwayland >=6.0"
+    "kscreenlocker >=6.0"
+    "kglobalacceld >=6.0"
+    "libcanberra"
+    "libepoxy >=1.3"
+    "libdisplay-info"
+    "libei"
+    "mesa >=23.3"
+    "lcms2"
+    "freetype >=2.10"
+    "fontconfig >=2.13"
+    "libsystemd"
+    "dbus >=1.14"
+    "plasma-activities >=6.2"
+    "plasma-wayland-protocols >=1.14"
+    "wayland-protocols >=1.36"
+    ## M9.R.15q.4.5 — additional KF6 components kwin's find_package
+    ## line declares: KF6 COMPONENTS Auth ColorScheme IdleTime
+    ## Declarative KCMUtils NewStuff Package; we have sibling source
+    ## recipes for all of these (kauth, kcolorscheme, kidletime,
+    ## kdeclarative, kcmutils, knewstuff, kpackage, kirigami) so the
+    ## resolver picks them up via the sibling path.
+    "kauth >=6.0"
+    "kcolorscheme >=6.0"
+    "kidletime >=6.0"
+    ## M9.R.15q.5.11 — kwin 6.2.5's top-level CMakeLists.txt:85 declares
+    ## ``find_package(KF6 ... COMPONENTS ... WindowSystem ...)`` which
+    ## is the always-required KF6 component list (separate from the
+    ## KCMS-gated list at line 104). kwindowsystem is the sibling
+    ## from-source recipe.
+    "kwindowsystem >=6.0"
+    ## M9.R.15q.5.11 — kwin's CMakeLists.txt also declares Crash +
+    ## DBusAddons + GlobalAccel + GuiAddons + I18n + Service + Svg
+    ## as KF6 components. Add the missing siblings.
+    "kcrash >=6.0"
+    "kdbusaddons >=6.0"
+    "kglobalaccel >=6.0"
+    "kguiaddons >=6.0"
+    "ki18n >=6.0"
+    "kservice >=6.0"
+    "ksvg >=6.0"
+    "kconfig >=6.0"
+    "kcoreaddons >=6.0"
+    "kwidgetsaddons >=6.0"
+    ## M9.R.15q.5.11.b — kwindowsystem was built with KWINDOWSYSTEM_X11=ON
+    ## so its CMake Config does ``find_dependency(X11)`` at consumer
+    ## time. cmake's ``FindX11`` looks for X11/X.h (xorgproto) + libX11
+    ## + libxcb on the standard system paths; since we're in a
+    ## hermetic nix-shell, we thread the X11 client libs onto kwin's
+    ## env via the M9.R.14e search-path channels (same shape
+    ## kwindowsystem itself uses).
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "libxext"
+    "libxfixes"
+    "libxrender"
+    ## M9.R.15q.5.12 — kwin 6.2.5's CMakeLists.txt:340 declares
+    ## ``pkg_check_modules(libxcvt>=0.1.1 REQUIRED)`` for the DRM
+    ## backend's modeline-fallback computation. libxcvt is a nix-stub.
+    "libxcvt"
+    ## M9.R.15q.5.12 — libepoxy.pc declares ``Requires: gl``, so
+    ## pkg-config recursively probes for ``gl.pc`` (libglvnd's desktop
+    ## OpenGL pkg-config file). The ``gl`` nix-stub points at
+    ## ``nixpkgs#libglvnd``'s gl.pc.
+    "gl"
+    ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
+    ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
+    ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
+    ## the cacheVars below set) these are NOT looked up and so the
+    ## from-source auto-recurse should not need to build them. We keep
+    ## kpackage + kirigami because the QML side of kwin's effects
+    ## still uses them.
+    "kpackage >=6.0"
+    "kirigami >=6.0"
+    ## hwdata (RUNTIME) for monitor vendor-ID mapping.
+    "hwdata"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -277,9 +401,83 @@ package kwinSource:
         "KWIN_BUILD_TABBOX=OFF",
         "KWIN_BUILD_X11=OFF",
         "KWIN_BUILD_KCMS=OFF",
+        # M9.R.15q.4.7 — disable optional kwin subsystems whose deps
+        # ship under nix as runtime daemons without CMake config
+        # files (kglobalacceld has no KGlobalAccelDConfig.cmake).
+        # Re-enable later if we ship the matching from-source recipe.
+        "KWIN_BUILD_GLOBALSHORTCUTS=OFF",
+        "KWIN_BUILD_NOTIFICATIONS=OFF",
+        "KWIN_BUILD_SCREENLOCKER=OFF",
+        "KWIN_BUILD_RUNNERS=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.15q.6.3 — explicit PKG_CONFIG_PATH_FOR_TARGET injection.
+      #
+      # The nix pkg-config-wrapper consults PKG_CONFIG_PATH_FOR_TARGET
+      # (NOT PKG_CONFIG_PATH) when NIX_PKG_CONFIG_WRAPPER_TARGET_TARGET_*
+      # is set, which it always is inside a nix-shell. The M9.R.14e.3
+      # search-path channels DO populate PKG_CONFIG_PATH_FOR_TARGET via
+      # the from-source resolver, but for kwin's 70+ dep graph some
+      # entries are dropped before reaching the configure action's env
+      # — the symptom is "wayland-scanner / wayland-protocols /
+      # libdisplay-info: No package found" even though each dep's tool
+      # identity has the right pkgConfigSearchList. Threading the
+      # known-good paths explicitly via extraEnv bypasses that channel.
+      #
+      # Discovered at recipe-eval time so the recipe is portable across
+      # hosts: walks the sibling source-recipe install mirrors. Both
+      # the wayland-protocols + libdisplay-info paths live in
+      # /nix/store/*-*-{wayland-protocols,libdisplay-info}/ (nix stubs),
+      # which we glob via a single shell expansion.
+      var pkgCfgDirs: seq[string] = @[]
+      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
+        "/opt/repro/reprobuild/recipes/packages/source")
+      # Sibling from-source pkg-config dirs.
+      for sib in walkDir(recipeRoot, relative = false):
+        if sib.kind == pcDir:
+          let p = sib.path / ".repro" / "output" / "install" / "usr" / "lib" / "pkgconfig"
+          if dirExists(p):
+            pkgCfgDirs.add(p)
+          let p64 = sib.path / ".repro" / "output" / "install" / "usr" / "lib64" / "pkgconfig"
+          if dirExists(p64):
+            pkgCfgDirs.add(p64)
+          let pShare = sib.path / ".repro" / "output" / "install" / "usr" / "share" / "pkgconfig"
+          if dirExists(pShare):
+            pkgCfgDirs.add(pShare)
+      # Nix-stub pkg-config dirs (wayland-protocols + libdisplay-info).
+      # /nix/store is huge (~33k entries) so walkDir is prohibitively slow;
+      # walkPattern only opens entries matching the glob.
+      for store in walkPattern("/nix/store/*-wayland-protocols-*"):
+        let n = extractFilename(store)
+        if n.endsWith(".drv") or n.endsWith(".tar.xz") or
+            n.endsWith(".tar.gz") or n.endsWith(".patch"):
+          continue
+        if not dirExists(store): continue
+        let pShare = store / "share" / "pkgconfig"
+        if dirExists(pShare):
+          pkgCfgDirs.add(pShare)
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      for store in walkPattern("/nix/store/*-libdisplay-info-*"):
+        let n = extractFilename(store)
+        if n.endsWith(".drv") or n.endsWith(".tar.xz") or
+            n.endsWith(".tar.gz") or n.endsWith(".patch"):
+          continue
+        if not dirExists(store): continue
+        let pShare = store / "share" / "pkgconfig"
+        if dirExists(pShare):
+          pkgCfgDirs.add(pShare)
+        let pLib = store / "lib" / "pkgconfig"
+        if dirExists(pLib):
+          pkgCfgDirs.add(pLib)
+      let pkgCfgPath = pkgCfgDirs.join(":")
+      let env = @[
+        ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
+        ("PKG_CONFIG_PATH", pkgCfgPath),
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              extraEnv = env)
       discard pkg.executable("kwinWayland")
       discard pkg.library("libKWin")
     finally:

@@ -36,7 +36,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/zlib/vendor/zlib-1.3.1.tar.gz"
+  "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
 
 const ExpectedHash =
   "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"

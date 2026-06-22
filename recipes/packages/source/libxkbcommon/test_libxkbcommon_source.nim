@@ -32,7 +32,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libxkbcommon/vendor/libxkbcommon-1.13.2.tar.gz"
+  "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz"
 
 const ExpectedHash =
   "acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528"
@@ -83,8 +83,9 @@ suite "libxkbcommonSource — from-source recipe smoke test":
     # discriminator or attributed both artifacts to the same kind
     # would mis-route the M9.L install path (``lib/`` vs ``bin/``).
     let arts = registeredArtifacts("libxkbcommonSource")
-    check arts.len == 2
+    check arts.len == 3
     var seenLib = false
+    var seenX11 = false
     var seenCli = false
     for art in arts:
       check art.packageName == "libxkbcommonSource"
@@ -92,12 +93,16 @@ suite "libxkbcommonSource — from-source recipe smoke test":
       of "libxkbcommon":
         seenLib = true
         check art.kind == dakLibrary
+      of "libxkbcommonX11":
+        seenX11 = true
+        check art.kind == dakLibrary
       of "xkbcli":
         seenCli = true
         check art.kind == dakExecutable
       else:
         discard
     check seenLib
+    check seenX11
     check seenCli
 
   test "versions block records the upstream tag + URL + repository":

@@ -2464,7 +2464,10 @@
   streaming with no production dependency; no regression anywhere.
 
 * M24 — Make PRODUCTION reads actually seekable (reconcile the two split formats)
-  :STATUS: planned — significant; the genuine "don't fully materialize" fix for production
+  :STATUS: DONE (2026-06-22) — production open materializes NEITHER values (M24c) nor steps
+           (M24c-steps); wire-format reconciliation complete; range-aware lazy step path +
+           omniscient-`linehits.tc` tier-where-present. Only the empty per-step scaffolding +
+           cheap call-key arrays remain at open on the lazy step path (no decode/decompress).
 
   CRITICAL FINDING (M23e-4 review, code + cross-read experiment, 2026-06-21): the
   seekable infrastructure (M17b/M22) does NOT engage on PRODUCTION bundles, so every
@@ -2501,29 +2504,61 @@
     `has_step_stream` (bit 9, M24a-1) + `has_value_stream` (bit 10, M24a-2) +
     `has_io_event_stream` (bit 11, M24a-3). REMAINS: `has_interning_tables` (a separate
     slice).
-  - [~] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
+  - [X] Make the db-backend's production read path SEEKABLE: the M22/M17b seekable
     overlays engage on production Nim bundles (now readable + flagged), AND
     `open_new_format_nim` no longer eagerly materializes the full step/value tables
     (serve them on-demand through the overlays). Bounded-decompression PROVEN on a
     real production bundle; DAP suite green; parity with the materialized result.
-    DONE for VALUES (M24c): the value table is no longer materialized at open — a
-    `LazyValueCache` over the seekable `values.dat` serves each step's values on first
-    borrow (one chunk per fetch, counter-proven). The step + value OVERLAYS both engage
-    on a production bundle. STEPS (`db.steps` + the `step_map` line→step index) are
-    STILL materialized at open — see M24c for the honest scope reason.
-  - [~] No regression: legacy + Rust-writer + production bundles all read correctly;
-    ct-print byte-identical. Reader-side regression bar met (M24c: full DAP + flow
-    suite green, split/log parity holds). ct-print byte-identical was proven for the
-    M24a writer slices.
+    DONE for VALUES (M24c) AND STEPS (M24c-steps, 2026-06-22).
+    - VALUES (M24c): a `LazyValueCache` over the seekable `values.dat` serves each
+      step's values on first borrow (one chunk per fetch, counter-proven).
+    - STEPS (M24c-steps): `open_new_format_nim` no longer materializes `db.steps`
+      NOR the `step_map` line→step index on a PRODUCTION (non-column-aware) split
+      bundle. A new RANGE-AWARE `LazyStepCache` (db-backend
+      `ctfs_trace_reader/step_value_stream_source.rs`) over the seekable `steps.dat`
+      stream reconstructs each `DbStep` on first borrow, filling only the requested
+      step's chunk-aligned RANGE (4096-record `steps.dat` chunk) — a point `step()`
+      lookup inflates AT MOST ONE chunk (counter-proven via `cached_chunk`). The
+      cheap O(steps) integer call-key arrays stay resident; the seekable stream
+      supplies `(path_id, line)` (the packed GLI ↔ the eager bulk-FFI line path,
+      byte-identical). The slice / line-map accessors (`steps_from`,
+      `steps_on_line`, `step_map_for_path`) — which back genuinely O(trace)
+      breakpoint-resolution Continue / step-over / history scans — memoize the
+      whole-table view ONCE on first such demand (each chunk inflated at most once),
+      so point-lookup navigation stays lazy/bounded while the inherently whole-table
+      operations stay correct and IDENTICAL to the eager path.
+    - OMNISCIENT `linehits.tc`: the engine ALREADY consults the omniscient line→tick
+      table (`OmniscientDb::source_line_hits` / `mcrOmniscientSourceLineHits`) for
+      breakpoint / origin resolution in the MCR omniscient mode WHEN the bundle ships
+      `linehits.tc`. That namespace is emitted ONLY by the MCR omniscient recorder
+      pipeline (`ct_emulator`), NOT by the `MultiStreamTraceWriter` every live
+      Python/Ruby/JS/shell recorder drives — so typical PRODUCTION split bundles do
+      NOT carry it. The range-aware lazy step path is therefore the PRIMARY deliverable
+      (it serves `step()` + line→step resolution on every production bundle); the
+      omniscient table is the optimization tier the engine already uses where it exists
+      (origin_omniscient / origin_mcr_omniscient suites green).
+    - DETECT + ROUTE: column-aware traces (whose eager path overrides `(path_id,line)`
+      via the pure-Rust `GlobalPositionDecoder` and sets `DbStep.column`), value-less /
+      pre-M24a / legacy / corrupt-stream bundles fall back to EAGER step materialization
+      — correctness first.
+  - [X] No regression: legacy + Rust-writer + production bundles all read correctly;
+    ct-print byte-identical. Reader-side regression bar met (M24c + M24c-steps: full
+    `cargo test --lib` (379) + DAP variables/column/breakpoint + python/ruby flow +
+    origin/omniscient suites green; split/log full-DB parity holds; `cargo clippy --lib
+    --tests` clean). ct-print byte-identical was proven for the M24a writer slices.
 
-  Acceptance (PARTIALLY MET): opening a PRODUCTION `.ct` does NOT fully materialize
-  VALUES (M24c) — a value fetch decompresses only the needed chunk (counter-proven) on
-  a genuine production bundle, and step+value overlays engage. STEPS are still
-  materialized at open (reader-side scope limit, M24c). The wire-format reconciliation
-  is now COMPLETE across all production chunked streams — steps (M24a-1) + values
-  (M24a-2) + events (M24a-3), plus calls (M20) and interning — all on the single spec
-  format, byte-compatible with the Rust readers. So M24's steps+values acceptance is met
-  for VALUES; the steps-lazy remainder is a documented M24c reader-side remainder.
+  Acceptance (MET): opening a PRODUCTION `.ct` materializes NEITHER VALUES (M24c) NOR
+  STEPS (M24c-steps) — a value fetch and a step fetch each decompress only the one
+  needed chunk (both counter-proven on genuine production bundles), and the step+value
+  overlays engage. The wire-format reconciliation is COMPLETE across all production
+  chunked streams — steps (M24a-1) + values (M24a-2) + events (M24a-3), plus calls
+  (M20) and interning — all on the single spec format, byte-compatible with the Rust
+  readers. M24's steps+values "don't fully materialize" acceptance is now met for BOTH
+  steps and values on production (non-column-aware) bundles. The only remaining
+  at-open materialization on the lazy step path is the EMPTY per-step scaffolding
+  (`instructions`/`compound`/`cells`/`variable_cells` HashMaps — no decode, no
+  decompression, required for split-bundle full-DB accessor parity) and the cheap
+  O(steps) integer call-key arrays; column-aware bundles keep eager steps by design.
 
 ** M24a-1 — Nim STEP stream on the SPEC-canonical wire format (done, 2026-06-22)
   :STATUS: done — first slice of the wire-format reconciliation (step stream only)
@@ -2747,3 +2782,299 @@
     full decompression) — a deliberate trade for clean per-path chunk-decompression
     accounting; can be collapsed to one shared `Arc` later if the extra index parse ever
     matters.
+
+* M25 — Unified, access-pattern-aware lazy map population (owner guidance 2026-06-22)
+  :STATUS: done
+
+  Owner guidance refining M24c's lazy population:
+   (1) "Most likely we can end up with the SAME code that builds the omniscient DB
+       tables and populates the local in-memory tables during replay by processing the
+       events in the other regular CTFS streams until a breakpoint is hit." → UNIFY the
+       lazy on-demand population with the omniscient-DB build into one "replay the
+       regular CTFS streams forward, processing events, populating the maps until a
+       breakpoint/tracepoint is hit" engine — not two parallel implementations.
+   (2) "The code can behave differently when the full trace is available locally vs
+       fetched over the network. When local, launch multiple threads populating disjoint
+       RANGES of the file. When over the internet, process events only from the starting
+       point of the search going forward (toward the next breakpoint/tracepoint hit)."
+
+  Current state: M24c populates the step/value maps with a per-point chunk-range fill
+  (`LazyStepCache`/`LazyValueCache`); the omniscient-DB build (`omniscient_db.rs`,
+  `lazy_omniscient_prep_trigger.rs`) is a separate path; breakpoint/tracepoint search is
+  in `flow_preloader.rs`/`dap_handler.rs`.
+
+  Deliverables (decomposed):
+  - [X] M25a — Unify the population engine: one routine that replays the regular CTFS
+    streams (steps/values/events) over a step range, processing events to populate the
+    in-memory maps (line→step / `step_map`, place→change-history) AND/OR the omniscient
+    tables (`linehits.tc`/`memwrites.tc`) — the lazy on-demand path and the omniscient
+    prep both call it. Identical results to today; DAP + omniscient suites green.
+    DONE (2026-06-22). One range-scoped engine `replay_steps_into_sinks(stream,
+    call_keys, global_call_keys, range, sinks)` in
+    `db-backend/src/ctfs_trace_reader/step_value_stream_source.rs`, plus the single
+    reconstruction core `reconstruct_db_step`. A `StepReplaySink` trait routes each
+    reconstructed `DbStep` to a target: `SlotFillSink` (M24c per-slot lazy fill —
+    `LazyStepCache::fill_range_for` now drives the engine), `WholeStepTableSink` (the
+    on-first-demand whole-table `step_map`/`steps` build — `lazy_full_steps` now drives
+    the engine over `[0,count)`), and `LineHitSink` (the omniscient `linehits.tc`
+    line→step/tick build — same engine, omniscient sink). No duplicated event-processing
+    logic remains: the per-slot lazy fill, the whole-table build, and the omniscient
+    line-hit build are all just sinks over the one engine. RANGE-PARAMETERIZED: the engine
+    walks any `Range<usize>` (one chunk for a point lookup, `[0,count)` for the whole
+    table, or a disjoint shard later), so M25b (local parallel-over-disjoint-ranges) and
+    M25c (network forward-from-search) plug in by choosing WHICH ranges to replay on WHICH
+    threads — the per-step processing core is untouched. That access-strategy seam is left
+    open for M25b/M25c. Parity proven in `db-backend/tests/m25a_unified_engine_test.rs`:
+    the engine-built whole-table line→step map equals an INDEPENDENT eager
+    `TraceProcessor::postprocess` (`from_events`) reference for the same logical trace;
+    the per-slot `step()` path and the whole-table `steps_on_line` path agree; and the
+    `LineHitSink` (omniscient build) reproduces the in-memory line→step map exactly,
+    proving lazy + omniscient share the engine. Safety net green: `cargo test --lib` (379),
+    `ctfs_lazy_production_steps_test` (6), `ctfs_lazy_production_values_test` (5),
+    `dap_variables_e2e` (3), `dap_column_flow` (3), `dap_column_breakpoint` (3),
+    `origin_omniscient_test` (9), `origin_mcr_omniscient_test` (9), `origin_dap_test` (21),
+    `m22_data_breakpoint_test` (8), `m25a_unified_engine_test` (3), `python_flow_dap_test`
+    (1); `cargo clippy --lib` clean. Pre-existing env SIGABRT failures
+    (`ruby_flow_dap_test` etc., recorder-on-PATH) confirmed A/B against clean `dev`.
+  - [X] M25b — LOCAL (filesystem) access: when the `.ct` is on local disk, populate the
+    maps with MULTIPLE THREADS over DISJOINT step/chunk RANGES (parallel fill), since
+    random access is cheap. Track which ranges are populated (range-aware, builds on
+    M24c's range awareness). Correctness identical; measurably parallel.
+    DONE: the on-first-demand WHOLE-TABLE build (`lazy_full_steps` → `db.steps` +
+    line→step map, triggered by `steps_on_line` / `step_map_for_path` / `steps_from` /
+    `materialized_db`) now splits `[0, count)` into N disjoint contiguous ranges
+    (N = bounded available parallelism) and replays each on its OWN `std::thread::scope`
+    thread over an INDEPENDENT per-thread `SeekableStepStream` (its own one-chunk
+    decompression cache, so threads neither contend on the shared source's `Mutex` nor
+    thrash one cached chunk), then MERGES the per-thread `WholeStepTableSink` partials in
+    range order — `DbStep` array concatenated by index, each line's step list concatenated
+    in range order so per-line step ORDER is identical to the sequential build. All shards
+    drive the SAME M25a `replay_steps_into_sinks` engine; only WHICH ranges run on WHICH
+    threads changed. An ACCESS-STRATEGY SEAM (`StepBuildStrategy::Local { threads }` vs the
+    `NetworkForward` M25c placeholder, default `Local`) selects the path; `threads == 1` /
+    tiny traces / a non-reopenable source fall back to the sequential single-stream build.
+    Point lookups stay single-chunk lazy (M24c unchanged — only the already-on-demand
+    whole-table build went parallel; open stays lazy). Implemented in
+    `db-backend/src/ctfs_trace_reader/step_value_stream_source.rs`
+    (`StepBuildStrategy`, `split_disjoint_ranges`, `build_whole_step_table`,
+    `build_partials_parallel`, `merge_partials`, `SeekableStepStream::open_sibling`,
+    `LazyStepCache::build_whole_table`) wired through `mod.rs` `lazy_full_steps`.
+    Parity + laziness + determinism + multi-chunk-shard coverage proven in
+    `db-backend/tests/m25b_parallel_step_build_test.rs` (parallel build byte-identical to
+    sequential incl. per-line ORDER, across thread counts and repeated runs) and the
+    `split_disjoint_ranges` tiling unit test; the M24c lazy point-lookup tests
+    (`ctfs_lazy_production_steps_test`) and the M25a engine test stay green.
+  - [X] M25c — NETWORK access: when the `.ct` is fetched over the network, populate
+    FORWARD from the search START POINT toward the next breakpoint/tracepoint hit only —
+    do not touch the whole file. (Audit whether a network/remote `.ct` loading mode
+    exists in the db-backend; if it's not yet built, design the population engine with a
+    pluggable access strategy + a local default, and implement the forward-from-search
+    strategy behind the same seam so it's ready when network loading lands.)
+    AUDIT: NO network/remote `.ct` LOADER exists in the db-backend yet (only an HTTP
+    omniscient-PREP trigger) — so M25c cannot be validated against a live streamed `.ct`;
+    that path does not exist. DONE: the FORWARD-FROM-SEARCH population STRATEGY is
+    implemented as a primitive on the SAME M25a engine and wired behind the existing
+    `StepBuildStrategy::NetworkForward` seam, TESTED IN ISOLATION over a local seekable
+    stream (the chunk-fetch pattern is identical regardless of where the bytes come from):
+      • `replay_forward_until(stream, call_keys, start_step, predicate, sink) -> Option<StepId>`
+        replays the seekable `steps.dat` FORWARD from `start_step`, reconstructing each
+        `DbStep` ONCE (via the M25a `reconstruct_db_step`), feeding `sink` incrementally
+        (chunk by chunk, bounded), and STOPPING as soon as `predicate(step)` holds —
+        returns the FIRST matching step (the next breakpoint/tracepoint hit) or `None` at
+        end-of-trace, WITHOUT replaying the whole trace. An ascending forward scan inflates
+        each touched chunk at most once and touches ONLY the chunks spanning
+        `[start_step, hit]`.
+      • `find_next_line_hit(stream, call_keys, path_id, line, from_step, strategy)` drives
+        that primitive so a "find next line-L hit from P" search forward-scans from `P`
+        populating incrementally until it lands on `(path_id, line)`. Under
+        `NetworkForward` it fetches ONLY the chunks from `from_step` up to the hit; under
+        `Local` the existing whole-table / `steps_on_line` path is still available — the
+        RESULT is strategy-independent.
+      • `LazyStepCache::find_next_line_hit` exposes it on the reader's lazy step cache.
+    Implemented in `db-backend/src/ctfs_trace_reader/step_value_stream_source.rs`
+    (`replay_forward_until`, `find_next_line_hit`, `DiscardStepSink`,
+    `LazyStepCache::find_next_line_hit`) behind the `NetworkForward` seam (default stays
+    `Local`, so current local opens are bit-for-bit unchanged). Proven in
+    `db-backend/tests/m25c_forward_step_search_test.rs` against a REAL Nim production
+    split-only bundle: BOUNDED-FETCH (an early hit inflates exactly ONE chunk vs the
+    whole-table build's many — strictly fewer; the scan stops at the hit, never running to
+    end), PARITY (`NetworkForward` next-hit == the `Local` whole-table `steps_on_line`
+    next hit for several (line, from) cases incl. the no-further-hit `None` case), and the
+    no-match / past-end edge cases (no chunk fetched past end). The M25a engine, M25b
+    parallel build, M24c lazy point-lookup tests, the DAP suite, and the origin/omniscient
+    tests all stay green; full `cargo clippy` clean.
+    CORRECTION (2026-06-22, owner): the earlier "no streamed `.ct` loader exists" claim
+    was WRONG. A STREAMING `.ct` reader DOES exist + is tested: `StreamingCtfsReader`
+    (codetracer-trace-format/codetracer_trace_reader) live-tails a growing `.ct` during
+    recording (`live_replay_test.rs` passes — reader sees events before recording
+    finishes); `ConcurrentCtfsReader` does concurrent read-while-write (CTFS-Binary-Format
+    M2 `:status: completed`); the `*_mcr_streaming_flow_test.rs` + GUI `tests/streaming/`
+    suites exercise it E2E; spec'd in `Streaming-Zstd.md` ("Implemented Phases 1-4") +
+    `Seek-Based-CTFS-Reader.md §1`. CAVEAT: that streaming reader follows the LEGACY
+    `events.log`, not the split streams. The genuinely-unbuilt piece is the NETWORK/HTTP
+    range-request loader for a REMOTE `.ct` (`Seek-Based-CTFS-Reader.md §3.6` Approach A/B;
+    only the omniscient-PREP HTTP trigger exists). So M25c's forward primitive is correct +
+    ready; the LIVE wiring needs (i) the remote-`.ct` loader and/or (ii) the streaming
+    reader extended to the split streams — both tracked as future work, NOT "nothing
+    exists". See M26 for the immediately-actionable, spec-aligned piece (`step-map.ns`).
+
+  Acceptance: one population engine shared with the omniscient build; local traces
+  populate maps in parallel over disjoint ranges; network traces populate forward from
+  the search start; breakpoint/tracepoint resolution is identical to today; no regression.
+  STATUS: M25 (a/b/c) complete — engine unified (M25a), LOCAL parallel disjoint-range
+  whole-table build (M25b), and the NETWORK forward-from-search strategy primitive +
+  seam wiring + isolation tests (M25c). Live network wiring awaits a network `.ct` loader
+  (documented under M25c).
+
+* M26 — Consume the prepopulated `step-map.ns` breakpoint namespace
+  :STATUS: DONE (2026-06-22) — CONSUMER wired; breakpoint resolution prefers the
+           prepopulated table when present, falls back to the M24c/M25b whole-table
+           build when absent. Production EMISSION is a separate writer-side toggle
+           (no writer emits the table today — see reality note below).
+
+  The spec's prepopulated breakpoint index — `step-map.ns`, a CTFS namespace mapping
+  `(path_id, line) → step_id` ranges (`Seek-Based-CTFS-Reader.md §4.1`, the spec's
+  Approach A for "continue to breakpoint") — is now READ by the db-backend: when a
+  `.ct` carries it, a breakpoint's line→step resolves directly from the index WITHOUT
+  building the whole step table; the index holds exactly the data the lazy build would
+  produce, computed at recording time.
+
+  *** REALITY CHECK (the earlier plan was wrong — corrected here)
+  The original plan claimed `step-map.ns` "is WRITTEN by the Nim `MultiStreamTraceWriter`
+  at recording end". That is FALSE. Investigation (file:line evidence):
+  - `step-map.ns` (magic `STMP`, `Seek-Based-CTFS-Reader.md §4.1`) has NO emitter
+    anywhere — it is documented-but-unbuilt.
+  - The Nim writer instead has a SEPARATE, OPT-IN `LinehitsBuilder`
+    (`codetracer-trace-format-nim/src/codetracer_trace_writer/linehits_builder.nim`),
+    wired into `multi_stream_writer.nim` (`enableLinehits` :309, `recordHit` :534/:601/
+    :650, `finalize` :996). It records the SAME `(globalLineIndex → [step_id])` mapping
+    into a `linehits` CTFS namespace. BUT: (a) `enableLinehits` is called ONLY from that
+    repo's own tests (`tests/test_linehits_builder.nim`), never by any live recorder, and
+    (b) even when enabled, the finalized namespace is NEVER serialized into the container
+    in `close()` — so `linehits.tc` is not consumable from a `.ct` either.
+  - The omniscient `linehits.tc` the db-backend already wraps (`omniscient_db.rs`
+    `source_line_hits`, M24c) is a DIFFERENT store: it is keyed by the MCR conditional-
+    branch TICK (not step_id), lives in the native/emulator FFI path, and is unrelated to
+    the materialized-trace `steps_on_line` breakpoint path.
+  Conclusion: NO production `.ct` bundle carries ANY prepopulated line→step breakpoint
+  table today. M26 therefore wires the CONSUMER (the immediately-actionable, spec-aligned
+  piece) against the spec's flat `STMP` layout — which is self-contained and trivially
+  seekable, unlike the complex B-tree `Namespace` format the Nim `LinehitsBuilder` uses —
+  and gates it on the table's actual PRESENCE. Production emission is left as a separate
+  writer-side toggle.
+
+  Deliverables:
+  - [X] A reader for the `step-map.ns` namespace per the spec §4.1 header/path-table/
+    line-entry/step-id-list layout, in `ctfs_trace_reader::step_map_namespace`
+    (`StepMapNamespace::parse`), defensive against every malformed-blob case. (Note: the
+    spec prose's "~28 bytes" for a line entry is a SIZE ESTIMATE; the on-disk record
+    stride is 32 bytes — line:u32 + step_count:u32 + first:i64 + last:i64 + steps_off:u64.)
+  - [X] New `TraceReader::step_ids_on_line(path_id, line) -> Option<Vec<StepId>>` —
+    the breakpoint primitive `find_next_step` needs (just the step ids). Default derives
+    it from `steps_on_line` (every reader correct out of the box). The CTFS reader
+    OVERRIDES it to PREFER the prepopulated `step-map.ns` (O(unique-lines) HashMap lookup,
+    NO step-stream access, NO whole-table build), falling back to the whole-table
+    derivation when no index is attached. The DAP `find_next_step` now resolves through it.
+  - [X] Attach the index at `CTFSTraceReader::open` (`load_step_map_namespace`): tries a
+    container-internal `step-map.ns`, then a `<ct>.step-map.ns` SIDECAR; a malformed/absent
+    table cleanly falls back (logged, never a hard open failure, never wrong breakpoints).
+  - [X] Parity + no-build + fallback proven in `tests/m26_step_map_namespace_test.rs`:
+    the index resolves IDENTICALLY to the whole-table build for every recorded line; a
+    table-bearing bundle resolves every breakpoint with `lazy_full_steps_materialized()
+    == false` and zero `steps.dat` chunk inflations; a bundle WITHOUT the table resolves
+    via the whole-table build (and that build IS triggered — the distinguishing proof).
+    The test DERIVES the index from the same recorded steps the whole-table build
+    reconstructs (via the production `serialize_step_map`) — the table is real, not faked.
+  - [X] Safety net green: `cargo test --lib` (387 passed), `dap_column_breakpoint`,
+    `dap_column_breakpoint_with_condition`, `dap_column_flow`, `dap_variables_e2e`,
+    `origin_omniscient_test`, `origin_mcr_omniscient_test`, `origin_dap_test`,
+    `m22_data_breakpoint_test`, `ctfs_lazy_production_steps_test` all pass. `cargo clippy`
+    and `cargo clippy --tests` clean (no `expect_used`/`unwrap_used` in new bin code).
+
+  Acceptance (MET for the CONSUMER): when a `.ct` carries `step-map.ns`, breakpoint
+  line→step resolution uses it directly (no whole-table materialization), identical
+  results, with a clean fallback. NOT YET wired: a production writer that EMITS the
+  table — that is a follow-up writer-side toggle (the Nim writer would need to serialize
+  its `linehits`/a new `step-map.ns` namespace into the container, or `serialize_step_map`
+  could be reused recorder-side).
+
+* M26b — EMIT the prepopulated `step-map.ns` from the Nim production writer
+  :STATUS: DONE (2026-06-22) — the Nim `MultiStreamTraceWriter` now BUILDS and
+           SERIALIZES the `step-map.ns` breakpoint namespace into the CTFS container
+           by DEFAULT on the line-only production write path. Production `.ct` bundles
+           now carry the prepopulated table; the M26 consumer's no-whole-table-build
+           breakpoint path is LIVE for production. Round-trip proven (Nim write → Rust
+           M26 read, identical to the whole-table build).
+
+  M26 wired the CONSUMER but no writer emitted the table, so the no-whole-table path was
+  dormant in production. M26b closes the round-trip: the writer now emits the spec §4.1
+  `STMP` namespace itself, so every line-only `.ct` carries the index and the consumer's
+  O(unique-lines) breakpoint lookup is served from real on-disk data.
+
+  How the writer builds + serializes the map:
+  - New `codetracer-trace-format-nim/src/codetracer_trace_writer/step_map_builder.nim`
+    (`StepMapBuilder`): accumulates `(path_id, line) → [step_id]` during recording and
+    serializes it into the spec §4.1 `STMP` byte layout — 18-byte header (magic `STMP`,
+    version u16, path_count u32, path_table_offset u64), 20-byte path entries (path_id
+    u64, line_count u32, lines_offset u64), 32-byte line entries (line u32, step_count
+    u32, first_step_id i64, last_step_id i64, steps_offset u64), and ascending i64
+    step-id lists. Paths sorted by id, lines ascending, step ids ascending — byte-for-byte
+    matching the canonical Rust `serialize_step_map` / `StepMapNamespace::parse`.
+  - KEY DERIVATION: the builder keys off the SAME `global_line_index` the exec stream
+    encoded, unpacked via `(gli >> 32, gli & 0xFFFF_FFFF)` — IDENTICAL to the db-backend's
+    `unpack_global_line_index` that the M26 whole-table build keys on
+    (`step_value_stream_source.rs` `reconstruct_db_step`/`step_line`). This guarantees the
+    Nim-written index agrees with the whole-table derivation by construction.
+  - `multi_stream_writer.nim`: a `stepMapBuilder` records each step at `registerStep`
+    time (alongside the existing optional linehits), and `close()` serializes it into a
+    container-internal `step-map.ns` file via `addFile`/`writeToFile`, after the
+    source-views block and before meta.dat.
+
+  Emission is DEFAULT-ON, but GATED to line-only traces: `enableColumnAwareSteps` (and the
+  column capability opt-ins) clear `emitStepMap`. Column-aware traces encode a byte-offset
+  `global_position_index` that the db-backend decodes via the column-aware path, NOT
+  `unpack_global_line_index`; a gli-derived `step-map.ns` would not agree with that
+  decode, and column-aware traces eager-materialize steps anyway (the lazy/seekable
+  no-whole-table path M26 serves is line-only). Most production recorders are line-only,
+  so the table ships in production by default.
+
+  Additive + back-compat: the extra internal file is ignored by every reader except the
+  M26 consumer; `events`/`steps`/`values`/`calls` streams and meta.dat are byte-identical;
+  legacy bundles (no `step-map.ns`) still read via the M26 whole-table fallback. ct-print
+  (`--json-events` unchanged) reads named streams, not a root-entry enumeration, so it is
+  unaffected (ct-print golden green).
+
+  Round-trip proof (the load-bearing gate): `tests/m26_step_map_namespace_test.rs` now
+  drives a REAL Nim-written `step-map.ns` (the FFI `NimTraceWriter` = the exact live-
+  recorder write path), not a Rust `serialize_step_map` sidecar. The Nim-emitted bytes are
+  parsed by the Rust M26 `StepMapNamespace::parse` and resolve breakpoints IDENTICALLY to
+  the whole-table `step_map_for_path` derivation, line by line, with
+  `lazy_full_steps_materialized() == false` and zero `steps.dat` chunk inflations. The
+  no-index / malformed scenarios synthesize a legacy bundle by stripping the internal
+  `step-map.ns` root entry (`strip_internal_step_map`).
+
+  Deliverables:
+  - [X] `StepMapBuilder` (build + STMP serialize), byte-matching `serialize_step_map`.
+  - [X] `MultiStreamTraceWriter` builds the map during recording and emits `step-map.ns`
+    into the container at `close()`, default-on for line-only traces (gated off for
+    column-aware; documented).
+  - [X] Nim test `tests/test_step_map_builder.nim`: standalone serialize↔parse round-trip
+    (Nim STMP reader), empty-trace well-formedness, writer emits `step-map.ns` by default
+    with content == the gli-derived map, and column-aware writers suppress it. Added to
+    the nimble `test` task.
+  - [X] Cross test `m26_step_map_namespace_test.rs` rewired to the REAL Nim-written
+    internal index — write↔read loop closed. 6/6 pass.
+  - [X] Safety net green: trace-format-nim writer/reader/ct-print/golden suites pass
+    (pre-existing, unrelated flakes: `test_new_trace_reader` navigation BENCHMARK threshold
+    — passes on re-run; `test_column_aware_steps` reserved-bit-8 assertion — fails
+    identically on baseline `dev` without these changes). db-backend `cargo test --lib`
+    (387 passed) + `m26_step_map_namespace_test` (6) + `ctfs_lazy_production_steps_test` /
+    `ctfs_split_only_full_db_test` / `ctfs_step_locations_bulk_test` all pass.
+    `cargo clippy --tests` clean on touched Rust (only pre-existing warnings in unrelated
+    `reprobuild_hcr_*` tests).
+
+  Acceptance (MET): production `.ct` bundles produced by the Nim writer now carry the
+  prepopulated `step-map.ns` breakpoint table; the M26 consumer reads it back identically
+  to the whole-table build, so the no-whole-table-build breakpoint path is LIVE in
+  production for line-only traces. Emission is gated to line-only traces (column-aware
+  suppressed, by design).

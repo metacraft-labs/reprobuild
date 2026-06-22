@@ -36,7 +36,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/gnutls/vendor/gnutls-3.8.8.tar.xz"
+  "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.8.tar.xz"
 
 const ExpectedHash =
   "ac4f020e583880b51380ed226e59033244bc536cad2623f2e26f5afa2939d8fb"

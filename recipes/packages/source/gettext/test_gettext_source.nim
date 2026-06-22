@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/gettext/vendor/gettext-0.22.5.tar.xz"
+  "https://ftp.gnu.org/gnu/gettext/gettext-0.22.5.tar.xz"
 
 const ExpectedHash =
   "fe10c37353213d78a5b83d48af231e005c4da84db5ce88037d88355938259640"

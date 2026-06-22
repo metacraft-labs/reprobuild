@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/coreutils/vendor/coreutils-9.5.tar.xz"
+  "https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz"
 
 const ExpectedHash =
   "cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"

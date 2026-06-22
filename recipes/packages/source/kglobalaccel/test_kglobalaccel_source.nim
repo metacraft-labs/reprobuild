@@ -29,7 +29,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kglobalaccel/vendor/kglobalaccel-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kglobalaccel-6.10.0.tar.xz"
 
 const ExpectedHash =
   "05b0ec6a44d43ce7a9cfd6cd70c8d07dca5c5f6216968af8128fe9a5ed9b1928"

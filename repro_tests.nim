@@ -3422,6 +3422,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/kwayland/test_kwayland_source.nim",
+    binary: "build/test-bin/test_kwayland_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/kwin/test_kwin_source.nim",
     binary: "build/test-bin/test_kwin_source",
     defines: @[],
@@ -6632,6 +6640,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_m9r15q_3_kf6_umbrella_config.nim",
     binary: "build/test-bin/t_m9r15q_3_kf6_umbrella_config",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r15q_4_x11_stubs.nim",
+    binary: "build/test-bin/t_m9r15q_4_x11_stubs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
+    binary: "build/test-bin/t_m9r15q_5_rpath_nix_stub_deps",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

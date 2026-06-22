@@ -179,6 +179,13 @@ addPackagePath("SSZ_SERIALIZATION_SRC", [
   ".." / "nim-ssz-serialization",
 ], "ssz_serialization.nim")
 addPackagePath("NIMCRYPTO_SRC", [
+  # Vendored source-only slice (cheatfate/nimcrypto @ 423ea4f / v0.7.3).
+  # Listed first so reprobuild is self-contained: the recipe-compile no
+  # longer depends on a consumer's sibling `nimcrypto` checkout. The
+  # package entry module is `nimcrypto.nim` at the repo root with
+  # submodules under `nimcrypto/`, so the dir itself is the --path root.
+  # Marker is `nimcrypto/hash.nim`.
+  "libs" / "nimcrypto",
   ".." / "codetracer" / "libs" / "nimcrypto",
   ".." / "nimcrypto",
 ], "nimcrypto" / "hash.nim")

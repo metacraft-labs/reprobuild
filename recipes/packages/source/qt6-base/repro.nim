@@ -268,9 +268,29 @@ package qt6BaseSource:
     ## qt6-base configure can find the EGL/GLES libs via the M9.R.14e
     ## LIBRARY_PATH / CPATH / PKG_CONFIG_PATH wiring populated from the
     ## sibling install mirror, so FEATURE_opengl can be flipped back ON
-    ## (see ``build:`` below). M9.R.15m landed mesa-from-source publishing
-    ## those three artifacts; we now lift the M9.R.15a.7 disable.
+    ## (see ``build:`` below). M9.R.15m landed mesa publishing those
+    ## three artifacts; we now lift the M9.R.15a.7 disable.
     "mesa >=23.3"
+    ## M9.R.15q.4.4 — X11 / XCB client libs required when
+    ## FEATURE_xcb=ON is flipped (see ``build:`` below). The XCB QPA
+    ## plugin (libqxcb.so) + the QtX11Extras private API
+    ## (private/qtx11extras_p.h) that kwindowsystem's X11 backend
+    ## #includes both need these at compile + link time. Stubs come
+    ## via the M9.R.15q.4.1 / 4.3 / 4.3.b stdlib stub family.
+    "xorgproto"
+    "libx11"
+    "libxcb"
+    "libxau"
+    "libxdmcp"
+    "xcb-util-keysyms"
+    "xcb-util-wm"
+    "xcb-util-renderutil"
+    "xcb-util-image"
+    "xcb-util-cursor"
+    "xcb-util"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
@@ -328,7 +348,17 @@ package qt6BaseSource:
         "BUILD_TESTING=OFF",
         "CMAKE_BUILD_TYPE=Release",
         "FEATURE_developer_build=OFF",
-        "FEATURE_xcb=OFF",
+        # M9.R.15q.4.4 — enable XCB QPA + QtX11Extras private API
+        # surface so kwindowsystem with KWINDOWSYSTEM_X11=ON (required
+        # by plasma-framework's unconditional KX11Extras include) can
+        # find <private/qtx11extras_p.h> and link against the XCB QPA
+        # plugin (libqxcb.so). X11 client libs come via the
+        # M9.R.15q.4.1 / 4.3 / 4.3.b stdlib stub family declared in
+        # buildDeps above. The v1 desktop story is STILL Wayland-first
+        # (Plasma + GNOME both ship Wayland sessions); enabling XCB
+        # adds the X11 fallback surface that KF6 components require
+        # for compile-time linkage even when runtime is Wayland.
+        "FEATURE_xcb=ON",
         "FEATURE_dbus=ON",
         "FEATURE_sql_sqlite=ON",
         "FEATURE_widgets=ON",

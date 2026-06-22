@@ -828,8 +828,12 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   # requirement; the consumer threads the parent prefix into
   # PKG_CONFIG_PATH at build time rather than spawning the file
   # directly.
+  # M9.R.15q.5.9 — hwdata ships ``share/hwdata/pnp.ids`` (the PnP
+  # vendor-ID database). Recognise ``.ids`` as a data declaration so
+  # the executable+permission check is skipped (the file is r--r--r--
+  # in the nix store).
   let dataExts = [".pc", ".so", ".a", ".h", ".hpp", ".cmake", ".json",
-    ".xml", ".txt"]
+    ".xml", ".txt", ".ids"]
   let lower = declaredExecutablePath.toLowerAscii
   var isDataDecl = false
   for ext in dataExts:

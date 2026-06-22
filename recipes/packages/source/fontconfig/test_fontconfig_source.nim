@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/fontconfig/vendor/fontconfig-2.16.0.tar.xz"
+  "https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.16.0.tar.xz"
 
 const ExpectedHash =
   "6a33dc555cc9ba8b10caf7695878ef134eeb36d0af366041f639b1da9b6ed220"

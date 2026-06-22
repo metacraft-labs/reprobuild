@@ -31,7 +31,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "http://0pointer.de/lennart/projects/libcanberra/libcanberra-0.30.tar.xz"
+  "file:./vendor/libcanberra-0.30.tar.xz"
 
 const ExpectedHash =
   "c2b671e67e0c288a69fc33dc1b6f1b534d07882c2aceed37004bf48c601afa72"

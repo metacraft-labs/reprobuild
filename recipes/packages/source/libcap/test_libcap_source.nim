@@ -40,7 +40,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libcap/vendor/libcap-2.71.tar.xz"
+  "https://www.kernel.org/pub/linux/libs/security/linux-privs/libcap2/libcap-2.71.tar.xz"
 
 const ExpectedHash =
   "b7006c9af5168315f35fc734bf1a8d2aa70766bd8b8c4340962e05b19c35b900"

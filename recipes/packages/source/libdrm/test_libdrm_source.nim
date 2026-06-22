@@ -30,7 +30,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libdrm/vendor/libdrm-2.4.133.tar.xz"
+  "https://dri.freedesktop.org/libdrm/libdrm-2.4.133.tar.xz"
 
 const ExpectedHash =
   "fc68f9d0ba2ea63c9432a299e14fea09fad7a8a66e8039fcd7802ca59f77b4f5"

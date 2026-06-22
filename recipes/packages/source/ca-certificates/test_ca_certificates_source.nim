@@ -46,7 +46,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/ca-certificates/vendor/cacert.pem"
+  "https://curl.se/ca/cacert.pem"
 
 const ExpectedHash =
   "a3f328c21e39ddd1f2be1cea43ac0dec819eaa20d90729a4c5b39ed0b9d3b9c0"

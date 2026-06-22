@@ -29,7 +29,12 @@
 import std/[tables]
 
 import blake3
-import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
+# Import only the BearSSL-free key/signature byte types, NOT the full
+# `auth` module: this type layer (and everything that imports it, incl.
+# `repro_binary_cache_client/cache_key` and the project DSL) needs only
+# the producer-pubkey / signature *shapes*, not BearSSL sign/verify. This
+# keeps BearSSL out of the recipe-interface-extraction type-check closure.
+import ../../../repro_peer_cache/src/repro_peer_cache/key_types as peerAuth
 
 export peerAuth.PublicKeyBytes
 export peerAuth.SignatureBytes

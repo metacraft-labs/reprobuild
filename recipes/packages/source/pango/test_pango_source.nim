@@ -37,7 +37,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/pango/vendor/pango-1.54.0.tar.xz"
+  "https://download.gnome.org/sources/pango/1.54/pango-1.54.0.tar.xz"
 
 const ExpectedHash =
   "8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8"

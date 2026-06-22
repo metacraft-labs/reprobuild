@@ -36,7 +36,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/glibc/vendor/glibc-2.40.tar.xz"
+  "https://ftp.gnu.org/gnu/glibc/glibc-2.40.tar.xz"
 
 const ExpectedHash =
   "19a890175e9263d748f627993de6f4b1af9cd21e03f080e4bfb3a1fac10205a2"

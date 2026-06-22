@@ -155,7 +155,17 @@ package libcanberraSource:
     ## sha256 was computed over the vendored 318,960-byte tarball
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
-    url: "http://0pointer.de/lennart/projects/libcanberra/libcanberra-0.30.tar.xz"
+    ## M9.R.15q.5.4 — switched the fetch URL to the vendored tarball
+    ## via the relative ``file:./`` form because the upstream
+    ## 0pointer.de hosting blocks port 80 inbound from the eli-wsl
+    ## smoke environment. The relative path is resolved against the
+    ## recipe's projectRoot at action-emission time (see the
+    ## ``startsWith("file:./")`` branch in
+    ## ``autotools_package.nim``'s ``maybeEmitFetchAction``) so the
+    ## recipe stays portable across hosts. The sha256 is unchanged
+    ## — the vendored bytes are byte-identical to the original
+    ## upstream tarball.
+    url: "file:./vendor/libcanberra-0.30.tar.xz"
     sha256: "c2b671e67e0c288a69fc33dc1b6f1b534d07882c2aceed37004bf48c601afa72"
     extractStrip: 1
 

@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/mutter/vendor/mutter-47.10.tar.xz"
+  "https://download.gnome.org/sources/mutter/47/mutter-47.10.tar.xz"
 
 const ExpectedHash =
   "ee8a583c2b6ff309b501dc97e7c0b4f11d6197a9529ed22247ee95e89663e969"

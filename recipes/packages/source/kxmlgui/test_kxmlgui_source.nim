@@ -30,7 +30,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kxmlgui/vendor/kxmlgui-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kxmlgui-6.10.0.tar.xz"
 
 const ExpectedHash =
   "561fa755638da16cae204b670f62fab70156b9121b9313612238ca9c9e8e1292"
