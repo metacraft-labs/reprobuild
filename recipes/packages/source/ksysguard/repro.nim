@@ -49,6 +49,14 @@ package ksysguardSource:
     "knewstuff >=6.0"
     "kservice >=6.0"
     "ksolid >=6.0"
+    ## M9.R.15q.11.1 — libnl + lm-sensors are ksysguard's two REQUIRED
+    ## non-KF6 deps. CMakeLists.txt declares
+    ## ``find_package(NL)`` + ``find_package(Sensors)`` with
+    ## ``TYPE REQUIRED``; without them
+    ## ``feature_summary(REQUIRED_PACKAGES_NOT_FOUND
+    ## FATAL_ON_MISSING_REQUIRED_PACKAGES)`` aborts the configure run.
+    "libnl"
+    "lm-sensors"
     ## X11 transitives.
     "xorgproto"
     "libx11"

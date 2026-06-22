@@ -70,6 +70,12 @@ import ./sonnet
 # M9.R.15q.10.7d — qrencode is a kprison build-time hard dep
 # (CMakeLists declares ``find_package(QRencode REQUIRED)``).
 import ./qrencode
+# M9.R.15q.11.1 — libnl + lm-sensors are ksysguard's two REQUIRED
+# non-KF6 deps (CMakeLists.txt declares
+## ``find_package(NL)`` + ``find_package(Sensors)`` with
+## ``TYPE REQUIRED``).
+import ./libnl
+import ./lm_sensors
 
 export qt6_tools
 export qt6_declarative
@@ -114,3 +120,5 @@ export ktexteditor
 export kstatusnotifieritem
 export sonnet
 export qrencode
+export libnl
+export lm_sensors

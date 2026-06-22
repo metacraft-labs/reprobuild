@@ -74,6 +74,10 @@ const NewStubNames = @[
   "kstatusnotifieritem",
   # M9.R.15q.9.9 — sonnet is ktextwidgets's transitive find_package dep.
   "sonnet",
+  # M9.R.15q.11.1 — libnl + lm-sensors are ksysguard's REQUIRED
+  # non-KF6 find_package deps.
+  "libnl",
+  "lm-sensors",
 ]
 
 const PriorWaveStubNames = @[
@@ -102,6 +106,8 @@ const StubSelectors = {
   "ktexteditor":             "nixpkgs#kdePackages.ktexteditor",
   "kstatusnotifieritem":     "nixpkgs#kdePackages.kstatusnotifieritem",
   "sonnet":                  "nixpkgs#kdePackages.sonnet",
+  "libnl":                   "nixpkgs#libnl^*",
+  "lm-sensors":              "nixpkgs#lm_sensors^*",
 }.toTable
 
 suite "DSL-port M9.R.15q.9.2 — Plasma / KF6 stdlib stubs":
