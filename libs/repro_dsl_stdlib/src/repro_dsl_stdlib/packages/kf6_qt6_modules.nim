@@ -57,6 +57,16 @@ import ./plasma5support
 import ./plasma_activities_stats
 import ./kscreen
 import ./breeze
+# M9.R.15q.9.8 — three more required plasma-workspace KF6 components
+# (UnitConversion, TextEditor, StatusNotifierItem) surfaced after
+# Plasma + KIO + KParts cleared via the M9.R.15q.9.2 stub batch.
+import ./kunitconversion
+import ./ktexteditor
+import ./kstatusnotifieritem
+# M9.R.15q.9.9 — sonnet is ktextwidgets's transitive find_package
+# dep at configure time (KF6TextWidgets's CMake config calls
+# find_dependency(KF6Sonnet)).
+import ./sonnet
 
 export qt6_tools
 export qt6_declarative
@@ -96,3 +106,7 @@ export plasma5support
 export plasma_activities_stats
 export kscreen
 export breeze
+export kunitconversion
+export ktexteditor
+export kstatusnotifieritem
+export sonnet

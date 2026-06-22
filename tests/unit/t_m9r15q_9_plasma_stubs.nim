@@ -11,7 +11,7 @@
 ##   for "kparts" (package "kparts") but no sibling recipe ... and no
 ##   stdlib provisioning channel ... declared.
 ##
-## The fifteen stubs cover:
+## The nineteen stubs cover:
 ##
 ##   * qcoro6                 — C++20 coroutines wrapper for Qt
 ##   * kparts                 — KParts document-component framework
@@ -68,6 +68,12 @@ const NewStubNames = @[
   "kscreen",
   "breeze",
   "qt6-positioning",
+  # M9.R.15q.9.8 — KF6 components added in the second wave.
+  "kunitconversion",
+  "ktexteditor",
+  "kstatusnotifieritem",
+  # M9.R.15q.9.9 — sonnet is ktextwidgets's transitive find_package dep.
+  "sonnet",
 ]
 
 const PriorWaveStubNames = @[
@@ -92,11 +98,15 @@ const StubSelectors = {
   "kscreen":                 "nixpkgs#kdePackages.libkscreen",
   "breeze":                  "nixpkgs#kdePackages.breeze",
   "qt6-positioning":         "nixpkgs#qt6.qtpositioning",
+  "kunitconversion":         "nixpkgs#kdePackages.kunitconversion",
+  "ktexteditor":             "nixpkgs#kdePackages.ktexteditor",
+  "kstatusnotifieritem":     "nixpkgs#kdePackages.kstatusnotifieritem",
+  "sonnet":                  "nixpkgs#kdePackages.sonnet",
 }.toTable
 
 suite "DSL-port M9.R.15q.9.2 — Plasma / KF6 stdlib stubs":
 
-  test "all fifteen NEW M9.R.15q.9.2 stubs register as packages":
+  test "all NEW M9.R.15q.9 stubs register as packages":
     for name in NewStubNames:
       let pkg = findPackage(name)
       check pkg.packageName == name

@@ -214,6 +214,37 @@ package plasmaWorkspaceSource:
     "kio >=6.0"
     "kded >=6.0"
     "plasma-framework >=6.0"
+    ## M9.R.15q.9.8 — additional REQUIRED KF6 components from
+    ## plasma-workspace's
+    ## ``find_package(KF6 ... REQUIRED COMPONENTS Auth Parts Runner
+    ## Notifications NotifyConfig NewStuff Wallet IdleTime Svg
+    ## Declarative I18n KCMUtils TextWidgets Crash GlobalAccel
+    ## DBusAddons CoreAddons KIO Prison Package GuiAddons Archive
+    ## ItemModels IconThemes UnitConversion TextEditor
+    ## StatusNotifierItem)`` probe.  Sibling from-source recipes for
+    ## the components we already ship + stdlib stubs for the rest.
+    "extra-cmake-modules >=6.0"
+    "kauth >=6.0"
+    "kidletime >=6.0"
+    "kdeclarative >=6.0"
+    "kcmutils >=6.0"
+    "knewstuff >=6.0"
+    "kpackage >=6.0"
+    "kitemmodels >=6.0"
+    "kcrash >=6.0"
+    "kunitconversion >=6.0"
+    "ktexteditor >=6.0"
+    "kstatusnotifieritem >=6.0"
+    ## M9.R.15q.9.9 — sonnet is ktextwidgets's transitive
+    ## find_package dep; without it the KF6TextWidgets find_package
+    ## probe sets KF6TextWidgets_FOUND=FALSE.
+    "sonnet >=6.0"
+    ## M9.R.15q.9.8 — Plasma framework family (PlasmaActivities +
+    ## PlasmaWaylandProtocols + KWayland surface through these source
+    ## recipes; PlasmaQuick is part of plasma-framework).
+    "plasma-activities >=6.0"
+    "plasma-wayland-protocols >=1.14"
+    "kwayland >=6.0"
     ## qt6-base supplies QtCore / QtGui / QtWidgets / QtConcurrent /
     ## QtNetwork / QtDBus which the Plasma shell uses for its base UI +
     ## IPC surface.
