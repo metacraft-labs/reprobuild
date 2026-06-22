@@ -295,7 +295,27 @@ package systemdSource:
         "portabled=false",
         "polkit=false",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      # M9.R.15q.12.3 — patch systemd's vendored
+      # ``src/basic/linux/input-event-codes.h`` to add KEY_LINK_PHONE.
+      # systemd v257 ships its own linux/* kernel header shims at
+      # ``src/basic/linux/`` (the shipped README documents the v6.10-rc1
+      # vintage); the udev keyboard builtin includes the shim via
+      # ``-I../src/src/basic`` which gcc preprocesses BEFORE the
+      # nix-shell gcc-wrapper's idirafter glibc 2.40-66-dev/include
+      # (which DOES define KEY_LINK_PHONE). The generator
+      # ``generate-keyboard-keys-list.sh`` runs cpp with NO ``-I
+      # src/basic`` argument so it picks up KEY_LINK_PHONE from glibc
+      # and bakes the constant into the gperf table, producing the
+      # asymmetry "gperf table references KEY_LINK_PHONE but the C
+      # compile uses an older header that doesn't define it." The
+      # surgical fix injects the missing define into systemd's vendored
+      # shim right after KEY_HANGUP_PHONE (0x1be), matching the
+      # canonical upstream value 0x1bf for the AL Phone Syncing key.
+      let patches = @[
+        "sed -i 's|^#define KEY_HANGUP_PHONE\\t0x1be.*|&\\n#define KEY_LINK_PHONE\\t\\t0x1bf\\t/* AL Phone Syncing */|' src/src/basic/linux/input-event-codes.h",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+                              srcPatches = patches)
       discard pkg.executable("systemdInit")
       discard pkg.executable("systemctl")
       discard pkg.executable("journalctl")
