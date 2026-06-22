@@ -233,6 +233,15 @@ package kwinSource:
     ## ECM's per-module find_package(Qt6 ... LinguistTools) probe
     ## requires at configure time even when translations are disabled.
     "qt6-tools >=6.6"
+    ## qt6-declarative supplies Qt6Qml + Qt6Quick the QML-based effect
+    ## runtime + Plasma's QtQuick-driven UI consume.
+    "qt6-declarative >=6.6"
+    ## qt6-wayland supplies Qt6WaylandClient for kwin's Wayland client
+    ## glue (find_package(Qt6 ... COMPONENTS WaylandClient REQUIRED)).
+    "qt6-wayland >=6.6"
+    ## qt6-svg supplies the Qt6Svg dependency kwin's QML scene loader
+    ## consumes for vector icons.
+    "qt6-svg >=6.6"
     ## libdrm is the kernel DRM client library kwin's DRM backend uses
     ## to drive direct-rendering on tty consoles. The sibling
     ## ``libdrmSource`` recipe vendors a compatible version.
@@ -247,6 +256,56 @@ package kwinSource:
     ## pixman is the software 2D rendering backend kwin's
     ## compositor uses for fallback paths.
     "pixman >=0.40"
+    ## M9.R.15q.4.5 — kwin's CMakeLists.txt requires:
+    ##  - KDecoration2 (server-side decoration framework)
+    ##  - KWayland (KDE Wayland client/server)
+    ##  - kscreenlocker (lock-screen daemon, KWIN_BUILD_SCREENLOCKER=ON)
+    ##  - kglobalacceld (global-shortcut daemon, KWIN_BUILD_GLOBALSHORTCUTS=ON)
+    ##  - libcanberra (event-sound)
+    ##  - libepoxy (GL dispatch)
+    ##  - libdisplay-info (EDID parser)
+    ##  - libei (emulated-input handling, optional but on)
+    ##  - mesa (gbm + EGL + GL fallbacks)
+    ##  - lcms2 (color management)
+    ##  - freetype + fontconfig (QPA plugin)
+    ##  - libsystemd (service watchdog)
+    ##  - dbus (DBus client library)
+    ##  - kactivities equivalent → plasma-activities
+    ##  - plasma-wayland-protocols (Plasma-specific Wayland XML)
+    ##  - wayland-protocols (upstream Wayland XML)
+    "kdecoration2 >=6.0"
+    "kwayland >=6.0"
+    "kscreenlocker >=6.0"
+    "kglobalacceld >=6.0"
+    "libcanberra"
+    "libepoxy >=1.3"
+    "libdisplay-info"
+    "libei"
+    "mesa >=23.3"
+    "lcms2"
+    "freetype >=2.10"
+    "fontconfig >=2.13"
+    "libsystemd"
+    "dbus >=1.14"
+    "plasma-activities >=6.2"
+    "plasma-wayland-protocols >=1.14"
+    "wayland-protocols >=1.36"
+    ## M9.R.15q.4.5 — additional KF6 components kwin's find_package
+    ## line declares: KF6 COMPONENTS Auth ColorScheme IdleTime
+    ## Declarative KCMUtils NewStuff Package; we have sibling source
+    ## recipes for all of these (kauth, kcolorscheme, kidletime,
+    ## kdeclarative, kcmutils, knewstuff, kpackage, kirigami) so the
+    ## resolver picks them up via the sibling path.
+    "kauth >=6.0"
+    "kcolorscheme >=6.0"
+    "kidletime >=6.0"
+    "kdeclarative >=6.0"
+    "kcmutils >=6.0"
+    "knewstuff >=6.0"
+    "kpackage >=6.0"
+    "kirigami >=6.0"
+    ## hwdata (RUNTIME) for monitor vendor-ID mapping.
+    "hwdata"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
