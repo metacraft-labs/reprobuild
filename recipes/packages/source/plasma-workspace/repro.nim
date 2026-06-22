@@ -232,11 +232,13 @@ package plasmaWorkspaceSource:
     ##   * qt6-5compat      - Qt6Core5Compat
     ##   * qt6-shadertools  - Qt6ShaderTools
     ##   * qt6-wayland      - Qt6WaylandCompositor + Qt6WaylandClient
+    ##   * qt6-positioning  - Qt6Positioning (M9.R.15q.9.1)
     "qt6-svg >=6.6"
     "qt6-declarative >=6.6"
     "qt6-5compat >=6.6"
     "qt6-shadertools >=6.6"
     "qt6-wayland >=6.6"
+    "qt6-positioning >=6.6"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
