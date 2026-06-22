@@ -57,7 +57,17 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     case spec.hashAlg
     of dshaSha256: "sha256"
     of dshaBlake3: "blake3"
-  let escapedUrl = spec.url.replace("\"", "\\\"")
+  # M9.R.15q.5.4 — support relative ``file:./vendor/...`` URL form so
+  # recipes that vendor a tarball can reference it without baking the
+  # host's absolute path into the recipe (mirrors the equivalent
+  # autotools_package / meson_package helpers).
+  var resolvedUrl = spec.url
+  if resolvedUrl.startsWith("file:./") or resolvedUrl.startsWith("file:../"):
+    let relPath = resolvedUrl[5 .. ^1]
+    let absPath = projectRoot / relPath
+    let posixAbs = absPath.replace("\\", "/")
+    resolvedUrl = "file://" & posixAbs
+  let escapedUrl = resolvedUrl.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
   let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
