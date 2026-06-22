@@ -23,7 +23,9 @@ suite "knewstuffSource — from-source recipe smoke test":
     check spec.hashHex == ExpectedHash
 
   test "artifacts register two KF6NewStuff libraries":
+    ## M9.R.15q.10.2 — knewstuff 6.10.0 ships the legacy ``libKF6NewStuff``
+    ## widget facade renamed as ``libKF6NewStuffWidgets`` (Core unchanged).
     let arts = registeredArtifacts("knewstuffSource")
     check arts.len == 2
-    check arts[0].artifactName == "libKF6NewStuff"
+    check arts[0].artifactName == "libKF6NewStuffWidgets"
     check arts[1].artifactName == "libKF6NewStuffCore"

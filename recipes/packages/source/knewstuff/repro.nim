@@ -56,7 +56,12 @@ package knewstuffSource:
   config:
     discard
 
-  library libKF6NewStuff:
+  ## M9.R.15q.10.2 — knewstuff 6.10.0 ships the legacy ``libKF6NewStuff``
+  ## widget facade renamed as ``libKF6NewStuffWidgets`` (the ``Widgets``
+  ## suffix mirrors the QtWidgets-only side of the split between the
+  ## QtCore-only ``Core`` library and the QtWidgets-based dialog set).
+  ## Adjust both the artifact declaration + the build-block stage list.
+  library libKF6NewStuffWidgets:
     discard
   library libKF6NewStuffCore:
     discard
@@ -71,7 +76,7 @@ package knewstuffSource:
         "CMAKE_BUILD_TYPE=Release",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
-      discard pkg.library("libKF6NewStuff")
+      discard pkg.library("libKF6NewStuffWidgets")
       discard pkg.library("libKF6NewStuffCore")
     finally:
       clearCurrentOwningPackageOverride()
