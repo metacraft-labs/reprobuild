@@ -273,7 +273,12 @@ package kwinSource:
     ##  - kactivities equivalent → plasma-activities
     ##  - plasma-wayland-protocols (Plasma-specific Wayland XML)
     ##  - wayland-protocols (upstream Wayland XML)
-    "kdecoration2 >=6.0"
+    ## M9.R.15q.4.8 — kdecoration source recipe at 6.2.0 ships the
+    ## legacy KDecoration2 CMake namespace kwin 6.2.5 looks up via
+    ## find_package(KDecoration2). nixpkgs's
+    ## kdePackages.kdecoration is at 6.3+ which renamed to
+    ## KDecoration3 — incompatible.
+    "kdecoration"
     "kwayland >=6.0"
     "kscreenlocker >=6.0"
     "kglobalacceld >=6.0"
