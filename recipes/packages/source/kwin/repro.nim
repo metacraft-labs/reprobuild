@@ -131,6 +131,8 @@
 ## variants need different strategies (e.g. an X11-supporting variant
 ## that flips ``KWIN_BUILD_X11=ON`` for legacy bundles).
 
+import std/[os, strutils]
+
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
@@ -409,7 +411,59 @@ package kwinSource:
         "KWIN_BUILD_RUNNERS=OFF",
         "CMAKE_BUILD_TYPE=Release",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.15q.6.3 — explicit PKG_CONFIG_PATH_FOR_TARGET injection.
+      #
+      # The nix pkg-config-wrapper consults PKG_CONFIG_PATH_FOR_TARGET
+      # (NOT PKG_CONFIG_PATH) when NIX_PKG_CONFIG_WRAPPER_TARGET_TARGET_*
+      # is set, which it always is inside a nix-shell. The M9.R.14e.3
+      # search-path channels DO populate PKG_CONFIG_PATH_FOR_TARGET via
+      # the from-source resolver, but for kwin's 70+ dep graph some
+      # entries are dropped before reaching the configure action's env
+      # — the symptom is "wayland-scanner / wayland-protocols /
+      # libdisplay-info: No package found" even though each dep's tool
+      # identity has the right pkgConfigSearchList. Threading the
+      # known-good paths explicitly via extraEnv bypasses that channel.
+      #
+      # Discovered at recipe-eval time so the recipe is portable across
+      # hosts: walks the sibling source-recipe install mirrors. Both
+      # the wayland-protocols + libdisplay-info paths live in
+      # /nix/store/*-*-{wayland-protocols,libdisplay-info}/ (nix stubs),
+      # which we glob via a single shell expansion.
+      var pkgCfgDirs: seq[string] = @[]
+      let recipeRoot = getEnv("REPROBUILD_RECIPE_ROOT",
+        "/opt/repro/reprobuild/recipes/packages/source")
+      # Sibling from-source pkg-config dirs.
+      for sib in walkDir(recipeRoot, relative = false):
+        if sib.kind == pcDir:
+          let p = sib.path / ".repro" / "output" / "install" / "usr" / "lib" / "pkgconfig"
+          if dirExists(p):
+            pkgCfgDirs.add(p)
+          let p64 = sib.path / ".repro" / "output" / "install" / "usr" / "lib64" / "pkgconfig"
+          if dirExists(p64):
+            pkgCfgDirs.add(p64)
+          let pShare = sib.path / ".repro" / "output" / "install" / "usr" / "share" / "pkgconfig"
+          if dirExists(pShare):
+            pkgCfgDirs.add(pShare)
+      # Nix-stub pkg-config dirs (wayland-protocols + libdisplay-info).
+      for store in walkDir("/nix/store", relative = false):
+        if store.kind == pcDir:
+          let n = extractFilename(store.path)
+          if "wayland-protocols-" in n or "libdisplay-info-" in n:
+            if not n.endsWith(".drv") and not n.endsWith(".tar.xz") and
+                not n.endsWith(".tar.gz"):
+              let pShare = store.path / "share" / "pkgconfig"
+              if dirExists(pShare):
+                pkgCfgDirs.add(pShare)
+              let pLib = store.path / "lib" / "pkgconfig"
+              if dirExists(pLib):
+                pkgCfgDirs.add(pLib)
+      let pkgCfgPath = pkgCfgDirs.join(":")
+      let env = @[
+        ("PKG_CONFIG_PATH_FOR_TARGET", pkgCfgPath),
+        ("PKG_CONFIG_PATH", pkgCfgPath),
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              extraEnv = env)
       discard pkg.executable("kwinWayland")
       discard pkg.library("libKWin")
     finally:

@@ -110,11 +110,24 @@ proc cmake_package*(srcDir: string;
                     prefix = "/usr";
                     generator = "";
                     cacheVars: seq[string] = @[];
-                    target = ""): CmakePackageResult =
+                    target = "";
+                    extraEnv: seq[(string, string)] = @[]): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
   ## (``component`` field on the install call); the standard layout
   ## table populated on the result mirrors meson's.
+  ##
+  ## ``extraEnv`` (M9.R.15q.6.3): per-edge env-var overrides applied
+  ## to ALL THREE edges (configure / build / install). The engine
+  ## extends the action's spawned-process env with each ``(NAME,
+  ## VALUE)`` pair AFTER the M9.R.14e.3 search-path channels are
+  ## threaded. Use this when a recipe needs to thread an env var that
+  ## the from-source resolver's auto-channel detection misses (e.g.
+  ## kwin's PKG_CONFIG_PATH_FOR_TARGET for the libdisplay-info /
+  ## wayland-protocols / wayland-scanner trio that pkg_check_modules
+  ## probes via the nix-wrapped pkg-config — the wrapper only consults
+  ## PKG_CONFIG_PATH_FOR_TARGET, not the bare PKG_CONFIG_PATH, and the
+  ## auto-channel doesn't compose for graphs with 70+ deps).
   ##
   ## ## M9.R.14g.6 — inline-exec build + install
   ##
@@ -266,7 +279,8 @@ proc cmake_package*(srcDir: string;
     buildDir = buildDir,
     generator = generator,
     cacheVars = effectiveCacheVars,
-    after = configureAfter)
+    after = configureAfter,
+    extraEnv = extraEnv)
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
@@ -304,7 +318,8 @@ proc cmake_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.build",
-    toolIdentityRefs = @["cmake", "sh"])
+    toolIdentityRefs = @["cmake", "sh"],
+    env = extraEnv)
   # M9.R.14g.6 — inline-exec install action. cmake's real install mode
   # is selected by ``--install``, NOT by ``install`` subcommand.
   #
@@ -351,7 +366,8 @@ proc cmake_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.install",
-    toolIdentityRefs = @["cmake", "sh"])
+    toolIdentityRefs = @["cmake", "sh"],
+    env = extraEnv)
   # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
   # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
   # from-source search-path channels reach the action env at fork time.
