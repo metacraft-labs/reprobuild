@@ -45,6 +45,10 @@ package breezeSource:
     "kwindowsystem >=6.0"
     ## KDecoration2 for the window-decoration plugin.
     "kdecoration2 >=6.0"
+    ## M9.R.15q.11.11 — kirigami ships KF6KirigamiPlatform that
+    ## breeze's CMakeLists declares find_package(KF6KirigamiPlatform
+    ## ${KF6_MIN_VERSION} REQUIRED) when Qt6Quick is found.
+    "kirigami >=6.0"
     ## X11 transitives (kwindowsystem's X11 backend probe).
     "xorgproto"
     "libx11"
