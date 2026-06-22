@@ -477,6 +477,14 @@ package plasmaWorkspaceSource:
         # fullbuild milestone can add ICU + restore both applets.
         "sed -i 's|^add_subdirectory(digital-clock)$|# M9.R.15q.12.16: dropped — needs ICU (unicode/tznames.h)|' src/applets/CMakeLists.txt",
         "sed -i 's|^add_subdirectory(kicker)$|# M9.R.15q.12.16: dropped — needs ICU (unicode/translit.h)|' src/applets/CMakeLists.txt",
+        # M9.R.15q.13.3 — gate gmenu-dbusmenu-proxy on WITH_X11. The
+        # gmenu-dbusmenu-proxy menuproxy.h #includes <xcb/xcb_atom.h>
+        # (from xcb-util) which we don't ship as a from-source sibling;
+        # the subdir also unconditionally find_package(XCB REQUIRED).
+        # Plasma's modern Wayland menu path is the StatusNotifierItem /
+        # Plasma::Menu QML; the gmenu-dbusmenu-proxy bridge only
+        # surfaces GTK-app global menus for X11 sessions.
+        "sed -i 's|^ecm_optional_add_subdirectory(gmenu-dbusmenu-proxy)$|if(WITH_X11)\\n    ecm_optional_add_subdirectory(gmenu-dbusmenu-proxy)\\nendif()|' src/CMakeLists.txt",
       ]
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
