@@ -200,21 +200,6 @@ package systemdSource:
     ## python3 stub doesn't bundle jinja2 and meson setup aborts with
     ## "ERROR: python3 is missing modules: jinja2".
     "python3-with-modules"
-    ## M9.R.15q.12.1 — linux-headers from the pinned nixpkgs rev. The
-    ## host kernel headers (when present at /usr/include/linux/) are
-    ## frequently older than what systemd v257 needs; specifically
-    ## ``KEY_LINK_PHONE`` was added in linux 6.10 and systemd's
-    ## ``udev-builtin-keyboard`` `#include`s ``linux/input-event-codes.h``
-    ## by name. The stdlib's ``linux-headers`` stub pins
-    ## ``nixpkgs#linuxHeaders`` (currently 6.16.7), which DEFINES
-    ## ``KEY_LINK_PHONE``. With this dep declared the M9.R.14e env-
-    ## prepend pass threads the header dir onto the compile action's
-    ## ``CPATH`` so ``KEY_LINK_PHONE`` resolves at gcc preprocessor
-    ## time. Required by every modern Linux kernel-using build, not
-    ## just systemd; routed as a ``nativeBuildDeps`` entry because
-    ## the headers are consumed at build host time, not by the
-    ## resulting binary at runtime.
-    "linux-headers"
 
   buildDeps:
     ## libcap supplies the POSIX capabilities library systemd consumes
