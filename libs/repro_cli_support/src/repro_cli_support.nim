@@ -1223,6 +1223,39 @@ proc renderCapabilitiesText*(): string =
     "hcrDecisionAuthority: " &
       caps["interfaces"]["hcr"]["decisionAuthority"].getStr()
 
+proc runConfigsCommand(args: openArray[string]): int =
+  ## List the recognized standard build configurations and the currently
+  ## selected ``buildType`` (Standard-Configurations.md). A "configuration"
+  ## is a value of the conventional ``buildType`` variant axis; the
+  ## ``--release`` / ``--debug`` flags are sugar for
+  ## ``--variant buildType=<config>``.
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--help" or arg == "-h":
+      echo "usage: repro configs"
+      echo "List the recognized standard build configurations " &
+        "(values of the buildType variant axis)."
+      return 0
+    else:
+      raise newException(ValueError, "unsupported configs argument: " & arg)
+    inc i
+  var current = "debug"
+  for assignment in getEnv("REPRO_VARIANTS").split(','):
+    let kv = assignment.split('=', 1)
+    if kv.len == 2 and kv[0].strip == "buildType":
+      current = kv[1].strip
+  echo "Standard configurations (values of the `buildType` variant axis):"
+  echo "  debug           development build (default)"
+  echo "  release         optimized build  (shorthand: --release)"
+  echo "  relWithDebInfo  optimized build with debug info"
+  echo "  minSizeRel      size-optimized build"
+  echo ""
+  echo "current buildType: " & current
+  echo "select with: repro build --release   " &
+    "(or --variant buildType=<value>)"
+  0
+
 proc runCapabilitiesCommand(args: openArray[string]): int =
   var format = "json"
   var i = 0
@@ -10199,6 +10232,18 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       if existing.len > 0:
         existing.add(',')
       existing.add(spec)
+      putEnv("REPRO_VARIANTS", existing)
+    elif arg == "--release" or arg == "--debug":
+      # Standard-configuration shorthand (Standard-Configurations.md):
+      # ``--release`` / ``--debug`` are sugar for ``--variant
+      # buildType=release|debug``. Recognized standard configs map a
+      # leading-dash flag to the conventional ``buildType`` axis value;
+      # other configs still use the explicit ``--variant buildType=…``.
+      let cfg = arg[2 .. ^1]
+      var existing = getEnv("REPRO_VARIANTS")
+      if existing.len > 0:
+        existing.add(',')
+      existing.add("buildType=" & cfg)
       putEnv("REPRO_VARIANTS", existing)
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported build flag: " & arg)
@@ -21525,6 +21570,15 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         existing.add(',')
       existing.add(spec)
       putEnv("REPRO_VARIANTS", existing)
+    elif arg == "--release" or arg == "--debug":
+      # Standard-configuration shorthand: sugar for ``--variant
+      # buildType=release|debug`` (Standard-Configurations.md).
+      let cfg = arg[2 .. ^1]
+      var existing = getEnv("REPRO_VARIANTS")
+      if existing.len > 0:
+        existing.add(',')
+      existing.add("buildType=" & cfg)
+      putEnv("REPRO_VARIANTS", existing)
     elif arg == "--daemon" or arg.startsWith("--daemon="):
       # Pass-through to ``runBuildCommand`` when ``repro test`` falls
       # through to the verb-alias path (no shard flags supplied). The
@@ -23021,6 +23075,17 @@ proc runThinApp*(programName: string): int =
       return runDebugArtifactCommand(artifactArgs)
     except CatchableError as err:
       stderr.writeLine("repro debug artifact: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "configs":
+    try:
+      let configArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runConfigsCommand(configArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro configs: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "capabilities":
     try:
