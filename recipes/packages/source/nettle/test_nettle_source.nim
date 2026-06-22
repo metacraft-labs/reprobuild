@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/nettle/vendor/nettle-3.10.tar.gz"
+  "https://ftp.gnu.org/gnu/nettle/nettle-3.10.tar.gz"
 
 const ExpectedHash =
   "b4c518adb174e484cb4acea54118f02380c7133771e7e9beb98a0787194ee47c"

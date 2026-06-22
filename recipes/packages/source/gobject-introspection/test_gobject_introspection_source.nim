@@ -33,10 +33,11 @@ suite "gobjectIntrospectionSource — from-source recipe smoke test":
 
   test "one library + two executable artifacts registered":
     let arts = registeredArtifacts("gobjectIntrospectionSource")
-    check arts.len == 3
+    check arts.len == 4
     var seenGirepository = false
     var seenScanner = false
     var seenCompiler = false
+    var seenIntrospect = false
     for art in arts:
       check art.packageName == "gobjectIntrospectionSource"
       case art.artifactName
@@ -49,11 +50,15 @@ suite "gobjectIntrospectionSource — from-source recipe smoke test":
       of "gIrCompiler":
         seenCompiler = true
         check art.kind == dakExecutable
+      of "gobjectIntrospection":
+        seenIntrospect = true
+        check art.kind == dakExecutable
       else:
         discard
     check seenGirepository
     check seenScanner
     check seenCompiler
+    check seenIntrospect
 
   test "versions block records the upstream tag + URL + repository":
     let vs = registeredVersions("gobjectIntrospectionSource")

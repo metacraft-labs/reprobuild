@@ -37,7 +37,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/eudev/vendor/eudev-3.2.14.tar.gz"
+  "https://github.com/eudev-project/eudev/releases/download/v3.2.14/eudev-3.2.14.tar.gz"
 
 const ExpectedHash =
   "8da4319102f24abbf7fff5ce9c416af848df163b29590e666d334cc1927f006f"

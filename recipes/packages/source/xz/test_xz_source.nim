@@ -31,7 +31,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/xz/vendor/xz-5.6.3.tar.xz"
+  "https://tukaani.org/xz/xz-5.6.3.tar.xz"
 
 const ExpectedHash =
   "db0590629b6f0fa36e74aea5f9731dc6f8df068ce7b7bafa45301832a5eebc3a"

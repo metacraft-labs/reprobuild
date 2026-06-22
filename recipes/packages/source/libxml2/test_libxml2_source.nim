@@ -31,7 +31,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libxml2/vendor/libxml2-2.13.5.tar.xz"
+  "https://download.gnome.org/sources/libxml2/2.13/libxml2-2.13.5.tar.xz"
 
 const ExpectedHash =
   "74fc163217a3964257d3be39af943e08861263c4231f9ef5b496b6f6d4c7b2b6"

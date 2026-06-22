@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kmod/vendor/kmod-33.tar.xz"
+  "https://www.kernel.org/pub/linux/utils/kernel/kmod/kmod-33.tar.xz"
 
 const ExpectedHash =
   "dc768b3155172091f56dc69430b5481f2d76ecd9ccb54ead8c2540dbcf5ea9bc"

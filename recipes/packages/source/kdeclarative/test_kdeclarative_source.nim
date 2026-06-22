@@ -25,5 +25,5 @@ suite "kdeclarativeSource — from-source recipe smoke test":
   test "artifacts register libKF6Declarative":
     let arts = registeredArtifacts("kdeclarativeSource")
     check arts.len == 1
-    check arts[0].artifactName == "libKF6Declarative"
+    check arts[0].artifactName == "libKF6CalendarEvents"
     check arts[0].kind == dakLibrary

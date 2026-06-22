@@ -105,13 +105,14 @@ suite "qt6BaseSource — from-source recipe smoke test":
     # cardinality would not produce six distinct entries with the
     # expected names below.
     let arts = registeredArtifacts("qt6BaseSource")
-    check arts.len == 6
+    check arts.len == 7
     var seenCore = false
     var seenGui = false
     var seenWidgets = false
     var seenNetwork = false
     var seenDBus = false
     var seenSql = false
+    var seenOpenGL = false
     for art in arts:
       check art.packageName == "qt6BaseSource"
       check art.kind == dakLibrary
@@ -128,6 +129,8 @@ suite "qt6BaseSource — from-source recipe smoke test":
         seenDBus = true
       of "libQt6Sql":
         seenSql = true
+      of "libQt6OpenGL":
+        seenOpenGL = true
       else:
         discard
     check seenCore
@@ -136,6 +139,7 @@ suite "qt6BaseSource — from-source recipe smoke test":
     check seenNetwork
     check seenDBus
     check seenSql
+    check seenOpenGL
 
   test "artifacts preserve the upstream PascalCase brand-casing":
     # M3 artifact-name partitioning under the SIX-artifact cardinality:
@@ -149,7 +153,7 @@ suite "qt6BaseSource — from-source recipe smoke test":
     for art in arts:
       if art.artifactName.len >= 5 and art.artifactName[0..4] == "libQt":
         inc prefixMatches
-    check prefixMatches == 6
+    check prefixMatches == 7
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream download.qt.io release tag is

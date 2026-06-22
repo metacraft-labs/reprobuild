@@ -32,7 +32,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/wayland/vendor/wayland-1.25.0.tar.xz"
+  "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.25.0/downloads/wayland-1.25.0.tar.xz"
 
 const ExpectedHash =
   "c065f040afdff3177680600f249727e41a1afc22fccf27222f15f5306faa1f03"

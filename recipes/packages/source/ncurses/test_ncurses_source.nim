@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/ncurses/vendor/ncurses-6.5.tar.gz"
+  "https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz"
 
 const ExpectedHash =
   "136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"

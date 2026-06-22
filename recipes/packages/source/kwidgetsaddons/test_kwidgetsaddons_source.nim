@@ -31,7 +31,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kwidgetsaddons/vendor/kwidgetsaddons-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kwidgetsaddons-6.10.0.tar.xz"
 
 const ExpectedHash =
   "e0fa4943d7874287fd2c2c254f1ef21edf7e573b6b19354df5fdef8cbbefe74e"

@@ -29,7 +29,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/less/vendor/less-668.tar.gz"
+  "https://www.greenwoodsoftware.com/less/less-668.tar.gz"
 
 const ExpectedHash =
   "2819f55564d86d542abbecafd82ff61e819a3eec967faa36cd3e68f1596a44b8"

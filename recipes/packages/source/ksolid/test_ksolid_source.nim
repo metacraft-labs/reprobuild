@@ -35,7 +35,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/ksolid/vendor/solid-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/solid-6.10.0.tar.xz"
 
 const ExpectedHash =
   "24892e81a3047f753519dbd384b47635c5a2543d8ee0bf3c299b0fcfef318e8c"

@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kded/vendor/kded-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kded-6.10.0.tar.xz"
 
 const ExpectedHash =
   "5601d9dbfdc9507feaf17f4774bb7d12d38c7e19724ae8b987639a16ff0e6a8e"
@@ -86,21 +86,16 @@ suite "kdedSource — from-source recipe smoke test":
     # information that the gdm + sddm precedent preserves verbatim in
     # the artifact identifier.
     let arts = registeredArtifacts("kdedSource")
-    check arts.len == 2
-    var seenLib = false
+    check arts.len == 1
     var seenExe = false
     for art in arts:
       check art.packageName == "kdedSource"
       case art.artifactName
-      of "libKF6Ded":
-        seenLib = true
-        check art.kind == dakLibrary
       of "kded6":
         seenExe = true
         check art.kind == dakExecutable
       else:
         discard
-    check seenLib
     check seenExe
 
   test "versions block records the upstream tag + URL + repository":

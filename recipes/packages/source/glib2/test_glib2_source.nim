@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/glib2/vendor/glib-2.82.5.tar.xz"
+  "https://download.gnome.org/sources/glib/2.82/glib-2.82.5.tar.xz"
 
 const ExpectedHash =
   "05c2031f9bdf6b5aba7a06ca84f0b4aced28b19bf1b50c6ab25cc675277cbc3f"

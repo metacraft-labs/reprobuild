@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/freetype/vendor/freetype-2.13.3.tar.xz"
+  "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz"
 
 const ExpectedHash =
   "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"

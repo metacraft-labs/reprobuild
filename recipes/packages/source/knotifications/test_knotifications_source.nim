@@ -30,7 +30,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/knotifications/vendor/knotifications-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/knotifications-6.10.0.tar.xz"
 
 const ExpectedHash =
   "36b7881d50400f37b4f3aeaa4c0a6a943e5783d35441e2b0cacdc6dad06af2a1"

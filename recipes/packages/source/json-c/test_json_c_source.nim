@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/json-c/vendor/json-c-0.18-20240915.tar.gz"
+  "https://github.com/json-c/json-c/archive/refs/tags/json-c-0.18-20240915.tar.gz"
 
 const ExpectedHash =
   "3112c1f25d39eca661fe3fc663431e130cc6e2f900c081738317fba49d29e298"

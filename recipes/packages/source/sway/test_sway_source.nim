@@ -35,7 +35,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/sway/vendor/sway-1.11.tar.gz"
+  "https://github.com/swaywm/sway/archive/refs/tags/1.11.tar.gz"
 
 const ExpectedHash =
   "034ec4519326d6af5275814700dde46e852c5174614109affe4c86b2fbee062a"

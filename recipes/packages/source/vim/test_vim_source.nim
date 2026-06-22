@@ -33,7 +33,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/vim/vendor/vim-9.1.1000.tar.gz"
+  "https://github.com/vim/vim/archive/refs/tags/v9.1.1000.tar.gz"
 
 const ExpectedHash =
   "c8ccd457bba5563513ab3e2088ad10d62b982682af9a9278686b48202b8c7697"

@@ -36,7 +36,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libinput/vendor/libinput-1.28.1.tar.gz"
+  "http://deb.debian.org/debian/pool/main/libi/libinput/libinput_1.28.1.orig.tar.gz"
 
 const ExpectedHash =
   "a13f8c9a7d93df3c85c66afd135f0296701d8d32f911991b7aa4273fdd6a42a3"

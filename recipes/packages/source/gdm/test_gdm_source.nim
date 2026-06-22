@@ -35,7 +35,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/gdm/vendor/gdm-47.0.tar.xz"
+  "https://download.gnome.org/sources/gdm/47/gdm-47.0.tar.xz"
 
 const ExpectedHash =
   "c5858326bfbcc8ace581352e2be44622dc0e9e5c2801c8690fd2eed502607f84"

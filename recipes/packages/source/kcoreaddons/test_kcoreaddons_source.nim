@@ -30,7 +30,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/kcoreaddons/vendor/kcoreaddons-6.10.0.tar.xz"
+  "https://download.kde.org/stable/frameworks/6.10/kcoreaddons-6.10.0.tar.xz"
 
 const ExpectedHash =
   "89bf28747915e987cab21c77397b0971caffa1258b6f575543d73d4188184a72"

@@ -32,7 +32,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libffi/vendor/libffi-3.4.6.tar.gz"
+  "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz"
 
 const ExpectedHash =
   "b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"

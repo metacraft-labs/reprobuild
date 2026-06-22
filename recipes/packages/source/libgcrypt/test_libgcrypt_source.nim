@@ -34,7 +34,7 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "file:///metacraft/reprobuild/recipes/packages/source/libgcrypt/vendor/libgcrypt-1.11.0.tar.bz2"
+  "https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.11.0.tar.bz2"
 
 const ExpectedHash =
   "09120c9867ce7f2081d6aaa1775386b98c2f2f246135761aae47d81f58685b9c"
