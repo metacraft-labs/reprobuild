@@ -195,17 +195,34 @@ package sddmSource:
     "gcc >=11"
 
   buildDeps:
-    ## qt6-base supplies QtCore / QtGui / QtQml / QtQuick which the
-    ## QML-driven sddm greeter uses for its login-form UI surface.
-    ## 6.6 is the minimum the sddm 0.21 line targets.
+    ## qt6-base supplies QtCore / QtGui / QtDBus which the daemon +
+    ## greeter consume for the base UI / D-Bus IPC surface. 6.6 is the
+    ## minimum the sddm 0.21 line targets.
     "qt6-base >=6.6"
     ## M9.R.15f.6 — qt6-tools supplies lupdate / lrelease / qhelpgenerator
     ## tooling sddm's CMakeLists invoke (`find_package(Qt6 ...
     ## LinguistTools)`) at configure time for the translations build.
     "qt6-tools >=6.6"
+    ## M9.R.15q.8.1 — qt6-declarative supplies QtQml + QtQuick which the
+    ## QML-driven sddm greeter uses for its login-form UI surface.
+    ## sddm's CMakeLists explicitly `find_package(Qt6 ... Qml Quick)`.
+    "qt6-declarative >=6.6"
     ## pam is the authentication-stack library sddm's greeter consumes
     ## to authenticate logins against ``/etc/pam.d/sddm``.
     "pam >=1.5"
+    ## M9.R.15q.8.1 — libxau supplies `xau.pc` which sddm's
+    ## `pkg_check_modules(LIBXAU REQUIRED "xau")` probe consumes for
+    ## the X11 authentication cookie generation in the greeter's
+    ## display-server-handshake glue.
+    "libxau >=1.0"
+    ## M9.R.15q.8.1 — libxcb supplies XCB which sddm's
+    ## `find_package(XCB REQUIRED)` consumes via ECM's `FindXCB.cmake`
+    ## for the X11 display backend.
+    "libxcb >=1.13"
+    ## M9.R.15q.8.1 — libxkbcommon supplies XKB which sddm's
+    ## `find_package(XKB REQUIRED)` consumes for keyboard layout
+    ## handling in the greeter.
+    "libxkbcommon >=1.0"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
