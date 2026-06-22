@@ -168,6 +168,9 @@ import ./libdisplayinfo
 import ./hwdata
 # M9.R.15q.5.7 — attica is the OCS client knewstuff needs.
 import ./attica
+# M9.R.15q.5.12 — libxcvt is the VESA CVT library kwin's DRM backend
+# probes via pkg-config (libxcvt>=0.1.1).
+import ./libxcvt
 
 export bc
 export bison
@@ -245,3 +248,4 @@ export libepoxy
 export libdisplayinfo
 export hwdata
 export attica
+export libxcvt

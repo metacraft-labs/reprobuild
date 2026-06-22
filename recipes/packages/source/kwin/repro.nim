@@ -349,6 +349,15 @@ package kwinSource:
     "libxext"
     "libxfixes"
     "libxrender"
+    ## M9.R.15q.5.12 — kwin 6.2.5's CMakeLists.txt:340 declares
+    ## ``pkg_check_modules(libxcvt>=0.1.1 REQUIRED)`` for the DRM
+    ## backend's modeline-fallback computation. libxcvt is a nix-stub.
+    "libxcvt"
+    ## M9.R.15q.5.12 — libepoxy.pc declares ``Requires: gl``, so
+    ## pkg-config recursively probes for ``gl.pc`` (libglvnd's desktop
+    ## OpenGL pkg-config file). The ``gl`` nix-stub points at
+    ## ``nixpkgs#libglvnd``'s gl.pc.
+    "gl"
     ## M9.R.15q.5.8 — kdeclarative + kcmutils + knewstuff are
     ## conditionally required ONLY when KWIN_BUILD_KCMS=ON (see kwin
     ## upstream CMakeLists.txt:104). With KWIN_BUILD_KCMS=OFF (which
