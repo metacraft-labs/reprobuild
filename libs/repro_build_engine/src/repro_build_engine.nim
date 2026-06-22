@@ -1662,16 +1662,23 @@ proc prependPathDirsToArgvEnv(env: seq[string];
       pathSeen = true
     else:
       result.add(entry)
+  # M9.R.15q.3.3 — dedup the final PATH list so the env stays under
+  # ARG_MAX even when 25+ buildDeps + a host PATH with overlapping
+  # nix-shell entries pile up.
   var parts: seq[string] = @[]
+  var seenP = initHashSet[string]()
   for d in binDirs:
-    if d.len > 0:
+    if d.len > 0 and d notin seenP:
+      seenP.incl(d)
       parts.add(d)
-  if pathSeen and pathValue.len > 0:
-    parts.add(pathValue)
-  elif not pathSeen:
-    let inherited = getEnv("PATH")
-    if inherited.len > 0:
-      parts.add(inherited)
+  let trailing =
+    if pathSeen: pathValue
+    else: getEnv("PATH")
+  if trailing.len > 0:
+    for ent in trailing.split(sep):
+      if ent.len > 0 and ent notin seenP:
+        seenP.incl(ent)
+        parts.add(ent)
   result.add("PATH=" & parts.join(sep))
 
 proc prependPathDirs(table: StringTableRef; binDirs: openArray[string]) =
@@ -1684,13 +1691,21 @@ proc prependPathDirs(table: StringTableRef; binDirs: openArray[string]) =
   let sep =
     when defined(windows): ";"
     else: ":"
+  # M9.R.15q.3.3 — dedup as in the argv-style counterpart so a host
+  # PATH with overlapping nix-shell + scoop entries doesn't push the
+  # combined env past ARG_MAX.
   var parts: seq[string] = @[]
+  var seenP = initHashSet[string]()
   for d in binDirs:
-    if d.len > 0:
+    if d.len > 0 and d notin seenP:
+      seenP.incl(d)
       parts.add(d)
   let existing = readPathValue(table)
   if existing.len > 0:
-    parts.add(existing)
+    for ent in existing.split(sep):
+      if ent.len > 0 and ent notin seenP:
+        seenP.incl(ent)
+        parts.add(ent)
   let combined = parts.join(sep)
   # Remove any case-variant duplicates so the resulting table only
   # has one PATH key. Without this step Windows' StartProcess sees
@@ -1714,14 +1729,23 @@ proc prependEnvDirs*(table: StringTableRef; varName: string;
   ## var, prepend with the platform path separator; otherwise inherit
   ## from the process env so a downstream tool that consults the var
   ## still sees the host's existing value as a fallback.
+  ##
+  ## M9.R.15q.3.3 — dedupe the final colon/semicolon-separated list so
+  ## an action env that inherits a CMAKE_PREFIX_PATH from the host
+  ## (set by nix-shell or a sibling resolver layer) doesn't end up
+  ## with duplicate entries from the newly prepended ``dirs``. ARG_MAX
+  ## hits at ~2 MB on Linux, and large recipes (plasma-framework, kwin)
+  ## blow past it without dedup.
   if table == nil or dirs.len == 0:
     return
   let sep =
     when defined(windows): ";"
     else: ":"
   var parts: seq[string] = @[]
+  var seen = initHashSet[string]()
   for d in dirs:
-    if d.len > 0:
+    if d.len > 0 and d notin seen:
+      seen.incl(d)
       parts.add(d)
   if parts.len == 0:
     return
@@ -1729,7 +1753,10 @@ proc prependEnvDirs*(table: StringTableRef; varName: string;
     if table.hasKey(varName): table[varName]
     else: getEnv(varName)
   if existing.len > 0:
-    parts.add(existing)
+    for ent in existing.split(sep):
+      if ent.len > 0 and ent notin seen:
+        seen.incl(ent)
+        parts.add(ent)
   table[varName] = parts.join(sep)
 
 proc prependEnvDirsToArgvEnv*(env: seq[string]; varName: string;
@@ -1738,6 +1765,12 @@ proc prependEnvDirsToArgvEnv*(env: seq[string]; varName: string;
   ## ``KEY=VALUE`` env list, dedupes any existing entries for
   ## ``varName``, and prepends ``dirs`` to the resulting value. Mirrors
   ## ``prependPathDirsToArgvEnv``'s last-write-wins semantics.
+  ##
+  ## M9.R.15q.3.3 — dedupe the colon/semicolon-separated list so an env
+  ## inheriting CMAKE_PREFIX_PATH from the host (set by nix-shell or a
+  ## sibling resolver layer) doesn't end up with duplicate entries on
+  ## top of the new ``dirs``. Same ARG_MAX rationale as the table-form
+  ## counterpart above.
   if dirs.len == 0:
     return env
   let sep =
@@ -1758,19 +1791,24 @@ proc prependEnvDirsToArgvEnv*(env: seq[string]; varName: string;
     else:
       result.add(entry)
   var parts: seq[string] = @[]
+  var seenDirs = initHashSet[string]()
   for d in dirs:
-    if d.len > 0:
+    if d.len > 0 and d notin seenDirs:
+      seenDirs.incl(d)
       parts.add(d)
   if parts.len == 0:
     if seen:
       result.add(varName & "=" & existing)
     return result
-  if seen and existing.len > 0:
-    parts.add(existing)
-  elif not seen:
-    let inherited = getEnv(varName)
-    if inherited.len > 0:
-      parts.add(inherited)
+  let trailing =
+    if seen: existing
+    elif not seen: getEnv(varName)
+    else: ""
+  if trailing.len > 0:
+    for ent in trailing.split(sep):
+      if ent.len > 0 and ent notin seenDirs:
+        seenDirs.incl(ent)
+        parts.add(ent)
   result.add(varName & "=" & parts.join(sep))
 
 proc kindForRef(action: BuildAction; index: int): DepKind {.inline.} =
@@ -1844,6 +1882,23 @@ proc collectResolvedAuxPaths(action: BuildAction;
   ## path channels.
   if action.toolIdentityRefs.len == 0 or resolver == nil:
     return
+  # M9.R.15q.3.3 — dedup at union time to keep the rendered env vars
+  # from exploding to E2BIG.  Without dedup, plasma-framework (25
+  # buildDeps) emits a CMAKE_PREFIX_PATH > 100 KB because each ref's
+  # transitive walk yields overlapping prefix roots and every duplicate
+  # appears on the action env. The execve(2) ``Argument list too long``
+  # failure in M9.R.15q.3 driving plasma-framework was the trigger —
+  # ARG_MAX on Linux is 2 MB combined argv + env, and the bulk of that
+  # was duplicate cmakePrefixList paths.
+  #
+  # Order semantics: keep the FIRST occurrence (in-order union), drop
+  # later duplicates. cmake / pkg-config / ld read these vars left-to-
+  # right so the first-found wins, identical to the previous behaviour
+  # for the dirs that aren't duplicated.
+  var seenPkgConfig: HashSet[string] = initHashSet[string]()
+  var seenCmakePrefix: HashSet[string] = initHashSet[string]()
+  var seenInclude: HashSet[string] = initHashSet[string]()
+  var seenLib: HashSet[string] = initHashSet[string]()
   for i, refName in action.toolIdentityRefs:
     let kind = kindForRef(action, i)
     let resolved = resolver(refName, kind)
@@ -1851,13 +1906,21 @@ proc collectResolvedAuxPaths(action: BuildAction;
       continue
     let r = resolved.get()
     for d in r.pkgConfigDirs:
-      if d.len > 0: result.pkgConfigDirs.add(d)
+      if d.len > 0 and d notin seenPkgConfig:
+        seenPkgConfig.incl(d)
+        result.pkgConfigDirs.add(d)
     for d in r.cmakePrefixDirs:
-      if d.len > 0: result.cmakePrefixDirs.add(d)
+      if d.len > 0 and d notin seenCmakePrefix:
+        seenCmakePrefix.incl(d)
+        result.cmakePrefixDirs.add(d)
     for d in r.includeDirs:
-      if d.len > 0: result.includeDirs.add(d)
+      if d.len > 0 and d notin seenInclude:
+        seenInclude.incl(d)
+        result.includeDirs.add(d)
     for d in r.libDirs:
-      if d.len > 0: result.libDirs.add(d)
+      if d.len > 0 and d notin seenLib:
+        seenLib.incl(d)
+        result.libDirs.add(d)
 
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
