@@ -193,6 +193,21 @@ package plasmaFrameworkSource:
     ## supply CMake configs; wayland-client comes via the wayland recipe.
     "plasma-wayland-protocols"
     "qt6-wayland >=6.6"
+    ## M9.R.15q.4.2 — libplasma's CMakeLists.txt:74 calls
+    ## ``find_package(X11)`` (optional but consumed when present);
+    ## src/plasma/private/theme_p.cpp + src/plasmaquick/*.cpp
+    ## unconditionally ``#include <KX11Extras>`` so plasma-framework
+    ## needs KX11Extras to be published (M9.R.15q.4.2 flips
+    ## KWINDOWSYSTEM_X11=ON on the sibling kwindowsystem recipe) AND
+    ## needs the X11 client libs on its own resolver path so the
+    ## resulting libplasma.so can link against them. The eleven X11
+    ## stubs land via the M9.R.15q.4.1 system_tools aggregator.
+    "libx11"
+    "libxcb"
+    "xcb-util-keysyms"
+    "libxext"
+    "libxfixes"
+    "libxrender"
 
   config:
     ## No prefix lifted from `cmakeFlags:`; flags inlined in the `build:` block.
