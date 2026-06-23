@@ -237,6 +237,11 @@ mount --move /sys  /mnt/live/rootfs/sys
 mount --move /dev  /mnt/live/rootfs/dev
 mount --move /run  /mnt/live/rootfs/run
 
+# Preserve the ISO mount so the installer can copy the kernel + initrd
+# off it for the bootloader install step (M9.R.24 demo).
+mkdir -p /mnt/live/rootfs/run/live/medium
+mount --move /mnt/live/medium /mnt/live/rootfs/run/live/medium 2>/dev/null || true
+
 # switch_root clears the old root and execs the new init. It also
 # auto-umounts the OLD initramfs tmpfs after the switch (including
 # our /run mount), but NOT before remounting the overlay's lower

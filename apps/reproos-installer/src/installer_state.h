@@ -129,6 +129,10 @@ public:
     // M9.R.24.2 -- pre-computed JSON form of the disko spec.
     // Lets the installer's apply path bypass `nim r` in the live ISO.
     Q_INVOKABLE QString renderDiskoJson(const QString &id = QString("INSTALL")) const;
+    // M9.R.24 -- minimal bootable-system bootstrap. Copies live kernel
+    // + initrd, installs GRUB, writes fstab. Falls back to this when
+    // the real `repro infra apply --target` isn't available.
+    void runMinimalBootstrap(const QString &target);
 
     // Toggle an activity on/off. Bound to each activity-card checkbox.
     Q_INVOKABLE void toggleActivity(const QString &name);
