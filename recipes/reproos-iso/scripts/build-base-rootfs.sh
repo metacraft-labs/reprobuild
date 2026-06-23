@@ -137,7 +137,7 @@ PKG_LIST=(
   # Bootloader tools the installer's Phase 5 (system apply) shells
   # out to via the disko/system stage. grub-efi + grub-pc cover both
   # UEFI and BIOS GRUB installs.
-  grub-efi-amd64-bin grub-pc-bin grub-common
+  grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
 )
 
 # Stable digest of the package list for the cache key. Sort first so
