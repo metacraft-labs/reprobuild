@@ -4245,6 +4245,40 @@ proc tryResolveFromSourceTool*(useDef: InterfaceToolUse;
             resolved = absolutePath(cmakeConfig)
             break configWalk
   if resolved.len == 0:
+    # DSL-port M9.R.28.4 — pkgconfig-only-package fast-path.
+    #
+    # Pure-header X11 protocol packages (xorgproto, xtrans, xorg-macros)
+    # ship NO compiled libraries and NO CMake configs — only ``.pc``
+    # files (e.g. ``xproto.pc``, ``xext.pc``, ``xtrans.pc``) under
+    # ``<prefix>/share/pkgconfig/`` plus headers under
+    # ``<prefix>/include/X11/``. The buildDep gets resolved via
+    # ``PKG_CONFIG_PATH`` at consumer compile time; the resolver just
+    # needs to confirm SOMETHING shipped so the dep is satisfied.
+    #
+    # Probe ``<install-mirror>/lib/pkgconfig/`` AND
+    # ``<install-mirror>/share/pkgconfig/`` for ANY ``.pc`` file.
+    # Presence of any .pc satisfies the "buildDep produced an artefact"
+    # check; PKG_CONFIG_PATH (built from the install-mirror via
+    # ``addUniquePath`` in toolProfileFor) takes care of consumption.
+    block pcWalk:
+      for prefixSubdir in [".repro/output/install/usr", "build/out/usr"]:
+        let prefixRoot = recipeDir / prefixSubdir
+        for pcSubdir in ["lib/pkgconfig", "lib64/pkgconfig",
+                         "share/pkgconfig"]:
+          let pcRoot = prefixRoot / pcSubdir
+          if not dirExists(extendedPath(pcRoot)):
+            continue
+          for kindPc, walked in walkDir(extendedPath(pcRoot)):
+            if kindPc != pcFile and kindPc != pcLinkToFile:
+              continue
+            var entry = walked
+            when defined(windows):
+              if entry.startsWith("\\\\?\\"):
+                entry = entry[4 .. ^1]
+            if entry.endsWith(".pc"):
+              resolved = absolutePath(entry)
+              break pcWalk
+  if resolved.len == 0:
     return FromSourceResolveResult(kind: rrNeedsBuild,
       recipeDir: recipeDir,
       expectedArtifact: baseCandidate,

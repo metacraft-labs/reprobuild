@@ -57,6 +57,7 @@ import ./libudev
 import ./libgpg_error
 import ./libacl
 import ./libcrypt
+import ./libxcrypt
 import ./libltdl
 import ./libseccomp
 import ./mtdev
