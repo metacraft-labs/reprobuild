@@ -142,10 +142,17 @@ package polkitSource:
         "session_tracking=ConsoleKit",
         # M9.R.27.2 — polkit's distro-autodetection probes /etc/<distro>-
         # release files; inside the from-source nix-shell build none
-        # match and meson aborts. Pin os_type=Debian (the closest match
-        # for the live ISO's apt-installed base userspace) so the
-        # PAM configuration emits the Debian-shape default policy.
-        "os_type=Debian",
+        # match. The allowed os_type values are
+        # redhat/suse/gentoo/pardus/solaris/netbsd/lfs/"" — none
+        # exactly matches the Debian-trixie base userspace the live
+        # ISO ships. Pin os_type="" (empty string) which is the
+        # generic-fallback explicitly listed as a valid option.
+        # Without distro-specific PAM defaults polkit-agent-helper-1
+        # uses the upstream-default ``polkit-1`` PAM service stanza
+        # which the live ISO's /etc/pam.d/polkit-1 (shipped by the
+        # apt-installed polkitd as a fallback or hand-installed by
+        # the installer's Phase 3) wires correctly.
+        "os_type=",
         # PAM is the authentication framework.
         "authfw=pam",
         # Drop optional surfaces we don't need at runtime.
