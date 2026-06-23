@@ -2998,6 +2998,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/duktape/test_duktape_source.nim",
+    binary: "build/test-bin/test_duktape_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/eudev/test_eudev_source.nim",
     binary: "build/test-bin/test_eudev_source",
     defines: @[],
@@ -3718,6 +3726,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/polkit/test_polkit_source.nim",
+    binary: "build/test-bin/test_polkit_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/plasma-framework/test_plasma_framework_source.nim",
     binary: "build/test-bin/test_plasma_framework_source",
     defines: @[],
@@ -3896,6 +3912,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/wlroots/test_wlroots_source.nim",
     binary: "build/test-bin/test_wlroots_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/xwayland/test_xwayland_source.nim",
+    binary: "build/test-bin/test_xwayland_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
