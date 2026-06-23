@@ -303,6 +303,157 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
       result.adapterPreference[osKey] = chain
 
 # ---------------------------------------------------------------------
+# M9.R.20: SystemIntent encode / decode.
+# ---------------------------------------------------------------------
+
+proc encodeStrList(items: seq[string]): string =
+  result = "["
+  for i, it in items:
+    if i > 0: result.add ","
+    result.add encodeStr(it)
+  result.add "]"
+
+proc encodeSystemConfigEntry(e: SystemConfigEntry): string =
+  result = "{\"key\":" & encodeStr(e.key) &
+    ",\"typeRepr\":" & encodeStr(e.typeRepr) &
+    ",\"defaultExpr\":" & encodeStr(e.defaultExpr) &
+    ",\"docComment\":" & encodeStr(e.docComment) &
+    ",\"isVariant\":" & (if e.isVariant: "true" else: "false") & "}"
+
+proc encodeSystemUserEntry(u: SystemUserEntry): string =
+  result = "{\"name\":" & encodeStr(u.name) &
+    ",\"fullName\":" & encodeStr(u.fullName) &
+    ",\"groups\":" & encodeStrList(u.groups) &
+    ",\"homeIntentImport\":" & encodeStr(u.homeIntentImport) & "}"
+
+proc encodeSystemServices(s: SystemServiceList): string =
+  result = "{\"enable\":" & encodeStrList(s.enableList) &
+    ",\"disable\":" & encodeStrList(s.disableList) & "}"
+
+proc encodeSystemBootloader(b: SystemBootloaderSpec): string =
+  result = "{\"kind\":" & encodeStr(b.kind) &
+    ",\"device\":" & encodeStr(b.device) & "}"
+
+proc encodeHardwareFs(f: SystemHardwareFs): string =
+  result = "{\"mountPoint\":" & encodeStr(f.mountPoint) &
+    ",\"device\":" & encodeStr(f.device) &
+    ",\"fsType\":" & encodeStr(f.fsType) &
+    ",\"options\":" & encodeStrList(f.options) & "}"
+
+proc emitSystemIntentJson*(p: SystemIntent): string =
+  ## Serialise a SystemIntent to deterministic JSON. Field order is
+  ## fixed; list elements preserve insertion order. Used by golden-file
+  ## tests + by the installer-side round-trip verification.
+  result = "{"
+  result.add "\"hostname\":" & encodeStr(p.hostname)
+  result.add ",\"imports\":" & encodeStrList(p.imports)
+  result.add ",\"configs\":["
+  for i, c in p.configs:
+    if i > 0: result.add ","
+    result.add encodeSystemConfigEntry(c)
+  result.add "]"
+  result.add ",\"users\":["
+  for i, u in p.users:
+    if i > 0: result.add ","
+    result.add encodeSystemUserEntry(u)
+  result.add "]"
+  result.add ",\"services\":" & encodeSystemServices(p.services)
+  result.add ",\"extraPackages\":" & encodeStrList(p.extraPackages)
+  result.add ",\"bootloader\":" & encodeSystemBootloader(p.bootloader)
+  result.add ",\"validateExprs\":" & encodeStrList(p.validateExprs)
+  result.add "}"
+
+proc emitSystemHardwareJson*(h: SystemHardwareSpec): string =
+  result = "{"
+  result.add "\"id\":" & encodeStr(h.id)
+  result.add ",\"cpuArch\":" & encodeStr(h.cpuArch)
+  result.add ",\"cpuMicrocode\":" & encodeStr(h.cpuMicrocode)
+  result.add ",\"kernelModules\":" & encodeStrList(h.kernelModules)
+  result.add ",\"loaderDevice\":" & encodeStr(h.loaderDevice)
+  result.add ",\"filesystems\":["
+  for i, f in h.filesystems:
+    if i > 0: result.add ","
+    result.add encodeHardwareFs(f)
+  result.add "]"
+  result.add ",\"graphicsDrivers\":" & encodeStrList(h.graphicsDrivers)
+  result.add ",\"audioCards\":" & encodeStrList(h.audioCards)
+  result.add "}"
+
+proc emitSystemActivityJson*(a: SystemActivitySpec): string =
+  result = "{"
+  result.add "\"name\":" & encodeStr(a.name)
+  result.add ",\"displayName\":" & encodeStr(a.displayName)
+  result.add ",\"description\":" & encodeStr(a.description)
+  result.add ",\"icon\":" & encodeStr(a.icon)
+  result.add ",\"systemPackages\":" & encodeStrList(a.systemPackages)
+  result.add ",\"systemServices\":" & encodeStrList(a.systemServices)
+  result.add ",\"groups\":" & encodeStrList(a.groups)
+  result.add ",\"homeContributions\":" & encodeStrList(a.homeContributions)
+  result.add "}"
+
+# Decode side — used by tests + future tooling.
+
+proc parseStrList(n: JsonNode): seq[string] =
+  result = @[]
+  for it in n:
+    result.add it.getStr()
+
+proc parseSystemIntentJson*(s: string): SystemIntent =
+  let root = parseJson(s)
+  result.hostname = root["hostname"].getStr()
+  result.imports = parseStrList(root["imports"])
+  for c in root["configs"]:
+    result.configs.add SystemConfigEntry(
+      key: c["key"].getStr(),
+      typeRepr: c["typeRepr"].getStr(),
+      defaultExpr: c["defaultExpr"].getStr(),
+      docComment: c["docComment"].getStr(),
+      isVariant: c["isVariant"].getBool())
+  for u in root["users"]:
+    result.users.add SystemUserEntry(
+      name: u["name"].getStr(),
+      fullName: u["fullName"].getStr(),
+      groups: parseStrList(u["groups"]),
+      homeIntentImport: u["homeIntentImport"].getStr())
+  let sNode = root["services"]
+  result.services = SystemServiceList(
+    enableList: parseStrList(sNode["enable"]),
+    disableList: parseStrList(sNode["disable"]))
+  result.extraPackages = parseStrList(root["extraPackages"])
+  let bNode = root["bootloader"]
+  result.bootloader = SystemBootloaderSpec(
+    kind: bNode["kind"].getStr(),
+    device: bNode["device"].getStr())
+  result.validateExprs = parseStrList(root["validateExprs"])
+
+proc parseSystemHardwareJson*(s: string): SystemHardwareSpec =
+  let root = parseJson(s)
+  result.id = root["id"].getStr()
+  result.cpuArch = root["cpuArch"].getStr()
+  result.cpuMicrocode = root["cpuMicrocode"].getStr()
+  result.kernelModules = parseStrList(root["kernelModules"])
+  result.loaderDevice = root["loaderDevice"].getStr()
+  for f in root["filesystems"]:
+    result.filesystems.add SystemHardwareFs(
+      mountPoint: f["mountPoint"].getStr(),
+      device: f["device"].getStr(),
+      fsType: f["fsType"].getStr(),
+      options: parseStrList(f["options"]))
+  result.graphicsDrivers = parseStrList(root["graphicsDrivers"])
+  result.audioCards = parseStrList(root["audioCards"])
+
+proc parseSystemActivityJson*(s: string): SystemActivitySpec =
+  let root = parseJson(s)
+  result.name = root["name"].getStr()
+  result.displayName = root["displayName"].getStr()
+  result.description = root["description"].getStr()
+  result.icon = root["icon"].getStr()
+  result.systemPackages = parseStrList(root["systemPackages"])
+  result.systemServices = parseStrList(root["systemServices"])
+  result.groups = parseStrList(root["groups"])
+  result.homeContributions = parseStrList(root["homeContributions"])
+
+# ---------------------------------------------------------------------
 # Entry-point helper.
 # ---------------------------------------------------------------------
 
@@ -312,4 +463,11 @@ template emitProfileIntent*(p: ProfileIntent): typed =
   ## this template so the user does not need a `when isMainModule:`
   ## block.
   echo emitProfileIntentJson(p)
+  quit(0)
+
+template emitSystemIntent*(p: SystemIntent): typed =
+  ## Convenience: emit the JSON form to stdout and quit. The
+  ## ``system "<hostname>":`` macro autogenerates a trailing
+  ## invocation when called as a main module.
+  echo emitSystemIntentJson(p)
   quit(0)

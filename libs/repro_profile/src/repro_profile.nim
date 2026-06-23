@@ -14,6 +14,7 @@ import repro_profile/strings
 import repro_profile/emit
 import repro_profile/resources
 import repro_profile/macros
+import repro_profile/macros_system
 
 export types
 export predicates
@@ -21,3 +22,4 @@ export strings
 export emit
 export resources
 export macros
+export macros_system

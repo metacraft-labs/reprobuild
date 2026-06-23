@@ -107,6 +107,93 @@ type
     expr*: string         ## canonical-stringified predicate; apply-
                           ## time parser handles evaluation
 
+  # -------------------------------------------------------------------
+  # M9.R.20: SystemIntent — user-editable ``system "<hostname>":`` form.
+  # -------------------------------------------------------------------
+  #
+  # ReproOS-Configuration-Architecture §2.2 pins the four recognised
+  # top-level sections (``imports`` / ``config`` / ``users`` /
+  # ``validate``) plus the activity helpers in §4.2 (``systemPackages`` /
+  # ``systemServices`` / ``groups``). The SystemIntent record captures
+  # the macro-expanded form parallel to ``ProfileIntent`` so the same
+  # JSON-friendly encode/decode + golden-file machinery applies. See
+  # ``./macros_system.nim`` for the macro that builds it.
+  #
+  # The macro stays text-only at v0.1 — full Configurable + variant
+  # threading (Stage 2/3 of the compile-then-apply pipeline) is
+  # delegated to the M83 ``repro_profile_compile`` runtime + the
+  # existing ``package``-macro registries; the SystemIntent record is
+  # the intermediate form the installer + the `system.nim`-port can
+  # round-trip through.
+
+  SystemConfigEntry* = object
+    ## A single ``config:`` entry — ``key: type = default``. For v0.1
+    ## we capture the field name + the default literal verbatim as a
+    ## string; full typed-Configurable wiring lives in M9.R.21+.
+    key*: string
+    typeRepr*: string        ## e.g. ``"string"``, ``"int"``, ``"DesktopKind"``
+    defaultExpr*: string     ## verbatim source representation
+    docComment*: string      ## attached doc-comment lines (`## ...`)
+    isVariant*: bool         ## ``@variant`` directive present
+
+  SystemUserEntry* = object
+    ## A single ``users:`` entry — ``"<name>": { groups: ..., homeIntent: import "..." }``.
+    name*: string
+    fullName*: string        ## optional; empty when not given
+    groups*: seq[string]
+    homeIntentImport*: string  ## verbatim import path; empty when absent
+
+  SystemServiceList* = object
+    ## ``services:`` block — ``enable: @[...]`` + ``disable: @[...]``.
+    enableList*: seq[string]
+    disableList*: seq[string]
+
+  SystemBootloaderSpec* = object
+    ## ``bootloader:`` sub-block — ``type: <ident>`` + ``device: "..."``.
+    kind*: string            ## e.g. ``"grub"``, ``"systemd-boot"``
+    device*: string
+
+  SystemHardwareFs* = object
+    ## ``filesystems:`` entry inside ``hardware "<id>":``.
+    mountPoint*: string
+    device*: string
+    fsType*: string
+    options*: seq[string]
+
+  SystemHardwareSpec* = object
+    ## ``hardware "<id>":`` macro form. Captures the per-host probe
+    ## output verbatim so v0.1 of the macro round-trips through JSON.
+    id*: string
+    cpuArch*: string
+    cpuMicrocode*: string
+    kernelModules*: seq[string]
+    loaderDevice*: string
+    filesystems*: seq[SystemHardwareFs]
+    graphicsDrivers*: seq[string]
+    audioCards*: seq[string]
+
+  SystemActivitySpec* = object
+    ## ``activity "<name>":`` macro form at the system scope.
+    name*: string
+    displayName*: string
+    description*: string
+    icon*: string
+    systemPackages*: seq[string]
+    systemServices*: seq[string]
+    groups*: seq[string]
+    homeContributions*: seq[string]
+      ## verbatim activity-helper call exprs (e.g. ``"devTools()"``).
+
+  SystemIntent* = object
+    hostname*: string
+    imports*: seq[string]
+    configs*: seq[SystemConfigEntry]
+    users*: seq[SystemUserEntry]
+    services*: SystemServiceList
+    extraPackages*: seq[string]      ## ``packages: extra: @[...]``
+    bootloader*: SystemBootloaderSpec
+    validateExprs*: seq[string]      ## verbatim ``validate:`` body expressions
+
 # Convenience constructors -- intentionally simple so macros can use
 # them at compile time without needing to know about variant tagging
 # specifics.
