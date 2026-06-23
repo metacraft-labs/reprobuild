@@ -405,6 +405,20 @@ cp "$REPRO_CLI_BIN" "$STAGE_DIR/usr/bin/repro"
 chmod +x "$STAGE_DIR/usr/bin/repro"
 echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/repro"))"
 
+# M9.R.24.1g.2 -- the repro CLI uses Nim's dynlib runtime which
+# dlopens libraries by their *linker* name (no SONAME version) by
+# default: dlopen("libsqlite3.so"). Debian's libsqlite3-0 ships only
+# the SONAME form (libsqlite3.so.0); the unversioned linker name is
+# in libsqlite3-dev. Symlink the SONAME -> linker name so the
+# unversioned dlopen succeeds without dragging in the -dev package.
+sqlite_so="$(find "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
+              -maxdepth 4 -name 'libsqlite3.so.0' -type f -o \
+              -name 'libsqlite3.so.0' -type l 2>/dev/null | head -1)"
+if [ -n "$sqlite_so" ]; then
+  ln -sf "$(basename "$sqlite_so")" "$(dirname "$sqlite_so")/libsqlite3.so"
+  echo "[stage-de-rootfs] symlinked libsqlite3.so -> $(basename "$sqlite_so")"
+fi
+
 # Track which recipes contributed.
 contributed=()
 missing=()
