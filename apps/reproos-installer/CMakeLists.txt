@@ -57,6 +57,7 @@ qt_add_resources(reproos-installer "qml-resources"
         qml/screens/Locale.qml
         qml/screens/Keyboard.qml
         qml/screens/Users.qml
+        qml/screens/Disk.qml
         qml/screens/DeSelect.qml
         qml/screens/Activities.qml
         qml/screens/Summary.qml

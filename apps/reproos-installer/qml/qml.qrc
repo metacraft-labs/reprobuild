@@ -5,6 +5,7 @@
         <file>qml/screens/Locale.qml</file>
         <file>qml/screens/Keyboard.qml</file>
         <file>qml/screens/Users.qml</file>
+        <file>qml/screens/Disk.qml</file>
         <file>qml/screens/DeSelect.qml</file>
         <file>qml/screens/Activities.qml</file>
         <file>qml/screens/Summary.qml</file>

@@ -36,11 +36,16 @@ ApplicationWindow {
     // Screen names in display order. Each entry maps to a file under
     // qml/screens/. The StackView is initialised with the first; Back /
     // Next push or pop the rest as the user navigates.
+    // M9.R.23.1 -- ten-screen flow (was nine). Disk inserts at position 5
+    // between Users and DeSelect: PRD Sec 3.1 lists target-disk + layout
+    // preset as a top-level wizard step, but M9.R.18.4 v0.1 stubbed it
+    // out. M9.R.23 wires the screen + the underlying install() driver.
     readonly property var screens: [
         { id: "welcome",     file: "Welcome.qml",     title: qsTr("Welcome") },
         { id: "locale",      file: "Locale.qml",      title: qsTr("Language and Timezone") },
         { id: "keyboard",    file: "Keyboard.qml",    title: qsTr("Keyboard Layout") },
         { id: "users",       file: "Users.qml",       title: qsTr("User Account") },
+        { id: "disk",        file: "Disk.qml",        title: qsTr("Target Disk") },
         { id: "deSelect",    file: "DeSelect.qml",    title: qsTr("Desktop Environment") },
         { id: "activities",  file: "Activities.qml",  title: qsTr("Activities") },
         { id: "summary",     file: "Summary.qml",     title: qsTr("Review") },
