@@ -49,6 +49,7 @@ import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/infra
+import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/mode1_loader
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
@@ -85,6 +86,7 @@ export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
+export cli_hardware.runHardwareCommand
 
 # ---------------------------------------------------------------------------
 # Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
@@ -195,6 +197,8 @@ proc renderUsage*(programName: string): string =
       " infra {plan | apply} ...\n       " &
           programName &
       " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
+          programName &
+      " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
       " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n\n" &
       "build progress: default=bar-line; aliases: " &
@@ -23720,5 +23724,17 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runSystemCommand(systemArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "hardware":
+    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
+    # from the live system. The dispatcher lives in
+    # `repro_cli_support/hardware.nim`; see
+    # `reprobuild-specs/ReproOS-Configuration-Architecture.md` §3 for
+    # the surface contract.
+    let hardwareArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runHardwareCommand(hardwareArgs)
   stderr.writeLine(renderUsage(programName))
   2
