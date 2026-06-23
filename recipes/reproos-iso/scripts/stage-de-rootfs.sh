@@ -431,6 +431,27 @@ if [ -n "$clingo_src" ]; then
   ln -sf "$(basename "$clingo_src")" "$STAGE_DIR/usr/lib/libclingo.so.4"
   ln -sf "libclingo.so.4" "$STAGE_DIR/usr/lib/libclingo.so"
   echo "[stage-de-rootfs] bundled $clingo_src + linker-name symlink"
+
+  # M9.R.24.1g.10 -- the repro CLI's clingo dynlib path is baked at
+  # compile-time as the nix-store ABSOLUTE path (e.g.
+  # /nix/store/07zxk485h58ab97j335174ana4xp13kh-clingo-5.8.0/lib/libclingo.so).
+  # Nim's dlopen tries that path FIRST and never falls back to the
+  # bare name (`libclingo.so`) if the file exists at the absolute
+  # path's parent dir... actually it doesn't fall back at all because
+  # the ELF's embedded path stops the search. Mirror the nix-store
+  # layout inside the staged tree so the absolute path resolves.
+  # Two candidate nix-store paths in eli-wsl (the binary was built
+  # under one specific hash); mirror BOTH to be safe.
+  for nsdir in /nix/store/07zxk485h58ab97j335174ana4xp13kh-clingo-5.8.0 \
+               /nix/store/kgibywhn2k14lr2mwwx2sp08p57pdizp-clingo-5.8.0; do
+    mkdir -p "$STAGE_DIR$nsdir/lib"
+    ln -sf "/usr/lib/$(basename "$clingo_src")" \
+      "$STAGE_DIR$nsdir/lib/$(basename "$clingo_src")"
+    ln -sf "$(basename "$clingo_src")" \
+      "$STAGE_DIR$nsdir/lib/libclingo.so.4"
+    ln -sf "libclingo.so.4" "$STAGE_DIR$nsdir/lib/libclingo.so"
+  done
+  echo "[stage-de-rootfs] mirrored libclingo at nix-store absolute paths"
 fi
 
 # Track which recipes contributed.
