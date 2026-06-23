@@ -1,223 +1,169 @@
-## Source-from-tarball qt6-quickcontrols2 recipe -- M9.R.19.1 ReproOS
-## Installer blocker. Provides ``libQt6QuickControls2.so`` to the
-## reproos-installer Qt6/QML wizard.
+## qt6-quickcontrols2 SHIM recipe -- M9.R.19.1 ReproOS Installer
+## blocker.  Re-exports the QuickControls2 artifacts that the sibling
+## qt6-declarative recipe already builds, via a deterministic copy.
 ##
-## ## Why this recipe shares the qtdeclarative tarball
+## ## Why this is a shim, not a real build
 ##
-## In the Qt 5.x release line QtQuickControls2 was a standalone upstream
-## module shipping its own ``qtquickcontrols2-everywhere-src-<ver>.tar.xz``
-## tarball.  Starting with Qt 6.2 (per upstream Qt 6 module restructure)
-## the QtQuickControls2 source tree was merged INTO qtdeclarative -- the
-## ``qtquickcontrols2-everywhere-src-6.x.x.tar.xz`` submodule URL returns
-## a hard HTTP 404 from download.qt.io's official_releases tree (verified
-## 2026-06-23), and qtdeclarative's tarball now contains
-## ``src/quickcontrols/`` (the modern path) plus
-## ``dist/archived/qtquickcontrols2/`` (historical changelogs).
+## Two upstream facts collide:
 ##
-## The c_cpp_cmake convention requires a separately-named recipe per
-## buildDep selector so the engine's tool-resolution layer can map
-## ``"qt6-quickcontrols2 >=6.6"`` (declared on the reproos-installer
-## recipe) onto a sibling-recipe build artifact.  We therefore configure
-## this recipe to fetch the same qtdeclarative tarball as the sibling
-## qt6-declarative recipe and declare the ``libQt6QuickControls2``
-## artifact -- the cmake build naturally produces it from
-## ``src/quickcontrols/`` while building qtdeclarative.
+##   1. Qt 6 merged QuickControls2 INTO qtdeclarative at Qt 6.2; the
+##      standalone qtquickcontrols2-everywhere-src-<ver>.tar.xz tarball
+##      that Qt 5 shipped no longer exists upstream
+##      (``https://download.qt.io/.../qtquickcontrols2-everywhere-src-
+##      6.8.1.tar.xz`` returns HTTP 404, verified 2026-06-23).
+##   2. The reprobuild engine's from-source tool resolver requires a
+##      sibling recipe at ``recipes/packages/source/<name>/`` per
+##      ``uses:`` selector, so the reproos-installer recipe's
+##      ``qt6-quickcontrols2 >=6.6`` buildDep must resolve to SOMETHING
+##      at this path or the engine hard-fails with
+##      "tool-resolution failed: ... but no sibling recipe at ...".
 ##
-## The duplicated build is the cost of honest provenance:
-## qt6-quickcontrols2 IS qtdeclarative-as-built-from-the-controls-subset,
-## and the recipe declares that explicitly via the shared tarball + sha.
-## The action-cache makes the second invocation a cache hit on the
-## extract step (same content-addressed tarball) so the marginal cost is
-## the configure + the controls-subset link, not a full second qtquick
-## compile.
+## An earlier draft of this recipe tried to build the whole
+## qtdeclarative tarball from scratch and declare libQt6QuickControls2
+## as its artifact.  That approach DETERMINISTICALLY wedged in
+## CMake's ``cmake_autogen`` worker for the
+## ``qtquickcontrols2nativestyleplugin_autogen`` target -- a known
+## upstream CMake + Qt6 race where the autogen futex-waits after
+## producing 51 of 60 moc files for that single target, never reaping
+## its moc subprocesses.  The wedge was reproduced across two
+## independent eli-wsl runs (M9.R.19.1, M9.R.19.1.2) and is independent
+## of the cache state, build parallelism, or env var hygiene.
 ##
-## ## sha256 strategy
-##
-## We reference the sibling qt6-declarative recipe's vendored tarball via
-## the relative ``file:../qt6-declarative/vendor/...`` URL form (supported
-## by cmake_package since M9.R.15q.5.4).  The 36-MiB tarball already
-## lives in tree under qt6-declarative; no duplicate vendor tarball is
-## committed here.
-##
-## sha256 = 95d15d5c1b6adcedb1df6485219ad13b8dc1bb5168b5151f2f1f7246a4c039fc
-##  (matches the sibling qt6-declarative recipe; the same upstream
-##  qtdeclarative-everywhere-src-6.8.1.tar.xz at 36,463,572 bytes
-##  downloaded once from download.qt.io and cross-checked against the
-##  upstream HTTP Digest: SHA-256 header).
-##
-## ## Version choice -- 6.8.1 (matches qt6-base / qt6-tools / qt6-declarative / qt6-svg / qt6-positioning)
-##
-## download.qt.io publishes Qt6 modular submodule sources at
-## ``https://download.qt.io/official_releases/qt/<major.minor>/<version>/submodules/``
-## and 6.8.1 is the current stable in the 6.8.x line as of mid-2026.
-## qt6-base + qt6-tools + qt6-declarative + qt6-svg + qt6-positioning
-## sibling recipes pin the same 6.8.1 tag; the Qt module set is built as
-## a coordinated release so cross-module ABI matches tag-for-tag.
+## The honest fix is to stop building qtdeclarative twice.  This recipe
+## stages an action that copies the relevant CMake configs + the QML
+## plugins + the libraries OUT of the sibling qt6-declarative recipe's
+## install-mirror INTO this recipe's install-mirror.  Per the
+## from-source tool resolver's M9.R.15p.1.6 "share-only-package
+## fast-path" (in ``libs/repro_tool_profiles/src/repro_tool_profiles.nim``),
+## the resolver succeeds as soon as
+## ``<recipe>/.repro/output/install/usr/lib/cmake/Qt6QuickControls2/
+##  Qt6QuickControls2Config.cmake`` exists; the share-only fast-path
+## was designed exactly for this shape (KDE's
+## ``extra-cmake-modules`` is the canonical share-only-package
+## consumer of the same path).
 ##
 ## ## Build shape
 ##
-## The c_cpp_cmake convention (M9.K) reads both the M9.H ``fetch:`` block
-## and the inlined ``cmake_package`` flags and lowers them into:
+## A single ``shell`` action:
 ##
-##   1. a fetch BuildAction whose argv carries the URL + sha256 + extract
-##      dest (content-addressed so a re-run hits the cache).
-##   2. a ``cmake`` configure BuildAction that depends on the fetch action
-##      and passes every flag in the inlined ``opts`` to
-##      ``cmake -S <src> -B <build>``, in declared order.
-##   3. a ``ninja`` (or ``cmake --build``) compile BuildAction.
-##   4. install/output collection actions for the libraries.
+##   1. Reads ``recipes/packages/source/qt6-declarative/.repro/output/
+##      install/usr/`` as input (extraInputs).
+##   2. Copies the QuickControls2 artifacts -- ``libQt6QuickControls2.
+##      so*``, ``libQt6QuickTemplates2.so*``, ``libQt6QuickControls2*.
+##      so*`` (Basic / Material / Universal / Fusion / Imagine /
+##      FluentWinUI3 style impls), the ``lib/cmake/Qt6QuickControls2/``
+##      + ``lib/cmake/Qt6QuickTemplates2/`` + the *StyleImpl cmake
+##      configs, the ``qml/QtQuick/Controls/`` QML plugins, and the
+##      ``include/QtQuickControls2*/`` + ``include/QtQuickTemplates2*/``
+##      headers -- into this recipe's ``out/usr/`` tree.
+##   3. Stages the resulting tree as the install-mirror.
 ##
-## ## Library artifacts
-##
-## qt6-quickcontrols2's CMake build (against the shared qtdeclarative
-## tarball) emits the desktop-style Quick controls library:
-##
-##   * ``libQt6QuickControls2.so``  -- the desktop-style Quick controls
-##     library the reproos-installer wizard's QML scenes consume
-##     (Button / ComboBox / TextField / ScrollView / TextArea /
-##     ProgressBar / CheckBox per PRD Sec 7.1).
-##
-## ## Configurables
-##
-## v1 ships NO configurables -- the CMake options are hardcoded to the
-## modern-desktop baseline:
-##
-##   * ``BUILD_TESTING=OFF``        -- skip the upstream test suite to
-##                                     keep the build hermetic + fast.
-##   * ``CMAKE_BUILD_TYPE=Release`` -- release-mode optimisation;
-##                                     matches sibling qt6-base /
-##                                     qt6-tools / qt6-declarative /
-##                                     qt6-svg / qt6-positioning recipes.
-##   * ``QT_BUILD_TESTS=OFF``       -- Qt-side test-build disable.
-##   * ``QT_BUILD_EXAMPLES=OFF``    -- skip the upstream examples build.
-##   * ``QT_GENERATE_SBOM=OFF``     -- SBOM gen hard-codes the canonical
-##                                     install prefix and fails when our
-##                                     cmake_package install passes a
-##                                     different ``--prefix``.  Same trip
-##                                     as qt6-base / qt6-tools /
-##                                     qt6-declarative / qt6-svg /
-##                                     qt6-positioning.
-##   * ``FEATURE_clang=OFF``        -- disable qdoc/Clang dependency
-##                                     (same trip as qt6-declarative).
-##   * ``CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE``
-##                                  -- belt-and-braces FEATURE_clang
-##                                     disable.
-##   * ``CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE``
-##                                  -- belt-and-braces FEATURE_clang
-##                                     disable.
+## When qt6-declarative isn't yet built, the action hard-fails with a
+## structured diagnostic naming the sibling recipe -- the engine's
+## ``uses`` / ``buildDeps`` topological-order pre-resolves qt6-
+## declarative before this recipe.
+
+import std/[strutils]
 
 import repro_project_dsl
-import repro_dsl_stdlib/constructors
-import repro_dsl_stdlib/types/package_result
+import repro_dsl_stdlib/packages/sh
 
 # ---------------------------------------------------------------------------
 # Package declaration
 # ---------------------------------------------------------------------------
 
 package qt6QuickControls2Source:
-  ## From-source qt6-quickcontrols2 -- M9.R.19.1 ReproOS Installer
-  ## blocker.  Sibling to qt6-base (qt6BaseSource), qt6-tools
-  ## (qt6ToolsSource), qt6-declarative (qt6DeclarativeSource), qt6-svg
-  ## (qt6SvgSource), qt6-positioning (qt6PositioningSource); shares the
-  ## same 6.8.1 pin.  Builds against the shared qtdeclarative tarball
-  ## because QtQuickControls2 was merged INTO qtdeclarative in Qt 6.2
-  ## (see header docstring for the upstream merge rationale).
+  ## Shim qt6-quickcontrols2 -- M9.R.19.1 ReproOS Installer blocker.
+  ## Re-exports qt6-declarative's QuickControls2 artifacts via a
+  ## deterministic copy so the from-source tool resolver matches the
+  ## reproos-installer recipe's ``qt6-quickcontrols2 >=6.6`` buildDep
+  ## without re-building qtdeclarative (avoiding the cmake_autogen
+  ## wedge documented in the header).
+
+  defaultToolProvisioning "path"
 
   versions:
     "6.8.1":
       sourceRevision = "v6.8.1"
-      sourceUrl = "https://download.qt.io/official_releases/qt/6.8/6.8.1/submodules/qtdeclarative-everywhere-src-6.8.1.tar.xz"
+      sourceUrl = "in-tree-shim:from-qt6-declarative"
       sourceRepository = "https://code.qt.io/qt/qtdeclarative.git"
 
-  fetch:
-    ## Sibling-vendored tarball.  ``file:../qt6-declarative/vendor/...``
-    ## resolves to the sibling qt6-declarative recipe's vendored
-    ## tarball; no duplicate 36-MiB blob is committed here.  The
-    ## ``file:../`` form is supported by cmake_package's URL resolver
-    ## per M9.R.15q.5.4.
-    url: "file:../qt6-declarative/vendor/qtdeclarative-everywhere-src-6.8.1.tar.xz"
-    sha256: "95d15d5c1b6adcedb1df6485219ad13b8dc1bb5168b5151f2f1f7246a4c039fc"
-    extractStrip: 1
-
-  nativeBuildDeps:
-    "cmake >=3.21"
-    "ninja >=1.10"
-    "gcc >=11"
-    "perl >=5.32"
-    "pkg-config"
-    "python3 >=3.8"
-    "qt6-tools >=6.8"
-
-  buildDeps:
-    ## qt6-base supplies QtCore + QtGui + QtNetwork the controls library
-    ## links against.
-    "qt6-base >=6.8"
-    ## qt6-shadertools supplies the ``qsb`` shader-bundle tool the
-    ## qtdeclarative configure probes for at build time.  Without qsb
-    ## the configure SKIPS libQt6Quick.so + libQt6QuickControls2.so
-    ## artifacts entirely -- same trip as qt6-declarative M9.R.15n.2.
-    "qt6-shadertools >=6.8"
-
-  config:
-    discard
-
-  library libQt6QuickControls2:
-    ## ``libQt6QuickControls2.so`` -- the desktop-style Quick controls
-    ## library the reproos-installer wizard's QML scenes consume
-    ## (Button / ComboBox / TextField / ScrollView / TextArea /
-    ## ProgressBar / CheckBox per ReproOS-Installer-PRD.md Sec 7.1).
-    ## v1 records the artifact only.
-    discard
+  uses:
+    "sh"
 
   build:
-    setCurrentOwningPackageOverride("qt6QuickControls2Source")
-    try:
-      let opts = @[
-        "BUILD_TESTING=OFF",
-        "CMAKE_BUILD_TYPE=Release",
-        "QT_BUILD_TESTS=OFF",
-        "QT_BUILD_EXAMPLES=OFF",
-        # Qt6's SBOM module hard-codes the canonical install prefix
-        # (matches qt6-base M9.R.15f.3 + qt6-tools M9.R.15h.1.4 +
-        # qt6-declarative M9.R.15j.1 + qt6-svg M9.R.15k.1 +
-        # qt6-positioning M9.R.15q.9.1).  Disable SBOM gen for v1.
-        "QT_GENERATE_SBOM=OFF",
-        # Disable FEATURE_clang (qdoc dependency) -- same trip as
-        # qt6-declarative M9.R.15j.1 on cross-mounted WSL builds.
-        "FEATURE_clang=OFF",
-        "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
-        "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
-      ]
-      # M9.R.19.1 -- when building qtdeclarative as the source for
-      # qt6-quickcontrols2, CMake's implicit-include-dir scan picks
-      # up sibling recipes' include dirs (qt6-base, qt6-tools, glib2,
-      # ...) from the nix-shell's NIX_CFLAGS_COMPILE env var that
-      # the cmake compile-test reads. CMake then DEDUPLICATES the
-      # explicit -I.../QtCore + -isystem .../usr/include flags out
-      # of the per-target compile commands because it thinks gcc
-      # already has them. The actual build invocation drops
-      # NIX_CFLAGS_COMPILE (it's a configure-time env), so the
-      # compiler invocation is missing those paths -- breaking
-      # qrc_*_init.cpp compiles that #include <QtCore/qtsymbolmacros.h>.
-      #
-      # Clear NIX_CFLAGS_COMPILE for the cmake invocation so the
-      # implicit-include-dir scan doesn't pick up sibling Qt installs.
-      # qt6-declarative's recipe was lucky -- it ran in a nix-shell env
-      # that happened not to surface the sibling Qt include dirs in
-      # the C/CXX implicit scan, but the env nondeterminism shouldn't
-      # be relied upon.
-      let env = @[
-        ("NIX_CFLAGS_COMPILE", ""),
-        ("NIX_CFLAGS_COMPILE_FOR_TARGET", ""),
-      ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts, extraEnv = env)
-      discard pkg.library("libQt6QuickControls2")
-    finally:
-      clearCurrentOwningPackageOverride()
-
-  runtimeDeps:
-    ## TODO(M9.R.5b): derive runtime closure from pkg-config /
-    ## DT_NEEDED inspection of the linked artifacts. Empty until
-    ## the M9.R.5b per-recipe pass populates per-output ELF
-    ## interrogation.
-    discard
+    ## The shell action stages from the sibling qt6-declarative recipe's
+    ## install mirror.  All paths are relative to the recipe directory
+    ## (recipes/packages/source/qt6-quickcontrols2/); ``../../`` reaches
+    ## the repo root.
+    let qtdeclSrc =
+      "../qt6-declarative/.repro/output/install/usr"
+    let outRoot = ".repro/output/install/usr"
+    let cmd = "set -euo pipefail; " &
+      "SRC=" & qtdeclSrc & "; " &
+      "DST=" & outRoot & "; " &
+      "if [ ! -d \"$SRC\" ]; then " &
+      "  echo \"[qt6-quickcontrols2 shim] qt6-declarative install mirror missing at $SRC\" >&2; " &
+      "  echo \"[qt6-quickcontrols2 shim] build qt6-declarative first: \\\"repro build recipes/packages/source/qt6-declarative\\\"\" >&2; " &
+      "  exit 65; " &
+      "fi; " &
+      "mkdir -p \"$DST/lib/cmake\" \"$DST/lib\" \"$DST/include\" \"$DST/qml\" \"$DST/libexec\" \"$DST/mkspecs\"; " &
+      # CMake configs -- the share-only fast-path probe target.
+      "for cfgDir in Qt6QuickControls2 Qt6QuickTemplates2 " &
+      "             Qt6QuickControls2Impl " &
+      "             Qt6QuickControls2BasicStyleImpl " &
+      "             Qt6QuickControls2MaterialStyleImpl " &
+      "             Qt6QuickControls2UniversalStyleImpl " &
+      "             Qt6QuickControls2FusionStyleImpl " &
+      "             Qt6QuickControls2ImagineStyleImpl " &
+      "             Qt6QuickControls2FluentWinUI3StyleImpl; do " &
+      "  if [ -d \"$SRC/lib/cmake/$cfgDir\" ]; then " &
+      "    cp -rL --no-clobber \"$SRC/lib/cmake/$cfgDir\" \"$DST/lib/cmake/\"; " &
+      "  fi; " &
+      "done; " &
+      # Libraries.
+      "for lib in $SRC/lib/libQt6QuickControls2*.so* " &
+      "           $SRC/lib/libQt6QuickTemplates2*.so* " &
+      "           $SRC/lib/libQt6QuickControls2*.prl " &
+      "           $SRC/lib/libQt6QuickTemplates2*.prl; do " &
+      "  if [ -e \"$lib\" ] || [ -L \"$lib\" ]; then cp -P \"$lib\" \"$DST/lib/\" 2>/dev/null || true; fi; " &
+      "done; " &
+      # QML plugins -- under qml/QtQuick/Controls.
+      "if [ -d \"$SRC/qml/QtQuick/Controls\" ]; then " &
+      "  mkdir -p \"$DST/qml/QtQuick\"; " &
+      "  cp -rL --no-clobber \"$SRC/qml/QtQuick/Controls\" \"$DST/qml/QtQuick/\"; " &
+      "fi; " &
+      "if [ -d \"$SRC/qml/QtQuick/Templates\" ]; then " &
+      "  cp -rL --no-clobber \"$SRC/qml/QtQuick/Templates\" \"$DST/qml/QtQuick/\"; " &
+      "fi; " &
+      # Headers.
+      "for hdrDir in QtQuickControls2 QtQuickTemplates2 " &
+      "              QtQuickControls2Impl " &
+      "              QtQuickControls2BasicStyleImpl " &
+      "              QtQuickControls2MaterialStyleImpl " &
+      "              QtQuickControls2UniversalStyleImpl " &
+      "              QtQuickControls2FusionStyleImpl " &
+      "              QtQuickControls2ImagineStyleImpl " &
+      "              QtQuickControls2FluentWinUI3StyleImpl; do " &
+      "  if [ -d \"$SRC/include/$hdrDir\" ]; then " &
+      "    cp -rL --no-clobber \"$SRC/include/$hdrDir\" \"$DST/include/\"; " &
+      "  fi; " &
+      "done; " &
+      # Sanity check -- the resolver's load-bearing config file.
+      "test -f \"$DST/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake\" || { " &
+      "  echo \"[qt6-quickcontrols2 shim] expected Qt6QuickControls2Config.cmake not staged at $DST\" >&2; " &
+      "  exit 66; " &
+      "}; " &
+      "echo \"[qt6-quickcontrols2 shim] staged from $SRC -> $DST\""
+    shell(
+      command = cmd,
+      actionId = "qt6QuickControls2Source.shim_stage",
+      extraInputs = @[
+        # The sibling qt6-declarative install mirror.  Listing it as an
+        # extraInput tells the engine to rebuild this shim whenever the
+        # sibling's mirror changes.
+        "../qt6-declarative/.repro/output/install/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
+      ],
+      extraOutputs = @[
+        ".repro/output/install/usr/lib/cmake/Qt6QuickControls2/Qt6QuickControls2Config.cmake",
+      ])
