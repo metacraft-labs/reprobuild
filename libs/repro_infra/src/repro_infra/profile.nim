@@ -45,6 +45,7 @@ type
     srkSystemdSystemUnit = "systemd.systemUnit"
     srkLaunchdSystemDaemon = "launchd.systemDaemon"
     srkFsSystemFile = "fs.systemFile"
+    srkFsSystemDirectory = "fs.systemDirectory"
     srkEnvSystemVariable = "env.systemVariable"
     srkPasswdUser = "passwd.user"
     srkOsTimezone = "os.timezone"
@@ -137,6 +138,12 @@ type
     of srkFsSystemFile:
       sfPath*: string
       sfContent*: string
+    of srkFsSystemDirectory:
+      dirPath*: string
+      dirAclPresent*: bool                ## false => ACL is unmanaged
+      dirAclOwner*: string                ## "" leaves ownership unchanged
+      dirAclEntries*: seq[string]         ## icacls /grant-form ACE specs
+      dirAclInheritance*: string          ## "" => "enabled"
     of srkEnvSystemVariable:
       evName*: string
       evContribution*: seq[string]
@@ -229,6 +236,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "systemDaemon:" & r.sdaLabel
   of srkFsSystemFile:
     "systemFile:" & r.sfPath
+  of srkFsSystemDirectory:
+    "systemDirectory:" & r.dirPath
   of srkEnvSystemVariable:
     "systemVariable:" & r.evName
   of srkPasswdUser:
@@ -291,6 +300,7 @@ proc resourceName*(r: SystemResource): string =
   of srkSystemdSystemUnit: r.suName
   of srkLaunchdSystemDaemon: r.sdaLabel
   of srkFsSystemFile: r.sfPath
+  of srkFsSystemDirectory: r.dirPath
   of srkEnvSystemVariable: r.evName
   of srkPasswdUser: r.puName
   of srkOsTimezone: r.tzIana
@@ -501,6 +511,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkSystemdSystemUnit: srk = srkSystemdSystemUnit
     of $srkLaunchdSystemDaemon: srk = srkLaunchdSystemDaemon
     of $srkFsSystemFile: srk = srkFsSystemFile
+    of $srkFsSystemDirectory: srk = srkFsSystemDirectory
     of $srkEnvSystemVariable: srk = srkEnvSystemVariable
     of $srkPasswdUser: srk = srkPasswdUser
     of $srkOsTimezone: srk = srkOsTimezone
@@ -737,6 +748,48 @@ proc parseSystemProfile*(text: string): SystemProfile =
       res = SystemResource(kind: srkFsSystemFile,
         sfPath: need("path"),
         sfContent: (if "content" in fields: fields["content"] else: ""))
+    of srkFsSystemDirectory:
+      let dirPath = need("path")
+      # ACL is optional: a stanza without aclEntries leaves ACL
+      # management to the host / parent inheritance. When any of the
+      # acl* fields appears the entries list must be non-empty.
+      let aclEntries =
+        if "aclEntries" in rawFields:
+          parseListLiteral(rawFields["aclEntries"])
+        else: @[]
+      let aclOwner =
+        if "aclOwner" in fields: fields["aclOwner"] else: ""
+      let aclInheritance =
+        if "aclInheritance" in fields: fields["aclInheritance"] else: ""
+      let aclPresent = aclEntries.len > 0 or aclOwner.len > 0 or
+                       aclInheritance.len > 0
+      if aclPresent and aclEntries.len == 0:
+        raiseSystemProfileInvalid("fs.systemDirectory '" & dirPath &
+          "' has aclOwner / aclInheritance but no aclEntries — " &
+          "set at least one aclEntries spec or remove the other " &
+          "acl* fields to leave the ACL unmanaged")
+      for e in aclEntries:
+        if not isSafeAclEntry(e):
+          raiseSystemProfileInvalid("fs.systemDirectory aclEntry '" & e &
+            "' is not a safe `<principal>:<perms>` ACE spec " &
+            "(principal must be in the NTAccount / SID charset; " &
+            "perms must use only icacls permission codes, '(', " &
+            "')', ',', ' ')")
+      if aclOwner.len > 0 and not isSafeAclPrincipal(aclOwner):
+        raiseSystemProfileInvalid("fs.systemDirectory aclOwner '" &
+          aclOwner & "' contains characters outside the principal " &
+          "charset (letters, digits, '\\', ' ', '.', '-', '_', '@')")
+      if aclInheritance.len > 0 and
+         aclInheritance notin DirectoryAclInheritanceModes:
+        raiseSystemProfileInvalid("fs.systemDirectory aclInheritance '" &
+          aclInheritance & "' is not one of " &
+          DirectoryAclInheritanceModes.join(" / "))
+      res = SystemResource(kind: srkFsSystemDirectory,
+        dirPath: dirPath,
+        dirAclPresent: aclPresent,
+        dirAclOwner: aclOwner,
+        dirAclEntries: aclEntries,
+        dirAclInheritance: aclInheritance)
     of srkEnvSystemVariable:
       let contribution =
         if "contribute" in rawFields:
@@ -1115,6 +1168,14 @@ proc toPrivilegedOperation*(r: SystemResource;
       sfPath: r.sfPath,
       sfContent: r.sfContent,
       sfDestroy: destroy)
+  of srkFsSystemDirectory:
+    PrivilegedOperation(kind: pokFsSystemDirectory, address: r.address,
+      fsdPath: r.dirPath,
+      fsdAclPresent: r.dirAclPresent,
+      fsdAclOwner: r.dirAclOwner,
+      fsdAclEntries: r.dirAclEntries,
+      fsdAclInheritance: r.dirAclInheritance,
+      fsdDestroy: destroy)
   of srkEnvSystemVariable:
     PrivilegedOperation(kind: pokEnvSystemVariable, address: r.address,
       evName: r.evName,

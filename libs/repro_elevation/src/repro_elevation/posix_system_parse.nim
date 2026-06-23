@@ -337,6 +337,88 @@ proc systemFileScopeError*(path: string; programDataRoot = ""): string =
     "system directory (" & roots & ") — writing arbitrary system " &
     "paths is not permitted"
 
+# ---------------------------------------------------------------------------
+# fs.systemDirectory — directory-scope allowlist.
+#
+# The directory allowlist is a SUPERSET of `fs.systemFile`'s file
+# allowlist. In addition to the fixed POSIX roots (`/etc/`,
+# `/usr/local/etc/`) and the runtime `${PROGRAMDATA}` root, a directory
+# may live under a top-level Windows install-root like `C:\actions-
+# runner` or `C:\actions-runner-tokens`. The carve-out is necessary
+# because production deployments install long-running services under
+# the system drive's root rather than under `${PROGRAMDATA}` — there is
+# no analogue at file scope (`fs.systemFile` writes are always config-
+# directory writes, never install-root writes). The allowlist is still
+# a closed set: the path must be a SINGLE-segment subdirectory of
+# `<drive>:\` (no nested `C:\Users\<user>\...` or `C:\Windows\...`),
+# free of any `..` segment, and shape-compliant with NTFS path
+# conventions.
+# ---------------------------------------------------------------------------
+
+proc isTopLevelWindowsInstallRoot*(path: string): bool =
+  ## True when `path` names a top-level subdirectory of a Windows
+  ## drive root — shape `<X>:\<name>` or `<X>:\<name>\<subpath>` where
+  ## `<X>` is a single drive letter and `<name>` is a single path
+  ## segment in a conservative install-root charset (letters, digits,
+  ## `.`, `-`, `_`). Used by `systemDirectoryScopeError` to admit the
+  ## production install-root pattern (`C:\actions-runner`,
+  ## `C:\actions-runner-tokens`) without opening the full Windows
+  ## filesystem to the fs.systemDirectory driver.
+  let n = normalizeSlashes(path)
+  if n.len < 4:
+    return false
+  if not ((n[0] in {'A'..'Z'} or n[0] in {'a'..'z'}) and n[1] == ':' and
+          n[2] == '/'):
+    return false
+  let rest = n[3 .. ^1]
+  if rest.len == 0:
+    return false
+  # The first segment after the drive root is the install-root name.
+  let firstSegEnd = rest.find('/')
+  let firstSeg =
+    if firstSegEnd < 0: rest else: rest[0 ..< firstSegEnd]
+  if firstSeg.len == 0:
+    return false
+  for ch in firstSeg:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  return true
+
+proc isAllowedSystemDirectoryPath*(path: string;
+                                   programDataRoot = ""): bool =
+  ## True for an absolute path that is either under one of the
+  ## `fs.systemFile` allowlist roots OR is a top-level Windows install-
+  ## root (e.g. `C:\actions-runner-tokens`). A `..` segment is
+  ## refused regardless. The proc is pure; the driver supplies
+  ## `programDataRoot` at apply time when running on Windows.
+  if isAllowedSystemFilePath(path, programDataRoot):
+    return true
+  if isTopLevelWindowsInstallRoot(path):
+    # Even an install-root carve-out path is refused if it contains
+    # a `..` segment — the structural-escape guard is enforced
+    # uniformly across both arms.
+    let norm = normalizeSlashes(path)
+    for seg in norm.split('/'):
+      if seg == "..":
+        return false
+    return true
+  return false
+
+proc systemDirectoryScopeError*(path: string;
+                                programDataRoot = ""): string =
+  ## Returns "" when the directory path is in-scope, otherwise a
+  ## human diagnostic naming the allowlist. The companion of
+  ## `systemFileScopeError`. Pure — the driver turns a non-empty
+  ## result into `EOutOfScope`.
+  if isAllowedSystemDirectoryPath(path, programDataRoot):
+    return ""
+  var roots = "/etc/, /usr/local/etc/, <DRIVE>:\\<install-root>"
+  if programDataRoot.len > 0:
+    roots.add(", " & normalizeSlashes(programDataRoot))
+  "fs.systemDirectory path '" & path & "' is not under a recognized " &
+    "system directory (" & roots & ") — creating arbitrary system " &
+    "directories is not permitted"
+
 # ===========================================================================
 # env.systemVariable — system-PATH / system-environment merge logic.
 #

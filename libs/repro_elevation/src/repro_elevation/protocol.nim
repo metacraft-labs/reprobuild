@@ -324,6 +324,15 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sfPath)
     body.writeString(op.sfContent)
     body.writeBool(op.sfDestroy)
+  of pokFsSystemDirectory:
+    body.writeString(op.fsdPath)
+    body.writeBool(op.fsdAclPresent)
+    body.writeString(op.fsdAclOwner)
+    body.writeU32Le(uint32(op.fsdAclEntries.len))
+    for e in op.fsdAclEntries:
+      body.writeString(e)
+    body.writeString(op.fsdAclInheritance)
+    body.writeBool(op.fsdDestroy)
   of pokEnvSystemVariable:
     body.writeString(op.evName)
     body.writeU32Le(uint32(op.evContribution.len))
@@ -540,6 +549,19 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sfPath = readString(body, pos)
     result.operation.sfContent = readString(body, pos)
     result.operation.sfDestroy = readBool(body, pos, "sfDestroy")
+  of pokFsSystemDirectory:
+    result.operation = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: address)
+    result.operation.fsdPath = readString(body, pos)
+    result.operation.fsdAclPresent = readBool(body, pos, "fsdAclPresent")
+    result.operation.fsdAclOwner = readString(body, pos)
+    let aCount = int(readU32Le(body, pos))
+    if aCount < 0 or pos + aCount > body.len:
+      raiseProtocol("fs.systemDirectory frame: implausible ACE count")
+    for _ in 0 ..< aCount:
+      result.operation.fsdAclEntries.add(readString(body, pos))
+    result.operation.fsdAclInheritance = readString(body, pos)
+    result.operation.fsdDestroy = readBool(body, pos, "fsdDestroy")
   of pokEnvSystemVariable:
     result.operation = PrivilegedOperation(kind: pokEnvSystemVariable,
       address: address)

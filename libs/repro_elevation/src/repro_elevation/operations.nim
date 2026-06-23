@@ -106,6 +106,18 @@ type
       ## under a recognized system directory (`/etc/`,
       ## `/usr/local/etc/`, `${PROGRAMDATA}`). A path outside the
       ## allowlist is rejected with an out-of-scope error.
+    pokFsSystemDirectory = "fs.systemDirectory"
+      ## A managed system-scope directory. The companion of
+      ## `pokFsSystemFile`: same recognized-system-root allowlist
+      ## (`/etc/`, `/usr/local/etc/`, `${PROGRAMDATA}`) PLUS a Windows
+      ## install-root carve-out (`C:\\<top-level>`) so production
+      ## profiles can declare directories like `C:\\actions-runner` or
+      ## `C:\\actions-runner-tokens` without resorting to a raw
+      ## elevated command. The driver creates the directory at apply
+      ## time (recursively auto-creating parents) and, when
+      ## `fsdAclPresent == true`, stamps the declared NTFS DACL via
+      ## `icacls` in the same observe / apply cycle. `fsdDestroy`
+      ## selects the rollback direction (`removeDir`).
     pokEnvSystemVariable = "env.systemVariable"
       ## The M69 Phase-C `env.systemVariable` operation: a system
       ## environment variable / system PATH with contribution-not-
@@ -398,6 +410,25 @@ type
       sfPath*: string
       sfContent*: string
       sfDestroy*: bool
+    of pokFsSystemDirectory:
+      ## Create / converge / remove the managed directory `fsdPath`.
+      ## `fsdAclPresent == true` triggers an `icacls` ACL stamp using
+      ## `fsdAclOwner` (optional NTAccount / SID; "" leaves ownership
+      ## unchanged), `fsdAclEntries` (the canonical
+      ## `<principal>:<perms>` ACE specs, the same form `pokWindowsAcl`
+      ## consumes), and `fsdAclInheritance` (one of `enabled` /
+      ## `disabled-replace` / `disabled-convert` /
+      ## `protected-clear-inherited`). `fsdDestroy` selects the
+      ## rollback direction (`removeDir`). The `fsd` prefix
+      ## distinguishes these fields from the `sd*` family
+      ## `pokMacosSystemDefault` / `pokLaunchdSystemDaemon` already
+      ## use.
+      fsdPath*: string
+      fsdAclPresent*: bool
+      fsdAclOwner*: string
+      fsdAclEntries*: seq[string]
+      fsdAclInheritance*: string
+      fsdDestroy*: bool
     of pokEnvSystemVariable:
       ## Contribute `evContribution` to the system variable `evName`.
       ## `evIsPathList` selects PATH-list (contribution-not-overwrite,
@@ -679,6 +710,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokSystemdSystemUnit: true
   of pokLaunchdSystemDaemon: true
   of pokFsSystemFile: true
+  of pokFsSystemDirectory: true
   of pokEnvSystemVariable: true
   of pokPasswdUser: true
   of pokOsTimezone: true
@@ -718,6 +750,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokSystemdSystemUnit: pokSystemdSystemUnit
   of $pokLaunchdSystemDaemon: pokLaunchdSystemDaemon
   of $pokFsSystemFile: pokFsSystemFile
+  of $pokFsSystemDirectory: pokFsSystemDirectory
   of $pokEnvSystemVariable: pokEnvSystemVariable
   of $pokPasswdUser: pokPasswdUser
   of $pokOsTimezone: pokOsTimezone
@@ -902,6 +935,19 @@ proc isSafeFirewallPort*(port: string): bool =
 
 const
   AclInheritanceModes* = ["enabled", "disabled-replace", "disabled-convert"]
+  DirectoryAclInheritanceModes* = ["enabled", "disabled-replace",
+                                   "disabled-convert",
+                                   "protected-clear-inherited"]
+    ## The inheritance-mode vocabulary `fs.systemDirectory`'s inline
+    ## ACL builder accepts — `AclInheritanceModes` plus
+    ## `protected-clear-inherited`. The new value disables inheritance
+    ## AND clears every previously-inherited ACE so only the explicit
+    ## ACEs declared in the stanza remain, which is the
+    ## actions-runner-tokens directory's production requirement
+    ## (`disabled-replace` only flushes inherited ACEs at the moment
+    ## inheritance is disabled — a subsequent re-inherit pass can
+    ## reintroduce them; `protected-clear-inherited` is the
+    ## SetAccessRuleProtection(true, false) shape that pins the DACL).
 
 proc isSafeAclPath*(path: string): bool =
   ## True only for a non-empty absolute Windows path with no `..`
@@ -1339,6 +1385,39 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       return scopeErr
     if op.sfPath.strip().len == 0:
       return "fs.systemFile operation has an empty path"
+  of pokFsSystemDirectory:
+    if op.fsdPath.strip().len == 0:
+      return "fs.systemDirectory operation has an empty path"
+    # `systemDirectoryScopeError` rejects only the structural-escape
+    # case (`..` segments); the closed system-root vs Windows-install-
+    # root choice is re-validated by the driver at apply time against
+    # the live `${PROGRAMDATA}`. We mirror the `fs.systemFile` arm: a
+    # path that fails the fixed allowlist AND contains `..` is refused
+    # here as an out-of-scope sandbox escape.
+    let scopeErr = systemDirectoryScopeError(op.fsdPath)
+    if scopeErr.len > 0 and op.fsdPath.find("..") >= 0:
+      return scopeErr
+    if op.fsdAclPresent:
+      if op.fsdAclOwner.len > 0 and not isSafeAclPrincipal(op.fsdAclOwner):
+        return "fs.systemDirectory aclOwner '" & op.fsdAclOwner &
+          "' contains characters outside the principal charset " &
+          "(letters, digits, '\\', ' ', '.', '-', '_', '@')"
+      if op.fsdAclInheritance.len > 0 and
+         op.fsdAclInheritance notin DirectoryAclInheritanceModes:
+        return "fs.systemDirectory aclInheritance '" &
+          op.fsdAclInheritance & "' is not one of " &
+          DirectoryAclInheritanceModes.join(" / ")
+      if not op.fsdDestroy and op.fsdAclEntries.len == 0:
+        return "fs.systemDirectory '" & op.fsdPath &
+          "' has aclPresent=true but an empty aclEntries list — a " &
+          "non-destroy apply with ACL management must declare at " &
+          "least one ACE"
+      for ace in op.fsdAclEntries:
+        if not isSafeAclEntry(ace):
+          return "fs.systemDirectory aclEntry '" & ace &
+            "' is not a safe `<principal>:<perms>` ACE spec " &
+            "(principal must be in the NTAccount / SID charset; perms " &
+            "must use only icacls permission codes, '(', ')', ',', ' ')"
   of pokEnvSystemVariable:
     if op.evName.len == 0:
       return "env.systemVariable operation has an empty variable name"

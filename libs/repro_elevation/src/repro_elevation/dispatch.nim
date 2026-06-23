@@ -102,7 +102,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
   of pokWindowsVsInstaller:
     vsInstallerDesiredDigestHex(op)
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
-     pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
+     pokFsSystemFile, pokFsSystemDirectory, pokEnvSystemVariable,
+     pokPasswdUser,
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
@@ -161,6 +162,8 @@ proc reobserve*(ctx: FixtureContext;
     observeLaunchdSystemDaemon(op)
   of pokFsSystemFile:
     observeFsSystemFile(op)
+  of pokFsSystemDirectory:
+    observeFsSystemDirectory(op)
   of pokEnvSystemVariable:
     observeEnvSystemVariable(op)
   of pokPasswdUser:
@@ -235,6 +238,8 @@ proc applyOne(ctx: FixtureContext;
     result = applyLaunchdSystemDaemon(op)
   of pokFsSystemFile:
     result = applyFsSystemFile(op)
+  of pokFsSystemDirectory:
+    result = applyFsSystemDirectory(op)
   of pokEnvSystemVariable:
     result = applyEnvSystemVariable(op)
   of pokPasswdUser:
@@ -325,6 +330,7 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokSystemdSystemUnit and op.suDestroy) or
     (op.kind == pokLaunchdSystemDaemon and op.sdaDestroy) or
     (op.kind == pokFsSystemFile and op.sfDestroy) or
+    (op.kind == pokFsSystemDirectory and op.fsdDestroy) or
     (op.kind == pokEnvSystemVariable and op.evDestroy) or
     (op.kind == pokPasswdUser and op.puDestroy) or
     (op.kind == pokLinuxSysctl and op.sysctlDestroy) or
