@@ -69,15 +69,22 @@ done
 
 # Verify the host has the tools we need. Fail loudly if not; the
 # orchestrator's recipe driver already apt-installs these on first run.
-for tool in xorriso grub-mkrescue mformat; do
+# grub-mkimage + mkfs.fat are required for the hybrid BIOS+UEFI path
+# (M9.R.28.1 fix); without them the UEFI El Torito alt-boot block is
+# silently dropped from the ISO.
+for tool in xorriso grub-mkrescue grub-mkimage mformat mcopy mmd mkfs.fat; do
   if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "required tool missing: $tool (apt-get install xorriso grub-pc-bin grub-efi-amd64-bin mtools)" >&2
+    echo "required tool missing: $tool (apt-get install xorriso grub-pc-bin grub-efi-amd64-bin mtools dosfstools)" >&2
     exit 66
   fi
 done
 
 WORK=$(mktemp -d -t reproos-iso-XXXXXX)
-trap 'rm -rf "$WORK"' EXIT
+# Best-effort cleanup. Files copied from /nix/store are read-only;
+# ``chmod -R u+w`` first so the trap's ``rm -rf`` cannot fail noisily
+# at exit. Run the chmod under ``|| true`` so a partial $WORK populates
+# (e.g. an early-script abort) doesn't mask the original exit code.
+trap '{ chmod -R u+w "$WORK" 2>/dev/null || true; rm -rf "$WORK"; }' EXIT
 
 # Reproducibility workaround for Debian 12's mtools 4.0.32: its
 # `mformat -C` seeds random() with `time(0)` (see init_random() in
@@ -319,31 +326,38 @@ REPRO_GPT_DISK_GUID='52455052-4f53-4953-4f52-322d62756c61'
 # YYYY MM DD hh mm ss cc = 20250101000000 00
 REPRO_MODIFICATION_DATE='2025010100000000'
 
-# M9.R.27.7 — assemble a unified GRUB module directory that contains
-# BOTH ``i386-pc`` (BIOS) AND ``x86_64-efi`` (UEFI) module trees so
-# grub-mkrescue can produce a true hybrid ISO with both an El Torito
-# BIOS boot entry AND a UEFI ESP boot entry.
+# M9.R.28.1 — assemble a hybrid BIOS+UEFI ISO on Nix-based hosts where
+# ``grub2`` (i386-pc) and ``grub2_efi`` (x86_64-efi) live in two
+# separate /nix/store outputs.
 #
-# Background: on Nix-based hosts ``nixpkgs#grub2`` ships ONLY the
-# ``i386-pc`` modules and ``nixpkgs#grub2_efi`` ships ONLY the
-# ``x86_64-efi`` modules. When both are present in the nix-shell,
-# the ``grub-mkrescue`` binary on PATH resolves to one or the other
-# (whichever appears first), and the resolved binary's default
-# probes the compile-time-baked /nix/store/<bin-grub>/lib/grub
-# which only has the binary's own arch's modules.
+# Background: ``grub-mkrescue`` accepts a single ``--directory`` arg
+# that must point at a single-platform module dir (the dir containing
+# ``modinfo.sh``). The compile-time ``pkglibdir`` baked into the
+# nixpkgs ``grub-mkrescue`` binary points at i386-pc only; passing
+# ``--directory`` to point at x86_64-efi or to a unified parent dir
+# breaks (the binary expects modinfo.sh DIRECTLY under --directory).
+# Specifying ``--directory`` twice overrides not combines.
 #
 # Diagnosis: ``xorriso -indev <iso> -report_el_torito as_mkisofs``
-# on the BIOS-only output shows only ``-b /boot/grub/i386-pc/eltorito.img``
-# — no ``-eltorito-alt-boot -e ... -no-emul-boot`` block for the UEFI
-# ESP image. OVMF boot in QEMU reports ``BdsDxe: No bootable option
-# or device was found`` because no UEFI bootable target exists on
-# the disc.
+# on a single-arch run shows only the boot block for whichever arch
+# was probed — ``-b boot/grub/i386-pc/eltorito.img`` (BIOS) OR
+# ``-e efi.img -no-emul-boot`` (UEFI), never both.
 #
-# Fix: locate the BIOS + EFI grub installations, copy a UNIFIED
-# grub installation tree (with both arch subdirs side-by-side under
-# lib/grub/) to a private work-dir, then build a wrapper grub-mkrescue
-# script that runs the host binary against the unified tree. Pass
-# the wrapper to xorriso instead of the host grub-mkrescue.
+# Fix shape (M9.R.28.1):
+#   1) Build the UEFI loader (``BOOTX64.EFI``) via ``grub-mkimage``
+#      against the x86_64-efi module dir.
+#   2) Wrap that loader in a FAT12 ESP image (``efi.img``) via
+#      ``mformat`` + ``mcopy``; the FAT image becomes a NoEmulation
+#      El Torito alt-boot target.
+#   3) Stage ``efi.img`` into the ISO source tree under
+#      ``boot/grub/efi.img`` AND a copy of the x86_64-efi modules
+#      under ``boot/grub/x86_64-efi/`` so the runtime BOOTX64.EFI
+#      can locate its modules after boot.
+#   4) Run ``grub-mkrescue`` for the BIOS half (default i386-pc) and
+#      pass a custom ``--xorriso`` wrapper that intercepts the
+#      xorriso call and appends ``-eltorito-alt-boot -e
+#      boot/grub/efi.img -no-emul-boot -isohybrid-gpt-basdat`` so
+#      the resulting ISO has BOTH boot entries.
 GRUB_MKRESCUE_BIN=$(command -v grub-mkrescue)
 GRUB_BIOS_DIR=""
 GRUB_EFI_DIR=""
@@ -358,36 +372,19 @@ GRUB_HAS_EFI=0
 [ -n "$GRUB_BIOS_DIR" ] && GRUB_HAS_BIOS=1
 [ -n "$GRUB_EFI_DIR" ] && GRUB_HAS_EFI=1
 echo "[build-iso] GRUB_HAS_BIOS=$GRUB_HAS_BIOS GRUB_HAS_EFI=$GRUB_HAS_EFI"
+echo "[build-iso] GRUB_BIOS_DIR=$GRUB_BIOS_DIR"
+echo "[build-iso] GRUB_EFI_DIR=$GRUB_EFI_DIR"
+GRUB_XORRISO_WRAPPER=""
 if [ "$GRUB_HAS_BIOS" = "0" ] || [ "$GRUB_HAS_EFI" = "0" ]; then
   echo "[build-iso] WARNING: only one GRUB arch present; ISO will not be hybrid" >&2
   GRUB_MKRESCUE_FLAGS=()
 else
-  # Build a unified lib/grub root with both arch subdirs symlinked in.
-  mkdir -p "$WORK/grub-unified/lib/grub"
-  ln -sfn "$GRUB_BIOS_DIR" "$WORK/grub-unified/lib/grub/i386-pc"
-  ln -sfn "$GRUB_EFI_DIR" "$WORK/grub-unified/lib/grub/x86_64-efi"
-  # Wrap grub-mkrescue: each grub-* helper grub-mkrescue calls expects
-  # to resolve its module dir via the compiled-in prefix. We use the
-  # GRUB_PREFIX env-var override (grub-mkrescue scans
-  # $GRUB_PREFIX/lib/grub/<platform>) by setting --directory pointing
-  # at each arch as needed. Modern grub-mkrescue probes for both archs
-  # under $libdir/grub/<arch>/ automatically when the binary's
-  # libexec/grub-mkimage finds the arch's eltorito.img.
-  #
-  # The simplest robust fix is to invoke grub-mkrescue WITHOUT
-  # ``--directory``; instead set the GRUB module path via the
-  # compiled-in default + symlinked /lib/grub under a TEMP prefix
-  # that grub-mkrescue's wrapper-detection picks up via its own
-  # libexec/grub-mkimage. Below we set the unified dir as the input
-  # --directory; if grub-mkrescue refuses, fall back to invoking
-  # against the BIOS dir only (the M9.R.25-era posture) and document
-  # the UEFI gap.
-  GRUB_MKRESCUE_FLAGS=(--directory="$GRUB_BIOS_DIR")
-  # Run a second grub-mkimage pass against the EFI arch to produce
-  # /EFI/BOOT/BOOTX64.EFI and stage it into the ISO source tree
-  # so grub-mkrescue's --efi-boot machinery picks it up at iso-build
-  # time.
+  # Step 1 — build BOOTX64.EFI via grub-mkimage against the EFI module
+  # dir. The loader is small (~750 KiB) and self-contained; it knows
+  # how to read the ISO9660 filesystem + locate /boot/grub/grub.cfg
+  # at runtime.
   mkdir -p "$WORK/EFI/BOOT"
+  echo "[build-iso] running grub-mkimage --directory=$GRUB_EFI_DIR --format=x86_64-efi"
   grub-mkimage \
     --directory="$GRUB_EFI_DIR" \
     --prefix="/boot/grub" \
@@ -396,12 +393,95 @@ else
     --compression=auto \
     part_gpt part_msdos fat iso9660 normal multiboot multiboot2 \
     configfile loadenv linux echo all_video test gfxterm font \
-    gettext efi_gop efi_uga \
-    || { echo "[build-iso] WARNING: grub-mkimage for x86_64-efi failed; UEFI boot disabled" >&2; rm -f "$WORK/EFI/BOOT/BOOTX64.EFI"; }
-  # Stage the x86_64-efi modules dir under boot/grub so the BOOTX64.EFI
-  # loader can find its modules at runtime.
+    gettext efi_gop efi_uga
+  mkimage_rc=$?
+  if [ "$mkimage_rc" -ne 0 ] || [ ! -s "$WORK/EFI/BOOT/BOOTX64.EFI" ]; then
+    echo "[build-iso] FATAL: grub-mkimage for x86_64-efi failed (rc=$mkimage_rc)" >&2
+    exit 68
+  fi
+  bootx64_size=$(stat -c %s "$WORK/EFI/BOOT/BOOTX64.EFI")
+  echo "[build-iso] BOOTX64.EFI size=$bootx64_size"
+
+  # Step 2 — wrap BOOTX64.EFI in a FAT12 ESP image. The size is rounded
+  # UP to leave headroom for the FAT filesystem overhead (boot sector
+  # + FAT tables + root dir).
+  #
+  # CRITICAL: use ``mkfs.fat -F 12`` (FAT12), NOT ``mformat`` which
+  # auto-picks FAT32 for any size >= 1 MiB. OVMF's FAT driver REJECTS
+  # the degenerate FAT32 mformat produces on a ~1 MiB image (the BPB
+  # has FAT32 layout but only 16 sectors per FAT, which the OVMF FAT
+  # driver treats as an invalid filesystem and the boot manager
+  # reports ``BdsDxe: failed to load Boot0001 ... Not Found``).
+  # FAT12 is the format real ESPs on small live-ISO boot images use
+  # (Arch, Debian Live, Fedora Server netinst all use FAT12 here).
+  esp_blocks=$(( (bootx64_size / 1024) + 256 ))
+  echo "[build-iso] efi.img size=${esp_blocks} KiB"
+  rm -f "$WORK/boot/grub/efi.img"
   mkdir -p "$WORK/boot/grub"
-  cp -a "$GRUB_EFI_DIR" "$WORK/boot/grub/x86_64-efi"
+  dd if=/dev/zero of="$WORK/boot/grub/efi.img" bs=1024 count="$esp_blocks" status=none
+  mkfs.fat -F 12 -n EFI "$WORK/boot/grub/efi.img"
+  mmd -i "$WORK/boot/grub/efi.img" ::/EFI
+  mmd -i "$WORK/boot/grub/efi.img" ::/EFI/BOOT
+  mcopy -i "$WORK/boot/grub/efi.img" "$WORK/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+
+  # Step 3 — stage the x86_64-efi runtime module tree alongside the
+  # BIOS modules so BOOTX64.EFI can dynamically load them after boot.
+  mkdir -p "$WORK/boot/grub/x86_64-efi"
+  cp -aL "$GRUB_EFI_DIR"/. "$WORK/boot/grub/x86_64-efi/"
+  # /nix/store files are read-only; restore u+w so the script's EXIT
+  # trap can ``rm -rf $WORK`` without errors.
+  chmod -R u+w "$WORK/boot/grub/x86_64-efi" "$WORK/EFI"
+
+  # Step 4 — build a xorriso wrapper. grub-mkrescue's ``--xorriso=``
+  # flag designates the program it execs to actually mint the ISO;
+  # we splice an ``-eltorito-alt-boot -e boot/grub/efi.img
+  # -no-emul-boot -isohybrid-gpt-basdat`` block IMMEDIATELY before
+  # the ``-o <out.iso>`` argument so xorriso sees a second El Torito
+  # boot entry while keeping the BIOS one grub-mkrescue passed first.
+  GRUB_XORRISO_WRAPPER="$WORK/_xorriso_wrap"
+  REAL_XORRISO="$(command -v xorriso)"
+  if [ -z "$REAL_XORRISO" ]; then
+    echo "[build-iso] FATAL: xorriso not in PATH" >&2
+    exit 66
+  fi
+  cat > "$GRUB_XORRISO_WRAPPER" <<EOF
+#!/usr/bin/env bash
+# M9.R.28.1 hybrid-grub xorriso wrapper. Splices the EFI alt-boot
+# block into grub-mkrescue's xorriso invocation so the resulting ISO
+# is bootable on both legacy BIOS AND UEFI firmware (e.g. OVMF/Q35).
+#
+# The minimum mkisofs flags that OVMF accepts as a UEFI El Torito
+# entry are:
+#   -eltorito-alt-boot
+#   -eltorito-platform efi          # set El Torito platform_id=0xEF
+#   -e boot/grub/efi.img            # FAT12 ESP image path on ISO
+#   -no-emul-boot                   # no floppy emulation
+#   -isohybrid-gpt-basdat           # mark in GPT as Basic Data partn
+#   -efi-boot-part --efi-boot-image # also mark the El Torito EFI image
+#                                   #   as the data source for the
+#                                   #   ESP GPT partition so the
+#                                   #   firmware finds the loader via
+#                                   #   either El Torito OR GPT scan
+#
+# The -eltorito-platform flag must precede the -e flag in mkisofs's
+# command-parser; it sets the platform_id of the NEXT boot entry.
+# Without -efi-boot-part the firmware cannot see /EFI/BOOT/BOOTX64.EFI
+# even though the catalog has the right platform_id — OVMF probes
+# both the El Torito catalog AND the GPT ESP partition, and several
+# OVMF versions only honour the GPT path.
+set -euo pipefail
+ARGS=()
+for a in "\$@"; do
+  if [ "\$a" = "-o" ]; then
+    ARGS+=(-eltorito-alt-boot -eltorito-platform efi -e boot/grub/efi.img -no-emul-boot -isohybrid-gpt-basdat -efi-boot-part --efi-boot-image -o)
+  else
+    ARGS+=("\$a")
+  fi
+done
+exec ${REAL_XORRISO} "\${ARGS[@]}"
+EOF
+  chmod +x "$GRUB_XORRISO_WRAPPER"
+  GRUB_MKRESCUE_FLAGS=(--directory="$GRUB_BIOS_DIR" --xorriso="$GRUB_XORRISO_WRAPPER")
 fi
 
 grub-mkrescue \
