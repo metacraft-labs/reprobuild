@@ -132,11 +132,14 @@ if [ ! -x "$INSTALLER_BIN" ]; then
 fi
 
 # Drop a minimal sway config that launches the installer full-screen
-# without a status bar or output decorations.
+# without a status bar or output decorations. Forces QT_QPA_PLATFORM
+# to wayland so the wizard binds to sway's compositor directly; sets
+# QT_QUICK_CONTROLS_STYLE to Material so the QML uses the dark token
+# theme even when the system style file is absent.
 SWAY_CFG=$(mktemp -t reproos-installer-sway-XXXXXX.cfg)
 cat > "$SWAY_CFG" <<SWAY
 output * background #0a0a0a solid_color
-exec "$INSTALLER_BIN; swaymsg exit"
+exec "QT_QPA_PLATFORM=wayland QT_QUICK_CONTROLS_STYLE=Material $INSTALLER_BIN; swaymsg exit"
 default_border none
 font pango:Sans 11
 SWAY
@@ -189,6 +192,29 @@ Relogin=true
 HaltCommand=/usr/bin/systemctl poweroff
 RebootCommand=/usr/bin/systemctl reboot
 EOF
+
+# M9.R.18.14 -- ReproOS Installer binary integration. When
+# $REPROOS_INSTALLER_BIN points at a built apps/reproos-installer binary,
+# overlay it into the staged /usr/bin. The reproos-installer.desktop
+# session + reproos-installer-launcher shell wrapper are already
+# unconditionally staged above (M9.R.18.1); the binary copy below is
+# the only piece that depends on the build artifact.
+#
+# Driver pattern: M9.R.19 wires this to the reprobuild engine's
+# action-cached output (apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer).
+# v0.1 supports a manual override via REPROOS_INSTALLER_BIN so the
+# boot smoke can ship a binary built standalone via cmake + nix-shell.
+REPROOS_INSTALLER_BIN="${REPROOS_INSTALLER_BIN:-}"
+if [ -n "$REPROOS_INSTALLER_BIN" ]; then
+  if [ ! -x "$REPROOS_INSTALLER_BIN" ]; then
+    echo "[stage-de-rootfs] REPROOS_INSTALLER_BIN=$REPROOS_INSTALLER_BIN not executable; skipping installer overlay" >&2
+  else
+    mkdir -p "$STAGE_DIR/usr/bin"
+    cp "$REPROOS_INSTALLER_BIN" "$STAGE_DIR/usr/bin/reproos-installer"
+    chmod +x "$STAGE_DIR/usr/bin/reproos-installer"
+    echo "[stage-de-rootfs] overlayed reproos-installer binary (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/reproos-installer"))"
+  fi
+fi
 
 # Track which recipes contributed.
 contributed=()

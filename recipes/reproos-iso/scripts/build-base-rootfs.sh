@@ -64,11 +64,16 @@ PKG_LIST=(
   libgl1 libegl1 libglx-mesa0 mesa-vulkan-drivers
   # gcc / cxx runtimes
   libgcc-s1 libstdc++6
-  # Qt6 runtime for sddm-greeter
+  # Qt6 runtime for sddm-greeter + reproos-installer
   libqt6gui6 libqt6widgets6 libqt6quick6 libqt6qml6
   libqt6quickcontrols2-6 libqt6dbus6 libqt6network6
   libqt6opengl6 libqt6openglwidgets6 libqt6svg6
   libqt6quicktemplates2-6
+  # M9.R.18.14 -- Qt6 Wayland QPA plugin for the reproos-installer
+  # (kiosk sway session). Without this the binary aborts at
+  # QGuiApplication construction with "Could not find the Qt platform
+  # plugin 'wayland'" since the launcher script forces WAYLAND_DISPLAY.
+  qt6-wayland
   # audio
   libpipewire-0.3-0
   # network / CA
