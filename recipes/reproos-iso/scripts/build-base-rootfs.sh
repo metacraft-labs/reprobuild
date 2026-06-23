@@ -122,6 +122,22 @@ PKG_LIST=(
   libkf6globalaccel6 libkf6idletime6
   # qt6-concurrent (kwin link target)
   libqt6concurrent6
+  # M9.R.24.1g -- the repro CLI links against libsqlite3 (engine
+  # action-cache backend). Without it the wizard's Phase 1 hardware
+  # probe shell-out fails with "error while loading shared libraries:
+  # libsqlite3.so".
+  libsqlite3-0
+  # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
+  # shells out to. wipefs (util-linux), sgdisk (gdisk), parted,
+  # mkfs.ext4 / mkfs.vfat (e2fsprogs + dosfstools), partprobe
+  # (parted post-install hook script). These let the installer's
+  # libs/repro_profile/src/repro_profile/disk_apply.nim driver run
+  # against the QEMU virtio-blk target.
+  gdisk parted e2fsprogs dosfstools btrfs-progs cryptsetup lvm2
+  # Bootloader tools the installer's Phase 5 (system apply) shells
+  # out to via the disko/system stage. grub-efi + grub-pc cover both
+  # UEFI and BIOS GRUB installs.
+  grub-efi-amd64-bin grub-pc-bin grub-common
 )
 
 # Stable digest of the package list for the cache key. Sort first so
