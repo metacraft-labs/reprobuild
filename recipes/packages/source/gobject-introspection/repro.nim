@@ -169,6 +169,22 @@ package gobjectIntrospectionSource:
         "gtk_doc=false",
         "tests=false",
         "doctool=disabled",
+        # M9.R.16.3 — pin ``libdir=lib`` (overrides meson's default of
+        # ``lib64``). The upstream ``g-ir-scanner`` script (installed
+        # to ``$prefix/bin``) computes its ``pylibdir`` relocatably as
+        # ``$prefix/../lib/gobject-introspection``. When meson uses the
+        # default ``lib64``, the ``giscanner`` Python module lands at
+        # ``$prefix/lib64/gobject-introspection/giscanner/`` and the
+        # scanner's relocatable probe misses it, falling through to a
+        # hard-coded ``/usr/lib64/gobject-introspection`` (also missing
+        # in the install-mirror), and the scanner aborts with
+        # ``ModuleNotFoundError: No module named 'giscanner'`` during
+        # any downstream ``g-ir-scanner`` call (e.g. gdm's
+        # ``libgdm/Gdm-1.0.gir`` step). Pinning ``libdir=lib`` keeps
+        # the relocatable probe happy. The install-mirror's pkg-config
+        # rewrite path already handles both ``lib`` and ``lib64``
+        # (``package_result.nim:1020-1021``).
+        "libdir=lib",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libGirepository")
