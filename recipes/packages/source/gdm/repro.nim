@@ -250,6 +250,12 @@ package gdmSource:
     ## required for compile + link of the daemon. Routed via
     ## nixpkgs#xorg.libXau via the existing libxau stub.
     "libxau"
+    ## M9.R.16.1 — xorgproto ships ``X11/Xfuncproto.h`` which libxau's
+    ## ``X11/Xauth.h`` includes at line 56 (``#include
+    ## <X11/Xfuncproto.h>``). Header-only proto-types package; no link
+    ## artifact. Routed via nixpkgs#xorg.xorgproto via the existing
+    ## xorgproto stub.
+    "xorgproto"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
