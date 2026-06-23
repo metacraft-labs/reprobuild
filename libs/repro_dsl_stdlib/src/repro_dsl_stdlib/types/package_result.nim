@@ -875,6 +875,36 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     "\"libstdc++.so.6\" ]; then ")
   script.add("rpath=\"$rpath:$(dirname \"$stdcxx_dir\")\"; ")
   script.add("fi; ")
+  # DSL-port M9.R.26.5 — discover the recipe's OWN internal versioned
+  # subdirs under lib/ + lib64/ (e.g. mutter-15/, qt6/plugins/, etc.)
+  # and append each as an absolute path to the rpath. Without this,
+  # files under lib64/mutter-15/*.so are patched with a base rpath
+  # whose $ORIGIN/.. resolves to lib64/ (good) but whose $ORIGIN/../..
+  # is the usr/ root, and the cross-subdir SONAME chain (libmutter-cogl
+  # in mutter-15/ linking against libmutter-mtk in the same subdir,
+  # plus libmutter-15.so in lib64/ linking against everything in
+  # mutter-15/) breaks because the parent lib's $ORIGIN doesn't reach
+  # the versioned subdir.
+  #
+  # Solution: enumerate every versioned subdir at install-mirror time
+  # and add it to the per-recipe rpath. The enumeration is dynamic
+  # (POSIX glob) so any recipe that ships internal-implementation .so
+  # files in lib64/<pkg-version>/ subdirs gets the right rpath without
+  # having to hand-thread per-recipe overrides.
+  for libDirName in ["lib", "lib64"]:
+    let libDirAbs = escapedDstUsr & "/" & libDirName
+    script.add("if [ -d \"" & libDirAbs & "\" ]; then ")
+    script.add("for subd in \"" & libDirAbs & "\"/*/; do ")
+    script.add("if [ -d \"$subd\" ]; then ")
+    # Only include the subdir if it contains .so* files (skip pkg-config /
+    # cmake / locale / static-only subdirs).
+    script.add("if find \"$subd\" -maxdepth 1 -name '*.so*' -print -quit 2>/dev/null | grep -q .; then ")
+    # Strip trailing slash for a clean rpath entry.
+    script.add("rpath=\"$rpath:${subd%/}\"; ")
+    script.add("fi; ")
+    script.add("fi; ")
+    script.add("done; ")
+    script.add("fi; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
   # Walk bin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &

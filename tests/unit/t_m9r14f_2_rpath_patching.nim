@@ -109,6 +109,24 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("command -v patchelf")
 
+  test "M9.R.26.5 emitted_script_enumerates_internal_versioned_subdirs":
+    # DSL-port M9.R.26.5 — for recipes that ship internal-implementation
+    # .so files in versioned subdirs (mutter-15/, qt6/plugins/, etc.),
+    # the per-recipe rpath must include each such subdir as an absolute
+    # path. The discovery is a shell glob over the install-mirror's own
+    # lib/ + lib64/ subdirs at script run-time.
+    let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
+    # The script must iterate the recipe's own lib/ + lib64/ for
+    # versioned subdirs and append each as an absolute path.
+    check script.contains("/tmp/mirror/usr/lib\"/*/")
+    check script.contains("/tmp/mirror/usr/lib64\"/*/")
+    # Each discovered subdir must be added to the rpath via parameter
+    # expansion that strips the trailing slash.
+    check script.contains("${subd%/}")
+    # Only subdirs containing .so* files contribute; the script must
+    # guard with find -name '*.so*'.
+    check script.contains("'*.so*'")
+
   when defined(linux):
     test "linux_end_to_end_patchelf_against_synthetic_elf":
       let patchelfPath = findExe("patchelf")

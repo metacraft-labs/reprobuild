@@ -556,10 +556,15 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
     fi
   done
   # From-source install-mirror INTERNAL subdir lib dirs (e.g.
-  # mutter-15/ inside mutter's lib64/).  Some recipes ship their
-  # internal-implementation SOs in a versioned subdir but the
-  # recipe's $ORIGIN-relative RPATH doesn't include the subdir.
-  # ld.so.cache picks them up at runtime regardless of RPATH.
+  # mutter-15/ inside mutter's lib64/).  Defence-in-depth: the
+  # M9.R.26.5 DSL fix to `m9r14fEmitRpathPatchScript` now bakes
+  # every internal versioned subdir into the per-recipe RPATH at
+  # install-mirror time, so a fresh-from-source mutter no longer
+  # NEEDS this ld.so.cache fall-through. We keep the scan as a
+  # safety net for recipes whose install-mirror was emitted before
+  # the M9.R.26.5 fix landed (the file mtime predates the fix) and
+  # for any future recipe that ships .so files in a versioned subdir
+  # but isn't itself rebuilt as part of the ISO build chain.
   while IFS= read -r d; do
     [ -n "$d" ] && echo "${d#$STAGE_DIR}"
   done < <(find "$ISO_SRC_MIRROR_ROOT" \
