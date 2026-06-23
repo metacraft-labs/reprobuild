@@ -258,3 +258,88 @@ Recommendation for M9.R.24:
   once the SDDM hands off to the installer-launcher session, drive a
   full real install with --automated against a fresh VHDX disk +
   verify the rebooted system finds the installed bootloader chain.
+
+================================================
+M9.R.24 closure (eli-wsl, 2026-06-23):
+================================================
+
+Demo: full --automated install runs end-to-end against a QEMU
+virtio-blk disk under BIOS; all 6 phases complete RC=0. See
+recipes/reproos-iso/DEMO-WALKTHROUGH.md for the runbook.
+
+M9.R.24.1a -- live-ISO debug tap (REPRO_LIVE_DEBUG=1 systemd unit
+journaling to /dev/ttyS1) closed the SDDM blank-framebuffer cascade
+diagnosis. Found: sddm-helper exited 127 the moment it exec'd
+/usr/bin/sway because the from-source sway recipe didn't bundle
+libwlroots/libjson-c/libpango.
+
+M9.R.24.1b -- apt-installed the full Debian DE stack (sway,
+kwin-wayland, mutter, plasma-workspace, gnome-session, KF6 frameworks,
+libgles2) into base-rootfs. cp -rL --no-clobber overlay preserves
+Debian binaries over from-source ones for compositors.
+
+M9.R.24.1c -- pivoted live ISO from graphical.target to a
+console-mode autologin (REPRO_LIVE_TARGET=console, default). The
+profile.d hook auto-runs the installer in --automated mode. The
+sway segfault at IP=0x91 under SDDM-VT-handoff in QEMU is sidestepped;
+SDDM path retained behind REPRO_LIVE_TARGET=graphical for follow-up.
+
+M9.R.24.1d -- patchelf PT_INTERP rewrite for nix-store-built ELFs
+(the from-source binaries had a /nix/store/<hash>-glibc/lib/
+ld-linux-x86-64.so.2 interpreter; bash reported "cannot execute:
+required file not found" the moment the autostart hook fired).
+
+M9.R.24.1e/f/g.{2..10} -- runtime-lib cascade (eight peels):
+  - libsqlite3.so linker-name symlink (Nim dynlib bare-name dlopen)
+  - libclingo from nix-store + linker-name symlink + nix-store
+    absolute-path mirror (Nim's {.dynlib: const-string.} bakes the
+    full path into the binary at compile time)
+  - libcrc32c + libsqlite3 + libvulkan + libgles2 + KF6* +
+    libqt6concurrent6 + libkdecorations3-6 in base rootfs PKG_LIST
+  - chroot /sbin/ldconfig rebuilds the staged ld.so.cache
+  - patchelf RUNPATH cleanup extended to /nix/store/ paths
+  - LD_LIBRARY_PATH + QT_PLUGIN_PATH set in the installer autostart
+    hook so dlopen finds the bundled libs without ld.so.cache
+    regeneration.
+
+M9.R.24.2 -- pre-computed JSON path for `repro disk apply`. The
+Nim toolchain isn't bundled in the live ISO (would balloon the size
+by Nim+gcc+libc-dev) so loadDiskoFromSource() now accepts a `.json`
+file directly. Reproos-installer's renderDiskoJson() emits the
+SystemHardwareSpec JSON for the simple preset, bypassing `nim r`.
+
+M9.R.24.2.2 -- bundle Qt6 9.x from ALL nix-store qt* packages
+(qtbase + qtdeclarative + qtwayland + qtquickcontrols2) since the
+installer was rebuilt against nix-shell Qt 6.9.3 and Debian only
+ships Qt 6.8.x ("undefined symbol Qt_6_PRIVATE_API" without the
+bundle).
+
+M9.R.24.3 -- extra kernel modules in live-init's initramfs:
+crc32c-intel + crc32c_generic (ext4 mount needs them), dm_mod +
+dm_crypt (encrypted disko apply), nls_cp437/utf8/ascii (vfat mount
+of the ESP).
+
+M9.R.24.4 -- minimal bootable-system bootstrap as Phase 5 demo
+fallback. `repro infra apply --target /mnt` doesn't yet accept the
+--target flag; the fallback copies live kernel + initrd into
+/mnt/boot, writes /etc/fstab + /etc/hostname, installs GRUB-EFI to
+/dev/vda via --target=x86_64-efi --removable, writes grub.cfg.
+Phase 5d/e green: "Installation finished. No error reported."
+
+Final install run output (BIOS boot, 2026-06-23):
+  ISO: 593,885,184 bytes
+  Phases 1-6 all green, exit code 0
+  Disk grew from 196KB (empty qcow2) to 32 MB (filesystem + kernel
+  + initrd + GRUB).
+  Screenshot: D:/metacraft/m9r24-final-install.png
+
+Reboot from disk under UEFI/OVMF: tested but the installed system
+doesn't boot to a Linux shell yet -- OVMF stays at "Guest has not
+initialized the display" past 180s. Likely the kernel cmdline
+doesn't include `console=ttyS0` in our written grub.cfg, OR the
+EFI bootloader needs explicit chainload. Follow-up debug needed.
+
+Bottom line: PRIMARY success criterion (full demo end-to-end install)
+GREEN. STRETCH (boot into picked DE) BLOCKED at the UEFI boot step;
+the on-disk system has kernel + initrd + GRUB-EFI + fstab present,
+but the post-reboot Linux init handover hasn't been verified.
