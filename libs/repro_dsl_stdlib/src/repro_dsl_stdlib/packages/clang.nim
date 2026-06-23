@@ -8,6 +8,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
+import repro_dsl_stdlib/operations/buildtype
 
 package clang:
   provisioning:
@@ -100,14 +101,14 @@ proc clangCompile*(opts: CompileOptions): BuildActionDef =
     for d in clangApiDefines(api): defs.add(d)
   for d in opts.defines: defs.add(d)
   let std = opts.standard
-  if includeDirs.len == 0 and defs.len == 0 and std.len == 0:
-    return clang(source = opts.source, output = opts.target,
-      compileOnly = true)
+  let bt = currentCompileFlags()
   clang(source = opts.source, output = opts.target,
     compileOnly = true,
     includeDirs = includeDirs,
     defines = defs,
-    standard = std)
+    standard = std,
+    optimization = bt.optimization,
+    debug3 = bt.debugInfo)
 
 proc clangLink*(opts: LinkOptions): BuildActionDef =
   var libs: seq[string] = @[]
