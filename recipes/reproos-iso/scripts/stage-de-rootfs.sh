@@ -255,4 +255,47 @@ if [ "${#contributed[@]}" -eq 0 ]; then
   echo "[stage-de-rootfs] no DE recipes contributed; aborting" >&2
   exit 65
 fi
+
+# M9.R.19.4 -- patchelf-rewrite RPATH/RUNPATH on every from-source
+# binary in the staged tree. The from-source recipes' cmake/meson
+# builds bake the BUILD HOST's
+#   /opt/repro/reprobuild/recipes/packages/source/<pkg>/.repro/output/install/usr/lib*
+# paths into each ELF's DT_RUNPATH. Those paths DO NOT EXIST in the
+# live ISO -- /opt/repro/reprobuild/ is a build-host fiction. The
+# Debian-trixie base userspace ships shared libs at
+# /usr/lib/x86_64-linux-gnu/ and our DE rootfs union copies the
+# from-source libs ALSO into /usr/lib/ (via the cp -rL above), so the
+# loader can find every dep at the standard search path -- but ONLY
+# IF we strip the bogus RUNPATH so the loader doesn't reject the
+# missing /opt/repro/... entries.
+#
+# Without this step, sway's libdrm + libgobject-2.0 + libpixman-1 are
+# "not found" at runtime because the loader honours the DT_RUNPATH
+# token list strictly: every directory in the list is searched, and a
+# missing directory aborts the search. Same trip for the
+# reproos-installer Qt6 binary.
+#
+# Strategy: set RUNPATH to an empty string (let the dynamic loader
+# fall back to /etc/ld.so.cache + LD_LIBRARY_PATH + standard search
+# paths). This is a destructive in-place edit -- safe because the
+# staged tree is a private copy of the install mirrors, not the
+# canonical artifact cache.
+patchelf_bin="$(command -v patchelf || true)"
+if [ -z "$patchelf_bin" ]; then
+  echo "[stage-de-rootfs] patchelf not in PATH; skipping RPATH cleanup -- the live ISO's from-source binaries WILL NOT find their .so deps" >&2
+else
+  patched=0
+  while IFS= read -r elf; do
+    # Only ELFs with a non-empty RUNPATH/RPATH that we built.
+    rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
+    if echo "$rp" | grep -q "/opt/repro/reprobuild/"; then
+      $patchelf_bin --remove-rpath "$elf" 2>/dev/null || continue
+      patched=$((patched + 1))
+    fi
+  done < <(find "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
+                "$STAGE_DIR/usr/libexec" \
+              -type f \( -name '*.so*' -o -perm -u+x \) 2>/dev/null)
+  echo "[stage-de-rootfs] patchelf cleaned RPATH on $patched from-source ELFs"
+fi
+
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
