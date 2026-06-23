@@ -265,6 +265,19 @@ package mutterSource:
     ## fribidi is required for bidirectional text layout in mutter's
     ## window-title rendering path.
     "fribidi"
+    ## M9.R.15r.2 — cairo's public ``cairo-ft.h`` header includes
+    ## ``ft2build.h`` (freetype) directly. mutter's
+    ## ``src/cogl/cogl-pango/cogl-pango-render.c`` pulls
+    ## ``cairo-ft.h`` transitively which short-fails the compile with
+    ## ``fatal error: ft2build.h: No such file or directory`` when
+    ## freetype's include dir is not on CPATH. M9.R.14e.1 only threads
+    ## DIRECTLY-declared buildDep include paths, not transitive ones
+    ## via cairo. Declaring freetype directly closes the gap.
+    "freetype >=2.10"
+    ## M9.R.15r.2 — fontconfig is cairo's font-discovery dep and
+    ## mutter's clutter text layer hits ``fontconfig.h`` for font
+    ## matching. Same transitive-propagation gap as freetype above.
+    "fontconfig >=2.13"
     ## libxml2 ships xmllint, consumed by mutter's GResource compile
     ## step + GSettings schema validation.
     "libxml2"
