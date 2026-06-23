@@ -77,8 +77,24 @@ package reproosIso:
     # the historical ``cd recipes/reproos-iso &&`` prefix bombs out
     # with ``No such file or directory``. Drop the prefix; paths are
     # already relative to the recipe dir.
+    #
+    # M9.R.16.8 — multi-DE ISO variant. Stage the DE rootfs union
+    # (sway + mutter + kwin + sddm + plasma-workspace + gdm) before
+    # invoking grub-mkrescue; the build-iso.sh wraps it in a
+    # deterministic SquashFS at /live/filesystem.squashfs. The GRUB
+    # variant is ``multi-de`` (four menu entries: Hyprland/GNOME/Plasma/
+    # Recovery) so the ISO advertises the DE choice at boot. The
+    # rootfs union depends on the from-source compositor recipes
+    # having been built first; missing recipes degrade gracefully
+    # (stage-de-rootfs.sh emits a warning + drops their binaries from
+    # the squashfs).
     shell(
-      command = ("SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
+      command = ("set -euo pipefail; " &
+                 "rm -rf build/de-rootfs && mkdir -p build/de-rootfs build; " &
+                 "bash scripts/stage-de-rootfs.sh build/de-rootfs; " &
+                 "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
+                 "REPRO_DE_ROOTFS_DIR=\"$PWD/build/de-rootfs\" " &
+                 "REPRO_GRUB_VARIANT=multi-de " &
                  "bash scripts/build-iso.sh " &
                  "vendor/vmlinuz-debian-netinst " &
                  "vendor/initrd.img-debian-netinst " &
@@ -93,6 +109,7 @@ package reproosIso:
         "vendor/initrd.img-debian-netinst",
         "vendor/SHA256SUMS",
         "scripts/build-iso.sh",
+        "scripts/stage-de-rootfs.sh",
       ],
       extraOutputs = @[
         "build/reproos.iso",

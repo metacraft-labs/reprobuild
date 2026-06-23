@@ -94,6 +94,43 @@ mkdir -p "$WORK/boot/grub"
 cp "$KERNEL" "$WORK/vmlinuz"
 cp "$INITRAMFS" "$WORK/initrd.img"
 
+# M9.R.16.8 — optional DE-rootfs SquashFS payload. When
+# REPRO_DE_ROOTFS_DIR points to a populated directory tree (typically
+# the union of /usr from the from-source compositor recipes' install
+# mirrors --- sway + kwin + mutter + sddm + plasma-workspace + gdm),
+# the script packs it into a deterministic SquashFS image at
+# /live/filesystem.squashfs in the ISO root. A booted system (with a
+# live-init-capable initramfs) can then loop-mount the squashfs and
+# pivot_root into a working DE environment. The R2 vendored Debian
+# netinst initramfs is the Debian Installer (no live-init); the
+# payload is still added so future R10 initramfses (custom live-init,
+# follow-up milestone) can consume it.
+REPRO_DE_ROOTFS_DIR="${REPRO_DE_ROOTFS_DIR:-}"
+if [ -n "$REPRO_DE_ROOTFS_DIR" ]; then
+  if [ ! -d "$REPRO_DE_ROOTFS_DIR" ]; then
+    echo "build-iso.sh: REPRO_DE_ROOTFS_DIR points at non-directory: $REPRO_DE_ROOTFS_DIR" >&2
+    exit 64
+  fi
+  if ! command -v mksquashfs >/dev/null 2>&1; then
+    echo "build-iso.sh: REPRO_DE_ROOTFS_DIR set but mksquashfs missing (apt-get install squashfs-tools)" >&2
+    exit 66
+  fi
+  mkdir -p "$WORK/live"
+  # -all-time fixes mtimes inside the SquashFS to SOURCE_DATE_EPOCH; -no-xattrs
+  # drops xattr noise; -comp xz -Xbcj x86 is the same xz-with-x86-BCJ
+  # variant Debian Live uses, producing the smallest reproducible
+  # output; -noappend prevents appending to a stale image.
+  mksquashfs "$REPRO_DE_ROOTFS_DIR" "$WORK/live/filesystem.squashfs" \
+    -all-time "$SOURCE_DATE_EPOCH" \
+    -mkfs-time "$SOURCE_DATE_EPOCH" \
+    -no-xattrs \
+    -comp xz -Xbcj x86 \
+    -noappend \
+    -no-progress \
+    -quiet
+  echo "[de-rootfs] squashfs size=$(stat -c %s "$WORK/live/filesystem.squashfs")"
+fi
+
 # GRUB config: console on tty1 + ttyS0 so the boot is visible both on
 # graphical consoles AND on Hyper-V's COM1 named pipe (which the
 # vm-harness boot gate tails).
