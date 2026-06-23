@@ -195,3 +195,66 @@ QEMU smoke test (eli-wsl, 2026-06-23):
   the autologin session targets it; the patchelf step makes the
   binary's RPATH valid for the live ISO's filesystem layout. The
   SDDM-to-session handoff is the next layer down the boot chain.
+
+================================================
+M9.R.23 closure (eli-wsl, 2026-06-23):
+================================================
+
+M9.R.23.1 -- Disk screen QML
+  Added apps/reproos-installer/qml/screens/Disk.qml. Wizard grows from
+  9 to 10 screens. Disk inserts at position 5 between Users and
+  DeSelect (PRD Sec 3.1 step 5). The screen drives 4 InstallerState
+  properties (targetDevice, diskoPreset, diskPassphrase,
+  wipeAcknowledged) + reads availableDisks from lsblk. Three preset
+  radios: simple (GPT+ESP+ext4) / encrypted (LUKS2+btrfs subvols) /
+  advanced (skip wizard, hand-author hardware.nim). Layouts: passphrase
+  fields hidden until encrypted preset; wipe-acknowledgement hidden
+  for advanced preset.
+
+M9.R.23.2 -- InstallerState extensions
+  apps/reproos-installer/src/installer_state.{h,cpp} gain 5 disk-screen
+  Q_PROPERTYs + 4 install-runtime Q_PROPERTYs + the renderDiskoNim()
+  / refreshAvailableDisks() / install() / runAutomatedConfig()
+  Q_INVOKABLE methods. The text contract: renderDiskoNim() emits the
+  M9.R.22 hardware "<id>": disko: ... block matching the chosen preset
+  (simple/encrypted/advanced).
+
+M9.R.23.3 -- install() orchestration
+  6-phase sequence: hardware probe -> disk apply -> mount -> write
+  system.nim+hardware.nim -> system apply -> unmount. Each phase
+  shells out to /usr/bin/repro (CT_REPRO_BINARY for override) via
+  QProcess. Phase progress drives the Install screen progress bar +
+  the live log area. REPRO_DISK_DRY_RUN=1 routes every destructive
+  call through a "would do X" log line; phase ordering preserved.
+
+M9.R.23.4 -- tests
+  tests/unit/t_m9r23_1_installer_state_install_sequence.nim covers
+  6 cases: simple/encrypted/advanced preset parses via M9.R.22 macro;
+  6-phase ordering pinned; dry-run gate; 10-screen flow ordering.
+  All 6 tests GREEN on Windows host + on eli-wsl (nix-shell -p nim2).
+
+M9.R.23.5 -- engine rebuild + dry-run smoke
+  Engine pipeline (./build/bin/repro build apps/reproos-installer
+  --tool-provisioning=from-source) succeeded: 5/5 actions, output at
+  .repro/output/install/usr/bin/reproos-installer (157368 bytes).
+  Standalone cmake build also green (144080 bytes, --version reports
+  ReproOS Installer 0.1.0).
+
+  Dry-run smoke against the engine-built binary:
+    LD_LIBRARY_PATH=<from-source qt6+xkbcommon> \
+    REPRO_DISK_DRY_RUN=1 QT_QPA_PLATFORM=offscreen \
+    CT_REPRO_BINARY=/opt/repro/reprobuild/build/bin/repro \
+    reproos-installer --automated smoke-test-config.toml
+
+  Result: all 6 phases ran in order, EXIT=0. Phase 1 (hardware probe)
+  ran the real `repro hardware probe` and produced
+  /tmp/repro-installer-<pid>/probed-hardware.nim. Phases 2-6 honored
+  the dry-run gate + logged "would do X" for every destructive step.
+
+Recommendation for M9.R.24:
+  End-to-end install on a Hyper-V VM with virtual GPU. Repro the SDDM
+  blank-framebuffer issue from M9.R.19 attempts 1-3 (likely SDDM
+  Wayland-session selection or sway/wlroots-against-virtio_gpu init);
+  once the SDDM hands off to the installer-launcher session, drive a
+  full real install with --automated against a fresh VHDX disk +
+  verify the rebooted system finds the installed bootloader chain.
