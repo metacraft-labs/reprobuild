@@ -194,6 +194,39 @@ HaltCommand=/usr/bin/systemctl poweroff
 RebootCommand=/usr/bin/systemctl reboot
 EOF
 
+# M9.R.24.1 -- Live-ISO debug tap (env-gated).
+#
+# When REPRO_LIVE_DEBUG=1 is set at ISO-build time, drop a systemd unit
+# that journal-tails sddm + the autologin session to /dev/ttyS1. QEMU
+# `-serial file:...` captures ttyS1 for post-boot analysis so we can
+# see WHY SDDM never paints the framebuffer. Off by default so
+# production ISOs don't leak diagnostic data to a (non-existent) ttyS1.
+REPRO_LIVE_DEBUG="${REPRO_LIVE_DEBUG:-0}"
+if [ "$REPRO_LIVE_DEBUG" = "1" ]; then
+  mkdir -p "$STAGE_DIR/etc/systemd/system"
+  cat > "$STAGE_DIR/etc/systemd/system/repro-debug-tap.service" <<'EOF'
+[Unit]
+Description=ReproOS live-ISO debug journal tap to /dev/ttyS1
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+# Tail the full journal (every unit + kernel) to /dev/ttyS1. -f =
+# follow forever; --no-pager because there's no tty.
+ExecStart=/bin/sh -c '/usr/bin/journalctl -f -o short-monotonic --no-pager > /dev/ttyS1 2>&1'
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  mkdir -p "$STAGE_DIR/etc/systemd/system/multi-user.target.wants"
+  ln -sf /etc/systemd/system/repro-debug-tap.service \
+    "$STAGE_DIR/etc/systemd/system/multi-user.target.wants/repro-debug-tap.service"
+  echo "[stage-de-rootfs] REPRO_LIVE_DEBUG=1; tap enabled at ttyS1"
+fi
+
 # M9.R.19.3 -- ReproOS Installer binary integration (engine-driven).
 #
 # The reproos-installer recipe at apps/reproos-installer/ builds the
