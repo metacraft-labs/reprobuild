@@ -171,6 +171,15 @@ import ./attica
 # M9.R.15q.5.12 — libxcvt is the VESA CVT library kwin's DRM backend
 # probes via pkg-config (libxcvt>=0.1.1).
 import ./libxcvt
+# M9.R.15r.1 — mesa-gl-headers exposes the mesa-specific EGL / GL
+# extension headers (EGL/eglmesaext.h, EGL/eglext_angle.h,
+# GL/internal/dri_interface.h) that libglvnd's Khronos-only -dev
+# output does NOT ship. Consumed by mutter 47.x (compositor pokes
+# meta-backend-types.h -> EGL/eglmesaext.h) and downstream by
+# gnome-shell + every wlroots/Qt EGL backend that uses mesa-extension
+# symbols. Routed through nixpkgs#mesa-gl-headers (split out of the
+# main mesa derivation).
+import ./mesa_gl_headers
 
 export bc
 export bison
@@ -249,3 +258,4 @@ export libdisplayinfo
 export hwdata
 export attica
 export libxcvt
+export mesa_gl_headers

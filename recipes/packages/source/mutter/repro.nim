@@ -309,6 +309,17 @@ package mutterSource:
     "gudev"
     "udev"
     "libudev"
+    ## M9.R.15r.1 — mutter's ``src/backends/meta-backend-types.h``
+    ## (and friends) include ``EGL/eglmesaext.h``, a mesa-specific
+    ## extension header NOT shipped by the Khronos-only libglvnd
+    ## -dev output. ``mesa-gl-headers`` (nixpkgs#mesa-gl-headers,
+    ## split out of the main mesa derivation) ships the missing
+    ## headers at ``include/EGL/eglmesaext.h`` +
+    ## ``include/EGL/eglext_angle.h`` +
+    ## ``include/GL/internal/dri_interface.h``. M9.R.14e.1's
+    ## from-source resolver threads the package's ``include`` dir
+    ## onto CPATH at action-fork time once it's declared here.
+    "mesa-gl-headers"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
