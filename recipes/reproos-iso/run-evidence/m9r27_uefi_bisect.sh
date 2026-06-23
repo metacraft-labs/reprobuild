@@ -38,6 +38,7 @@ run_combo() {
   local extra_args=("$@")
   local vars="$OUT_DIR/$name.vars.fd"
   cp "$OVMF_VARS_TPL" "$vars"
+  chmod u+w "$vars"
   echo "[m9r27-uefi-bisect] running combo: $name"
   echo "[m9r27-uefi-bisect]   args: ${extra_args[*]}"
   echo "[m9r27-uefi-bisect]   transcript: $OUT_DIR/$name.transcript"
