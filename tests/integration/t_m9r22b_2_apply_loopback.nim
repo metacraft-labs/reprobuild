@@ -266,6 +266,8 @@ suite "M9.R.22b.2: apply driver against loopback / dry-run":
 # ---------------------------------------------------------------------
 
 when defined(linux):
+  import std/posix
+
   suite "M9.R.22b.2: loopback end-to-end (Linux, --loopback gated)":
 
     proc canRunLoopbackE2e(): bool =
@@ -275,7 +277,7 @@ when defined(linux):
                    "mkfs.ext4", "mkfs.vfat", "wipefs"]:
         if findExe(tool).len == 0: return false
       # Root privilege required for losetup --find.
-      if getEnv("USER") != "root" and geteuid() != 0: return false
+      if getEnv("USER") != "root" and posix.geteuid() != 0: return false
       return true
 
     test "Test#5 (loopback): simple-ext4 against a 128M image":
