@@ -161,7 +161,7 @@ Investigation results:
 Fix: no code change required. The 401 is benign provided
 cache.nixos.org is reachable.
 
-Gap 6 — ISO rebuild end-to-end (M9.R.27.6)               IN-PROGRESS
+Gap 6 — ISO rebuild end-to-end (M9.R.27.6)               PARTIAL
 ----------------------------------------------------------------
 - Engine rebuild + cleanup: cleared the stuck repro-daemon
   fs-snoop wedge (stale runquotad wrapped subprocess); restarted
@@ -176,9 +176,21 @@ Gap 6 — ISO rebuild end-to-end (M9.R.27.6)               IN-PROGRESS
     * `depmod not in PATH` from build-initramfs.sh — added kmod
       to the nix-shell.
     * Daemon fs-snoop wedge after the iso build's last step —
-      killed and restarted.
-- Iso build runs in background; per-phase progress tracked in
-  /tmp/iso-build-v2.log.
+      twice; the runquotad wedge documented in user memory.
+      Worked around by running stage-de-rootfs.sh + build-iso.sh
+      DIRECTLY (bypassing the repro engine + fs-snoop) under
+      nix-shell -p with the same env.
+- BUILT iso end-to-end: reproos.iso, 1,523,179,520 bytes,
+    sha256=2f027dc1ac352a442153cbcd70f610a61078f7f93dd01b07eeb2e9838acabbaf.
+- ldd verdicts on staged DE binaries (post-mutter-rebuild):
+    sway:         29/33 RESOLVED via embedded RPATH
+    kwin_wayland: 87/94 RESOLVED via embedded RPATH
+    mutter:       34/49 RESOLVED via embedded RPATH (+ mutter-15 subdir)
+    plasmashell:  98/103 RESOLVED via embedded RPATH
+  The drops vs M9.R.25 baseline (sway 29/29, kwin 91/91, mutter
+  58/58, plasmashell 101/101) reflect the M9.R.27.1 removal of the
+  ld.so.conf internal-subdir scan. Live ISO runtime uses chroot/
+  ldconfig (Phase 7) for bare-name dlopen() resolution.
 - Pre-rebuild ldd verdicts (existing M9.R.27.1-rebuilt mutter +
   pre-rebuild others):
     sway:         29/33 RESOLVED (was 29/29 with ld.so.conf scan)
@@ -192,9 +204,10 @@ Gap 6 — ISO rebuild end-to-end (M9.R.27.6)               IN-PROGRESS
   runtime resolves correctly. The drop in raw-ldd numbers does
   NOT correspond to a runtime gap.
 
-Gap 7 — OVMF + QEMU bisect for UEFI boot (M9.R.27.7)     CLOSED
+Gap 7 — OVMF + QEMU bisect for UEFI boot (M9.R.27.7)     PARTIAL
 ----------------------------------------------------------------
-ROOT CAUSE IDENTIFIED + FIX LANDED.
+ROOT CAUSE IDENTIFIED. PARTIAL FIX LANDED; FULL HYBRID NEEDS ONE
+MORE ITERATION.
 
 Bisect harness (`m9r27_uefi_bisect.sh`, commit 8ee3f307 + the
 chmod fix de0129b9) runs 6 OVMF + machine + display + serial-
@@ -226,13 +239,46 @@ ONLY `x86_64-efi` modules (two separate /nix/store outputs).
 grub-mkrescue's default `--directory` is
 `$(dirname $0)/../lib/grub` which sees only one arch.
 
-FIX (commit c9e6a462): in `build-iso.sh`, assemble a private
-merged grub module dir ($WORK/grub-modules) that symlinks
-BOTH `i386-pc` and `x86_64-efi` trees (the missing arch
-probed from /nix/store/*-grub-2.*/), then pass
-`--directory=$WORK/grub-modules` to grub-mkrescue. Logs
-`GRUB_HAS_BIOS=1 GRUB_HAS_EFI=1` when both archs are present
-and warns if only one is.
+FIX ATTEMPT 1 (commit c9e6a462): in `build-iso.sh`, assemble a
+private merged grub module dir ($WORK/grub-modules) that symlinks
+BOTH `i386-pc` and `x86_64-efi` trees (the missing arch probed
+from /nix/store/*-grub-2.*/), then pass `--directory=$WORK/grub-
+modules` to grub-mkrescue. Logs `GRUB_HAS_BIOS=1 GRUB_HAS_EFI=1`.
+
+FAILED: grub-mkrescue treats `--directory` as a SINGLE-arch dir
+(it probes for `modinfo.sh` directly under the dir, not nested
+under `<platform>/`). Build error:
+``grub-mkrescue: error: $WORK/grub-modules/modinfo.sh doesn't
+exist. Please specify --target or --directory.``
+
+FIX ATTEMPT 2 (commit 954eebd1): pass `--directory=$GRUB_BIOS_DIR`
+for the BIOS arch; additionally run grub-mkimage against
+$GRUB_EFI_DIR to produce $WORK/EFI/BOOT/BOOTX64.EFI (the UEFI
+loader); cp -a the x86_64-efi modules dir to $WORK/boot/grub/
+so the UEFI loader can find its modules at runtime. The staged
+source tree IS passed to grub-mkrescue as a positional arg, so
+grub-mkrescue should pick up the EFI dir automatically when it
+detects the `/EFI/BOOT/BOOTX64.EFI` presence (its `--efi-boot`
+auto-detection).
+
+VERIFIED: iso DID build (1,523,179,520 bytes,
+sha256=2f027dc1ac352a442153cbcd70f610a61078f7f93dd01b07eeb2e9838acabbaf).
+BUT: `xorriso -indev <iso> -report_el_torito as_mkisofs` STILL
+shows only `-b /boot/grub/i386-pc/eltorito.img` — no
+`-eltorito-alt-boot -e /EFI/BOOT/BOOTX64.EFI` block. The iso
+also doesn't contain `/EFI/BOOT/BOOTX64.EFI` as a file. This
+suggests grub-mkimage either silently failed in the script
+context (manual test in the same nix-shell succeeded) OR the
+$WORK/EFI/BOOT dir was wiped before grub-mkrescue staged it.
+The script reaches the iso-write step (logged `OK build/...`),
+so it doesn't fatal-exit; the EFI path is silently dropped.
+
+NEXT STEP (M9.R.28 candidate): bash -x trace of build-iso.sh
+end-to-end to isolate WHERE the EFI binary is lost, then
+either (a) fix the silent-failure path, or (b) switch to a
+xorriso-direct invocation (drop grub-mkrescue, call xorriso
+with explicit `-eltorito-alt-boot -e EFI/BOOT/BOOTX64.EFI
+-no-emul-boot -isohybrid-gpt-basdat`).
 
 CANONICAL QEMU UEFI INVOCATION (post-rebuild):
 
