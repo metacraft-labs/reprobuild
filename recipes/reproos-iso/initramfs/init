@@ -114,6 +114,14 @@ load_module overlay
 load_module ext4
 load_module vfat
 
+# DRM / GPU - so sddm can open a display. Failing to load these is OK
+# for headless boots; we just won't have a GUI.
+load_module drm
+load_module drm_kms_helper
+load_module virtio-gpu
+load_module qxl
+load_module bochs
+
 # Give udev-less devtmpfs a beat to settle. Most virtio probes
 # complete in microseconds but cdrom drives can take a moment.
 sleep 1

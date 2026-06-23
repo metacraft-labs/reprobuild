@@ -75,6 +75,14 @@ PKG_LIST=(
   ca-certificates iputils-ping iproute2
   # users
   sudo
+  # display manager + DE runtime - we install the Debian-packaged
+  # sddm even though the from-source recipe builds its own binary;
+  # the Debian package ships the systemd .service + PAM glue that the
+  # bare from-source build doesn't, and the overlayed from-source
+  # /usr/bin/sddm wins anyway.
+  sddm
+  # session-bus support for the DE that sddm spawns
+  xdg-desktop-portal
 )
 
 # Stable digest of the package list for the cache key. Sort first so

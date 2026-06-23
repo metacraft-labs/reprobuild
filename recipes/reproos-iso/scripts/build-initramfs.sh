@@ -250,6 +250,11 @@ REQUIRED_MODULES=(
   # virtio infrastructure (qemu)
   virtio virtio_ring virtio_pci virtio_pci_modern_dev virtio_pci_legacy_dev
   virtio_mmio virtio_balloon virtio_input
+  # virtio-gpu + DRM stack so sddm/sway/mutter/kwin can open a display
+  # under qemu's -device virtio-gpu-pci.
+  drm drm_kms_helper virtio-gpu drm-shmem-helper drm_panel_orientation_quirks
+  # qxl + bochs_drm as fallbacks for VGA-only qemu invocations
+  qxl bochs
   # input + tty
   evdev hid hid-generic usbhid
 )
