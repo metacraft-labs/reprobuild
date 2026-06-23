@@ -116,6 +116,14 @@ package dbusBrokerSource:
     ## C++ component, so the C compiler is sufficient.
     "gcc >=11"
 
+  buildDeps:
+    ## M9.R.15r.6 — dbus-broker's ``src/meson.build:75`` declares
+    ## ``dependency('expat')`` for the bus configuration XML parser.
+    ## Without expat on PKG_CONFIG_PATH meson setup short-fails with
+    ## ``Dependency "expat" not found, tried pkgconfig``. Recipe-level
+    ## buildDep on the sibling expat from-source recipe.
+    "expat"
+
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
     discard
