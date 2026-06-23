@@ -73,6 +73,11 @@ package polkitSource:
     ## meson's gnome module invokes glib-mkenums + glib-compile-resources
     ## at configure time.
     "glib2"
+    ## M9.R.27.2 — gettext provides ``msgfmt`` (consumed by polkit's
+    ## ``src/actions/meson.build:3`` to compile .po translation
+    ## catalogs). Without it meson setup short-fails with
+    ## ``Program 'msgfmt' not found or not executable``.
+    "gettext"
 
   buildDeps:
     ## glib2 + gio supply the GMainLoop + GDBus the polkit daemon's
@@ -135,6 +140,12 @@ package polkitSource:
         # built-in fallback and produces functional polkitd / pkexec /
         # polkit-agent-helper-1 binaries.
         "session_tracking=ConsoleKit",
+        # M9.R.27.2 — polkit's distro-autodetection probes /etc/<distro>-
+        # release files; inside the from-source nix-shell build none
+        # match and meson aborts. Pin os_type=Debian (the closest match
+        # for the live ISO's apt-installed base userspace) so the
+        # PAM configuration emits the Debian-shape default policy.
+        "os_type=Debian",
         # PAM is the authentication framework.
         "authfw=pam",
         # Drop optional surfaces we don't need at runtime.
