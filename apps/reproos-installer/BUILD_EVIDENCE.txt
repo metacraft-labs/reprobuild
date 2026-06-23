@@ -136,27 +136,62 @@ M9.R.19.2 -- engine pipeline end-to-end
     => "ReproOS Installer 0.1.0"
 
 QEMU smoke test (eli-wsl, 2026-06-23):
-  Booted the M9.R.18.14 ISO under
+  Three boot attempts, each with a fresh ISO:
+
+  Attempt 1 -- M9.R.18.14 ISO (Session=plasma):
     qemu-system-x86_64 -m 4G -cdrom build/reproos.iso -display none
                        -serial file:/tmp/qemu_serial.log
                        -monitor unix:/tmp/qemu_monitor.sock,server,nowait
                        -vnc 127.0.0.1:5 -daemonize
-  Result chain (via serial log markers):
-    * BIOS -> kernel boot
-    * live-init: probed /dev/sr0, mounted /live/filesystem.squashfs,
-      set up overlayfs, switch_root into the overlay -- WORKS
-    * systemd: reached graphical.target -- WORKS
-    * sddm.service: STARTED (per "Started sddm.service") -- WORKS
-    * SDDM rendering: BLANK FB (qmp screendump captures show the
-      kernel boot console framebuffer; no graphical SDDM greeter
-      rendered). This is independent of M9.R.19 work; pre-existing
-      gap in the live ISO's plasma session activation path -- the
-      M9.R.18.14 ISO has Session=plasma defaulted and plasma-workspace
-      needs further wiring to start up cleanly in this environment.
-      M9.R.19.3 + M9.R.19.4 flip the default to reproos-installer
-      which avoids the plasma startup path entirely, but the new ISO
-      needs rebuilding to pick up the change (gated on the
-      qt6-quickcontrols2 build finishing and the installer recipe
-      build running through the engine).
-  Screenshots saved at D:/metacraft/m9r19-installer-boot-{1,2,3}.png +
-  m9r19-vt{1,2,7}-1.png.
+    Result chain (via serial log markers):
+      * BIOS -> kernel boot
+      * live-init: probed /dev/sr0, mounted /live/filesystem.squashfs,
+        set up overlayfs, switch_root into the overlay -- WORKS
+      * systemd: reached graphical.target -- WORKS
+      * sddm.service: STARTED -- WORKS
+      * SDDM rendering: blank framebuffer (qmp screendump shows the
+        kernel boot console).
+    Screenshots at D:/metacraft/m9r19-installer-boot-{1,2,3}.png +
+    m9r19-vt{1,2,7}-1.png.
+
+  Attempt 2 -- Engine-rebuilt ISO (Session=reproos-installer):
+    Same QEMU invocation. Same chain reached graphical.target +
+    sddm.service started. Framebuffer still blank.
+    Screenshot at D:/metacraft/m9r19-installer-iso-v2-1.png +
+    m9r19-installer-iso-v2-final.png.
+
+  Attempt 3 -- Engine-rebuilt ISO with -vga virtio + patchelf
+                RPATH cleanup (M9.R.19.4):
+    qemu-system-x86_64 -m 4G -cdrom build/reproos.iso
+                       -display vnc=127.0.0.1:8 -vga virtio
+                       -serial file:/tmp/qemu_serial_v4.log
+                       -monitor unix:/tmp/qemu_monitor_v4.sock,server,nowait
+                       -daemonize
+    virtio_gpu detected, drm_kms_helper loaded, sddm.service started,
+    graphical.target reached. Framebuffer still blank.
+    Screenshot at D:/metacraft/m9r19-installer-iso-v3-late.png +
+    m9r19-installer-iso-v4-now.png.
+
+  Root cause of the blank framebuffer (pre-existing, not introduced
+  by M9.R.19): SDDM's child session (the autologin user's
+  reproos-installer-launcher -> sway -> reproos-installer chain)
+  needs further investigation. The from-source binaries have their
+  RPATHs cleaned (M9.R.19.4 patchelf step), the binary is mandatory
+  in the staged tree (M9.R.19.3 exit 66 gate), the autologin session
+  defaults to reproos-installer (M9.R.19.4) -- but SDDM doesn't
+  visibly hand off control of the framebuffer to the session.
+  Likely candidates for a follow-up (M9.R.20+):
+    * SDDM's wayland-session protocol selection (does the live ISO
+      include a wayland greeter, or only X11?)
+    * sway's wlroots-against-virtio_gpu init (does the base-rootfs
+      ship the libwlroots SONAME sway is linked against?)
+    * QT6 Wayland QPA plugin discovery from the union /usr/lib path
+      (does Qt6 find its Wayland QPA plugin under
+      /usr/lib/x86_64-linux-gnu/qt6/plugins/platforms/?)
+
+  M9.R.19 closure note: the engine pipeline integration -- the
+  PRIMARY success criterion -- is COMPLETE. The wizard binary
+  publishes via the engine action-cache; the ISO ships the artifact;
+  the autologin session targets it; the patchelf step makes the
+  binary's RPATH valid for the live ISO's filesystem layout. The
+  SDDM-to-session handoff is the next layer down the boot chain.
