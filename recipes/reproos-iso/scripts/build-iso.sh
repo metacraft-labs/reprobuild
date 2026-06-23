@@ -214,6 +214,15 @@ EOF
     # arranges the display-manager.service symlink before
     # graphical.target. Default = Hyprland (index 0; smallest, validates
     # fastest).
+    #
+    # M9.R.18.2 -- real-hardware graphics coverage. Two extra entries:
+    #   * "Safe graphics (nomodeset)" boots with nomodeset so the
+    #     kernel uses VESA framebuffer instead of KMS; needed on hosts
+    #     where the i915/amdgpu/nouveau driver hangs at probe.
+    #   * "i915 modeset" forces i915.modeset=1 for Intel iGPUs that
+    #     default to disabled (rare but documented on legacy ivy-/sandy-
+    #     bridge platforms). Same shape as Ubuntu's "Safe graphics"
+    #     fallback.
     cat > "$WORK/boot/grub/grub.cfg" <<EOF
 set timeout=$REPRO_GRUB_TIMEOUT
 set default=$REPRO_GRUB_DEFAULT
@@ -223,17 +232,22 @@ terminal_input  serial console
 terminal_output serial console
 
 menuentry 'ReproOS -- Hyprland (default)' {
-  linux  /vmlinuz repro.de=hyprland console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  linux  /vmlinuz repro.de=hyprland i915.modeset=1 console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
   initrd /initrd.img
 }
 
 menuentry 'ReproOS -- GNOME' {
-  linux  /vmlinuz repro.de=gnome console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  linux  /vmlinuz repro.de=gnome i915.modeset=1 console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
   initrd /initrd.img
 }
 
 menuentry 'ReproOS -- KDE Plasma' {
-  linux  /vmlinuz repro.de=plasma console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  linux  /vmlinuz repro.de=plasma i915.modeset=1 console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  initrd /initrd.img
+}
+
+menuentry 'ReproOS -- Safe graphics (nomodeset)' {
+  linux  /vmlinuz repro.de=plasma nomodeset console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
   initrd /initrd.img
 }
 
