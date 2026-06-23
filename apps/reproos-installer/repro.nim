@@ -119,6 +119,23 @@ package reproosInstaller:
     ## the configure flags + tells the engine what artifact to expect.
     setCurrentOwningPackageOverride("reproosInstaller")
     try:
+      # M9.R.19.2 -- the cmake_package convention's M9.R.15i.5
+      # auto-thread-cmake-config-dirs walker assumes the recipe lives
+      # under ``recipes/packages/source/<x>/`` so it can find sibling
+      # deps via ``parentDir(projectRoot) / <dep>``. For ``apps/``
+      # recipes the sibling layout is wrong (``apps/qt6-declarative``
+      # does not exist), so the walker emits NO ``-D<Component>_DIR``
+      # for qt6-declarative + qt6-quickcontrols2, and the cmake
+      # configure hard-fails with
+      #
+      #   Expected Config file at "<qt6-base>/cmake/Qt6Qml/Qt6QmlConfig.cmake"
+      #   does NOT exist
+      #
+      # Pass the cmake-config dirs explicitly to bridge the gap.
+      let qtDecl =
+        "../../recipes/packages/source/qt6-declarative/.repro/output/install/usr/lib/cmake"
+      let qtQc2 =
+        "../../recipes/packages/source/qt6-quickcontrols2/.repro/output/install/usr/lib/cmake"
       let opts = @[
         # CMake 4.x compatibility -- the local CMakeLists already
         # declares min 3.16, but the from-source cmake-4.x in the
@@ -129,6 +146,21 @@ package reproosInstaller:
         # PRD Sec 7.1 -- Wayland-native. The runtime QPA plugin is
         # picked up at exec time from the from-source qt6-base
         # install; no extra cmake flag needed here.
+
+        # Qt6 components from qt6-declarative -- Qml + Quick are the
+        # load-bearing buildDeps for this app's CMakeLists.txt's
+        # find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick
+        # QuickControls2) call. Qt6QuickControls2_DIR comes from the
+        # shim recipe (M9.R.19.1.3) which restages the artifact from
+        # qt6-declarative.
+        "Qt6Qml_DIR=" & qtDecl & "/Qt6Qml",
+        "Qt6Quick_DIR=" & qtDecl & "/Qt6Quick",
+        "Qt6QmlMeta_DIR=" & qtDecl & "/Qt6QmlMeta",
+        "Qt6QmlModels_DIR=" & qtDecl & "/Qt6QmlModels",
+        "Qt6QmlWorkerScript_DIR=" & qtDecl & "/Qt6QmlWorkerScript",
+        "Qt6QmlIntegration_DIR=" & qtDecl & "/Qt6QmlIntegration",
+        "Qt6QuickControls2_DIR=" & qtQc2 & "/Qt6QuickControls2",
+        "Qt6QuickTemplates2_DIR=" & qtQc2 & "/Qt6QuickTemplates2",
       ]
       let pkg = cmake_package(srcDir = ".", cacheVars = opts)
       discard pkg.executable("reproos-installer")
