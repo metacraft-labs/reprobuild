@@ -107,6 +107,34 @@ M9.R.19.3 -- ISO integration
   declares the installer binary path as an extraInput so the engine
   refingerprints the ISO when the wizard changes.
 
+M9.R.19.1.3 -- qt6-quickcontrols2 shim
+  The cmake_package-based build of the qtdeclarative tarball hits a
+  deterministic cmake_autogen wedge in the
+  qtquickcontrols2nativestyleplugin_autogen target after producing
+  51 of 60 moc files. Reproduced across two independent eli-wsl runs.
+  Switched the recipe to a shim that copies the QuickControls2
+  artifacts out of the sibling qt6-declarative install mirror. The
+  share-only fast-path in the from-source tool resolver matches as
+  soon as Qt6QuickControls2Config.cmake lands at the expected layout.
+
+M9.R.19.2 -- engine pipeline end-to-end
+  The cmake_package convention's M9.R.15i.5 auto-thread-cmake-
+  config-dirs walker assumes the recipe lives under
+  recipes/packages/source/<x>/ so it finds sibling deps via
+  parentDir(projectRoot)/<dep>. For apps/ recipes the sibling layout
+  is wrong (apps/qt6-declarative doesn't exist), so no
+  -DQt6Qml_DIR / -DQt6Quick_DIR is emitted and cmake configure
+  hard-fails. Passed Qt6Qml_DIR, Qt6Quick_DIR, Qt6QuickControls2_DIR,
+  + transitive component dirs explicitly via cacheVars.
+
+  Engine-built artifact:
+    /opt/repro/reprobuild/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer
+    89,560 bytes, ELF executable.
+  Smoke run:
+    LD_LIBRARY_PATH=<from-source qt6/libxkbcommon/mesa> \
+    QT_QPA_PLATFORM=offscreen reproos-installer --version
+    => "ReproOS Installer 0.1.0"
+
 QEMU smoke test (eli-wsl, 2026-06-23):
   Booted the M9.R.18.14 ISO under
     qemu-system-x86_64 -m 4G -cdrom build/reproos.iso -display none
