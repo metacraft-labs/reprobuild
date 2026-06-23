@@ -9,7 +9,7 @@
 ## path) that exercises `parseSystemProfile` + the canonical-text
 ## round-trip rather than the broker.
 
-import std/[tables, unittest]
+import std/[strutils, tables, unittest]
 
 import repro_infra
 import repro_profile
@@ -68,6 +68,50 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     let plan = producePlan(txt, "phaseD-sys-host")
     check plan.envelope.operations.len == 1
     check plan.envelope.operations[0].kindTag == "windows.firewallRule"
+
+  test "fs.systemDirectory adapter -> text -> producePlan emits one op":
+    var intent = ProfileIntent(name: "phaseD-sys-fsdir")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("C:\\actions-runner-tokens")
+    f["aclOwner"] = strField("SYSTEM")
+    f["aclEntries"] = listField(@[
+      "SYSTEM:(F)",
+      "BUILTIN\\Administrators:(F)",
+      "NetworkService:(RX)"])
+    f["aclInheritance"] = strField("protected-clear-inherited")
+    intent.resources.add(ResourceIntent(kind: "fs.systemDirectory",
+      address: "runnerTokenDir", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkFsSystemDirectory
+    check sp.resources[0].dirAclPresent
+    check sp.resources[0].dirAclInheritance ==
+      "protected-clear-inherited"
+    let txt = renderSystemProfileToText(sp)
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].dirPath == "C:\\actions-runner-tokens"
+    check reparsed.resources[0].dirAclEntries.len == 3
+    let plan = producePlan(txt, "phaseD-sys-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "fs.systemDirectory"
+
+  test "fs.systemDirectory without acl skips the acl* fields in text":
+    var intent = ProfileIntent(name: "phaseD-sys-fsdir-no-acl")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("/etc/myapp.d")
+    intent.resources.add(ResourceIntent(kind: "fs.systemDirectory",
+      address: "myappDir", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkFsSystemDirectory
+    check not sp.resources[0].dirAclPresent
+    let txt = renderSystemProfileToText(sp)
+    check "aclEntries" notin txt
+    check "aclOwner" notin txt
+    check "aclInheritance" notin txt
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].dirPath == "/etc/myapp.d"
+    check not reparsed.resources[0].dirAclPresent
 
   test "windows.acl adapter -> text -> producePlan emits one op":
     var intent = ProfileIntent(name: "phaseD-sys-acl")

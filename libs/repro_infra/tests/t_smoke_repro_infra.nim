@@ -273,6 +273,41 @@ windows.registryValue {
     check parsed.resources.len == 1
     check parsed.resources[0].kind == srkFsSystemFile
 
+  test "fs.systemDirectory parses without ACL":
+    let parsed = parseSystemProfile(
+      "fs.systemDirectory {\n  path = \"/etc/myapp.d\"\n}\n")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemDirectory
+    check parsed.resources[0].dirPath == "/etc/myapp.d"
+    check parsed.resources[0].dirAclPresent == false
+
+  test "fs.systemDirectory parses with ACL":
+    let parsed = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "BUILTIN\Administrators:(F)"]
+  aclInheritance = "protected-clear-inherited"
+}
+""")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemDirectory
+    check parsed.resources[0].dirPath == "C:\\actions-runner-tokens"
+    check parsed.resources[0].dirAclPresent == true
+    check parsed.resources[0].dirAclOwner == "SYSTEM"
+    check parsed.resources[0].dirAclEntries.len == 2
+    check parsed.resources[0].dirAclInheritance ==
+      "protected-clear-inherited"
+
+  test "fs.systemDirectory roundtrips to PrivilegedOperation":
+    let parsed = parseSystemProfile(
+      "fs.systemDirectory {\n  path = \"/etc/myapp.d\"\n}\n")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.kind == pokFsSystemDirectory
+    check op.fsdPath == "/etc/myapp.d"
+    check op.fsdAclPresent == false
+    check op.fsdDestroy == false
+
   test "an unclosed block is rejected":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("windows.capability {\n  name = \"X\"\n")

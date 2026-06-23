@@ -430,10 +430,61 @@ suite "repro_elevation: Phase C closed-set wiring":
   test "the six Phase-C kinds are in the closed set and require elevation":
     for k in [pokMacosSystemDefault, pokSystemdSystemUnit,
               pokLaunchdSystemDaemon, pokFsSystemFile,
+              pokFsSystemDirectory,
               pokEnvSystemVariable, pokPasswdUser]:
       check requiresElevation(k)
       check isKnownPrivilegedOperationKind($k)
     check not isKnownPrivilegedOperationKind("posix.runArbitraryCommand")
+
+  test "fs.systemDirectory frames round-trip through the wire codec":
+    let d = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fd1",
+      fsdPath: "/etc/myapp.d",
+      fsdAclPresent: false,
+      fsdDestroy: false)
+    check operationValidationError(d) == ""
+    let dd = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: d, baselineDigestHex: ""))).body)
+    check dd.operation.kind == pokFsSystemDirectory
+    check dd.operation.fsdPath == "/etc/myapp.d"
+    check dd.operation.fsdAclPresent == false
+    check dd.operation.fsdDestroy == false
+
+    let dAcl = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fd2",
+      fsdPath: "C:\\actions-runner-tokens",
+      fsdAclPresent: true,
+      fsdAclOwner: "SYSTEM",
+      fsdAclEntries: @[
+        "SYSTEM:(F)",
+        "BUILTIN\\Administrators:(F)",
+        "NetworkService:(RX)"],
+      fsdAclInheritance: "protected-clear-inherited",
+      fsdDestroy: false)
+    check operationValidationError(dAcl) == ""
+    let ddAcl = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: dAcl, baselineDigestHex: ""))).body)
+    check ddAcl.operation.kind == pokFsSystemDirectory
+    check ddAcl.operation.fsdAclPresent
+    check ddAcl.operation.fsdAclOwner == "SYSTEM"
+    check ddAcl.operation.fsdAclEntries.len == 3
+    check ddAcl.operation.fsdAclInheritance ==
+      "protected-clear-inherited"
+
+  test "fs.systemDirectory validator rejects malformed ACEs":
+    let bad = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdBad",
+      fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @["x; rm -rf /:(F)"])
+    check operationValidationError(bad).len > 0
+    let badInh = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdBadInh",
+      fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @["SYSTEM:(F)"],
+      fsdAclInheritance: "evil-mode")
+    check operationValidationError(badInh).len > 0
 
   test "macos.systemDefault operation frame round-trips":
     let op = PrivilegedOperation(kind: pokMacosSystemDefault,
@@ -672,6 +723,59 @@ suite "repro_elevation: fs.systemFile allowlist (Phase C)":
     check not isAllowedSystemFilePath("")
     check systemFileScopeError("/home/u/x").len > 0
     check systemFileScopeError("/etc/ok") == ""
+
+suite "repro_elevation: fs.systemDirectory allowlist + driver":
+
+  test "directory allowlist accepts POSIX system roots":
+    check isAllowedSystemDirectoryPath("/etc/myapp.d")
+    check isAllowedSystemDirectoryPath("/usr/local/etc/repro-managed")
+
+  test "directory allowlist accepts top-level Windows install roots":
+    check isAllowedSystemDirectoryPath("C:\\actions-runner")
+    check isAllowedSystemDirectoryPath("C:\\actions-runner-tokens")
+    check isAllowedSystemDirectoryPath("D:\\repro-managed\\sub")
+    # `${PROGRAMDATA}` is still accepted via the file allowlist path.
+    check isAllowedSystemDirectoryPath(
+      "C:/ProgramData/repro/dir", r"C:\ProgramData")
+
+  test "directory allowlist refuses escaping or unknown paths":
+    check not isAllowedSystemDirectoryPath("/home/u/x")
+    check not isAllowedSystemDirectoryPath("/tmp/y")
+    check not isAllowedSystemDirectoryPath("/etc/../home/x")
+    check not isAllowedSystemDirectoryPath("C:\\actions-runner\\..\\Users")
+    check not isAllowedSystemDirectoryPath("")
+    check systemDirectoryScopeError("/home/u/x").len > 0
+    check systemDirectoryScopeError("/etc/ok") == ""
+    check systemDirectoryScopeError("C:\\actions-runner") == ""
+
+  test "observe of an absent directory returns the absent sentinel":
+    # The driver's `observeFsSystemDirectory` is read-only and works
+    # against any allowlisted path. We exercise the absent branch
+    # against `/etc/<random>` which is in-scope but won't exist on
+    # the CI host.
+    when defined(linux) or defined(macosx):
+      let path = "/etc/repro-fssystemdir-absent-" &
+        $getCurrentProcessId() & "-" & $epochTime().int
+      let op = PrivilegedOperation(kind: pokFsSystemDirectory,
+        address: "fdAbsent", fsdPath: path, fsdAclPresent: false,
+        fsdDestroy: false)
+      let obs = observeFsSystemDirectory(op)
+      check not obs.present
+      check obs.digestHex == ZeroDigestHex
+
+  test "scope error refuses an out-of-allowlist apply":
+    when defined(linux) or defined(macosx):
+      # `/tmp/...` is NOT in the allowlist; the driver fails closed
+      # with `EProtocol` before touching the filesystem.
+      let op = PrivilegedOperation(kind: pokFsSystemDirectory,
+        address: "fdOos", fsdPath: "/tmp/repro-fssystemdir-out-of-scope",
+        fsdAclPresent: false, fsdDestroy: false)
+      var raised = false
+      try:
+        discard applyFsSystemDirectory(op)
+      except CatchableError:
+        raised = true
+      check raised
 
 suite "repro_elevation: env.systemVariable merge (Phase C)":
 
