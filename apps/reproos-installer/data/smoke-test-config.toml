@@ -1,0 +1,36 @@
+# M9.R.23.5 — minimal smoke-test config for the --automated installer
+# entry point. Used by the M9.R.23.5 smoke harness:
+#
+#   REPRO_DISK_DRY_RUN=1 QT_QPA_PLATFORM=offscreen \
+#     reproos-installer --automated /path/to/smoke-test-config.toml
+#
+# Under REPRO_DISK_DRY_RUN=1 the install() driver logs "would do X" for
+# every destructive operation + returns success without spawning the
+# underlying CLI commands. This is the dev-host smoke; a real install
+# requires Hyper-V / QEMU with a writable target disk (M9.R.24).
+#
+# Format: key = "value" (one per line). The parser strips surrounding
+# double quotes + skips blank lines + # comments. No nested tables.
+
+hostname = "smoke-host"
+locale = "en_US.UTF-8"
+timezone = "UTC"
+keymap = "us"
+
+username = "smoke-user"
+fullName = "Smoke Tester"
+password = "smoke-pass-changeme"
+isAdmin = "true"
+
+# Disk preset: simple → GPT + ESP(vfat /boot) + ext4(/).
+diskoPreset = "simple"
+targetDevice = "/dev/sda"
+diskPassphrase = ""
+
+# Desktop environment selection; the rendered system.nim imports
+# modules/de/<desktopKind>.nim.
+desktopKind = "plasma"
+
+# Wizard acks the wipe automatically in --automated mode (the operator
+# wrote the config file by hand, so they already opted in).
+wipeAcknowledged = "true"
