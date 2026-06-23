@@ -631,6 +631,166 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "fs.systemFile", addr0, fields,
       dependsOn)
 
+# ---------------------------------------------------------------------
+# fs.systemDirectory + inline NTFS ACL builder.
+#
+# `fsSystemDirectory` mirrors `fsSystemFile` minus `content` / `mode`,
+# plus an OPTIONAL `acl` parameter that bundles the directory's NTFS
+# DACL specification atomically with the directory declaration. The
+# corresponding driver creates the directory and (when `acl` is set)
+# stamps the declared ACL via `icacls` in one observe / apply cycle, so
+# operators no longer need to declare a `windows.acl` companion stanza
+# alongside every protected directory.
+#
+# The ACL is built from `ntfsAcl(owner, entries, inheritance)` with each
+# entry produced by `aclEntry(principal, rights, type)`. The builders
+# emit canonical ACE strings in the same `icacls /grant`-compatible form
+# `windowsAcl` already accepts (e.g. `"BUILTIN\\Administrators:(F)"`),
+# so the driver can re-use the existing icacls path without an extra
+# layer of translation.
+# ---------------------------------------------------------------------
+
+type
+  AclRight* = enum
+    ## The NTFS access right shorthand exposed by `aclEntry`. Maps to
+    ## an `icacls` permission code (the parenthesised letter group):
+    ##
+    ##   `FullControl`     -> `(F)`   — full control (read, write,
+    ##                                  delete, change permissions,
+    ##                                  take ownership).
+    ##   `ReadAndExecute`  -> `(RX)`  — read + execute.
+    ##   `Modify`          -> `(M)`   — read, write, execute, delete.
+    ##   `Read`            -> `(R)`   — read.
+    ##   `Write`           -> `(W)`   — write.
+    ##
+    ## The icacls flag set is much larger; this enum surfaces only the
+    ## five rights production profiles actually need today. Adding a
+    ## new right is a typed change at this enum + the `$` mapping
+    ## below; the driver path stays unchanged because the entry
+    ## reaches it as a canonical `icacls` ACE string.
+    FullControl
+    ReadAndExecute
+    Modify
+    Read
+    Write
+
+  AclEntryType* = enum
+    ## The ACE direction. `Allow` produces the standard
+    ## `<principal>:(<rights>)` ACE the icacls `/grant` verb consumes.
+    ## `Deny` produces a `<principal>:(D,<rights>)` form whose leading
+    ## `D` code instructs icacls to set a deny ACE rather than an
+    ## allow ACE. The driver branches on the leading `D` flag at apply
+    ## time.
+    Allow
+    Deny
+
+  AclInheritance* = enum
+    ## Inheritance behaviour the directory's DACL inherits from its
+    ## parent. Mapped to one of the string vocabulary
+    ## `windowsAcl.inheritanceMode` already understands, plus a new
+    ## `protected-clear-inherited` value for the actions-runner case:
+    ## disable inheritance AND clear every previously-inherited ACE so
+    ## only the explicit declared ACEs remain. The existing
+    ## `disabled-replace` is the closest sibling; the new value's
+    ## stricter semantics are the production profile's request.
+    Enabled
+    DisabledReplace
+    DisabledConvert
+    ProtectedClearInherited
+
+  NtfsAclSpec* = object
+    ## A packed declaration of the NTFS DACL the directory should
+    ## carry. `present == false` means "the directory's ACL is
+    ## unmanaged — let the OS / parent inheritance decide"; the driver
+    ## skips every icacls call in that mode and only creates / removes
+    ## the directory. When `present == true` the driver:
+    ##
+    ##   1. (optional) takes ownership via `takeown` + `icacls /setowner`;
+    ##   2. applies the inheritance mode (skipped for `enabled`);
+    ##   3. issues an `icacls /grant` per entry.
+    present*: bool
+    owner*: string
+    entries*: seq[string]
+    inheritance*: string
+      ## Serialized form fed straight to the driver — one of `enabled`,
+      ## `disabled-replace`, `disabled-convert`,
+      ## `protected-clear-inherited`. Stored as a string (not an enum
+      ## value) so the `pushResource` field table can carry it
+      ## verbatim through the existing string-keyed transport.
+
+proc aclEntry*(principal: string; rights: AclRight;
+               `type`: AclEntryType = Allow): string =
+  ## Build a canonical `<principal>:(<rights>)` ACE string. The
+  ## principal must be NTAccount-form (`BUILTIN\\Administrators`,
+  ## `NT AUTHORITY\\SYSTEM`) or a bare local name; the rights enum maps
+  ## to one of the five icacls permission codes documented above. An
+  ## `Allow` entry produces `"<principal>:(<flag>)"`; a `Deny` entry
+  ## produces `"<principal>:(D,<flag>)"` — the leading `D` is the
+  ## icacls `/deny`-style marker the driver pivots on at apply time.
+  ##
+  ## The principal is the operator's responsibility — Nim's string
+  ## literal already represents the backslash in `BUILTIN\\Administrators`
+  ## as a single `\` byte, which is the form `icacls` expects.
+  let flag =
+    case rights
+    of FullControl: "F"
+    of ReadAndExecute: "RX"
+    of Modify: "M"
+    of Read: "R"
+    of Write: "W"
+  case `type`
+  of Allow:
+    principal & ":(" & flag & ")"
+  of Deny:
+    principal & ":(D," & flag & ")"
+
+proc ntfsAcl*(owner: string = ""; entries: openArray[string];
+              inheritance: AclInheritance = Enabled): NtfsAclSpec =
+  ## Pack a complete NTFS DACL declaration. `owner` is an OPTIONAL
+  ## NTAccount-form principal (empty = leave ownership unchanged);
+  ## `entries` is the ACE list produced by `aclEntry`; `inheritance`
+  ## selects how the directory inherits from its parent. The result is
+  ## consumed by `fsSystemDirectory` via the `acl` parameter.
+  let inhStr =
+    case inheritance
+    of Enabled: "enabled"
+    of DisabledReplace: "disabled-replace"
+    of DisabledConvert: "disabled-convert"
+    of ProtectedClearInherited: "protected-clear-inherited"
+  NtfsAclSpec(present: true, owner: owner, entries: @entries,
+              inheritance: inhStr)
+
+template fsSystemDirectory*(targetResources: var seq[ResourceIntent];
+                            path: string;
+                            acl: NtfsAclSpec = NtfsAclSpec(present: false);
+                            address: string = "";
+                            dependsOn: seq[string] = @[]) =
+  ## A managed system-scope directory under a recognized system root.
+  ## The driver creates the directory at apply time (recursively
+  ## auto-creating parents); when `acl` is set, the declared NTFS DACL
+  ## is stamped via `icacls` in the same observe / apply cycle so a
+  ## profile can declare a protected directory atomically rather than
+  ## as a `fs.systemDirectory` + a companion `windows.acl` stanza.
+  ##
+  ## `path` follows the same allowlist as `fsSystemFile` (`/etc/`,
+  ## `/usr/local/etc/`, `${PROGRAMDATA}`) WITH an additional carve-out
+  ## for top-level Windows install-root paths like
+  ## `C:\\actions-runner` — see `systemDirectoryScopeError` for the
+  ## rationale.
+  ##
+  ## Address default: `fs.systemDirectory:<path>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["path"] = strField(path)
+    if acl.present:
+      fields["aclOwner"] = strField(acl.owner)
+      fields["aclEntries"] = listField(acl.entries)
+      fields["aclInheritance"] = strField(acl.inheritance)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("fs.systemDirectory", path)
+    pushResource(targetResources, "fs.systemDirectory", addr0, fields,
+      dependsOn)
+
 template envSystemVariable*(targetResources: var seq[ResourceIntent];
                             name: string;
                             contribute: seq[string];
