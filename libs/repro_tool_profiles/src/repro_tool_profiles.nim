@@ -3921,6 +3921,30 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
     addUniquePath(profile.pkgConfigSearchList, prefixRoot / "share" / "pkgconfig")
     # CPATH — include/ dir.
     addUniquePath(profile.cpathList, prefixRoot / "include")
+    # M9.R.15r.3 — also expose every one-level subdir of include/ so
+    # nested-header packages (freetype's ``include/freetype2/ft2build.h``
+    # is the motivating case) are reachable when a downstream consumer
+    # transitively pulls a public header that references the nested
+    # symbol via a bare ``#include <ft2build.h>``.
+    ##
+    ## The bare CPATH thread of ``include/`` is not sufficient because
+    ## gcc resolves ``<ft2build.h>`` against ``include/ft2build.h``
+    ## (which doesn't exist) rather than walking nested subdirs.
+    ## pkg-config consumers query freetype2.pc explicitly and get
+    ## ``-I${includedir}/freetype2`` from its Cflags, so direct
+    ## consumers (pango, qt6-base) work; but transitive consumers
+    ## (mutter -> cairo-ft.h -> <ft2build.h>) do not.
+    ##
+    ## Adding one-level subdirs to CPATH is a safe overshoot: it
+    ## enables ``#include <ft2build.h>`` resolution against
+    ## ``include/freetype2/ft2build.h`` without preventing the existing
+    ## ``#include <freetype2/ft2build.h>`` path from also resolving
+    ## (gcc tries each ``-I`` in order; both succeed).
+    let includeRoot = prefixRoot / "include"
+    if dirExists(extendedPath(includeRoot)):
+      for kind, sub in walkDir(includeRoot, relative = false):
+        if kind == pcDir:
+          addUniquePath(profile.cpathList, sub)
     # LIBRARY_PATH / LD_LIBRARY_PATH — lib/ dir (+ lib64 on multilib
     # distros).
     addUniquePath(profile.libraryPathList, prefixRoot / "lib")
