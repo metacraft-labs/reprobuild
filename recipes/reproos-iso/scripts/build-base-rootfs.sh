@@ -88,6 +88,40 @@ PKG_LIST=(
   sddm
   # session-bus support for the DE that sddm spawns
   xdg-desktop-portal
+  # M9.R.24.1 -- Wayland-session DE runtimes.
+  #
+  # Pre-M9.R.24, the live ISO only had from-source DE binaries unioned
+  # into the staged tree. The from-source sway/kwin/mutter recipes
+  # don't bundle their full dep graph (libwlroots, libpango, libKF6*,
+  # libGLESv2) so the moment SDDM execs the launcher (`exec sway`)
+  # the loader aborts with "shared library: cannot open shared object
+  # file" -- which propagates as exec exit 127, sddm-helper returns
+  # 127, and SDDM busy-loops adding+removing displays without ever
+  # painting the framebuffer.
+  #
+  # Fix: apt-install the full Debian DE stack so the loader finds
+  # every NEEDED soname at the standard /usr/lib search paths.
+  # stage-de-rootfs.sh's `cp -rL --no-clobber` overlay then preserves
+  # the working Debian binaries; the from-source binaries only
+  # contribute libs+resources that aren't already in the Debian set
+  # (because the from-source linkage targets versions Debian doesn't
+  # ship -- libwlroots-0.19 vs Debian's 0.18, etc).
+  #
+  # Compositors: sway (autologin kiosk wrapper for the reproos
+  # installer), kwin-wayland (Plasma session), mutter (GNOME session).
+  sway kwin-wayland mutter
+  # GL ES 2 runtime -- mutter + Qt6 RHI need libGLESv2.so.2 unrelated
+  # to the compositor packages above.
+  libgles2
+  # Plasma + GNOME session managers.
+  plasma-workspace gnome-session
+  # KF6 frameworks (transitive deps of plasma-workspace + kwin).
+  libkf6coreaddons6 libkf6i18n6 libkf6configcore6 libkf6configgui6
+  libkf6configwidgets6 libkf6colorscheme6 libkf6service6 libkf6svg6
+  libkf6widgetsaddons6 libkf6windowsystem6 libkf6crash6
+  libkf6globalaccel6 libkf6idletime6
+  # qt6-concurrent (kwin link target)
+  libqt6concurrent6
 )
 
 # Stable digest of the package list for the cache key. Sort first so
