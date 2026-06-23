@@ -117,10 +117,23 @@ proc applyDiskLayout*(layout: DiskLayout;
       ctx.recordOperation(wipefsAll(d.device))
 
     # Step 3 + 4: partition tables + partitions.
+    # NOTE: parted mklabel + sgdisk -n on the SAME device race against
+    # each other for the partition-table metadata. We use sgdisk -o
+    # (zap + create a new GPT) for both steps when table=gpt; for mbr
+    # we fall back to parted mklabel msdos + sgdisk for partitions
+    # (which sgdisk supports via its MBR mode).
     for diskName, d in ctx.layout.disks:
-      ctx.recordOperation(partedMklabel(d.device, d.`type`))
+      let tableKind = if d.`type`.len == 0: "gpt" else: d.`type`
+      if tableKind == "gpt":
+        # `sgdisk -o` zaps any existing GPT and creates a fresh empty
+        # GPT in one operation, which avoids the parted-then-sgdisk
+        # metadata race.
+        ctx.recordOperation(execTool("sgdisk",
+          @["sgdisk", "-o", d.device]))
+      else:
+        # MBR path: parted is the right tool for the label.
+        ctx.recordOperation(partedMklabel(d.device, tableKind))
       var num = 1
-      var prevSize = "1MiB"  # First partition starts at 1MiB for alignment.
       for pName, p in d.partitions:
         let gptType = gptTypeCodeFor(p.`type`)
         let sizeArg =
@@ -140,6 +153,11 @@ proc applyDiskLayout*(layout: DiskLayout;
         if p.bootable:
           ctx.recordOperation(partedSetBootable(d.device, num, true))
         inc num
+      # After writing partitions, ask the kernel to re-read the table
+      # so /dev/<disk>pN show up for the mkfs / cryptsetup steps.
+      if findExe("partprobe").len > 0:
+        ctx.recordOperation(execTool("partprobe",
+          @["partprobe", d.device]))
 
     # Step 5 + 6 + 7 + 8: walk each partition's content recursively.
     for diskName, d in ctx.layout.disks:

@@ -161,17 +161,19 @@ suite "M9.R.22b.2: apply driver against loopback / dry-run":
       @["mkfs.vfat", "-F", "32", "-n", "ESP", "/dev/loop0p1"]
     check rootOp.argv ==
       @["mkfs.ext4", "-F", "-L", "rootfs", "/dev/loop0p2"]
-    # Partition table goes through partedMklabel BEFORE any sgdisk -n.
+    # GPT table goes through `sgdisk -o` (zap + create empty GPT) so
+    # parted mklabel + sgdisk -n don't race on the same device. The
+    # `-o` sgdisk runs FIRST, then the `sgdisk -n` partition creates.
     var labelIdx = -1
-    var firstSgdiskIdx = -1
+    var firstPartIdx = -1
     for i, op in r.operations:
-      if op.tool == "parted" and "mklabel" in op.argv and labelIdx < 0:
+      if op.tool == "sgdisk" and "-o" in op.argv and labelIdx < 0:
         labelIdx = i
-      if op.tool == "sgdisk" and firstSgdiskIdx < 0:
-        firstSgdiskIdx = i
+      if op.tool == "sgdisk" and "-n" in op.argv and firstPartIdx < 0:
+        firstPartIdx = i
     check labelIdx >= 0
-    check firstSgdiskIdx >= 0
-    check labelIdx < firstSgdiskIdx
+    check firstPartIdx >= 0
+    check labelIdx < firstPartIdx
 
   test "Test#2: GPT + LUKS + btrfs + subvols — walker recursion":
     let layout = buildLuksBtrfsLayout("/dev/loop1")
