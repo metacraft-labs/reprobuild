@@ -444,50 +444,40 @@ fi
 qt6_core_src="$(find /nix/store -maxdepth 4 -path '*qtbase*/lib/libQt6Core.so.6.9*' \
                 -type f 2>/dev/null | head -1)"
 if [ -n "$qt6_core_src" ]; then
-  qt6_libdir="$(dirname "$qt6_core_src")"
-  echo "[stage-de-rootfs] bundling Qt6 9.x from $qt6_libdir"
-  # Put EVERY bundled Qt6 lib at /usr/lib/x86_64-linux-gnu/ so the
-  # loader picks up a coherent 6.9 set rather than mixing 6.9 Core
-  # with 6.8 Qml/Quick from Debian (which produces
-  # "undefined symbol Qt_6_PRIVATE_API"). Force-overwrite Debian's
-  # Qt6 libs (the package files; the SONAME symlinks point at the
-  # bundled 6.9.x file after this step).
+  echo "[stage-de-rootfs] bundling Qt6 9.x from all nix-store qt* packages"
   qt6_dst="$STAGE_DIR/usr/lib/x86_64-linux-gnu"
   mkdir -p "$qt6_dst"
-  for f in "$qt6_libdir"/libQt6*.so.6*; do
-    [ -f "$f" ] || continue
+  # Walk EVERY nix-store qt-package (qtbase, qtdeclarative, qtwayland,
+  # qtquickcontrols2, ...) so we pick up libQt6Qml from qtdeclarative,
+  # libQt6Core from qtbase, etc. Otherwise we mix 6.9 Core with 6.8
+  # Qml and the loader complains 'Qt_6_PRIVATE_API not found'.
+  qt6_count=0
+  while IFS= read -r f; do
     base="$(basename "$f")"
     cp -f "$f" "$qt6_dst/$base"
-    # Strip "6.9.3" tail to "6" for the major-SONAME symlink that
-    # the installer's binary actually NEEDED.
-    soname6="$(echo "$base" | sed -E 's/(libQt6[^.]+)\.so\.6\.[0-9]+\.[0-9]+/\1.so.6/')"
-    if [ "$soname6" != "$base" ]; then
-      ln -sf "$base" "$qt6_dst/$soname6"
-    fi
-  done
-  # Mirror the same Qt6 set into /usr/lib so cache+ldconfig finds it.
-  for f in "$qt6_libdir"/libQt6*.so.6*; do
-    [ -f "$f" ] || continue
-    base="$(basename "$f")"
     cp -f "$f" "$STAGE_DIR/usr/lib/$base"
     soname6="$(echo "$base" | sed -E 's/(libQt6[^.]+)\.so\.6\.[0-9]+\.[0-9]+/\1.so.6/')"
     if [ "$soname6" != "$base" ]; then
+      ln -sf "$base" "$qt6_dst/$soname6"
       ln -sf "$base" "$STAGE_DIR/usr/lib/$soname6"
     fi
+    qt6_count=$((qt6_count + 1))
+  done < <(find /nix/store -maxdepth 4 \
+            -path '/nix/store/*qt*/lib/libQt6*.so.6.9*' \
+            -type f 2>/dev/null)
+  echo "[stage-de-rootfs] copied $qt6_count Qt6 9.x .so files"
+  # Plugins (offscreen/xcb/wayland QPA) + QML dirs from every Qt6 9.x
+  # package.
+  for qtpkg in /nix/store/*qt*-6.9.*; do
+    [ -d "$qtpkg/lib/qt-6" ] || continue
+    for sub in plugins qml; do
+      if [ -d "$qtpkg/lib/qt-6/$sub" ]; then
+        mkdir -p "$STAGE_DIR/usr/lib/qt6/$sub"
+        cp -rLfn "$qtpkg/lib/qt-6/$sub/." \
+          "$STAGE_DIR/usr/lib/qt6/$sub/" 2>/dev/null || true
+      fi
+    done
   done
-  # Also bundle the Qt6 plugins dir (platforms/, etc) so the installer
-  # can find the offscreen QPA plugin.
-  qt6_pluginsdir="$qt6_libdir/qt-6/plugins"
-  if [ -d "$qt6_pluginsdir" ]; then
-    mkdir -p "$STAGE_DIR/usr/lib/qt6/plugins"
-    cp -rL "$qt6_pluginsdir/." "$STAGE_DIR/usr/lib/qt6/plugins/" 2>/dev/null || true
-  fi
-  # Same for Qt6 qml/
-  qt6_qmldir="$qt6_libdir/qt-6/qml"
-  if [ -d "$qt6_qmldir" ]; then
-    mkdir -p "$STAGE_DIR/usr/lib/qt6/qml"
-    cp -rL "$qt6_qmldir/." "$STAGE_DIR/usr/lib/qt6/qml/" 2>/dev/null || true
-  fi
 fi
 
 clingo_src="$(find /nix/store -maxdepth 3 -name 'libclingo.so.4*' \
