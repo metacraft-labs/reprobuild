@@ -283,36 +283,38 @@ when defined(linux):
     test "Test#5 (loopback): simple-ext4 against a 128M image":
       if not canRunLoopbackE2e():
         skip()
-        return
-      # Set up a real 128M loopback image.
-      let img = "/tmp/disko-test-m9r22b-2.img"
-      if fileExists(img): removeFile(img)
-      let dd = execCmdEx("dd if=/dev/zero of=" & img &
-        " bs=1M count=128 status=none")
-      check dd.exitCode == 0
-      defer:
-        try: removeFile(img) except: discard
-      # Create the loop device.
-      let loopDev = losetupCreate(img)
-      defer:
-        try: discard losetupDetach(loopDev) except: discard
-      # Apply: GPT + ESP + ext4 root.
-      let layout = buildSimpleEsp4Layout(loopDev)
-      let r = applyDiskLayout(layout)
-      check not r.failure
-      if r.failure:
-        echo "operations log:"
-        for op in r.operations:
-          echo "  ", op.tool, ": ", op.cmd, " (exit ", op.exit, ")"
-        echo "failure: ", r.failureMsg
-      # Verify with blkid: the ext4 root should be detected on the
-      # second partition (loopNp2 on Linux).
-      let p2 = partitionDevicePath(loopDev, 2)
-      let blkidR = execCmdEx("blkid -s TYPE -o value " & p2)
-      check blkidR.exitCode == 0
-      check blkidR.output.strip() == "ext4"
-      # ESP on p1.
-      let p1 = partitionDevicePath(loopDev, 1)
-      let blkidP1 = execCmdEx("blkid -s TYPE -o value " & p1)
-      check blkidP1.exitCode == 0
-      check blkidP1.output.strip() == "vfat"
+      else:
+        # Set up a real 128M loopback image.
+        let img = "/tmp/disko-test-m9r22b-2.img"
+        if fileExists(img): removeFile(img)
+        let dd = execCmdEx("dd if=/dev/zero of=" & img &
+          " bs=1M count=128 status=none")
+        check dd.exitCode == 0
+        # Create the loop device.
+        let loopDev = losetupCreate(img)
+        # Apply: GPT + ESP + ext4 root.
+        let layout = buildSimpleEsp4Layout(loopDev)
+        let r = applyDiskLayout(layout)
+        if r.failure:
+          echo "operations log:"
+          for op in r.operations:
+            echo "  ", op.tool, ": ", op.cmd, " (exit ", op.exit, ")"
+          echo "failure: ", r.failureMsg
+        check not r.failure
+        # Re-read the kernel's view of the partition table so blkid can
+        # see the freshly written partitions.
+        discard execCmdEx("partprobe " & loopDev)
+        # Verify with blkid: the ext4 root should be detected on the
+        # second partition (loopNp2 on Linux).
+        let p2 = partitionDevicePath(loopDev, 2)
+        let blkidR = execCmdEx("blkid -s TYPE -o value " & p2)
+        check blkidR.exitCode == 0
+        check blkidR.output.strip() == "ext4"
+        # ESP on p1.
+        let p1 = partitionDevicePath(loopDev, 1)
+        let blkidP1 = execCmdEx("blkid -s TYPE -o value " & p1)
+        check blkidP1.exitCode == 0
+        check blkidP1.output.strip() == "vfat"
+        # Cleanup.
+        try: discard losetupDetach(loopDev) except CatchableError: discard
+        try: removeFile(img) except CatchableError: discard
