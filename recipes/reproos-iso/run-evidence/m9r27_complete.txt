@@ -289,7 +289,7 @@ WHAT'S NOT YET VERIFIED (M9.R.27 honest gaps)
   build" (waiting on 9 leaf recipes) + "G8 post-rebuild QEMU smoke"
   (waiting on G6 finish).
 
-COMMITS LANDED (12)
+COMMITS LANDED (14)
 ====================
   84608ab7  M9.R.27.1: mutter end-to-end rebuild + remove ld.so.conf workaround
   5320fc04  M9.R.27.4a: from-source shadow-utils recipe
@@ -303,6 +303,8 @@ COMMITS LANDED (12)
   c9e6a462  M9.R.27.7: hybrid BIOS+UEFI ISO via merged grub modules dir
   e1f5a2dd  M9.R.27.6: chmod +w before re-cleanup of stale de-rootfs
   48ce98e0  M9.R.27.3: from-source xwayland leaf x.org library recipes (9)
+  b26ead32  M9.R.27: update evidence file — G3 DSL-CLOSED + 19 smoke tests
+  954eebd1  M9.R.27.7: hybrid grub via grub-mkimage for EFI + mkrescue for BIOS
 
 All commits pushed to origin/dev and origin/main; eli-wsl reset to
 origin/dev between every commit-push cycle per the brief's discipline.
