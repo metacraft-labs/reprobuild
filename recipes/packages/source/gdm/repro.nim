@@ -310,7 +310,25 @@ package gdmSource:
         # the build minimal.
         "libaudit=disabled",
       ]
-      let pkg = meson_package(srcDir = "./src", configureOptions = opts)
+      # M9.R.16.4 — strip the unconditional ``gnome.generate_gir`` call
+      # from ``libgdm/meson.build``. gdm 47.x ships no meson option to
+      # disable libgdm's gir output; the call requires ``GLib-2.0.gir``
+      # on the gir-search-path which only exists when glib2 is built
+      # with ``introspection=enabled``. Enabling glib2 introspection
+      # would introduce a circular build-time dep (glib2 needs
+      # gobject-introspection's libgirepository headers; gobject-
+      # introspection's libgirepository links libglib2). v1 doesn't
+      # consume the libgdm gir/typelib at runtime (no language bindings
+      # in the closure), so the safe path is patching the source to
+      # skip the gir step entirely. The ``sed`` rewrites the
+      # ``libgdm_gir = gnome.generate_gir(...)`` block (lines 89-101 of
+      # ``libgdm/meson.build`` in 47.0) to a comment, leaving every
+      # other libgdm artifact (libgdm.so + pkg-config + headers) intact.
+      let srcPatches = @[
+        "sed -i '/^libgdm_gir = gnome.generate_gir(libgdm,$/,/^)$/c\\# M9.R.16.4: libgdm gir generation stripped (no GLib-2.0.gir available)' src/libgdm/meson.build",
+      ]
+      let pkg = meson_package(srcDir = "./src", configureOptions = opts,
+                              srcPatches = srcPatches)
       discard pkg.executable("gdm")
       discard pkg.executable("gdmGreeterSession")
     finally:
