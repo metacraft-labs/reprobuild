@@ -27,6 +27,8 @@ import std/[options, os, osproc, strutils, tables]
 
 import repro_profile/emit
 import repro_profile/types
+import repro_profile/disk_tools
+import repro_profile/disk_apply
 
 # ---------------------------------------------------------------------
 # Plan output: human-readable summary of a DiskLayout.
@@ -343,36 +345,103 @@ proc runDiskApply(opts: DiskCliOptions): int =
       "usage: repro disk apply <disko.nim> [--device DEV] --confirm")
     return 2
   if not opts.confirm:
+    # --confirm is the explicit destructive opt-in. Print the plan
+    # the user is about to run and abort with exit-2 so it's
+    # impossible to wipe a disk on a typo.
+    let outcome = loadDiskoFromSource(opts.source)
+    if outcome.failure:
+      stderr.writeLine("repro disk apply: " & outcome.failureMsg)
+      return 2
     stderr.writeLine("repro disk apply: refusing to run destructive " &
       "operation without --confirm")
+    stderr.writeLine("Planned operations (re-run with --confirm to " &
+      "execute):")
+    stderr.writeLine(outcome.text)
     return 2
-  stderr.writeLine("repro disk apply: " & PendingNotice)
-  stderr.writeLine("  source: " & opts.source)
+  # --confirm given: load the layout + run the apply driver.
+  let outcome = loadDiskoFromSource(opts.source)
+  if outcome.failure:
+    stderr.writeLine("repro disk apply: " & outcome.failureMsg)
+    case outcome.failureKind
+    of dpfMissingFile, dpfNoDisko: return 2
+    of dpfCompileFailed, dpfRunFailed, dpfParseFailed: return 1
+  let dl = outcome.spec.disko.get()
+  # --target / --device scoping: when --device is set, only operate
+  # on that one disk (safety guard against typos in a multi-disk
+  # disko.nim).
+  var scoped: DiskLayout
   if opts.device.len > 0:
-    stderr.writeLine("  device override: " & opts.device)
-  if opts.target.len > 0:
-    stderr.writeLine("  target prefix: " & opts.target)
-  return 2
+    var found = false
+    for diskName, d in dl.disks:
+      if d.device == opts.device:
+        scoped.disks[diskName] = d
+        found = true
+    if not found:
+      stderr.writeLine("repro disk apply: --device " & opts.device &
+        " does not match any disk in " & opts.source)
+      stderr.writeLine("Available devices:")
+      for _, d in dl.disks:
+        stderr.writeLine("  " & d.device)
+      return 2
+    # Scope ZFS pools too: keep only the pools whose devices all
+    # match the scoped disks.
+    for pool in dl.pools:
+      var allMatch = true
+      for pd in pool.devices:
+        if pd != opts.device:
+          allMatch = false; break
+      if allMatch: scoped.pools.add pool
+  else:
+    scoped = dl
+  let passphrases = initTable[string, string]()
+  let r = applyDiskLayout(scoped, passphrases)
+  # Log every operation that ran so the user can audit.
+  for op in r.operations:
+    stderr.writeLine("[apply] " & op.tool & ": " & op.cmd &
+      " (exit " & $op.exit & ")")
+  if r.failure:
+    stderr.writeLine("repro disk apply: FAILED at step " &
+      r.failureStep & " — " & r.failureMsg)
+    return 1
+  stderr.writeLine("repro disk apply: OK (" & $r.operations.len &
+    " operations)")
+  return 0
 
 proc runDiskMount(opts: DiskCliOptions): int =
   if opts.source.len == 0 or opts.target.len == 0:
     stderr.writeLine("repro disk mount: missing arguments\n" &
       "usage: repro disk mount <disko.nim> --target /mnt")
     return 2
-  stderr.writeLine("repro disk mount: " & PendingNotice)
-  stderr.writeLine("  source: " & opts.source)
-  stderr.writeLine("  target: " & opts.target)
-  return 2
+  let outcome = loadDiskoFromSource(opts.source)
+  if outcome.failure:
+    stderr.writeLine("repro disk mount: " & outcome.failureMsg)
+    return 2
+  let dl = outcome.spec.disko.get()
+  let plan = collectMountPlan(dl, opts.target)
+  stderr.writeLine("repro disk mount: " & $plan.len & " entries")
+  for (dev, mp) in plan:
+    stderr.writeLine("  " & dev & " -> " & mp)
+  # Actually mount when --confirm is set; otherwise plan-only.
+  if opts.confirm:
+    discard mountDiskLayout(dl, opts.target)
+    stderr.writeLine("repro disk mount: mounted " & $plan.len &
+      " entries under " & opts.target)
+  return 0
 
 proc runDiskUnmount(opts: DiskCliOptions): int =
   if opts.source.len == 0 or opts.target.len == 0:
     stderr.writeLine("repro disk unmount: missing arguments\n" &
       "usage: repro disk unmount <disko.nim> --target /mnt")
     return 2
-  stderr.writeLine("repro disk unmount: " & PendingNotice)
-  stderr.writeLine("  source: " & opts.source)
-  stderr.writeLine("  target: " & opts.target)
-  return 2
+  let outcome = loadDiskoFromSource(opts.source)
+  if outcome.failure:
+    stderr.writeLine("repro disk unmount: " & outcome.failureMsg)
+    return 2
+  let dl = outcome.spec.disko.get()
+  let plan = collectMountPlan(dl, opts.target)
+  stderr.writeLine("repro disk unmount: " & $plan.len & " entries")
+  unmountDiskLayout(plan)
+  return 0
 
 proc runDiskGenerate(opts: DiskCliOptions): int =
   let probeRoot = if opts.probe.len > 0: opts.probe else: "/"
@@ -394,10 +463,10 @@ proc runDiskImage(opts: DiskCliOptions): int =
 
 proc renderDiskUsage(): string =
   "usage: repro disk {plan|apply|mount|unmount|generate|image} ...\n" &
-  "  repro disk plan <disko.nim>            (v1: full implementation)\n" &
-  "  repro disk apply <disko.nim> --confirm (M9.R.22b: pending)\n" &
-  "  repro disk mount <disko.nim> --target /mnt   (M9.R.22b: pending)\n" &
-  "  repro disk unmount <disko.nim> --target /mnt (M9.R.22b: pending)\n" &
+  "  repro disk plan <disko.nim>            (v1: full)\n" &
+  "  repro disk apply <disko.nim> --confirm [--device DEV] (M9.R.22b: full)\n" &
+  "  repro disk mount <disko.nim> --target /mnt [--confirm] (M9.R.22b: full)\n" &
+  "  repro disk unmount <disko.nim> --target /mnt (M9.R.22b: full)\n" &
   "  repro disk generate --probe /          (M9.R.22c: pending)\n" &
   "  repro disk image <disko.nim> --output PATH --size SIZE   (M9.R.22c: pending)\n"
 

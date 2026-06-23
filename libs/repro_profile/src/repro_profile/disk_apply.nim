@@ -251,6 +251,50 @@ proc applyContentNode*(ctx: ApplyContext; device, ctxKey: string;
 # should unmount on cleanup.
 # ---------------------------------------------------------------------
 
+proc walkMounts(acc: var seq[(string, string)];
+                target, device: string; c: ContentSpec) =
+  ## Recursive helper for ``collectMountPlan``. Pulled out as a free
+  ## proc (rather than a closure) so Nim's lent-iterator memory-safety
+  ## check is happy.
+  case c.kind
+  of cfsNone: discard
+  of cfsFilesystem:
+    if c.mountpoint.len > 0:
+      # mountpoint "/" → target, mountpoint "/boot" → target/boot.
+      let mp =
+        if c.mountpoint == "/": target
+        else: target & c.mountpoint
+      acc.add((device, mp))
+      # btrfs subvolumes mount AFTER the top-level mount; emit each.
+      if c.format == "btrfs":
+        for s in c.subvols:
+          # subvol path is the *mount target* for the subvol; we
+          # mount the SAME device with -o subvol=<name>. The walker
+          # captures this as a (device, mountpoint) pair where the
+          # device repeats — the caller distinguishes by repetition.
+          if s.path.len > 0 and s.path != "/":
+            let smp =
+              if s.path == "/": target
+              else: target & s.path
+            acc.add((device, smp))
+  of cfsEncrypted:
+    if not c.inner.isNil:
+      let mapper = "/dev/mapper/" &
+        extractFilename(device).replace(".", "_") & "_crypt"
+      walkMounts(acc, target, mapper, c.inner[])
+  of cfsLvm:
+    for vol in c.volumes:
+      if not vol.content.isNil:
+        let lvDev = "/dev/" & c.vg & "/" & vol.name
+        walkMounts(acc, target, lvDev, vol.content[])
+  of cfsZfs:
+    if c.zfsMountpoint.len > 0:
+      let mp =
+        if c.zfsMountpoint == "/": target
+        else: target & c.zfsMountpoint
+      acc.add((c.dataset, mp))
+  of cfsSwap: discard
+
 proc collectMountPlan*(layout: DiskLayout; target: string):
     seq[(string, string)] =
   ## Walk every ContentSpec and emit ``(device, mountpoint)`` pairs in
@@ -258,52 +302,11 @@ proc collectMountPlan*(layout: DiskLayout; target: string):
   ## order). ``target`` is the prefix (typically ``/mnt``); the returned
   ## mountpoints have ``target`` prepended.
   result = @[]
-  proc walk(device: string; c: ContentSpec) =
-    case c.kind
-    of cfsNone: discard
-    of cfsFilesystem:
-      if c.mountpoint.len > 0:
-        # mountpoint "/" → target, mountpoint "/boot" → target/boot.
-        let mp =
-          if c.mountpoint == "/": target
-          else: target & c.mountpoint
-        result.add((device, mp))
-        # btrfs subvolumes mount AFTER the top-level mount; emit each.
-        if c.format == "btrfs":
-          for s in c.subvols:
-            # subvol path is the *mount target* for the subvol; we
-            # mount the SAME device with -o subvol=<name>. For the
-            # plan output we capture this as a special entry where the
-            # mountpoint is the subvol path and the device is the
-            # btrfs device. Caller distinguishes via the device repeat.
-            if s.path.len > 0 and s.path != "/":
-              let smp =
-                if s.path == "/": target
-                else: target & s.path
-              result.add((device, smp))
-    of cfsEncrypted:
-      if not c.inner.isNil:
-        let mapper = "/dev/mapper/" &
-          extractFilename(device).replace(".", "_") & "_crypt"
-        walk(mapper, c.inner[])
-    of cfsLvm:
-      for vol in c.volumes:
-        if not vol.content.isNil:
-          let lvDev = "/dev/" & c.vg & "/" & vol.name
-          walk(lvDev, vol.content[])
-    of cfsZfs:
-      if c.zfsMountpoint.len > 0:
-        let mp =
-          if c.zfsMountpoint == "/": target
-          else: target & c.zfsMountpoint
-        result.add((c.dataset, mp))
-    of cfsSwap: discard
-
   for _, d in layout.disks:
     var num = 1
     for _, p in d.partitions:
       let partDev = partitionDevicePath(d.device, num)
-      walk(partDev, p.content)
+      walkMounts(result, target, partDev, p.content)
       inc num
 
   # Sort by mountpoint depth (shallow first) so "/" is mounted before
