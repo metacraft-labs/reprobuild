@@ -270,11 +270,16 @@ package gdmSource:
     ## closes.
     discard
 
-  executable gdmGreeterSession:
-    ## ``/usr/libexec/gdm-greeter-session`` — the PAM-authenticated
-    ## greeter binary gdm spawns as the login-screen UI; runs as the
-    ## unprivileged ``gdm`` system user, displays the login form,
-    ## hands off to the user session on successful authentication.
+  executable gdmSessionWorker:
+    ## ``/usr/libexec/gdm-session-worker`` — the PAM-authenticated
+    ## session-worker binary gdm's daemon spawns to drive the
+    ## per-session PAM conversation. M9.R.16.5: in gdm 47.x there is
+    ## no ``gdm-greeter-session`` binary (the legacy greeter was
+    ## replaced by gnome-shell running in greeter mode under the
+    ## ``gnome-shell --gdm-mode`` invocation). The PAM-side session
+    ## worker is the load-bearing libexec binary for the v1 login
+    ## path; recorded here in place of the historical
+    ## ``gdm-greeter-session``.
     discard
 
   build:
@@ -330,7 +335,7 @@ package gdmSource:
       let pkg = meson_package(srcDir = "./src", configureOptions = opts,
                               srcPatches = srcPatches)
       discard pkg.executable("gdm")
-      discard pkg.executable("gdmGreeterSession")
+      discard pkg.executable("gdmSessionWorker")
     finally:
       clearCurrentOwningPackageOverride()
 
