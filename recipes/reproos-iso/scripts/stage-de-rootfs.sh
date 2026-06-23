@@ -527,19 +527,26 @@ fi
 # are discoverable by dlopen() at runtime. Without this the live-init
 # does NOT regenerate the cache; libclingo isn't found because the
 # stock Debian cache only knows /usr/lib/x86_64-linux-gnu/.
-ldconfig_bin="$(command -v ldconfig || true)"
-if [ -n "$ldconfig_bin" ]; then
-  # -r treats $STAGE_DIR as the root; the cache + dyn-linker conf
-  # paths are interpreted relative to it. Quiet mode -- warnings about
-  # non-symlinked libs are noise (from-source libs land as plain
-  # files, not SONAME-symlink chains).
-  # -r reroots search paths but does NOT redirect the cache output;
-  # by default ldconfig writes to $(nix-store-glibc)/etc/ld.so.cache
-  # which fails on a read-only /nix/store. -C overrides the output
-  # path so we land in $STAGE_DIR/etc/ld.so.cache.
-  "$ldconfig_bin" -r "$STAGE_DIR" -C "$STAGE_DIR/etc/ld.so.cache" 2>&1 | \
+# Use the staged Debian glibc /sbin/ldconfig inside a chroot so the
+# cache writes resolve naturally against $STAGE_DIR. The nix-shell
+# host glibc-bin ldconfig's -r doesn't redirect the cache temp file
+# correctly and falls over creating ld.so.cache~ on a read-only path.
+chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
+if [ -x "$chroot_ldconfig" ]; then
+  # Add /usr/lib (where libclingo + from-source overlays live) to the
+  # search path so ldconfig indexes it. The stock Debian
+  # /etc/ld.so.conf.d/x86_64-linux-gnu.conf only covers the multiarch
+  # subdir.
+  mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
+  cat > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf" <<'EOF'
+/usr/lib
+/usr/lib64
+EOF
+  chroot "$STAGE_DIR" /sbin/ldconfig 2>&1 | \
     grep -vE 'is not a symbolic link|file format not recognized' || true
-  echo "[stage-de-rootfs] rebuilt ld.so.cache in stage"
+  echo "[stage-de-rootfs] rebuilt ld.so.cache via chroot/sbin/ldconfig"
+else
+  echo "[stage-de-rootfs] no chroot/sbin/ldconfig; dlopen() bare-name libs may fail" >&2
 fi
 
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
