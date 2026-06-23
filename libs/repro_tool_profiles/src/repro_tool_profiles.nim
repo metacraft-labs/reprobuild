@@ -3935,15 +3935,36 @@ proc populateFromSourceSearchPathsLocal(profile: var PathOnlyToolProfile;
     ## consumers (pango, qt6-base) work; but transitive consumers
     ## (mutter -> cairo-ft.h -> <ft2build.h>) do not.
     ##
-    ## Adding one-level subdirs to CPATH is a safe overshoot: it
-    ## enables ``#include <ft2build.h>`` resolution against
-    ## ``include/freetype2/ft2build.h`` without preventing the existing
-    ## ``#include <freetype2/ft2build.h>`` path from also resolving
-    ## (gcc tries each ``-I`` in order; both succeed).
+    ## ## Standard-header shadow guard
+    ##
+    ## Some packages (gettext's ``textstyle/`` subdir is the motivating
+    ## case) ship per-platform wrappers that include FILES named after
+    ## standard C/C++ headers (``stdbool.h``, ``stdio.h``, ...). Adding
+    ## such subdirs to CPATH causes gcc to pick up the wrapper instead
+    ## of the system header, leading to infinite include recursion
+    ## (``#include nested depth 200 exceeds maximum of 200``). The
+    ## guard below skips any subdir containing a file whose basename
+    ## matches a well-known standard C header.
     let includeRoot = prefixRoot / "include"
     if dirExists(extendedPath(includeRoot)):
       for kind, sub in walkDir(includeRoot, relative = false):
-        if kind == pcDir:
+        if kind != pcDir: continue
+        var shadowsStandard = false
+        for fkind, child in walkDir(sub, relative = true):
+          if fkind != pcFile: continue
+          case child.toLowerAscii()
+          of "stdbool.h", "stdio.h", "stddef.h", "stdlib.h",
+             "stdint.h", "string.h", "stdarg.h", "assert.h",
+             "errno.h", "ctype.h", "math.h", "time.h", "limits.h",
+             "float.h", "locale.h", "setjmp.h", "signal.h",
+             "wchar.h", "wctype.h", "iso646.h", "stdalign.h",
+             "stdnoreturn.h", "stdatomic.h", "uchar.h",
+             "complex.h", "fenv.h", "inttypes.h", "tgmath.h",
+             "threads.h":
+            shadowsStandard = true
+            break
+          else: discard
+        if not shadowsStandard:
           addUniquePath(profile.cpathList, sub)
     # LIBRARY_PATH / LD_LIBRARY_PATH — lib/ dir (+ lib64 on multilib
     # distros).
