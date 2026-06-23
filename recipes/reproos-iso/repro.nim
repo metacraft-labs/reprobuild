@@ -84,12 +84,16 @@ package reproosIso:
                  "vendor/initrd.img-debian-netinst " &
                  "build/reproos.iso"),
       actionId = "reproosIso.build_iso",
+      # M9.R.16.7 — extraInputs/extraOutputs are resolved relative to
+      # the action's cwd (the recipe directory). The legacy
+      # ``recipes/reproos-iso/...`` prefix was duplicated under the
+      # action cwd; drop it.
       extraInputs = @[
-        "recipes/reproos-iso/vendor/vmlinuz-debian-netinst",
-        "recipes/reproos-iso/vendor/initrd.img-debian-netinst",
-        "recipes/reproos-iso/vendor/SHA256SUMS",
-        "recipes/reproos-iso/scripts/build-iso.sh",
+        "vendor/vmlinuz-debian-netinst",
+        "vendor/initrd.img-debian-netinst",
+        "vendor/SHA256SUMS",
+        "scripts/build-iso.sh",
       ],
       extraOutputs = @[
-        "recipes/reproos-iso/build/reproos.iso",
+        "build/reproos.iso",
       ])
