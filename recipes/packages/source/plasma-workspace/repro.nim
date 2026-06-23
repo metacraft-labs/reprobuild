@@ -533,6 +533,15 @@ package plasmaWorkspaceSource:
         # skip.  Plasma Wayland session uses XDG cursor themes; the
         # cursortheme KCM can be restored when xcb/X11 are added.
         "sed -i 's|^    add_subdirectory(cursortheme)$|    # M9.R.15q.13.10: dropped — needs X11/Xcursor|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.11 — drop kcm_style + kcm_colors.  Both
+        # #include ``krdb.h`` from the dropped krdb library (M9.R.15q.13.9).
+        # These are theme-preference KCMs that propagate the chosen
+        # style/color scheme into X11 resources via the krdb helper;
+        # Plasma Wayland session uses QStyle + Qt theming directly and
+        # doesn't need the X11-resource bridge.  Restore in fullbuild
+        # when krdb's X11 dependency is satisfied.
+        "sed -i 's|^add_subdirectory(style)$|# M9.R.15q.13.11: dropped — needs krdb (X11 resources)|' src/kcms/CMakeLists.txt",
+        "sed -i 's|^add_subdirectory(colors)$|# M9.R.15q.13.11: dropped — needs krdb (X11 resources)|' src/kcms/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
