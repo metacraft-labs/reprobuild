@@ -3492,6 +3492,56 @@ proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
       snapshotEvidence: durableFileEvidence(path),
       snapshot: result.get())
 
+proc canonicalVariantAssignments(): string =
+  ## Canonical (sorted, de-duplicated) form of the active variant
+  ## assignments from ``REPRO_VARIANTS`` (the env var ``--variant`` /
+  ## ``--release`` write). The lowered-graph cache key MUST include this:
+  ## solver-participating variants are resolved at provider-run time, not
+  ## baked into the compiled provider artifact, so two builds that differ
+  ## only in their variant values (e.g. ``buildType=debug`` vs
+  ## ``buildType=release``) otherwise share an identical
+  ## ``providerArtifactId`` and the engine reuses the stale lowered graph
+  ## (``providerInvocations: 0``). Folding the assignments in forces a
+  ## re-lowering when a variant changes. Sorted so assignment order does
+  ## not perturb the key.
+  let raw = getEnv("REPRO_VARIANTS")
+  if raw.len == 0:
+    return ""
+  var parts: seq[string] = @[]
+  for item in raw.split(','):
+    let s = item.strip()
+    if s.len > 0:
+      parts.add(s)
+  parts.sort()
+  parts.join(",")
+
+proc providerGraphStoreRoot(base: string): string =
+  ## Provider-graph snapshot store root, isolated per active variant set.
+  ##
+  ## The provider-graph snapshot (``provider-fragments.rbsz``) caches the
+  ## fragments a provider emitted. ``refreshProviderGraph`` reuses a stored
+  ## snapshot whenever the ``providerArtifactId`` matches and nothing it tracks
+  ## (file mtimes, body hashes, directory membership) changed — but it does
+  ## NOT track solver-participating variant values, which are resolved at
+  ## provider-run time and change the emitted graph (e.g. ``buildType=release``
+  ## moves every output to ``build-release-repro/``). Two builds differing only
+  ## in their variants therefore share one snapshot and the second reuses the
+  ## first's graph without re-invoking the provider (``providerInvocations:
+  ## 0``). Giving each variant set its own snapshot subdirectory forces a cold
+  ## start (and a fresh provider invocation) when the variants change, and lets
+  ## the two configurations' snapshots coexist and cache independently — the
+  ## same way cargo keeps ``target/debug`` and ``target/release`` separate.
+  let sig = canonicalVariantAssignments()
+  if sig.len == 0:
+    return base
+  var slug = ""
+  for ch in sig:
+    if ch.isAlphaNumeric() or ch == '=' or ch == '-' or ch == '_' or ch == '.':
+      slug.add(ch)
+    else:
+      slug.add('_')
+  base / ("variants-" & slug)
+
 proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode;
                           providerArtifactId, providerSnapshotPath,
@@ -3504,6 +3554,7 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
   payload.addCacheField(toolIdentityCacheKey(artifact, mode))
   payload.addCacheField(providerArtifactId)
+  payload.addCacheField(canonicalVariantAssignments())
   if fileExists(extendedPath(providerSnapshotPath)):
     payload.addCacheField(fileContentDigest(providerSnapshotPath))
   else:
@@ -5130,7 +5181,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerGraphStart = statStart(statsEnabled)
     progressRenderer.renderPhase("refreshing trycompile provider graph")
     let refresh = refreshProviderGraph(RefreshConfig(
-      storeRoot: outDir / "provider-graph",
+      storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
       providerBinaryPath: tryCompileProviderBinary,
       providerArtifactId: TryCompileProviderArtifactId,
       rootEntryPointId: TryCompileProviderRootEntryPointId,
@@ -5364,7 +5415,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let providerGraphStart = statStart(statsEnabled)
       progressRenderer.renderPhase("refreshing standard provider graph")
       let refresh = refreshProviderGraph(RefreshConfig(
-        storeRoot: outDir / "provider-graph",
+        storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
         providerBinaryPath: standardProviderBinary,
         providerArtifactId: StandardProviderArtifactId,
         rootEntryPointId: StandardProviderRootEntryPointId,
@@ -5542,7 +5593,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary("providerArtifact: " & providerArtifactId)
 
     let projectRoot = result.projectRoot
-    let providerGraphStore = outDir / "provider-graph"
+    let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
     let providerGraphStart = statStart(statsEnabled)
     var refresh: ProviderRefreshReport
     progressRenderer.renderPhase("checking project provider graph snapshot")
@@ -8971,6 +9022,16 @@ const
     # observe it there. Without forwarding, an env-only selection is silently
     # ignored under the default daemon-hosted build path.
     "REPRO_TOOL_PROVISIONING",
+    # Solver-participating variant overrides. ``--variant name=value`` /
+    # ``--release`` write the selection into ``REPRO_VARIANTS``; like
+    # ``REPRO_TOOL_PROVISIONING`` above, the daemon-hosted executor re-parses
+    # the request's rawArgs and resolves variants from the env, so without
+    # forwarding this the user's variant selection is silently ignored under
+    # the default daemon-hosted build path — both for the provider's variant
+    # resolution and for the lowered-graph cache key (see
+    # ``canonicalVariantAssignments`` / ``loweredGraphCacheKey``), which means
+    # ``--release`` would reuse the cached ``debug`` graph.
+    "REPRO_VARIANTS",
     # Monitor-shim lookup override. ``repro internal fs-snoop`` (the
     # automatic-monitor launcher) needs to locate librepro_monitor_shim.{dylib,so}
     # when repro runs against an arbitrary project outside its own build tree;
@@ -10980,7 +11041,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   result.providerArtifactId = digestHex(provider.providerFingerprint)
   result.providerBinaryPath = provider.outputBinaryPath
 
-  let providerGraphStore = outDir / "provider-graph"
+  let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
   let freshSnapshot =
     if forceRefresh:
