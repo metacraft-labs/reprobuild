@@ -435,20 +435,39 @@ fi
 # canonical artifact cache.
 patchelf_bin="$(command -v patchelf || true)"
 if [ -z "$patchelf_bin" ]; then
-  echo "[stage-de-rootfs] patchelf not in PATH; skipping RPATH cleanup -- the live ISO's from-source binaries WILL NOT find their .so deps" >&2
+  echo "[stage-de-rootfs] patchelf not in PATH; skipping RPATH/interpreter cleanup -- the live ISO's from-source binaries WILL NOT find their .so deps" >&2
 else
   patched=0
+  # M9.R.24.1d -- in addition to RPATH/RUNPATH, the from-source recipes
+  # build under nix-shell which bakes a nix-store glibc interpreter
+  # path into every ELF's PT_INTERP segment, e.g.
+  #   /nix/store/<hash>-glibc-2.40/lib/ld-linux-x86-64.so.2
+  # That path DOES NOT EXIST in the live ISO -- /nix/store/ is a
+  # build-host fiction. `bash` reports "cannot execute: required file
+  # not found" the moment it tries to exec the binary because the
+  # kernel loader can't find the interpreter named in PT_INTERP.
+  # Fix: rewrite PT_INTERP to the staged Debian glibc ld-linux path.
+  STAGE_LDLINUX=/lib64/ld-linux-x86-64.so.2
+  interp_patched=0
   while IFS= read -r elf; do
-    # Only ELFs with a non-empty RUNPATH/RPATH that we built.
+    # RPATH/RUNPATH cleanup -- as before.
     rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
     if echo "$rp" | grep -q "/opt/repro/reprobuild/"; then
-      $patchelf_bin --remove-rpath "$elf" 2>/dev/null || continue
+      $patchelf_bin --remove-rpath "$elf" 2>/dev/null || true
       patched=$((patched + 1))
+    fi
+    # Interpreter cleanup -- only ELFs that have a PT_INTERP segment
+    # (executables, not shared libs).
+    interp="$($patchelf_bin --print-interpreter "$elf" 2>/dev/null || true)"
+    if echo "$interp" | grep -q "^/nix/store/"; then
+      $patchelf_bin --set-interpreter "$STAGE_LDLINUX" "$elf" 2>/dev/null || true
+      interp_patched=$((interp_patched + 1))
     fi
   done < <(find "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
                 "$STAGE_DIR/usr/libexec" \
               -type f \( -name '*.so*' -o -perm -u+x \) 2>/dev/null)
   echo "[stage-de-rootfs] patchelf cleaned RPATH on $patched from-source ELFs"
+  echo "[stage-de-rootfs] patchelf rewrote PT_INTERP on $interp_patched nix-store-built ELFs"
 fi
 
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
