@@ -3846,6 +3846,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/shadow-utils/test_shadow_utils_source.nim",
+    binary: "build/test-bin/test_shadow_utils_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/sqlite/test_sqlite_source.nim",
     binary: "build/test-bin/test_sqlite_source",
     defines: @[],
