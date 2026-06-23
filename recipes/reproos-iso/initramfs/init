@@ -107,6 +107,14 @@ load_module usb-storage
 load_module uas
 # Loop block - needed for losetup of the squashfs.
 load_module loop
+# crc32c is needed by ext4 on x86_64; load it before ext4 so the
+# ext4 mount can hash its journal blocks. Without it, mount /dev/vdaN
+# fails post-switch_root with "EXT4-fs: Cannot load crc32c driver".
+load_module crc32c_generic
+load_module crc32c-intel
+# dm_mod / dm_crypt for encrypted-preset disko apply.
+load_module dm_mod
+load_module dm_crypt
 # Filesystems
 load_module isofs
 load_module squashfs
