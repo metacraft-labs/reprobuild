@@ -182,6 +182,14 @@ Gap 6 — ISO rebuild end-to-end (M9.R.27.6)               PARTIAL
       nix-shell -p with the same env.
 - BUILT iso end-to-end: reproos.iso, 1,523,179,520 bytes,
     sha256=2f027dc1ac352a442153cbcd70f610a61078f7f93dd01b07eeb2e9838acabbaf.
+- BIOS BOOT VERIFIED on the rebuilt iso (qemu-system-x86_64
+  -no-reboot -cdrom <iso> -m 2048 -display none -serial file:LOG):
+  serial transcript shows GRUB loading
+  ``Booting 'ReproOS -- Hyprland (default)'`` followed by
+  ``Linux version 6.12.86+deb13-amd64 ...``. Confirms the M9.R.27.1
+  mutter-rebuilt mirrors are correctly threaded onto the live ISO
+  boot chain via the BIOS path. Re-runs produce the same sha256
+  (deterministic rebuild).
 - ldd verdicts on staged DE binaries (post-mutter-rebuild):
     sway:         29/33 RESOLVED via embedded RPATH
     kwin_wayland: 87/94 RESOLVED via embedded RPATH
@@ -279,6 +287,24 @@ either (a) fix the silent-failure path, or (b) switch to a
 xorriso-direct invocation (drop grub-mkrescue, call xorriso
 with explicit `-eltorito-alt-boot -e EFI/BOOT/BOOTX64.EFI
 -no-emul-boot -isohybrid-gpt-basdat`).
+
+RE-BISECT against the REBUILT iso (2026-06-24 post-M9.R.27.1
+mutter rebuild + M9.R.27.7 hybrid grub attempt 2) shows the
+EXACT same OVMF behaviour as the M9.R.25-era iso:
+
+  combo1 (i440fx + display none):                0 bytes
+  combo2 (q35 + display none):                 317 bytes (BdsDxe)
+  combo3 (q35 + vga std + display none):       317 bytes (BdsDxe)
+  combo4 (q35 + vga std + nographic):          317 bytes (BdsDxe)
+  combo5 (i440fx + vga std + nographic):         0 bytes
+  combo6 (q35 + virtio-vga + sdl):             317 bytes (BdsDxe)
+
+q35 + OVMF-202411 reach BdsDxe but ``failed to load Boot0001
+"UEFI QEMU DVD-ROM QM00005 " ... No bootable option or device
+was found`` — confirming the iso has no UEFI bootable target.
+Same root cause + same iso layout as the M9.R.25-era iso; the
+M9.R.27.7 fix attempts 1 + 2 did NOT change the El Torito boot
+catalog (still BIOS-only).
 
 CANONICAL QEMU UEFI INVOCATION (post-rebuild):
 
