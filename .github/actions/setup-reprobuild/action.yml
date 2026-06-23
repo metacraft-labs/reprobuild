@@ -15,6 +15,26 @@ inputs:
     description: GitHub token (CI App token) for cloning private metacraft-labs repos and Nix flake inputs.
     required: false
     default: ""
+  substituters:
+    description: Space-separated Nix substituter URLs to trust in addition to cache.nixos.org.
+    required: false
+    default: ""
+  trusted-public-keys:
+    description: Space-separated signing public keys for the extra Nix substituters.
+    required: false
+    default: ""
+  attic-token:
+    description: Attic token used to upload newly built store paths.
+    required: false
+    default: ""
+  attic-cache:
+    description: Attic cache name to upload newly built store paths to.
+    required: false
+    default: ""
+  attic-endpoint:
+    description: Attic server endpoint.
+    required: false
+    default: "https://cache.metacraft-labs.com/"
   repro-build-pin:
     description: >
       Git ref (branch, tag, or SHA) of `metacraft-labs/reprobuild` to build the
@@ -48,6 +68,11 @@ runs:
       uses: metacraft-labs/metacraft-github-actions/setup-nix@main
       with:
         gh-token: ${{ inputs.gh-token }}
+        substituters: ${{ inputs.substituters }}
+        trusted-public-keys: ${{ inputs.trusted-public-keys }}
+        attic-token: ${{ inputs.attic-token }}
+        attic-cache: ${{ inputs.attic-cache }}
+        attic-endpoint: ${{ inputs.attic-endpoint }}
 
     - name: Build repro CLI (Linux/macOS)
       if: ${{ runner.os != 'Windows' }}
