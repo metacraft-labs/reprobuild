@@ -308,8 +308,16 @@ void InstallerState::refreshAvailableDisks() {
 void InstallerState::appendLog(const QString &line) {
     const QString stamp = QDateTime::currentDateTimeUtc()
         .toString("yyyy-MM-dd hh:mm:ss");
-    m_installLog += "[" + stamp + "] " + line + "\n";
+    const QString stamped = "[" + stamp + "] " + line;
+    m_installLog += stamped + "\n";
     emit installLogChanged();
+    // M9.R.23.5 -- when running headless (no QML engine, e.g. via
+    // --automated CONFIG_TOML or any caller that didn't bind a Qml
+    // engine to installerState), mirror the line to stderr so the
+    // operator sees the same trace the GUI would show. The GUI path
+    // ignores this duplicate; QML binds to installLogChanged and
+    // re-reads installLog every time.
+    QTextStream(stderr) << stamped << '\n';
 }
 
 void InstallerState::setInstallStatus(const QString &s) {
@@ -582,7 +590,26 @@ int InstallerState::runAutomatedConfig(const QString &configPath) {
     // Force the wipe acknowledgement on -- the operator typed the
     // config file by hand, so they already opted in.
     setWipeAcknowledged(true);
+    // Track failure via a one-shot signal hook so the return code
+    // reflects what actually happened. install() runs synchronously
+    // because every helper uses QProcess::waitForFinished.
+    bool failed = false;
+    QString failureReason;
+    auto conn = connect(this, &InstallerState::installFailed, this,
+        [&](const QString &reason) {
+            failed = true;
+            failureReason = reason;
+        });
     install();
-    // install() runs synchronously; check the running flag for state.
-    return m_installRunning ? 1 : 0;
+    disconnect(conn);
+    if (failed) {
+        QTextStream(stderr) << "install failed: " << failureReason << '\n';
+        return 1;
+    }
+    if (m_installProgress < 1.0) {
+        QTextStream(stderr) << "install incomplete (progress=" <<
+            m_installProgress << ")\n";
+        return 1;
+    }
+    return 0;
 }
