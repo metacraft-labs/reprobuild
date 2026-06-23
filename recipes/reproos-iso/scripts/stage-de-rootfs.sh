@@ -522,4 +522,20 @@ else
   echo "[stage-de-rootfs] patchelf rewrote PT_INTERP on $interp_patched nix-store-built ELFs"
 fi
 
+# M9.R.24.1g.4 -- rebuild ld.so.cache so the unioned /usr/lib libs
+# (libclingo, the from-source overlays, the symlinked libsqlite3.so)
+# are discoverable by dlopen() at runtime. Without this the live-init
+# does NOT regenerate the cache; libclingo isn't found because the
+# stock Debian cache only knows /usr/lib/x86_64-linux-gnu/.
+ldconfig_bin="$(command -v ldconfig || true)"
+if [ -n "$ldconfig_bin" ]; then
+  # -r treats $STAGE_DIR as the root; the cache + dyn-linker conf
+  # paths are interpreted relative to it. Quiet mode -- warnings about
+  # non-symlinked libs are noise (from-source libs land as plain
+  # files, not SONAME-symlink chains).
+  "$ldconfig_bin" -r "$STAGE_DIR" -q 2>&1 | \
+    grep -vE 'is not a symbolic link|file format not recognized' || true
+  echo "[stage-de-rootfs] rebuilt ld.so.cache in stage"
+fi
+
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
