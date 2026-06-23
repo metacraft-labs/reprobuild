@@ -95,6 +95,7 @@ package reproosIso:
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
                  "REPRO_DE_ROOTFS_DIR=\"$PWD/build/de-rootfs\" " &
                  "REPRO_GRUB_VARIANT=multi-de " &
+                 "REPRO_LIVE_INIT=1 " &
                  "bash scripts/build-iso.sh " &
                  "vendor/vmlinuz-debian-netinst " &
                  "vendor/initrd.img-debian-netinst " &

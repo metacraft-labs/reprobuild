@@ -45,9 +45,14 @@ OUT_ISO="$3"
 # The vendored initrd is the d-i installer; it ignores the squashfs
 # payload and boots straight into the text-mode installer. Bypass it
 # by regenerating $INITRAMFS via build-initramfs.sh when
-# REPRO_LIVE_INIT=1 (default 1 for multi-de variant builds).
+# REPRO_LIVE_INIT=1.
+#
+# Default OFF so the historical R2 reproducibility test
+# (tests/reproducibility/t_r2_iso_reproducibility.sh) keeps passing
+# without invoking the cache-warming side effects of build-initramfs.sh.
+# The reproos-iso recipe sets REPRO_LIVE_INIT=1 explicitly.
 SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
-REPRO_LIVE_INIT="${REPRO_LIVE_INIT:-1}"
+REPRO_LIVE_INIT="${REPRO_LIVE_INIT:-0}"
 if [ "$REPRO_LIVE_INIT" = "1" ]; then
   LIVE_INIT_OUT="${REPRO_LIVE_INIT_OUT:-$(dirname "$INITRAMFS")/initrd.img-live}"
   echo "[build-iso] regenerating live-init initramfs at $LIVE_INIT_OUT"
