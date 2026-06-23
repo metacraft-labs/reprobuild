@@ -546,6 +546,22 @@ package plasmaWorkspaceSource:
         # ``#include "krdb.h"`` and we already dropped krdb (13.9).
         # plasmashell doesn't depend on the lookandfeel KCM at runtime.
         "sed -i 's|^add_subdirectory(lookandfeel)$|# M9.R.15q.13.12: dropped — needs krdb (X11 resources)|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.13 — wrap m_previousWId = 0 in clearPreviousWindow
+        # in HAVE_X11 (the field is gated on HAVE_X11 in the header but
+        # the bare assignment in the .cpp isn't).
+        "sed -i 's|^    m_previousWId = 0;$|#if HAVE_X11\\n    m_previousWId = 0;\\n#endif|' src/shell/shellcorona.cpp",
+        # M9.R.15q.13.14 — also drop startplasma since its startplasma.cpp
+        # includes lookandfeelmanager.h from the dropped lookandfeel
+        # KCM.  startplasma is the session launcher — the v1 path
+        # uses the upstream NDE-K1 startplasma-wayland script directly
+        # without rebuilding it from this source tree.  Drop the
+        # startkde subdir from src/CMakeLists.txt.
+        "sed -i 's|^add_subdirectory(startkde)$|# M9.R.15q.13.14: dropped — needs lookandfeel KCM headers|' src/CMakeLists.txt",
+        # M9.R.15q.13.15 — drop kcm_autostart since its unit.cpp
+        # #includes systemd/sd-journal.h which trips -Werror=undef on
+        # __STDC_VERSION__ in C++ mode.  v1 plasmashell does not depend
+        # on the autostart KCM at runtime.
+        "sed -i 's|^add_subdirectory(autostart)$|# M9.R.15q.13.15: dropped — systemd sd-id128.h -Werror=undef|' src/kcms/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
