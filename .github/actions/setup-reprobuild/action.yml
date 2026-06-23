@@ -1,0 +1,105 @@
+name: Setup reprobuild (install the repro CLI)
+description: >
+  Clone the reprobuild source at a pin and build the `repro` CLI, putting it on
+  PATH. The reprobuild flake/env.ps1 inputs that the build needs must already be
+  provisioned adjacent to the host checkout (see the companion
+  `reprobuild-provision` action). On Linux/macOS the CLI is built via the Nix
+  dev shell; on Windows it is built by replaying reprobuild's own env.ps1 DIY
+  contract.
+
+  This is the "install the tool" half of the reprobuild dev-env flavor. It is the
+  reprobuild analogue of `setup-nix`.
+
+inputs:
+  gh-token:
+    description: GitHub token (CI App token) for cloning private metacraft-labs repos and Nix flake inputs.
+    required: false
+    default: ""
+  repro-build-pin:
+    description: >
+      Git ref (branch, tag, or SHA) of `metacraft-labs/reprobuild` to build the
+      `repro` CLI from. Defaults to `dev`, the branch reprobuild's own CI gates on.
+    required: false
+    default: "dev"
+
+runs:
+  using: composite
+  steps:
+    - name: Clone reprobuild source
+      shell: bash
+      env:
+        REPRO_BUILD_PIN: ${{ inputs.repro-build-pin }}
+      run: |
+        # Reprobuild's CI matrix builds `repro` on every push, so the
+        # default-branch tip is always a known-good source tree. Honour an
+        # optional pin so repos can lock reprobuild to a known SHA across runs.
+        REF="${REPRO_BUILD_PIN:-dev}"
+        DEST="${GITHUB_WORKSPACE}/.reprobuild-src"
+        rm -rf "${DEST}"
+        if ! git clone --depth 1 --branch "${REF}" --single-branch \
+          "https://github.com/metacraft-labs/reprobuild.git" "${DEST}" 2>/dev/null; then
+          rm -rf "${DEST}"
+          git clone --no-checkout "https://github.com/metacraft-labs/reprobuild.git" "${DEST}"
+          git -C "${DEST}" checkout "${REF}"
+        fi
+
+    - name: Install Nix (Linux/macOS, to build repro)
+      if: ${{ runner.os != 'Windows' }}
+      uses: metacraft-labs/metacraft-github-actions/setup-nix@main
+      with:
+        gh-token: ${{ inputs.gh-token }}
+
+    - name: Build repro CLI (Linux/macOS)
+      if: ${{ runner.os != 'Windows' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${GITHUB_WORKSPACE}/.reprobuild-src"
+        # Use the dev shell's just target — the same path reprobuild's own CI
+        # exercises — overriding the private flake inputs to the local clones
+        # `reprobuild-provision` produced so Nix doesn't fetch them via tarball.
+        nix develop \
+          --override-input codetracer-native-recorder "path:${GITHUB_WORKSPACE}/codetracer-native-recorder" \
+          --override-input runquota-src "path:${GITHUB_WORKSPACE}/runquota" \
+          --command bash -c '
+            set -euo pipefail
+            just build
+            : "${NIMCRYPTO_SRC:?reprobuild dev shell did not set NIMCRYPTO_SRC}"
+            : "${BEARSSL_SRC:?reprobuild dev shell did not set BEARSSL_SRC}"
+            : "${GITHUB_ENV:?GitHub Actions did not set GITHUB_ENV}"
+            echo "NIMCRYPTO_SRC=${NIMCRYPTO_SRC}" >> "${GITHUB_ENV}"
+            echo "BEARSSL_SRC=${BEARSSL_SRC}" >> "${GITHUB_ENV}"
+          '
+        # `just build` writes to ./build/bin/repro. Surface it on PATH.
+        echo "${PWD}/build/bin" >> "$GITHUB_PATH"
+
+    - name: Relocate reprobuild + build repro CLI (Windows)
+      if: ${{ runner.os == 'Windows' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        WS="${GITHUB_WORKSPACE}"
+        # Move reprobuild from .reprobuild-src to a sibling location so env.ps1
+        # finds repo-workspaces et al. (cloned by reprobuild-provision) at ../<name>.
+        if [ -d "${WS}/.reprobuild-src" ] && [ ! -d "${WS}/reprobuild" ]; then
+          mv "${WS}/.reprobuild-src" "${WS}/reprobuild"
+        fi
+        # Git for Windows may check text files out with CRLF. This file's lines
+        # become Nim source paths during `just build`, so strip CRs first.
+        entrypoints="${WS}/reprobuild/apps/entrypoints.txt"
+        if [ -f "${entrypoints}" ]; then
+          sed -i 's/\r$//' "${entrypoints}"
+        fi
+
+    - name: Build repro CLI (Windows)
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        # Windows-side: replay reprobuild's own DIY contract. Source its env.ps1
+        # (which pulls in the scoop/winget toolchain managed by
+        # non-nix-build/windows/ensure-*.ps1) and run `just build`. The build
+        # drops `repro.exe` under build\bin\ which we add to GITHUB_PATH.
+        Set-Location "$env:GITHUB_WORKSPACE\reprobuild"
+        . .\env.ps1
+        just build
+        Add-Content -Path $env:GITHUB_PATH -Value (Resolve-Path .\build\bin).Path
