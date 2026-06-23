@@ -121,6 +121,9 @@ load_module squashfs
 load_module overlay
 load_module ext4
 load_module vfat
+load_module nls_cp437
+load_module nls_utf8
+load_module nls_ascii
 
 # DRM / GPU - so sddm can open a display. Failing to load these is OK
 # for headless boots; we just won't have a GUI.
