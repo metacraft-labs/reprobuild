@@ -54,10 +54,13 @@
 ## round-trips through JSON, so the installer can write a ``system.nim``
 ## that the macro parses back into the same SystemIntent.
 
-import std/[macros, strutils]
+import std/[macros, options, strutils]
 
 import ./types
 import ./emit
+
+export options  # users of `hardware`/`buildHardwareSpec` need `some`/`none`
+                # in scope to author `disko:` body expressions.
 
 const SystemIntentVar* = "systemIntentBuilder"
 const HardwareIntentVar* = "hardwareIntentBuilder"
@@ -649,6 +652,612 @@ proc parseHardwareFsBody(body: NimNode; hwVar: NimNode): NimNode =
       result.add blk
     else: error("filesystems entry: " & $entry.kind, entry)
 
+# ---------------------------------------------------------------------
+# M9.R.22: disko `disko:` block parser.
+# ---------------------------------------------------------------------
+#
+# Spec: ``reprobuild-specs/ReproOS-Disko-Port.md`` §2.
+#
+# The `disko:` block declares the create-from-scratch partition intent
+# the installer uses to rebuild the system on bare metal. The shape is
+# recursive (LUKS-on-LVM-on-RAID composes naturally) so the parser is
+# a small set of mutually-recursive helpers.
+#
+# Top-level shape::
+#
+#   disko:
+#     disks:
+#       "<diskName>":
+#         device: "/dev/disk/by-id/..."
+#         type: gpt
+#         partitions:
+#           "<partName>":
+#             type: esp
+#             size: "512M"
+#             bootable: true
+#             content:
+#               filesystem:    # | encrypted: | lvm: | zfs: | swap:
+#                 format: "vfat"
+#                 mountpoint: "/boot"
+#     pools:
+#       "rpool":
+#         devices: @["/dev/disk/by-id/..."]
+#         layout: "stripe"
+#         options: @["ashift=12"]
+
+proc parseContentDecl(node: NimNode): NimNode
+
+proc collectStrLitListExpr(n: NimNode): NimNode =
+  ## Same shape as collectStrLitList but returns a Nim expression node
+  ## that constructs the seq[string] at runtime — works for the cases
+  ## where the macro builder needs to emit ``@["a", "b"]`` verbatim
+  ## inside an object constructor argument slot.
+  let items = collectStrLitList(n)
+  let pref = newNimNode(nnkPrefix)
+  pref.add ident("@")
+  let bracket = newNimNode(nnkBracket)
+  for it in items: bracket.add newStrLitNode(it)
+  pref.add bracket
+  pref
+
+proc parseBtrfsSubvolsExpr(body: NimNode): NimNode =
+  ## ``subvols:`` body is an indented block of ``"<name>": <subblock>``
+  ## entries where the subblock has ``path:`` + ``options:``. Returns a
+  ## Nim expression that constructs a ``seq[BtrfsSubvolSpec]``.
+  if body.kind != nnkStmtList:
+    error("subvols: expects an indented block", body)
+  let pref = newNimNode(nnkPrefix)
+  pref.add ident("@")
+  let bracket = newNimNode(nnkBracket)
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let key {.used.} = identOrStr(entry[0])  # subvol-decl name (e.g. "@home")
+      let sub = entry[^1]
+      var path = ""
+      var opts: NimNode = nil
+      if sub.kind == nnkStmtList:
+        for kv in sub:
+          case kv.kind
+          of nnkCommentStmt, nnkDiscardStmt: continue
+          of nnkCall, nnkCommand:
+            let k = identOrStr(kv[0])
+            var val = kv[^1]
+            if val.kind == nnkStmtList and val.len == 1: val = val[0]
+            case k
+            of "path": path = identOrStr(val)
+            of "options": opts = collectStrLitListExpr(val)
+            else: error("subvols.<name> sub-entry: " & k, kv[0])
+          else: error("subvols.<name> entry must be `<key>: <value>`", kv)
+      let pathLit = newStrLitNode(path)
+      let optsExpr =
+        if opts == nil:
+          let p = newNimNode(nnkPrefix)
+          p.add ident("@")
+          p.add newNimNode(nnkBracket)
+          p
+        else: opts
+      bracket.add quote do:
+        BtrfsSubvolSpec(path: `pathLit`, options: `optsExpr`)
+    else: error("subvols entry must be `\"<name>\": <subblock>`", entry)
+  pref.add bracket
+  pref
+
+proc parseEncryptionExpr(body: NimNode): NimNode =
+  ## ``encryption:`` sub-block — returns an ``EncryptionSpec(...)`` expr.
+  if body.kind != nnkStmtList:
+    error("encryption: expects an indented block", body)
+  var typ = "luks2"
+  var keyFile = ""
+  var cipher = ""
+  var allowDiscards = false
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let k = identOrStr(entry[0])
+      var val = entry[^1]
+      if val.kind == nnkStmtList and val.len == 1: val = val[0]
+      case k
+      of "type", "kind":
+        # ``type:`` matches disko's Nix vocabulary; ``kind:`` works
+        # around Nim's ``type`` keyword if the user prefers an unquoted
+        # identifier (see the disk-level note above).
+        typ = identOrStr(val)
+      of "keyFile": keyFile = identOrStr(val)
+      of "cipher": cipher = identOrStr(val)
+      of "allowDiscards":
+        case val.kind
+        of nnkIdent:
+          let s = $val
+          allowDiscards = (s == "true")
+        else: error("encryption.allowDiscards must be true/false", val)
+      else: error("encryption sub-entry: " & k, entry[0])
+    else: error("encryption entry must be `<key>: <value>`", entry)
+  let typLit = newStrLitNode(typ)
+  let kfLit = newStrLitNode(keyFile)
+  let cipherLit = newStrLitNode(cipher)
+  let adLit = newLit(allowDiscards)
+  # The `type` field is a reserved Nim keyword; we can't write it as a
+  # bare identifier in the object-constructor sugar. Build the
+  # constructor node by hand so the `type` field name is wrapped in
+  # accented identifiers.
+  result = newNimNode(nnkObjConstr)
+  result.add ident("EncryptionSpec")
+  let typExpr = newNimNode(nnkExprColonExpr)
+  let typIdent = newNimNode(nnkAccQuoted)
+  typIdent.add ident("type")
+  typExpr.add typIdent
+  typExpr.add typLit
+  result.add typExpr
+  let kfExpr = newNimNode(nnkExprColonExpr)
+  kfExpr.add ident("keyFile")
+  kfExpr.add kfLit
+  result.add kfExpr
+  let cipherExpr = newNimNode(nnkExprColonExpr)
+  cipherExpr.add ident("cipher")
+  cipherExpr.add cipherLit
+  result.add cipherExpr
+  let adExpr = newNimNode(nnkExprColonExpr)
+  adExpr.add ident("allowDiscards")
+  adExpr.add adLit
+  result.add adExpr
+
+proc parseLvmVolumesExpr(body: NimNode): NimNode =
+  ## ``volumes:`` body — ``"<lvname>":`` entries, each with ``size:`` +
+  ## ``content:``. Returns a ``seq[LvmVolumeSpec]`` expr.
+  if body.kind != nnkStmtList:
+    error("volumes: expects an indented block", body)
+  let pref = newNimNode(nnkPrefix)
+  pref.add ident("@")
+  let bracket = newNimNode(nnkBracket)
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let lvName = identOrStr(entry[0])
+      let sub = entry[^1]
+      var size = ""
+      var contentExpr: NimNode = nil
+      if sub.kind == nnkStmtList:
+        for kv in sub:
+          case kv.kind
+          of nnkCommentStmt, nnkDiscardStmt: continue
+          of nnkCall, nnkCommand:
+            let k = identOrStr(kv[0])
+            var val = kv[^1]
+            case k
+            of "size":
+              if val.kind == nnkStmtList and val.len == 1: val = val[0]
+              size = identOrStr(val)
+            of "content":
+              if val.kind != nnkStmtList:
+                error("volumes.<name>.content expects an indented block",
+                      val)
+              contentExpr = parseContentDecl(val)
+            else: error("volumes.<name> sub-entry: " & k, kv[0])
+          else: error("volumes.<name> entry must be `<key>: <value>`", kv)
+      let nameLit = newStrLitNode(lvName)
+      let sizeLit = newStrLitNode(size)
+      let cExpr =
+        if contentExpr == nil:
+          quote do: ContentSpec(kind: cfsNone)
+        else: contentExpr
+      bracket.add quote do:
+        block:
+          var lv = LvmVolumeSpec(name: `nameLit`, size: `sizeLit`)
+          lv.content = new(ContentSpec)
+          lv.content[] = `cExpr`
+          lv
+    else: error("volumes entry must be `\"<name>\": <subblock>`", entry)
+  pref.add bracket
+  pref
+
+proc parseContentDecl(node: NimNode): NimNode =
+  ## ``content:`` body — exactly one of ``filesystem:`` / ``encrypted:``
+  ## / ``lvm:`` / ``zfs:`` / ``swap:``. Returns a Nim expression that
+  ## evaluates to a ``ContentSpec`` value.
+  if node.kind != nnkStmtList:
+    error("content: expects an indented block", node)
+  var chosen: NimNode = nil
+  var chosenKind = ""
+  for entry in node:
+    case entry.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      if chosen != nil:
+        error("content: must contain exactly one of " &
+              "filesystem/encrypted/lvm/zfs/swap", entry)
+      let head = identOrStr(entry[0])
+      if entry.len < 2 or entry[^1].kind != nnkStmtList:
+        error("content.<kind> must be a sub-block: `" & head & ":`", entry)
+      chosenKind = head
+      chosen = entry[^1]
+    else: error("content entry must be `<kind>: <subblock>`", entry)
+  if chosen == nil:
+    return quote do: ContentSpec(kind: cfsNone)
+  let body = chosen
+  case chosenKind
+  of "filesystem":
+    var format = ""
+    var mountpoint = ""
+    var mountOpts: NimNode = nil
+    var label = ""
+    var subvols: NimNode = nil
+    for kv in body:
+      case kv.kind
+      of nnkCommentStmt, nnkDiscardStmt: continue
+      of nnkCall, nnkCommand:
+        let k = identOrStr(kv[0])
+        var val = kv[^1]
+        case k
+        of "format":
+          if val.kind == nnkStmtList and val.len == 1: val = val[0]
+          format = identOrStr(val)
+        of "mountpoint":
+          if val.kind == nnkStmtList and val.len == 1: val = val[0]
+          mountpoint = identOrStr(val)
+        of "label":
+          if val.kind == nnkStmtList and val.len == 1: val = val[0]
+          label = identOrStr(val)
+        of "mountOptions":
+          if val.kind == nnkStmtList and val.len == 1: val = val[0]
+          mountOpts = collectStrLitListExpr(val)
+        of "subvols":
+          if val.kind != nnkStmtList:
+            error("filesystem.subvols expects an indented block", val)
+          subvols = parseBtrfsSubvolsExpr(val)
+        else: error("filesystem sub-entry: " & k, kv[0])
+      else: error("filesystem entry must be `<key>: <value>`", kv)
+    let fmtLit = newStrLitNode(format)
+    let mpLit = newStrLitNode(mountpoint)
+    let labelLit = newStrLitNode(label)
+    let optsExpr =
+      if mountOpts == nil:
+        let p = newNimNode(nnkPrefix); p.add ident("@")
+        p.add newNimNode(nnkBracket); p
+      else: mountOpts
+    let svExpr =
+      if subvols == nil:
+        let p = newNimNode(nnkPrefix); p.add ident("@")
+        p.add newNimNode(nnkBracket); p
+      else: subvols
+    result = quote do:
+      ContentSpec(kind: cfsFilesystem, format: `fmtLit`,
+        mountpoint: `mpLit`, mountOptions: `optsExpr`,
+        label: `labelLit`, subvols: `svExpr`)
+  of "encrypted":
+    var encExpr: NimNode = nil
+    var innerExpr: NimNode = nil
+    for kv in body:
+      case kv.kind
+      of nnkCommentStmt, nnkDiscardStmt: continue
+      of nnkCall, nnkCommand:
+        let k = identOrStr(kv[0])
+        let val = kv[^1]
+        case k
+        of "encryption":
+          if val.kind != nnkStmtList:
+            error("encrypted.encryption expects an indented block", val)
+          encExpr = parseEncryptionExpr(val)
+        of "inner":
+          if val.kind != nnkStmtList:
+            error("encrypted.inner expects an indented block", val)
+          innerExpr = parseContentDecl(val)
+        else: error("encrypted sub-entry: " & k, kv[0])
+      else: error("encrypted entry must be `<key>: <value>`", kv)
+    if encExpr == nil:
+      encExpr = quote do: EncryptionSpec()
+    if innerExpr == nil:
+      innerExpr = quote do: ContentSpec(kind: cfsNone)
+    result = quote do:
+      block:
+        var c = ContentSpec(kind: cfsEncrypted, encryption: `encExpr`)
+        c.inner = new(ContentSpec)
+        c.inner[] = `innerExpr`
+        c
+  of "lvm":
+    var vg = ""
+    var volsExpr: NimNode = nil
+    for kv in body:
+      case kv.kind
+      of nnkCommentStmt, nnkDiscardStmt: continue
+      of nnkCall, nnkCommand:
+        let k = identOrStr(kv[0])
+        var val = kv[^1]
+        case k
+        of "vg":
+          if val.kind == nnkStmtList and val.len == 1: val = val[0]
+          vg = identOrStr(val)
+        of "volumes":
+          if val.kind != nnkStmtList:
+            error("lvm.volumes expects an indented block", val)
+          volsExpr = parseLvmVolumesExpr(val)
+        else: error("lvm sub-entry: " & k, kv[0])
+      else: error("lvm entry must be `<key>: <value>`", kv)
+    let vgLit = newStrLitNode(vg)
+    let vExpr =
+      if volsExpr == nil:
+        let p = newNimNode(nnkPrefix); p.add ident("@")
+        p.add newNimNode(nnkBracket); p
+      else: volsExpr
+    result = quote do:
+      ContentSpec(kind: cfsLvm, vg: `vgLit`, volumes: `vExpr`)
+  of "zfs":
+    var pool = ""
+    var dataset = ""
+    var mountpoint = ""
+    for kv in body:
+      case kv.kind
+      of nnkCommentStmt, nnkDiscardStmt: continue
+      of nnkCall, nnkCommand:
+        let k = identOrStr(kv[0])
+        var val = kv[^1]
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        case k
+        of "pool": pool = identOrStr(val)
+        of "dataset": dataset = identOrStr(val)
+        of "mountpoint": mountpoint = identOrStr(val)
+        else: error("zfs sub-entry: " & k, kv[0])
+      else: error("zfs entry must be `<key>: <value>`", kv)
+    let pLit = newStrLitNode(pool)
+    let dsLit = newStrLitNode(dataset)
+    let mpLit = newStrLitNode(mountpoint)
+    result = quote do:
+      ContentSpec(kind: cfsZfs, pool: `pLit`, dataset: `dsLit`,
+                  zfsMountpoint: `mpLit`)
+  of "swap":
+    var priority = 0
+    var policy = ""
+    for kv in body:
+      case kv.kind
+      of nnkCommentStmt, nnkDiscardStmt: continue
+      of nnkCall, nnkCommand:
+        let k = identOrStr(kv[0])
+        var val = kv[^1]
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        case k
+        of "priority":
+          if val.kind == nnkIntLit: priority = val.intVal.int
+          else: error("swap.priority must be int literal", val)
+        of "discardPolicy": policy = identOrStr(val)
+        else: error("swap sub-entry: " & k, kv[0])
+      else: error("swap entry must be `<key>: <value>`", kv)
+    let prLit = newLit(priority)
+    let polLit = newStrLitNode(policy)
+    result = quote do:
+      ContentSpec(kind: cfsSwap, swapPriority: `prLit`,
+                  swapDiscardPolicy: `polLit`)
+  else:
+    error("unknown content kind: `" & chosenKind &
+          "` (expected filesystem/encrypted/lvm/zfs/swap)", body)
+
+proc parsePartitionDecl(body: NimNode): NimNode =
+  ## ``"<name>": <sub>`` partition entry — produces a ``PartitionSpec``
+  ## expression suitable for object-constructor use.
+  if body.kind != nnkStmtList:
+    error("partition entry expects an indented block", body)
+  var typ = ""
+  var size = ""
+  var bootable = false
+  var contentExpr: NimNode = nil
+  for kv in body:
+    case kv.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let k = identOrStr(kv[0])
+      var val = kv[^1]
+      case k
+      of "type", "kind":
+        # Both names accepted: ``type:`` matches the disko Nix
+        # vocabulary, ``kind:`` is the Nim-friendly alternative the
+        # spec §2.2 example uses (avoids Nim's ``type`` keyword
+        # collision at parse time without backticks).
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        typ = identOrStr(val)
+      of "size":
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        size = identOrStr(val)
+      of "bootable":
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        case val.kind
+        of nnkIdent:
+          let s = $val
+          bootable = (s == "true")
+        else: error("partition.bootable must be true/false", val)
+      of "content":
+        if val.kind != nnkStmtList:
+          error("partition.content expects an indented block", val)
+        contentExpr = parseContentDecl(val)
+      else: error("partition sub-entry: " & k, kv[0])
+    else: error("partition entry must be `<key>: <value>`", kv)
+  let typLit = newStrLitNode(typ)
+  let sizeLit = newStrLitNode(size)
+  let bLit = newLit(bootable)
+  let cExpr =
+    if contentExpr == nil:
+      quote do: ContentSpec(kind: cfsNone)
+    else: contentExpr
+  # Manual object-constructor build to use the accent-quoted `type`
+  # field name.
+  result = newNimNode(nnkObjConstr)
+  result.add ident("PartitionSpec")
+  block:
+    let e = newNimNode(nnkExprColonExpr)
+    let tq = newNimNode(nnkAccQuoted); tq.add ident("type")
+    e.add tq; e.add typLit
+    result.add e
+  block:
+    let e = newNimNode(nnkExprColonExpr)
+    e.add ident("size"); e.add sizeLit
+    result.add e
+  block:
+    let e = newNimNode(nnkExprColonExpr)
+    e.add ident("content"); e.add cExpr
+    result.add e
+  block:
+    let e = newNimNode(nnkExprColonExpr)
+    e.add ident("bootable"); e.add bLit
+    result.add e
+
+proc parseDiskDecl(diskName: string; body: NimNode; hwVar: NimNode):
+    NimNode =
+  ## ``"<diskname>":`` disk entry — emits assignments into a fresh
+  ## DiskSpec then registers it into ``hwVar.disko.get().disks``.
+  if body.kind != nnkStmtList:
+    error("disk entry expects an indented block", body)
+  var device = ""
+  var table = "gpt"
+  var partsBody: NimNode = nil
+  for kv in body:
+    case kv.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let k = identOrStr(kv[0])
+      var val = kv[^1]
+      case k
+      of "device":
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        device = identOrStr(val)
+      of "type", "table":
+        # ``type:`` matches disko's Nix vocabulary; ``table:`` is the
+        # Nim-friendly alternative the spec §2.2 example recommends.
+        if val.kind == nnkStmtList and val.len == 1: val = val[0]
+        table = identOrStr(val)
+      of "partitions":
+        if val.kind != nnkStmtList:
+          error("disk.partitions expects an indented block", val)
+        partsBody = val
+      else: error("disk sub-entry: " & k, kv[0])
+    else: error("disk entry must be `<key>: <value>`", kv)
+  let nameLit = newStrLitNode(diskName)
+  let devLit = newStrLitNode(device)
+  let tabLit = newStrLitNode(table)
+  let diskSym = genSym(nskVar, "diskSpec")
+  # Build DiskSpec(...) with accent-quoted `type` field.
+  let diskCtor = newNimNode(nnkObjConstr)
+  diskCtor.add ident("DiskSpec")
+  block:
+    let e = newNimNode(nnkExprColonExpr)
+    e.add ident("device"); e.add devLit
+    diskCtor.add e
+  block:
+    let e = newNimNode(nnkExprColonExpr)
+    let tq = newNimNode(nnkAccQuoted); tq.add ident("type")
+    e.add tq; e.add tabLit
+    diskCtor.add e
+  let inner = newNimNode(nnkStmtList)
+  inner.add quote do:
+    var `diskSym` = `diskCtor`
+  if partsBody != nil:
+    for partEntry in partsBody:
+      case partEntry.kind
+      of nnkCommentStmt, nnkDiscardStmt: continue
+      of nnkCall, nnkCommand:
+        let pName = identOrStr(partEntry[0])
+        if pName.len == 0:
+          error("partition name must be a string literal", partEntry[0])
+        let pSub = partEntry[^1]
+        let pExpr = parsePartitionDecl(pSub)
+        let pLit = newStrLitNode(pName)
+        inner.add quote do:
+          `diskSym`.partitions[`pLit`] = `pExpr`
+      else: error("partition entry: " & $partEntry.kind, partEntry)
+  inner.add quote do:
+    `hwVar`.disko.get().disks[`nameLit`] = `diskSym`
+  let blk = newNimNode(nnkBlockStmt)
+  blk.add newEmptyNode(); blk.add inner
+  result = blk
+
+proc parseZfsPoolsBody(body: NimNode; hwVar: NimNode): NimNode =
+  ## ``pools:`` body — ``"<poolname>":`` entries with ``devices:`` +
+  ## ``layout:`` + ``options:``. Each appends a ZfsPoolSpec to
+  ## ``hwVar.disko.get().pools``.
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("pools: expects an indented block", body)
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let pName = identOrStr(entry[0])
+      let sub = entry[^1]
+      var devices: NimNode = nil
+      var layout = ""
+      var opts: NimNode = nil
+      if sub.kind == nnkStmtList:
+        for kv in sub:
+          case kv.kind
+          of nnkCommentStmt, nnkDiscardStmt: continue
+          of nnkCall, nnkCommand:
+            let k = identOrStr(kv[0])
+            var val = kv[^1]
+            case k
+            of "devices":
+              if val.kind == nnkStmtList and val.len == 1: val = val[0]
+              devices = collectStrLitListExpr(val)
+            of "layout":
+              if val.kind == nnkStmtList and val.len == 1: val = val[0]
+              layout = identOrStr(val)
+            of "options":
+              if val.kind == nnkStmtList and val.len == 1: val = val[0]
+              opts = collectStrLitListExpr(val)
+            else: error("pools.<name> sub-entry: " & k, kv[0])
+          else: error("pools.<name> entry must be `<key>: <value>`", kv)
+      let nameLit = newStrLitNode(pName)
+      let layoutLit = newStrLitNode(layout)
+      let devExpr =
+        if devices == nil:
+          let p = newNimNode(nnkPrefix); p.add ident("@")
+          p.add newNimNode(nnkBracket); p
+        else: devices
+      let optsExpr =
+        if opts == nil:
+          let p = newNimNode(nnkPrefix); p.add ident("@")
+          p.add newNimNode(nnkBracket); p
+        else: opts
+      result.add quote do:
+        `hwVar`.disko.get().pools.add ZfsPoolSpec(
+          name: `nameLit`, devices: `devExpr`,
+          layout: `layoutLit`, options: `optsExpr`)
+    else: error("pools entry must be `\"<name>\": <subblock>`", entry)
+
+proc parseHardwareDiskoBody(body: NimNode; hwVar: NimNode): NimNode =
+  ## Top-level ``disko:`` body parser. Initialises ``disko = some(...)``
+  ## with an empty DiskLayout, then handles ``disks:`` and ``pools:``.
+  result = newNimNode(nnkStmtList)
+  result.add quote do:
+    `hwVar`.disko = some(DiskLayout())
+  if body.kind != nnkStmtList:
+    error("disko: expects an indented block", body)
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt, nnkDiscardStmt: continue
+    of nnkCall, nnkCommand:
+      let head = identOrStr(entry[0])
+      let sub = entry[^1]
+      case head
+      of "disks":
+        if sub.kind != nnkStmtList:
+          error("disko.disks expects an indented block", sub)
+        for dEntry in sub:
+          case dEntry.kind
+          of nnkCommentStmt, nnkDiscardStmt: continue
+          of nnkCall, nnkCommand:
+            let dName = identOrStr(dEntry[0])
+            if dName.len == 0:
+              error("disk entry name must be a string literal",
+                    dEntry[0])
+            result.add parseDiskDecl(dName, dEntry[^1], hwVar)
+          else: error("disko.disks entry: " & $dEntry.kind, dEntry)
+      of "pools":
+        if sub.kind != nnkStmtList:
+          error("disko.pools expects an indented block", sub)
+        result.add parseZfsPoolsBody(sub, hwVar)
+      else: error("disko sub-section: " & head, entry[0])
+    else: error("disko entry: " & $entry.kind, entry)
+
 proc parseHardwareSimpleListBody(body: NimNode; hwVar: NimNode;
                                   field: string): NimNode =
   result = newNimNode(nnkStmtList)
@@ -709,6 +1318,7 @@ macro hardware*(id: static[string]; body: untyped): untyped =
       of "filesystems": stmts.add parseHardwareFsBody(stmt[^1], hwSym)
       of "graphics":    stmts.add parseHardwareSimpleListBody(stmt[^1], hwSym, "graphics")
       of "audio":       stmts.add parseHardwareSimpleListBody(stmt[^1], hwSym, "audio")
+      of "disko":       stmts.add parseHardwareDiskoBody(stmt[^1], hwSym)
       else: error("unrecognised hardware body section: " & $head, stmt)
     of nnkCommentStmt, nnkDiscardStmt: discard
     else: error("unrecognised hardware body form: " & $stmt.kind, stmt)
@@ -752,6 +1362,7 @@ macro buildHardwareSpec*(id: static[string]; body: untyped): untyped =
       of "filesystems": stmts.add parseHardwareFsBody(stmt[^1], hwSym)
       of "graphics":    stmts.add parseHardwareSimpleListBody(stmt[^1], hwSym, "graphics")
       of "audio":       stmts.add parseHardwareSimpleListBody(stmt[^1], hwSym, "audio")
+      of "disko":       stmts.add parseHardwareDiskoBody(stmt[^1], hwSym)
       else: error("unrecognised hardware body section: " & $head, stmt)
     of nnkCommentStmt, nnkDiscardStmt: discard
     else: error("unrecognised hardware body form: " & $stmt.kind, stmt)
