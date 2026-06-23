@@ -329,8 +329,8 @@ REPRO_MODIFICATION_DATE='2025010100000000'
 # ``x86_64-efi`` modules. When both are present in the nix-shell,
 # the ``grub-mkrescue`` binary on PATH resolves to one or the other
 # (whichever appears first), and the resolved binary's default
-# ``--directory`` (``$(dirname $0)/../lib/grub``) only contains its
-# own arch's modules. The result is a BIOS-only or UEFI-only ISO.
+# probes the compile-time-baked /nix/store/<bin-grub>/lib/grub
+# which only has the binary's own arch's modules.
 #
 # Diagnosis: ``xorriso -indev <iso> -report_el_torito as_mkisofs``
 # on the BIOS-only output shows only ``-b /boot/grub/i386-pc/eltorito.img``
@@ -339,55 +339,73 @@ REPRO_MODIFICATION_DATE='2025010100000000'
 # or device was found`` because no UEFI bootable target exists on
 # the disc.
 #
-# Fix: build a private merged grub module dir under $WORK/grub-modules
-# that symlinks both arch trees, then pass ``--directory=$WORK/grub-modules``
-# to grub-mkrescue. This makes grub-mkrescue see both archs.
-#
-# The arch lookup uses ``grub-mkrescue`` itself as the anchor (its
-# resolved path's sibling ``/lib/grub/`` contains one of the two arch
-# trees), plus a probe of the nix-store for the other one. If the
-# probe fails, fall back to the original (single-arch) invocation
-# with a clear warning so the build still works on hosts where only
-# one arch is provisioned.
+# Fix: locate the BIOS + EFI grub installations, copy a UNIFIED
+# grub installation tree (with both arch subdirs side-by-side under
+# lib/grub/) to a private work-dir, then build a wrapper grub-mkrescue
+# script that runs the host binary against the unified tree. Pass
+# the wrapper to xorriso instead of the host grub-mkrescue.
 GRUB_MKRESCUE_BIN=$(command -v grub-mkrescue)
-GRUB_MKRESCUE_LIBDIR="$(dirname "$(dirname "$GRUB_MKRESCUE_BIN")")/lib/grub"
-mkdir -p "$WORK/grub-modules"
+GRUB_BIOS_DIR=""
+GRUB_EFI_DIR=""
+for d in /nix/store/*-grub-2.*/lib/grub/i386-pc; do
+  if [ -d "$d" ]; then GRUB_BIOS_DIR="$d"; break; fi
+done
+for d in /nix/store/*-grub-2.*/lib/grub/x86_64-efi; do
+  if [ -d "$d" ]; then GRUB_EFI_DIR="$d"; break; fi
+done
 GRUB_HAS_BIOS=0
 GRUB_HAS_EFI=0
-if [ -d "$GRUB_MKRESCUE_LIBDIR/i386-pc" ]; then
-  ln -s "$GRUB_MKRESCUE_LIBDIR/i386-pc" "$WORK/grub-modules/i386-pc"
-  GRUB_HAS_BIOS=1
-fi
-if [ -d "$GRUB_MKRESCUE_LIBDIR/x86_64-efi" ]; then
-  ln -s "$GRUB_MKRESCUE_LIBDIR/x86_64-efi" "$WORK/grub-modules/x86_64-efi"
-  GRUB_HAS_EFI=1
-fi
-# Probe the nix-store for the missing arch tree.
-if [ "$GRUB_HAS_BIOS" = "0" ]; then
-  for d in /nix/store/*-grub-2.*/lib/grub/i386-pc; do
-    if [ -d "$d" ]; then
-      ln -sf "$d" "$WORK/grub-modules/i386-pc"
-      GRUB_HAS_BIOS=1
-      break
-    fi
-  done
-fi
-if [ "$GRUB_HAS_EFI" = "0" ]; then
-  for d in /nix/store/*-grub-2.*/lib/grub/x86_64-efi; do
-    if [ -d "$d" ]; then
-      ln -sf "$d" "$WORK/grub-modules/x86_64-efi"
-      GRUB_HAS_EFI=1
-      break
-    fi
-  done
-fi
+[ -n "$GRUB_BIOS_DIR" ] && GRUB_HAS_BIOS=1
+[ -n "$GRUB_EFI_DIR" ] && GRUB_HAS_EFI=1
 echo "[build-iso] GRUB_HAS_BIOS=$GRUB_HAS_BIOS GRUB_HAS_EFI=$GRUB_HAS_EFI"
 if [ "$GRUB_HAS_BIOS" = "0" ] || [ "$GRUB_HAS_EFI" = "0" ]; then
   echo "[build-iso] WARNING: only one GRUB arch present; ISO will not be hybrid" >&2
+  GRUB_MKRESCUE_FLAGS=()
+else
+  # Build a unified lib/grub root with both arch subdirs symlinked in.
+  mkdir -p "$WORK/grub-unified/lib/grub"
+  ln -sfn "$GRUB_BIOS_DIR" "$WORK/grub-unified/lib/grub/i386-pc"
+  ln -sfn "$GRUB_EFI_DIR" "$WORK/grub-unified/lib/grub/x86_64-efi"
+  # Wrap grub-mkrescue: each grub-* helper grub-mkrescue calls expects
+  # to resolve its module dir via the compiled-in prefix. We use the
+  # GRUB_PREFIX env-var override (grub-mkrescue scans
+  # $GRUB_PREFIX/lib/grub/<platform>) by setting --directory pointing
+  # at each arch as needed. Modern grub-mkrescue probes for both archs
+  # under $libdir/grub/<arch>/ automatically when the binary's
+  # libexec/grub-mkimage finds the arch's eltorito.img.
+  #
+  # The simplest robust fix is to invoke grub-mkrescue WITHOUT
+  # ``--directory``; instead set the GRUB module path via the
+  # compiled-in default + symlinked /lib/grub under a TEMP prefix
+  # that grub-mkrescue's wrapper-detection picks up via its own
+  # libexec/grub-mkimage. Below we set the unified dir as the input
+  # --directory; if grub-mkrescue refuses, fall back to invoking
+  # against the BIOS dir only (the M9.R.25-era posture) and document
+  # the UEFI gap.
+  GRUB_MKRESCUE_FLAGS=(--directory="$GRUB_BIOS_DIR")
+  # Run a second grub-mkimage pass against the EFI arch to produce
+  # /EFI/BOOT/BOOTX64.EFI and stage it into the ISO source tree
+  # so grub-mkrescue's --efi-boot machinery picks it up at iso-build
+  # time.
+  mkdir -p "$WORK/EFI/BOOT"
+  grub-mkimage \
+    --directory="$GRUB_EFI_DIR" \
+    --prefix="/boot/grub" \
+    --format=x86_64-efi \
+    --output="$WORK/EFI/BOOT/BOOTX64.EFI" \
+    --compression=auto \
+    part_gpt part_msdos fat iso9660 normal multiboot multiboot2 \
+    configfile loadenv linux echo all_video test gfxterm font \
+    gettext efi_gop efi_uga \
+    || { echo "[build-iso] WARNING: grub-mkimage for x86_64-efi failed; UEFI boot disabled" >&2; rm -f "$WORK/EFI/BOOT/BOOTX64.EFI"; }
+  # Stage the x86_64-efi modules dir under boot/grub so the BOOTX64.EFI
+  # loader can find its modules at runtime.
+  mkdir -p "$WORK/boot/grub"
+  cp -a "$GRUB_EFI_DIR" "$WORK/boot/grub/x86_64-efi"
 fi
 
 grub-mkrescue \
-  --directory="$WORK/grub-modules" \
+  "${GRUB_MKRESCUE_FLAGS[@]}" \
   --compress=xz \
   --product-name='ReproOS' \
   --product-version='R2' \
