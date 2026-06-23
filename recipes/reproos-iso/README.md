@@ -100,12 +100,50 @@ The grub.cfg launches the vendored Debian netinst kernel with:
 console=tty1 console=ttyS0,115200n8 quiet
 ```
 
-The d-i kernel reads the `console=` cmdline option and writes its
+### Historical R2 boot path (REPRO_LIVE_INIT=0, default)
+
+The vendored d-i initramfs runs busybox + the Debian Installer
+framework. Reads the `console=` cmdline option and writes its
 text-mode installer banner to ttyS0. Under Hyper-V Gen-2 UEFI with
 COM1 wired to a named pipe, the R0 vm-harness `bootFromMedia` boot
 gate tails the pipe and asserts on the installer banner.
 
 R2 does NOT drive the installer (we just verify the kernel reaches
-userspace). R10's recipe will boot the from-source kernel + initramfs
-through the same mechanism and the boot-gate assertion targets will
-shift to systemd's startup banner.
+userspace).
+
+### M9.R.17c live-init boot path (REPRO_LIVE_INIT=1)
+
+The historical R2 d-i initramfs ignores `/live/filesystem.squashfs`
+and just runs the installer. M9.R.17c replaces it with a custom
+live-init capable initramfs (see `scripts/build-initramfs.sh` +
+`initramfs/init`) that:
+
+1. Probes block devices for the ISO.
+2. Mounts `/live/filesystem.squashfs` via the loop driver.
+3. Overlays it with a tmpfs upper via overlayfs.
+4. `switch_root`s into the overlay where /sbin/init = systemd.
+
+The squashfs payload is assembled by `scripts/stage-de-rootfs.sh`
+which:
+
+1. Pulls a base userspace (systemd, libc, Qt6, GL stack, sddm)
+   from `debian:trixie-slim` via Docker apt-install
+   (`scripts/build-base-rootfs.sh`).
+2. Overlays the from-source DE binaries (sway, mutter, kwin, sddm,
+   plasma-workspace, gdm) from the sibling source recipes'
+   `.repro/output/install/usr/` trees.
+3. Stages `/usr/share/wayland-sessions/{sway,plasma,gnome}.desktop`
+   so SDDM enumerates all three at the login screen.
+4. Symlinks `/etc/systemd/system/display-manager.service ->
+   /usr/lib/systemd/system/sddm.service` and `default.target ->
+   graphical.target` so systemd starts SDDM on graphical.target.
+
+QEMU smoke (verified 2026-06-23): boots into SDDM with `Session:`
+dropdown showing Sway/Plasma/GNOME, the live user avatar, and a
+password input field (password = `reproos`).
+
+The recipe's `repro.nim` sets `REPRO_LIVE_INIT=1` so the recipe
+invocation builds the live-boot path; the reproducibility test
+(`tests/reproducibility/t_r2_iso_reproducibility.sh`) leaves
+REPRO_LIVE_INIT defaulted to 0 so the historical R2 reproducibility
+contract continues to be enforced against the vendored d-i path.
