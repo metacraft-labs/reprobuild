@@ -73,3 +73,62 @@ Pending for M9.R.19:
   - Quick-path implementations (Welcome screen's USB / git URL buttons).
   - Activity TOML loader (Activities.qml currently inlines the catalog).
   - M82 broker integration for the destructive install step.
+
+================================================
+M9.R.19 closure (eli-wsl, 2026-06-23):
+================================================
+
+M9.R.19.1 -- qt6-quickcontrols2 from-source recipe
+  Landed `recipes/packages/source/qt6-quickcontrols2/repro.nim`. Builds
+  from the shared qtdeclarative-everywhere-src-6.8.1.tar.xz tarball
+  (referenced via `file:../qt6-declarative/vendor/...` so the 36-MiB
+  blob isn't duplicated). Upstream Qt merged QuickControls2 INTO
+  qtdeclarative at Qt 6.2; the standalone qtquickcontrols2-everywhere-
+  src-<ver>.tar.xz returns HTTP 404 from download.qt.io (verified
+  M9.R.19).
+
+M9.R.19.1.2 -- NIX_CFLAGS_COMPILE leak fix
+  Cleared NIX_CFLAGS_COMPILE for the qt6-quickcontrols2 cmake configure
+  via extraEnv. Without this fix, CMake's implicit-include-dir scan
+  picks up sibling Qt include dirs from the nix-shell env and
+  deduplicates the explicit -I.../QtCore + -isystem .../usr/include
+  flags out of the per-target compile commands; the actual gcc
+  invocation then lacks them and fails with
+  "QtCore/qtsymbolmacros.h: No such file or directory" when compiling
+  qrc_jsRootMetaTypes_init.cpp.
+
+M9.R.19.3 -- ISO integration
+  stage-de-rootfs.sh now consumes
+  apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer
+  as the canonical source for the installer binary. The script exits
+  with code 66 if the binary is missing (was a soft skip in M9.R.18.14).
+  Defaults the SDDM autologin Session= to reproos-installer (was
+  plasma in M9.R.18.1 as a placeholder). reproos-iso/repro.nim
+  declares the installer binary path as an extraInput so the engine
+  refingerprints the ISO when the wizard changes.
+
+QEMU smoke test (eli-wsl, 2026-06-23):
+  Booted the M9.R.18.14 ISO under
+    qemu-system-x86_64 -m 4G -cdrom build/reproos.iso -display none
+                       -serial file:/tmp/qemu_serial.log
+                       -monitor unix:/tmp/qemu_monitor.sock,server,nowait
+                       -vnc 127.0.0.1:5 -daemonize
+  Result chain (via serial log markers):
+    * BIOS -> kernel boot
+    * live-init: probed /dev/sr0, mounted /live/filesystem.squashfs,
+      set up overlayfs, switch_root into the overlay -- WORKS
+    * systemd: reached graphical.target -- WORKS
+    * sddm.service: STARTED (per "Started sddm.service") -- WORKS
+    * SDDM rendering: BLANK FB (qmp screendump captures show the
+      kernel boot console framebuffer; no graphical SDDM greeter
+      rendered). This is independent of M9.R.19 work; pre-existing
+      gap in the live ISO's plasma session activation path -- the
+      M9.R.18.14 ISO has Session=plasma defaulted and plasma-workspace
+      needs further wiring to start up cleanly in this environment.
+      M9.R.19.3 + M9.R.19.4 flip the default to reproos-installer
+      which avoids the plasma startup path entirely, but the new ISO
+      needs rebuilding to pick up the change (gated on the
+      qt6-quickcontrols2 build finishing and the installer recipe
+      build running through the engine).
+  Screenshots saved at D:/metacraft/m9r19-installer-boot-{1,2,3}.png +
+  m9r19-vt{1,2,7}-1.png.
