@@ -1,0 +1,75 @@
+M9.R.18 -- ReproOS Installer build evidence.
+================================================
+
+Standalone-build verification (eli-wsl, 2026-06-23):
+
+1. CMake configure:
+     cd /opt/repro/reprobuild/apps/reproos-installer
+     nix-shell -p qt6.qtbase qt6.qtdeclarative qt6.qtwayland cmake ninja \
+                 gcc14 pkg-config --run \
+       'cmake -S . -B /tmp/installer-build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.16'
+   Result: PASS (Qt6 found, ninja generator, Threads/Atomic/OpenGL detected)
+
+2. CMake build:
+     cmake --build /tmp/installer-build
+   Result: PASS (8/8 ninja steps, exit 0)
+     [1/8] Running qmlimportscanner for reproos-installer
+     [2/8] Automatic MOC and UIC for target reproos-installer
+     [3/8] Running rcc for resource qml-resources
+     [4/8] Building qrc_qml-resources.cpp.o
+     [5/8] Building mocs_compilation.cpp.o
+     [6/8] Building src/installer_state.cpp.o
+     [7/8] Building src/main.cpp.o
+     [8/8] Linking CXX executable reproos-installer
+
+3. Binary verification:
+     ls -la /tmp/installer-build/reproos-installer
+     => -rwxr-xr-x 1 root root 87856 Jun 23 11:47 reproos-installer
+
+4. CLI surface verification:
+     /tmp/installer-build/reproos-installer --help
+   Result:
+     Usage: reproos-installer [options]
+     ReproOS first-boot installer wizard. See ReproOS-Installer-PRD.md
+     Options:
+       -h, --help                Displays help on commandline options.
+       --help-all                Displays help, including generic Qt options.
+       -v, --version             Displays version information.
+       --activities-toml <path>  Path to the activity catalog TOML.
+       --dry-run                 Stop before the destructive install step.
+
+5. Version reporting (proves QGuiApplication bootstrap works):
+     QT_QPA_PLATFORM=offscreen reproos-installer --version
+   Result: ReproOS Installer 0.1.0
+
+Screens implemented (9 total):
+  - Welcome.qml      ($BAR M9.R.18.5)
+  - Locale.qml       ($BAR M9.R.18.6)
+  - Keyboard.qml     ($BAR M9.R.18.7)
+  - Users.qml        ($BAR M9.R.18.8)
+  - DeSelect.qml     ($BAR M9.R.18.9)
+  - Activities.qml   ($BAR M9.R.18.10)
+  - Summary.qml      ($BAR M9.R.18.11)
+  - Install.qml      ($BAR M9.R.18.12)
+  - Finished.qml     ($BAR M9.R.18.12)
+
+InstallerState C++ model exposes 12 QProperty fields:
+  hostname / locale / timezone / keymap / username / fullName / password
+  / isAdmin / desktopKind / activeActivities / activitiesTomlPath / dryRun
+
+Plus 3 Q_INVOKABLE methods:
+  renderSystemNim()   -- Sec 3.3 system.nim preview text
+  toggleActivity()    -- catalog checkbox toggle
+  hasActivity()       -- catalog checkbox initial-state probe
+
+Pending for M9.R.19:
+  - qt6-quickcontrols2 from-source recipe (currently only the nix-shell
+    QtQuickControls2 path works; the reprobuild recipe needs it landed
+    before the engine can build the installer end-to-end).
+  - Wire the launcher into the live ISO autologin chain (M9.R.18.14 --
+    deferred; pre-requires the binary landing in the base rootfs).
+  - Quick-path implementations (Welcome screen's USB / git URL buttons).
+  - Activity TOML loader (Activities.qml currently inlines the catalog).
+  - M82 broker integration for the destructive install step.
