@@ -587,12 +587,18 @@ void InstallerState::runMinimalBootstrap(const QString &target) {
     appendLog("Phase 5d: installing GRUB to " +
               (m_targetDevice.isEmpty() ? QStringLiteral("/dev/vda")
                                         : m_targetDevice));
-    // Use grub-install from the live ISO. --target=i386-pc covers
-    // BIOS, --boot-directory=<mnt>/boot writes the GRUB modules.
+    // Use grub-install via UEFI (the GPT layout has an ESP at /boot
+    // but no BIOS Boot Partition, so i386-pc embedding fails with
+    // "will not proceed with blocklists"). --target=x86_64-efi +
+    // --efi-directory=<mnt>/boot writes the EFI binary into the ESP
+    // and registers the boot entry. --removable installs it under the
+    // EFI/BOOT/BOOTX64.EFI canonical path so QEMU OVMF picks it up
+    // without an NVRAM variable.
     const QString grubDevice = m_targetDevice.isEmpty()
         ? QStringLiteral("/dev/vda") : m_targetDevice;
-    sh("grub-install --target=i386-pc --boot-directory=" + target +
-       "/boot --no-floppy --recheck " + grubDevice, 120000);
+    sh("grub-install --target=x86_64-efi --efi-directory=" + target +
+       "/boot --boot-directory=" + target +
+       "/boot --no-nvram --removable --recheck " + grubDevice, 120000);
     appendLog("Phase 5e: writing GRUB config");
     QString grubCfg =
         "set timeout=5\n"
