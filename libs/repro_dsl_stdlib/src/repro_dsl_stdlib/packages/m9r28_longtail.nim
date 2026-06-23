@@ -61,3 +61,10 @@ package `pam`:
   provisioning:
     nixPackage "nixpkgs#linux-pam", executablePath = "lib/libpam.so",
       nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+
+package `libbsd`:
+  ## shadow-utils' configure tests for ``readpassphrase()`` which
+  ## glibc lacks; libbsd provides it.
+  provisioning:
+    nixPackage "nixpkgs#libbsd", executablePath = "lib/libbsd.so",
+      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash

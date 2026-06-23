@@ -68,9 +68,15 @@ package ianaTzdataSource:
       ## c89-via-c99 rule resolves to the real compiler. Also force
       ## TOPDIR= since the recipe doesn't use the configure-script
       ## --prefix machinery (skipConfigure=true).
+      ## tz Makefile honours both ``TOPDIR=`` (the prefix root —
+       ## zoneinfo lands under $TOPDIR/usr/share/zoneinfo on Linux)
+       ## AND ``DESTDIR=`` (autotools_package sets DESTDIR=build/out
+       ## via the install-edge's env). With DESTDIR set, leave TOPDIR
+       ## at the default ``/usr`` so the install lands under
+       ## ``build/out/usr/share/zoneinfo/`` — the canonical
+       ## install-mirror layout the M9.R.14e mirror walks.
       let pkg = autotools_package(srcDir = "./src",
-                                  configureOptions = @["CC=gcc",
-                                                        "TOPDIR=out/usr"],
+                                  configureOptions = @["CC=gcc"],
                                   skipConfigure = true)
       discard pkg
     finally:

@@ -84,6 +84,10 @@ package shadowUtilsSource:
     ## libaudit ships the audit subsystem hooks shadow's helpers emit
     ## events into when present.
     "audit"
+    ## libbsd provides ``readpassphrase()`` which glibc lacks. shadow's
+    ## ``configure`` hard-errors with "readpassphrase() is missing,
+    ## either from libc or libbsd" if neither has it.
+    "libbsd"
 
   config:
     discard
