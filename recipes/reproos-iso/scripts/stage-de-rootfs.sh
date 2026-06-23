@@ -419,6 +419,15 @@ if [ -n "$sqlite_so" ]; then
   ln -sf "$(basename "$sqlite_so")" "$(dirname "$sqlite_so")/libsqlite3.so"
   echo "[stage-de-rootfs] symlinked libsqlite3.so -> $(basename "$sqlite_so")"
 fi
+# Qt6 dlopens libvulkan.so (bare linker name); Debian's libvulkan1
+# package only ships libvulkan.so.1.
+vulkan_so="$(find "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
+              -maxdepth 4 \( -name 'libvulkan.so.1' -type f -o \
+              -name 'libvulkan.so.1' -type l \) 2>/dev/null | head -1)"
+if [ -n "$vulkan_so" ]; then
+  ln -sf "$(basename "$vulkan_so")" "$(dirname "$vulkan_so")/libvulkan.so"
+  echo "[stage-de-rootfs] symlinked libvulkan.so -> $(basename "$vulkan_so")"
+fi
 
 # M9.R.24.1g.3 -- libclingo is the ASP solver Repro's engine action-cache
 # planner dlopens at runtime. Debian doesn't package it (Potassco

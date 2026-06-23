@@ -61,7 +61,7 @@ PKG_LIST=(
   # fonts so SDDM can render text
   fontconfig fonts-dejavu-core
   # GL/Vulkan stack
-  libgl1 libegl1 libglx-mesa0 mesa-vulkan-drivers
+  libgl1 libegl1 libglx-mesa0 mesa-vulkan-drivers libvulkan1
   # gcc / cxx runtimes
   libgcc-s1 libstdc++6
   # Qt6 runtime for sddm-greeter + reproos-installer
