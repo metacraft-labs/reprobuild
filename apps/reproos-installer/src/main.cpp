@@ -7,19 +7,18 @@
 // the libreproos_installer shared library the Nim recipe builds and
 // links here), but the Qt object instantiation is C++.
 //
-// v0.1 scope (this commit): the engine loads qrc:/qml/main.qml which
-// drives a StackView through the eight wizard screens documented in
-// ReproOS-Installer-PRD.md Sec 3.1. The on-disk apply pipeline (Sec 7.2
-// step 8) is stubbed -- the install screen shells out to `echo` until
-// M9.R.19 wires it to `repro disk apply` + `repro infra apply`.
+// M9.R.23.5 -- adds the --automated CONFIG_TOML CLI flag that
+// bypasses the wizard, loads CONFIG_TOML, and runs install()
+// directly. Used by the smoke harness + future first-boot kiosks
+// that prefer pre-configured installs.
 
 #include <QtCore/QCommandLineParser>
-#include <QtGui/QGuiApplication>
-#include <QtQml/QQmlApplicationEngine>
-#include <QtQml/QQmlContext>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QUrl>
 #include <QtCore/QDebug>
+#include <QtGui/QGuiApplication>
+#include <QtQml/QQmlApplicationEngine>
+#include <QtQml/QQmlContext>
 
 #include "installer_state.h"
 
@@ -47,13 +46,29 @@ int main(int argc, char *argv[]) {
         "dry-run",
         "Stop before the destructive install step -- prints the planned "
         "system.nim instead.");
+    QCommandLineOption automatedOpt(
+        "automated",
+        "Skip the wizard + run install() directly using CONFIG_TOML as "
+        "the source of truth. The TOML is read with a minimal key=value "
+        "parser (no nested tables). Smoke harness + first-boot kiosk "
+        "use this path.",
+        "config-toml");
     parser.addOption(activitiesOpt);
     parser.addOption(dryRunOpt);
+    parser.addOption(automatedOpt);
     parser.process(app);
 
     InstallerState state;
     state.setActivitiesTomlPath(parser.value(activitiesOpt));
     state.setDryRun(parser.isSet(dryRunOpt));
+
+    if (parser.isSet(automatedOpt)) {
+        // Headless install path. main.cpp returns the install() exit
+        // code directly without entering the QML event loop.
+        const QString cfg = parser.value(automatedOpt);
+        const int rc = state.runAutomatedConfig(cfg);
+        return rc;
+    }
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("installerState", &state);

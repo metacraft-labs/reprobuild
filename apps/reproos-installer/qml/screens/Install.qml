@@ -1,59 +1,36 @@
 // M9.R.18.12 -- Install screen. Per ReproOS-Installer-PRD.md Sec 3.1
-// screen 10 + Sec 7.2 step 8 the wizard shells out to the actual
+// screen 9 + Sec 7.2 step 8 the wizard shells out to the actual
 // install pipeline (`repro disk apply` -> `repro disk mount` -> file
 // writes -> `repro infra apply --target /mnt`).
 //
-// v0.1 stubs the destructive pipeline: the screen runs `echo` and
-// reports success. M9.R.19 wires it to the M82 broker per PRD Sec 7.3.
+// M9.R.23.3 wires the screen to InstallerState.install() which drives
+// the actual sequence via QProcess wrappers. The Stub button is gone;
+// the screen is now bound to the install* properties + the
+// installLogChanged signal updates the live log.
 
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Item {
-    property real installProgress: 0.0
-    property string installStatus: qsTr("Ready to install")
-    property bool installRunning: false
-    property bool installFinished: false
-    property bool installFailed: false
-    property string installLog: ""
+    id: installScreen
 
-    Timer {
-        id: stubTimer
-        interval: 250
-        repeat: true
-        onTriggered: {
-            installProgress += 0.04;
-            if (installProgress >= 1.0) {
-                installProgress = 1.0;
-                installRunning = false;
-                installFinished = true;
-                installStatus = qsTr("Install completed (M9.R.19 will wire the real apply).");
-                appendLog("[done] stub install pipeline completed");
-                stop();
-            } else {
-                var step = Math.floor(installProgress * 8);
-                var labels = [
-                    qsTr("Probing target hardware..."),
-                    qsTr("Planning disk layout..."),
-                    qsTr("Applying disk layout..."),
-                    qsTr("Mounting target rootfs at /mnt..."),
-                    qsTr("Writing /mnt/etc/repro/system.nim..."),
-                    qsTr("Copying activity modules..."),
-                    qsTr("Running repro infra apply --target /mnt..."),
-                    qsTr("Finalising bootloader install...")
-                ];
-                if (step < labels.length) {
-                    installStatus = labels[step];
-                    appendLog("[" + step + "] " + labels[step]);
-                }
-            }
+    Connections {
+        target: installerState
+        function onInstallLogChanged() {
+            logArea.text = installerState.installLog;
+            // Keep the log area scrolled to the bottom.
+            logArea.cursorPosition = logArea.length;
         }
-    }
-
-    function appendLog(line) {
-        installLog += line + "\n";
-        logArea.text = installLog;
+        function onInstallComplete() {
+            // Surface the completion + let the user advance to the
+            // Finished screen. main.qml's Next button enables once the
+            // installRunning flag drops to false.
+        }
+        function onInstallFailed(reason) {
+            // The reason already lands in the installLog via the C++
+            // appendLog() call; no separate dialog needed.
+        }
     }
 
     ColumnLayout {
@@ -68,7 +45,7 @@ Item {
         }
 
         Label {
-            text: installStatus
+            text: installerState.installStatus
             font.pixelSize: 14
             color: "#b8b8d0"
             wrapMode: Text.WordWrap
@@ -77,25 +54,19 @@ Item {
 
         ProgressBar {
             Layout.fillWidth: true
-            value: installProgress
-            indeterminate: installRunning && installProgress < 0.05
+            value: installerState.installProgress
+            indeterminate: installerState.installRunning
+                && installerState.installProgress < 0.05
         }
 
         Button {
-            text: installRunning ? qsTr("Installing...")
-                  : installFinished ? qsTr("Done")
-                  : qsTr("Start install (stub)")
-            enabled: !installRunning && !installFinished
-            highlighted: !installRunning && !installFinished
-            onClicked: {
-                installRunning = true;
-                installProgress = 0.0;
-                installLog = "";
-                appendLog("# ReproOS installer stub log");
-                appendLog("# M9.R.18.12 -- the real apply lands in M9.R.19");
-                appendLog("");
-                stubTimer.start();
-            }
+            text: installerState.installRunning ? qsTr("Installing...")
+                  : installerState.installProgress >= 1.0 ? qsTr("Done")
+                  : qsTr("Start install")
+            enabled: !installerState.installRunning
+                && installerState.installProgress < 1.0
+            highlighted: enabled
+            onClicked: installerState.install()
         }
 
         Label {
@@ -126,7 +97,8 @@ Item {
                     font.family: "monospace"
                     font.pixelSize: 11
                     background: null
-                    text: ""
+                    text: installerState.installLog
+                    wrapMode: TextEdit.Wrap
                 }
             }
         }
