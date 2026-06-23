@@ -1,0 +1,1 @@
+m9r21_4_smoke: OK — systemId=KYWWX1968CGK8HQ13PB0F9H0V2, arch=x86_64, microcode=amd, kernelModules=36, filesystems=3, drivers=0, audioCards=0

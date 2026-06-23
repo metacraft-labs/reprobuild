@@ -69,6 +69,35 @@ suite "M9.R.21.4: hardware probe end-to-end":
     else:
       skip()
 
+  test "eli-wsl captured fixture parses + matches captured JSON":
+    ## Pinned regression fixture: the eli-wsl live probe captured at
+    ## M9.R.21.4 step b. The .nim file is the rendered hardware.nim
+    ## that came out of probeAll on a NixOS WSL host; the .json file
+    ## is the result of compiling that .nim file through the M9.R.20
+    ## `hardware "<id>":` macro. Re-parsing the JSON yields a spec
+    ## whose round-tripped JSON is byte-identical to the captured
+    ## one — pinning the macro / renderer agreement.
+    const FixtureJson = staticRead(
+      "fixtures/m9r21_4_eliwsl_hardware.json")
+    let spec = parseSystemHardwareJson(FixtureJson)
+    check spec.id == "KYWWX1968CGK8HQ13PB0F9H0V2"
+    check spec.cpuArch == "x86_64"
+    check spec.cpuMicrocode == "amd"
+    check spec.kernelModules.len == 36
+    check "btrfs" in spec.kernelModules
+    check spec.loaderDevice == "/dev/sdd"
+    check spec.filesystems.len == 3
+    check spec.filesystems[0].mountPoint == "/home"
+    check spec.filesystems[0].fsType == "btrfs"
+    # Byte-equivalence: emit + re-parse + re-emit yields the same JSON.
+    let reEmitted = emitSystemHardwareJson(spec)
+    check reEmitted == FixtureJson.strip()
+    # And rendering it back produces text that contains every section.
+    let txt = renderHardwareSpec(spec)
+    check "hardware \"KYWWX1968CGK8HQ13PB0F9H0V2\":" in txt
+    check "kernelModules: " in txt
+    check "btrfs" in txt
+
   test "render path produces macro-parseable text on every host":
     # Hardcoded spec exercises the same renderer used by the live
     # probe — verifies the harness on Windows / Darwin where the live
