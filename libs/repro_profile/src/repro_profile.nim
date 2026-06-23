@@ -16,6 +16,7 @@ import repro_profile/resources
 import repro_profile/macros
 import repro_profile/macros_system
 import repro_profile/hardware_id
+import repro_profile/hardware_probe
 
 export types
 export predicates
@@ -25,3 +26,4 @@ export resources
 export macros
 export macros_system
 export hardware_id
+export hardware_probe
