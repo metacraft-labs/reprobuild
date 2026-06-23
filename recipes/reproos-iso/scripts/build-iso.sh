@@ -319,7 +319,75 @@ REPRO_GPT_DISK_GUID='52455052-4f53-4953-4f52-322d62756c61'
 # YYYY MM DD hh mm ss cc = 20250101000000 00
 REPRO_MODIFICATION_DATE='2025010100000000'
 
+# M9.R.27.7 — assemble a unified GRUB module directory that contains
+# BOTH ``i386-pc`` (BIOS) AND ``x86_64-efi`` (UEFI) module trees so
+# grub-mkrescue can produce a true hybrid ISO with both an El Torito
+# BIOS boot entry AND a UEFI ESP boot entry.
+#
+# Background: on Nix-based hosts ``nixpkgs#grub2`` ships ONLY the
+# ``i386-pc`` modules and ``nixpkgs#grub2_efi`` ships ONLY the
+# ``x86_64-efi`` modules. When both are present in the nix-shell,
+# the ``grub-mkrescue`` binary on PATH resolves to one or the other
+# (whichever appears first), and the resolved binary's default
+# ``--directory`` (``$(dirname $0)/../lib/grub``) only contains its
+# own arch's modules. The result is a BIOS-only or UEFI-only ISO.
+#
+# Diagnosis: ``xorriso -indev <iso> -report_el_torito as_mkisofs``
+# on the BIOS-only output shows only ``-b /boot/grub/i386-pc/eltorito.img``
+# — no ``-eltorito-alt-boot -e ... -no-emul-boot`` block for the UEFI
+# ESP image. OVMF boot in QEMU reports ``BdsDxe: No bootable option
+# or device was found`` because no UEFI bootable target exists on
+# the disc.
+#
+# Fix: build a private merged grub module dir under $WORK/grub-modules
+# that symlinks both arch trees, then pass ``--directory=$WORK/grub-modules``
+# to grub-mkrescue. This makes grub-mkrescue see both archs.
+#
+# The arch lookup uses ``grub-mkrescue`` itself as the anchor (its
+# resolved path's sibling ``/lib/grub/`` contains one of the two arch
+# trees), plus a probe of the nix-store for the other one. If the
+# probe fails, fall back to the original (single-arch) invocation
+# with a clear warning so the build still works on hosts where only
+# one arch is provisioned.
+GRUB_MKRESCUE_BIN=$(command -v grub-mkrescue)
+GRUB_MKRESCUE_LIBDIR="$(dirname "$(dirname "$GRUB_MKRESCUE_BIN")")/lib/grub"
+mkdir -p "$WORK/grub-modules"
+GRUB_HAS_BIOS=0
+GRUB_HAS_EFI=0
+if [ -d "$GRUB_MKRESCUE_LIBDIR/i386-pc" ]; then
+  ln -s "$GRUB_MKRESCUE_LIBDIR/i386-pc" "$WORK/grub-modules/i386-pc"
+  GRUB_HAS_BIOS=1
+fi
+if [ -d "$GRUB_MKRESCUE_LIBDIR/x86_64-efi" ]; then
+  ln -s "$GRUB_MKRESCUE_LIBDIR/x86_64-efi" "$WORK/grub-modules/x86_64-efi"
+  GRUB_HAS_EFI=1
+fi
+# Probe the nix-store for the missing arch tree.
+if [ "$GRUB_HAS_BIOS" = "0" ]; then
+  for d in /nix/store/*-grub-2.*/lib/grub/i386-pc; do
+    if [ -d "$d" ]; then
+      ln -sf "$d" "$WORK/grub-modules/i386-pc"
+      GRUB_HAS_BIOS=1
+      break
+    fi
+  done
+fi
+if [ "$GRUB_HAS_EFI" = "0" ]; then
+  for d in /nix/store/*-grub-2.*/lib/grub/x86_64-efi; do
+    if [ -d "$d" ]; then
+      ln -sf "$d" "$WORK/grub-modules/x86_64-efi"
+      GRUB_HAS_EFI=1
+      break
+    fi
+  done
+fi
+echo "[build-iso] GRUB_HAS_BIOS=$GRUB_HAS_BIOS GRUB_HAS_EFI=$GRUB_HAS_EFI"
+if [ "$GRUB_HAS_BIOS" = "0" ] || [ "$GRUB_HAS_EFI" = "0" ]; then
+  echo "[build-iso] WARNING: only one GRUB arch present; ISO will not be hybrid" >&2
+fi
+
 grub-mkrescue \
+  --directory="$WORK/grub-modules" \
   --compress=xz \
   --product-name='ReproOS' \
   --product-version='R2' \
