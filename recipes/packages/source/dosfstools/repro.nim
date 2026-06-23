@@ -36,10 +36,13 @@ package dosfstoolsSource:
 
   config:
     discard
-  executable mkfsFat:
-    discard
-  executable fsckFat:
-    discard
+  ## M9.R.28.4 — dosfstools installs ``mkfs.fat`` + ``fsck.fat``
+  ## (period between verb and filesystem name) which the PascalToKebab
+  ## transformer cannot represent. ``fatlabel`` round-trips fine.
+  ## Use ``executableAlias`` (M9.R.28.4 autotools-side helper) for the
+  ## period-bearing binaries; the install-mirror harvests the
+  ## upstream-named compat symlinks (mkdosfs / mkfs.msdos / mkfs.vfat
+  ## / fsck.msdos / fsck.vfat / dosfsck / dosfslabel) verbatim.
   executable fatlabel:
     discard
 
@@ -50,8 +53,8 @@ package dosfstoolsSource:
         "--enable-compat-symlinks",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
-      discard pkg.executable("mkfsFat")
-      discard pkg.executable("fsckFat")
+      discard pkg.executableAlias("mkfsFat", "mkfs.fat")
+      discard pkg.executableAlias("fsckFat", "fsck.fat")
       discard pkg.executable("fatlabel")
     finally:
       clearCurrentOwningPackageOverride()

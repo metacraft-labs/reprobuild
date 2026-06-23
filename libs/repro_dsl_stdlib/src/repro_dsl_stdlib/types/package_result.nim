@@ -1568,16 +1568,27 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
   let effectiveDestRoot =
     if buildDir.len > 0: buildDir & "/" & destdir
     else: destdir
-  let installPrefix = effectiveDestRoot & "/usr/bin"
-  let escapedSrcDir = installPrefix.replace("\\", "/").replace("\"", "\\\"")
   let escapedSrc = sourceName.replace("\"", "\\\"")
+  # M9.R.28.4 — probe usr/bin THEN usr/sbin THEN usr/libexec THEN
+  # usr/lib/libexec for the alias source. Filesystem-utility recipes
+  # (dosfstools, e2fsprogs, util-linux) install most binaries under
+  # /usr/sbin/, not /usr/bin/, so the historical bin-only probe missed
+  # them and forced recipes to over-specify install paths.
+  let bin = (effectiveDestRoot & "/usr/bin").replace("\\", "/").replace("\"", "\\\"")
+  let sbin = (effectiveDestRoot & "/usr/sbin").replace("\\", "/").replace("\"", "\\\"")
+  let libexec = (effectiveDestRoot & "/usr/libexec").replace("\\", "/").replace("\"", "\\\"")
+  let libLibexec = (effectiveDestRoot & "/usr/lib/libexec").replace("\\", "/").replace("\"", "\\\"")
+  let candidateDirs = [bin, sbin, libexec, libLibexec]
   var script = "set -e; mkdir -p \"" & escapedOutDir & "\"; "
-  # Probe the requested source name, plus the .exe shape for cross-builds.
-  script.add("if [ -f \"" & escapedSrcDir & "/" & escapedSrc & "\" ]; then ")
-  script.add("cp -fL \"" & escapedSrcDir & "/" & escapedSrc & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
-  script.add("elif [ -f \"" & escapedSrcDir & "/" & escapedSrc & ".exe\" ]; then ")
-  script.add("cp -fL \"" & escapedSrcDir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
-  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & escapedSrcDir & "\" >&2; exit 1; fi")
+  var firstClause = true
+  for dir in candidateDirs:
+    let leader = (if firstClause: "if" else: "elif")
+    script.add(leader & " [ -f \"" & dir & "/" & escapedSrc & "\" ]; then ")
+    script.add("cp -fL \"" & dir & "/" & escapedSrc & "\" \"" & escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+    script.add("elif [ -f \"" & dir & "/" & escapedSrc & ".exe\" ]; then ")
+    script.add("cp -fL \"" & dir & "/" & escapedSrc & ".exe\" \"" & escapedOut & ".exe\"; ")
+    firstClause = false
+  script.add("else echo \"executableAlias stage-copy: no source binary " & escapedSrc & " under " & bin & " or " & sbin & " or " & libexec & " or " & libLibexec & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-alias-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(aliasName)
@@ -1611,6 +1622,27 @@ proc executable*(r: AutotoolsPackageResult; name: string): Executable =
   newExecutable(
     install = r.installEdge,
     executableName = name,
+    installPrefix = componentPath(r.components, "runtime"))
+
+proc executableAlias*(r: AutotoolsPackageResult; aliasName, sourceName: string):
+    Executable =
+  ## M9.R.28.4 — autotools-side mirror of ``MesonPackageResult.executableAlias``.
+  ## Some autotools projects install binaries whose on-disk names
+  ## include characters the PascalToKebab transformer cannot represent
+  ## (e.g. ``mkfs.fat``, ``fsck.fat`` — period between the verb and
+  ## the filesystem name) so the stock probe shape misses them.
+  ## ``executableAlias`` stages the binary at
+  ## ``<destdir>/usr/{bin,sbin}/<sourceName>`` under the canonical
+  ## ``.repro/output/<aliasName>/<aliasName>`` resolver path, letting
+  ## the recipe author bridge the DSL-side name to the upstream
+  ## on-disk basename verbatim.
+  emitStageCopyAlias(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage(), aliasName, sourceName)
+  emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage())
+  newExecutable(
+    install = r.installEdge,
+    executableName = aliasName,
     installPrefix = componentPath(r.components, "runtime"))
 
 proc library*(r: AutotoolsPackageResult; name: string): Library =
