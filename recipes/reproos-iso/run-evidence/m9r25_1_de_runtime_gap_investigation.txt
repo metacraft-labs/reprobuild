@@ -1,0 +1,163 @@
+M9.R.25.1 — DE-rootfs runtime-resolution gap investigation
+============================================================
+
+CONTEXT
+-------
+M9.R.19.4 introduced a patchelf-strip pass in stage-de-rootfs.sh that
+nukes every RUNPATH/RPATH pointing at /opt/repro/reprobuild/ or
+/nix/store/ from from-source DE binaries.  M9.R.24.1 then added an
+apt-install fallback in build-base-rootfs.sh that pulls in Debian's
+sway / kwin-wayland / mutter / plasma-workspace / gnome-session / sddm /
+xwayland / KF6 / Qt6 / polkitd / fontconfig / mesa / GL / Wayland stack
+"to make exec resolve" because the strip left from-source binaries
+unable to find their deps.
+
+The user correctly called out both hacks as architectural failures:
+
+  1. apt-install bypasses the from-source principle Reprobuild stands
+     for.  We become an apt-frontend, not a reproducible-from-source
+     distro.
+  2. RUNPATH-strip discards M9.R.14f's hard-won embedded dep paths.
+     Nix-style stores work precisely BECAUSE absolute RPATHs are
+     preserved end-to-end (`/nix/store/<hash>-pkg/lib`); the binary
+     finds its libs at the same path on every machine that mirrors the
+     store layout.
+
+INVESTIGATION — eli-wsl at /opt/repro/reprobuild (HEAD f6033567)
+-----------------------------------------------------------------
+
+A. RPATH chain on sway (build host, no patching):
+
+   $ patchelf --print-rpath \
+       recipes/packages/source/sway/.repro/output/install/usr/bin/sway
+   $ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:
+     /opt/repro/reprobuild/recipes/packages/source/wlroots/.repro/output/install/usr/lib:
+     /opt/repro/reprobuild/recipes/packages/source/wlroots/.repro/output/install/usr/lib64:
+     /opt/repro/reprobuild/recipes/packages/source/wayland/.repro/output/install/usr/lib:
+     /opt/repro/reprobuild/recipes/packages/source/libxkbcommon/.repro/output/install/usr/lib:
+     /opt/repro/reprobuild/recipes/packages/source/pcre2/.repro/output/install/usr/lib:
+     /opt/repro/reprobuild/recipes/packages/source/json-c/.repro/output/install/usr/lib:
+     /opt/repro/reprobuild/recipes/packages/source/pango/.repro/output/install/usr/lib:
+     ... (24 more dep dirs)
+
+   This is exactly the layout M9.R.14f's
+   `m9r14fEmitRpathPatchScript` was designed to emit: every dep's
+   install-mirror is on rpath.
+
+B. Sway ldd on the build host (no patching, paths intact):
+
+   libcairo.so.2     => .../source/cairo/.repro/output/.../lib64/libcairo.so.2  OK
+   libjson-c.so.5    => .../source/json-c/.repro/output/.../lib64/libjson-c.so.5 OK
+   libpango-1.0.so.0 => .../source/pango/.repro/output/.../lib/libpango-1.0.so.0 OK
+   libwayland-server.so.0 => .../source/wayland/.repro/output/.../lib/...      OK
+   libwlroots-0.19.so     => .../source/wlroots/.repro/output/.../lib/...      OK
+   libxkbcommon.so.0      => .../source/libxkbcommon/.repro/output/.../lib/... OK
+   libgobject-2.0.so.0    => .../source/glib2/.repro/output/.../lib/...        OK
+   libdrm.so.2            => .../source/libdrm/.repro/output/.../lib/...       OK
+   libfontconfig.so.1     => .../source/fontconfig/.repro/output/.../lib/...   OK
+   libfreetype.so.6       => .../source/freetype/.repro/output/.../lib/...     OK
+   libpixman-1.so.0       => .../source/pixman/.repro/output/.../lib/...       OK
+   libharfbuzz.so.0       => .../source/harfbuzz/.repro/output/.../lib/...     OK
+   libffi.so.8            => .../source/libffi/.repro/output/.../lib/...       OK
+   libxml2.so.2           => .../source/libxml2/.repro/output/.../lib/...      OK
+   libfribidi.so.0        => .../source/pango/.repro/output/.../lib/...        OK
+
+   Six 'not found' lines remain:
+     libpng16.so.16  — no recipes/packages/source/libpng/   (absent)
+     libevdev.so.2   — no recipes/packages/source/libevdev/ (absent)
+
+   The 'libdrm/libpixman/libglib/libgobject => not found' lines in the
+   first-pass ldd output are RESOLVED later in the same listing via
+   their RPATH-chain parent.
+
+C. Recipe presence audit:
+
+   built install-mirrors (≥ 1 file): 114 of 154 from-source recipes
+   total install-mirror disk:        ~1.4 GB
+
+   Recipes present + built that the apt fallback redundantly pulled in:
+     sway, kwin, mutter, sddm, plasma-workspace, gdm
+     wayland, libxkbcommon, libdrm, libinput, libxml2
+     glib2, gtk4, qt6-base, qt6-declarative, qt6-wayland, qt6-svg,
+     qt6-tools, qt6-shadertools, qt6-5compat, qt6-quickcontrols2,
+     qt6-positioning, qt6-sensors,
+     mesa, fontconfig, freetype, harfbuzz, pixman, cairo, pango,
+     gdk-pixbuf, json-c, libffi, expat, openssl,
+     pam, systemd, dbus, util-linux,
+     kcoreaddons, kconfig, kio, ki18n, kwidgetsaddons, kwindowsystem,
+     kcrash, kdbusaddons, kcolorscheme, kconfigwidgets, ksvg, kded,
+     kglobalaccel, kidletime, kcmutils, kdeclarative, knotifications,
+     kwayland, kdecoration, kdecoration2, plasma-framework,
+     plasma-activities, plasma5support, plasma-activities-stats,
+     kglobalacceld, krunner, kpackage, kparts, kxmlgui, kjobwidgets,
+     kitemmodels, kitemviews, kunitconversion, kstatusnotifieritem,
+     kbookmarks, kguiaddons, kiconthemes, knewstuff, knotifyconfig,
+     kscreen, kscreenlocker, kpipewire, kprison, kservice, ksolid,
+     ktextwidgets, ksysguard, kauth, kwallet, karchive, kcodecs,
+     kcompletion, kdeclarative, sonnet, phonon4qt6, layer-shell-qt,
+     gobject-introspection, graphene, libcanberra, libepoxy,
+     wlroots, gnome-shell, breeze, attica, syntax-highlighting
+
+   Recipes legitimately ABSENT from from-source tree (need authoring):
+     libpng         — needed by sway, mutter, plasma-workspace
+     libevdev       — needed by sway, mutter, kwin
+     libjpeg        — needed by mutter, plasma-workspace
+     libmtdev       — needed by mutter
+     libxcb (+children: xcb-res, xcb-keysyms, xcb-util, xcb-util-wm, ...)
+                    — needed by plasmashell + Qt6 xcb plugin
+     libXfixes, libXrandr, libXcursor, libXi, libXext, libXcomposite,
+     libXdamage, libXinerama, libXtst, libxshmfence
+                    — Xlib client libs, needed by Qt6/sddm/Wayland-xwayland
+     polkit         — needed by Plasma (auth dialogs) + gnome-shell
+     xwayland       — needed for X11 client support in Wayland sessions
+
+D. Mutter internal RPATH gap (separate issue, M9.R.26 candidate):
+
+   mutter ships its own libmutter-cogl/mtk/clutter-15.so.0 under
+   .../usr/lib64/mutter-15/ but neither /usr/bin/mutter nor
+   /usr/lib/libmutter-15.so adds $ORIGIN/mutter-15 (or
+   $ORIGIN/../lib64/mutter-15) to its RPATH.  This is an internal
+   recipe RPATH bug — the install-mirror IS complete, the RPATH is
+   incomplete.  Out of scope for M9.R.25 (would need a recipe patch +
+   from-source rebuild).
+
+E. Interpreter (PT_INTERP) gap (separate from RPATH):
+
+   sway has PT_INTERP =
+     /nix/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/ld-linux-x86-64.so.2
+
+   On the ISO that nix-store path doesn't exist, so the kernel can't
+   start the binary.  Options:
+     a. Mirror /nix/store/<glibc-hash>/lib/ld-linux-x86-64.so.2 onto
+        the ISO (preserves the bake-time PT_INTERP without rewriting).
+     b. patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 (the
+        from-source glibc recipe's install-mirror provides this path
+        via /usr/lib64/ld-linux-x86-64.so.2 -> /lib64/...).
+
+   Either option keeps fidelity to the from-source build.  Option (a)
+   is more faithful to the Nix pattern (paths exist verbatim
+   everywhere); option (b) trims the ISO size (no need to copy
+   /nix/store/<glibc>/).
+
+CONCLUSION
+----------
+The M9.R.14f embedding mechanism is correct and produces working
+binaries on the build host.  The bug is exclusively in
+stage-de-rootfs.sh's cherry-pick logic + the M9.R.19.4 RUNPATH-strip
+band-aid that the cherry-pick required to limp.
+
+The fix per user direction:
+
+  1. Replace the cherry-pick with FULL install-mirror staging at the
+     same absolute paths the RPATHs reference.
+  2. Drop the patchelf-strip block entirely.
+  3. Drop the apt-install fallback in build-base-rootfs.sh.
+  4. Author from-source recipes for the genuinely-absent transitive
+     deps (libpng, libevdev, libjpeg, libxcb*, libX*, polkit,
+     xwayland) — or document each gap clearly as a TODO(M9.R.26+) and
+     let the affected DE fail honestly rather than silently apt-
+     install a black-box replacement.
+
+Subsequent commits in this milestone implement (1)-(3).  (4) is out of
+the 6-hour budget for M9.R.25; M9.R.25.6 documents the genuine gaps
+that block ldd-clean resolution on the ISO without the apt fallback.
