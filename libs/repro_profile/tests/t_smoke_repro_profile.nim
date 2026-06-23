@@ -776,6 +776,54 @@ suite "Resource constructors":
     check target[0].kind == "fs.systemFile"
     check target[0].fields["mode"].s == "0644"
 
+  test "fsSystemDirectory without acl":
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target, path = "/etc/myapp.d",
+      address = "myappDir")
+    check target.len == 1
+    check target[0].kind == "fs.systemDirectory"
+    check target[0].fields["path"].s == "/etc/myapp.d"
+    check "aclEntries" notin target[0].fields
+    check "aclOwner" notin target[0].fields
+    check "aclInheritance" notin target[0].fields
+    check target[0].address == "myappDir"
+
+  test "fsSystemDirectory with inline ntfsAcl":
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target,
+      path = "C:\\actions-runner-tokens",
+      acl = ntfsAcl(
+        owner = "SYSTEM",
+        entries = [
+          aclEntry(principal = "SYSTEM", rights = FullControl,
+                   `type` = Allow),
+          aclEntry(principal = "BUILTIN\\Administrators",
+                   rights = FullControl, `type` = Allow),
+          aclEntry(principal = "NetworkService",
+                   rights = ReadAndExecute, `type` = Allow)
+        ],
+        inheritance = ProtectedClearInherited),
+      address = "runnerTokenDir")
+    check target.len == 1
+    check target[0].kind == "fs.systemDirectory"
+    check target[0].fields["path"].s == "C:\\actions-runner-tokens"
+    check target[0].fields["aclOwner"].s == "SYSTEM"
+    check target[0].fields["aclInheritance"].s ==
+      "protected-clear-inherited"
+    check target[0].fields["aclEntries"].items.len == 3
+    check target[0].fields["aclEntries"].items[0] == "SYSTEM:(F)"
+    check target[0].fields["aclEntries"].items[1] ==
+      "BUILTIN\\Administrators:(F)"
+    check target[0].fields["aclEntries"].items[2] ==
+      "NetworkService:(RX)"
+    check target[0].address == "runnerTokenDir"
+
+  test "aclEntry deny direction":
+    # The driver pivots on the leading `D,` marker in the ACE spec.
+    let e = aclEntry(principal = "Guests", rights = Write,
+                     `type` = Deny)
+    check e == "Guests:(D,W)"
+
   test "envSystemVariable with isPathList":
     var target: seq[ResourceIntent] = @[]
     envSystemVariable(target, name = "PATH",

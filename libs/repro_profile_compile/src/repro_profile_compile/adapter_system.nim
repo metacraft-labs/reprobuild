@@ -196,6 +196,42 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
     result = SystemResource(kind: srkFsSystemFile,
       sfPath: fieldString(r, "path"),
       sfContent: fieldString(r, "content"))
+  of "fs.systemDirectory":
+    let dirPath = fieldString(r, "path")
+    # ACL is optional. The fsSystemDirectory template emits the three
+    # acl* fields only when the user passes a non-default `acl`; mirror
+    # that: aclEntries is the load-bearing field — if missing, the ACL
+    # is unmanaged. The presence of any ACL field without aclEntries is
+    # a typed error.
+    let aclEntries = fieldList(r, "aclEntries")
+    let aclOwner = fieldString(r, "aclOwner")
+    let aclInheritance = fieldString(r, "aclInheritance")
+    let aclPresent = aclEntries.len > 0 or aclOwner.len > 0 or
+                     aclInheritance.len > 0
+    if aclPresent and aclEntries.len == 0:
+      raise newException(ValueError,
+        "fs.systemDirectory '" & dirPath &
+        "' has aclOwner / aclInheritance but no aclEntries")
+    for e in aclEntries:
+      if not isSafeAclEntry(e):
+        raise newException(ValueError,
+          "fs.systemDirectory aclEntry '" & e &
+          "' is not a safe `<principal>:<perms>` ACE spec")
+    if aclOwner.len > 0 and not isSafeAclPrincipal(aclOwner):
+      raise newException(ValueError,
+        "fs.systemDirectory aclOwner '" & aclOwner &
+        "' contains characters outside the principal charset")
+    if aclInheritance.len > 0 and
+       aclInheritance notin DirectoryAclInheritanceModes:
+      raise newException(ValueError,
+        "fs.systemDirectory aclInheritance '" & aclInheritance &
+        "' is not one of " & DirectoryAclInheritanceModes.join(" / "))
+    result = SystemResource(kind: srkFsSystemDirectory,
+      dirPath: dirPath,
+      dirAclPresent: aclPresent,
+      dirAclOwner: aclOwner,
+      dirAclEntries: aclEntries,
+      dirAclInheritance: aclInheritance)
   of "env.systemVariable":
     result = SystemResource(kind: srkEnvSystemVariable,
       evName: fieldString(r, "name"),
@@ -480,7 +516,7 @@ proc isSystemScopeResource(kind: string): bool =
      "windows.service", "windows.vsInstaller",
      "windows.firewallRule", "windows.acl",
      "macos.systemDefault", "systemd.systemUnit",
-     "launchd.systemDaemon", "fs.systemFile",
+     "launchd.systemDaemon", "fs.systemFile", "fs.systemDirectory",
      "env.systemVariable", "passwd.user",
      "os.timezone", "os.hostname",
      "linux.sysctl", "linux.udevRule", "linux.polkitRule",
@@ -648,6 +684,15 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkFsSystemFile:
       pairs.add(("path", quoteSystemValue(r.sfPath)))
       pairs.add(("content", quoteSystemValue(r.sfContent)))
+    of srkFsSystemDirectory:
+      pairs.add(("path", quoteSystemValue(r.dirPath)))
+      if r.dirAclPresent:
+        if r.dirAclOwner.len > 0:
+          pairs.add(("aclOwner", quoteSystemValue(r.dirAclOwner)))
+        pairs.add(("aclEntries", renderListLiteral(r.dirAclEntries)))
+        if r.dirAclInheritance.len > 0:
+          pairs.add(("aclInheritance",
+            quoteSystemValue(r.dirAclInheritance)))
     of srkEnvSystemVariable:
       pairs.add(("name", quoteSystemValue(r.evName)))
       pairs.add(("contribute", renderListLiteral(r.evContribution)))

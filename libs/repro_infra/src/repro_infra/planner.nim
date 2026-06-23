@@ -154,7 +154,8 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
   of pokWindowsVsInstaller:
     vsInstallerDesiredDigestHex(op)
   of pokMacosSystemDefault, pokSystemdSystemUnit, pokLaunchdSystemDaemon,
-     pokFsSystemFile, pokEnvSystemVariable, pokPasswdUser,
+     pokFsSystemFile, pokFsSystemDirectory,
+     pokEnvSystemVariable, pokPasswdUser,
      pokLinuxSysctl, pokLinuxUdevRule, pokLinuxPolkitRule,
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
@@ -204,6 +205,7 @@ proc observeResource*(r: SystemResource): ResourceObservation =
       of srkSystemdSystemUnit: observeSystemdSystemUnit(op)
       of srkLaunchdSystemDaemon: observeLaunchdSystemDaemon(op)
       of srkFsSystemFile: observeFsSystemFile(op)
+      of srkFsSystemDirectory: observeFsSystemDirectory(op)
       of srkEnvSystemVariable: observeEnvSystemVariable(op)
       of srkPasswdUser: observePasswdUser(op)
       of srkOsTimezone:
@@ -314,6 +316,11 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " system-daemon " & r.sdaLabel
   of srkFsSystemFile:
     action & " system-file " & r.sfPath
+  of srkFsSystemDirectory:
+    action & " system-directory " & r.dirPath &
+      (if r.dirAclPresent: " (acl: " & $r.dirAclEntries.len &
+        " entr" & (if r.dirAclEntries.len == 1: "y" else: "ies") & ")"
+       else: "")
   of srkEnvSystemVariable:
     action & " system-variable " & r.evName & " (+" &
       $r.evContribution.len & " entr" &

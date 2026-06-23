@@ -58,7 +58,7 @@ import ./posix_system_parse
 when defined(linux) or defined(macosx):
   import std/[os, osproc, streams]
 elif defined(windows):
-  import std/[os]
+  import std/[os, osproc]
 
 # ---------------------------------------------------------------------------
 # Digest helpers — the canonical-bytes model shared with every other
@@ -166,6 +166,15 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.sfContent)
+  of pokFsSystemDirectory:
+    # The directory has no content to digest the way `pokFsSystemFile`
+    # does. The driver's "present" sentinel is a fixed string so two
+    # observations of the same created directory hash identically; the
+    # destroy direction uses the absent sentinel.
+    if op.fsdDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText("fs.systemDirectory:present")
   of pokEnvSystemVariable:
     # The desired digest is over the JOINED CONTRIBUTION — the same
     # recorded-payload model `env.userPath` uses, so the broker's
@@ -702,6 +711,174 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     result = post
   else:
     raiseNotImplementedPlatform("fs.systemFile apply")
+
+# ===========================================================================
+# fs.systemDirectory — a managed system-scope directory.
+#
+# Companion of `fs.systemFile`. The driver creates the directory at
+# apply time (recursively auto-creating parents the way the
+# `fs.systemFile` driver does for its parent path) and, when the
+# operator declared an inline NTFS ACL via `sdAclPresent == true`,
+# stamps the ACL via `icacls` in the same observe / apply cycle. The
+# ACL invocation reuses the same `quoteShell` + `icacls /grant`
+# pattern the `windows.acl` driver established; the helpers are
+# duplicated here because they live behind a `when defined(windows)`
+# scope in `windows_system_driver.nim` and exposing them would force
+# the cross-module shape changes the M83 surface explicitly avoided.
+#
+# Off-Windows the ACL fields are silently ignored — a POSIX host has
+# no NTFS DACL to stamp. The directory create / destroy happens on
+# every platform so a profile authoring `fsSystemDirectory(...)` for
+# `/etc/<x>` works on Linux unchanged.
+# ===========================================================================
+
+when defined(windows):
+  proc icaclsSetOwnerDir(path, owner: string):
+      tuple[output: string; code: int] =
+    ## Mirror of `takeownOf` in `windows_system_driver.nim`: take
+    ## ownership via `takeown /F <path> /A` (a directory is OK — the
+    ## `/A` flag still seizes to Administrators) then pin the owner
+    ## via `icacls <path> /setowner <owner>`. The first call's
+    ## failure is non-fatal (the directory may already be owned by
+    ## an Administrator account).
+    let takeownCmd = "takeown /F " & quoteShell(path) & " /A"
+    discard execCmdEx(takeownCmd)
+    let setownerCmd = "icacls " & quoteShell(path) &
+      " /setowner " & quoteShell(owner)
+    let (output, code) = execCmdEx(setownerCmd)
+    (output, code)
+
+  proc icaclsInheritanceDir(path, mode: string):
+      tuple[output: string; code: int] =
+    ## Apply the inheritance-mode change for a directory.
+    ## `disabled-replace` -> `/inheritance:r`; `disabled-convert` ->
+    ## `/inheritance:d`; `protected-clear-inherited` -> `/inheritance:r`
+    ## (same flag — icacls's "remove inherited" verb IS the SetAccess
+    ## RuleProtection(true, false) form the
+    ## `protected-clear-inherited` value names). `enabled` is a
+    ## no-op.
+    let flag =
+      case mode
+      of "disabled-replace", "protected-clear-inherited": "r"
+      of "disabled-convert": "d"
+      else: ""
+    if flag.len == 0:
+      return ("", 0)
+    let cmd = "icacls " & quoteShell(path) & " /inheritance:" & flag
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
+  proc icaclsGrantDir(path, entry: string):
+      tuple[output: string; code: int] =
+    ## `icacls /grant` an ACE on a directory. Deny entries (the
+    ## `(D,...)` form `aclEntry(... type = Deny)` emits) are routed
+    ## through `/deny` so the icacls verb matches the ACE direction;
+    ## an Allow entry uses the default `/grant`.
+    let isDeny = entry.find(":(D,") >= 0
+    let verb = if isDeny: " /deny " else: " /grant "
+    let normalizedEntry =
+      if isDeny:
+        # Strip the leading `D,` marker so the spec is the bare
+        # `(<flag>)` form `icacls /deny` consumes.
+        entry.replace(":(D,", ":(")
+      else:
+        entry
+    let cmd = "icacls " & quoteShell(path) & verb &
+      quoteShell(normalizedEntry)
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
+proc observeFsSystemDirectory*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-observe a managed system directory. The digest is a fixed
+  ## present-sentinel (created vs absent is the only meaningful
+  ## observation the driver can make — directory contents are NOT in
+  ## scope; the operator manages those via `fs.systemFile` etc.).
+  ## The path's allowlist membership is re-validated as defence in
+  ## depth.
+  when defined(linux) or defined(macosx) or defined(windows):
+    let scopeErr = systemDirectoryScopeError(op.fsdPath, programDataRoot())
+    if scopeErr.len > 0:
+      raiseProtocol(scopeErr)
+    if not dirExists(op.fsdPath):
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    result.present = true
+    result.digestHex = posixDigestHexOfText("fs.systemDirectory:present")
+  else:
+    raiseNotImplementedPlatform("fs.systemDirectory observe")
+
+proc applyFsSystemDirectory*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Create (or, for the destroy direction, delete) the managed
+  ## directory. The path is re-validated against the allowlist before
+  ## any I/O — a path outside `/etc/`, `/usr/local/etc/`,
+  ## `${PROGRAMDATA}`, or the Windows install-root carve-out is
+  ## refused with an out-of-scope protocol error.
+  ##
+  ## When `fsdAclPresent == true`, the driver stamps the declared NTFS
+  ## DACL via `icacls`:
+  ##
+  ##   1. (optional) take ownership via `takeown /F /A` +
+  ##      `icacls /setowner <owner>`;
+  ##   2. apply the inheritance mode (skipped for `enabled`);
+  ##   3. issue an `icacls /grant <ACE>` per Allow entry and an
+  ##      `icacls /deny <ACE>` per Deny entry.
+  ##
+  ## Off-Windows the ACL fields are silently ignored — POSIX has no
+  ## NTFS DACL to stamp.
+  ##
+  ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): re-observe via the
+  ## same `observeFsSystemDirectory` path to confirm the directory
+  ## exists (or is gone, for a destroy). A disagreement raises
+  ## `EProtocol`.
+  when defined(linux) or defined(macosx) or defined(windows):
+    let scopeErr = systemDirectoryScopeError(op.fsdPath, programDataRoot())
+    if scopeErr.len > 0:
+      raiseProtocol(scopeErr)
+    if op.fsdDestroy:
+      if dirExists(op.fsdPath):
+        try: removeDir(op.fsdPath)
+        except OSError: discard
+      if dirExists(op.fsdPath):
+        raiseProtocol("fs.systemDirectory destroy of " & op.fsdPath &
+          " post-apply observation disagrees with desired state: " &
+          "the directory still exists after `removeDir`.")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    createDir(op.fsdPath)
+    when defined(windows):
+      if op.fsdAclPresent:
+        if op.fsdAclOwner.len > 0:
+          let (ownOut, ownCode) = icaclsSetOwnerDir(
+            op.fsdPath, op.fsdAclOwner)
+          if ownCode != 0:
+            raiseProtocol("fs.systemDirectory `icacls /setowner " &
+              op.fsdAclOwner & "` of '" & op.fsdPath & "' failed: " &
+              ownOut.strip())
+        let mode =
+          if op.fsdAclInheritance.len > 0: op.fsdAclInheritance
+          else: "enabled"
+        if mode != "enabled":
+          let (inhOut, inhCode) = icaclsInheritanceDir(op.fsdPath, mode)
+          if inhCode != 0:
+            raiseProtocol("fs.systemDirectory `icacls /inheritance` " &
+              "of '" & op.fsdPath & "' failed: " & inhOut.strip())
+        for ace in op.fsdAclEntries:
+          let (aceOut, aceCode) = icaclsGrantDir(op.fsdPath, ace)
+          if aceCode != 0:
+            raiseProtocol("fs.systemDirectory `icacls /grant " & ace &
+              "` of '" & op.fsdPath & "' failed: " & aceOut.strip())
+    let post = observeFsSystemDirectory(op)
+    if not post.present:
+      raiseProtocol("fs.systemDirectory " & op.fsdPath &
+        " post-apply observation disagrees with desired state: " &
+        "the directory does not exist after `createDir`.")
+    result = post
+  else:
+    raiseNotImplementedPlatform("fs.systemDirectory apply")
 
 # ===========================================================================
 # env.systemVariable — system PATH / system environment variable.

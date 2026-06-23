@@ -106,6 +106,35 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check byKind["fs.systemFile"].fields["content"].s ==
       "127.0.0.1 dev"
 
+  test "system_fssystemdirectory.nim builds an fs.systemDirectory + acl":
+    let js = compileAndRun("system_fssystemdirectory.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemFsDir"
+    check p.resources.len == 2
+    # Two fs.systemDirectory resources — one bare, one with the inline
+    # NTFS ACL builder.
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+    check "myappDir" in byAddr
+    check byAddr["myappDir"].kind == "fs.systemDirectory"
+    check byAddr["myappDir"].fields["path"].s == "/etc/myapp.d"
+    check "aclEntries" notin byAddr["myappDir"].fields
+    check "aclOwner" notin byAddr["myappDir"].fields
+
+    check "runnerTokenDir" in byAddr
+    check byAddr["runnerTokenDir"].kind == "fs.systemDirectory"
+    check byAddr["runnerTokenDir"].fields["path"].s ==
+      "C:\\actions-runner-tokens"
+    check byAddr["runnerTokenDir"].fields["aclOwner"].s == "SYSTEM"
+    check byAddr["runnerTokenDir"].fields["aclInheritance"].s ==
+      "protected-clear-inherited"
+    let aces = byAddr["runnerTokenDir"].fields["aclEntries"].items
+    check aces.len == 3
+    check aces[0] == "SYSTEM:(F)"
+    check aces[1] == "BUILTIN\\Administrators:(F)"
+    check aces[2] == "NetworkService:(RX)"
+
   test "home_with_config_and_hosts.nim assembles all four sections":
     let js = compileAndRun("home_with_config_and_hosts.nim")
     let p = parseProfileIntentJson(js)

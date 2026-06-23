@@ -298,6 +298,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  path = " & renderScalar(r.sfPath))
     if r.sfContent.len > 0:
       result.add("  content = " & renderScalar(r.sfContent))
+  of srkFsSystemDirectory:
+    result.add("  path = " & renderScalar(r.dirPath))
+    if r.dirAclPresent:
+      if r.dirAclOwner.len > 0:
+        result.add("  aclOwner = " & renderScalar(r.dirAclOwner))
+      result.add("  aclEntries = " & renderList(r.dirAclEntries))
+      if r.dirAclInheritance.len > 0:
+        result.add("  aclInheritance = " &
+          renderScalar(r.dirAclInheritance))
   of srkEnvSystemVariable:
     result.add("  name = " & renderScalar(r.evName))
     if r.evContribution.len > 0:
