@@ -533,7 +533,11 @@ if [ -n "$ldconfig_bin" ]; then
   # paths are interpreted relative to it. Quiet mode -- warnings about
   # non-symlinked libs are noise (from-source libs land as plain
   # files, not SONAME-symlink chains).
-  "$ldconfig_bin" -r "$STAGE_DIR" 2>&1 | \
+  # -r reroots search paths but does NOT redirect the cache output;
+  # by default ldconfig writes to $(nix-store-glibc)/etc/ld.so.cache
+  # which fails on a read-only /nix/store. -C overrides the output
+  # path so we land in $STAGE_DIR/etc/ld.so.cache.
+  "$ldconfig_bin" -r "$STAGE_DIR" -C "$STAGE_DIR/etc/ld.so.cache" 2>&1 | \
     grep -vE 'is not a symbolic link|file format not recognized' || true
   echo "[stage-de-rootfs] rebuilt ld.so.cache in stage"
 fi
