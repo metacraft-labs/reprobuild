@@ -242,8 +242,13 @@ REQUIRED_MODULES=(
   pata_acpi libahci scsi_mod usb-storage uas
   # filesystems
   isofs squashfs overlay ext4 vfat fat exfat nls_cp437 nls_utf8 nls_ascii
-  # block crypto used by some squashfs payloads
-  crc32_generic crc32c_generic crc16 libcrc32c
+  # block crypto used by some squashfs payloads + EXT4 needs crc32c
+  # to mount on x86_64 (load: crc32c-generic; ext4 mount fails with
+  # "Cannot load crc32c driver" without it).
+  crc32_generic crc32c_generic crc16 libcrc32c crc32c-intel
+  crc-ccitt crct10dif_pclmul crct10dif_generic crct10dif_common
+  # dm-mod / dm-crypt for encrypted disko apply paths.
+  dm_mod dm_crypt
   # usb hosts (so usb-storage actually attaches)
   ohci-hcd ohci-pci ehci-hcd ehci-pci xhci-hcd xhci-pci uhci-hcd
   usb-common usbcore
