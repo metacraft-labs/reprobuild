@@ -69,9 +69,9 @@ fi
 
 # Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 # Each .desktop file names the per-DE session entry point.
-mkdir -p "$STAGE_DIR/etc/wayland-sessions"
+mkdir -p "$STAGE_DIR/usr/share/wayland-sessions"
 
-cat > "$STAGE_DIR/etc/wayland-sessions/sway.desktop" <<EOF
+cat > "$STAGE_DIR/usr/share/wayland-sessions/sway.desktop" <<EOF
 [Desktop Entry]
 Name=Sway
 Comment=An i3-compatible Wayland compositor
@@ -80,7 +80,7 @@ Type=Application
 DesktopNames=sway
 EOF
 
-cat > "$STAGE_DIR/etc/wayland-sessions/plasma.desktop" <<EOF
+cat > "$STAGE_DIR/usr/share/wayland-sessions/plasma.desktop" <<EOF
 [Desktop Entry]
 Name=Plasma (Wayland)
 Comment=Plasma by KDE
@@ -90,7 +90,7 @@ Type=Application
 DesktopNames=KDE
 EOF
 
-cat > "$STAGE_DIR/etc/wayland-sessions/gnome.desktop" <<EOF
+cat > "$STAGE_DIR/usr/share/wayland-sessions/gnome.desktop" <<EOF
 [Desktop Entry]
 Name=GNOME
 Comment=This session logs you into GNOME (Wayland)
