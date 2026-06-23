@@ -43,6 +43,30 @@ DE_RECIPES=(
 
 mkdir -p "$STAGE_DIR/usr"
 
+# M9.R.17c.5 - extract a minimum base userspace (systemd + libc +
+# Qt6 + GL stack + login) into the staging dir BEFORE we overlay
+# the from-source DE binaries. Without this base the squashfs lacks
+# /sbin/init and the live-init's switch_root has nothing to exec.
+#
+# Driven by build-base-rootfs.sh which pulls debian:trixie-slim,
+# apt-installs the curated package list, exports the container as a
+# tarball, then xz-compresses it. The tarball is cached host-side at
+# $REPRO_BASE_ROOTFS_CACHE (default /var/cache/reprobuild/base-rootfs)
+# so subsequent stages are near-instantaneous.
+SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
+REPRO_BASE_ROOTFS_DISABLE="${REPRO_BASE_ROOTFS_DISABLE:-0}"
+if [ "$REPRO_BASE_ROOTFS_DISABLE" != "1" ]; then
+  base_tar="$STAGE_DIR/../base-rootfs.tar.xz"
+  echo "[stage-de-rootfs] building base userspace"
+  SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1735689600}" \
+    bash "$SCRIPT_DIR_SELF/build-base-rootfs.sh" "$base_tar"
+  echo "[stage-de-rootfs] extracting base userspace into $STAGE_DIR"
+  tar -C "$STAGE_DIR" -xf "$base_tar"
+  # Some docker exports include leading ./; tar handles both. Remove
+  # the staging-time base tarball to keep STAGE_DIR clean.
+  rm -f "$base_tar"
+fi
+
 # Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 # Each .desktop file names the per-DE session entry point.
 mkdir -p "$STAGE_DIR/etc/wayland-sessions"

@@ -116,6 +116,11 @@ package reproosIso:
         # instead of the d-i text installer ignoring it.
         "scripts/build-initramfs.sh",
         "initramfs/init",
+        # M9.R.17c.5 -- base-userspace tarball driver. Pulls
+        # debian:trixie-slim + apt-installs systemd/libc/Qt6 so the
+        # squashfs payload contains /sbin/init + every shared lib
+        # the from-source DE binaries dynamically link against.
+        "scripts/build-base-rootfs.sh",
       ],
       extraOutputs = @[
         "build/reproos.iso",

@@ -9,7 +9,7 @@
 #   2) Probe for the boot medium - the CD-ROM that contains the ISO
 #      ships /live/filesystem.squashfs at its root.
 #   3) Loop-mount the SquashFS read-only.
-#   4) Build an overlayfs at /run/live/rootfs with:
+#   4) Build an overlayfs at /mnt/live/rootfs with:
 #        lowerdir = squashfs mount (read-only)
 #        upperdir = tmpfs "upper" (read-write writes here)
 #        workdir  = tmpfs "work"  (overlayfs internal scratch)
@@ -127,8 +127,8 @@ fi
 
 # Search block devices for one that contains $LIVE_IMAGE. Iterate
 # every /sys/class/block entry, mount each device read-only at
-# /run/live/medium, look for $LIVE_IMAGE; unmount if not found.
-mkdir -p /run/live/medium /run/live/lower /run/live/upper /run/live/work /run/live/rootfs
+# /mnt/live/medium, look for $LIVE_IMAGE; unmount if not found.
+mkdir -p /mnt/live/medium /mnt/live/lower /mnt/live/upper /mnt/live/work /mnt/live/rootfs
 
 find_medium() {
   # Order matters: probe optical (sr*) + virtio/scsi block devices
@@ -145,12 +145,12 @@ find_medium() {
       fi
       log "probing $devnode"
       for fs in "$LIVE_FSTYPE" iso9660 vfat ext4 squashfs; do
-        if mount -t "$fs" -o ro "$devnode" /run/live/medium 2>/dev/null; then
-          if [ -f "/run/live/medium$LIVE_IMAGE" ]; then
+        if mount -t "$fs" -o ro "$devnode" /mnt/live/medium 2>/dev/null; then
+          if [ -f "/mnt/live/medium$LIVE_IMAGE" ]; then
             log "found $LIVE_IMAGE on $devnode (fs=$fs)"
             return 0
           fi
-          umount /run/live/medium 2>/dev/null || true
+          umount /mnt/live/medium 2>/dev/null || true
         fi
       done
     done
@@ -178,49 +178,55 @@ loop_dev="$(losetup -f)"
 if [ -z "$loop_dev" ]; then
   rescue "losetup -f returned empty"
 fi
-if ! losetup -r "$loop_dev" "/run/live/medium$LIVE_IMAGE"; then
+if ! losetup -r "$loop_dev" "/mnt/live/medium$LIVE_IMAGE"; then
   rescue "losetup $loop_dev failed for $LIVE_IMAGE"
 fi
 log "loop device: $loop_dev"
 
-mount -t squashfs -o ro "$loop_dev" /run/live/lower || rescue "squashfs mount failed"
+mount -t squashfs -o ro "$loop_dev" /mnt/live/lower || rescue "squashfs mount failed"
 
 # overlayfs over (lower=squashfs, upper=tmpfs/upper, work=tmpfs/work).
 mount -t overlay overlay \
-  -o "lowerdir=/run/live/lower,upperdir=/run/live/upper,workdir=/run/live/work" \
-  /run/live/rootfs || rescue "overlayfs mount failed"
+  -o "lowerdir=/mnt/live/lower,upperdir=/mnt/live/upper,workdir=/mnt/live/work" \
+  /mnt/live/rootfs || rescue "overlayfs mount failed"
 
-log "overlayfs ready at /run/live/rootfs"
+log "overlayfs ready at /mnt/live/rootfs"
 
 # Sanity-check: target must have /sbin/init or /lib/systemd/systemd.
 INIT_BIN=''
 for cand in /sbin/init /lib/systemd/systemd /usr/lib/systemd/systemd /usr/sbin/init; do
-  if [ -x "/run/live/rootfs$cand" ]; then
+  if [ -x "/mnt/live/rootfs$cand" ]; then
     INIT_BIN="$cand"
     break
   fi
 done
 if [ -z "$INIT_BIN" ]; then
-  log "no init binary found in /run/live/rootfs; contents:"
-  ls /run/live/rootfs >/dev/kmsg 2>/dev/null || ls /run/live/rootfs
-  ls /run/live/rootfs/sbin >/dev/kmsg 2>/dev/null || true
+  log "no init binary found in /mnt/live/rootfs; contents:"
+  ls /mnt/live/rootfs >/dev/kmsg 2>/dev/null || ls /mnt/live/rootfs
+  ls /mnt/live/rootfs/sbin >/dev/kmsg 2>/dev/null || true
   rescue "no init binary in overlay"
 fi
 
 # Preserve /proc /sys /dev /run mounts into the new root before
-# switch_root. switch_root expects them moved, not bind-mounted; do
-# the moves explicitly with mount --move.
+# switch_root. Our live-mount infrastructure now lives under
+# /mnt/live/{medium,lower,upper,work,rootfs} so /run is free to move
+# wholesale into the new root.
 log "preparing switch_root - init=$INIT_BIN"
-mkdir -p /run/live/rootfs/proc /run/live/rootfs/sys /run/live/rootfs/dev /run/live/rootfs/run
-mount --move /proc /run/live/rootfs/proc
-mount --move /sys  /run/live/rootfs/sys
-mount --move /dev  /run/live/rootfs/dev
-mount --move /run  /run/live/rootfs/run
+mkdir -p /mnt/live/rootfs/proc /mnt/live/rootfs/sys /mnt/live/rootfs/dev /mnt/live/rootfs/run
+mount --move /proc /mnt/live/rootfs/proc
+mount --move /sys  /mnt/live/rootfs/sys
+mount --move /dev  /mnt/live/rootfs/dev
+mount --move /run  /mnt/live/rootfs/run
 
-# switch_root clears the old root and execs the new init.
+# switch_root clears the old root and execs the new init. It also
+# auto-umounts the OLD initramfs tmpfs after the switch (including
+# our /run mount), but NOT before remounting the overlay's lower
+# loop device and squashfs - those stay alive because they're
+# referenced by the new root's mount table (overlayfs/loop/squashfs
+# are pinned via the overlay mount).
 log "switch_root -> $INIT_BIN"
 trap - EXIT
-exec switch_root /run/live/rootfs "$INIT_BIN"
+exec switch_root /mnt/live/rootfs "$INIT_BIN"
 
 # If exec returns, we're catastrophically broken.
 rescue "switch_root returned"

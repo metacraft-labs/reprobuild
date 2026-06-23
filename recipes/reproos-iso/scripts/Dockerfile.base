@@ -1,0 +1,61 @@
+# M9.R.17c.5 -- minimum base userspace for the reproos-iso live DE rootfs.
+#
+# Pinned to debian:trixie-slim (same Debian release the M9.R.17c.1
+# vendored kernel ships from). Adds:
+#   * systemd + systemd-sysv     - /lib/systemd/systemd + /sbin/init
+#   * libpam-systemd             - PAM session integration the DEs need
+#   * dbus + dbus-user-session   - session bus / message bus
+#   * util-linux + mount         - mount(8), umount(8), agetty(8)
+#   * libc-bin + locales-all     - libc + locale data
+#   * kmod + udev                - module loading + dev events at runtime
+#   * tzdata                     - timezone data
+#   * passwd + login + procps    - user accounts + ps/top
+#   * less + nano                - just to keep the rescue shell usable
+#   * polkitd + libpolkit-gobject-1-0 - DE permission prompts
+#   * xkb-data + console-data    - keyboard maps for sddm
+#   * libxcursor1 + libxext6     - X11 client libs for X-Wayland fallbacks
+#   * fontconfig + fonts-dejavu  - so sddm has something to render with
+#   * libqt6gui6 + libqt6widgets6 + libqt6quick6 - sddm-greeter Qt deps
+#   * libqt6qml6 + libqt6quickcontrols2-6
+#   * libgcc-s1 + libstdc++6     - cxx runtime for compositors
+#   * libgl1 + libegl1 + libglx-mesa0 - GL stack for the compositors
+#   * libwayland-server0 + libwayland-client0 - wayland protocol
+#   * libxkbcommon0 + libpipewire-0.3-0 - input + audio
+#   * mesa-vulkan-drivers        - vulkan for kwin/mutter fallbacks
+#   * xwayland                   - x11 client compat
+#
+# Output: extracted via `docker export` into a tarball the
+# stage-de-rootfs.sh consumer untars into the staging /. Our DE
+# binaries from the from-source recipes overlay on top.
+
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv libpam-systemd dbus dbus-user-session \
+      util-linux mount libc-bin locales-all kmod udev tzdata \
+      passwd login procps less nano polkitd libpolkit-gobject-1-0 \
+      xkb-data console-data libxcursor1 libxext6 libxrandr2 libxi6 \
+      fontconfig fonts-dejavu-core libgcc-s1 libstdc++6 libgl1 \
+      libegl1 libglx-mesa0 libwayland-server0 libwayland-client0 \
+      libxkbcommon0 libpipewire-0.3-0 mesa-vulkan-drivers xwayland \
+      libqt6gui6 libqt6widgets6 libqt6quick6 libqt6qml6 \
+      libqt6quickcontrols2-6 libqt6dbus6 libqt6network6 \
+      libqt6opengl6 libqt6openglwidgets6 libqt6svg6 \
+      libqt6quicktemplates2-6 libpam0g libpam-runtime \
+      ca-certificates iputils-ping iproute2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && systemctl set-default graphical.target
+
+# Create the live user (uid 1000) and add it to relevant groups so
+# the DE session can spawn without a fresh accountsservice setup.
+RUN useradd --create-home --shell /bin/bash --uid 1000 \
+      --groups audio,video,input,plugdev,netdev,sudo live \
+    && echo 'live:live' | chpasswd \
+    && echo 'root:reproos' | chpasswd
+
+# Stage a vendor-id banner / hostname so the booted system is
+# identifiable in `cat /etc/os-release` etc.
+RUN echo 'reproos' > /etc/hostname \
+    && sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="ReproOS"/' /etc/os-release
