@@ -125,7 +125,14 @@ fi
 # Default systemd to graphical.target.
 systemctl set-default graphical.target 2>/dev/null || true
 # Create the live user (uid 1000) so the DEs have a session target.
-useradd --create-home --shell /bin/bash --uid 1000 --groups audio,video,input,plugdev,netdev,sudo live 2>/dev/null || true
+# Ensure the optional groups exist before useradd consumes them.
+# debian:trixie-slim ships audio + video by default; plugdev / netdev
+# are conditionally created by package post-install. groupadd -f is a
+# no-op if the group already exists.
+for g in audio video input plugdev netdev sudo; do
+  groupadd -f \"\$g\" 2>/dev/null || true
+done
+useradd --create-home --shell /bin/bash --uid 1000 --groups audio,video,input,plugdev,netdev,sudo live
 # chpasswd via libpam-systemd can fail in non-PID-1 contexts; usermod
 # -p with a precomputed hash sidesteps PAM entirely. Hashes pre-
 # computed via openssl passwd -6 'live' / 'reproos'.
