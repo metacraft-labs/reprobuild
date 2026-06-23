@@ -196,8 +196,8 @@ QString InstallerState::renderDiskoNim(const QString &id) const {
     s << "    arch: \"x86_64\"\n";
     s << "    microcode: \"intel\"\n";
     s << "  boot:\n";
-    s << "    bootloader: \"systemd-boot\"\n";
-    s << "    efi: true\n";
+    s << "    loaderDevice: \"" << (m_targetDevice.isEmpty()
+        ? QStringLiteral("/dev/sda") : m_targetDevice) << "\"\n";
 
     if (m_diskoPreset == "advanced") {
         s << "  # disko: block omitted -- the user opted for the\n";
@@ -235,7 +235,7 @@ QString InstallerState::renderDiskoNim(const QString &id) const {
         // CT_DISK_PASSPHRASE env var instead of a key file.
         s << "              encrypted:\n";
         s << "                encryption:\n";
-        s << "                  type: \"luks2\"\n";
+        s << "                  kind: \"luks2\"\n";
         s << "                  keyFile: \"interactive\"\n";
         s << "                  allowDiscards: true\n";
         s << "                inner:\n";
@@ -244,11 +244,11 @@ QString InstallerState::renderDiskoNim(const QString &id) const {
         s << "                    mountpoint: \"/\"\n";
         s << "                    subvols:\n";
         s << "                      \"@\":\n";
-        s << "                        mountpoint: \"/\"\n";
+        s << "                        path: \"/\"\n";
         s << "                      \"@home\":\n";
-        s << "                        mountpoint: \"/home\"\n";
+        s << "                        path: \"/home\"\n";
         s << "                      \"@nix\":\n";
-        s << "                        mountpoint: \"/nix\"\n";
+        s << "                        path: \"/nix\"\n";
     } else {
         // simple preset (default): ext4 root.
         s << "              filesystem:\n";
