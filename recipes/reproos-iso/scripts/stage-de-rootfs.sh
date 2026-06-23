@@ -385,6 +385,26 @@ cp "$REPROOS_INSTALLER_BIN" "$STAGE_DIR/usr/bin/reproos-installer"
 chmod +x "$STAGE_DIR/usr/bin/reproos-installer"
 echo "[stage-de-rootfs] overlayed reproos-installer binary (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/reproos-installer"))"
 
+# M9.R.24.1f -- the wizard's install() driver shells out to
+# /usr/bin/repro for the 6-phase apply (hardware probe -> disk apply
+# -> mount -> system apply -> unmount). Without the CLI in the live
+# ISO the installer fails at Phase 1 with
+#   "spawn failed: Child process set up failed: execve: No such file"
+# Bake the engine-built repro binary at build/bin/repro into the
+# live ISO so the installer's QProcess shell-outs resolve.
+REPRO_CLI_BIN="${REPRO_CLI_BIN:-}"
+if [ -z "$REPRO_CLI_BIN" ]; then
+  REPRO_CLI_BIN="$REPO_ROOT/build/bin/repro"
+fi
+if [ ! -x "$REPRO_CLI_BIN" ]; then
+  echo "[stage-de-rootfs] repro CLI binary missing or not executable at $REPRO_CLI_BIN" >&2
+  echo "[stage-de-rootfs] build it first: \`just build\` or run the bootstrap script" >&2
+  exit 67
+fi
+cp "$REPRO_CLI_BIN" "$STAGE_DIR/usr/bin/repro"
+chmod +x "$STAGE_DIR/usr/bin/repro"
+echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/repro"))"
+
 # Track which recipes contributed.
 contributed=()
 missing=()
