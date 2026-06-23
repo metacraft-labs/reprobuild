@@ -239,6 +239,17 @@ package gdmSource:
     ## ``systemd`` and there is no header-disable opt-out. Routed via
     ## nixpkgs#systemdMinimal.dev.
     "libsystemd"
+    ## M9.R.16.1 — libxau ships ``X11/Xauth.h`` + ``libXau.so``. gdm
+    ## 47.x's ``daemon/gdm-display-access-file.c`` includes
+    ## ``<X11/Xauth.h>`` UNCONDITIONALLY and calls ``XauWriteAuth`` to
+    ## maintain an Xauthority cookie file for downstream XWayland
+    ## sessions. Although the v1 gdm baseline sets
+    ## ``x11-support=false`` (drops xcb/x11/xau from the meson-declared
+    ## deps), the source file remains in the gdm-daemon build closure
+    ## (``src/daemon/meson.build:186``) so the header + library are
+    ## required for compile + link of the daemon. Routed via
+    ## nixpkgs#xorg.libXau via the existing libxau stub.
+    "libxau"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.
