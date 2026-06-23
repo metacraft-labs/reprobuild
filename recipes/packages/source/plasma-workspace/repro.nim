@@ -542,6 +542,10 @@ package plasmaWorkspaceSource:
         # when krdb's X11 dependency is satisfied.
         "sed -i 's|^add_subdirectory(style)$|# M9.R.15q.13.11: dropped — needs krdb (X11 resources)|' src/kcms/CMakeLists.txt",
         "sed -i 's|^add_subdirectory(colors)$|# M9.R.15q.13.11: dropped — needs krdb (X11 resources)|' src/kcms/CMakeLists.txt",
+        # M9.R.15q.13.12 — drop the lookandfeel KCM since its kcm.cpp
+        # ``#include "krdb.h"`` and we already dropped krdb (13.9).
+        # plasmashell doesn't depend on the lookandfeel KCM at runtime.
+        "sed -i 's|^add_subdirectory(lookandfeel)$|# M9.R.15q.13.12: dropped — needs krdb (X11 resources)|' src/kcms/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
