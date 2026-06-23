@@ -282,15 +282,18 @@ when defined(linux):
       if getEnv("USER") != "root" and posix.geteuid() != 0: return false
       return true
 
-    test "Test#5 (loopback): simple-ext4 against a 128M image":
+    test "Test#5 (loopback): simple-ext4 against a 1G image":
       if not canRunLoopbackE2e():
         skip()
       else:
-        # Set up a real 128M loopback image.
+        # Set up a real 1G loopback image. The simple layout needs
+        # 512M for ESP + room for ext4 root; ESP alone needs ≥256MB
+        # before mkfs.vfat complains, so a 1G total budget keeps the
+        # arithmetic comfortable.
         let img = "/tmp/disko-test-m9r22b-2.img"
         if fileExists(img): removeFile(img)
         let dd = execCmdEx("dd if=/dev/zero of=" & img &
-          " bs=1M count=128 status=none")
+          " bs=1M count=1024 status=none")
         check dd.exitCode == 0
         # Create the loop device.
         let loopDev = losetupCreate(img)
