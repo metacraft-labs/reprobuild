@@ -58,6 +58,9 @@ import ./libgpg_error
 import ./libacl
 import ./libcrypt
 import ./libxcrypt
+import ./libfontenc
+import ./audit
+import ./m9r28_longtail
 import ./libltdl
 import ./libseccomp
 import ./mtdev

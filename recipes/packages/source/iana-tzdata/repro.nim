@@ -62,8 +62,15 @@ package ianaTzdataSource:
   build:
     setCurrentOwningPackageOverride("ianaTzdataSource")
     try:
+      ## M9.R.28.4 — tz Makefile's default CC is ``c99`` (POSIX
+      ## conformance comment at the top of the file) which Nix-based
+      ## nix-shells don't provide. Override CC=gcc so the implicit
+      ## c89-via-c99 rule resolves to the real compiler. Also force
+      ## TOPDIR= since the recipe doesn't use the configure-script
+      ## --prefix machinery (skipConfigure=true).
       let pkg = autotools_package(srcDir = "./src",
-                                  configureOptions = @[],
+                                  configureOptions = @["CC=gcc",
+                                                        "TOPDIR=out/usr"],
                                   skipConfigure = true)
       discard pkg
     finally:
