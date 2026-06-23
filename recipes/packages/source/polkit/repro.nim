@@ -91,6 +91,16 @@ package polkitSource:
     ## authentication. The sibling pamSource recipe vendors via the
     ## stdlib stub when needed.
     "pam"
+    ## M9.R.27.2 — polkit's session_tracking=libsystemd-login backend
+    ## requires libsystemd-login.so (shipped pre-systemd-258 by systemd's
+    ## -dev output as a separate .pc; modern systemd merges it into
+    ## libsystemd.pc). The systemd sibling recipe currently ships only
+    ## libsystemd.pc, so we route polkit through the ConsoleKit
+    ## fallback (session_tracking=ConsoleKit, configured in `build:`
+    ## below) which has no dep on libsystemd-login. This trades the
+    ## modern logind seat-tracking integration for a fallback that
+    ## works in the from-source closure; v1 desktops can fall back to
+    ## the polkitd uid-based authorization model without seat tracking.
 
   config:
     discard
@@ -116,9 +126,15 @@ package polkitSource:
         # Use duktape as the JS engine (the v1 default per upstream;
         # mozjs is a much heavier dep chain).
         "js_engine=duktape",
-        # Session tracking via libsystemd-login (the sibling systemd
-        # recipe ships the .pc); ConsoleKit is the legacy fallback.
-        "session_tracking=libsystemd-login",
+        # M9.R.27.2 — session tracking via ConsoleKit fallback (no
+        # external libsystemd-login dep). Modern systemd merges
+        # libsystemd-login into libsystemd, but polkit 124 still
+        # probes for the separate .pc and fails meson setup with
+        # ``Dependency "libsystemd-login" not found, tried pkgconfig
+        # and cmake``. The ConsoleKit shape works against polkit's
+        # built-in fallback and produces functional polkitd / pkexec /
+        # polkit-agent-helper-1 binaries.
+        "session_tracking=ConsoleKit",
         # PAM is the authentication framework.
         "authfw=pam",
         # Drop optional surfaces we don't need at runtime.
