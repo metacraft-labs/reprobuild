@@ -308,6 +308,154 @@ fs.systemDirectory {
     check op.fsdAclPresent == false
     check op.fsdDestroy == false
 
+  test "fs.systemFile parses with sourceUrl + sha256":
+    # Windows-System-Resources Phase A: the URL-fetch content source.
+    let parsed = parseSystemProfile("""
+fs.systemFile {
+  path = "C:\actions-runner-cache\runner.zip"
+  sourceUrl = "https://example.com/runner.zip"
+  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+""")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemFile
+    check parsed.resources[0].sfPath ==
+      "C:\\actions-runner-cache\\runner.zip"
+    check parsed.resources[0].sfSourceUrl ==
+      "https://example.com/runner.zip"
+    check parsed.resources[0].sfSha256.len == 64
+    check parsed.resources[0].sfContent == ""
+    check parsed.resources[0].sfSourceLocal == ""
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.sfSourceUrl == "https://example.com/runner.zip"
+    check op.sfSha256.len == 64
+
+  test "fs.systemFile parses with sourceLocal":
+    # Windows-System-Resources Phase A: the controller-side path
+    # content source.
+    let parsed = parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  sourceLocal = "/home/zah/profiles/myapp.toml"
+}
+""")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemFile
+    check parsed.resources[0].sfSourceLocal ==
+      "/home/zah/profiles/myapp.toml"
+    check parsed.resources[0].sfContent == ""
+    check parsed.resources[0].sfSourceUrl == ""
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.sfSourceLocal == "/home/zah/profiles/myapp.toml"
+
+  test "fs.systemFile rejects content + sourceUrl together":
+    # Mutual-exclusion: the validator MUST refuse a profile that sets
+    # more than one of the three sources, regardless of which two.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  content = "x = 1"
+  sourceUrl = "https://example.com/c.toml"
+  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+""")
+
+  test "fs.systemFile rejects content + sourceLocal together":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  content = "x = 1"
+  sourceLocal = "/home/zah/profiles/myapp.toml"
+}
+""")
+
+  test "fs.systemFile rejects sourceUrl without sha256":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  sourceUrl = "https://example.com/c.toml"
+}
+""")
+
+  test "fs.systemFile rejects sourceUrl + sourceLocal together":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  sourceUrl = "https://example.com/c.toml"
+  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  sourceLocal = "/home/zah/profiles/myapp.toml"
+}
+""")
+
+  test "fs.systemFile PrivilegedOperation frame round-trips all three sources":
+    # Codec round-trip: encode + decode preserves every source field.
+    let inline = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "inlineCfg", sfPath: "/etc/inline.cfg",
+      sfContent: "k = v\n", sfDestroy: false)
+    check operationValidationError(inline) == ""
+    let inlineRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: inline,
+        baselineDigestHex: ""))).body).operation
+    check inlineRT.kind == pokFsSystemFile
+    check inlineRT.sfPath == "/etc/inline.cfg"
+    check inlineRT.sfContent == "k = v\n"
+    check inlineRT.sfSourceUrl == ""
+    check inlineRT.sfSha256 == ""
+    check inlineRT.sfSourceLocal == ""
+
+    let urlOp = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "urlCfg", sfPath: "/etc/url.cfg",
+      sfSourceUrl: "https://example.com/url.cfg",
+      sfSha256: "0123456789abcdef0123456789abcdef" &
+                "0123456789abcdef0123456789abcdef",
+      sfDestroy: false)
+    check operationValidationError(urlOp) == ""
+    let urlRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: urlOp,
+        baselineDigestHex: ""))).body).operation
+    check urlRT.sfSourceUrl == "https://example.com/url.cfg"
+    check urlRT.sfSha256.len == 64
+    check urlRT.sfContent == ""
+    check urlRT.sfSourceLocal == ""
+
+    let localOp = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "localCfg", sfPath: "/etc/local.cfg",
+      sfSourceLocal: "/home/zah/profiles/local.cfg",
+      sfDestroy: false)
+    check operationValidationError(localOp) == ""
+    let localRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: localOp,
+        baselineDigestHex: ""))).body).operation
+    check localRT.sfSourceLocal == "/home/zah/profiles/local.cfg"
+    check localRT.sfContent == ""
+    check localRT.sfSourceUrl == ""
+    check localRT.sfSha256 == ""
+
+  test "fs.systemFile rendered stanza round-trips through parseSystemProfile":
+    for r in [
+      SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/url.cfg",
+        sfPath: "/etc/url.cfg",
+        sfSourceUrl: "https://example.com/url.cfg",
+        sfSha256: "0123456789abcdef0123456789abcdef" &
+                  "0123456789abcdef0123456789abcdef"),
+      SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/local.cfg",
+        sfPath: "/etc/local.cfg",
+        sfSourceLocal: "/home/zah/profiles/local.cfg")]:
+      let lines = renderStanza(r)
+      let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+      check reparsed.resources.len == 1
+      check reparsed.resources[0].kind == r.kind
+      check reparsed.resources[0].sfPath == r.sfPath
+      check reparsed.resources[0].sfSourceUrl == r.sfSourceUrl
+      check reparsed.resources[0].sfSha256 == r.sfSha256
+      check reparsed.resources[0].sfSourceLocal == r.sfSourceLocal
+
   test "an unclosed block is rejected":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("windows.capability {\n  name = \"X\"\n")

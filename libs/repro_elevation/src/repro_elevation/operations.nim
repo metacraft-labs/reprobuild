@@ -403,12 +403,31 @@ type
       sdaRunAtLoad*: bool
       sdaDestroy*: bool
     of pokFsSystemFile:
-      ## Write `sfContent` to `sfPath` — an absolute path that MUST
-      ## be under a recognized system directory (`/etc/`,
+      ## Write the file's content to `sfPath` — an absolute path that
+      ## MUST be under a recognized system directory (`/etc/`,
       ## `/usr/local/etc/`, `${PROGRAMDATA}`). `sfDestroy` selects the
       ## delete direction.
+      ##
+      ## The bytes written come from exactly ONE source, selected by
+      ## which of the three source fields the planner populated (the
+      ## validator enforces mutual exclusion):
+      ##
+      ##   * `sfContent`     — inline string (the historical default,
+      ##                       and the fallback when all three external-
+      ##                       source fields are empty).
+      ##   * `sfSourceUrl` + `sfSha256` — the controller GETs the URL,
+      ##                       checks the response's BLAKE3 digest
+      ##                       against `sfSha256`, raises `EProtocol`
+      ##                       on mismatch, and only then asks the
+      ##                       broker to write the verified bytes.
+      ##   * `sfSourceLocal` — controller-side path re-read on every
+      ##                       apply (so a between-step edit lands).
+      ##                       Missing / unreadable raises `EProtocol`.
       sfPath*: string
       sfContent*: string
+      sfSourceUrl*: string
+      sfSha256*: string
+      sfSourceLocal*: string
       sfDestroy*: bool
     of pokFsSystemDirectory:
       ## Create / converge / remove the managed directory `fsdPath`.
@@ -1385,6 +1404,37 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       return scopeErr
     if op.sfPath.strip().len == 0:
       return "fs.systemFile operation has an empty path"
+    # External-source mutual exclusion: defence-in-depth against a
+    # malformed plan reaching the broker. The template + validator on
+    # the profile side already reject this; we re-check here so the
+    # closed-set boundary stays self-contained.
+    let nonEmptySources = (if op.sfContent.len > 0: 1 else: 0) +
+                          (if op.sfSourceUrl.len > 0: 1 else: 0) +
+                          (if op.sfSourceLocal.len > 0: 1 else: 0)
+    if nonEmptySources > 1:
+      return "fs.systemFile '" & op.sfPath &
+        "' declares more than one content source — at most one of " &
+        "`sfContent`, `sfSourceUrl`, `sfSourceLocal` may be non-empty"
+    if op.sfSourceUrl.len > 0 and op.sfSha256.len == 0:
+      return "fs.systemFile '" & op.sfPath &
+        "' sets `sfSourceUrl` but no `sfSha256` — the URL fetch " &
+        "requires a digest to verify against"
+    if op.sfSha256.len > 0 and op.sfSourceUrl.len == 0:
+      return "fs.systemFile '" & op.sfPath &
+        "' sets `sfSha256` but no `sfSourceUrl` — the digest is only " &
+        "meaningful when paired with a URL fetch"
+    if op.sfSha256.len > 0:
+      # Lowercase 64-char hex check. Mirrors the format the BLAKE3
+      # driver emits for `posixDigestHexOfText`.
+      if op.sfSha256.len != 64:
+        return "fs.systemFile '" & op.sfPath &
+          "' sfSha256 must be a 64-character lowercase hex digest " &
+          "(got " & $op.sfSha256.len & " chars)"
+      for ch in op.sfSha256:
+        if ch notin {'0'..'9', 'a'..'f'}:
+          return "fs.systemFile '" & op.sfPath &
+            "' sfSha256 must be a 64-character lowercase hex digest " &
+            "(contains non-hex character '" & $ch & "')"
   of pokFsSystemDirectory:
     if op.fsdPath.strip().len == 0:
       return "fs.systemDirectory operation has an empty path"

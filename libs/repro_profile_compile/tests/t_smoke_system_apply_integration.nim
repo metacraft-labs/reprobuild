@@ -9,7 +9,7 @@
 ## path) that exercises `parseSystemProfile` + the canonical-text
 ## round-trip rather than the broker.
 
-import std/[strutils, tables, unittest]
+import std/[os, strutils, tables, tempfiles, unittest]
 
 import repro_infra
 import repro_profile
@@ -153,6 +153,100 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     let plan = producePlan(txt, "phaseD-sys-host")
     check plan.envelope.operations.len == 1
     check plan.envelope.operations[0].kindTag == "os.timezone"
+
+  test "fs.systemFile sourceLocal adapter -> text -> producePlan emits one op":
+    # Windows-System-Resources Phase A: end-to-end across the compile
+    # stack — the controller-side path source flows from ProfileIntent
+    # through the adapter, the canonical-text renderer, the parser,
+    # and into a PrivilegedOperation that the broker would dispatch.
+    #
+    # `producePlan` re-reads `sourceLocal` for the desired-digest
+    # observation, so the test seeds a real tempdir file rather than
+    # a fake path.
+    let dir = createTempDir("repro-phasea-sysfile-", "")
+    defer: removeDir(dir)
+    let localSrc = dir / "myapp.toml"
+    writeFile(localSrc, "[server]\nport = 7878\n")
+    var intent = ProfileIntent(name: "phaseA-sysfile-sourceLocal")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("/etc/myapp/config.toml")
+    f["sourceLocal"] = strField(localSrc)
+    intent.resources.add(ResourceIntent(kind: "fs.systemFile",
+      address: "myappConfig", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkFsSystemFile
+    check sp.resources[0].sfSourceLocal == localSrc
+    let txt = renderSystemProfileToText(sp)
+    check "sourceLocal" in txt
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].sfSourceLocal == localSrc
+    let plan = producePlan(txt, "phaseA-sysfile-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "fs.systemFile"
+
+  test "fs.systemFile sourceUrl + sha256 adapter -> text -> producePlan emits one op":
+    # `producePlan` includes a read-only observation of the resource;
+    # on a Linux host the path must be under the POSIX allowlist
+    # (the `${PROGRAMDATA}` arm is Windows-only). `/etc/cache/...` is
+    # the closest analogue to the production `C:\actions-runner-cache`
+    # path that the Linux planner will permit.
+    var intent = ProfileIntent(name: "phaseA-sysfile-sourceUrl")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("/etc/cache/runner.zip")
+    f["sourceUrl"] = strField(
+      "https://example.com/runner.zip")
+    f["sha256"] = strField(
+      "0123456789abcdef0123456789abcdef" &
+      "0123456789abcdef0123456789abcdef")
+    intent.resources.add(ResourceIntent(kind: "fs.systemFile",
+      address: "actionsRunnerZip", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkFsSystemFile
+    check sp.resources[0].sfSourceUrl ==
+      "https://example.com/runner.zip"
+    check sp.resources[0].sfSha256.len == 64
+    let txt = renderSystemProfileToText(sp)
+    check "sourceUrl" in txt
+    check "sha256" in txt
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].sfSourceUrl ==
+      "https://example.com/runner.zip"
+    check reparsed.resources[0].sfSha256.len == 64
+    let plan = producePlan(txt, "phaseA-sysfile-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "fs.systemFile"
+
+  test "fs.systemFile inline content stays backward-compatible":
+    # The pre-Phase-A inline-content shape MUST round-trip with NO
+    # new fields emitted in the rendered text — a profile that does
+    # not use the external sources looks identical to today's output.
+    var intent = ProfileIntent(name: "phaseA-sysfile-inline")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("/etc/hosts.d/local")
+    f["content"] = strField("127.0.0.1 dev")
+    intent.resources.add(ResourceIntent(kind: "fs.systemFile",
+      address: "hostsLocal", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp)
+    check "sourceUrl" notin txt
+    check "sha256" notin txt
+    check "sourceLocal" notin txt
+
+  test "fs.systemFile rejects mutually exclusive sources in the adapter":
+    # Defence in depth — the adapter is the third gate the validator
+    # crosses. A planner that bypasses the template and the parser
+    # still hits this rejection.
+    var intent = ProfileIntent(name: "phaseA-sysfile-bad")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("/etc/myapp/config.toml")
+    f["content"] = strField("x = 1")
+    f["sourceLocal"] = strField("/home/zah/profiles/myapp.toml")
+    intent.resources.add(ResourceIntent(kind: "fs.systemFile",
+      address: "bad", fields: f, dependsOn: @[]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
 
   test "multi-resource adapter -> text -> producePlan emits N operations":
     var intent = ProfileIntent(name: "phaseD-sys-smoke")

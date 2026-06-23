@@ -106,6 +106,49 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check byKind["fs.systemFile"].fields["content"].s ==
       "127.0.0.1 dev"
 
+  test "system_fssystemfile_sources.nim builds fs.systemFile with all three sources":
+    # Windows-System-Resources Phase A e2e: compile + run the fixture
+    # that declares one inline-content, one URL-fetch, and one
+    # controller-side `sourceLocal` `fs.systemFile`. The e2e gate
+    # checks the ProfileIntent JSON — no real fetch, no apply.
+    let js = compileAndRun("system_fssystemfile_sources.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemFsFileSources"
+    check p.resources.len == 3
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    check "hostsInline" in byAddr
+    check byAddr["hostsInline"].kind == "fs.systemFile"
+    check byAddr["hostsInline"].fields["path"].s == "/etc/hosts.d/local"
+    check byAddr["hostsInline"].fields["content"].s == "127.0.0.1 dev"
+    check "sourceUrl" notin byAddr["hostsInline"].fields
+    check "sha256" notin byAddr["hostsInline"].fields
+    check "sourceLocal" notin byAddr["hostsInline"].fields
+
+    check "actionsRunnerZip" in byAddr
+    check byAddr["actionsRunnerZip"].kind == "fs.systemFile"
+    check byAddr["actionsRunnerZip"].fields["path"].s ==
+      "C:\\actions-runner-cache\\actions-runner-win-x64.zip"
+    check byAddr["actionsRunnerZip"].fields["sourceUrl"].s.startsWith(
+      "https://github.com/actions/runner/releases/download/")
+    check byAddr["actionsRunnerZip"].fields["sha256"].s.len == 64
+    check "sourceLocal" notin byAddr["actionsRunnerZip"].fields
+    # Inline `content` is still emitted by the template (empty), since
+    # the template always pushes the `content` key for stable codec
+    # shape — the load-bearing fact is that it is empty.
+    check byAddr["actionsRunnerZip"].fields["content"].s == ""
+
+    check "myappConfig" in byAddr
+    check byAddr["myappConfig"].kind == "fs.systemFile"
+    check byAddr["myappConfig"].fields["path"].s ==
+      "/etc/myapp/config.toml"
+    check byAddr["myappConfig"].fields["sourceLocal"].s ==
+      "/home/zah/profiles/myapp.toml"
+    check "sourceUrl" notin byAddr["myappConfig"].fields
+    check "sha256" notin byAddr["myappConfig"].fields
+
   test "system_fssystemdirectory.nim builds an fs.systemDirectory + acl":
     let js = compileAndRun("system_fssystemdirectory.nim")
     let p = parseProfileIntentJson(js)

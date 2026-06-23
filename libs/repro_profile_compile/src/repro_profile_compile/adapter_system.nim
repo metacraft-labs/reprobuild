@@ -193,9 +193,40 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       sdaProgramArgs: fieldList(r, "programArgs"),
       sdaRunAtLoad: fieldBool(r, "runAtLoad", true))
   of "fs.systemFile":
+    let sfPath = fieldString(r, "path")
+    let sfContent = fieldString(r, "content")
+    let sfSourceUrl = fieldString(r, "sourceUrl")
+    let sfSha256 = fieldString(r, "sha256")
+    let sfSourceLocal = fieldString(r, "sourceLocal")
+    # Mutual-exclusion + sha256-pairing — same shape the template
+    # raises at compile time and `parseSystemProfile` raises in the
+    # text parser. The adapter is the third surface; all three layers
+    # reject the same malformed intent so a bypass through any one
+    # path still fails closed.
+    let nonEmptySources = (if sfContent.len > 0: 1 else: 0) +
+                          (if sfSourceUrl.len > 0: 1 else: 0) +
+                          (if sfSourceLocal.len > 0: 1 else: 0)
+    if nonEmptySources > 1:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath &
+        "' declares more than one content source — at most one of " &
+        "`content`, `sourceUrl`, `sourceLocal` may be non-empty")
+    if sfSourceUrl.len > 0 and sfSha256.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath &
+        "' sets `sourceUrl` but no `sha256` — the URL fetch requires " &
+        "a lowercase 64-char BLAKE3 hex digest to verify against")
+    if sfSha256.len > 0 and sfSourceUrl.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath &
+        "' sets `sha256` but no `sourceUrl` — the digest is only " &
+        "meaningful when paired with a URL fetch")
     result = SystemResource(kind: srkFsSystemFile,
-      sfPath: fieldString(r, "path"),
-      sfContent: fieldString(r, "content"))
+      sfPath: sfPath,
+      sfContent: sfContent,
+      sfSourceUrl: sfSourceUrl,
+      sfSha256: sfSha256,
+      sfSourceLocal: sfSourceLocal)
   of "fs.systemDirectory":
     let dirPath = fieldString(r, "path")
     # ACL is optional. The fsSystemDirectory template emits the three
@@ -684,6 +715,17 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkFsSystemFile:
       pairs.add(("path", quoteSystemValue(r.sfPath)))
       pairs.add(("content", quoteSystemValue(r.sfContent)))
+      # External-source fields (Windows-System-Resources Phase A): emit
+      # only when present, mirroring the template + ACL-fields pattern.
+      # A profile that uses inline content alone re-renders with NO
+      # `sourceUrl` / `sha256` / `sourceLocal` lines — backward-compat
+      # with the pre-Phase-A canonical text.
+      if r.sfSourceUrl.len > 0:
+        pairs.add(("sourceUrl", quoteSystemValue(r.sfSourceUrl)))
+      if r.sfSha256.len > 0:
+        pairs.add(("sha256", quoteSystemValue(r.sfSha256)))
+      if r.sfSourceLocal.len > 0:
+        pairs.add(("sourceLocal", quoteSystemValue(r.sfSourceLocal)))
     of srkFsSystemDirectory:
       pairs.add(("path", quoteSystemValue(r.dirPath)))
       if r.dirAclPresent:

@@ -775,6 +775,79 @@ suite "Resource constructors":
       content = "127.0.0.1 dev")
     check target[0].kind == "fs.systemFile"
     check target[0].fields["mode"].s == "0644"
+    # The three external-source fields stay absent in the inline-
+    # content shape: this is the backward-compat guarantee.
+    check "sourceUrl" notin target[0].fields
+    check "sha256" notin target[0].fields
+    check "sourceLocal" notin target[0].fields
+
+  test "fsSystemFile sourceUrl + sha256":
+    var target: seq[ResourceIntent] = @[]
+    fsSystemFile(target,
+      path = "C:\\actions-runner-cache\\actions-runner-win-x64.zip",
+      sourceUrl = "https://github.com/actions/runner/releases/download/" &
+                  "v2.335.1/actions-runner-win-x64-2.335.1.zip",
+      sha256 = "0123456789abcdef0123456789abcdef" &
+               "0123456789abcdef0123456789abcdef",
+      address = "actionsRunnerZip")
+    check target.len == 1
+    check target[0].kind == "fs.systemFile"
+    check su.startsWith(target[0].fields["sourceUrl"].s, "https://")
+    check target[0].fields["sha256"].s.len == 64
+    check "sourceLocal" notin target[0].fields
+    # `content` is still emitted (carries the empty string — the
+    # template always pushes the inline-content field for stable
+    # codec shape); the load-bearing fact is that it is empty.
+    check target[0].fields["content"].s == ""
+
+  test "fsSystemFile sourceLocal":
+    var target: seq[ResourceIntent] = @[]
+    fsSystemFile(target,
+      path = "/etc/myapp/config.toml",
+      sourceLocal = "/home/zah/profiles/myapp.toml",
+      address = "myappConfig")
+    check target.len == 1
+    check target[0].fields["sourceLocal"].s == "/home/zah/profiles/myapp.toml"
+    check "sourceUrl" notin target[0].fields
+    check "sha256" notin target[0].fields
+    check target[0].fields["content"].s == ""
+
+  test "fsSystemFile rejects both content and sourceUrl":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        content = "x = 1",
+        sourceUrl = "https://example.com/c.toml",
+        sha256 = "0123456789abcdef0123456789abcdef" &
+                 "0123456789abcdef0123456789abcdef")
+    check target.len == 0
+
+  test "fsSystemFile rejects both content and sourceLocal":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        content = "x = 1",
+        sourceLocal = "/home/zah/profiles/myapp.toml")
+    check target.len == 0
+
+  test "fsSystemFile rejects sourceUrl without sha256":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        sourceUrl = "https://example.com/c.toml")
+    check target.len == 0
+
+  test "fsSystemFile rejects sha256 without sourceUrl":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        sha256 = "0123456789abcdef0123456789abcdef" &
+                 "0123456789abcdef0123456789abcdef")
+    check target.len == 0
 
   test "fsSystemDirectory without acl":
     var target: seq[ResourceIntent] = @[]

@@ -298,6 +298,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  path = " & renderScalar(r.sfPath))
     if r.sfContent.len > 0:
       result.add("  content = " & renderScalar(r.sfContent))
+    # External-source fields: emit only when present, so a profile
+    # using `content` round-trips byte-identically with the legacy
+    # rendering (the renderer never injects an empty key).
+    if r.sfSourceUrl.len > 0:
+      result.add("  sourceUrl = " & renderScalar(r.sfSourceUrl))
+    if r.sfSha256.len > 0:
+      result.add("  sha256 = " & renderScalar(r.sfSha256))
+    if r.sfSourceLocal.len > 0:
+      result.add("  sourceLocal = " & renderScalar(r.sfSourceLocal))
   of srkFsSystemDirectory:
     result.add("  path = " & renderScalar(r.dirPath))
     if r.dirAclPresent:

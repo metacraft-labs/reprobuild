@@ -138,6 +138,27 @@ type
     of srkFsSystemFile:
       sfPath*: string
       sfContent*: string
+      sfSourceUrl*: string
+        ## External content source: URL fetched at apply time on the
+        ## controller side. Empty when the file is content-inline or
+        ## sourced from a local path. When non-empty, `sfSha256` MUST
+        ## also be set (the validator enforces this).
+      sfSha256*: string
+        ## Lowercase 64-char hex BLAKE3 digest of the bytes the
+        ## controller expects `sfSourceUrl` to serve. The driver
+        ## compares the fetched bytes' digest against this string and
+        ## raises `EProtocol` on mismatch BEFORE asking the broker to
+        ## write.
+      sfSourceLocal*: string
+        ## External content source: path on the controller side
+        ## re-read on every apply (so a between-step edit between two
+        ## applies of the same plan lands).
+        ##
+        ## These three external-source fields are mutually exclusive
+        ## with each other AND with `sfContent`: at most one of
+        ## `sfContent` / `sfSourceUrl` / `sfSourceLocal` may be
+        ## non-empty. The validator rejects an over-specified profile
+        ## with `ESystemProfileInvalid`.
     of srkFsSystemDirectory:
       dirPath*: string
       dirAclPresent*: bool                ## false => ACL is unmanaged
@@ -745,9 +766,43 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "runAtLoad" in fields: parseBoolField("runAtLoad",
             fields["runAtLoad"]) else: true)
     of srkFsSystemFile:
+      let sfPath = need("path")
+      let sfContent =
+        if "content" in fields: fields["content"] else: ""
+      let sfSourceUrl =
+        if "sourceUrl" in fields: fields["sourceUrl"] else: ""
+      let sfSha256 =
+        if "sha256" in fields: fields["sha256"] else: ""
+      let sfSourceLocal =
+        if "sourceLocal" in fields: fields["sourceLocal"] else: ""
+      # Mutual-exclusion: at most one of `content` / `sourceUrl` /
+      # `sourceLocal` may be non-empty. Defence-in-depth — the template
+      # already raises at compile time, but a hand-authored / generated
+      # profile that bypasses the template MUST also fail closed here.
+      let nonEmptySources = (if sfContent.len > 0: 1 else: 0) +
+                            (if sfSourceUrl.len > 0: 1 else: 0) +
+                            (if sfSourceLocal.len > 0: 1 else: 0)
+      if nonEmptySources > 1:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
+          "' declares more than one content source — at most one of " &
+          "`content`, `sourceUrl`, `sourceLocal` may be non-empty")
+      # `sourceUrl` MUST be paired with `sha256` so a fetch always has
+      # something to verify against. A bare `sha256` without a URL is
+      # equally meaningless — both directions fail closed.
+      if sfSourceUrl.len > 0 and sfSha256.len == 0:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
+          "' sets `sourceUrl` but no `sha256` — the URL fetch requires " &
+          "a lowercase 64-char BLAKE3 hex digest to verify against")
+      if sfSha256.len > 0 and sfSourceUrl.len == 0:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
+          "' sets `sha256` but no `sourceUrl` — the digest is only " &
+          "meaningful when paired with a URL fetch")
       res = SystemResource(kind: srkFsSystemFile,
-        sfPath: need("path"),
-        sfContent: (if "content" in fields: fields["content"] else: ""))
+        sfPath: sfPath,
+        sfContent: sfContent,
+        sfSourceUrl: sfSourceUrl,
+        sfSha256: sfSha256,
+        sfSourceLocal: sfSourceLocal)
     of srkFsSystemDirectory:
       let dirPath = need("path")
       # ACL is optional: a stanza without aclEntries leaves ACL
@@ -1167,6 +1222,9 @@ proc toPrivilegedOperation*(r: SystemResource;
     PrivilegedOperation(kind: pokFsSystemFile, address: r.address,
       sfPath: r.sfPath,
       sfContent: r.sfContent,
+      sfSourceUrl: r.sfSourceUrl,
+      sfSha256: r.sfSha256,
+      sfSourceLocal: r.sfSourceLocal,
       sfDestroy: destroy)
   of srkFsSystemDirectory:
     PrivilegedOperation(kind: pokFsSystemDirectory, address: r.address,

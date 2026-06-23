@@ -323,6 +323,14 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
   of pokFsSystemFile:
     body.writeString(op.sfPath)
     body.writeString(op.sfContent)
+    # External-source fields (Windows-System-Resources Phase A). All
+    # three are written as strings; absent values encode as empty,
+    # which round-trips as empty on the decode side, matching the
+    # "all three external-source fields absent => inline content"
+    # backward-compat shape.
+    body.writeString(op.sfSourceUrl)
+    body.writeString(op.sfSha256)
+    body.writeString(op.sfSourceLocal)
     body.writeBool(op.sfDestroy)
   of pokFsSystemDirectory:
     body.writeString(op.fsdPath)
@@ -548,6 +556,12 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
       address: address)
     result.operation.sfPath = readString(body, pos)
     result.operation.sfContent = readString(body, pos)
+    # External-source fields (Windows-System-Resources Phase A) —
+    # read positionally in the same order they were written. Decoder
+    # ordering matches the encoder above.
+    result.operation.sfSourceUrl = readString(body, pos)
+    result.operation.sfSha256 = readString(body, pos)
+    result.operation.sfSourceLocal = readString(body, pos)
     result.operation.sfDestroy = readBool(body, pos, "sfDestroy")
   of pokFsSystemDirectory:
     result.operation = PrivilegedOperation(kind: pokFsSystemDirectory,

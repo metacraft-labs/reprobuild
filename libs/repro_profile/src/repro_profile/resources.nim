@@ -617,15 +617,69 @@ template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
 
 template fsSystemFile*(targetResources: var seq[ResourceIntent];
                        path: string;
-                       content: string;
+                       content: string = "";
+                       sourceUrl: string = "";
+                       sha256: string = "";
+                       sourceLocal: string = "";
                        mode: string = "0644";
                        address: string = "";
                        dependsOn: seq[string] = @[]) =
+  ## A managed system-scope file. The file's content is supplied by
+  ## EXACTLY ONE of three mutually-exclusive sources:
+  ##
+  ##   * `content`     — inline string baked into the plan (the
+  ##                     existing behaviour; the historical default).
+  ##   * `sourceUrl`   — URL fetched at apply time; the controller
+  ##                     downloads the bytes, verifies them against
+  ##                     `sha256` (lowercase 64-char hex BLAKE3
+  ##                     digest), and only then asks the broker to
+  ##                     write. `sha256` MUST also be set.
+  ##   * `sourceLocal` — path on the controller side; re-read on every
+  ##                     apply so a between-step edit lands. The file
+  ##                     is opened by the unprivileged controller
+  ##                     before the broker dispatch — the broker
+  ##                     receives the bytes, not the path.
+  ##
+  ## A profile that supplies two or more of these (e.g. both `content`
+  ## and `sourceUrl`) is a compile-time error here AND a validator
+  ## reject downstream (defence in depth). All three absent means the
+  ## resource declares an empty file — equivalent to `content = ""`.
   block:
+    # Defence in depth #1: at-most-one-source mutual exclusion. The
+    # downstream validator (`profile.parseSystemProfile` and the
+    # adapter) re-checks; both layers raise so a bypass at either
+    # surface still fails closed.
+    let nonEmptySources = (if content.len > 0: 1 else: 0) +
+                          (if sourceUrl.len > 0: 1 else: 0) +
+                          (if sourceLocal.len > 0: 1 else: 0)
+    if nonEmptySources > 1:
+      raise newException(ValueError,
+        "fs.systemFile '" & path &
+        "' declares more than one content source — at most one of " &
+        "`content`, `sourceUrl`, `sourceLocal` may be non-empty")
+    # Defence in depth #2: `sourceUrl` requires `sha256` (and vice
+    # versa — a profile that pins a digest without a URL has no
+    # bytes to verify against).
+    if sourceUrl.len > 0 and sha256.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & path &
+        "' sets `sourceUrl` but no `sha256` — the URL fetch requires " &
+        "a lowercase 64-char BLAKE3 hex digest to verify against")
+    if sha256.len > 0 and sourceUrl.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & path &
+        "' sets `sha256` but no `sourceUrl` — the digest is only " &
+        "meaningful when paired with a URL fetch")
     var fields = initTable[string, FieldValue]()
     fields["path"] = strField(path)
     fields["content"] = strField(content)
     fields["mode"] = strField(mode)
+    if sourceUrl.len > 0:
+      fields["sourceUrl"] = strField(sourceUrl)
+    if sha256.len > 0:
+      fields["sha256"] = strField(sha256)
+    if sourceLocal.len > 0:
+      fields["sourceLocal"] = strField(sourceLocal)
     let addr0 = if address.len > 0: address
                 else: autoAddress("fs.systemFile", path)
     pushResource(targetResources, "fs.systemFile", addr0, fields,
