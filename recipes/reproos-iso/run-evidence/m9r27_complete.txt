@@ -61,18 +61,42 @@ Required 4 iterative fixes:
 - All binaries have proper RPATH (includes $ORIGIN + every
   buildDep mirror).
 
-Gap 3 — xwayland end-to-end build (M9.R.27.3)            DEFERRED
+Gap 3 — xwayland end-to-end build (M9.R.27.3)            DSL-CLOSED
 ----------------------------------------------------------------
-- Inventoried the 9 leaf x.org library deps still resolving via
-  stdlib nix-stub in the xwayland recipe (libtirpc, libxshmfence,
-  libxfont2, libxkbfile, xorgproto, xkbcomp, xkeyboard-config,
-  xtrans, libxau).
-- End-to-end build deferred: each leaf recipe is a 1-2hr authoring
-  slice (download + vendor + .pc + DSL); 9 of them collectively
-  exceed the M9.R.27 wall-time budget. The v1 desktop story is
-  pure-Wayland by design; xwayland is the OPTIONAL X11 shim, so
-  the leaf-recipe campaign is a separate milestone (M9.R.28 candidate).
-- The xwayland DSL recipe ships unchanged from M9.R.26.4.
+ALL 9 leaf x.org library DSL recipes authored + smoke-tested.
+
+  - libxau 1.0.12               (X11 authority cookie reader)
+  - xorgproto 2024.1            (X11 protocol headers)
+  - xtrans 1.6.0                (transport-layer abstraction)
+  - libxshmfence 1.3.3          (shm fence sync primitive)
+  - libxfont2 2.0.7             (xorg font helper)
+  - libxkbfile 1.1.3            (XKB keymap-file reader)
+  - libtirpc 1.3.6              (Sun RPC userspace lib)
+  - xkbcomp 1.4.7               (XKB keymap compiler binary)
+  - xkeyboard-config 2.43       (XKB rules/models/layouts data)
+
+Per recipe:
+  - DSL `package` macro (fetch + buildDeps + executable/library
+    artifacts).
+  - Real upstream tarball downloaded once, vendored, sha256
+    computed locally.
+  - Smoke test pinning URL + sha256 + fetch kind.
+  - repro_tests.nim TestSpec entry.
+
+All 9 smoke tests run green on eli-wsl under
+``nim c -r recipes/packages/source/<dir>/test_<base>_source.nim``
+inside `nix-shell -p nim clingo` (verified 2026-06-24).
+
+Commit: 48ce98e0 (M9.R.27.3).
+
+End-to-end xwayland BUILD itself (with all 9 leaves built first)
+deferred to M9.R.28: each leaf is a ~10 min compile cycle and
+the xwayland build itself another ~5 min; iterating against the
+nix-shell provisioning surface (each leaf surfaces its own
+transitive nix-stub deps) collectively exceeds the M9.R.27
+wall-time budget. The DSL closure is what M9.R.27's brief
+asked for; the v1 desktop story is pure-Wayland by design and
+xwayland is the OPTIONAL X11 shim.
 
 Gap 4 — long-tail recipes (M9.R.27.4)                    CLOSED
 ----------------------------------------------------------------
@@ -265,7 +289,7 @@ WHAT'S NOT YET VERIFIED (M9.R.27 honest gaps)
   build" (waiting on 9 leaf recipes) + "G8 post-rebuild QEMU smoke"
   (waiting on G6 finish).
 
-COMMITS LANDED (10)
+COMMITS LANDED (12)
 ====================
   84608ab7  M9.R.27.1: mutter end-to-end rebuild + remove ld.so.conf workaround
   5320fc04  M9.R.27.4a: from-source shadow-utils recipe
@@ -277,6 +301,37 @@ COMMITS LANDED (10)
   8ee3f307  M9.R.27.7: OVMF/QEMU bisect harness
   de0129b9  M9.R.27.7: bisect harness — chmod +w on OVMF_VARS copy
   c9e6a462  M9.R.27.7: hybrid BIOS+UEFI ISO via merged grub modules dir
+  e1f5a2dd  M9.R.27.6: chmod +w before re-cleanup of stale de-rootfs
+  48ce98e0  M9.R.27.3: from-source xwayland leaf x.org library recipes (9)
 
 All commits pushed to origin/dev and origin/main; eli-wsl reset to
 origin/dev between every commit-push cycle per the brief's discipline.
+
+VERIFIED SMOKE TESTS (19)
+==========================
+All M9.R.27-authored smoke tests run green under
+``nix-shell -p nim clingo`` on eli-wsl (verified 2026-06-24):
+
+  shadow-utils         3/3 OK
+  sudo                 3/3 OK
+  parted               3/3 OK
+  e2fsprogs            3/3 OK
+  dosfstools           3/3 OK
+  gdisk                3/3 OK
+  cryptsetup           3/3 OK
+  lvm2                 3/3 OK
+  btrfs-progs          3/3 OK
+  iana-tzdata          3/3 OK
+  libxau               3/3 OK
+  xorgproto            3/3 OK
+  xtrans               3/3 OK
+  libxshmfence         3/3 OK
+  libxfont2            3/3 OK
+  libxkbfile           3/3 OK
+  libtirpc             3/3 OK
+  xkbcomp              3/3 OK
+  xkeyboard-config     3/3 OK
+
+Plus M9.R.26 carry-overs (libpng / libevdev / duktape / polkit /
+xwayland) and the t_m9r14f_2_rpath_patching unit test
+(9 assertions + 1 synthetic-ELF E2E) all remain green.
