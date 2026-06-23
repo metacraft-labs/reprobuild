@@ -90,6 +90,13 @@ package reproosIso:
     # the squashfs).
     shell(
       command = ("set -euo pipefail; " &
+                 # M9.R.27.6 — stage-de-rootfs.sh mirrors /nix/store
+                 # paths which are read-only (cp -a preserves perms).
+                 # On re-runs the `rm -rf` of the stale dir hits
+                 # ``Permission denied`` for every read-only file
+                 # inside the mirror. ``chmod -R u+w`` first so the
+                 # cleanup succeeds without sudo.
+                 "if [ -d build/de-rootfs ]; then chmod -R u+w build/de-rootfs 2>/dev/null || true; fi; " &
                  "rm -rf build/de-rootfs && mkdir -p build/de-rootfs build; " &
                  "bash scripts/stage-de-rootfs.sh build/de-rootfs; " &
                  "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
