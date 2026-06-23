@@ -273,10 +273,10 @@ proc walkMounts(acc: var seq[(string, string)];
           # captures this as a (device, mountpoint) pair where the
           # device repeats — the caller distinguishes by repetition.
           if s.path.len > 0 and s.path != "/":
-            let smp =
-              if s.path == "/": target
-              else: target & s.path
-            acc.add((device, smp))
+            let sep =
+              if s.path.startsWith("/") or target.endsWith("/"): ""
+              else: "/"
+            acc.add((device, target & sep & s.path))
   of cfsEncrypted:
     if not c.inner.isNil:
       let mapper = "/dev/mapper/" &
