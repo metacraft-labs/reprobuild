@@ -555,26 +555,14 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
       echo "${d#$STAGE_DIR}"
     fi
   done
-  # From-source install-mirror INTERNAL subdir lib dirs (e.g.
-  # mutter-15/ inside mutter's lib64/).  Defence-in-depth: the
-  # M9.R.26.5 DSL fix to `m9r14fEmitRpathPatchScript` now bakes
-  # every internal versioned subdir into the per-recipe RPATH at
-  # install-mirror time, so a fresh-from-source mutter no longer
-  # NEEDS this ld.so.cache fall-through. We keep the scan as a
-  # safety net for recipes whose install-mirror was emitted before
-  # the M9.R.26.5 fix landed (the file mtime predates the fix) and
-  # for any future recipe that ships .so files in a versioned subdir
-  # but isn't itself rebuilt as part of the ISO build chain.
-  while IFS= read -r d; do
-    [ -n "$d" ] && echo "${d#$STAGE_DIR}"
-  done < <(find "$ISO_SRC_MIRROR_ROOT" \
-              -path '*/.repro/output/install/usr/lib*/*' \
-              -maxdepth 8 -type d 2>/dev/null | \
-            while read -r sub; do
-              if find "$sub" -maxdepth 1 -name '*.so*' -print -quit 2>/dev/null | grep -q .; then
-                echo "$sub"
-              fi
-            done)
+  # M9.R.27.1 — REMOVED the from-source install-mirror INTERNAL subdir
+  # scan (mutter-15/, qt6/plugins/, etc.).  The M9.R.26.5 DSL fix to
+  # `m9r14fEmitRpathPatchScript` bakes every internal versioned subdir
+  # into the per-recipe RPATH at install-mirror time, and the M9.R.27.1
+  # mutter rebuild proved end-to-end that the rebuilt mutter's
+  # libmutter-15.so.0 + the internal mutter-15/libmutter-*-15.so libs
+  # all carry the right RPATH entry.  No more ld.so.conf fall-through
+  # needed — pure embedded RPATH does the job.
   # Nix-store mirrored /lib dirs.
   for d in "$STAGE_DIR"/nix/store/*/lib; do
     if [ -d "$d" ]; then
