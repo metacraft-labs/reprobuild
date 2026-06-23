@@ -99,6 +99,52 @@ Type=Application
 DesktopNames=GNOME
 EOF
 
+# M9.R.18.14 -- ReproOS Installer session. SDDM autologin (M9.R.18.1)
+# routes to this session once the installer binary lands in the base
+# rootfs. The launcher script starts a minimal Wayland compositor
+# (sway in kiosk mode per ReproOS-Installer-PRD.md §7.5) and execs
+# the wizard binary.
+cat > "$STAGE_DIR/usr/share/wayland-sessions/reproos-installer.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=ReproOS Installer
+Comment=First-boot ReproOS installer wizard (kiosk mode)
+Exec=/usr/bin/reproos-installer-launcher
+DesktopNames=reproos-installer
+EOF
+
+# Companion launcher script -- starts sway in kiosk mode and execs the
+# installer binary. If the binary is missing (pre-M9.R.18.14 ISO), the
+# script falls through to a plain plasma session so the boot smoke still
+# reaches a desktop.
+mkdir -p "$STAGE_DIR/usr/bin"
+cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher" <<'EOF'
+#!/bin/sh
+# ReproOS Installer kiosk launcher.
+#
+# Per ReproOS-Installer-PRD.md §7.5, starts a minimal Wayland
+# compositor (sway in kiosk mode) and execs the wizard full-screen.
+# Closing the wizard logs the session out and returns to sddm.
+
+INSTALLER_BIN=/usr/bin/reproos-installer
+if [ ! -x "$INSTALLER_BIN" ]; then
+  exec /usr/bin/startplasma-wayland
+fi
+
+# Drop a minimal sway config that launches the installer full-screen
+# without a status bar or output decorations.
+SWAY_CFG=$(mktemp -t reproos-installer-sway-XXXXXX.cfg)
+cat > "$SWAY_CFG" <<SWAY
+output * background #0a0a0a solid_color
+exec "$INSTALLER_BIN; swaymsg exit"
+default_border none
+font pango:Sans 11
+SWAY
+
+exec /usr/bin/sway -c "$SWAY_CFG"
+EOF
+chmod +x "$STAGE_DIR/usr/bin/reproos-installer-launcher"
+
 # M9.R.17c.4 -- enable sddm as display-manager.service. systemd starts
 # the unit symlinked at /etc/systemd/system/display-manager.service on
 # graphical.target. Without this symlink the booted system reaches
@@ -114,6 +160,35 @@ ln -sf /usr/lib/systemd/system/sddm.service \
 # init/default policy of its own.
 ln -sf /usr/lib/systemd/system/graphical.target \
   "$STAGE_DIR/etc/systemd/system/default.target"
+
+# M9.R.18.1 -- SDDM autologin config for the live ISO. Closes the
+# boot-to-desktop round-trip: SDDM appears (proved by M9.R.17c.6) but
+# without autologin the user has to type a password the live-rootfs
+# doesn't prompt them about. The live-rootfs's `live` user has its
+# password cleared in build-base-rootfs.sh; autologin sidesteps the
+# prompt entirely.
+#
+# Per ReproOS-Installer-PRD.md §7.5 the live ISO should autologin to
+# the custom installer session (reproos-installer.desktop). Until the
+# installer binary ships in the live rootfs (M9.R.18.14), autologin
+# routes to plasma instead so the boot smoke can validate the
+# end-to-end chain (SDDM -> autologin -> DE session up).
+#
+# Session choice is env-gated:
+#   REPRO_AUTOLOGIN_SESSION=plasma           (default until M9.R.18.14)
+#   REPRO_AUTOLOGIN_SESSION=reproos-installer (post-M9.R.18.14)
+REPRO_AUTOLOGIN_SESSION="${REPRO_AUTOLOGIN_SESSION:-plasma}"
+mkdir -p "$STAGE_DIR/etc/sddm.conf.d"
+cat > "$STAGE_DIR/etc/sddm.conf.d/00-autologin.conf" <<EOF
+[Autologin]
+User=live
+Session=${REPRO_AUTOLOGIN_SESSION}
+Relogin=true
+
+[General]
+HaltCommand=/usr/bin/systemctl poweroff
+RebootCommand=/usr/bin/systemctl reboot
+EOF
 
 # Track which recipes contributed.
 contributed=()
