@@ -3518,6 +3518,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/libevdev/test_libevdev_source.nim",
+    binary: "build/test-bin/test_libevdev_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/libffi/test_libffi_source.nim",
     binary: "build/test-bin/test_libffi_source",
     defines: @[],
@@ -3544,6 +3552,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/libogg/test_libogg_source.nim",
     binary: "build/test-bin/test_libogg_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "recipes/packages/source/libpng/test_libpng_source.nim",
+    binary: "build/test-bin/test_libpng_source",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

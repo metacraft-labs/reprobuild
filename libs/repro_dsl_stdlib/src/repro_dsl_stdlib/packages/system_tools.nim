@@ -46,11 +46,13 @@ import ./pkg_config
 import ./gmp
 import ./mpfr
 import ./mpc
-import ./libpng
+# M9.R.26.1 — libpng promoted to a from-source recipe at
+# recipes/packages/source/libpng/. The stdlib nix-stub is retired.
 import ./libjpeg
 import ./libtiff
 import ./libelf
-import ./libevdev
+# M9.R.26.2 — libevdev promoted to a from-source recipe at
+# recipes/packages/source/libevdev/. The stdlib nix-stub is retired.
 import ./libudev
 import ./libgpg_error
 import ./libacl
@@ -198,11 +200,11 @@ export pkg_config
 export gmp
 export mpfr
 export mpc
-export libpng
+# M9.R.26.1 — libpng promoted to from-source recipe; stdlib stub retired.
 export libjpeg
 export libtiff
 export libelf
-export libevdev
+# M9.R.26.2 — libevdev promoted to from-source recipe; stdlib stub retired.
 export libudev
 export libgpg_error
 export libacl
