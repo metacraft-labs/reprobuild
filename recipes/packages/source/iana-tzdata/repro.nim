@@ -1,22 +1,37 @@
-## Source-from-tarball IANA tzdata recipe — closes M9.R.27 Gap 4 (G4).
+## Source-from-tarball IANA tzdata recipe — closes M9.R.27 Gap 4 (G4),
+## end-to-end built in M9.R.28.4.
 ##
 ## tzdata is the IANA Time Zone Database. The recipe ships the
 ## data-only payload that becomes /usr/share/zoneinfo on the live ISO,
 ## consumed by libc + systemd-timesyncd for local-time conversion.
 ##
-## Vendored at ``recipes/packages/source/iana-tzdata/vendor/tzdata2024b.tar.gz``.
-## sha256 = 70e754db126a8d0db3d16d6b4cb5f7ec1e04d5f261255e4558a67fe92d39e550
-## (459,393 bytes).
+## ## M9.R.28.4 — combined-source vendor
+##
+## Earlier M9.R.27 vendored only the ``tzdata2024b.tar.gz`` data-only
+## tarball; the Makefile inside that archive requires ``tzselect.ksh``
+## + ``zic.c`` (from the SEPARATE ``tzcode2024b.tar.gz``) to build
+## the ``zic`` compiler. The standalone data tarball therefore fails
+## the ``all`` target with "No rule to make target 'tzselect.ksh'".
+##
+## Fix: re-vendor from the upstream Git tag tarball
+## (``tz-2024b.tar.gz`` from github.com/eggert/tz) which combines
+## tzcode + tzdata into a single source tree. The combined archive
+## extracts to ``tz-2024b/`` (extractStrip: 1 unrolls one level).
+##
+## Vendored at
+## ``recipes/packages/source/iana-tzdata/vendor/tz-2024b.tar.gz``.
+## sha256 = 557c41d8eb5c29387a9d496db87c4aeb4f2ac8a2b6d5f60e869a8cade26e679c
+## (619,499 bytes).
 ##
 ## ## Build shape
 ##
-## tzdata's upstream is plain ``make`` against the canonical Makefile
-## (no autoconf). The Makefile reads ``TOPDIR`` + ``ZIC=zic`` and
-## populates ``$TOPDIR/usr/share/zoneinfo`` with the compiled binary
-## TZif catalog when invoked as ``make install TOPDIR=$DESTDIR``.
+## Plain ``make`` against the canonical Makefile (no autoconf). The
+## Makefile builds ``zic`` from tzcode then compiles tzdata's region
+## files (africa, antarctica, asia, etc.) into the TZif binary
+## catalog under ``$TOPDIR/usr/share/zoneinfo``.
 ##
-## Uses the autotools convention with ``skipConfigure = true`` (same
-## shape as gptfdisk + duktape).
+## Uses the autotools convention with ``skipConfigure = true`` (no
+## ./configure to run).
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -26,19 +41,17 @@ package ianaTzdataSource:
   versions:
     "2024b":
       sourceRevision = "2024b"
-      sourceUrl = "https://data.iana.org/time-zones/releases/tzdata2024b.tar.gz"
+      sourceUrl = "https://github.com/eggert/tz/archive/refs/tags/2024b.tar.gz"
       sourceRepository = "https://github.com/eggert/tz"
 
   fetch:
-    url: "https://data.iana.org/time-zones/releases/tzdata2024b.tar.gz"
-    sha256: "70e754db126a8d0db3d16d6b4cb5f7ec1e04d5f261255e4558a67fe92d39e550"
-    extractStrip: 0
+    url: "https://github.com/eggert/tz/archive/refs/tags/2024b.tar.gz"
+    sha256: "557c41d8eb5c29387a9d496db87c4aeb4f2ac8a2b6d5f60e869a8cade26e679c"
+    extractStrip: 1
 
   nativeBuildDeps:
     "make"
     "gcc >=11"
-    ## tzcode (sibling tarball) ships the ``zic`` compiler. For now we
-    ## use the host's zic via gcc-compiled fallback at first build time.
 
   buildDeps:
     discard

@@ -8,9 +8,9 @@ import repro_project_dsl
 import ./repro
 
 const ExpectedUrl =
-  "https://data.iana.org/time-zones/releases/tzdata2024b.tar.gz"
+  "https://github.com/eggert/tz/archive/refs/tags/2024b.tar.gz"
 const ExpectedHash =
-  "70e754db126a8d0db3d16d6b4cb5f7ec1e04d5f261255e4558a67fe92d39e550"
+  "557c41d8eb5c29387a9d496db87c4aeb4f2ac8a2b6d5f60e869a8cade26e679c"
 
 suite "ianaTzdataSource — from-source recipe smoke test":
 
