@@ -116,13 +116,16 @@ if [ -n "$REPRO_DE_ROOTFS_DIR" ]; then
     exit 66
   fi
   mkdir -p "$WORK/live"
-  # -all-time fixes mtimes inside the SquashFS to SOURCE_DATE_EPOCH; -no-xattrs
-  # drops xattr noise; -comp xz -Xbcj x86 is the same xz-with-x86-BCJ
-  # variant Debian Live uses, producing the smallest reproducible
-  # output; -noappend prevents appending to a stale image.
+  # mksquashfs >= 4.5 already honours SOURCE_DATE_EPOCH for both the
+  # superblock mkfs-time and each entry's mtime; the historical
+  # ``-all-time`` / ``-mkfs-time`` overrides conflict with the env var
+  # and abort with ``SOURCE_DATE_EPOCH and command line options can't
+  # be used at the same time to set timestamp(s)``. Drop the explicit
+  # flags. -no-xattrs drops xattr noise; -comp xz -Xbcj x86 is the
+  # same xz-with-x86-BCJ variant Debian Live uses, producing the
+  # smallest reproducible output; -noappend prevents appending to a
+  # stale image.
   mksquashfs "$REPRO_DE_ROOTFS_DIR" "$WORK/live/filesystem.squashfs" \
-    -all-time "$SOURCE_DATE_EPOCH" \
-    -mkfs-time "$SOURCE_DATE_EPOCH" \
     -no-xattrs \
     -comp xz -Xbcj x86 \
     -noappend \
