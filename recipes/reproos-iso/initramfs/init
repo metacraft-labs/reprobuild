@@ -1,0 +1,226 @@
+#!/bin/sh
+# M9.R.17c.1 - Custom live-init for reproos-iso.
+#
+# Drop-in replacement for Debian Live's live-boot's mountroot() that
+# avoids the initramfs-tools dependency chain. Does the minimal work
+# needed to boot into the DE-rootfs SquashFS payload:
+#
+#   1) Mount /proc, /sys, /dev (and devtmpfs auto-populates /dev/sr0 etc.)
+#   2) Probe for the boot medium - the CD-ROM that contains the ISO
+#      ships /live/filesystem.squashfs at its root.
+#   3) Loop-mount the SquashFS read-only.
+#   4) Build an overlayfs at /run/live/rootfs with:
+#        lowerdir = squashfs mount (read-only)
+#        upperdir = tmpfs "upper" (read-write writes here)
+#        workdir  = tmpfs "work"  (overlayfs internal scratch)
+#   5) Move /proc /sys /dev mounts into the new root.
+#   6) switch_root into the overlay and exec /sbin/init.
+#
+# Designed for the BUSYBOX-only userspace the M9.R.17c.1 build-initramfs.sh
+# stages. Every binary referenced below is a busybox applet.
+#
+# Logging: prints diagnostic lines prefixed with [live-init] to the
+# kernel console (we keep stderr open on whatever the kernel handed us
+# - usually /dev/console - through the initramfs lifetime).
+
+set -e
+
+LIVE_INIT_VERSION='M9.R.17c.1'
+
+log() {
+  echo "[live-init] $*" >/dev/kmsg 2>/dev/null || echo "[live-init] $*"
+}
+
+# Drop into a shell if anything blows up - so the boot smoke can
+# diagnose without a stuck kernel panic.
+rescue() {
+  log "FATAL: $*"
+  log "dropping to busybox shell - use 'exit' to panic"
+  exec /bin/sh
+}
+
+trap 'rescue "trap fired before reaching switch_root"' EXIT
+
+log "starting $LIVE_INIT_VERSION"
+
+# Boot-tier mounts. Use the kernel's auto-mount-on-mkdir-of-special
+# nodes idiom - mkdir + mount -t for /proc and /sys; busybox mount
+# autopopulates /dev via devtmpfs (which the netinst kernel has
+# built-in CONFIG_DEVTMPFS=y).
+mkdir -p /proc /sys /dev /run /tmp /mnt
+mount -t proc     none /proc
+mount -t sysfs    none /sys
+mount -t devtmpfs none /dev || true
+mount -t tmpfs    none /run
+mount -t tmpfs    none /tmp
+
+# Parse kernel cmdline. We honour:
+#   repro.de=<name>            - DE choice (consumed by repro-de-select.service
+#                                inside the squashfs's /etc/systemd/system)
+#   live.fstype=<fs>           - override iso9660 (default)
+#   live.image=<path>          - override /live/filesystem.squashfs
+#   live.debug                 - drop to shell BEFORE attempting overlay
+LIVE_IMAGE='/live/filesystem.squashfs'
+LIVE_FSTYPE='iso9660'
+LIVE_DEBUG=''
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    live.image=*)  LIVE_IMAGE="${arg#live.image=}" ;;
+    live.fstype=*) LIVE_FSTYPE="${arg#live.fstype=}" ;;
+    live.debug)    LIVE_DEBUG=1 ;;
+  esac
+done
+
+log "live.image=$LIVE_IMAGE live.fstype=$LIVE_FSTYPE"
+
+# Load modules. We pre-staged a slimmed /lib/modules/<kver>/modules.dep
+# so modprobe can resolve the dependency chain itself.
+#
+# Order matters - load USB/SCSI host adapters first so /dev/sr0
+# materialises before we probe block devices.
+load_module() {
+  modprobe "$1" 2>/dev/null && log "modprobe $1 ok" || log "modprobe $1 missing/failed (ok)"
+}
+
+log "loading kernel modules"
+# Virtio (qemu default block transport)
+load_module virtio
+load_module virtio_ring
+load_module virtio_pci
+load_module virtio_pci_modern_dev
+load_module virtio_pci_legacy_dev
+load_module virtio_blk
+load_module virtio_scsi
+# SCSI + ATA
+load_module scsi_mod
+load_module sd_mod
+load_module sr_mod
+load_module cdrom
+load_module ata_piix
+load_module ahci
+# USB host + storage (USB CD-ROM / USB stick boot)
+load_module usbcore
+load_module ohci-pci
+load_module ehci-pci
+load_module xhci-pci
+load_module usb-storage
+load_module uas
+# Loop block - needed for losetup of the squashfs.
+load_module loop
+# Filesystems
+load_module isofs
+load_module squashfs
+load_module overlay
+load_module ext4
+load_module vfat
+
+# Give udev-less devtmpfs a beat to settle. Most virtio probes
+# complete in microseconds but cdrom drives can take a moment.
+sleep 1
+
+if [ -n "$LIVE_DEBUG" ]; then
+  log "live.debug set - shell drop"
+  trap - EXIT
+  /bin/sh
+  trap 'rescue "post-debug-shell trap"' EXIT
+fi
+
+# Search block devices for one that contains $LIVE_IMAGE. Iterate
+# every /sys/class/block entry, mount each device read-only at
+# /run/live/medium, look for $LIVE_IMAGE; unmount if not found.
+mkdir -p /run/live/medium /run/live/lower /run/live/upper /run/live/work /run/live/rootfs
+
+find_medium() {
+  # Order matters: probe optical (sr*) + virtio/scsi block devices
+  # FIRST, then USB / loop / ram as fallback. This keeps the log
+  # readable and avoids ~50 noisy failed-mount lines for loop devices
+  # the kernel just allocated for our use.
+  for prefix in sr vd sd hd nvme mmcblk; do
+    for sysblk in /sys/class/block/${prefix}*; do
+      [ -e "$sysblk" ] || continue
+      devname="$(basename "$sysblk")"
+      devnode="/dev/$devname"
+      if [ ! -b "$devnode" ]; then
+        continue
+      fi
+      log "probing $devnode"
+      for fs in "$LIVE_FSTYPE" iso9660 vfat ext4 squashfs; do
+        if mount -t "$fs" -o ro "$devnode" /run/live/medium 2>/dev/null; then
+          if [ -f "/run/live/medium$LIVE_IMAGE" ]; then
+            log "found $LIVE_IMAGE on $devnode (fs=$fs)"
+            return 0
+          fi
+          umount /run/live/medium 2>/dev/null || true
+        fi
+      done
+    done
+  done
+  return 1
+}
+
+# Retry loop - some devices take time to settle, especially USB.
+attempt=0
+while ! find_medium; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    log "no medium found after 30s; available block devices:"
+    ls /sys/class/block/ >/dev/kmsg 2>/dev/null || ls /sys/class/block/
+    rescue "no live medium found"
+  fi
+  sleep 1
+done
+
+# Loop-mount the squashfs read-only. BusyBox losetup doesn't support
+# --show, so we acquire a free loop device with -f (which prints it on
+# stdout) and then bind it explicitly.
+log "loop-mounting $LIVE_IMAGE"
+loop_dev="$(losetup -f)"
+if [ -z "$loop_dev" ]; then
+  rescue "losetup -f returned empty"
+fi
+if ! losetup -r "$loop_dev" "/run/live/medium$LIVE_IMAGE"; then
+  rescue "losetup $loop_dev failed for $LIVE_IMAGE"
+fi
+log "loop device: $loop_dev"
+
+mount -t squashfs -o ro "$loop_dev" /run/live/lower || rescue "squashfs mount failed"
+
+# overlayfs over (lower=squashfs, upper=tmpfs/upper, work=tmpfs/work).
+mount -t overlay overlay \
+  -o "lowerdir=/run/live/lower,upperdir=/run/live/upper,workdir=/run/live/work" \
+  /run/live/rootfs || rescue "overlayfs mount failed"
+
+log "overlayfs ready at /run/live/rootfs"
+
+# Sanity-check: target must have /sbin/init or /lib/systemd/systemd.
+INIT_BIN=''
+for cand in /sbin/init /lib/systemd/systemd /usr/lib/systemd/systemd /usr/sbin/init; do
+  if [ -x "/run/live/rootfs$cand" ]; then
+    INIT_BIN="$cand"
+    break
+  fi
+done
+if [ -z "$INIT_BIN" ]; then
+  log "no init binary found in /run/live/rootfs; contents:"
+  ls /run/live/rootfs >/dev/kmsg 2>/dev/null || ls /run/live/rootfs
+  ls /run/live/rootfs/sbin >/dev/kmsg 2>/dev/null || true
+  rescue "no init binary in overlay"
+fi
+
+# Preserve /proc /sys /dev /run mounts into the new root before
+# switch_root. switch_root expects them moved, not bind-mounted; do
+# the moves explicitly with mount --move.
+log "preparing switch_root - init=$INIT_BIN"
+mkdir -p /run/live/rootfs/proc /run/live/rootfs/sys /run/live/rootfs/dev /run/live/rootfs/run
+mount --move /proc /run/live/rootfs/proc
+mount --move /sys  /run/live/rootfs/sys
+mount --move /dev  /run/live/rootfs/dev
+mount --move /run  /run/live/rootfs/run
+
+# switch_root clears the old root and execs the new init.
+log "switch_root -> $INIT_BIN"
+trap - EXIT
+exec switch_root /run/live/rootfs "$INIT_BIN"
+
+# If exec returns, we're catastrophically broken.
+rescue "switch_root returned"

@@ -75,6 +75,22 @@ Type=Application
 DesktopNames=GNOME
 EOF
 
+# M9.R.17c.4 -- enable sddm as display-manager.service. systemd starts
+# the unit symlinked at /etc/systemd/system/display-manager.service on
+# graphical.target. Without this symlink the booted system reaches
+# multi-user.target but never spawns the login screen.
+mkdir -p "$STAGE_DIR/etc/systemd/system"
+# Use a path inside the staged /usr because the squashfs's /usr/lib
+# becomes /usr/lib at runtime; the symlink target must be absolute and
+# rooted at the live ISO's filesystem layout.
+ln -sf /usr/lib/systemd/system/sddm.service \
+  "$STAGE_DIR/etc/systemd/system/display-manager.service"
+
+# Wire graphical.target as the default - the rootfs we stage has no
+# init/default policy of its own.
+ln -sf /usr/lib/systemd/system/graphical.target \
+  "$STAGE_DIR/etc/systemd/system/default.target"
+
 # Track which recipes contributed.
 contributed=()
 missing=()

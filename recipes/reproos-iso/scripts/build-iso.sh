@@ -39,6 +39,22 @@ OUT_ISO="$3"
 : "${LC_ALL:?LC_ALL=C required for byte-identical output}"
 : "${TZ:?TZ=UTC required for byte-identical output}"
 
+# M9.R.17c.1 -- replace the vendored Debian Installer initramfs with a
+# from-source live-init-capable initramfs that knows how to loop-mount
+# /live/filesystem.squashfs + pivot_root into the DE rootfs overlay.
+# The vendored initrd is the d-i installer; it ignores the squashfs
+# payload and boots straight into the text-mode installer. Bypass it
+# by regenerating $INITRAMFS via build-initramfs.sh when
+# REPRO_LIVE_INIT=1 (default 1 for multi-de variant builds).
+SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
+REPRO_LIVE_INIT="${REPRO_LIVE_INIT:-1}"
+if [ "$REPRO_LIVE_INIT" = "1" ]; then
+  LIVE_INIT_OUT="${REPRO_LIVE_INIT_OUT:-$(dirname "$INITRAMFS")/initrd.img-live}"
+  echo "[build-iso] regenerating live-init initramfs at $LIVE_INIT_OUT"
+  bash "$SCRIPT_DIR_SELF/build-initramfs.sh" "$LIVE_INIT_OUT"
+  INITRAMFS="$LIVE_INIT_OUT"
+fi
+
 for f in "$KERNEL" "$INITRAMFS"; do
   if [ ! -f "$f" ]; then
     echo "input missing: $f" >&2
@@ -74,6 +90,15 @@ trap 'rm -rf "$WORK"' EXIT
 # pinning a documented constant is what matters for the recipe.
 # 0xb007ed02 == "boot ed02" mnemonic; just an opaque 32-bit FAT vol id.
 REPRO_FAT_SERIAL='0xb007ed02'
+# Locate the real mformat dynamically so the shim works on Nix-based
+# hosts (eli-wsl: /nix/store/.../mtools-*/bin/mformat) as well as
+# Debian (/usr/bin/mformat). Resolve via PATH but EXCLUDE any directory
+# we control - the shim must not be self-referential.
+REAL_MFORMAT="$(command -v mformat || true)"
+if [ -z "$REAL_MFORMAT" ]; then
+  echo "build-iso.sh: mformat not in PATH" >&2
+  exit 66
+fi
 SHIM_DIR="$WORK/_mformat_shim"
 mkdir -p "$SHIM_DIR"
 cat > "$SHIM_DIR/mformat" <<EOF
@@ -82,7 +107,7 @@ cat > "$SHIM_DIR/mformat" <<EOF
 # to work around mtools 4.0.32's time-of-day-seeded FAT volume serial.
 # The literal '-N <hex>' is prepended so grub-mkrescue's invocation
 # becomes deterministic across rebuilds.
-exec /usr/bin/mformat -N $REPRO_FAT_SERIAL "\$@"
+exec ${REAL_MFORMAT} -N $REPRO_FAT_SERIAL "\$@"
 EOF
 chmod +x "$SHIM_DIR/mformat"
 export PATH="$SHIM_DIR:$PATH"
