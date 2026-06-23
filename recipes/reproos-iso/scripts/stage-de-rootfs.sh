@@ -424,6 +424,45 @@ fi
 # planner dlopens at runtime. Debian doesn't package it (Potassco
 # upstream releases binary tarballs but no debian/control). Lift the
 # host's nix-shell libclingo into the staged tree at /usr/lib/.
+# M9.R.24.2 -- Qt6 9.x bundle from the nix-shell. The reproos-installer
+# is built against nix-shell Qt 6.9.x; Debian trixie ships Qt 6.8.x.
+# Without the bundle, the installer aborts at startup with:
+#   libQt6Core.so.6: version `Qt_6.9' not found
+# Mirror the nix-store Qt6 .so files into /usr/lib so the loader picks
+# them up via ld.so.cache. The bundled libs are SONAME-suffixed
+# (libQt6Core.so.6.9.x); we create the symlink chain that maps the
+# major-SONAME (libQt6Core.so.6) to the bundled file.
+qt6_core_src="$(find /nix/store -maxdepth 4 -path '*qtbase*/lib/libQt6Core.so.6.9*' \
+                -type f 2>/dev/null | head -1)"
+if [ -n "$qt6_core_src" ]; then
+  qt6_libdir="$(dirname "$qt6_core_src")"
+  echo "[stage-de-rootfs] bundling Qt6 9.x from $qt6_libdir"
+  for f in "$qt6_libdir"/libQt6*.so.6*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    cp "$f" "$STAGE_DIR/usr/lib/$base"
+    # Strip "6.9.3" tail to "6" for the major-SONAME symlink that
+    # the installer's binary actually NEEDED.
+    soname6="$(echo "$base" | sed -E 's/(libQt6[^.]+)\.so\.6\.[0-9]+\.[0-9]+/\1.so.6/')"
+    if [ "$soname6" != "$base" ]; then
+      ln -sf "$base" "$STAGE_DIR/usr/lib/$soname6"
+    fi
+  done
+  # Also bundle the Qt6 plugins dir (platforms/, etc) so the installer
+  # can find the offscreen QPA plugin.
+  qt6_pluginsdir="$qt6_libdir/qt-6/plugins"
+  if [ -d "$qt6_pluginsdir" ]; then
+    mkdir -p "$STAGE_DIR/usr/lib/qt6/plugins"
+    cp -rL "$qt6_pluginsdir/." "$STAGE_DIR/usr/lib/qt6/plugins/" 2>/dev/null || true
+  fi
+  # Same for Qt6 qml/
+  qt6_qmldir="$qt6_libdir/qt-6/qml"
+  if [ -d "$qt6_qmldir" ]; then
+    mkdir -p "$STAGE_DIR/usr/lib/qt6/qml"
+    cp -rL "$qt6_qmldir/." "$STAGE_DIR/usr/lib/qt6/qml/" 2>/dev/null || true
+  fi
+fi
+
 clingo_src="$(find /nix/store -maxdepth 3 -name 'libclingo.so.4*' \
               -type f 2>/dev/null | head -1)"
 if [ -n "$clingo_src" ]; then
