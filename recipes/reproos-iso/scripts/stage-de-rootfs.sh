@@ -419,6 +419,19 @@ if [ -n "$sqlite_so" ]; then
   echo "[stage-de-rootfs] symlinked libsqlite3.so -> $(basename "$sqlite_so")"
 fi
 
+# M9.R.24.1g.3 -- libclingo is the ASP solver Repro's engine action-cache
+# planner dlopens at runtime. Debian doesn't package it (Potassco
+# upstream releases binary tarballs but no debian/control). Lift the
+# host's nix-shell libclingo into the staged tree at /usr/lib/.
+clingo_src="$(find /nix/store -maxdepth 3 -name 'libclingo.so.4*' \
+              -type f 2>/dev/null | head -1)"
+if [ -n "$clingo_src" ]; then
+  cp "$clingo_src" "$STAGE_DIR/usr/lib/$(basename "$clingo_src")"
+  ln -sf "$(basename "$clingo_src")" "$STAGE_DIR/usr/lib/libclingo.so.4"
+  ln -sf "libclingo.so.4" "$STAGE_DIR/usr/lib/libclingo.so"
+  echo "[stage-de-rootfs] bundled $clingo_src + linker-name symlink"
+fi
+
 # Track which recipes contributed.
 contributed=()
 missing=()
