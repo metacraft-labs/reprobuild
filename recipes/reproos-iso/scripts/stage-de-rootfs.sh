@@ -502,9 +502,15 @@ else
   STAGE_LDLINUX=/lib64/ld-linux-x86-64.so.2
   interp_patched=0
   while IFS= read -r elf; do
-    # RPATH/RUNPATH cleanup -- as before.
+    # RPATH/RUNPATH cleanup -- strip any bake-time RUNPATH that points
+    # outside the live ISO's filesystem. The loader honours RUNPATH
+    # strictly: a single missing directory aborts the search (the
+    # dynamic linker checks each entry, and ENOENT on one terminates
+    # resolution). Targets BOTH /opt/repro/reprobuild/ (from-source
+    # recipes' install-mirror) and /nix/store/ (nix-shell glibc/gcc-
+    # lib RUNPATHs baked into libclingo and Qt6 libs).
     rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
-    if echo "$rp" | grep -q "/opt/repro/reprobuild/"; then
+    if echo "$rp" | grep -qE "/opt/repro/reprobuild/|/nix/store/"; then
       $patchelf_bin --remove-rpath "$elf" 2>/dev/null || true
       patched=$((patched + 1))
     fi
