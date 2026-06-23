@@ -122,6 +122,15 @@ package reproosIso:
         # squashfs payload contains /sbin/init + every shared lib
         # the from-source DE binaries dynamically link against.
         "scripts/build-base-rootfs.sh",
+        # M9.R.19.3 -- the ReproOS Installer wizard binary, built by
+        # the apps/reproos-installer/ recipe via the c_cpp_cmake
+        # convention. Declared here as a verbatim path-extraInput so
+        # the engine refingerprints the ISO build when the wizard
+        # binary changes. stage-de-rootfs.sh consumes it via a fixed
+        # repo-relative path (see the M9.R.19.3 block in that script);
+        # without this declaration the engine would not see binary
+        # updates as ISO-cache invalidations.
+        "../../apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer",
       ],
       extraOutputs = @[
         "build/reproos.iso",

@@ -171,16 +171,17 @@ ln -sf /usr/lib/systemd/system/graphical.target \
 # password cleared in build-base-rootfs.sh; autologin sidesteps the
 # prompt entirely.
 #
-# Per ReproOS-Installer-PRD.md §7.5 the live ISO should autologin to
-# the custom installer session (reproos-installer.desktop). Until the
-# installer binary ships in the live rootfs (M9.R.18.14), autologin
-# routes to plasma instead so the boot smoke can validate the
-# end-to-end chain (SDDM -> autologin -> DE session up).
+# Per ReproOS-Installer-PRD.md §7.5 the live ISO autologs into the
+# custom installer session (reproos-installer.desktop). M9.R.19.4
+# flipped this default now that the installer binary is mandatory in
+# the live ISO (M9.R.19.3 -- the engine-driven build artifact at
+# apps/reproos-installer/.repro/output/install/usr/bin is enforced
+# above; this script bails with exit 66 if it's missing).
 #
-# Session choice is env-gated:
-#   REPRO_AUTOLOGIN_SESSION=plasma           (default until M9.R.18.14)
-#   REPRO_AUTOLOGIN_SESSION=reproos-installer (post-M9.R.18.14)
-REPRO_AUTOLOGIN_SESSION="${REPRO_AUTOLOGIN_SESSION:-plasma}"
+# Session choice is env-gated for opt-out:
+#   REPRO_AUTOLOGIN_SESSION=reproos-installer (default, M9.R.19.4)
+#   REPRO_AUTOLOGIN_SESSION=plasma            (opt-out for DE smoke)
+REPRO_AUTOLOGIN_SESSION="${REPRO_AUTOLOGIN_SESSION:-reproos-installer}"
 mkdir -p "$STAGE_DIR/etc/sddm.conf.d"
 cat > "$STAGE_DIR/etc/sddm.conf.d/00-autologin.conf" <<EOF
 [Autologin]
@@ -193,28 +194,38 @@ HaltCommand=/usr/bin/systemctl poweroff
 RebootCommand=/usr/bin/systemctl reboot
 EOF
 
-# M9.R.18.14 -- ReproOS Installer binary integration. When
-# $REPROOS_INSTALLER_BIN points at a built apps/reproos-installer binary,
-# overlay it into the staged /usr/bin. The reproos-installer.desktop
-# session + reproos-installer-launcher shell wrapper are already
-# unconditionally staged above (M9.R.18.1); the binary copy below is
-# the only piece that depends on the build artifact.
+# M9.R.19.3 -- ReproOS Installer binary integration (engine-driven).
 #
-# Driver pattern: M9.R.19 wires this to the reprobuild engine's
-# action-cached output (apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer).
-# v0.1 supports a manual override via REPROOS_INSTALLER_BIN so the
-# boot smoke can ship a binary built standalone via cmake + nix-shell.
+# The reproos-installer recipe at apps/reproos-installer/ builds the
+# wizard binary via the c_cpp_cmake convention and stages it at
+#   apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer
+# The reproos-iso recipe lists reproos-installer as a buildDep so the
+# engine guarantees the binary exists before this script runs.
+#
+# The binary is MANDATORY in the live ISO: the SDDM autologin session
+# (M9.R.18.1) targets reproos-installer.desktop which execs the wizard
+# via reproos-installer-launcher. Without the binary, the launcher
+# falls through to startplasma-wayland but the autologin session
+# advertised at /usr/share/wayland-sessions/reproos-installer.desktop
+# would still be misleading. Fail hard if the binary is missing.
+#
+# A REPROOS_INSTALLER_BIN override is still honoured for ad-hoc smoke
+# runs (boot the ISO against a binary built standalone via the
+# apps/reproos-installer/CMakeLists.txt + nix-shell -p qt6.qtbase ...);
+# the override path takes precedence over the engine-built artifact.
 REPROOS_INSTALLER_BIN="${REPROOS_INSTALLER_BIN:-}"
-if [ -n "$REPROOS_INSTALLER_BIN" ]; then
-  if [ ! -x "$REPROOS_INSTALLER_BIN" ]; then
-    echo "[stage-de-rootfs] REPROOS_INSTALLER_BIN=$REPROOS_INSTALLER_BIN not executable; skipping installer overlay" >&2
-  else
-    mkdir -p "$STAGE_DIR/usr/bin"
-    cp "$REPROOS_INSTALLER_BIN" "$STAGE_DIR/usr/bin/reproos-installer"
-    chmod +x "$STAGE_DIR/usr/bin/reproos-installer"
-    echo "[stage-de-rootfs] overlayed reproos-installer binary (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/reproos-installer"))"
-  fi
+if [ -z "$REPROOS_INSTALLER_BIN" ]; then
+  REPROOS_INSTALLER_BIN="$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer"
 fi
+if [ ! -x "$REPROOS_INSTALLER_BIN" ]; then
+  echo "[stage-de-rootfs] reproos-installer binary missing or not executable at $REPROOS_INSTALLER_BIN" >&2
+  echo "[stage-de-rootfs] build the recipe first: \`repro build apps/reproos-installer --tool-provisioning=from-source\`" >&2
+  exit 66
+fi
+mkdir -p "$STAGE_DIR/usr/bin"
+cp "$REPROOS_INSTALLER_BIN" "$STAGE_DIR/usr/bin/reproos-installer"
+chmod +x "$STAGE_DIR/usr/bin/reproos-installer"
+echo "[stage-de-rootfs] overlayed reproos-installer binary (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/reproos-installer"))"
 
 # Track which recipes contributed.
 contributed=()

@@ -147,3 +147,43 @@ invocation builds the live-boot path; the reproducibility test
 (`tests/reproducibility/t_r2_iso_reproducibility.sh`) leaves
 REPRO_LIVE_INIT defaulted to 0 so the historical R2 reproducibility
 contract continues to be enforced against the vendored d-i path.
+
+### M9.R.19 ReproOS Installer wizard chain
+
+M9.R.19 closed the engine integration for the ReproOS Installer
+(see `apps/reproos-installer/`). The full boot chain the live ISO
+exercises:
+
+```
+GRUB (multi-de variant)
+  -> kernel (vendored vmlinuz-debian-netinst, until R8)
+  -> initrd (custom live-init initramfs, M9.R.17c.1)
+  -> live-init: probe block devices, mount /live/filesystem.squashfs,
+                overlay with tmpfs upper, switch_root to overlay
+  -> systemd (graphical.target via the staged default.target symlink)
+  -> sddm (display-manager.service, autologin per M9.R.18.1)
+  -> autologin Session=reproos-installer (default since M9.R.19.4)
+  -> /usr/bin/reproos-installer-launcher (kiosk wrapper)
+  -> sway -c $SWAY_CFG (minimal compositor in kiosk mode)
+  -> /usr/bin/reproos-installer (Qt6/QML wizard, 9 screens)
+```
+
+The installer binary is **mandatory** in the ISO since M9.R.19.3 —
+`stage-de-rootfs.sh` enforces it via exit code 66 if the engine-built
+artifact at `apps/reproos-installer/.repro/output/install/usr/bin/
+reproos-installer` is missing. The reproos-iso recipe's `extraInputs`
+declares the binary path so the engine refingerprints the ISO build
+when the wizard changes.
+
+Build the wizard recipe before the ISO:
+
+```bash
+repro build apps/reproos-installer --tool-provisioning=from-source
+repro build recipes/reproos-iso     --tool-provisioning=from-source
+```
+
+The qt6-quickcontrols2 dep on the wizard is satisfied by
+`recipes/packages/source/qt6-quickcontrols2/` (M9.R.19.1), which
+shares the qtdeclarative tarball with the sibling qt6-declarative
+recipe — QtQuickControls2 was merged into qtdeclarative upstream at
+Qt 6.2 so no separate qtquickcontrols2-everywhere-src tarball exists.
