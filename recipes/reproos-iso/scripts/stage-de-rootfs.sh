@@ -113,10 +113,17 @@ Exec=/usr/bin/reproos-installer-launcher
 DesktopNames=reproos-installer
 EOF
 
-# Companion launcher script -- starts sway in kiosk mode and execs the
-# installer binary. If the binary is missing (pre-M9.R.18.14 ISO), the
-# script falls through to a plain plasma session so the boot smoke still
-# reaches a desktop.
+# Companion launcher script -- starts a Wayland compositor in kiosk
+# mode and execs the installer binary full-screen. If the binary is
+# missing (pre-M9.R.18.14 ISO), the script falls through to a plain
+# plasma session so the boot smoke still reaches a desktop.
+#
+# M9.R.24.1c -- the launcher previously embedded the env-var prefix
+# inside sway's `exec` command which sway forks via /bin/sh -c; the
+# inner quote made sway treat the whole `FOO=bar cmd; swaymsg exit`
+# as a single argv[0], producing a NULL fn-pointer crash at IP=0x91
+# under SDDM autologin. Move every env var into the launcher itself
+# and use a dedicated init script for sway's `exec` directive.
 mkdir -p "$STAGE_DIR/usr/bin"
 cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher" <<'EOF'
 #!/bin/sh
@@ -126,20 +133,45 @@ cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher" <<'EOF'
 # compositor (sway in kiosk mode) and execs the wizard full-screen.
 # Closing the wizard logs the session out and returns to sddm.
 
+set -eu
+
 INSTALLER_BIN=/usr/bin/reproos-installer
 if [ ! -x "$INSTALLER_BIN" ]; then
   exec /usr/bin/startplasma-wayland
 fi
 
+# Env vars travel via the parent shell so sway's exec hook gets a
+# clean command. The QT vars apply to the wizard fork sway spawns.
+export QT_QPA_PLATFORM=wayland
+export QT_QUICK_CONTROLS_STYLE=Material
+# XDG_RUNTIME_DIR is needed by libwayland-client; sddm-helper sets
+# this normally but kiosk wrappers run before the user session is
+# fully initialised on some Debian builds. Synthesise if absent.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+  XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export XDG_RUNTIME_DIR
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+fi
+
+# Install-once init script that sway's `exec` runs as a child shell.
+SWAY_INIT=$(mktemp -t reproos-installer-sway-init-XXXXXX.sh)
+cat > "$SWAY_INIT" <<'INIT'
+#!/bin/sh
+# Sway exec hook -- runs the installer, then asks sway to exit when
+# the installer process closes (either by user click or by --automated
+# finish).
+/usr/bin/reproos-installer "$@"
+/usr/bin/swaymsg exit
+INIT
+chmod +x "$SWAY_INIT"
+
 # Drop a minimal sway config that launches the installer full-screen
-# without a status bar or output decorations. Forces QT_QPA_PLATFORM
-# to wayland so the wizard binds to sway's compositor directly; sets
-# QT_QUICK_CONTROLS_STYLE to Material so the QML uses the dark token
-# theme even when the system style file is absent.
+# without a status bar or output decorations.
 SWAY_CFG=$(mktemp -t reproos-installer-sway-XXXXXX.cfg)
 cat > "$SWAY_CFG" <<SWAY
 output * background #0a0a0a solid_color
-exec "QT_QPA_PLATFORM=wayland QT_QUICK_CONTROLS_STYLE=Material $INSTALLER_BIN; swaymsg exit"
+exec $SWAY_INIT
 default_border none
 font pango:Sans 11
 SWAY
@@ -148,21 +180,109 @@ exec /usr/bin/sway -c "$SWAY_CFG"
 EOF
 chmod +x "$STAGE_DIR/usr/bin/reproos-installer-launcher"
 
-# M9.R.17c.4 -- enable sddm as display-manager.service. systemd starts
-# the unit symlinked at /etc/systemd/system/display-manager.service on
-# graphical.target. Without this symlink the booted system reaches
-# multi-user.target but never spawns the login screen.
+# M9.R.17c.4 + M9.R.24.1c -- target selection.
+#
+# Pre-M9.R.24, the default boot target was `graphical.target` with
+# SDDM as the display manager and a kiosk Wayland session running the
+# reproos-installer. M9.R.24 diagnosed two cascading bugs:
+#   1. SDDM execs sway via `exec /usr/bin/sway` but our from-source
+#      sway recipe was missing dynamic-linker deps -> exit 127.
+#   2. Even with Debian's sway in place, sway crashes at IP=0x91 in
+#      the qemu virtio-gpu / SDDM-VT-handoff environment.
+#
+# REPRO_LIVE_TARGET selects which surface the autologin lands on:
+#   - "console" (M9.R.24 default): `multi-user.target` + a getty
+#       autologin that runs the installer in --automated mode if a
+#       config TOML is present, else drops to an interactive shell.
+#       No compositor needed; works against any vgafb-capable QEMU.
+#   - "graphical": the legacy SDDM + Wayland-kiosk session
+#       (M9.R.18.14). Reserved for future once the wlroots/virtio_gpu
+#       trip lands; pre-M9.R.24 path retained behind the gate.
 mkdir -p "$STAGE_DIR/etc/systemd/system"
-# Use a path inside the staged /usr because the squashfs's /usr/lib
-# becomes /usr/lib at runtime; the symlink target must be absolute and
-# rooted at the live ISO's filesystem layout.
-ln -sf /usr/lib/systemd/system/sddm.service \
-  "$STAGE_DIR/etc/systemd/system/display-manager.service"
+REPRO_LIVE_TARGET="${REPRO_LIVE_TARGET:-console}"
+case "$REPRO_LIVE_TARGET" in
+  graphical)
+    ln -sf /usr/lib/systemd/system/sddm.service \
+      "$STAGE_DIR/etc/systemd/system/display-manager.service"
+    ln -sf /usr/lib/systemd/system/graphical.target \
+      "$STAGE_DIR/etc/systemd/system/default.target"
+    ;;
+  console)
+    ln -sf /usr/lib/systemd/system/multi-user.target \
+      "$STAGE_DIR/etc/systemd/system/default.target"
+    ;;
+  *)
+    echo "[stage-de-rootfs] unknown REPRO_LIVE_TARGET=$REPRO_LIVE_TARGET" >&2
+    exit 64
+    ;;
+esac
 
-# Wire graphical.target as the default - the rootfs we stage has no
-# init/default policy of its own.
-ln -sf /usr/lib/systemd/system/graphical.target \
-  "$STAGE_DIR/etc/systemd/system/default.target"
+# Console-mode autologin override -- replaces base-rootfs's
+# `agetty --autologin live tty1`. We want root (full install perms)
+# autologging in and the launcher script auto-running.
+mkdir -p "$STAGE_DIR/etc/systemd/system/getty@tty1.service.d"
+cat > "$STAGE_DIR/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
+EOF
+
+# Profile hook to auto-launch the installer on root login (tty1 only).
+# Falls through to a normal shell if the installer is missing or the
+# user types Ctrl+C during the 3-second grace period.
+mkdir -p "$STAGE_DIR/etc/profile.d"
+cat > "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh" <<'EOF'
+# ReproOS live-ISO console-mode installer autostart.
+# Triggers on tty1 only (avoids reentry when the install runs `bash`).
+if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
+  export REPRO_INSTALLER_RAN=1
+  AUTO_CFG=""
+  for cand in /etc/reproos/auto-config.toml /run/reproos/auto-config.toml; do
+    if [ -f "$cand" ]; then
+      AUTO_CFG="$cand"
+      break
+    fi
+  done
+  if [ -x /usr/bin/reproos-installer ] && [ -n "$AUTO_CFG" ]; then
+    echo ""
+    echo "=== ReproOS Installer (automated) starting in 3 seconds; Ctrl+C aborts. ==="
+    echo "Config: $AUTO_CFG"
+    echo ""
+    sleep 3
+    /usr/bin/reproos-installer --automated "$AUTO_CFG"
+    rc=$?
+    echo ""
+    echo "=== Installer exited with rc=$rc ==="
+    echo "Type \`poweroff\` to shut down or \`reboot\` to boot into the installed system."
+    echo ""
+  elif [ -x /usr/bin/reproos-installer ]; then
+    echo ""
+    echo "=== ReproOS Installer console ==="
+    echo "No automated config found at /etc/reproos/auto-config.toml."
+    echo "Run \`reproos-installer --help\` to see options, or drop a config"
+    echo "TOML at /etc/reproos/auto-config.toml and re-login to run the"
+    echo "automated path."
+    echo ""
+  fi
+fi
+EOF
+chmod 0644 "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh"
+
+# Bake a default automated config for the demo run. Honours the M9.R.23
+# --automated TOML shape (smoke-test-config.toml format).
+mkdir -p "$STAGE_DIR/etc/reproos"
+cat > "$STAGE_DIR/etc/reproos/auto-config.toml" <<'EOF'
+# M9.R.24 demo -- automated ReproOS install against the QEMU
+# /dev/vda virtio-blk disk. Targets the simplest disko preset so the
+# end-to-end demo runs in under a minute.
+hostname = "reproos-vm"
+defaultUser = "alice"
+password = "reproos"
+diskoPreset = "simple"
+targetDevice = "/dev/vda"
+preferredDE = "plasma"
+activities = ["daily-computing", "system-tools"]
+EOF
 
 # M9.R.18.1 -- SDDM autologin config for the live ISO. Closes the
 # boot-to-desktop round-trip: SDDM appears (proved by M9.R.17c.6) but
