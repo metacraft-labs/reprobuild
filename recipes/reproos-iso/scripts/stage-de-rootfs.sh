@@ -533,7 +533,7 @@ if [ -n "$ldconfig_bin" ]; then
   # paths are interpreted relative to it. Quiet mode -- warnings about
   # non-symlinked libs are noise (from-source libs land as plain
   # files, not SONAME-symlink chains).
-  "$ldconfig_bin" -r "$STAGE_DIR" -q 2>&1 | \
+  "$ldconfig_bin" -r "$STAGE_DIR" 2>&1 | \
     grep -vE 'is not a symbolic link|file format not recognized' || true
   echo "[stage-de-rootfs] rebuilt ld.so.cache in stage"
 fi
