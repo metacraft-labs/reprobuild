@@ -13814,9 +13814,15 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
-  if not shouldEnterBuildPipeline(mode):
-    raise newException(ValueError,
-      "repro watch requires --tool-provisioning=path|nix|tarball|scoop|from-source")
+  # Tool-provisioning resolution mirrors ``repro build`` (CLI/watch.md): an
+  # explicit ``--tool-provisioning`` flag wins, else the
+  # ``REPRO_TOOL_PROVISIONING`` env var, else the project's
+  # ``defaultToolProvisioning`` — the last tier resolved per build cycle inside
+  # ``executeBuildTarget``. ``repro watch`` and ``repro watch <target>`` must
+  # therefore work WITHOUT a mandatory CLI flag, just like a one-shot build;
+  # only the env tier can be applied here (the interface is loaded per cycle),
+  # so apply it and let ``executeBuildTarget`` resolve the project default.
+  mode = resolveToolProvisioningWithEnv(mode)
   # Windows: kqueue gate dropped — Windows now reaches the live watch loop
   # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
   # surfaces the deferred-backend OSError from openFilesystemWatcher.
