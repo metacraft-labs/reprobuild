@@ -54,13 +54,15 @@
 ## round-trips through JSON, so the installer can write a ``system.nim``
 ## that the macro parses back into the same SystemIntent.
 
-import std/[macros, options, strutils]
+import std/[macros, options, strutils, tables]
 
 import ./types
 import ./emit
 
-export options  # users of `hardware`/`buildHardwareSpec` need `some`/`none`
-                # in scope to author `disko:` body expressions.
+export options, tables  # users of `hardware`/`buildHardwareSpec` need
+                        # `some`/`none` in scope to author `disko:` body
+                        # expressions, and the macro emits code that
+                        # exercises `OrderedTable.[]=` for partitions.
 
 const SystemIntentVar* = "systemIntentBuilder"
 const HardwareIntentVar* = "hardwareIntentBuilder"

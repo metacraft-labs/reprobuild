@@ -50,6 +50,7 @@ import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/infra
 import repro_cli_support/hardware as cli_hardware
+import repro_cli_support/disk as cli_disk
 import repro_cli_support/mode1_loader
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
@@ -87,6 +88,10 @@ export home.runHomeCommand, home.setPackageCatalogLookup,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
 export cli_hardware.runHardwareCommand
+export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
+       cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
+       cli_disk.DiskCliOptions, cli_disk.DiskSubcommand,
+       cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
 
 # ---------------------------------------------------------------------------
 # Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
@@ -23736,5 +23741,15 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runHardwareCommand(hardwareArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "disk":
+    # M9.R.22.4: `repro disk` subcommand surface (plan/apply/mount/...)
+    # per `reprobuild-specs/ReproOS-Disko-Port.md` §4. The dispatcher
+    # lives in `repro_cli_support/disk.nim`.
+    let diskArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runDiskCommand(diskArgs)
   stderr.writeLine(renderUsage(programName))
   2
