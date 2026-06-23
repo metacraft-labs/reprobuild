@@ -1,0 +1,91 @@
+# M9.R.18.13 -- Activity catalog seed. Per ReproOS-Installer-PRD.md
+# Sec 4.2 + Sec 7.4 the wizard reads this file from
+# /usr/share/reproos-installer/activities.toml at startup. v0.1 ships
+# the catalog inline in qml/screens/Activities.qml; this file is a
+# placeholder for M9.R.19 which will switch the QML loader to read
+# from disk.
+
+[[activity]]
+name = "daily-computing"
+displayName = "Daily Computing"
+shortDescription = "Browser, file manager, email, document viewer."
+icon = "applications-internet"
+defaultEnabled = true
+
+[[activity]]
+name = "system-tools"
+displayName = "System Tools"
+shortDescription = "Terminal, basic CLI utilities, text editor, system monitor."
+icon = "utilities-terminal"
+defaultEnabled = true
+
+[[activity]]
+name = "development"
+displayName = "Development"
+shortDescription = "Programming languages, dev tools, container engine."
+icon = "applications-development"
+defaultEnabled = false
+suggestedWith = ["system-tools"]
+
+[[activity]]
+name = "creative"
+displayName = "Creative"
+shortDescription = "Graphics, image editing, vector tools, audio/video production."
+icon = "applications-graphics"
+defaultEnabled = false
+
+[[activity]]
+name = "gaming"
+displayName = "Gaming"
+shortDescription = "Game launchers, controllers, performance tooling."
+icon = "applications-games"
+defaultEnabled = false
+
+[[activity]]
+name = "office"
+displayName = "Office"
+shortDescription = "Office suite, PIM, project management."
+icon = "applications-office"
+defaultEnabled = false
+
+[[activity]]
+name = "media-consumption"
+displayName = "Media Consumption"
+shortDescription = "Video player, music player, podcast client."
+icon = "applications-multimedia"
+defaultEnabled = false
+
+[[activity]]
+name = "system-administration"
+displayName = "System Administration"
+shortDescription = "Sysadmin tooling, monitoring, networking, containers, dev VMs."
+icon = "applications-system"
+defaultEnabled = false
+
+[[activity]]
+name = "privacy-security"
+displayName = "Privacy and Security"
+shortDescription = "Tor, VPN clients, password managers, secrets tooling."
+icon = "security-high"
+defaultEnabled = false
+
+[[activity]]
+name = "communication"
+displayName = "Communication"
+shortDescription = "Chat, video call, social."
+icon = "internet-mail"
+defaultEnabled = false
+
+[[activity]]
+name = "photography"
+displayName = "Photography"
+shortDescription = "RAW processing, library management, tethering."
+icon = "applications-graphics"
+defaultEnabled = false
+
+[[activity]]
+name = "home-server"
+displayName = "Home Server"
+shortDescription = "Selfhost basics, container engine, reverse proxy, file sharing."
+icon = "applications-internet"
+defaultEnabled = false
