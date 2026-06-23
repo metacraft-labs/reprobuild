@@ -12,7 +12,7 @@
 ## `ProfileIntent` through JSON without depending on std/json's object-
 ## variant gymnastics.
 
-import std/[algorithm, json, strutils, tables]
+import std/[algorithm, json, options, strutils, tables]
 
 import ./types
 
@@ -363,6 +363,131 @@ proc emitSystemIntentJson*(p: SystemIntent): string =
   result.add ",\"validateExprs\":" & encodeStrList(p.validateExprs)
   result.add "}"
 
+# ---------------------------------------------------------------------
+# M9.R.22: disko DiskLayout encode/decode.
+# ---------------------------------------------------------------------
+#
+# The recursive ``ContentSpec`` case-object is encoded with an explicit
+# ``"kind":`` tag + the union of all-arm fields under their per-arm
+# names. This mirrors how `ActivityElement` is encoded above.
+
+proc encodeContentSpec(c: ContentSpec): string
+
+proc encodeContentRef(c: ref ContentSpec): string =
+  if c.isNil:
+    result = "null"
+  else:
+    result = encodeContentSpec(c[])
+
+proc encodeEncryption(e: EncryptionSpec): string =
+  result = "{\"type\":" & encodeStr(e.`type`) &
+    ",\"keyFile\":" & encodeStr(e.keyFile) &
+    ",\"cipher\":" & encodeStr(e.cipher) &
+    ",\"allowDiscards\":" & (if e.allowDiscards: "true" else: "false") & "}"
+
+proc encodeBtrfsSubvol(s: BtrfsSubvolSpec): string =
+  result = "{\"path\":" & encodeStr(s.path) &
+    ",\"options\":" & encodeStrList(s.options) & "}"
+
+proc encodeBtrfsSubvolSeq(items: seq[BtrfsSubvolSpec]): string =
+  result = "["
+  for i, it in items:
+    if i > 0: result.add ","
+    result.add encodeBtrfsSubvol(it)
+  result.add "]"
+
+proc encodeZfsPool(p: ZfsPoolSpec): string =
+  result = "{\"name\":" & encodeStr(p.name) &
+    ",\"devices\":" & encodeStrList(p.devices) &
+    ",\"layout\":" & encodeStr(p.layout) &
+    ",\"options\":" & encodeStrList(p.options) & "}"
+
+proc encodeStrStrTable(t: OrderedTable[string, string]): string =
+  var keys: seq[string] = @[]
+  for k in t.keys: keys.add k
+  keys.sort(cmp[string])
+  result = "{"
+  for i, k in keys:
+    if i > 0: result.add ","
+    result.add encodeStr(k)
+    result.add ":"
+    result.add encodeStr(t[k])
+  result.add "}"
+
+proc encodeLvmVolume(v: LvmVolumeSpec): string =
+  result = "{\"name\":" & encodeStr(v.name) &
+    ",\"size\":" & encodeStr(v.size) &
+    ",\"content\":" & encodeContentRef(v.content) & "}"
+
+proc encodeLvmVolumeSeq(items: seq[LvmVolumeSpec]): string =
+  result = "["
+  for i, it in items:
+    if i > 0: result.add ","
+    result.add encodeLvmVolume(it)
+  result.add "]"
+
+proc encodeContentSpec(c: ContentSpec): string =
+  case c.kind
+  of cfsNone:
+    result = "{\"kind\":\"none\"}"
+  of cfsFilesystem:
+    result = "{\"kind\":\"filesystem\",\"format\":" & encodeStr(c.format) &
+      ",\"mountpoint\":" & encodeStr(c.mountpoint) &
+      ",\"mountOptions\":" & encodeStrList(c.mountOptions) &
+      ",\"label\":" & encodeStr(c.label) &
+      ",\"subvols\":" & encodeBtrfsSubvolSeq(c.subvols) & "}"
+  of cfsEncrypted:
+    result = "{\"kind\":\"encrypted\",\"encryption\":" &
+      encodeEncryption(c.encryption) &
+      ",\"inner\":" & encodeContentRef(c.inner) & "}"
+  of cfsLvm:
+    result = "{\"kind\":\"lvm\",\"vg\":" & encodeStr(c.vg) &
+      ",\"volumes\":" & encodeLvmVolumeSeq(c.volumes) & "}"
+  of cfsZfs:
+    result = "{\"kind\":\"zfs\",\"pool\":" & encodeStr(c.pool) &
+      ",\"dataset\":" & encodeStr(c.dataset) &
+      ",\"mountpoint\":" & encodeStr(c.zfsMountpoint) &
+      ",\"properties\":" & encodeStrStrTable(c.zfsProperties) & "}"
+  of cfsSwap:
+    result = "{\"kind\":\"swap\",\"priority\":" & $c.swapPriority &
+      ",\"discardPolicy\":" & encodeStr(c.swapDiscardPolicy) & "}"
+
+proc encodePartitionSpec(p: PartitionSpec): string =
+  result = "{\"type\":" & encodeStr(p.`type`) &
+    ",\"size\":" & encodeStr(p.size) &
+    ",\"content\":" & encodeContentSpec(p.content) &
+    ",\"bootable\":" & (if p.bootable: "true" else: "false") & "}"
+
+proc encodeDiskSpec(d: DiskSpec): string =
+  result = "{\"device\":" & encodeStr(d.device) &
+    ",\"type\":" & encodeStr(d.`type`) &
+    ",\"partitions\":{"
+  # OrderedTable iteration preserves insertion order; emit in that
+  # order so canonical-emit round-trips the user-provided ordering.
+  var firstPart = true
+  for k, v in d.partitions:
+    if not firstPart: result.add ","
+    firstPart = false
+    result.add encodeStr(k)
+    result.add ":"
+    result.add encodePartitionSpec(v)
+  result.add "}}"
+
+proc encodeDiskLayout(l: DiskLayout): string =
+  result = "{\"disks\":{"
+  var firstDisk = true
+  for k, v in l.disks:
+    if not firstDisk: result.add ","
+    firstDisk = false
+    result.add encodeStr(k)
+    result.add ":"
+    result.add encodeDiskSpec(v)
+  result.add "},\"pools\":["
+  for i, p in l.pools:
+    if i > 0: result.add ","
+    result.add encodeZfsPool(p)
+  result.add "]}"
+
 proc emitSystemHardwareJson*(h: SystemHardwareSpec): string =
   result = "{"
   result.add "\"id\":" & encodeStr(h.id)
@@ -377,6 +502,8 @@ proc emitSystemHardwareJson*(h: SystemHardwareSpec): string =
   result.add "]"
   result.add ",\"graphicsDrivers\":" & encodeStrList(h.graphicsDrivers)
   result.add ",\"audioCards\":" & encodeStrList(h.audioCards)
+  if h.disko.isSome:
+    result.add ",\"disko\":" & encodeDiskLayout(h.disko.get())
   result.add "}"
 
 proc emitSystemActivityJson*(a: SystemActivitySpec): string =
@@ -426,6 +553,106 @@ proc parseSystemIntentJson*(s: string): SystemIntent =
     device: bNode["device"].getStr())
   result.validateExprs = parseStrList(root["validateExprs"])
 
+proc parseContentSpec(n: JsonNode): ContentSpec
+
+proc parseContentRef(n: JsonNode): ref ContentSpec =
+  if n.isNil or n.kind == JNull:
+    return nil
+  result = new(ContentSpec)
+  result[] = parseContentSpec(n)
+
+proc parseEncryption(n: JsonNode): EncryptionSpec =
+  result.`type` = n["type"].getStr()
+  result.keyFile = n["keyFile"].getStr()
+  result.cipher = n["cipher"].getStr()
+  result.allowDiscards = n["allowDiscards"].getBool()
+
+proc parseBtrfsSubvol(n: JsonNode): BtrfsSubvolSpec =
+  result.path = n["path"].getStr()
+  result.options = parseStrList(n["options"])
+
+proc parseLvmVolume(n: JsonNode): LvmVolumeSpec =
+  result.name = n["name"].getStr()
+  result.size = n["size"].getStr()
+  if n.hasKey("content"):
+    result.content = parseContentRef(n["content"])
+
+proc parseZfsPool(n: JsonNode): ZfsPoolSpec =
+  result.name = n["name"].getStr()
+  result.devices = parseStrList(n["devices"])
+  result.layout = n["layout"].getStr()
+  result.options = parseStrList(n["options"])
+
+proc parseContentSpec(n: JsonNode): ContentSpec =
+  let kind = n["kind"].getStr()
+  case kind
+  of "none":
+    result = ContentSpec(kind: cfsNone)
+  of "filesystem":
+    var subs: seq[BtrfsSubvolSpec] = @[]
+    if n.hasKey("subvols"):
+      for s in n["subvols"]: subs.add parseBtrfsSubvol(s)
+    result = ContentSpec(
+      kind: cfsFilesystem,
+      format: n["format"].getStr(),
+      mountpoint: n["mountpoint"].getStr(),
+      mountOptions: parseStrList(n["mountOptions"]),
+      label: n["label"].getStr(),
+      subvols: subs)
+  of "encrypted":
+    result = ContentSpec(
+      kind: cfsEncrypted,
+      encryption: parseEncryption(n["encryption"]),
+      inner: parseContentRef(n["inner"]))
+  of "lvm":
+    var vols: seq[LvmVolumeSpec] = @[]
+    for v in n["volumes"]: vols.add parseLvmVolume(v)
+    result = ContentSpec(
+      kind: cfsLvm,
+      vg: n["vg"].getStr(),
+      volumes: vols)
+  of "zfs":
+    var props: OrderedTable[string, string]
+    if n.hasKey("properties"):
+      for pk, pv in n["properties"]:
+        props[pk] = pv.getStr()
+    result = ContentSpec(
+      kind: cfsZfs,
+      pool: n["pool"].getStr(),
+      dataset: n["dataset"].getStr(),
+      zfsMountpoint: n["mountpoint"].getStr(),
+      zfsProperties: props)
+  of "swap":
+    result = ContentSpec(
+      kind: cfsSwap,
+      swapPriority: n["priority"].getInt(),
+      swapDiscardPolicy: n["discardPolicy"].getStr())
+  else:
+    raise newException(ValueError,
+      "unknown ContentSpec kind: '" & kind & "'")
+
+proc parsePartitionSpec(n: JsonNode): PartitionSpec =
+  result.`type` = n["type"].getStr()
+  result.size = n["size"].getStr()
+  result.content = parseContentSpec(n["content"])
+  result.bootable = n["bootable"].getBool()
+
+proc parseDiskSpec(n: JsonNode): DiskSpec =
+  result.device = n["device"].getStr()
+  result.`type` = n["type"].getStr()
+  # JsonNode for objects is order-preserving when constructed via the
+  # parser (uses an OrderedTable underneath); iterate in source order
+  # so the OrderedTable round-trips byte-identical.
+  for pk, pv in n["partitions"]:
+    result.partitions[pk] = parsePartitionSpec(pv)
+
+proc parseDiskLayout(n: JsonNode): DiskLayout =
+  for dk, dv in n["disks"]:
+    result.disks[dk] = parseDiskSpec(dv)
+  if n.hasKey("pools"):
+    for p in n["pools"]:
+      result.pools.add parseZfsPool(p)
+
 proc parseSystemHardwareJson*(s: string): SystemHardwareSpec =
   let root = parseJson(s)
   result.id = root["id"].getStr()
@@ -441,6 +668,8 @@ proc parseSystemHardwareJson*(s: string): SystemHardwareSpec =
       options: parseStrList(f["options"]))
   result.graphicsDrivers = parseStrList(root["graphicsDrivers"])
   result.audioCards = parseStrList(root["audioCards"])
+  if root.hasKey("disko"):
+    result.disko = some(parseDiskLayout(root["disko"]))
 
 proc parseSystemActivityJson*(s: string): SystemActivitySpec =
   let root = parseJson(s)

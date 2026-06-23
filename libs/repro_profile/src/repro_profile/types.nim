@@ -8,7 +8,7 @@
 ## with the RBPI binary envelope while keeping the same Nim-side
 ## record types.
 
-import std/tables
+import std/[options, tables]
 
 type
   ProfileIntent* = object
@@ -160,6 +160,115 @@ type
     fsType*: string
     options*: seq[string]
 
+  # -------------------------------------------------------------------
+  # M9.R.22: declarative disk-layout DSL — port of nix-community/disko.
+  # -------------------------------------------------------------------
+  #
+  # Spec: ``reprobuild-specs/ReproOS-Disko-Port.md``.
+  #
+  # The ``disko:`` block inside ``hardware "<id>":`` captures the
+  # CREATE-FROM-SCRATCH partition intent that the installer needs to
+  # rebuild the system on bare metal. The ``filesystems:`` block (above)
+  # captures RUNTIME state of an already-installed system; the two are
+  # complementary, and the round-trip property is:
+  #
+  #   probe(installed system) → SystemHardwareSpec.filesystems
+  #   disko(probe live system) → SystemHardwareSpec.disko
+  #   apply(SystemHardwareSpec.disko) → recreates filesystems[]
+  #
+  # The shape mirrors disko's recursive Nix expression (every node has a
+  # ``kind`` + a ``content:`` child that is itself recursive). The
+  # type-bag below is the Nim transliteration the spec §2.3 fixes.
+
+  ContentKind* = enum
+    cfsNone           ## absent / unset (the default zero value)
+    cfsFilesystem     ## final filesystem layer (ext4/btrfs/vfat/...)
+    cfsEncrypted      ## LUKS-style encryption wrapping an inner content
+    cfsLvm            ## LVM volume-group + per-LV breakdown
+    cfsZfs            ## ZFS pool + dataset reference
+    cfsSwap           ## swap partition
+
+  EncryptionSpec* = object
+    ## LUKS/dm-crypt parameters that wrap an inner ContentSpec.
+    `type`*: string            ## "luks1" / "luks2" (default "luks2")
+    keyFile*: string           ## file path or the literal "interactive"
+    cipher*: string            ## "aes-xts-plain64" (default if empty)
+    allowDiscards*: bool       ## ``settings.allowDiscards = true``
+
+  BtrfsSubvolSpec* = object
+    ## ``btrfs subvolume create`` declaration; ``options:`` flow through
+    ## as the mount-time flags for the subvolume's bind-mount.
+    path*: string              ## "/home", "/nix", "/var/log"
+    options*: seq[string]      ## ["compress=zstd", "noatime"]
+
+  ZfsPoolSpec* = object
+    ## Top-level ZFS pool (e.g. ``rpool``, ``userdata``) — mirrors
+    ## disko's ``disko.devices.zpool.<name>`` namespace. Datasets are
+    ## referenced from a partition's ContentSpec via ``kind=cfsZfs``.
+    name*: string              ## "rpool", "userdata"
+    devices*: seq[string]      ## by-id forms (preferred for stability)
+    layout*: string            ## "stripe" / "mirror" / "raidz" / "raidz2"
+    options*: seq[string]      ## passed verbatim to ``zpool create -o ...``
+
+  LvmVolumeSpec* = object
+    ## Logical-volume declaration inside an LVM volume group.
+    name*: string              ## "root", "swap", "home"
+    size*: string              ## "20G" / "100%FREE"
+    content*: ref ContentSpec  ## what lives inside the LV (ext4, ...)
+
+  ContentSpec* = object
+    ## Recursive disko content node. The default-constructed value has
+    ## ``kind == cfsNone`` so ``Option[ContentSpec]`` is not needed —
+    ## absence is the zero value.
+    case kind*: ContentKind
+    of cfsFilesystem:
+      format*: string             ## "ext4" / "btrfs" / "vfat" / "xfs"
+      mountpoint*: string         ## "/", "/boot", "/home" ...
+      mountOptions*: seq[string]
+      label*: string
+      subvols*: seq[BtrfsSubvolSpec]  ## populated when format=="btrfs"
+    of cfsEncrypted:
+      encryption*: EncryptionSpec
+      inner*: ref ContentSpec     ## recursive: what's inside the LUKS
+    of cfsLvm:
+      vg*: string                 ## volume-group name
+      volumes*: seq[LvmVolumeSpec]
+    of cfsZfs:
+      pool*: string               ## ZFS pool name (must match a
+                                  ## ``DiskLayout.pools`` entry)
+      dataset*: string            ## e.g. "rpool/nixos/root"
+      zfsMountpoint*: string
+      zfsProperties*: OrderedTable[string, string]
+    of cfsSwap:
+      swapPriority*: int
+      swapDiscardPolicy*: string  ## "" / "once" / "pages" / "both"
+    of cfsNone:
+      discard
+
+  PartitionSpec* = object
+    ## A single GPT/MBR partition declaration.
+    `type`*: string             ## "esp" / "linux" / "swap" / "lvm" /
+                                ## "luks" / "raid" / "" (unset)
+    size*: string               ## "512M" / "100%" / "remaining"
+    content*: ContentSpec       ## recursive content (filesystem,
+                                ## encrypted, lvm, zfs, ...)
+    bootable*: bool
+
+  DiskSpec* = object
+    ## Top-level disk-device declaration; one per physical / virtual
+    ## block device the installer is asked to wipe + repartition.
+    device*: string             ## "/dev/disk/by-id/ata-Samsung_SSD_..."
+    `type`*: string             ## "gpt" (default) or "mbr"
+    partitions*: OrderedTable[string, PartitionSpec]
+
+  DiskLayout* = object
+    ## The full disko intent: zero or more disks + zero or more ZFS
+    ## pools. ``disks`` is an OrderedTable so canonical-emit preserves
+    ## the user-provided ordering; ``pools`` is a seq because pool
+    ## ordering is positional (the first listed pool is the rpool).
+    disks*: OrderedTable[string, DiskSpec]
+    pools*: seq[ZfsPoolSpec]
+
   SystemHardwareSpec* = object
     ## ``hardware "<id>":`` macro form. Captures the per-host probe
     ## output verbatim so v0.1 of the macro round-trips through JSON.
@@ -171,6 +280,9 @@ type
     filesystems*: seq[SystemHardwareFs]
     graphicsDrivers*: seq[string]
     audioCards*: seq[string]
+    disko*: Option[DiskLayout]
+      ## M9.R.22: declarative create-from-scratch partition intent.
+      ## ``none`` when the user did not include a ``disko:`` block.
 
   SystemActivitySpec* = object
     ## ``activity "<name>":`` macro form at the system scope.
