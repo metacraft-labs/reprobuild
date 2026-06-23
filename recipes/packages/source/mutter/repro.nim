@@ -278,6 +278,18 @@ package mutterSource:
     ## mutter's clutter text layer hits ``fontconfig.h`` for font
     ## matching. Same transitive-propagation gap as freetype above.
     "fontconfig >=2.13"
+    ## M9.R.15r.5 — mutter links libcairo.so + libgdk_pixbuf-2.0.so
+    ## + libinput.so directly. Their needed-libraries (libpng16,
+    ## libjpeg, libevdev, libmtdev) must be on the linker's -L path
+    ## for the ``-Wl,--no-undefined`` mutter executable link. The
+    ## M9.R.14e.1 LIBRARY_PATH thread only walks DIRECT buildDeps,
+    ## not transitive needed-libs of those buildDeps. Declaring them
+    ## directly closes the gap. (Same shape as the freetype +
+    ## fontconfig direct-decl above for the CPATH side.)
+    "libpng"
+    "libjpeg"
+    "libevdev"
+    "mtdev"
     ## libxml2 ships xmllint, consumed by mutter's GResource compile
     ## step + GSettings schema validation.
     "libxml2"
