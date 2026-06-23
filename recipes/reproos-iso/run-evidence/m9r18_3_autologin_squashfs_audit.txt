@@ -1,0 +1,70 @@
+M9.R.18.3 -- squashfs audit confirming SDDM autologin lands in the live ISO.
+==============================================================================
+
+Build invocation (eli-wsl, 2026-06-23):
+  cd /opt/repro/reprobuild/recipes/reproos-iso
+  STAGE_ABS=$(realpath build/de-rootfs)
+  REPRO_DE_ROOTFS_DIR=$STAGE_ABS \
+  SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC \
+  REPRO_GRUB_VARIANT=multi-de REPRO_LIVE_INIT=1 \
+    nix-shell -p binutils squashfsTools xorriso grub2 mtools cpio xz zstd kmod \
+      --run "bash scripts/build-iso.sh \
+        vendor/vmlinuz-debian-netinst \
+        vendor/initrd.img-debian-netinst \
+        build/reproos.iso"
+
+ISO output:
+  bytes  = 230879232
+  sha256 = 1baa6eb34f5731d62654ca10c9bd7d4e1308b0f310e7a38c4011444a8734d6d1
+
+Extracted /etc/sddm.conf.d/00-autologin.conf:
+  [Autologin]
+  User=live
+  Session=plasma
+  Relogin=true
+
+  [General]
+  HaltCommand=/usr/bin/systemctl poweroff
+  RebootCommand=/usr/bin/systemctl reboot
+
+Extracted /usr/share/wayland-sessions/reproos-installer.desktop:
+  [Desktop Entry]
+  Type=Application
+  Name=ReproOS Installer
+  Comment=First-boot ReproOS installer wizard (kiosk mode)
+  Exec=/usr/bin/reproos-installer-launcher
+  DesktopNames=reproos-installer
+
+Extracted /usr/bin/reproos-installer-launcher (mode 0755): present.
+  - probes $INSTALLER_BIN, falls through to startplasma-wayland if missing
+  - sway-kiosk minimal config; mktemp scratch; exec sway -c $SWAY_CFG
+
+Extracted /boot/grub/grub.cfg (multi-de variant):
+  - Hyprland (default)      -> repro.de=hyprland i915.modeset=1
+  - GNOME                   -> repro.de=gnome i915.modeset=1
+  - KDE Plasma              -> repro.de=plasma i915.modeset=1
+  - Safe graphics           -> repro.de=plasma nomodeset (M9.R.18.2)
+  - Recovery                -> single (no DE)
+
+Closure argument for the boot smoke (QEMU not available in the eli-wsl
+sub-agent harness; M9.R.17c.6 already proved SDDM renders in QEMU on
+the same boot chain):
+
+  1. SDDM's startup sequence reads /etc/sddm.conf.d/*.conf during the
+     `[Autologin]` parsing pass. The dropped 00-autologin.conf instructs
+     SDDM to skip the greeter for the `live` user and start the `plasma`
+     session immediately.
+  2. The `live` account exists in the base rootfs (build-base-rootfs.sh
+     M9.R.17c.5) with password unlocked (M9.R.17c.7 / M9.R.17c.8).
+  3. The plasma.desktop session file already shipped (M9.R.17c.7) at
+     /usr/share/wayland-sessions/plasma.desktop and Exec=/usr/bin/startplasma-wayland.
+
+Therefore the autologin chain SDDM -> live user -> plasma session is
+fully wired; the post-M9.R.17c.6 boot gate (interactive screenshot)
+shifts to M9.R.19 once QEMU is available in the build environment.
+
+Cross-checks for future regressions:
+  - Boot-smoke that the ISO sha256 matches between two consecutive
+    builds (reproducibility, t_r2_iso_reproducibility.sh).
+  - Squashfs audit that 00-autologin.conf still ships (no future
+    M9.R.18.N stage change drops the conf.d hook).
