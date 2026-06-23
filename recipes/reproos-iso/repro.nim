@@ -72,9 +72,13 @@ package reproosIso:
     # (the action picks up the recipe dir via the literal path). This
     # mirrors the ``apps/repro-*`` action shape that ``apps/repro.nim``
     # uses for the per-binary nim.c(...) calls.
+    # M9.R.16.6 — the repro engine sets cwd to the recipe directory
+    # (``recipes/reproos-iso``) before launching the shell action, so
+    # the historical ``cd recipes/reproos-iso &&`` prefix bombs out
+    # with ``No such file or directory``. Drop the prefix; paths are
+    # already relative to the recipe dir.
     shell(
-      command = ("cd recipes/reproos-iso && " &
-                 "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
+      command = ("SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC " &
                  "bash scripts/build-iso.sh " &
                  "vendor/vmlinuz-debian-netinst " &
                  "vendor/initrd.img-debian-netinst " &
