@@ -446,12 +446,30 @@ qt6_core_src="$(find /nix/store -maxdepth 4 -path '*qtbase*/lib/libQt6Core.so.6.
 if [ -n "$qt6_core_src" ]; then
   qt6_libdir="$(dirname "$qt6_core_src")"
   echo "[stage-de-rootfs] bundling Qt6 9.x from $qt6_libdir"
+  # Put EVERY bundled Qt6 lib at /usr/lib/x86_64-linux-gnu/ so the
+  # loader picks up a coherent 6.9 set rather than mixing 6.9 Core
+  # with 6.8 Qml/Quick from Debian (which produces
+  # "undefined symbol Qt_6_PRIVATE_API"). Force-overwrite Debian's
+  # Qt6 libs (the package files; the SONAME symlinks point at the
+  # bundled 6.9.x file after this step).
+  qt6_dst="$STAGE_DIR/usr/lib/x86_64-linux-gnu"
+  mkdir -p "$qt6_dst"
   for f in "$qt6_libdir"/libQt6*.so.6*; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
-    cp "$f" "$STAGE_DIR/usr/lib/$base"
+    cp -f "$f" "$qt6_dst/$base"
     # Strip "6.9.3" tail to "6" for the major-SONAME symlink that
     # the installer's binary actually NEEDED.
+    soname6="$(echo "$base" | sed -E 's/(libQt6[^.]+)\.so\.6\.[0-9]+\.[0-9]+/\1.so.6/')"
+    if [ "$soname6" != "$base" ]; then
+      ln -sf "$base" "$qt6_dst/$soname6"
+    fi
+  done
+  # Mirror the same Qt6 set into /usr/lib so cache+ldconfig finds it.
+  for f in "$qt6_libdir"/libQt6*.so.6*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    cp -f "$f" "$STAGE_DIR/usr/lib/$base"
     soname6="$(echo "$base" | sed -E 's/(libQt6[^.]+)\.so\.6\.[0-9]+\.[0-9]+/\1.so.6/')"
     if [ "$soname6" != "$base" ]; then
       ln -sf "$base" "$STAGE_DIR/usr/lib/$soname6"
