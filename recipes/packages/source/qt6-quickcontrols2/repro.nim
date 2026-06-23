@@ -188,7 +188,29 @@ package qt6QuickControls2Source:
         "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
         "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.19.1 -- when building qtdeclarative as the source for
+      # qt6-quickcontrols2, CMake's implicit-include-dir scan picks
+      # up sibling recipes' include dirs (qt6-base, qt6-tools, glib2,
+      # ...) from the nix-shell's NIX_CFLAGS_COMPILE env var that
+      # the cmake compile-test reads. CMake then DEDUPLICATES the
+      # explicit -I.../QtCore + -isystem .../usr/include flags out
+      # of the per-target compile commands because it thinks gcc
+      # already has them. The actual build invocation drops
+      # NIX_CFLAGS_COMPILE (it's a configure-time env), so the
+      # compiler invocation is missing those paths -- breaking
+      # qrc_*_init.cpp compiles that #include <QtCore/qtsymbolmacros.h>.
+      #
+      # Clear NIX_CFLAGS_COMPILE for the cmake invocation so the
+      # implicit-include-dir scan doesn't pick up sibling Qt installs.
+      # qt6-declarative's recipe was lucky -- it ran in a nix-shell env
+      # that happened not to surface the sibling Qt include dirs in
+      # the C/CXX implicit scan, but the env nondeterminism shouldn't
+      # be relied upon.
+      let env = @[
+        ("NIX_CFLAGS_COMPILE", ""),
+        ("NIX_CFLAGS_COMPILE_FOR_TARGET", ""),
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts, extraEnv = env)
       discard pkg.library("libQt6QuickControls2")
     finally:
       clearCurrentOwningPackageOverride()
