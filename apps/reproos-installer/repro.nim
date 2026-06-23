@@ -17,16 +17,22 @@
 ## launcher execs ``reproos-installer`` once the binary lands in the
 ## live rootfs.
 ##
-## ## v0.1 scope vs M9.R.19 closure
+## ## v0.1 scope (closed by M9.R.19)
 ##
-## v0.1 (this commit) declares the recipe shape -- the buildDeps trio,
-## the cmake_package call, the executable artifact. The actual integrated
-## build is gated on the qt6-quickcontrols2 recipe landing in
-## ``recipes/packages/source/`` (the existing qt6-declarative covers
-## QtQuick + QtQml, but the Controls 2 module ships separately upstream).
-## M9.R.19 lands that recipe + runs this recipe end-to-end + wires the
-## installed binary into the reproos-iso DE-rootfs union via
-## ``stage-de-rootfs.sh`` so the live ISO's autologin session can exec it.
+## v0.1 declares the recipe shape -- the buildDeps quartet, the
+## cmake_package call, the executable artifact -- and runs end-to-end
+## via the c_cpp_cmake convention.  M9.R.19 closed the integration:
+##
+##   * M9.R.19.1 landed ``recipes/packages/source/qt6-quickcontrols2/``
+##     so the engine resolves the buildDep selector.
+##   * M9.R.19.2 ran this recipe via the engine, producing
+##     ``.repro/output/install/usr/bin/reproos-installer``.
+##   * M9.R.19.3 wired the binary into the live ISO via
+##     ``recipes/reproos-iso/scripts/stage-de-rootfs.sh`` (the
+##     overlay is now mandatory, no env-var gate).
+##   * M9.R.19.4 flipped the SDDM autologin Session= to
+##     ``reproos-installer`` so the live ISO boots straight into the
+##     wizard.
 ##
 ## ## Build shape
 ##
@@ -87,12 +93,14 @@ package reproosInstaller:
     ## will consume them; v0.1 ships English strings inline per PRD
     ## Sec 7.6).
     "qt6-tools >=6.6"
-    ## qt6-quickcontrols2 -- TODO(M9.R.19): the upstream Qt6 Controls 2
-    ## module is not yet packaged as a from-source recipe in this tree.
-    ## The wizard UI uses Button / ComboBox / TextField / ScrollView /
-    ## TextArea / ProgressBar / CheckBox -- all in QtQuickControls2.
-    ## M9.R.19 lands the missing recipe + flips this line to the
-    ## from-source dependency.
+    ## qt6-quickcontrols2 supplies libQt6QuickControls2.so the wizard
+    ## QML scenes consume (Button / ComboBox / TextField / ScrollView /
+    ## TextArea / ProgressBar / CheckBox).  Recipe lives at
+    ## ``recipes/packages/source/qt6-quickcontrols2/`` and builds from
+    ## the shared qtdeclarative tarball (QuickControls2 was merged into
+    ## qtdeclarative at Qt 6.2; the standalone qtquickcontrols2-
+    ## everywhere-src-<ver>.tar.xz tarball returns HTTP 404 from
+    ## download.qt.io).  M9.R.19.1 landed the recipe.
     "qt6-quickcontrols2 >=6.6"
 
   config:
