@@ -126,6 +126,9 @@ public:
     // choice; the wizard's target hardware.nim layers this on top of
     // the M9.R.21 probe output.
     Q_INVOKABLE QString renderDiskoNim(const QString &id = QString("INSTALL")) const;
+    // M9.R.24.2 -- pre-computed JSON form of the disko spec.
+    // Lets the installer's apply path bypass `nim r` in the live ISO.
+    Q_INVOKABLE QString renderDiskoJson(const QString &id = QString("INSTALL")) const;
 
     // Toggle an activity on/off. Bound to each activity-card checkbox.
     Q_INVOKABLE void toggleActivity(const QString &name);

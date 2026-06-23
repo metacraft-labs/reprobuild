@@ -259,6 +259,83 @@ QString InstallerState::renderDiskoNim(const QString &id) const {
     return out;
 }
 
+// M9.R.24.2 -- renderDiskoJson: pre-compute the SystemHardwareSpec
+// JSON the disk_apply driver consumes, so the live ISO's installer
+// can `repro disk apply --confirm <disko.json>` WITHOUT a Nim
+// toolchain (the .nim path goes through `nim r` -- requires nim +
+// gcc + libc-dev in the live filesystem, which we deliberately don't
+// ship). The output must match libs/repro_profile/.../emit.nim's
+// emitSystemHardwareJson for the same SystemHardwareSpec input.
+//
+// Currently supports the `simple` preset only; encrypted/advanced
+// fall through to the .nim path (which still requires Nim).
+QString InstallerState::renderDiskoJson(const QString &id) const {
+    QString out;
+    QTextStream s(&out);
+    auto esc = [](const QString &x) {
+        QString r;
+        for (QChar c : x) {
+            if (c == '"' || c == '\\') r += '\\';
+            r += c;
+        }
+        return r;
+    };
+    const QString dev = m_targetDevice.isEmpty()
+        ? QStringLiteral("/dev/vda") : m_targetDevice;
+    // Filesystem content node (filesystem kind) -- includes all keys
+    // parseContentSpec requires when kind==filesystem.
+    auto fsContent = [&](const QString &format, const QString &mountpoint,
+                         const QString &mountOpts) {
+        QString r;
+        r += "{\"kind\":\"filesystem\"";
+        r += ",\"format\":\"" + esc(format) + "\"";
+        r += ",\"mountpoint\":\"" + esc(mountpoint) + "\"";
+        r += ",\"mountOptions\":" + mountOpts;
+        r += ",\"label\":\"\"";
+        r += ",\"subvols\":[]";
+        r += "}";
+        return r;
+    };
+    s << "{";
+    s << "\"id\":\"" << esc(id) << "\"";
+    s << ",\"cpuArch\":\"x86_64\"";
+    s << ",\"cpuMicrocode\":\"intel\"";
+    s << ",\"kernelModules\":[]";
+    s << ",\"loaderDevice\":\"" << esc(dev) << "\"";
+    s << ",\"filesystems\":[]";
+    s << ",\"graphicsDrivers\":[]";
+    s << ",\"audioCards\":[]";
+    if (m_diskoPreset == "simple" || m_diskoPreset.isEmpty()) {
+        s << ",\"disko\":{";
+        s << "\"disks\":{";
+        s << "\"main\":{";
+        s << "\"device\":\"" << esc(dev) << "\"";
+        s << ",\"type\":\"gpt\"";
+        s << ",\"partitions\":{";
+        // ESP partition.
+        s << "\"esp\":{";
+        s << "\"type\":\"esp\"";
+        s << ",\"size\":\"512M\"";
+        s << ",\"bootable\":true";
+        s << ",\"content\":" << fsContent("vfat", "/boot", "[]");
+        s << "},";
+        // Root partition.
+        s << "\"root\":{";
+        s << "\"type\":\"linux\"";
+        s << ",\"size\":\"100%\"";
+        s << ",\"bootable\":false";
+        s << ",\"content\":" << fsContent("ext4", "/", "[\"noatime\"]");
+        s << "}";
+        s << "}";
+        s << "}";
+        s << "}";
+        s << ",\"pools\":[]";
+        s << "}";
+    }
+    s << "}";
+    return out;
+}
+
 // ---------------------------------------------------------------------
 // M9.R.23.2 -- lsblk-driven disk refresh.
 // ---------------------------------------------------------------------
@@ -399,8 +476,10 @@ bool InstallerState::runReproDiskApply() {
     const QString tmpDir = QString("/tmp/repro-installer-%1")
         .arg(QCoreApplication::applicationPid());
     QDir().mkpath(tmpDir);
-    const QString diskoPath = tmpDir + "/disko.nim";
-    writeFileAtomic(diskoPath, renderDiskoNim());
+    // M9.R.24.2 -- write the JSON form so `repro disk apply` skips
+    // the `nim r` compile step (the live ISO doesn't bundle Nim).
+    const QString diskoPath = tmpDir + "/disko.json";
+    writeFileAtomic(diskoPath, renderDiskoJson());
     QStringList args = {"disk", "apply", diskoPath, "--confirm"};
     if (!m_targetDevice.isEmpty()) {
         args << "--device" << m_targetDevice;
@@ -416,9 +495,9 @@ bool InstallerState::runReproDiskMount(const QString &mountPoint) {
     }
     const QString tmpDir = QString("/tmp/repro-installer-%1")
         .arg(QCoreApplication::applicationPid());
-    const QString diskoPath = tmpDir + "/disko.nim";
+    const QString diskoPath = tmpDir + "/disko.json";
     if (!QFileInfo::exists(diskoPath)) {
-        writeFileAtomic(diskoPath, renderDiskoNim());
+        writeFileAtomic(diskoPath, renderDiskoJson());
     }
     QStringList args = {"disk", "mount", diskoPath, "--target", mountPoint,
                         "--confirm"};
@@ -432,7 +511,7 @@ bool InstallerState::runReproDiskUnmount(const QString &mountPoint) {
     }
     const QString tmpDir = QString("/tmp/repro-installer-%1")
         .arg(QCoreApplication::applicationPid());
-    const QString diskoPath = tmpDir + "/disko.nim";
+    const QString diskoPath = tmpDir + "/disko.json";
     QStringList args = {"disk", "unmount", diskoPath, "--target",
                         mountPoint};
     return runReproSubcommand(args) == 0;

@@ -191,25 +191,40 @@ proc loadDiskoFromSource*(diskoNim: string): DiskPlanOutcome =
   ## Compile + run ``diskoNim`` via ``nim r`` and capture the emitted
   ## SystemHardwareSpec JSON. The file must contain a single
   ## ``hardware "<id>":`` block whose body includes a ``disko:`` block.
+  ##
+  ## M9.R.24.2 -- if ``diskoNim`` ends in ``.json``, skip the ``nim r``
+  ## compile step and parse the file directly as a pre-computed
+  ## SystemHardwareSpec JSON. Lets the reproos-installer's --automated
+  ## path run on the live ISO without bundling a Nim toolchain.
   if not fileExists(diskoNim):
     result.failure = true
     result.failureKind = dpfMissingFile
     result.failureMsg = "no such file: " & diskoNim
     return
-  let cmd = "nim r --hints:off --warnings:off --verbosity:0 " &
-    quoteShell(diskoNim)
-  let (output, exitCode) = execCmdEx(cmd)
-  if exitCode != 0:
-    result.failure = true
-    result.failureKind = dpfCompileFailed
-    result.failureMsg = "nim r failed (exit " & $exitCode & "):\n" & output
-    return
-  # The hardware macro emits JSON on the last non-empty stdout line.
   var jsonLine = ""
-  for line in output.splitLines():
-    let t = line.strip()
-    if t.len > 0 and t[0] == '{':
-      jsonLine = t
+  if diskoNim.endsWith(".json"):
+    # Pre-computed JSON path -- read the file directly.
+    try:
+      jsonLine = readFile(diskoNim).strip()
+    except CatchableError as e:
+      result.failure = true
+      result.failureKind = dpfRunFailed
+      result.failureMsg = "read " & diskoNim & " failed: " & e.msg
+      return
+  else:
+    let cmd = "nim r --hints:off --warnings:off --verbosity:0 " &
+      quoteShell(diskoNim)
+    let (output, exitCode) = execCmdEx(cmd)
+    if exitCode != 0:
+      result.failure = true
+      result.failureKind = dpfCompileFailed
+      result.failureMsg = "nim r failed (exit " & $exitCode & "):\n" & output
+      return
+    # The hardware macro emits JSON on the last non-empty stdout line.
+    for line in output.splitLines():
+      let t = line.strip()
+      if t.len > 0 and t[0] == '{':
+        jsonLine = t
   if jsonLine.len == 0:
     result.failure = true
     result.failureKind = dpfRunFailed
