@@ -555,6 +555,21 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
       echo "${d#$STAGE_DIR}"
     fi
   done
+  # From-source install-mirror INTERNAL subdir lib dirs (e.g.
+  # mutter-15/ inside mutter's lib64/).  Some recipes ship their
+  # internal-implementation SOs in a versioned subdir but the
+  # recipe's $ORIGIN-relative RPATH doesn't include the subdir.
+  # ld.so.cache picks them up at runtime regardless of RPATH.
+  while IFS= read -r d; do
+    [ -n "$d" ] && echo "${d#$STAGE_DIR}"
+  done < <(find "$ISO_SRC_MIRROR_ROOT" \
+              -path '*/.repro/output/install/usr/lib*/*' \
+              -maxdepth 8 -type d 2>/dev/null | \
+            while read -r sub; do
+              if find "$sub" -maxdepth 1 -name '*.so*' -print -quit 2>/dev/null | grep -q .; then
+                echo "$sub"
+              fi
+            done)
   # Nix-store mirrored /lib dirs.
   for d in "$STAGE_DIR"/nix/store/*/lib; do
     if [ -d "$d" ]; then
