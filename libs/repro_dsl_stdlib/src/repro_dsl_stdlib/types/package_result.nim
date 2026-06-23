@@ -1485,7 +1485,15 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # recipes that happen to ship a same-named file under $libdir/X/
     # don't get mis-routed.
     let libSystemdSrcDir = (effectiveDestRoot & "/usr/lib/systemd").replace("\\", "/").replace("\"", "\\\"")
-    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir]
+    # M9.R.27.2 — polkit installs its daemon + helper binaries under
+    # ``$libdir/polkit-1/`` (the polkit-private libexec convention).
+    # Without this entry, the autotools_package executable stage-copy
+    # for polkitd / polkit-agent-helper-1 fails with "no executable
+    # candidate" even though the binaries ARE in the install tree at
+    # /usr/lib/polkit-1/polkitd + /usr/lib/polkit-1/polkit-agent-helper-1.
+    # Probe this AFTER the canonical $bindir + $sbindir + $libexec dirs.
+    let libPolkit1SrcDir = (effectiveDestRoot & "/usr/lib/polkit-1").replace("\\", "/").replace("\"", "\\\"")
+    let candidateDirs = @[escapedSrcDir, sbinSrcDir, libexecSrcDir, libLibexecSrcDir, libSystemdSrcDir, libPolkit1SrcDir]
     # M9.R.15q.7.9 — also probe snake_case form. The kebab probe
     # covers ``kwinWayland`` → ``kwin-wayland`` but kwin upstream
     # installs ``kwin_wayland`` (snake_case underscore). The library
@@ -1514,7 +1522,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" & escapedOut & ".exe\"; ")
       first = false
-    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & "\" >&2; exit 1; fi")
+    script.add("else echo \"autotools_package stage-copy: no executable candidate for " & escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " & libexecSrcDir & " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " & libPolkit1SrcDir & "\" >&2; exit 1; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(packageName) &
     "-" & sanitizeStageCopyName(name)

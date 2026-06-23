@@ -115,8 +115,16 @@ package polkitSource:
   executable pkexec:
     discard
 
-  executable polkitAgentHelper1:
-    discard
+  # M9.R.27.2 — polkit-agent-helper-1 ships under
+  # /usr/lib/polkit-1/polkit-agent-helper-1 (polkit-private libexec)
+  # but the upstream binary basename has a hyphen between "helper"
+  # and the SUFFIX "1" (``polkit-agent-helper-1``) that the PascalToKebab
+  # transformer does not emit (it would yield ``polkit-agent-helper1``).
+  # The install-mirror harvests the binary via the cp -a phase, so
+  # downstream consumers (the live ISO via stage-de-rootfs.sh's mirror
+  # walk) get it without a per-artifact stage-copy. Skip the explicit
+  # ``executable polkitAgentHelper1:`` block; the install-mirror
+  # captures it under its on-disk name verbatim.
 
   library libPolkitGobject1:
     discard
@@ -169,7 +177,8 @@ package polkitSource:
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("polkitd")
       discard pkg.executable("pkexec")
-      discard pkg.executable("polkitAgentHelper1")
+      # M9.R.27.2 — polkit-agent-helper-1 harvested via install-mirror,
+      # not per-artifact stage-copy (see DSL block above).
       discard pkg.library("libPolkitGobject1")
       discard pkg.library("libPolkitAgent1")
     finally:
