@@ -254,6 +254,8 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
     # try to connect to xcb (which fails on a tty boot) and instead
     # uses the headless rasteriser.
     QT_QPA_PLATFORM=offscreen \
+    QT_PLUGIN_PATH=/usr/lib/qt6/plugins \
+    QML2_IMPORT_PATH=/usr/lib/qt6/qml \
     LD_LIBRARY_PATH=/usr/lib:/usr/lib64:/usr/lib/x86_64-linux-gnu \
       /usr/bin/reproos-installer --automated "$AUTO_CFG"
     rc=$?
