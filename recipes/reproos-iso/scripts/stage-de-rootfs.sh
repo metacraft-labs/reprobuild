@@ -1,22 +1,63 @@
 #!/usr/bin/env bash
-# M9.R.16.8 — stage the DE-rootfs union for the reproos-iso payload.
+# M9.R.25.2 — stage the DE-rootfs union for the reproos-iso payload.
 #
-# Walks sibling source recipes' install-mirror trees and unions the
-# load-bearing /usr/ subtrees into a single staging directory the
-# reproos-iso build-iso.sh wraps in a deterministic SquashFS.
+# Architectural model (revised M9.R.25): the staging mirror is
+# Nix-style — every from-source install-mirror is preserved on the
+# live ISO at the SAME absolute path the recipe baked into its
+# binaries' DT_RUNPATH at install time.  No path rewriting, no RPATH
+# stripping, no apt-installed Debian DE fallback.
 #
-# Source recipes ingested:
-#   * sway              -- wlroots-based standalone compositor
-#   * mutter            -- GNOME Wayland compositor
-#   * kwin              -- KDE Plasma's Wayland compositor
-#   * sddm              -- Simple Desktop Display Manager (login screen)
-#   * plasma-workspace  -- KDE Plasma's plasmashell + supporting bits
-#   * gdm               -- GNOME Display Manager
+# This is the same trick Nix uses: `/nix/store/<hash>-pkg/lib` exists
+# verbatim on every machine that consumes the package, so the
+# dynamic loader finds every dep at the embedded absolute path.
+# Reprobuild's equivalent path is
+# `/opt/repro/reprobuild/recipes/packages/source/<pkg>/.repro/output/
+#   install/usr/{lib,lib64,bin,...}` — already the on-disk layout the
+# M9.R.14f `m9r14fEmitRpathPatchScript` embedded into every ELF.
 #
-# Output: $STAGE_DIR is populated with the union /usr tree; the
-# build-iso.sh consumer then squashfses it to /live/filesystem.squashfs.
+# Sources mirrored onto the ISO:
 #
-# Invocation (from the reproos-iso recipe directory --- engine cwd):
+#   1. Every `recipes/packages/source/<pkg>/.repro/output/install/`
+#      tree that holds at least one regular file.  Currently 114 of
+#      154 source recipes meet this bar (M9.R.25.1 inventory).
+#
+#   2. The nix-store closure referenced by from-source RPATHs.
+#      The `m9r14fEmitRpathPatchScript` keeps nix-stub deps (glibc,
+#      gcc-lib, qt6-* in the reproos-installer chain, etc) on rpath
+#      via the `LD_LIBRARY_PATH` reflection mechanism.  Those
+#      `/nix/store/<hash>-<pkg>/lib` paths must exist on the ISO for
+#      the loader to resolve them.  The script walks every ELF's
+#      rpath, collects unique `/nix/store/<hash>-*` prefixes, and
+#      mirrors each one verbatim onto the staged tree.
+#
+#   3. The PT_INTERP nix-store dir(s).  Every from-source ELF's
+#      kernel-loader interpreter is a nix-store path; the kernel
+#      needs that path to exist or `execve(2)` fails with ENOENT
+#      before ld.so even runs.
+#
+# Output layout (squashfs root):
+#
+#   /opt/repro/reprobuild/recipes/packages/source/<pkg>/.repro/output/
+#     install/usr/{bin,lib,lib64,share,...}        # from-source mirror
+#   /nix/store/<hash>-<pkg>/{lib,bin,...}          # nix-store closure
+#   /usr/bin/sway -> /opt/.../sway/.../usr/bin/sway
+#   /usr/bin/kwin_wayland -> /opt/.../kwin/.../usr/bin/kwin_wayland
+#   /usr/bin/mutter -> /opt/.../mutter/.../usr/bin/mutter
+#   /usr/bin/plasmashell -> /opt/.../plasma-workspace/.../usr/bin/plasmashell
+#   /usr/bin/startplasma-wayland -> ...
+#   /usr/bin/gnome-session -> /opt/.../gdm/.../usr/bin/gnome-session
+#   /usr/bin/sddm -> /opt/.../sddm/.../usr/bin/sddm
+#   /usr/share/wayland-sessions/*.desktop          # session definitions
+#   /etc/systemd/system/default.target -> ...      # autologin wiring
+#
+# The `build-base-rootfs.sh` companion now ships only the minimum
+# Debian base that has no from-source recipe yet (kernel modules,
+# core util-linux not-yet-stripped, gawk/grep/coreutils stand-ins
+# until those recipes' install-mirrors are wired into the ISO).
+# The DE stack and KF6/Qt6/Wayland/GL stack are sourced exclusively
+# from the from-source install-mirrors.
+#
+# Invocation (from the reproos-iso recipe directory — engine cwd):
 #   bash scripts/stage-de-rootfs.sh <stage-dir>
 
 set -euo pipefail
@@ -30,29 +71,8 @@ STAGE_DIR="$1"
 # The engine sets cwd to the recipe dir; the repo root is two levels up.
 REPO_ROOT="$(cd ../.. && pwd)"
 
-# Source recipe install-mirror roots. Each one's
-# .repro/output/install/usr/ is the canonical "/usr" we want to merge.
-DE_RECIPES=(
-  sway
-  mutter
-  kwin
-  sddm
-  plasma-workspace
-  gdm
-)
-
 mkdir -p "$STAGE_DIR/usr"
 
-# M9.R.17c.5 - extract a minimum base userspace (systemd + libc +
-# Qt6 + GL stack + login) into the staging dir BEFORE we overlay
-# the from-source DE binaries. Without this base the squashfs lacks
-# /sbin/init and the live-init's switch_root has nothing to exec.
-#
-# Driven by build-base-rootfs.sh which pulls debian:trixie-slim,
-# apt-installs the curated package list, exports the container as a
-# tarball, then xz-compresses it. The tarball is cached host-side at
-# $REPRO_BASE_ROOTFS_CACHE (default /var/cache/reprobuild/base-rootfs)
-# so subsequent stages are near-instantaneous.
 SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
 REPRO_BASE_ROOTFS_DISABLE="${REPRO_BASE_ROOTFS_DISABLE:-0}"
 if [ "$REPRO_BASE_ROOTFS_DISABLE" != "1" ]; then
@@ -62,15 +82,225 @@ if [ "$REPRO_BASE_ROOTFS_DISABLE" != "1" ]; then
     bash "$SCRIPT_DIR_SELF/build-base-rootfs.sh" "$base_tar"
   echo "[stage-de-rootfs] extracting base userspace into $STAGE_DIR"
   tar -C "$STAGE_DIR" -xf "$base_tar"
-  # Some docker exports include leading ./; tar handles both. Remove
-  # the staging-time base tarball to keep STAGE_DIR clean.
   rm -f "$base_tar"
 fi
 
-# Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
-# Each .desktop file names the per-DE session entry point.
+# ---------------------------------------------------------------------------
+# Phase 1: mirror every built from-source install-mirror onto the ISO
+# at the same absolute path the build-host has them under.  Preserves
+# every embedded RPATH M9.R.14f bakes into the ELFs verbatim — no
+# patchelf rewriting, no path translation.
+# ---------------------------------------------------------------------------
+
+SRC_RECIPES_ROOT="$REPO_ROOT/recipes/packages/source"
+# The from-source mirror prefix on the ISO is the SAME absolute path
+# the recipes use on the build host.  Without this fidelity, every
+# embedded RPATH like
+#   /opt/repro/reprobuild/recipes/packages/source/wlroots/.repro/...
+# fails to resolve and ldd reports 'not found'.
+ISO_SRC_MIRROR_ROOT="$STAGE_DIR$SRC_RECIPES_ROOT"
+mkdir -p "$ISO_SRC_MIRROR_ROOT"
+
+staged_recipes=0
+staged_bytes=0
+echo "[stage-de-rootfs] staging from-source install-mirrors at $SRC_RECIPES_ROOT"
+for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
+  [ -d "$recipe_dir" ] || continue
+  install_dir="$recipe_dir/.repro/output/install"
+  [ -d "$install_dir" ] || continue
+  # Skip recipes whose install dir is empty (recipe is registered but
+  # not yet built).  These contribute nothing and the warning is
+  # already emitted by the source-tree inventory.
+  if [ -z "$(find "$install_dir" -maxdepth 4 -type f -print -quit 2>/dev/null)" ]; then
+    continue
+  fi
+  recipe_name="$(basename "$recipe_dir")"
+  dst_dir="$ISO_SRC_MIRROR_ROOT/$recipe_name/.repro/output/install"
+  mkdir -p "$(dirname "$dst_dir")"
+  # cp -a preserves symlinks + permissions + timestamps.  We do NOT
+  # dereference symlinks (no -L) so internal soname chains stay
+  # symlinks rather than balloon into duplicate files.
+  cp -a "$install_dir" "$dst_dir"
+  staged_recipes=$((staged_recipes + 1))
+done
+echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
+
+# ---------------------------------------------------------------------------
+# Phase 2: walk every staged ELF's RPATH + PT_INTERP, collect unique
+# /nix/store/<hash>-<pkg>/ prefixes, and mirror each one onto the ISO
+# verbatim.  This is the closure of nix-stub deps the from-source
+# recipes reference via $LD_LIBRARY_PATH-reflected RPATH entries +
+# the nix-shell glibc interpreter every nix-built ELF inherits.
+# ---------------------------------------------------------------------------
+
+# Discover candidate ELFs (from the staged mirror + the reproos-
+# installer + repro CLI binaries we overlay later in this script).
+patchelf_bin="$(command -v patchelf || true)"
+if [ -z "$patchelf_bin" ]; then
+  echo "[stage-de-rootfs] patchelf not in PATH; cannot compute nix-store closure" >&2
+  echo "[stage-de-rootfs] expected nix-shell to provision patchelf via the bootstrap-linux-smoke.sh" >&2
+  exit 70
+fi
+
+# Collect nix-store prefixes from every ELF's RPATH + PT_INTERP.
+# Using a temporary file as a poor-man's set; sort -u dedup at end.
+nix_prefixes_file="$(mktemp -t reproos-iso-nix-prefixes-XXXXXX)"
+trap 'rm -f "$nix_prefixes_file"' EXIT
+
+extract_nix_prefixes_from_elf() {
+  local elf="$1"
+  local rp interp
+  rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
+  interp="$($patchelf_bin --print-interpreter "$elf" 2>/dev/null || true)"
+  # Split rp on ':' and emit each /nix/store/<hash>-<pkg>/ prefix.
+  printf '%s\n' "$rp" | tr ':' '\n' | \
+    sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+  printf '%s\n' "$interp" | \
+    sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
+}
+export -f extract_nix_prefixes_from_elf
+
+# Walk the staged source mirror + the reproos-installer + repro CLI.
+# The latter two get overlayed later in this script but we need their
+# nix-store closure included BEFORE the overlay so the loader resolves
+# correctly.
+{
+  find "$ISO_SRC_MIRROR_ROOT" -type f \
+    \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null
+  if [ -x "$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer" ]; then
+    echo "$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer"
+  fi
+  if [ -x "$REPO_ROOT/build/bin/repro" ]; then
+    echo "$REPO_ROOT/build/bin/repro"
+  fi
+} | while IFS= read -r elf; do
+  # Cheap ELF-magic check before patchelf invocation.
+  magic=$(head -c 4 "$elf" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+  case "$magic" in
+    177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
+  esac
+done | sort -u > "$nix_prefixes_file"
+
+nix_closure_count=$(wc -l < "$nix_prefixes_file")
+echo "[stage-de-rootfs] discovered $nix_closure_count unique /nix/store/ prefixes"
+
+# Mirror each prefix verbatim.  We dereference symlinks AT the leaf
+# level only via cp -a; nix-store contents are themselves symlink-
+# heavy so cp -a preserves the topology.  Any single prefix is
+# self-contained: nix-store sub-dirs don't link to outside the
+# prefix.
+mirrored_prefixes=0
+while IFS= read -r prefix; do
+  [ -z "$prefix" ] && continue
+  [ -d "$prefix" ] || continue
+  dst="$STAGE_DIR$prefix"
+  if [ -e "$dst" ]; then
+    # Idempotent: re-running the script should not re-copy.
+    continue
+  fi
+  mkdir -p "$(dirname "$dst")"
+  cp -a "$prefix" "$dst"
+  mirrored_prefixes=$((mirrored_prefixes + 1))
+done < "$nix_prefixes_file"
+echo "[stage-de-rootfs] mirrored $mirrored_prefixes nix-store prefixes onto ISO"
+
+# ---------------------------------------------------------------------------
+# Phase 3: nix-store closure is one level deep — the prefixes we
+# mirrored above themselves have RPATHs that reach OTHER nix-store
+# prefixes.  Iterate to fixed point.
+# ---------------------------------------------------------------------------
+
+iter=0
+while :; do
+  iter=$((iter + 1))
+  new_prefixes_file="$(mktemp -t reproos-iso-nix-prefixes-it-XXXXXX)"
+  # Walk every ELF inside the freshly-mirrored nix-store dirs and
+  # collect their RPATH/INTERP references.
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    staged_prefix="$STAGE_DIR$prefix"
+    [ -d "$staged_prefix" ] || continue
+    find "$staged_prefix" -type f \
+      \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) 2>/dev/null | \
+      while IFS= read -r elf; do
+        magic=$(head -c 4 "$elf" 2>/dev/null | od -An -c | tr -d ' \n' || true)
+        case "$magic" in
+          177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
+        esac
+      done
+  done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
+
+  # Filter out prefixes we already mirrored.
+  to_mirror=$(comm -23 "$new_prefixes_file" "$nix_prefixes_file" 2>/dev/null || true)
+  if [ -z "$to_mirror" ]; then
+    rm -f "$new_prefixes_file"
+    break
+  fi
+  added=0
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    [ -d "$prefix" ] || continue
+    dst="$STAGE_DIR$prefix"
+    if [ -e "$dst" ]; then
+      continue
+    fi
+    mkdir -p "$(dirname "$dst")"
+    cp -a "$prefix" "$dst"
+    added=$((added + 1))
+  done <<< "$to_mirror"
+  echo "[stage-de-rootfs] iteration $iter: mirrored $added new nix-store prefixes"
+  # Union the new prefixes into the working set so the next iteration
+  # walks them in turn.
+  cat "$nix_prefixes_file" "$new_prefixes_file" | sort -u > "$nix_prefixes_file.next"
+  mv "$nix_prefixes_file.next" "$nix_prefixes_file"
+  rm -f "$new_prefixes_file"
+  if [ "$iter" -ge 10 ]; then
+    echo "[stage-de-rootfs] nix-store closure didn't converge in 10 iterations" >&2
+    break
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Phase 4: user-facing entry-point symlinks under /usr/bin and
+# /usr/share for the live ISO.  Sessions enumerate them at standard
+# paths; SDDM/GDM/sway exec them directly.
+# ---------------------------------------------------------------------------
+
+mkdir -p "$STAGE_DIR/usr/bin"
 mkdir -p "$STAGE_DIR/usr/share/wayland-sessions"
 
+# Helper to symlink a DE entry-point.  The symlink target is the
+# absolute mirrored install-mirror path (which IS the build-host path
+# preserved via Phase 1) so it stays valid inside the squashfs root.
+link_entry() {
+  local recipe="$1"
+  local binname="$2"
+  local src="$ISO_SRC_MIRROR_ROOT/$recipe/.repro/output/install/usr/bin/$binname"
+  # Strip $STAGE_DIR for the link target so the link is absolute
+  # WITHIN the rootfs (i.e. resolves correctly after pivot_root).
+  local link_target="${src#$STAGE_DIR}"
+  if [ ! -e "$src" ]; then
+    echo "[stage-de-rootfs] entry-point missing: $recipe/$binname (recipe not built; symlink skipped)" >&2
+    return 0
+  fi
+  ln -sf "$link_target" "$STAGE_DIR/usr/bin/$binname"
+}
+
+# DE entry-points.  Each maps to one Wayland-session .desktop file
+# below.
+link_entry sway sway
+link_entry kwin kwin_wayland
+link_entry kwin kwin_wayland_wrapper
+link_entry mutter mutter
+link_entry sddm sddm
+link_entry sddm sddm-greeter-qt6
+link_entry plasma-workspace plasmashell
+link_entry plasma-workspace startplasma-wayland
+link_entry plasma-workspace startplasma-x11
+link_entry gdm gdm-session-worker
+link_entry gdm gdm
+
+# Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 cat > "$STAGE_DIR/usr/share/wayland-sessions/sway.desktop" <<EOF
 [Desktop Entry]
 Name=Sway
@@ -99,11 +329,7 @@ Type=Application
 DesktopNames=GNOME
 EOF
 
-# M9.R.18.14 -- ReproOS Installer session. SDDM autologin (M9.R.18.1)
-# routes to this session once the installer binary lands in the base
-# rootfs. The launcher script starts a minimal Wayland compositor
-# (sway in kiosk mode per ReproOS-Installer-PRD.md §7.5) and execs
-# the wizard binary.
+# M9.R.18.14 -- ReproOS Installer session.
 cat > "$STAGE_DIR/usr/share/wayland-sessions/reproos-installer.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -114,24 +340,10 @@ DesktopNames=reproos-installer
 EOF
 
 # Companion launcher script -- starts a Wayland compositor in kiosk
-# mode and execs the installer binary full-screen. If the binary is
-# missing (pre-M9.R.18.14 ISO), the script falls through to a plain
-# plasma session so the boot smoke still reaches a desktop.
-#
-# M9.R.24.1c -- the launcher previously embedded the env-var prefix
-# inside sway's `exec` command which sway forks via /bin/sh -c; the
-# inner quote made sway treat the whole `FOO=bar cmd; swaymsg exit`
-# as a single argv[0], producing a NULL fn-pointer crash at IP=0x91
-# under SDDM autologin. Move every env var into the launcher itself
-# and use a dedicated init script for sway's `exec` directive.
-mkdir -p "$STAGE_DIR/usr/bin"
+# mode and execs the installer binary full-screen.
 cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher" <<'EOF'
 #!/bin/sh
 # ReproOS Installer kiosk launcher.
-#
-# Per ReproOS-Installer-PRD.md §7.5, starts a minimal Wayland
-# compositor (sway in kiosk mode) and execs the wizard full-screen.
-# Closing the wizard logs the session out and returns to sddm.
 
 set -eu
 
@@ -140,13 +352,8 @@ if [ ! -x "$INSTALLER_BIN" ]; then
   exec /usr/bin/startplasma-wayland
 fi
 
-# Env vars travel via the parent shell so sway's exec hook gets a
-# clean command. The QT vars apply to the wizard fork sway spawns.
 export QT_QPA_PLATFORM=wayland
 export QT_QUICK_CONTROLS_STYLE=Material
-# XDG_RUNTIME_DIR is needed by libwayland-client; sddm-helper sets
-# this normally but kiosk wrappers run before the user session is
-# fully initialised on some Debian builds. Synthesise if absent.
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
   XDG_RUNTIME_DIR="/run/user/$(id -u)"
   export XDG_RUNTIME_DIR
@@ -154,20 +361,14 @@ if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
   chmod 700 "$XDG_RUNTIME_DIR"
 fi
 
-# Install-once init script that sway's `exec` runs as a child shell.
 SWAY_INIT=$(mktemp -t reproos-installer-sway-init-XXXXXX.sh)
 cat > "$SWAY_INIT" <<'INIT'
 #!/bin/sh
-# Sway exec hook -- runs the installer, then asks sway to exit when
-# the installer process closes (either by user click or by --automated
-# finish).
 /usr/bin/reproos-installer "$@"
 /usr/bin/swaymsg exit
 INIT
 chmod +x "$SWAY_INIT"
 
-# Drop a minimal sway config that launches the installer full-screen
-# without a status bar or output decorations.
 SWAY_CFG=$(mktemp -t reproos-installer-sway-XXXXXX.cfg)
 cat > "$SWAY_CFG" <<SWAY
 output * background #0a0a0a solid_color
@@ -180,24 +381,13 @@ exec /usr/bin/sway -c "$SWAY_CFG"
 EOF
 chmod +x "$STAGE_DIR/usr/bin/reproos-installer-launcher"
 
-# M9.R.17c.4 + M9.R.24.1c -- target selection.
-#
-# Pre-M9.R.24, the default boot target was `graphical.target` with
-# SDDM as the display manager and a kiosk Wayland session running the
-# reproos-installer. M9.R.24 diagnosed two cascading bugs:
-#   1. SDDM execs sway via `exec /usr/bin/sway` but our from-source
-#      sway recipe was missing dynamic-linker deps -> exit 127.
-#   2. Even with Debian's sway in place, sway crashes at IP=0x91 in
-#      the qemu virtio-gpu / SDDM-VT-handoff environment.
-#
-# REPRO_LIVE_TARGET selects which surface the autologin lands on:
-#   - "console" (M9.R.24 default): `multi-user.target` + a getty
-#       autologin that runs the installer in --automated mode if a
-#       config TOML is present, else drops to an interactive shell.
-#       No compositor needed; works against any vgafb-capable QEMU.
-#   - "graphical": the legacy SDDM + Wayland-kiosk session
-#       (M9.R.18.14). Reserved for future once the wlroots/virtio_gpu
-#       trip lands; pre-M9.R.24 path retained behind the gate.
+# ---------------------------------------------------------------------------
+# Phase 5: systemd target wiring (console vs graphical default).
+# Unchanged from pre-M9.R.25 behaviour.  REPRO_LIVE_TARGET=console is
+# the safe default; graphical opt-in switches to SDDM autologin once
+# the from-source DE recipes resolve cleanly on the ISO.
+# ---------------------------------------------------------------------------
+
 mkdir -p "$STAGE_DIR/etc/systemd/system"
 REPRO_LIVE_TARGET="${REPRO_LIVE_TARGET:-console}"
 case "$REPRO_LIVE_TARGET" in
@@ -217,9 +407,7 @@ case "$REPRO_LIVE_TARGET" in
     ;;
 esac
 
-# Console-mode autologin override -- replaces base-rootfs's
-# `agetty --autologin live tty1`. We want root (full install perms)
-# autologging in and the launcher script auto-running.
+# Console-mode autologin override.
 mkdir -p "$STAGE_DIR/etc/systemd/system/getty@tty1.service.d"
 cat > "$STAGE_DIR/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<'EOF'
 [Service]
@@ -228,12 +416,9 @@ ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9
 EOF
 
 # Profile hook to auto-launch the installer on root login (tty1 only).
-# Falls through to a normal shell if the installer is missing or the
-# user types Ctrl+C during the 3-second grace period.
 mkdir -p "$STAGE_DIR/etc/profile.d"
 cat > "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh" <<'EOF'
 # ReproOS live-ISO console-mode installer autostart.
-# Triggers on tty1 only (avoids reentry when the install runs `bash`).
 if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
   export REPRO_INSTALLER_RAN=1
   AUTO_CFG=""
@@ -249,14 +434,7 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
     echo "Config: $AUTO_CFG"
     echo ""
     sleep 3
-    # --automated path doesn't need a display server but QGuiApplication
-    # still initialises a QPA plugin. Force `offscreen` so Qt doesn't
-    # try to connect to xcb (which fails on a tty boot) and instead
-    # uses the headless rasteriser.
     QT_QPA_PLATFORM=offscreen \
-    QT_PLUGIN_PATH=/usr/lib/qt6/plugins \
-    QML2_IMPORT_PATH=/usr/lib/qt6/qml \
-    LD_LIBRARY_PATH=/usr/lib:/usr/lib64:/usr/lib/x86_64-linux-gnu \
       /usr/bin/reproos-installer --automated "$AUTO_CFG"
     rc=$?
     echo ""
@@ -276,13 +454,9 @@ fi
 EOF
 chmod 0644 "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh"
 
-# Bake a default automated config for the demo run. Honours the M9.R.23
-# --automated TOML shape (smoke-test-config.toml format).
+# Bake a default automated config for the demo run.
 mkdir -p "$STAGE_DIR/etc/reproos"
 cat > "$STAGE_DIR/etc/reproos/auto-config.toml" <<'EOF'
-# M9.R.24 demo -- automated ReproOS install against the QEMU
-# /dev/vda virtio-blk disk. Targets the simplest disko preset so the
-# end-to-end demo runs in under a minute.
 hostname = "reproos-vm"
 defaultUser = "alice"
 password = "reproos"
@@ -292,23 +466,7 @@ preferredDE = "plasma"
 activities = ["daily-computing", "system-tools"]
 EOF
 
-# M9.R.18.1 -- SDDM autologin config for the live ISO. Closes the
-# boot-to-desktop round-trip: SDDM appears (proved by M9.R.17c.6) but
-# without autologin the user has to type a password the live-rootfs
-# doesn't prompt them about. The live-rootfs's `live` user has its
-# password cleared in build-base-rootfs.sh; autologin sidesteps the
-# prompt entirely.
-#
-# Per ReproOS-Installer-PRD.md §7.5 the live ISO autologs into the
-# custom installer session (reproos-installer.desktop). M9.R.19.4
-# flipped this default now that the installer binary is mandatory in
-# the live ISO (M9.R.19.3 -- the engine-driven build artifact at
-# apps/reproos-installer/.repro/output/install/usr/bin is enforced
-# above; this script bails with exit 66 if it's missing).
-#
-# Session choice is env-gated for opt-out:
-#   REPRO_AUTOLOGIN_SESSION=reproos-installer (default, M9.R.19.4)
-#   REPRO_AUTOLOGIN_SESSION=plasma            (opt-out for DE smoke)
+# M9.R.18.1 -- SDDM autologin config.
 REPRO_AUTOLOGIN_SESSION="${REPRO_AUTOLOGIN_SESSION:-reproos-installer}"
 mkdir -p "$STAGE_DIR/etc/sddm.conf.d"
 cat > "$STAGE_DIR/etc/sddm.conf.d/00-autologin.conf" <<EOF
@@ -323,12 +481,6 @@ RebootCommand=/usr/bin/systemctl reboot
 EOF
 
 # M9.R.24.1 -- Live-ISO debug tap (env-gated).
-#
-# When REPRO_LIVE_DEBUG=1 is set at ISO-build time, drop a systemd unit
-# that journal-tails sddm + the autologin session to /dev/ttyS1. QEMU
-# `-serial file:...` captures ttyS1 for post-boot analysis so we can
-# see WHY SDDM never paints the framebuffer. Off by default so
-# production ISOs don't leak diagnostic data to a (non-existent) ttyS1.
 REPRO_LIVE_DEBUG="${REPRO_LIVE_DEBUG:-0}"
 if [ "$REPRO_LIVE_DEBUG" = "1" ]; then
   mkdir -p "$STAGE_DIR/etc/systemd/system"
@@ -340,8 +492,6 @@ Wants=multi-user.target
 
 [Service]
 Type=simple
-# Tail the full journal (every unit + kernel) to /dev/ttyS1. -f =
-# follow forever; --no-pager because there's no tty.
 ExecStart=/bin/sh -c '/usr/bin/journalctl -f -o short-monotonic --no-pager > /dev/ttyS1 2>&1'
 Restart=always
 RestartSec=1
@@ -355,25 +505,12 @@ EOF
   echo "[stage-de-rootfs] REPRO_LIVE_DEBUG=1; tap enabled at ttyS1"
 fi
 
-# M9.R.19.3 -- ReproOS Installer binary integration (engine-driven).
-#
-# The reproos-installer recipe at apps/reproos-installer/ builds the
-# wizard binary via the c_cpp_cmake convention and stages it at
-#   apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer
-# The reproos-iso recipe lists reproos-installer as a buildDep so the
-# engine guarantees the binary exists before this script runs.
-#
-# The binary is MANDATORY in the live ISO: the SDDM autologin session
-# (M9.R.18.1) targets reproos-installer.desktop which execs the wizard
-# via reproos-installer-launcher. Without the binary, the launcher
-# falls through to startplasma-wayland but the autologin session
-# advertised at /usr/share/wayland-sessions/reproos-installer.desktop
-# would still be misleading. Fail hard if the binary is missing.
-#
-# A REPROOS_INSTALLER_BIN override is still honoured for ad-hoc smoke
-# runs (boot the ISO against a binary built standalone via the
-# apps/reproos-installer/CMakeLists.txt + nix-shell -p qt6.qtbase ...);
-# the override path takes precedence over the engine-built artifact.
+# ---------------------------------------------------------------------------
+# Phase 6: reproos-installer + repro CLI binary overlay.  The
+# nix-store closure these depend on was already mirrored in Phases 2/3
+# so the binaries' embedded RPATHs resolve unchanged.
+# ---------------------------------------------------------------------------
+
 REPROOS_INSTALLER_BIN="${REPROOS_INSTALLER_BIN:-}"
 if [ -z "$REPROOS_INSTALLER_BIN" ]; then
   REPROOS_INSTALLER_BIN="$REPO_ROOT/apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer"
@@ -388,13 +525,6 @@ cp "$REPROOS_INSTALLER_BIN" "$STAGE_DIR/usr/bin/reproos-installer"
 chmod +x "$STAGE_DIR/usr/bin/reproos-installer"
 echo "[stage-de-rootfs] overlayed reproos-installer binary (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/reproos-installer"))"
 
-# M9.R.24.1f -- the wizard's install() driver shells out to
-# /usr/bin/repro for the 6-phase apply (hardware probe -> disk apply
-# -> mount -> system apply -> unmount). Without the CLI in the live
-# ISO the installer fails at Phase 1 with
-#   "spawn failed: Child process set up failed: execve: No such file"
-# Bake the engine-built repro binary at build/bin/repro into the
-# live ISO so the installer's QProcess shell-outs resolve.
 REPRO_CLI_BIN="${REPRO_CLI_BIN:-}"
 if [ -z "$REPRO_CLI_BIN" ]; then
   REPRO_CLI_BIN="$REPO_ROOT/build/bin/repro"
@@ -408,226 +538,36 @@ cp "$REPRO_CLI_BIN" "$STAGE_DIR/usr/bin/repro"
 chmod +x "$STAGE_DIR/usr/bin/repro"
 echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/repro"))"
 
-# M9.R.24.1g.2 -- the repro CLI uses Nim's dynlib runtime which
-# dlopens libraries by their *linker* name (no SONAME version) by
-# default: dlopen("libsqlite3.so"). Debian's libsqlite3-0 ships only
-# the SONAME form (libsqlite3.so.0); the unversioned linker name is
-# in libsqlite3-dev. Symlink the SONAME -> linker name so the
-# unversioned dlopen succeeds without dragging in the -dev package.
-sqlite_so="$(find "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
-              -maxdepth 4 -name 'libsqlite3.so.0' -type f -o \
-              -name 'libsqlite3.so.0' -type l 2>/dev/null | head -1)"
-if [ -n "$sqlite_so" ]; then
-  ln -sf "$(basename "$sqlite_so")" "$(dirname "$sqlite_so")/libsqlite3.so"
-  echo "[stage-de-rootfs] symlinked libsqlite3.so -> $(basename "$sqlite_so")"
-fi
-# Qt6 dlopens libvulkan.so (bare linker name); Debian's libvulkan1
-# package only ships libvulkan.so.1.
-vulkan_so="$(find "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
-              -maxdepth 4 \( -name 'libvulkan.so.1' -type f -o \
-              -name 'libvulkan.so.1' -type l \) 2>/dev/null | head -1)"
-if [ -n "$vulkan_so" ]; then
-  ln -sf "$(basename "$vulkan_so")" "$(dirname "$vulkan_so")/libvulkan.so"
-  echo "[stage-de-rootfs] symlinked libvulkan.so -> $(basename "$vulkan_so")"
-fi
+# ---------------------------------------------------------------------------
+# Phase 7: rebuild ld.so.cache so dlopen(bare-name) calls inside DE
+# binaries find shared libs that aren't reachable via embedded RPATH.
+# We feed every nix-store-mirrored /lib dir + every from-source
+# install-mirror /lib + /lib64 into /etc/ld.so.conf.d/ and let
+# /sbin/ldconfig under chroot do the rest.
+# ---------------------------------------------------------------------------
 
-# M9.R.24.1g.3 -- libclingo is the ASP solver Repro's engine action-cache
-# planner dlopens at runtime. Debian doesn't package it (Potassco
-# upstream releases binary tarballs but no debian/control). Lift the
-# host's nix-shell libclingo into the staged tree at /usr/lib/.
-# M9.R.24.2 -- Qt6 9.x bundle from the nix-shell. The reproos-installer
-# is built against nix-shell Qt 6.9.x; Debian trixie ships Qt 6.8.x.
-# Without the bundle, the installer aborts at startup with:
-#   libQt6Core.so.6: version `Qt_6.9' not found
-# Mirror the nix-store Qt6 .so files into /usr/lib so the loader picks
-# them up via ld.so.cache. The bundled libs are SONAME-suffixed
-# (libQt6Core.so.6.9.x); we create the symlink chain that maps the
-# major-SONAME (libQt6Core.so.6) to the bundled file.
-qt6_core_src="$(find /nix/store -maxdepth 4 -path '*qtbase*/lib/libQt6Core.so.6.9*' \
-                -type f 2>/dev/null | head -1)"
-if [ -n "$qt6_core_src" ]; then
-  echo "[stage-de-rootfs] bundling Qt6 9.x from all nix-store qt* packages"
-  qt6_dst="$STAGE_DIR/usr/lib/x86_64-linux-gnu"
-  mkdir -p "$qt6_dst"
-  # Walk EVERY nix-store qt-package (qtbase, qtdeclarative, qtwayland,
-  # qtquickcontrols2, ...) so we pick up libQt6Qml from qtdeclarative,
-  # libQt6Core from qtbase, etc. Otherwise we mix 6.9 Core with 6.8
-  # Qml and the loader complains 'Qt_6_PRIVATE_API not found'.
-  qt6_count=0
-  while IFS= read -r f; do
-    base="$(basename "$f")"
-    cp -f "$f" "$qt6_dst/$base"
-    cp -f "$f" "$STAGE_DIR/usr/lib/$base"
-    soname6="$(echo "$base" | sed -E 's/(libQt6[^.]+)\.so\.6\.[0-9]+\.[0-9]+/\1.so.6/')"
-    if [ "$soname6" != "$base" ]; then
-      ln -sf "$base" "$qt6_dst/$soname6"
-      ln -sf "$base" "$STAGE_DIR/usr/lib/$soname6"
+mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
+{
+  # From-source install-mirror lib dirs.
+  for d in "$ISO_SRC_MIRROR_ROOT"/*/.repro/output/install/usr/lib \
+           "$ISO_SRC_MIRROR_ROOT"/*/.repro/output/install/usr/lib64; do
+    if [ -d "$d" ]; then
+      echo "${d#$STAGE_DIR}"
     fi
-    qt6_count=$((qt6_count + 1))
-  done < <(find /nix/store -maxdepth 4 \
-            -path '/nix/store/*qt*/lib/libQt6*.so.6.9*' \
-            -type f 2>/dev/null)
-  echo "[stage-de-rootfs] copied $qt6_count Qt6 9.x .so files"
-  # Plugins (offscreen/xcb/wayland QPA) + QML dirs from every Qt6 9.x
-  # package.
-  for qtpkg in /nix/store/*qt*-6.9.*; do
-    [ -d "$qtpkg/lib/qt-6" ] || continue
-    for sub in plugins qml; do
-      if [ -d "$qtpkg/lib/qt-6/$sub" ]; then
-        mkdir -p "$STAGE_DIR/usr/lib/qt6/$sub"
-        cp -rLfn "$qtpkg/lib/qt-6/$sub/." \
-          "$STAGE_DIR/usr/lib/qt6/$sub/" 2>/dev/null || true
-      fi
-    done
   done
-fi
-
-clingo_src="$(find /nix/store -maxdepth 3 -name 'libclingo.so.4*' \
-              -type f 2>/dev/null | head -1)"
-if [ -n "$clingo_src" ]; then
-  cp "$clingo_src" "$STAGE_DIR/usr/lib/$(basename "$clingo_src")"
-  ln -sf "$(basename "$clingo_src")" "$STAGE_DIR/usr/lib/libclingo.so.4"
-  ln -sf "libclingo.so.4" "$STAGE_DIR/usr/lib/libclingo.so"
-  echo "[stage-de-rootfs] bundled $clingo_src + linker-name symlink"
-
-  # M9.R.24.1g.10 -- the repro CLI's clingo dynlib path is baked at
-  # compile-time as the nix-store ABSOLUTE path (e.g.
-  # /nix/store/07zxk485h58ab97j335174ana4xp13kh-clingo-5.8.0/lib/libclingo.so).
-  # Nim's dlopen tries that path FIRST and never falls back to the
-  # bare name (`libclingo.so`) if the file exists at the absolute
-  # path's parent dir... actually it doesn't fall back at all because
-  # the ELF's embedded path stops the search. Mirror the nix-store
-  # layout inside the staged tree so the absolute path resolves.
-  # Two candidate nix-store paths in eli-wsl (the binary was built
-  # under one specific hash); mirror BOTH to be safe.
-  for nsdir in /nix/store/07zxk485h58ab97j335174ana4xp13kh-clingo-5.8.0 \
-               /nix/store/kgibywhn2k14lr2mwwx2sp08p57pdizp-clingo-5.8.0; do
-    mkdir -p "$STAGE_DIR$nsdir/lib"
-    ln -sf "/usr/lib/$(basename "$clingo_src")" \
-      "$STAGE_DIR$nsdir/lib/$(basename "$clingo_src")"
-    ln -sf "$(basename "$clingo_src")" \
-      "$STAGE_DIR$nsdir/lib/libclingo.so.4"
-    ln -sf "libclingo.so.4" "$STAGE_DIR$nsdir/lib/libclingo.so"
+  # Nix-store mirrored /lib dirs.
+  for d in "$STAGE_DIR"/nix/store/*/lib; do
+    if [ -d "$d" ]; then
+      echo "${d#$STAGE_DIR}"
+    fi
   done
-  echo "[stage-de-rootfs] mirrored libclingo at nix-store absolute paths"
-fi
+  # Standard fallbacks for the slim Debian base.
+  echo "/usr/lib"
+  echo "/usr/lib64"
+} > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf"
 
-# Track which recipes contributed.
-contributed=()
-missing=()
-
-for pkg in "${DE_RECIPES[@]}"; do
-  install_root="$REPO_ROOT/recipes/packages/source/$pkg/.repro/output/install/usr"
-  if [ ! -d "$install_root" ]; then
-    missing+=("$pkg")
-    continue
-  fi
-  # Recursive copy preserving symlinks + permissions. Use -L to
-  # dereference symlinks where the source is a /nix/store path (we
-  # need a self-contained rootfs; nix-store paths aren't on the live
-  # ISO). Use -n so we don't overwrite when two recipes ship the same
-  # file (first wins; the priority order in DE_RECIPES is intentional:
-  # sway is smallest and has the fewest collisions).
-  cp -rL --no-clobber "$install_root/." "$STAGE_DIR/usr/" 2>/dev/null || true
-  contributed+=("$pkg")
-done
-
-echo "[stage-de-rootfs] contributed=${contributed[*]}"
-if [ "${#missing[@]}" -gt 0 ]; then
-  echo "[stage-de-rootfs] missing=${missing[*]} (these recipes aren't built; their binaries WILL NOT be in the ISO)" >&2
-fi
-if [ "${#contributed[@]}" -eq 0 ]; then
-  echo "[stage-de-rootfs] no DE recipes contributed; aborting" >&2
-  exit 65
-fi
-
-# M9.R.19.4 -- patchelf-rewrite RPATH/RUNPATH on every from-source
-# binary in the staged tree. The from-source recipes' cmake/meson
-# builds bake the BUILD HOST's
-#   /opt/repro/reprobuild/recipes/packages/source/<pkg>/.repro/output/install/usr/lib*
-# paths into each ELF's DT_RUNPATH. Those paths DO NOT EXIST in the
-# live ISO -- /opt/repro/reprobuild/ is a build-host fiction. The
-# Debian-trixie base userspace ships shared libs at
-# /usr/lib/x86_64-linux-gnu/ and our DE rootfs union copies the
-# from-source libs ALSO into /usr/lib/ (via the cp -rL above), so the
-# loader can find every dep at the standard search path -- but ONLY
-# IF we strip the bogus RUNPATH so the loader doesn't reject the
-# missing /opt/repro/... entries.
-#
-# Without this step, sway's libdrm + libgobject-2.0 + libpixman-1 are
-# "not found" at runtime because the loader honours the DT_RUNPATH
-# token list strictly: every directory in the list is searched, and a
-# missing directory aborts the search. Same trip for the
-# reproos-installer Qt6 binary.
-#
-# Strategy: set RUNPATH to an empty string (let the dynamic loader
-# fall back to /etc/ld.so.cache + LD_LIBRARY_PATH + standard search
-# paths). This is a destructive in-place edit -- safe because the
-# staged tree is a private copy of the install mirrors, not the
-# canonical artifact cache.
-patchelf_bin="$(command -v patchelf || true)"
-if [ -z "$patchelf_bin" ]; then
-  echo "[stage-de-rootfs] patchelf not in PATH; skipping RPATH/interpreter cleanup -- the live ISO's from-source binaries WILL NOT find their .so deps" >&2
-else
-  patched=0
-  # M9.R.24.1d -- in addition to RPATH/RUNPATH, the from-source recipes
-  # build under nix-shell which bakes a nix-store glibc interpreter
-  # path into every ELF's PT_INTERP segment, e.g.
-  #   /nix/store/<hash>-glibc-2.40/lib/ld-linux-x86-64.so.2
-  # That path DOES NOT EXIST in the live ISO -- /nix/store/ is a
-  # build-host fiction. `bash` reports "cannot execute: required file
-  # not found" the moment it tries to exec the binary because the
-  # kernel loader can't find the interpreter named in PT_INTERP.
-  # Fix: rewrite PT_INTERP to the staged Debian glibc ld-linux path.
-  STAGE_LDLINUX=/lib64/ld-linux-x86-64.so.2
-  interp_patched=0
-  while IFS= read -r elf; do
-    # RPATH/RUNPATH cleanup -- strip any bake-time RUNPATH that points
-    # outside the live ISO's filesystem. The loader honours RUNPATH
-    # strictly: a single missing directory aborts the search (the
-    # dynamic linker checks each entry, and ENOENT on one terminates
-    # resolution). Targets BOTH /opt/repro/reprobuild/ (from-source
-    # recipes' install-mirror) and /nix/store/ (nix-shell glibc/gcc-
-    # lib RUNPATHs baked into libclingo and Qt6 libs).
-    rp="$($patchelf_bin --print-rpath "$elf" 2>/dev/null || true)"
-    if echo "$rp" | grep -qE "/opt/repro/reprobuild/|/nix/store/"; then
-      $patchelf_bin --remove-rpath "$elf" 2>/dev/null || true
-      patched=$((patched + 1))
-    fi
-    # Interpreter cleanup -- only ELFs that have a PT_INTERP segment
-    # (executables, not shared libs).
-    interp="$($patchelf_bin --print-interpreter "$elf" 2>/dev/null || true)"
-    if echo "$interp" | grep -q "^/nix/store/"; then
-      $patchelf_bin --set-interpreter "$STAGE_LDLINUX" "$elf" 2>/dev/null || true
-      interp_patched=$((interp_patched + 1))
-    fi
-  done < <(find "$STAGE_DIR/usr/bin" "$STAGE_DIR/usr/lib" "$STAGE_DIR/usr/lib64" \
-                "$STAGE_DIR/usr/libexec" \
-              -type f \( -name '*.so*' -o -perm -u+x \) 2>/dev/null)
-  echo "[stage-de-rootfs] patchelf cleaned RPATH on $patched from-source ELFs"
-  echo "[stage-de-rootfs] patchelf rewrote PT_INTERP on $interp_patched nix-store-built ELFs"
-fi
-
-# M9.R.24.1g.4 -- rebuild ld.so.cache so the unioned /usr/lib libs
-# (libclingo, the from-source overlays, the symlinked libsqlite3.so)
-# are discoverable by dlopen() at runtime. Without this the live-init
-# does NOT regenerate the cache; libclingo isn't found because the
-# stock Debian cache only knows /usr/lib/x86_64-linux-gnu/.
-# Use the staged Debian glibc /sbin/ldconfig inside a chroot so the
-# cache writes resolve naturally against $STAGE_DIR. The nix-shell
-# host glibc-bin ldconfig's -r doesn't redirect the cache temp file
-# correctly and falls over creating ld.so.cache~ on a read-only path.
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
 if [ -x "$chroot_ldconfig" ]; then
-  # Add /usr/lib (where libclingo + from-source overlays live) to the
-  # search path so ldconfig indexes it. The stock Debian
-  # /etc/ld.so.conf.d/x86_64-linux-gnu.conf only covers the multiarch
-  # subdir.
-  mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
-  cat > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf" <<'EOF'
-/usr/lib
-/usr/lib64
-EOF
   chroot "$STAGE_DIR" /sbin/ldconfig 2>&1 | \
     grep -vE 'is not a symbolic link|file format not recognized' || true
   echo "[stage-de-rootfs] rebuilt ld.so.cache via chroot/sbin/ldconfig"
