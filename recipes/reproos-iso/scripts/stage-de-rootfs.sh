@@ -249,7 +249,12 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
     echo "Config: $AUTO_CFG"
     echo ""
     sleep 3
-    /usr/bin/reproos-installer --automated "$AUTO_CFG"
+    # --automated path doesn't need a display server but QGuiApplication
+    # still initialises a QPA plugin. Force `offscreen` so Qt doesn't
+    # try to connect to xcb (which fails on a tty boot) and instead
+    # uses the headless rasteriser.
+    QT_QPA_PLATFORM=offscreen \
+      /usr/bin/reproos-installer --automated "$AUTO_CFG"
     rc=$?
     echo ""
     echo "=== Installer exited with rc=$rc ==="
