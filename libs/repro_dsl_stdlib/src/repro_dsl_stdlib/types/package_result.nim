@@ -375,6 +375,15 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
   ## emitted shell script does not need additional escaping. Order is
   ## (nativeBuildDeps, then buildDeps) in source-declaration order —
   ## deterministic across runs.
+  ##
+  ## **Direct-only** — this helper enumerates ONLY the package's
+  ## directly-declared deps. Transitive propagation is layered on top
+  ## by ``m9r30CollectDepPropagatedManifests`` (M9.R.30.2), which
+  ## reads each direct dep's ``.m9r30_propagated_libdirs.txt`` file
+  ## (emitted by every recipe's install-mirror at install time) and
+  ## appends every line to the consumer's RPATH. Together the two
+  ## helpers implement Nix-style ``propagatedBuildInputs`` semantics:
+  ## every runtime dep of every dep automatically joins the consumer.
   let recipeRoot = parentDir(projectRoot)
   if recipeRoot.len == 0:
     return
@@ -382,6 +391,72 @@ proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
   for raw in registeredBuildDeps(packageName):
     m9r14fAppendDepMirrorDir(result, recipeRoot, raw)
+
+# ---------------------------------------------------------------------------
+# M9.R.30.2 — transitive RPATH propagation via per-recipe manifest file.
+# ---------------------------------------------------------------------------
+#
+# The architectural gap surfaced by M9.R.29 (DE binaries' RPATH missing
+# transitive libs — sway → wlroots → libdrm gap; kwin → libz; mutter →
+# libGLESv2; plasmashell → libmount) was that ``m9r14fCollectDepMirrorLibDirs``
+# walks only DIRECT buildDeps + nativeBuildDeps. The recipes'
+# ``runtimeDeps:`` blocks all carry the M9.R.5b TODO (empty `discard`)
+# so they cannot serve as the propagation channel.
+#
+# M9.R.30.2 closes the gap with the same mechanism Nix uses for
+# ``propagatedBuildInputs``: each recipe's install-mirror writes a
+# manifest file at ``.repro/output/install/.m9r30_propagated_libdirs.txt``
+# listing every absolute lib dir that contributed to the recipe's own
+# RPATH. When a consumer recipe runs its install-mirror script, it reads
+# each DIRECT dep's manifest and appends every line to its RPATH.
+# Because each recipe's manifest already contains its OWN transitive
+# closure (every dep that recipe inherited from its deps' manifests),
+# the propagation is transitive without a graph walk at Nim time.
+#
+# Determinism: the manifest is line-separated, deduplicated, in
+# insertion order. The shell-time merge preserves order and dedups.
+#
+# Bootstrap: a dep that hasn't been built yet (no manifest on disk)
+# contributes only its direct lib + lib64 dirs (the M9.R.14f.2
+# behaviour). Once the dep is rebuilt, the manifest appears and the
+# consumer's NEXT install-mirror run picks up the transitive paths.
+# This means a freshly-checked-out tree needs ONE bottom-up build pass
+# to fully populate every manifest; subsequent builds are stable.
+
+const m9r30PropagatedManifestName* = ".m9r30_propagated_libdirs.txt"
+  ## Per-recipe manifest filename relative to
+  ## ``<recipeRoot>/.repro/output/install/``. Exported for unit-test
+  ## introspection + for the staging script's reverse audit (M9.R.30.10
+  ## verifies every produced ELF's NEEDED resolves under the union of
+  ## every manifest that reached the RPATH).
+
+proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
+    seq[string] =
+  ## DSL-port M9.R.30.2 — return the absolute paths of every direct
+  ## dep's ``.m9r30_propagated_libdirs.txt`` manifest file. The emitted
+  ## shell snippet reads each one (with ``[ -f ... ]`` guard so a dep
+  ## that hasn't been built yet contributes nothing) and folds every
+  ## line into the consumer's RPATH.
+  ##
+  ## Order: (nativeBuildDeps, then buildDeps) in source-declaration
+  ## order — same as ``m9r14fCollectDepMirrorLibDirs`` so the resulting
+  ## RPATH preserves a deterministic "direct first, then propagated"
+  ## structure.
+  let recipeRoot = parentDir(projectRoot)
+  if recipeRoot.len == 0:
+    return
+  proc appendManifestPath(dst: var seq[string]; depRaw: string) =
+    let dep = m9r14fStripDepConstraint(depRaw)
+    if dep.len == 0: return
+    let manifest = recipeRoot / dep / ".repro" / "output" / "install" /
+      m9r30PropagatedManifestName
+    let posix = manifest.replace("\\", "/")
+    if posix notin dst:
+      dst.add(posix)
+  for raw in registeredNativeBuildDeps(packageName):
+    appendManifestPath(result, raw)
+  for raw in registeredBuildDeps(packageName):
+    appendManifestPath(result, raw)
 
 # ---------------------------------------------------------------------------
 # M9.R.15i.1 — Qt6 component CMake-config dir threading.
@@ -792,11 +867,31 @@ proc m9r15oCollectQt6TransitiveCmakeConfigDirs*(projectRoot, packageName: string
     m9r15iScanCmakeConfigDirs(siblingsRoot / dep, result)
 
 proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
-                                 depMirrorLibDirs: seq[string]): string =
+                                 depMirrorLibDirs: seq[string];
+                                 depManifestPaths: seq[string] = @[];
+                                 ownManifestPath: string = "";
+                                 packageName: string = ""): string =
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
   ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin``
   ## and runs ``patchelf --set-rpath`` on each. RPATH layout:
   ## ``$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:<dep1>:<dep2>:...``.
+  ##
+  ## DSL-port M9.R.30.2 — when ``depManifestPaths`` is non-empty, the
+  ## script reads each dep's ``.m9r30_propagated_libdirs.txt`` manifest
+  ## file (if it exists on disk) and appends every line to the RPATH.
+  ## When ``ownManifestPath`` is non-empty, the script ALSO writes the
+  ## consumer's final RPATH lines to that path so downstream consumers
+  ## (recipes that buildDep this one) can read the closure transitively.
+  ##
+  ## DSL-port M9.R.30.3 — when ``ownManifestPath`` is non-empty (i.e.
+  ## the standard install-mirror call path), after patching every ELF
+  ## the script runs ``patchelf --print-needed`` and verifies that
+  ## every NEEDED line resolves to an actual file under one of the
+  ## RPATH dirs. An unresolved NEEDED FAILS THE BUILD (exit 75) with
+  ## a structured error naming the package + binary + missing SONAME.
+  ## This forces recipe authors to declare the missing transitive dep
+  ## explicitly instead of silently shipping broken binaries to the
+  ## ISO stage.
   ##
   ## The ``$ORIGIN`` family covers same-directory + sibling-directory
   ## SONAME chains (``libwayland-server.so`` next to
@@ -848,6 +943,30 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     let escapedLibDir = libDir.replace("\"", "\\\"")
     script.add("if [ -d \"" & escapedLibDir & "\" ]; then ")
     script.add("rpath=\"$rpath:" & escapedLibDir & "\"; ")
+    script.add("fi; ")
+  # DSL-port M9.R.30.2 — read each direct dep's propagated-libdirs
+  # manifest (if it exists) and append every line to rpath. Each
+  # recipe's install-mirror writes its own manifest at
+  # ``<recipeRoot>/.repro/output/install/.m9r30_propagated_libdirs.txt``
+  # with the full set of lib dirs that contributed to ITS rpath. So a
+  # consumer transitively inherits its dep's dep's dep's lib dirs
+  # without having to walk the recipe graph at Nim time. Lines are
+  # absolute POSIX paths; existence-check via ``[ -d ... ]`` so stale
+  # entries don't pollute the embedded RPATH.
+  #
+  # The dedup is by simple substring scan against the current rpath
+  # — ``case ":$rpath:" in *":$line:"*) ;; *) rpath="$rpath:$line";;
+  # esac`` — so a dep already on rpath from the direct-walk doesn't
+  # duplicate. This keeps the final RPATH bounded by the total number
+  # of distinct lib dirs in the build closure.
+  for manifestPath in depManifestPaths:
+    let escapedManifest = manifestPath.replace("\"", "\\\"")
+    script.add("if [ -f \"" & escapedManifest & "\" ]; then ")
+    script.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
+    script.add("if [ -z \"$line\" ] || ! [ -d \"$line\" ]; then continue; fi; ")
+    script.add("case \":$rpath:\" in *\":$line:\"*) ;; ")
+    script.add("*) rpath=\"$rpath:$line\";; esac; ")
+    script.add("done < \"" & escapedManifest & "\"; ")
     script.add("fi; ")
   # Append every directory present in ``$LD_LIBRARY_PATH``. Splits on
   # ``:`` via IFS; existence-check via ``[ -d ... ]`` so empty
@@ -913,6 +1032,32 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("fi; ")
     script.add("done; ")
     script.add("fi; ")
+  # DSL-port M9.R.30.2 — write the consumer's own propagated-libdirs
+  # manifest BEFORE walking the ELFs so a parallel build pass that
+  # races against this consumer's downstream recipe can read the
+  # manifest as soon as the rpath is computed. Lines are absolute,
+  # one per line, in the order they appear in $rpath. We split rpath
+  # on ``:`` and filter out the ``$ORIGIN`` family (those are
+  # binary-relative and meaningless to a downstream consumer); only
+  # the ABSOLUTE paths land in the manifest.
+  if ownManifestPath.len > 0:
+    let escapedManifest = ownManifestPath.replace("\"", "\\\"")
+    script.add("mkdir -p \"$(dirname \"" & escapedManifest & "\")\"; ")
+    # ``: > file`` truncates atomically; the subsequent appends are
+    # individual ``printf`` calls each appending one line. Using
+    # printf rather than ``echo`` so a future rpath entry that starts
+    # with ``-`` doesn't get interpreted as a flag.
+    script.add(": > \"" & escapedManifest & "\"; ")
+    script.add("OLD_IFS=$IFS; IFS=':'; ")
+    script.add("for rp in $rpath; do ")
+    # Skip ``$ORIGIN`` family — binary-relative tokens have no meaning
+    # to a downstream consumer's ELF (its $ORIGIN is different).
+    script.add("case \"$rp\" in '$ORIGIN'*) continue;; esac; ")
+    # Skip empty / non-absolute entries.
+    script.add("if [ -z \"$rp\" ]; then continue; fi; ")
+    script.add("case \"$rp\" in /*) ;; *) continue;; esac; ")
+    script.add("printf '%s\\n' \"$rp\" >> \"" & escapedManifest & "\"; ")
+    script.add("done; IFS=$OLD_IFS; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
   # Walk bin/ for executables.
   script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
@@ -931,6 +1076,78 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add(";; esac; ")
   script.add("done; ")
   script.add("fi; done; ")
+  # DSL-port M9.R.30.3 — NEEDED safety net. After patching every ELF,
+  # re-walk lib/ + lib64/ + bin/ and run ``patchelf --print-needed``
+  # on each ELF. For every NEEDED SONAME, verify the file is found
+  # under one of the RPATH dirs (split $rpath on ``:`` and probe
+  # ``$dir/$soname``). If any NEEDED is unresolved, FAIL the build
+  # (exit 75 — "M9.R.30 unresolved transitive NEEDED").
+  #
+  # The check is gated on the M9.R.30 env var ``REPRO_M9R30_NEEDED_CHECK``
+  # so partial-graph dev builds (a single recipe rebuilt in isolation
+  # while a downstream dep is in flight) can opt out. The reproos-iso
+  # build sets the env var to ``1`` so the ISO-staging path always
+  # enforces. The default is OFF so single-recipe unit-test fixtures
+  # don't accidentally fail.
+  #
+  # ``$ORIGIN``-relative entries in rpath are expanded by substituting
+  # the directory of the ELF being checked (``dirname "$f"``); this
+  # matches the dynamic-linker semantics exactly.
+  #
+  # The ``while read`` body runs in a SUBSHELL (find | while pipe), so
+  # we count failures via a marker FILE next to the manifest; the
+  # parent shell then checks the file's line count + exits non-zero
+  # if any unresolved NEEDED landed.
+  if ownManifestPath.len > 0:
+    let escapedPackage = packageName.replace("\"", "\\\"")
+    let escapedManifest = ownManifestPath.replace("\"", "\\\"")
+    script.add("if [ \"${REPRO_M9R30_NEEDED_CHECK:-0}\" = \"1\" ]; then ")
+    script.add("m9r30_unresolved_log=\"" & escapedManifest & ".m9r30_unresolved\"; ")
+    script.add(": > \"$m9r30_unresolved_log\"; ")
+    script.add("for d in \"" & escapedDstUsr & "/lib\" \"" & escapedDstUsr &
+      "/lib64\" \"" & escapedDstUsr & "/bin\"; do ")
+    script.add("if [ -d \"$d\" ]; then ")
+    script.add("find \"$d\" -maxdepth 2 -type f \\( ")
+    script.add("-name '*.so' -o -name '*.so.*' -o -perm -u+x ")
+    script.add("\\) 2>/dev/null | while IFS= read -r f; do ")
+    script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
+    script.add("case \"$magic\" in 177ELF*) ")
+    script.add("origin_dir=$(dirname \"$f\"); ")
+    script.add("for so in $(patchelf --print-needed \"$f\" 2>/dev/null); do ")
+    script.add("found=0; ")
+    script.add("OLD_IFS=$IFS; IFS=':'; ")
+    script.add("for rp in $rpath; do ")
+    script.add("expanded=$(printf '%s' \"$rp\" | sed \"s|\\$ORIGIN|$origin_dir|g\"); ")
+    script.add("if [ -f \"$expanded/$so\" ]; then ")
+    script.add("found=1; break; ")
+    script.add("fi; ")
+    script.add("done; IFS=$OLD_IFS; ")
+    # Also accept resolution via standard system dirs the live ISO
+    # always has (the dynamic loader's default search list).  Without
+    # this fallback every ELF would fail on ``libc.so.6`` /
+    # ``ld-linux-*.so`` etc. since those come from the nix-stub /
+    # base-rootfs path, not from a from-source dep mirror.
+    script.add("if [ \"$found\" = \"0\" ]; then ")
+    script.add("for sysd in /lib /lib64 /usr/lib /usr/lib64 /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do ")
+    script.add("if [ -f \"$sysd/$so\" ]; then found=1; break; fi; ")
+    script.add("done; fi; ")
+    script.add("if [ \"$found\" = \"0\" ]; then ")
+    script.add("printf '[m9r30] UNRESOLVED NEEDED: pkg=%s bin=%s soname=%s\\n' " &
+      "\"" & escapedPackage & "\" \"$f\" \"$so\" >&2; ")
+    script.add("printf '%s\\t%s\\n' \"$f\" \"$so\" >> \"$m9r30_unresolved_log\"; ")
+    script.add("fi; ")
+    script.add("done; ")
+    script.add(";; esac; ")
+    script.add("done; ")
+    script.add("fi; done; ")
+    # Parent-shell tally: any non-empty unresolved log = fail.
+    script.add("if [ -s \"$m9r30_unresolved_log\" ]; then ")
+    script.add("printf '[m9r30] FAILED: pkg=%s has %d unresolved NEEDED " &
+      "entries (see %s)\\n' \"" & escapedPackage &
+      "\" \"$(wc -l < \"$m9r30_unresolved_log\")\" \"$m9r30_unresolved_log\" >&2; ")
+    script.add("exit 75; ")
+    script.add("fi; ")
+    script.add("fi; ")
   script.add("fi; ")
   script
 
@@ -1067,8 +1284,19 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # M9.R.14f.2 — patch RPATH on every ELF under the mirror's lib/lib64/bin
   # dirs so the resulting binaries can find their transitive deps without
   # relying on LD_LIBRARY_PATH at runtime.
+  #
+  # M9.R.30.2 — additionally walk each direct dep's propagated-libdirs
+  # manifest (Nix ``propagatedBuildInputs`` semantics) AND write the
+  # consumer's own manifest so downstream consumers transitively inherit.
   let depMirrorLibDirs = m9r14fCollectDepMirrorLibDirs(projectRoot, packageName)
-  script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs))
+  let depManifestPaths = m9r30CollectDepPropagatedManifestPaths(
+    projectRoot, packageName)
+  let ownManifestPath = (dstUsrRoot / m9r30PropagatedManifestName)
+    .replace("\\", "/").replace("\"", "\\\"")
+  script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs,
+    depManifestPaths = depManifestPaths,
+    ownManifestPath = ownManifestPath,
+    packageName = packageName))
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
   let stageId = "install-mirror-" & sanitizeStageCopyName(packageName)
