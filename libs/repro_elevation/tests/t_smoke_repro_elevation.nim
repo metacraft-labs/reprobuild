@@ -969,6 +969,308 @@ suite "repro_elevation: fs.systemDirectory allowlist + driver":
         raised = true
       check raised
 
+# ===========================================================================
+# Windows-System-Resources Phase D — `fs.systemDirectory` NTFS ACL apply
+# pure helpers + drift digest. The icacls argv assemblers + the Allow
+# / Deny pivot + the canonical-payload contributors are all
+# platform-pure (no shell-out); the live `icacls <path>` re-probe lives
+# behind `when defined(windows)` in the driver and is exercised only
+# on a Windows host.
+# ===========================================================================
+
+suite "repro_elevation: fs.systemDirectory Phase D — icacls argv":
+
+  test "splitDirAclEntry detects the Deny direction":
+    # The profile builder's `aclEntry(... type=Deny)` emits the leading
+    # `:(D,...)` marker; the splitter strips it to the bare `:(...)` form
+    # icacls's `/deny` verb consumes.
+    let allow = splitDirAclEntry("SYSTEM:(F)")
+    check allow.verb == icaclsGrantVerb
+    check allow.spec == "SYSTEM:(F)"
+    let deny = splitDirAclEntry("Guests:(D,W)")
+    check deny.verb == icaclsDenyVerb
+    check deny.spec == "Guests:(W)"
+    let denyMulti = splitDirAclEntry(
+      "BUILTIN\\Administrators:(D,F)")
+    check denyMulti.verb == icaclsDenyVerb
+    check denyMulti.spec == "BUILTIN\\Administrators:(F)"
+
+  test "renderTakeownDirCommandArgs exact argv":
+    check renderTakeownDirCommandArgs("C:\\actions-runner-tokens") ==
+      @["takeown", "/F", "C:\\actions-runner-tokens", "/A"]
+    # Path with a space — the renderer emits the raw argv; quoting
+    # happens at the shell-cmd join.
+    check renderTakeownDirCommandArgs("C:\\Program Files\\foo") ==
+      @["takeown", "/F", "C:\\Program Files\\foo", "/A"]
+
+  test "renderIcaclsSetOwnerCommandArgs exact argv":
+    check renderIcaclsSetOwnerCommandArgs(
+      "C:\\actions-runner-tokens", "SYSTEM") ==
+      @["icacls", "C:\\actions-runner-tokens", "/setowner", "SYSTEM"]
+    check renderIcaclsSetOwnerCommandArgs(
+      "C:\\actions-runner-tokens", "BUILTIN\\Administrators") ==
+      @["icacls", "C:\\actions-runner-tokens", "/setowner",
+        "BUILTIN\\Administrators"]
+
+  test "renderIcaclsInheritanceCommandArgs maps the closed set":
+    let empty: seq[string] = @[]
+    # `enabled` (or unset) is a no-op — empty argv.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "enabled") == empty
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "") == empty
+    # `disabled-replace` -> `/inheritance:r`.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "disabled-replace") ==
+      @["icacls", "C:\\actions-runner-tokens", "/inheritance:r"]
+    # `disabled-convert` -> `/inheritance:d`.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "disabled-convert") ==
+      @["icacls", "C:\\actions-runner-tokens", "/inheritance:d"]
+    # `protected-clear-inherited` -> same `/inheritance:r` flag (the
+    # new vocabulary value names the SetAccessRuleProtection(true,
+    # false) intent — icacls's `r` is the closest live verb).
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "protected-clear-inherited") ==
+      @["icacls", "C:\\actions-runner-tokens", "/inheritance:r"]
+
+  test "renderIcaclsInheritanceCommandArgs refuses an unknown mode":
+    let empty: seq[string] = @[]
+    # An unknown mode falls through to the no-op branch; the closed-
+    # set validator at the codec boundary already rejects this before
+    # the driver sees the operation, so the pure renderer can fall
+    # through silently rather than raising.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "evil-mode") == empty
+
+  test "renderIcaclsGrantCommandArgs routes Allow vs Deny":
+    # Allow ACE -> /grant + verbatim spec.
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens", "SYSTEM:(F)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/grant", "SYSTEM:(F)"]
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens",
+      "BUILTIN\\Administrators:(F)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/grant",
+        "BUILTIN\\Administrators:(F)"]
+    # Deny ACE -> /deny + spec with the leading `D,` marker stripped.
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens", "Guests:(D,W)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/deny", "Guests:(W)"]
+    # Network ReadAndExecute (RX) Allow.
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens", "NetworkService:(RX)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/grant",
+        "NetworkService:(RX)"]
+
+  test "renderArgvAsShellCmd quotes each token":
+    # The shell-cmd join is what the driver feeds to `execCmdEx`. The
+    # path-with-spaces case is the load-bearing one: `quoteShell`
+    # wraps the path in double-quotes so the cmd.exe argv parser
+    # treats it as one token.
+    let argv = renderTakeownDirCommandArgs("C:\\Program Files\\foo")
+    let cmd = renderArgvAsShellCmd(argv)
+    # cmd.exe quoting: `takeown /F "C:\Program Files\foo" /A` on
+    # Windows; on POSIX `quoteShell` uses single-quotes. Either way
+    # the path's space must round-trip as part of ONE argument.
+    check cmd.contains("Program Files") or cmd.contains("Program\\ Files")
+    check cmd.startsWith("takeown")
+    check cmd.endsWith("/A")
+
+suite "repro_elevation: fs.systemDirectory Phase D — drift digest":
+
+  test "canonicalDirAclDesired empty when ACL unmanaged":
+    # The back-compat sentinel — an ACL-unmanaged directory MUST
+    # contribute the empty string so the post-Phase-D
+    # `fsSystemDirectoryDigestPayload` matches PR #7's pre-Phase-D
+    # payload byte-for-byte.
+    check canonicalDirAclDesired(false, "", @[], "") == ""
+
+  test "canonicalDirAclDesired stable across entry re-ordering":
+    let a = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)",
+        "NetworkService:(RX)"],
+      "protected-clear-inherited")
+    let b = canonicalDirAclDesired(true, "SYSTEM",
+      @["NetworkService:(RX)", "SYSTEM:(F)",
+        "BUILTIN\\Administrators:(F)"],
+      "protected-clear-inherited")
+    check a == b
+    check a.contains("SYSTEM:(F)")
+    check a.contains("mode=protected-clear-inherited")
+
+  test "canonicalDirAclDesired distinguishes inheritance vocab":
+    let enabled = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "enabled")
+    let replace = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-replace")
+    let convert = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-convert")
+    let protected = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "protected-clear-inherited")
+    check enabled != replace
+    check replace != convert
+    check convert != protected
+    check enabled != protected
+
+  test "canonicalDirAclDesired defaults missing inheritance to enabled":
+    check canonicalDirAclDesired(true, "SYSTEM", @["SYSTEM:(F)"], "") ==
+      canonicalDirAclDesired(true, "SYSTEM", @["SYSTEM:(F)"], "enabled")
+
+  test "canonicalDirAclObserved matches desired when ACEs converge":
+    # Order-independence: a host whose ACL contains the desired ACEs
+    # (plus possibly extras) yields the SAME observed-projection
+    # digest as the desired digest, so the broker's cache-hit
+    # predicate fires.
+    let desired = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"], "disabled-replace")
+    let observed = canonicalDirAclObserved(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"],
+      # Host's ACL has the desired ACEs PLUS an extra one (additive
+      # semantics — extras are NOT drift).
+      @["BUILTIN\\Administrators:(F)", "NetworkService:(RX)",
+        "SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    check desired == observed
+
+  test "canonicalDirAclObserved differs when a desired ACE is missing":
+    let desired = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"], "disabled-replace")
+    let observed = canonicalDirAclObserved(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"],
+      # Missing the second desired ACE on the host.
+      @["SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    check desired != observed
+
+  test "canonicalDirAclObserved differs when inheritance not pinned":
+    # `disabled-replace` requires the live ACL to have inheritance
+    # disabled. A host where inheritance is still enabled flips the
+    # digest even when every desired ACE is present.
+    let desired = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-replace")
+    let observed = canonicalDirAclObserved(true, "SYSTEM",
+      @["SYSTEM:(F)"], @["SYSTEM:(F)"],
+      observedInheritanceDisabled = false,
+      desiredInheritance = "disabled-replace")
+    check desired != observed
+
+  test "dirAclMatchesDesired covers the convergence + drift cases":
+    # Converged: every desired ACE present, inheritance disabled.
+    check dirAclMatchesDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], @["SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    # Drift: a desired ACE missing.
+    check not dirAclMatchesDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"],
+      @["SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    # Absent target -> never a match for an ACL-managed directory.
+    check not dirAclMatchesDesired(false, "SYSTEM",
+      @["SYSTEM:(F)"], @[],
+      observedInheritanceDisabled = false,
+      desiredInheritance = "enabled")
+
+  test "normalizeDirAclEntry collapses internal whitespace":
+    check normalizeDirAclEntry("SYSTEM:(F)") == "SYSTEM:(F)"
+    check normalizeDirAclEntry("  SYSTEM:(F)  ") == "SYSTEM:(F)"
+    check normalizeDirAclEntry("SYSTEM:(F)  (OI)") == "SYSTEM:(F) (OI)"
+    check normalizeDirAclEntry("SYSTEM:(F)\t (CI)") == "SYSTEM:(F) (CI)"
+
+  test "fsSystemDirectoryDigestPayload back-compat for ACL-unmanaged":
+    # The aclPresent==false branch MUST produce a string
+    # byte-identical to PR #7's legacy
+    # `"fs.systemDirectory:present"` payload so the unmanaged-ACL
+    # observation digest is bit-for-bit unchanged.
+    check fsSystemDirectoryDigestPayload(true, false, "", @[], "") ==
+      "fs.systemDirectory:present"
+    # Owner / entries / inheritance are IGNORED when aclPresent==false
+    # — a stray field doesn't poison the legacy payload.
+    check fsSystemDirectoryDigestPayload(true, false, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-replace") ==
+      "fs.systemDirectory:present"
+
+  test "fsSystemDirectoryDigestPayload absent yields the empty string":
+    # The absent observation digests to the zero sentinel; the
+    # payload itself is the empty string.
+    check fsSystemDirectoryDigestPayload(false, false, "", @[], "") == ""
+    check fsSystemDirectoryDigestPayload(false, true, "SYSTEM",
+      @["SYSTEM:(F)"], "enabled") == ""
+
+  test "fsSystemDirectoryDigestPayload extends payload when ACL managed":
+    let payload = fsSystemDirectoryDigestPayload(true, true,
+      "SYSTEM", @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)"],
+      "protected-clear-inherited")
+    check payload.startsWith("fs.systemDirectory:present|")
+    check payload.contains("owner=SYSTEM")
+    check payload.contains("mode=protected-clear-inherited")
+    check payload.contains("SYSTEM:(F)")
+    check payload.contains("BUILTIN\\Administrators:(F)")
+
+  test "fsSystemDirectoryDigestPayload distinguishes aclPresent variants":
+    # Pure-function digest assertion (no filesystem I/O): the
+    # aclPresent==false branch produces the back-compat sentinel; the
+    # aclPresent==true branch extends it with the canonical ACL
+    # contribution. The two payloads MUST hash to distinct digests so
+    # the broker's drift comparison recomputes the apply when the
+    # operator changes the ACL declaration.
+    let legacyPayload = fsSystemDirectoryDigestPayload(true, false,
+      "", @[], "")
+    let aclPayload = fsSystemDirectoryDigestPayload(true, true,
+      "SYSTEM", @["SYSTEM:(F)"], "protected-clear-inherited")
+    check legacyPayload == "fs.systemDirectory:present"
+    check legacyPayload != aclPayload
+    # BLAKE3 hashing is injective on distinct payloads.
+    check posixDigestHexOfText(legacyPayload) !=
+      posixDigestHexOfText(aclPayload)
+    # The aclPresent==false digest matches PR #7's legacy
+    # `posixDigestHexOfText("fs.systemDirectory:present")`
+    # byte-for-byte.
+    check posixDigestHexOfText(legacyPayload) ==
+      posixDigestHexOfText("fs.systemDirectory:present")
+
+  test "validator: aclInheritance closed-set vocabulary":
+    # Defence-in-depth — the codec-boundary validator rejects an
+    # inheritance value outside the closed set.
+    let bad = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdBadInh", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @["SYSTEM:(F)"],
+      fsdAclInheritance: "make-up-mode")
+    check operationValidationError(bad).len > 0
+    # All four documented values pass the validator.
+    for mode in ["enabled", "disabled-replace",
+                 "disabled-convert", "protected-clear-inherited"]:
+      let ok = PrivilegedOperation(kind: pokFsSystemDirectory,
+        address: "fdOk", fsdPath: "/etc/myapp.d",
+        fsdAclPresent: true,
+        fsdAclEntries: @["SYSTEM:(F)"],
+        fsdAclInheritance: mode)
+      check operationValidationError(ok) == ""
+
+  test "validator: aclEntries non-empty when aclPresent + non-destroy":
+    # A managed ACL must declare at least one ACE — an empty list is
+    # a profile authoring bug.
+    let bad = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdNoEntries", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @[],
+      fsdAclInheritance: "disabled-replace")
+    check operationValidationError(bad).len > 0
+    # Destroy direction does NOT require entries (the destroy strips
+    # the directory; no ACL stamp needed).
+    let okDestroy = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdDestroy", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @[],
+      fsdAclInheritance: "enabled",
+      fsdDestroy: true)
+    check operationValidationError(okDestroy) == ""
+
 suite "repro_elevation: env.systemVariable merge (Phase C)":
 
   test "computeMergedSystemPath keeps existing order, appends new entries":

@@ -309,6 +309,94 @@ fs.systemDirectory {
     check op.fsdDestroy == false
 
   # -----------------------------------------------------------------
+  # Windows-System-Resources Phase D — fs.systemDirectory ACL apply.
+  # The Phase A-C codec already round-trips the dirAcl* fields (PR #7
+  # landed the schema); Phase D bolts on apply-time tests asserting:
+  # (a) every inheritance vocabulary value round-trips, (b) the ACL
+  # fields ride into PrivilegedOperation correctly, (c) back-compat
+  # round-trips when aclPresent==false stay byte-identical, and
+  # (d) the Deny-direction ACE rides through unmangled.
+  # -----------------------------------------------------------------
+
+  test "fs.systemDirectory roundtrips with full ACL -> PrivilegedOperation":
+    # Phase D — the apply-side coverage: every dirAcl* field MUST land
+    # in the PrivilegedOperation so the driver sees the same shape
+    # the profile declared.
+    let parsed = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "BUILTIN\Administrators:(F)",
+                "NetworkService:(RX)"]
+  aclInheritance = "protected-clear-inherited"
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.kind == pokFsSystemDirectory
+    check op.fsdPath == "C:\\actions-runner-tokens"
+    check op.fsdAclPresent == true
+    check op.fsdAclOwner == "SYSTEM"
+    check op.fsdAclEntries.len == 3
+    check op.fsdAclEntries[0] == "SYSTEM:(F)"
+    check op.fsdAclEntries[2] == "NetworkService:(RX)"
+    check op.fsdAclInheritance == "protected-clear-inherited"
+    check operationValidationError(op) == ""
+
+  test "fs.systemDirectory every inheritance variant round-trips":
+    # Phase D closed-set defence-in-depth: the codec MUST emit + parse
+    # every documented `aclInheritance` vocabulary value identically.
+    for mode in @["enabled", "disabled-replace", "disabled-convert",
+                  "protected-clear-inherited"]:
+      let text = """
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)"]
+  aclInheritance = "$1"
+}
+""".replace("$1", mode)
+      let parsed = parseSystemProfile(text)
+      check parsed.resources.len == 1
+      check parsed.resources[0].dirAclInheritance == mode
+      let op = toPrivilegedOperation(parsed.resources[0])
+      check op.fsdAclInheritance == mode
+      check op.fsdAclPresent
+      check operationValidationError(op) == ""
+
+  test "fs.systemDirectory back-compat: no-ACL stanza re-renders cleanly":
+    # PR #7's pre-Phase-D shape: a stanza without any acl* fields MUST
+    # parse to `dirAclPresent == false`, render BACK without acl*
+    # fields, AND round-trip a second pass without drift. Phase D's
+    # observe digest preserves this back-compat via
+    # `fsSystemDirectoryDigestPayload(present, false, ...)`.
+    let text = "fs.systemDirectory {\n  path = \"/etc/myapp.d\"\n}\n"
+    let parsed = parseSystemProfile(text)
+    check parsed.resources[0].dirAclPresent == false
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.fsdAclPresent == false
+    check op.fsdAclOwner == ""
+    check op.fsdAclEntries.len == 0
+    check op.fsdAclInheritance == ""
+
+  test "fs.systemDirectory Deny ACE round-trips through the codec":
+    # Phase D — the Deny direction. The profile builder's
+    # `aclEntry(... type=Deny)` emits the `:(D,...)` marker; the codec
+    # MUST carry it verbatim so the driver's pure
+    # `splitDirAclEntry` can pivot to icacls's `/deny` verb.
+    let parsed = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "Guests:(D,W)"]
+  aclInheritance = "disabled-replace"
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.fsdAclEntries.len == 2
+    check op.fsdAclEntries[0] == "SYSTEM:(F)"
+    check op.fsdAclEntries[1] == "Guests:(D,W)"
+
+  # -----------------------------------------------------------------
   # Windows-System-Resources Phase C: windows.scheduledTask parser +
   # adapter + codec coverage.
   # -----------------------------------------------------------------

@@ -1318,6 +1318,81 @@ suite "Resource constructors":
                      `type` = Deny)
     check e == "Guests:(D,W)"
 
+  test "fsSystemDirectory with deny ACE rides through the field table":
+    # Windows-System-Resources Phase D: profile-side coverage of the
+    # Deny direction. The ACE string in `aclEntries` carries the
+    # `:(D,...)` marker the driver's pure splitter pivots on.
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target,
+      path = "C:\\actions-runner-tokens",
+      acl = ntfsAcl(
+        owner = "SYSTEM",
+        entries = [
+          aclEntry(principal = "SYSTEM", rights = FullControl),
+          aclEntry(principal = "Guests", rights = Write,
+                   `type` = Deny)],
+        inheritance = DisabledReplace),
+      address = "runnerTokenDirDeny")
+    check target.len == 1
+    check target[0].fields["aclOwner"].s == "SYSTEM"
+    check target[0].fields["aclInheritance"].s == "disabled-replace"
+    check target[0].fields["aclEntries"].items.len == 2
+    check target[0].fields["aclEntries"].items[0] == "SYSTEM:(F)"
+    check target[0].fields["aclEntries"].items[1] == "Guests:(D,W)"
+
+  test "fsSystemDirectory inheritance closed set exercises every variant":
+    # Windows-System-Resources Phase D: defence-in-depth — the
+    # template lowers each `AclInheritance` enum value to the exact
+    # string vocabulary the codec validator + the driver's
+    # `renderIcaclsInheritanceCommandArgs` switch on.
+    for (inheritance, expected) in @[
+      (Enabled, "enabled"),
+      (DisabledReplace, "disabled-replace"),
+      (DisabledConvert, "disabled-convert"),
+      (ProtectedClearInherited, "protected-clear-inherited")]:
+      var target: seq[ResourceIntent] = @[]
+      fsSystemDirectory(target,
+        path = "C:\\actions-runner-tokens",
+        acl = ntfsAcl(
+          owner = "SYSTEM",
+          entries = [aclEntry(principal = "SYSTEM",
+                              rights = FullControl)],
+          inheritance = inheritance),
+        address = "runnerTokenDirInh-" & $inheritance)
+      check target.len == 1
+      check target[0].fields["aclInheritance"].s == expected
+
+  test "fsSystemDirectory omits acl fields when acl.present == false":
+    # Back-compat assertion: a profile that uses the default acl
+    # parameter MUST NOT emit `aclOwner` / `aclEntries` /
+    # `aclInheritance` fields. The codec's back-compat sentinel
+    # depends on this — see the t_smoke_repro_infra round-trip.
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target, path = "/etc/myapp.d",
+      address = "myappBare")
+    check target.len == 1
+    check "aclOwner" notin target[0].fields
+    check "aclEntries" notin target[0].fields
+    check "aclInheritance" notin target[0].fields
+
+  test "ntfsAcl owner can be empty (leave ownership unchanged)":
+    # Production profiles can declare an ACL whose owner is unset —
+    # the driver skips the `takeown` + `icacls /setowner` calls and
+    # only applies the entries / inheritance. The template still
+    # emits an empty-string `aclOwner` field so the codec's
+    # `aclPresent` sentinel reflects "operator declared an ACL".
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target,
+      path = "C:\\actions-runner-tokens",
+      acl = ntfsAcl(
+        entries = [aclEntry(principal = "SYSTEM",
+                            rights = FullControl)],
+        inheritance = DisabledReplace),
+      address = "runnerTokenDirNoOwner")
+    check target[0].fields["aclOwner"].s == ""
+    check target[0].fields["aclInheritance"].s == "disabled-replace"
+    check target[0].fields["aclEntries"].items.len == 1
+
   test "envSystemVariable with isPathList":
     var target: seq[ResourceIntent] = @[]
     envSystemVariable(target, name = "PATH",

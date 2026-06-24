@@ -114,6 +114,46 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     check reparsed.resources[0].dirPath == "/etc/myapp.d"
     check not reparsed.resources[0].dirAclPresent
 
+  test "fs.systemDirectory ACL end-to-end: ResourceIntent -> Operation":
+    # Windows-System-Resources Phase D — integration test for the
+    # apply-side: a profile with a full NTFS ACL declaration MUST
+    # land in the broker's `PrivilegedOperation` envelope with every
+    # `fsdAcl*` field populated, so the Windows driver sees the ACE
+    # list + the inheritance vocabulary the operator declared.
+    var intent = ProfileIntent(name: "phaseD-sys-fsdir-acl-apply")
+    var f = initTable[string, FieldValue]()
+    f["path"] = strField("C:\\actions-runner-tokens")
+    f["aclOwner"] = strField("SYSTEM")
+    f["aclEntries"] = listField(@[
+      "SYSTEM:(F)",
+      "BUILTIN\\Administrators:(F)",
+      "Guests:(D,W)"])
+    f["aclInheritance"] = strField("protected-clear-inherited")
+    intent.resources.add(ResourceIntent(kind: "fs.systemDirectory",
+      address: "runnerTokenDir", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources[0].dirAclPresent
+    check sp.resources[0].dirAclOwner == "SYSTEM"
+    check sp.resources[0].dirAclEntries.len == 3
+    check sp.resources[0].dirAclEntries[2] == "Guests:(D,W)"
+    check sp.resources[0].dirAclInheritance ==
+      "protected-clear-inherited"
+    # The text round-trip preserves the Deny ACE + the new inheritance
+    # vocabulary value.
+    let txt = renderSystemProfileToText(sp)
+    check "Guests:(D,W)" in txt
+    check "protected-clear-inherited" in txt
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].dirAclEntries.len == 3
+    check reparsed.resources[0].dirAclEntries[2] == "Guests:(D,W)"
+    check reparsed.resources[0].dirAclInheritance ==
+      "protected-clear-inherited"
+    # Produce a broker-side plan; the envelope MUST carry one
+    # `fs.systemDirectory` operation with the same ACL shape.
+    let plan = producePlan(txt, "phaseD-sys-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "fs.systemDirectory"
+
   test "windows.acl adapter -> text -> producePlan emits one op":
     var intent = ProfileIntent(name: "phaseD-sys-acl")
     var f = initTable[string, FieldValue]()

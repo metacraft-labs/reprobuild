@@ -224,6 +224,69 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check aces[1] == "BUILTIN\\Administrators:(F)"
     check aces[2] == "NetworkService:(RX)"
 
+  test "system_fssystemdirectory_acl.nim covers every Phase-D ACL variant":
+    # Windows-System-Resources Phase D e2e: compile + run the fixture
+    # that declares one fsSystemDirectory per inheritance vocabulary
+    # value PLUS the Allow / Deny ACE pivot PLUS an owner-unset
+    # stanza. The e2e gate checks the ProfileIntent JSON — no Windows
+    # host, no icacls call, no apply.
+    let js = compileAndRun("system_fssystemdirectory_acl.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemFsDirAcl"
+    check p.resources.len == 4
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    # runnerTokenDir: protected-clear-inherited + 3 Allow ACEs +
+    # SYSTEM owner. The production actions-runner-tokens shape.
+    check "runnerTokenDir" in byAddr
+    check byAddr["runnerTokenDir"].kind == "fs.systemDirectory"
+    check byAddr["runnerTokenDir"].fields["path"].s ==
+      "C:\\actions-runner-tokens"
+    check byAddr["runnerTokenDir"].fields["aclOwner"].s == "SYSTEM"
+    check byAddr["runnerTokenDir"].fields["aclInheritance"].s ==
+      "protected-clear-inherited"
+    let runnerAces = byAddr["runnerTokenDir"].fields["aclEntries"].items
+    check runnerAces.len == 3
+    check runnerAces[0] == "SYSTEM:(F)"
+    check runnerAces[1] == "BUILTIN\\Administrators:(F)"
+    check runnerAces[2] == "NetworkService:(RX)"
+
+    # runnerCacheDir: disabled-replace + Deny ACE + Administrators
+    # owner. Covers the Deny direction's `:(D,W)` marker the driver
+    # pivots on at apply time.
+    check "runnerCacheDir" in byAddr
+    check byAddr["runnerCacheDir"].fields["aclOwner"].s ==
+      "BUILTIN\\Administrators"
+    check byAddr["runnerCacheDir"].fields["aclInheritance"].s ==
+      "disabled-replace"
+    let cacheAces = byAddr["runnerCacheDir"].fields["aclEntries"].items
+    check cacheAces.len == 3
+    check cacheAces[0] == "BUILTIN\\Administrators:(F)"
+    check cacheAces[1] == "Users:(RX)"
+    check cacheAces[2] == "Guests:(D,W)"
+
+    # reproManagedDir: owner-unset + disabled-convert. The driver
+    # skips the takeown / icacls /setowner calls and applies only the
+    # entries + inheritance mode.
+    check "reproManagedDir" in byAddr
+    check byAddr["reproManagedDir"].fields["aclOwner"].s == ""
+    check byAddr["reproManagedDir"].fields["aclInheritance"].s ==
+      "disabled-convert"
+    let managedAces = byAddr["reproManagedDir"].fields["aclEntries"].items
+    check managedAces.len == 1
+    check managedAces[0] == "NT AUTHORITY\\SYSTEM:(F)"
+
+    # reproDataDir: inheritance = Enabled (the OS default; the driver
+    # emits no /inheritance call).
+    check "reproDataDir" in byAddr
+    check byAddr["reproDataDir"].fields["aclOwner"].s == "SYSTEM"
+    check byAddr["reproDataDir"].fields["aclInheritance"].s == "enabled"
+    let dataAces = byAddr["reproDataDir"].fields["aclEntries"].items
+    check dataAces.len == 1
+    check dataAces[0] == "SYSTEM:(M)"
+
   test "system_windowsscheduledtask.nim builds a windows.scheduledTask per ScheduleKind":
     # Windows-System-Resources Phase C e2e: compile + run the fixture
     # that declares one task per ScheduleKind variant. The e2e gate
