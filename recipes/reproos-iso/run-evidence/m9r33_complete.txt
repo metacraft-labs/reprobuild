@@ -159,11 +159,39 @@ the heaviest entries).
 
 The fresh plasma-workspace cmake configure SUCCEEDS with the
 M9.R.33.2 walker threading the M9.R.32 GLESv2 + PlatformGraphics
-gaps (PROVEN from the inline command line under G2 above).  The
-full build + install + ISO rebuild + QEMU UEFI DE smoke run was
-bounded by the 24-hour wall-time budget; the driver scripts
-(``_m9r33_fresh_pw_build.sh``, ``_m9r33_iso_build.sh``,
-``_m9r33_qemu_de_smoke.sh``) are committed for reuse.
+gaps (PROVEN from the inline command line under G2 above).  qcoro6
+from-source recipe was picked up by the auto-recurse build (M9.R.33.1
+artifact registration verified).
+
+The plasma-workspace compile phase hit a NEW blocker unrelated to
+M9.R.33.1/2/3/4-12 work: ``qmlcachegen`` emits files at
+``build/.../<comp>/.rcc/qmlcache/<comp>_qmlcache_loader.cpp`` with
+mode ``0300 (--wx------)`` --- no read permission.  ``cc1plus``
+subsequently fails with ``fatal error: <file>: Permission denied``
+on every plugin component (lookandfeel, workspace, calendar,
+containmentlayoutmanager, ...).  The compile fails after
+~345 ``.o`` files are produced.
+
+The exact failure pattern:
+
+  cc1plus: fatal error: /opt/.../plasma-workspace/build/lookandfeel/
+    .rcc/qmlcache/components_qmlcache_loader.cpp: Permission denied
+  compilation terminated.
+  make[2]: *** [.../components.dir/.../components_qmlcache_loader.cpp.o]
+    Error 1
+
+After ``chmod +r`` the file content reads correctly --- only the
+mode bit is wrong, not the content.  Likely cause: ``qmlcachegen``'s
+file-create path uses a mode that doesn't include read, OR the
+io-mon shim's ``open`` hook is clobbering mode bits.  Diagnosis +
+fix is its own multi-hour debug campaign and orthogonal to
+M9.R.33's declared scope.
+
+The full ISO rebuild + QEMU UEFI DE smoke run was NOT completed
+in this milestone due to the qmlcache permission blocker.  The
+driver scripts (``_m9r33_fresh_pw_build.sh``, ``_m9r33_iso_build.sh``,
+``_m9r33_qemu_de_smoke.sh``) are committed for reuse once the
+qmlcache blocker is closed.
 
 ### G6 (M9.R.33.14) — Phase E installed-system smoke: DEFERRED
 
@@ -192,14 +220,30 @@ DRIVE-BY FIXES
 HONEST REMAINING GAPS
 =====================
 
-* G5 full ISO rebuild + QEMU smoke transcript: not captured in this
-  evidence file due to 24-hour wall-time budget.  The plasma-
-  workspace cmake configure has been proven correct against the
-  M9.R.33.2 walker output; the remaining work is mechanical (compile
-  + install + iso-build + qemu boot).
+* G5 plasma-workspace compile blocker (qmlcachegen mode 0300): see
+  G5 section above.  Closing this is its own multi-hour debug
+  campaign (qmlcachegen's file-create mode OR io-mon ``open`` shim
+  mode-bit clobber) and orthogonal to M9.R.33's declared scope.
 
-* G6 Phase E installed-system smoke: not reached.  Same wall-time
-  reason as G5.
+* G5 full ISO rebuild + QEMU smoke transcript: not captured because
+  G5 was blocked at the qmlcache step.  Driver scripts committed for
+  reuse.
+
+* G6 Phase E installed-system smoke: not reached.  Depends on G5
+  closing.
+
+* qcoro6 install-mirror produces ``.a`` archives rather than ``.so``
+  shared objects despite ``BUILD_SHARED_LIBS=ON`` in the recipe.
+  The cmake build/ dir from the first build attempt (pre-M9.R.33.1.1)
+  was incremental-cached past the BUILD_SHARED_LIBS recipe edit; the
+  cache key for the cmake-configure action did NOT pick up the new
+  ``-DBUILD_SHARED_LIBS=ON`` argv on the re-run.  Drive-by follow-up:
+  the fresh-build script needs to wipe BOTH ``qcoro6/.repro/build``
+  AND ``qcoro6/build/`` to force re-configure when the recipe's
+  cacheVars change.  Alternatively the engine could fingerprint
+  cacheVars into the configure-action key.  For now the build
+  proceeds because plasma-workspace's ``find_package(QCoro6)``
+  resolves the build-dir ``QCoro6Config.cmake`` directly.
 
 * Mozjs + gjs + gnome-shell: honestly deferred per the M9.R.32.2
   honest-blocker documentation.  gnome-shell's BUILD layer needs
