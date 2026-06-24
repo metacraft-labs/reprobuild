@@ -306,7 +306,15 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       let fx = setupFixture(gitBin, "no-workspace")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
-      # No seedWorkspaceToml call — the wrapper must skip silently.
+      # No seedWorkspaceToml call AND no resolved manifest checkout — the
+      # workspace is genuinely uninitialized (RA-10 canonical marker:
+      # a bare ``.repo/`` with no ``workspace.toml`` and no resolved
+      # ``projects/*.toml`` is NOT a workspace). The wrapper must skip
+      # silently. (``setupFixture`` seeds ``manifests/projects/lib-a.toml``;
+      # RA-10 treats a single resolvable project as an initialized
+      # workspace, so we strip it here to model the genuine non-workspace
+      # case this test is about.)
+      removeDir(fx.workspaceRoot / ".repo" / "manifests")
 
       let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check res.code == 0

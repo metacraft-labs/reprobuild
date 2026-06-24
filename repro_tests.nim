@@ -6390,6 +6390,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
+    binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim",
     binary: "build/test-bin/t_workspace_post_commit_lock_refresh_is_best_effort",
     defines: @[],

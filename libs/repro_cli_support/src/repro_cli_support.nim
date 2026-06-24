@@ -18029,15 +18029,23 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.timestamp = timestamp
   report.exitCode = 0
 
-  # No workspace metadata reachable → skip silently, log once.
-  if workspaceRoot.len == 0 or
-      not fileExists(workspaceRoot / ".repo" / "workspace.toml"):
+  # RA-10: no-op outside an initialized workspace. The post-commit hook
+  # may be installed under a half-bootstrapped or non-workspace parent —
+  # a plain git repo, or a bare ``.repo/`` with no resolved manifest
+  # checkout. We use the canonical ``isInitializedWorkspace`` marker
+  # (resolved manifest checkout OR a ``workspace.toml``) rather than a
+  # bare ``fileExists(.repo/workspace.toml)`` so a workspace that resolves
+  # from a single ``projects/*.toml`` (no metadata-only workspace.toml
+  # yet) still runs, while a genuine non-workspace skips silently. A
+  # commit must never be blocked by hook failure, so this always exits 0.
+  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
     report.outcome = postCommitOutcomeTag(pcoSkippedNoWorkspace)
     report.diagnostic =
       if workspaceRoot.len == 0:
         "no workspace root found from --current-repo=" & parsed.currentRepo
       else:
-        "no .repo/workspace.toml at " & workspaceRoot
+        "not a workspace; nothing to enforce (no resolved manifest " &
+          "checkout at " & workspaceRoot & ")"
     if workspaceRoot.len > 0:
       writePostCommitReport(workspaceRoot, report)
       appendPostCommitLog(workspaceRoot,
@@ -18061,6 +18069,14 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   lockArgs.triggerSha = parsed.triggerSha
   lockArgs.triggerRepo = parsed.triggerRepo
   lockArgs.toolProvisioning = parsed.toolProvisioning
+  # RA-10: an initialized workspace may resolve from a single
+  # ``projects/*.toml`` with no metadata-only ``workspace.toml`` yet. The
+  # strict lock resolver needs an explicit project name in that case
+  # (it only auto-recovers a name from a present workspace.toml), so we
+  # supply the name the canonical marker detected. When a workspace.toml
+  # is present this is harmless: the compositional / metadata-only path
+  # ignores ``projectName``.
+  lockArgs.projectName = detectWorkspaceProjectName(workspaceRoot)
 
   var raised = false
   var raisedDiagnostic = ""
@@ -19376,6 +19392,19 @@ proc runCheckCommand*(args: openArray[string]): int =
       return 1
   case parsed.mode
   of cmPrePush:
+    # RA-10: no-op outside an initialized workspace. A managed pre-push
+    # hook may be installed under a half-bootstrapped or non-workspace
+    # parent (a plain git repo, or a bare ``.repo/`` with no resolved
+    # manifest checkout). In that case there is nothing to enforce — the
+    # gate must NOT block the push with a fatal error. Detect "not a
+    # workspace" via the canonical marker and exit 0 with a clear
+    # diagnostic instead of letting ``resolveCheckProject`` raise (which
+    # would surface as a blocking exit 1).
+    if not isInitializedWorkspace(parsed.workspaceRoot):
+      stderr.writeLine("repro check: not a workspace; nothing to enforce " &
+        "(no resolved manifest checkout at " & parsed.workspaceRoot &
+        "); pre-push gate is a no-op")
+      return 0
     var report: CheckReport
     try:
       report = executeCheckPrePush(parsed)

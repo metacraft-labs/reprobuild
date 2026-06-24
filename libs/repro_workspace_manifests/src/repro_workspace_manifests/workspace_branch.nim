@@ -31,7 +31,7 @@
 ## overwrites the file with byte-identical bytes (key order and
 ## quoting are fixed by the serializer).
 
-import std/[options, os]
+import std/[options, os, strutils]
 
 import types
 import diagnostics
@@ -150,6 +150,48 @@ proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
     # single-project mode (which will then either succeed or emit its
     # own missing-project diagnostic).
     return false
+
+proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
+  ## True iff ``<workspaceRoot>/.repo/manifests`` carries at least one
+  ## resolved project manifest (a ``projects/*.toml`` or a
+  ## ``variants/*.toml``). A bare ``.repo/manifests`` directory with no
+  ## project/variant file present is NOT a resolved checkout — it is the
+  ## half-bootstrapped state ``repo init`` leaves behind before the
+  ## manifest repo is actually checked out.
+  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  for sub in ["projects", "variants"]:
+    let dir = manifestsRoot / sub
+    if dirExists(dir):
+      for kind, path in walkDir(dir):
+        if kind == pcFile and path.endsWith(".toml"):
+          return true
+  false
+
+proc isInitializedWorkspace*(workspaceRoot: string): bool =
+  ## RA-10 canonical "initialized workspace" marker. A directory counts
+  ## as an initialized workspace only when its ``.repo/`` shell carries a
+  ## *resolved manifest checkout* — NOT merely a bare ``.repo/``/
+  ## ``.repro/`` directory left behind by a half-finished bootstrap.
+  ##
+  ## Concretely, the marker is present when EITHER:
+  ##
+  ##   * ``<workspaceRoot>/.repo/workspace.toml`` exists (the metadata
+  ##     file ``repro workspace init`` writes once the workspace shell is
+  ##     established — single-project or compositional), OR
+  ##   * ``<workspaceRoot>/.repo/manifests`` holds at least one resolved
+  ##     project/variant manifest (``projects/*.toml`` /
+  ##     ``variants/*.toml``).
+  ##
+  ## A bare ``.repo/`` (or ``.repro/``) with neither of those is treated
+  ## as "not an initialized workspace": the shared predicate the hook
+  ## bodies and any init-skip logic consult so a managed hook installed
+  ## under a half-bootstrapped or non-workspace parent no-ops with
+  ## success instead of blocking.
+  if workspaceRoot.len == 0:
+    return false
+  if fileExists(workspaceTomlPath(workspaceRoot)):
+    return true
+  hasResolvedManifestCheckout(workspaceRoot)
 
 proc readWorkspaceFeatureStarted*(workspaceRoot: string): bool =
   ## M16 — Return ``true`` iff the workspace metadata records that the
