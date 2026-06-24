@@ -47,10 +47,10 @@
 ## Anything ``>=8.0`` covers the bracketed-paste + the
 ## ``rl_clear_visible_line`` API.
 ##
-## sha256 = 3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a5f6d5fd58b2f2c5f4ec
-##  (computed locally over the vendored ``readline-8.2.tar.gz``,
-##  3,043,945 bytes; downloaded once from the upstream URL recorded
-##  in ``versions:`` above).
+## sha256 = 3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a053331d7d1095007c35
+##  (computed locally over the upstream ``readline-8.2.tar.gz`` fetched
+##  from ftp.gnu.org via curl on 2026-06-24; the original sha pin in
+##  M9.R.27 was incorrect — fixed in M9.R.29.2).
 ##
 ## ## Build shape
 ##
@@ -140,7 +140,7 @@ package readlineSource:
     ## downloaded once from the upstream URL recorded in
     ## ``versions:`` above.
     url: "https://ftp.gnu.org/gnu/readline/readline-8.2.tar.gz"
-    sha256: "3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a5f6d5fd58b2f2c5f4ec"
+    sha256: "3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a053331d7d1095007c35"
     extractStrip: 1
 
   nativeBuildDeps:
