@@ -111,6 +111,65 @@ proc defaultCacheRoot*(workspaceRoot = ""): string =
   proc liveEnv(key: string): string = getEnv(key)
   resolveCacheRoot(liveEnv, workspaceRoot, defined(windows))
 
+# ---- bootstrap manifest cache root (RA-11) ---------------------------------
+
+proc resolveManifestCacheRoot*(env: proc(key: string): string {.closure.};
+                               private = false; isWindows = false): string =
+  ## Resolve the **bootstrap manifest cache** root (RA-11). This is the
+  ## tool-managed location ``repro workspace init`` clones the manifest
+  ## repo into so that ``init`` works *outside* an existing workspace
+  ## (no sibling manifest checkout yet). It is independent of the RA-5
+  ## *clones* cache above: the manifest cache holds manifest REPOS, the
+  ## clones cache holds participating-repo object pools.
+  ##
+  ## Resolution order, per
+  ## ``Workspace-And-Develop-Mode.md`` §"Manifest cache and
+  ## partial-failure policy":
+  ##
+  ##   ``REPRO_MANIFEST_CACHE`` (explicit override)
+  ##   → ``XDG_CACHE_HOME``/reprobuild/manifests
+  ##   → ``%LOCALAPPDATA%``/reprobuild/manifests   (Windows fallback)
+  ##   → ``~/.cache``/reprobuild/manifests
+  ##
+  ## ``private = true`` selects the **private companion** cache: a
+  ## parallel ``…/manifests-private`` tree so a private companion
+  ## manifest never shares a directory (or a slug namespace) with the
+  ## public manifest. The override branch honors the same split by
+  ## appending ``-private`` to the operator's explicit path.
+  ##
+  ## ``env`` is injected (rather than calling ``os.getEnv`` directly) so
+  ## the resolver is hermetically testable.
+  let leaf = if private: "manifests-private" else: "manifests"
+  let override = env("REPRO_MANIFEST_CACHE")
+  if override.len > 0:
+    return if private: override & "-private" else: override
+
+  let xdg = env("XDG_CACHE_HOME")
+  if xdg.len > 0:
+    return xdg / "reprobuild" / leaf
+
+  if isWindows:
+    let localAppData = env("LOCALAPPDATA")
+    if localAppData.len > 0:
+      return localAppData / "reprobuild" / leaf
+
+  let home = env("HOME")
+  let base =
+    if home.len > 0: home / ".cache"
+    elif isWindows:
+      let up = env("USERPROFILE")
+      if up.len > 0: up / ".cache" else: ".cache"
+    else: ".cache"
+  base / "reprobuild" / leaf
+
+proc defaultManifestCacheRoot*(private = false): string =
+  ## Convenience wrapper that resolves the manifest cache root against the
+  ## live process environment and host OS. Production call sites use this;
+  ## hermetic tests use ``resolveManifestCacheRoot`` with an injected
+  ## ``env``.
+  proc liveEnv(key: string): string = getEnv(key)
+  resolveManifestCacheRoot(liveEnv, private, defined(windows))
+
 # ---- URL → slug ------------------------------------------------------------
 
 proc sanitizeSlugSegment(segment: string): string =
@@ -199,6 +258,13 @@ proc sharedBarePath*(cacheRoot, fetchUrl: string): string =
   ## ``cacheRoot``.
   cacheRoot / urlSlug(fetchUrl)
 
+proc manifestCachePath*(cacheRoot, manifestUrl: string): string =
+  ## Absolute path of the cached manifest-repo checkout for
+  ## ``manifestUrl`` under the bootstrap manifest cache ``cacheRoot``
+  ## (RA-11). Keyed by source URL (its slug) so workspaces bootstrapped
+  ## from different manifest URLs never collide.
+  cacheRoot / urlSlug(manifestUrl)
+
 # ---- git plumbing ----------------------------------------------------------
 
 proc runGit(gitBin: string; args: openArray[string];
@@ -255,6 +321,62 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
       diagnostic: "git clone --bare into shared cache failed (" & $res.code &
         "): " & res.output.strip())
   SharedCloneResult(ok: true, sharedBarePath: bare)
+
+# ---- bootstrap manifest cache population (RA-11) ---------------------------
+
+proc ensureManifestCache*(gitBin, cacheRoot, manifestUrl: string;
+                          branch = ""): SharedCloneResult =
+  ## Clone-if-missing / fetch-and-fast-forward-if-present the manifest
+  ## repo for ``manifestUrl`` into the bootstrap manifest cache. Returns
+  ## ``ok = true`` with ``sharedBarePath`` set to the on-disk manifest
+  ## checkout (a NORMAL working tree, not a bare — the composer/resolver
+  ## reads ``projects/*.toml`` files from it), or ``ok = false`` with a
+  ## diagnostic on any failure.
+  ##
+  ## Unlike ``refreshSharedBare`` (which manages a *bare* object pool),
+  ## this materialises a checked-out manifest tree because the manifest
+  ## reader walks real files. The clone uses ``--single-branch`` on the
+  ## requested ``branch`` when one is given.
+  let target = manifestCachePath(cacheRoot, manifestUrl)
+  if looksLikeGitDir(target):
+    # fetch-if-present, then fast-forward the checked-out branch so the
+    # cached manifest reflects upstream. Best-effort: a fetch failure
+    # leaves the existing (possibly stale) checkout usable.
+    let fetched = runGit(gitBin, ["-C", target, "fetch", "--quiet",
+      "--prune", "origin"])
+    if fetched.code != 0:
+      return SharedCloneResult(ok: true, sharedBarePath: target,
+        diagnostic: "manifest cache fetch failed (using existing checkout): " &
+          fetched.output.strip())
+    let curRes = runGit(gitBin,
+      ["-C", target, "rev-parse", "--abbrev-ref", "HEAD"])
+    let cur = if curRes.code == 0: curRes.output.strip() else: ""
+    if cur.len > 0 and cur != "HEAD":
+      discard runGit(gitBin, ["-C", target, "merge", "--ff-only", "--quiet",
+        "refs/remotes/origin/" & cur])
+    return SharedCloneResult(ok: true, sharedBarePath: target)
+
+  let parent = target.splitPath.head
+  if parent.len > 0:
+    try:
+      createDir(parent)
+    except OSError as e:
+      return SharedCloneResult(ok: false, sharedBarePath: target,
+        diagnostic: "could not create manifest cache parent " & parent &
+          ": " & e.msg)
+  var cloneArgs = @["clone", "--quiet"]
+  if branch.len > 0:
+    cloneArgs.add(["--single-branch", "--branch", branch])
+  cloneArgs.add([manifestUrl, target])
+  let res = runGit(gitBin, cloneArgs)
+  if res.code != 0:
+    if dirExists(target):
+      try: removeDir(target)
+      except OSError: discard
+    return SharedCloneResult(ok: false, sharedBarePath: target,
+      diagnostic: "git clone of manifest repo into cache failed (" &
+        $res.code & "): " & res.output.strip())
+  SharedCloneResult(ok: true, sharedBarePath: target)
 
 # ---- alternates wiring -----------------------------------------------------
 

@@ -15885,6 +15885,19 @@ type
       ## manifest layers from a fatal diagnostic to a structured
       ## ``WorkspaceInitSkippedLayerEntry``. Used by public-only users
       ## of a mixed workspace so they can still init the public subset.
+    manifestUrl: string
+      ## RA-11 — bootstrap manifest URL. When set AND the workspace has
+      ## no ``.repo/manifests`` checkout yet, ``init`` clones the manifest
+      ## repo into the tool-managed bootstrap manifest cache
+      ## (``$XDG_CACHE_HOME/reprobuild/manifests`` / ``REPRO_MANIFEST_CACHE``
+      ## override; keyed by source URL) and materialises ``.repo/manifests``
+      ## from it, so ``init`` works OUTSIDE an existing workspace.
+    manifestBranch: string
+      ## RA-11 — optional branch for the bootstrap manifest clone.
+    privateManifestUrl: string
+      ## RA-11 — optional private companion manifest URL. Cloned into the
+      ## PARALLEL private cache (``…/manifests-private``) so a private
+      ## companion never shares a slug namespace with the public manifest.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -15914,6 +15927,18 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
       # drops the unreachable layer and the init proceeds with the
       # public subset.
       result.allowMissingLayers = true
+    elif arg == "--manifest-url" or arg.startsWith("--manifest-url="):
+      # RA-11 — bootstrap manifest URL (init outside an existing
+      # workspace). Clones the manifest repo into the bootstrap cache.
+      result.manifestUrl = valueFromFlag(args, i, "--manifest-url")
+    elif arg == "--manifest-branch" or arg.startsWith("--manifest-branch="):
+      result.manifestBranch = valueFromFlag(args, i, "--manifest-branch")
+    elif arg == "--private-manifest-url" or
+        arg.startsWith("--private-manifest-url="):
+      # RA-11 — private companion manifest, cloned into the parallel
+      # private cache.
+      result.privateManifestUrl = valueFromFlag(args, i,
+        "--private-manifest-url")
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace init` flag: " & arg)
@@ -16101,11 +16126,71 @@ proc safeRepoIdSegment(value: string): string =
   if result.len == 0:
     result = "repo"
 
+proc bootstrapManifestCache(args: WorkspaceInitArgs) =
+  ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
+  ## the workspace has no ``.repo/manifests`` checkout yet, clone the
+  ## manifest repo into the tool-managed bootstrap cache
+  ## (``resolveManifestCacheRoot`` order: ``REPRO_MANIFEST_CACHE`` →
+  ## ``XDG_CACHE_HOME`` → ``%LOCALAPPDATA%`` → ``~/.cache``, all under
+  ## ``reprobuild/manifests``; keyed by source URL) and materialise
+  ## ``.repo/manifests`` from it so the resolver finds
+  ## ``projects/<name>.toml`` without a pre-existing sibling checkout.
+  ##
+  ## A private companion manifest (``--private-manifest-url``) is cloned
+  ## into the PARALLEL private cache (``…/manifests-private``) and
+  ## materialised at ``.repo/manifests-private`` — a separate cache tree
+  ## so the two never share a slug namespace.
+  if args.manifestUrl.len == 0:
+    return
+  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
+  if dirExists(manifestsDir):
+    # Already have a manifest checkout — bootstrap is a no-op (a sibling
+    # checkout or a prior bootstrap already populated it).
+    return
+  let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+  createDir(args.workspaceRoot / ".repo")
+
+  let cacheRoot = defaultManifestCacheRoot(private = false)
+  let cached = ensureManifestCache(identity.binaryPath, cacheRoot,
+    args.manifestUrl, args.manifestBranch)
+  if not cached.ok:
+    raise newException(ValueError,
+      "could not bootstrap manifest repo '" & args.manifestUrl &
+        "' into the manifest cache at '" & cacheRoot & "': " &
+        cached.diagnostic)
+  # Materialise the workspace's manifest checkout from the cache. A
+  # symlink keeps a single cached copy shared across workspaces; on a
+  # platform/filesystem that rejects the symlink we fall back to a copy.
+  try:
+    createSymlink(cached.sharedBarePath, manifestsDir)
+  except OSError, IOError:
+    copyDir(cached.sharedBarePath, manifestsDir)
+
+  if args.privateManifestUrl.len > 0:
+    let privateDir = args.workspaceRoot / ".repo" / "manifests-private"
+    if not dirExists(privateDir):
+      let privateCacheRoot = defaultManifestCacheRoot(private = true)
+      let privCached = ensureManifestCache(identity.binaryPath,
+        privateCacheRoot, args.privateManifestUrl, args.manifestBranch)
+      if not privCached.ok:
+        raise newException(ValueError,
+          "could not bootstrap private companion manifest '" &
+            args.privateManifestUrl & "' into the private manifest cache " &
+            "at '" & privateCacheRoot & "': " & privCached.diagnostic)
+      try:
+        createSymlink(privCached.sharedBarePath, privateDir)
+      except OSError, IOError:
+        copyDir(privCached.sharedBarePath, privateDir)
+
 proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
   ## ``bakWorkspaceVcs.clone`` build plan for the missing ones, then
   ## emits the structured report.
+  # RA-11: bootstrap the manifest repo into the tool-managed cache when
+  # ``--manifest-url`` is given and no manifest checkout exists yet, so
+  # ``init`` works OUTSIDE an existing workspace.
+  bootstrapManifestCache(args)
   let resolution = resolveWorkspaceInitProject(args)
   let resolved = resolution.project
   var report: WorkspaceInitReport
@@ -17331,6 +17416,411 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   let outcome = executeWorkspaceSync(parsed)
   writeWorkspaceSyncReport(outcome.report)
   for line in renderSyncTextLines(outcome.report):
+    stdout.writeLine(line)
+  outcome.report.exitCode
+
+# ---- RA-11: `repro workspace pull` ----------------------------------------
+#
+# ``pull`` is the converge-to-manifest-revision operation, distinct from
+# ``sync`` (per Workspace-And-Develop-Mode.md §"sync vs pull"):
+#
+#   - ``sync`` honors each repo's CURRENT branch: fetch + ``merge
+#     --ff-only @{u}`` on whatever branch is checked out (per-repo
+#     upstream tracking). It does NOT realign repos to the
+#     manifest-declared revisions.
+#   - ``pull`` converges the workspace TO the manifest-declared revisions:
+#     refresh the manifest, then put every repo on a LOCAL TRACKING
+#     BRANCH matching its manifest revision (the repo-workspaces
+#     ``ensureRepoTrackingBranches`` behavior). HEAD ends at the manifest
+#     revision AND attached to a branch — never detached.
+#
+# No-rollback partial-sync policy: ``pull`` refreshes the manifest FIRST
+# (advancing it, recording before→after SHAs). If a later per-repo
+# convergence step fails, the manifest repo is NOT rolled back — the
+# report shows the before→after SHAs and ``pull`` stops with a non-zero
+# exit, leaving the partial state for a manual rerun.
+
+type
+  WorkspacePullRepoOutcome* = enum
+    ppoConvergedExisting   ## Existing checkout converged to the manifest
+                           ## revision on a tracking branch.
+    ppoCloned              ## Missing checkout cloned + put on a tracking
+                           ## branch at the manifest revision.
+    ppoFailed              ## A clone / fetch / branch-attach step failed.
+
+  WorkspacePullRepoEntry* = object
+    ## One per declared repo after ``pull``. ``trackingBranch`` is the
+    ## local branch HEAD is attached to after convergence (empty only on
+    ## failure); ``revision`` is the manifest-declared revision the repo
+    ## was converged to; ``headSha`` is the resolved HEAD afterward.
+    name*: string
+    path*: string
+    revision*: string
+    trackingBranch*: string
+    headSha*: string
+    outcome*: string
+    diagnostic*: string
+
+  WorkspacePullReport* = object
+    ## Structured outcome of one ``repro workspace pull`` invocation.
+    ## ``manifestLayers`` carries the SAME before→after refresh entries
+    ## sync emits — the explicit no-rollback evidence. ``manifestStopped``
+    ## is set when a manifest layer advanced AND a later step failed: the
+    ## report then names the layer whose advance was kept (NOT rolled
+    ## back).
+    project*: string
+    workspaceRoot*: string
+    manifestLayers*: seq[WorkspaceSyncManifestLayerEntry]
+    manifestStopped*: bool
+    repos*: seq[WorkspacePullRepoEntry]
+    exitCode*: int
+
+  WorkspacePullOutcome* = object
+    report*: WorkspacePullReport
+
+proc pullOutcomeTag(outcome: WorkspacePullRepoOutcome): string =
+  case outcome
+  of ppoConvergedExisting: "converged"
+  of ppoCloned: "cloned"
+  of ppoFailed: "failed"
+
+proc toJsonNode*(report: WorkspacePullReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  var layers = newJArray()
+  for entry in report.manifestLayers:
+    var obj = newJObject()
+    obj["index"] = %entry.index
+    obj["provenance"] = %entry.provenance
+    obj["layerPath"] = %entry.layerPath
+    obj["status"] = %entry.status
+    obj["beforeSha"] = %entry.beforeSha
+    obj["afterSha"] = %entry.afterSha
+    obj["diagnostic"] = %entry.diagnostic
+    layers.add(obj)
+  result["manifestLayers"] = layers
+  result["manifestStopped"] = %report.manifestStopped
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["revision"] = %entry.revision
+    obj["trackingBranch"] = %entry.trackingBranch
+    obj["headSha"] = %entry.headSha
+    obj["outcome"] = %entry.outcome
+    obj["diagnostic"] = %entry.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
+  for entry in report.manifestLayers:
+    if entry.beforeSha.len > 0 and entry.afterSha.len > 0 and
+        entry.beforeSha != entry.afterSha:
+      result.add("workspace pull: manifest-layer " & entry.provenance &
+        " advanced " & entry.beforeSha & " → " & entry.afterSha)
+  for entry in report.repos:
+    var line = "workspace pull: " & entry.path & " " & entry.outcome
+    if entry.trackingBranch.len > 0:
+      line.add(" → branch " & entry.trackingBranch & " @ " & entry.headSha)
+    if entry.diagnostic.len > 0:
+      line.add(" (" & entry.diagnostic & ")")
+    result.add(line)
+  if report.manifestStopped:
+    result.add("workspace pull: STOPPED after a step failed — the manifest " &
+      "repo was advanced and is NOT rolled back; rerun `repro workspace " &
+      "pull` to resume from the partial state")
+
+type
+  WorkspacePullArgs = object
+    workspaceRoot: string
+    projectName: string
+    toolProvisioning: ToolProvisioningMode
+
+proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
+  ## ``repro workspace pull`` argv parser. Mirrors ``sync``'s shape: an
+  ## optional ``<project>`` positional (single-project mode) plus
+  ## ``--workspace-root=PATH`` / ``--tool-provisioning=...``.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace pull` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace pull`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
+  ## Same dispatch rule as sync: compose layers when a compositional
+  ## ``.repo/workspace.toml`` is present, else look up the named project /
+  ## variant under ``.repo/manifests/`` (a metadata-only workspace.toml
+  ## can supply the project name).
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    return composeManifestLayersFromFile(workspaceToml)
+  if parsed.projectName.len == 0:
+    if fileExists(workspaceToml):
+      try:
+        let recordedProject =
+          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+        if recordedProject.len > 0:
+          var withProject = parsed
+          withProject.projectName = recordedProject
+          return resolveWorkspacePullProject(withProject)
+      except WorkspaceManifestParseError:
+        discard
+    raise newException(ValueError,
+      "`repro workspace pull` requires either `.repo/workspace.toml` " &
+        "or a <project> argument; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" /
+    (parsed.projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" /
+    (parsed.projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "no project or variant named '" & parsed.projectName &
+      "' found under '" & manifestsRoot & "'")
+
+proc convergeRepoToManifestRevision(
+    identity: GitToolIdentity;
+    repoPath, revision: string): tuple[ok: bool; branch, headSha, diag: string] =
+  ## ``ensureRepoTrackingBranches`` core (RA-11). Put the existing
+  ## checkout at ``repoPath`` onto a LOCAL TRACKING BRANCH matching the
+  ## manifest-declared ``revision``, with HEAD at that revision.
+  ##
+  ##   - Branch-named revision (e.g. ``dev``): fetch ``origin``, then
+  ##     ensure a local branch ``<revision>`` exists tracking
+  ##     ``origin/<revision>``, check it out, and fast-forward it to the
+  ##     remote tip. The steady state is "on branch ``<revision>`` at
+  ##     ``origin/<revision>``".
+  ##   - SHA-pinned revision: fetch ``origin``, then create / reset a
+  ##     synthetic local tracking branch
+  ##     ``reprobuild/pinned/<short-sha>`` at the pinned SHA and check it
+  ##     out, so HEAD is at the SHA but ATTACHED to a branch (never
+  ##     detached — the spec's explicit requirement).
+  # Always fetch first so origin/<branch> reflects the manifest's
+  # upstream tip (pull is a network-converge op, unlike a pure checkout).
+  let fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
+    "--prune", "origin"])
+  if fetched.code != 0:
+    return (false, "", "",
+      "git fetch failed: " & fetched.output.strip())
+
+  if revision.len == 0:
+    return (false, "", "", "manifest declares no revision for this repo")
+
+  if looksLikeSha(revision):
+    let shortSha =
+      if revision.len > 12: revision[0 ..< 12] else: revision
+    let branch = "reprobuild/pinned/" & shortSha
+    # Create or move the synthetic branch to the pinned SHA, then check
+    # it out. ``branch -f`` is idempotent across reruns.
+    let mk = gitRunPlain(identity, ["-C", repoPath, "branch", "-f",
+      branch, revision])
+    if mk.code != 0:
+      return (false, "", "",
+        "could not create pinned tracking branch '" & branch & "' at " &
+          revision & ": " & mk.output.strip())
+    let co = gitRunPlain(identity, ["-C", repoPath, "checkout", "--quiet",
+      branch])
+    if co.code != 0:
+      return (false, "", "",
+        "could not check out pinned tracking branch '" & branch & "': " &
+          co.output.strip())
+    let head = revParse(identity, repoPath, "HEAD")
+    return (true, branch, head, "")
+
+  # Branch-named revision. Resolve the remote-tracking tip first.
+  let remoteTip = revParse(identity, repoPath, "refs/remotes/origin/" & revision)
+  if remoteTip.len == 0:
+    return (false, "", "",
+      "no remote-tracking branch 'origin/" & revision & "' after fetch")
+  # Create the local branch tracking origin/<revision> if it does not yet
+  # exist; ``checkout -B`` resets it to the remote tip and attaches HEAD.
+  let co = gitRunPlain(identity, ["-C", repoPath, "checkout", "--quiet",
+    "-B", revision, "--track", "refs/remotes/origin/" & revision])
+  if co.code != 0:
+    return (false, "", "",
+      "could not converge to tracking branch '" & revision & "': " &
+        co.output.strip())
+  let head = revParse(identity, repoPath, "HEAD")
+  return (true, revision, head, "")
+
+proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
+  ## End-to-end ``pull`` driver:
+  ##   (1) refresh manifest layers (records before→after SHAs; the
+  ##       advance is KEPT on any later failure — no rollback).
+  ##   (2) resolve / compose the project.
+  ##   (3) for each repo: clone if missing, then converge to the
+  ##       manifest-declared revision on a local tracking branch.
+  ##   (4) emit the structured report; stop (non-zero) on the first
+  ##       per-repo failure, surfacing that the manifest stays advanced.
+  var report: WorkspacePullReport
+  report.workspaceRoot = args.workspaceRoot
+
+  # Step 1: manifest-layer refresh — advances the manifest repo. The
+  # before→after SHAs are recorded; this advance is NEVER rolled back.
+  let refresh = refreshManifestLayers(args.workspaceRoot)
+  var manifestAdvanced = false
+  for entry in refresh.layers:
+    if entry.beforeSha.len > 0 and entry.afterSha.len > 0 and
+        entry.beforeSha != entry.afterSha:
+      manifestAdvanced = true
+    report.manifestLayers.add(WorkspaceSyncManifestLayerEntry(
+      index: entry.index,
+      provenance: entry.provenance,
+      layerPath: entry.layerPath,
+      status: manifestLayerStatusTag(entry.status),
+      beforeSha: entry.beforeSha,
+      afterSha: entry.afterSha,
+      diagnostic: entry.diagnostic))
+
+  # Step 2: resolve / compose.
+  let resolved = resolveWorkspacePullProject(args)
+  report.project = resolved.projectName
+
+  let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  var sharedBareByUrl = initTable[string, string]()
+  proc sharedReferenceFor(fetchUrl: string): string =
+    if fetchUrl.len == 0:
+      return ""
+    if sharedBareByUrl.hasKey(fetchUrl):
+      return sharedBareByUrl[fetchUrl]
+    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
+    sharedBareByUrl[fetchUrl] = reference
+    reference
+
+  var anyFailure = false
+  for idx, repo in resolved.repos:
+    let absPath = args.workspaceRoot / repo.path
+    var entry = WorkspacePullRepoEntry(
+      name: repo.name, path: repo.path, revision: repo.revision)
+    if not dirExists(absPath):
+      # Missing checkout — clone first (so the converge step has a tree).
+      let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
+      createDir(receiptDir)
+      let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("pull-clone-" & idSeg & ".receipt")
+      var action = gitCloneAction("workspace-pull-clone-" & idSeg, identity,
+        remoteUrl = repo.fetchUrl,
+        repoPath = repo.path,
+        receiptPath = receiptRel,
+        revision = repo.revision,
+        referencePath = sharedReferenceFor(repo.fetchUrl),
+        cloneFilter = repo.cloneFilter,
+        depth = repo.depth,
+        singleBranch = repo.singleBranch)
+      action.cwd = args.workspaceRoot
+      let engineCacheRoot = args.workspaceRoot / ".repro" / "workspace" /
+        "engine-cache"
+      var config = defaultBuildEngineConfig(engineCacheRoot)
+      config.suppressTrace = true
+      config.fallbackToRunQuotaBypass = true
+      let res = runBuild(graph([action]), config)
+      if res.results.len != 1 or
+          res.results[0].status notin {asSucceeded, asCacheHit, asUpToDate}:
+        let outcome =
+          if res.results.len > 0: res.results[0]
+          else: ActionResult(status: asFailed, reason: "no-result")
+        entry.outcome = pullOutcomeTag(ppoFailed)
+        entry.diagnostic = "clone failed: status=" & $outcome.status &
+          " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+        report.repos.add(entry)
+        anyFailure = true
+        break
+      entry.outcome = pullOutcomeTag(ppoCloned)
+    else:
+      entry.outcome = pullOutcomeTag(ppoConvergedExisting)
+
+    # Converge to the manifest revision on a local tracking branch.
+    let converged = convergeRepoToManifestRevision(
+      identity, absPath, repo.revision)
+    if not converged.ok:
+      entry.outcome = pullOutcomeTag(ppoFailed)
+      entry.diagnostic = converged.diag
+      report.repos.add(entry)
+      anyFailure = true
+      break
+    entry.trackingBranch = converged.branch
+    entry.headSha = converged.headSha
+    report.repos.add(entry)
+
+  if anyFailure:
+    report.exitCode = 1
+    # No-rollback: when the manifest advanced AND a later step failed,
+    # surface that the advance is kept (the partial state stays for a
+    # rerun) rather than being silently reverted.
+    if manifestAdvanced:
+      report.manifestStopped = true
+  else:
+    report.exitCode = 0
+    # On full success, record the converged branch in workspace metadata
+    # so downstream commands read a coherent active branch (mirrors init).
+    let branchValue =
+      if resolved.trunk.len > 0: resolved.trunk
+      elif resolved.defaultRevision.len > 0: resolved.defaultRevision
+      else: ""
+    if branchValue.len > 0:
+      try:
+        writeWorkspaceBranch(args.workspaceRoot,
+          project = resolved.projectName, branch = branchValue)
+      except WorkspaceManifestParseError as e:
+        stderr.writeLine(
+          "workspace pull: could not record active branch: " & e.msg)
+
+  result.report = report
+
+proc writeWorkspacePullReport(report: WorkspacePullReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "pull-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspacePullCommand*(args: openArray[string]): int =
+  ## ``repro workspace pull [<project>] [--workspace-root=PATH]
+  ## [--tool-provisioning=path|nix|tarball|scoop]``.
+  ##
+  ## Converges every repo to its manifest-declared revision on a local
+  ## tracking branch (distinct from ``sync``, which honors each repo's
+  ## current branch). Exit codes:
+  ##   - 0 — every repo converged to the manifest revision on a tracking
+  ##         branch.
+  ##   - 1 — a clone / fetch / branch-attach step failed. When the
+  ##         manifest had already advanced, it is NOT rolled back: the
+  ##         report names the before→after SHAs and the partial state is
+  ##         left for a rerun.
+  let parsed = parseWorkspacePullArgs(args)
+  let outcome = executeWorkspacePull(parsed)
+  writeWorkspacePullReport(outcome.report)
+  for line in renderPullTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
 
@@ -24891,6 +25381,23 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceSyncCommand(syncArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace sync: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "pull":
+    # RA-11 — `repro workspace pull`. Distinct from `sync`: converges
+    # every repo to its manifest-declared revision on a local tracking
+    # branch (``ensureRepoTrackingBranches``), rather than honoring each
+    # repo's current branch. Same dispatch convention as the M9–M12
+    # family; implementation in ``runWorkspacePullCommand``.
+    try:
+      let pullArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspacePullCommand(pullArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace pull: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "lock":
