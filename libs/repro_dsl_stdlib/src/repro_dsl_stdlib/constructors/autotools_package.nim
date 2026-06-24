@@ -307,7 +307,7 @@ proc autotools_package*(srcDir: string;
       "    if [ -d \"$ad\" ]; then aclocal_dirs=\"$ad:$aclocal_dirs\"; fi; " &
       "  fi; " &
       "done; " &
-      "for sp in /nix/store/*-pkg-config-*/share/aclocal /nix/store/*-libtool-*/share/aclocal /nix/store/*-gtk-doc-*/share/aclocal; do " &
+      "for sp in /nix/store/*-pkg-config-*/share/aclocal /nix/store/*-libtool-*/share/aclocal /nix/store/*-gtk-doc-*/share/aclocal /nix/store/*-libgcrypt-*-dev/share/aclocal /nix/store/*-libgpg-error-*-dev/share/aclocal; do " &
       "  if [ -d \"$sp\" ]; then aclocal_dirs=\"$sp:$aclocal_dirs\"; fi; " &
       "done; " &
       "export ACLOCAL_PATH=\"$aclocal_dirs\"; " &
