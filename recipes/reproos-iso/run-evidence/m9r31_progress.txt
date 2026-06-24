@@ -1,0 +1,142 @@
+M9.R.31 — DE binary RPATH closure (Phase B+C progress)
+======================================================
+
+Status as of 2026-06-24 12:30 (mid-pass; ISO smoke pending).
+
+PHASE A (LANDED IN M9.R.30): manifest-walker mechanism.
+- libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/package_result.nim
+  (commits 6632b49e + e132fec6) emits the M9.R.30 manifest walker
+  in install-mirror scripts.
+
+PHASE B (M9.R.31): bottleneck identified + bootstrap applied.
+==============================================================
+
+THE BLOCKER
+
+Phase A's walker only activates when each recipe's install-mirror
+re-runs. The pre-M9.R.30 build state had 134 recipes' install dirs
+populated by the M9.R.14f mechanism but lacking the
+`.m9r30_propagated_libdirs.txt` manifest. Until each recipe re-ran
+its install-mirror with the new walker, transitive RPATHs stayed
+non-propagated. Direct re-build of every recipe was infeasible:
+
+  * `repro build` rebuilds the entire upstream compile chain even
+    when only install-mirror is stale (the engine doesn't separate
+    install-mirror from compile).
+  * Many compile chains have unrelated breakage (e.g. mutter's
+    msgfmt step short-fails at libacl.so.1 missing; see M9.R.31.1).
+  * The 24h time budget would not cover full-graph rebuild.
+
+THE M9.R.31.1 FIX
+
+`recipes/packages/source/gettext/repro.nim` gained `libacl` as a
+direct buildDep so msgfmt's DT_NEEDED libacl.so.1 resolves under
+the new walker's RPATH (gettext's autotools configure unconditionally
+probes for libacl + links it into libgettextlib; previous builds
+inherited the path via host nix-shell's ambient LD_LIBRARY_PATH
+which the M9.R.30 batch rebuild lacked).
+
+THE M9.R.31.2 BOOTSTRAP
+
+`_m9r31_propagate_v3.sh` applies the M9.R.30 walker's RPATH
+transformation in-place to existing pre-M9.R.30 install trees:
+
+  1. Synthesize each recipe's `.m9r30_propagated_libdirs.txt`
+     manifest from the union of its binaries' current RPATHs
+     (filtered to absolute paths, $ORIGIN family stripped).
+  2. For each recipe with deps declared in its `repro.nim`'s
+     `buildDeps:`/`nativeBuildDeps:`, compute the extra RPATH
+     entries = union of (recipe's own manifest, each dep's lib
+     dir, each dep's manifest contents).
+  3. patchelf --set-rpath every ELF under `<install>/usr/` (lib,
+     lib64, bin, sbin, plugins, libexec, ...) with the merged
+     dedup-preserving RPATH.
+  4. Re-synthesize the recipe's manifest from the now-extended
+     RPATHs so downstream consumers can pick up the closure.
+
+This is the SAME RPATH transformation the install-mirror script
+emits — applied via a closure-walking shell script instead of
+through the build engine. The recipe-side mechanism (M9.R.14f +
+M9.R.30) remains the source of truth; the bootstrap closes the
+gap for the pre-M9.R.30 build state without requiring a full
+graph rebuild.
+
+DE BINARY SURVEY RESULTS (after bootstrap)
+===========================================
+
+Pre-M9.R.30:
+  sway          libdrm.so.2: not found
+  swaymsg       libdrm.so.2: not found
+  swaybar       libdrm.so.2: not found
+  swaynag       libdrm.so.2: not found
+  kwin_wayland  (built before — already had M9.R.14f closure)
+  mutter        libatk-1.0.so.0, libcolord.so.2, libEGL.so.1, libeis.so.1,
+                libgbm.so.1, libGLESv2.so.2, libGL.so.1, libgudev-1.0.so.0,
+                liblcms2.so.2, libsystemd.so.0, libudev.so.1 (11 missing)
+  plasmashell   libmount.so.1: not found
+  sddm          (built before — already had M9.R.14f closure)
+  sddm-greeter-qt6  libxkbcommon.so.0: not found
+  gdm           libgio-2.0.so.0, libglib-2.0.so.0, libgobject-2.0.so.0
+
+Post-M9.R.31.2 bootstrap (build-host ldd "not found" count):
+  sway              0
+  swaymsg           0
+  swaybar           0
+  swaynag           0
+  kwin_wayland      0
+  mutter            0
+  plasmashell       0
+  sddm              0
+  sddm-greeter-qt6  0
+  gdm               0
+
+  (startplasma-wayland: recipe doesn't declare this executable;
+   gnome-shell: recipe never produced binary — out of scope for M9.R.31)
+
+PHASE C (ISO REBUILD): RUNNING
+==============================
+
+The reproos-iso build is rebuilding (third invocation in this
+session) to incorporate the v3-propagated install trees. Each
+build:
+  * stage-de-rootfs.sh: copies every from-source install-mirror
+    + walks ELF closure to discover unique nix-store prefixes
+    + mirrors them onto the ISO image.
+  * build-iso.sh: GRUB + EFI hybrid + xorriso pack.
+
+PHASE D (LIVE ISO UEFI DE SMOKE): PARTIAL
+==========================================
+
+First QEMU boot (post-v2 propagation, before Qt plugin tree walk):
+  sway --version         → "sway version 1.11"           OK
+  kwin_wayland --version → "kwin 6.2.5"                  OK
+  mutter --version       → "mutter 47.10"                OK
+  plasmashell --version  → CRASHED rc=134 (xcb plugin)   FAIL
+  sddm --version         → daemon started (X server up)  OK (greeter then failed authn)
+  sddm-greeter-qt6 --help → (output truncated)           partial
+
+The plasmashell crash traced to Qt6 xcb platform plugin's
+DT_NEEDED libxkbcommon.so.0/libGLESv2.so.2/libEGL.so.1 not
+finding their libs — the v2 propagation only walked usr/lib/
++ usr/lib64/ + usr/bin/ + usr/sbin/, missing usr/plugins/.
+
+The v3 propagation extends the walk to ALL ELFs under usr/, so
+Qt platform plugins, KF6 plugins, mutter compositor plugins,
+libexec helpers all participate.
+
+REMAINING TODOs
+===============
+
+* Phase D rerun (post-v3 ISO rebuild) — pending.
+* Phase E (installed-system smoke) — pending Phase D pass.
+* Phase F (apt cleanup) — none of the apt fallbacks were re-introduced;
+  reproos-iso's apt-based packages stay as the v1 base-rootfs
+  network layer; no Phase F changes needed.
+* Honest gaps:
+  - startplasma-wayland not declared as artifact in plasma-workspace
+    recipe — Plasma session entry-point missing.
+  - gnome-shell recipe doesn't produce a binary — GNOME session
+    entry-point missing.
+  - SDDM greeter auth ERROR_INTERNAL execve fails for
+    /usr/bin/reproos-installer-launcher — installer-launcher
+    not on disk (out of M9.R.31 scope).
