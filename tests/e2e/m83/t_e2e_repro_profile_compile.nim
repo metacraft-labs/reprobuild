@@ -7,7 +7,7 @@
 ## pipeline does NOT invoke this code path yet -- but the gate stays
 ## green so Phase D's apply integration can rely on it.
 
-import std/[os, osproc, sets, strutils, tables, unittest]
+import std/[json, os, osproc, sets, strutils, tables, unittest]
 
 import repro_elevation
 import repro_profile
@@ -414,6 +414,68 @@ suite "M83 Phase A e2e: compile + run user profiles":
         repro_elevation.pokInlineExecCall)
       check repro_elevation.isKnownPrivilegedOperationKind(
         $repro_elevation.pokInlineExecCall)
+
+  test "Phase F expandArchive fixture: format override + auto-detect emit the right argv":
+    # Windows-System-Resources Phase F e2e — the new fixture exercises
+    # the typed `expandArchive.build(...)` wrapper for every load-
+    # bearing dispatch (format override + auto-detect, zip + tar
+    # family, requiresElevation toggle). The fixture emits one JSON
+    # object per build edge; we assert the load-bearing fields match
+    # the spec's lowering.
+    let raw = compileAndRun("system_expandarchive.nim")
+    let doc = parseJson(raw)
+    # The fixture marks the host platform so the gate can branch on
+    # which dispatch was compiled in.
+    let host = doc{"host"}.getStr()
+    check host in @["windows", "posix"]
+    # Edge 1 — actions-runner zip with requiresElevation = true. The
+    # archive's `.zip` suffix auto-detects to eafZip; the marker is
+    # wired into outputs.
+    let zipEdge = doc{"runnerZip"}
+    check zipEdge{"id"}.getStr() == "extractRunnerZip"
+    check zipEdge{"requiresElevation"}.getBool() == true
+    check zipEdge{"outputs"}.elems[0].getStr() ==
+      "C:\\actions-runner\\config.cmd"
+    check zipEdge{"inputs"}.elems[0].getStr() ==
+      "C:\\actions-runner-cache\\runner.zip"
+    check zipEdge{"callPackage"}.getStr() == "reprobuild.builtin"
+    check zipEdge{"callExecutable"}.getStr() == "exec"
+    check zipEdge{"commandStatsId"}.getStr() == "expandArchive.eafZip"
+    let zipArgv = zipEdge{"argv"}
+    if host == "windows":
+      check zipArgv.elems[0].getStr() == "powershell"
+      check zipArgv.elems[1].getStr() == "-NoProfile"
+      check zipArgv.elems[2].getStr() == "-Command"
+      check zipArgv.elems[3].getStr().contains("Expand-Archive")
+      check zipArgv.elems[3].getStr().contains("-Force")
+    else:
+      check zipArgv.elems[0].getStr() == "unzip"
+      check zipArgv.elems[1].getStr() == "-q"
+      check zipArgv.elems[2].getStr() == "-o"
+      check zipArgv.elems[3].getStr() ==
+        "C:\\actions-runner-cache\\runner.zip"
+    # Edge 2 — explicit format = "tar.gz" override + strip-components.
+    let tgz = doc{"runnerTarGz"}
+    check tgz{"commandStatsId"}.getStr() == "expandArchive.eafTarGz"
+    check tgz{"requiresElevation"}.getBool() == false
+    let tgzArgv = tgz{"argv"}
+    check tgzArgv.elems[0].getStr() == "tar"
+    check tgzArgv.elems[1].getStr() == "-z"
+    check tgzArgv.elems[2].getStr() == "-x"
+    var sawStrip = false
+    for a in tgzArgv.elems:
+      if a.getStr() == "--strip-components=1":
+        sawStrip = true
+    check sawStrip
+    # Edge 3 — auto-detect tar.xz from the suffix.
+    let txz = doc{"runnerTarXz"}
+    check txz{"commandStatsId"}.getStr() == "expandArchive.eafTarXz"
+    let txzArgv = txz{"argv"}
+    check txzArgv.elems[0].getStr() == "tar"
+    check txzArgv.elems[1].getStr() == "-J"
+    # Edge 4 — explicit format = "zip" with a non-zip suffix.
+    let amb = doc{"ambiguousZip"}
+    check amb{"commandStatsId"}.getStr() == "expandArchive.eafZip"
 
   test "byte-exact home_basic JSON matches the in-process construction":
     # Sanity check that the JSON the compiled fixture emits matches

@@ -16,6 +16,15 @@ import repro_infra
 import repro_profile
 import repro_profile_compile
 
+# Windows-System-Resources Phase F — the expandArchive stdlib package
+# is consumed in-process so the integration test exercises a real
+# `expandArchive.build(...)` lowering and pins the resulting
+# BuildActionDef shape. The package lives in `repro_dsl_stdlib`, on
+# the `--path` set from the repo's config.nims, so a bare import
+# resolves.
+import repro_project_dsl
+import repro_dsl_stdlib/packages/expand_archive as expandArchive
+
 proc intentWithCapability(name: string;
                           installed: bool): ProfileIntent =
   result = ProfileIntent(name: "phaseD-sys-smoke")
@@ -557,3 +566,69 @@ suite "M83 Phase D: system apply round-trip via canonical text":
       if entry.contains("<arg redacted: read from "):
         sawRedaction = true
     check sawRedaction
+
+  test "Phase F expandArchive: build(...) lowers to an inlineExecCall BuildActionDef":
+    # Windows-System-Resources Phase F — the typed `expandArchive`
+    # stdlib package wraps platform-native archive tools (`unzip` /
+    # `tar` / PowerShell `Expand-Archive`) and emits a build edge
+    # whose `call` is an `inlineExecCall(...)`. The lowering binds
+    # the host's platform at profile-compile time so the resulting
+    # `BuildActionDef.call` argv is deterministic per host.
+    #
+    # This integration test pins the load-bearing edge-attribute
+    # fields the planner will eventually project into a build-graph
+    # operation (Phase G+): id, requiresElevation, outputs (the
+    # marker file), inputs (the archive + any extras), the
+    # `reprobuild.builtin.exec` builtin tag on the call, and the
+    # commandStatsId that records the resolved format.
+    resetBuildActionRegistry()
+    let act = expandArchive.build(
+      archive = "C:\\actions-runner-cache\\actions-runner-win-x64.zip",
+      destination = "C:\\actions-runner",
+      marker = "C:\\actions-runner\\config.cmd",
+      requiresElevation = true,
+      address = "extractRunnerZip",
+      dependsOn = ["actionsRunnerZip"])
+    check act.id == "extractRunnerZip"
+    check act.requiresElevation == true
+    check act.deps == @["actionsRunnerZip"]
+    check act.outputs == @["C:\\actions-runner\\config.cmd"]
+    check "C:\\actions-runner-cache\\actions-runner-win-x64.zip" in act.inputs
+    # The lowering targets the builtin-exec branch the engine
+    # short-circuits in `lowerGraphAction` — same path the Phase E
+    # `inlineExecCall(...)` resource takes on its way through the
+    # broker.
+    check act.call.packageName == "reprobuild.builtin"
+    check act.call.executableName == "exec"
+    # The format auto-detect (zip) propagates to the stats id; this is
+    # the lever planning + replays use to tell archive-format-specific
+    # actions apart at the cache layer.
+    check act.commandStatsId == "expandArchive.eafZip"
+
+  test "Phase F expandArchive: format= override threads through":
+    # An archive whose suffix is ambiguous still resolves correctly
+    # when the caller passes an explicit format. The action's argv
+    # then carries the matching tar-family flags.
+    resetBuildActionRegistry()
+    let act = expandArchive.build(
+      archive = "/var/cache/runner-bundle.dat",
+      destination = "/opt/runner",
+      marker = "/opt/runner/config.sh",
+      format = "tar.xz",
+      stripComponents = 1)
+    check act.commandStatsId == "expandArchive.eafTarXz"
+    # The argv carries the tar.xz compression switch + the
+    # strip-components override.
+    var sawXz = false
+    var sawStrip = false
+    var sawTar = false
+    for arg in act.call.arguments:
+      if arg.encodedValue.contains("-J"):
+        sawXz = true
+      if arg.encodedValue.contains("--strip-components=1"):
+        sawStrip = true
+      if arg.encodedValue.contains("tar"):
+        sawTar = true
+    check sawXz
+    check sawStrip
+    check sawTar
