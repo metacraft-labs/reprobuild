@@ -6110,6 +6110,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim",
+    binary: "build/test-bin/t_shared_clone_cache_repacks_and_bounds_growth",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_spec_example_fixtures_compile.nim",
     binary: "build/test-bin/t_spec_example_fixtures_compile",
     defines: @[],

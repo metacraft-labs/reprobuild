@@ -29,7 +29,7 @@
 ## same identity-bound binary ``git_actions`` uses) via ``execCmdEx`` —
 ## no new third-party dependency, matching the M2 subprocess shape.
 
-import std/[os, osproc, strutils]
+import std/[os, osproc, strutils, times]
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -360,6 +360,250 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
       diagnostic: "cache-ref push failed (" & $res.code & "): " &
         res.output.strip())
   SharedCloneResult(ok: true, sharedBarePath: sharedBarePath)
+
+# ---- cache maintenance: gc / repack / dead-ref prune (RA-15) ---------------
+#
+# The RA-5 cache accumulates loose objects from every ``refs/cache/<ws>/*``
+# push without bound (each cache-ref push lands a new commit's objects loose).
+# RA-15 adds an *opportunistic*, *best-effort* maintenance pass per shared
+# bare that:
+#
+#   1. prunes ``refs/cache/<workspace>/*`` for workspaces that are no longer
+#      live (so unreachable objects become collectable), and
+#   2. runs ``git gc``/``git repack`` to fold loose objects into packs,
+#      bounded by a loose-object-count / cache-size / age budget so we do NOT
+#      gc on every operation.
+#
+# It is designed to never block a clone or commit: callers run it on a
+# threshold (or detached in the background). Every step is wrapped so a
+# failure is reported via ``MaintenanceResult.diagnostic`` rather than raised
+# — a maintenance failure must never break init/sync/commit.
+
+type
+  MaintenanceBudget* = object
+    ## Threshold that gates whether a gc/repack pass runs. Maintenance is
+    ## skipped (a cheap no-op) until at least one bound is exceeded, so the
+    ## common path stays fast. ``looseObjectLimit`` is the primary trigger
+    ## (it tracks exactly the cache-ref-push growth); ``ageSeconds`` forces a
+    ## periodic pass even when growth is slow; ``sizeBytesLimit`` caps total
+    ## on-disk footprint. A value of 0 disables that particular bound.
+    looseObjectLimit*: int
+    sizeBytesLimit*: int64
+    ageSeconds*: int
+
+  MaintenanceResult* = object
+    ## Outcome of a best-effort maintenance pass over one shared bare.
+    ## ``ok`` is false only on a genuine error (a git command failed); a
+    ## *skipped* pass (budget not exceeded) is ``ok = true`` with
+    ## ``ran = false``. ``prunedRefs`` lists the dead cache refs removed.
+    ok*: bool
+    ran*: bool
+    sharedBarePath*: string
+    looseBefore*: int
+    looseAfter*: int
+    prunedRefs*: seq[string]
+    diagnostic*: string
+
+const
+  DefaultLooseObjectLimit* = 500
+    ## Default loose-object trigger. Each cache-ref push of a fresh commit
+    ## adds a handful of loose objects; a few hundred is a sensible "enough
+    ## churn to bother packing" threshold that stays well below git's own
+    ## ``gc.auto`` default (6700) so the cache never balloons.
+  DefaultMaintenanceAgeSeconds* = 7 * 24 * 60 * 60
+    ## Default age bound: force a pass at least weekly even on a quiet cache.
+  MaintenanceStampRelPath* = "reprobuild-last-gc"
+    ## File (relative to the bare root) whose mtime records the last pass, so
+    ## the age bound and the "dead workspace" age fallback have a clock.
+
+proc defaultMaintenanceBudget*(): MaintenanceBudget =
+  ## Sensible defaults (overridable by callers / the CLI later).
+  MaintenanceBudget(
+    looseObjectLimit: DefaultLooseObjectLimit,
+    sizeBytesLimit: 0,
+    ageSeconds: DefaultMaintenanceAgeSeconds)
+
+proc looseObjectCount*(gitBin, barePath: string): int =
+  ## Number of loose (unpacked) objects in ``barePath``, via
+  ## ``git count-objects -v`` (the ``count:`` field). Returns 0 on error so
+  ## a failed probe never *triggers* maintenance spuriously.
+  let res = runGit(gitBin, ["-C", barePath, "count-objects", "-v"])
+  if res.code != 0:
+    return 0
+  for line in res.output.splitLines:
+    let trimmed = line.strip()
+    if trimmed.startsWith("count:"):
+      try:
+        return parseInt(trimmed[len("count:") .. ^1].strip())
+      except ValueError:
+        return 0
+  0
+
+proc directorySizeBytes(path: string): int64 =
+  ## Total size of all regular files under ``path`` (best-effort; unreadable
+  ## entries are skipped). Used only when a ``sizeBytesLimit`` is configured.
+  if not dirExists(path):
+    return 0
+  for f in walkDirRec(path, yieldFilter = {pcFile}):
+    try:
+      result += getFileSize(f)
+    except OSError, IOError:
+      discard
+
+proc maintenanceStampPath(barePath: string): string =
+  barePath / MaintenanceStampRelPath
+
+proc maintenanceAgeSeconds(barePath: string): int =
+  ## Seconds since the last recorded maintenance pass, or a very large number
+  ## when no stamp exists yet (so the age bound fires on a never-maintained
+  ## bare).
+  let stamp = maintenanceStampPath(barePath)
+  if not fileExists(stamp):
+    return high(int)
+  try:
+    let last = getLastModificationTime(stamp).toUnix()
+    let now = getTime().toUnix()
+    int(max(0'i64, now - last))
+  except OSError:
+    high(int)
+
+proc touchMaintenanceStamp(barePath: string) =
+  try:
+    writeFile(maintenanceStampPath(barePath), "")
+  except IOError, OSError:
+    discard
+
+proc maintenanceDue*(gitBin, barePath: string;
+                     budget: MaintenanceBudget): bool =
+  ## True when at least one configured budget bound is exceeded. This is the
+  ## cheap gate callers consult before paying for a gc — it never runs git gc
+  ## itself.
+  if not looksLikeGitDir(barePath):
+    return false
+  if budget.looseObjectLimit > 0 and
+      looseObjectCount(gitBin, barePath) >= budget.looseObjectLimit:
+    return true
+  if budget.ageSeconds > 0 and
+      maintenanceAgeSeconds(barePath) >= budget.ageSeconds:
+    return true
+  if budget.sizeBytesLimit > 0 and
+      directorySizeBytes(barePath) >= budget.sizeBytesLimit:
+    return true
+  false
+
+proc cacheRefWorkspaces*(gitBin, barePath: string): seq[string] =
+  ## The distinct workspace names that currently own a ``refs/cache/<ws>/*``
+  ## ref in ``barePath``. Used to find dead-workspace refs to prune.
+  let res = runGit(gitBin,
+    ["-C", barePath, "for-each-ref", "--format=%(refname)", "refs/cache/"])
+  if res.code != 0:
+    return @[]
+  var seen: seq[string]
+  for line in res.output.splitLines:
+    let refName = line.strip()
+    # refs/cache/<ws>/<branch...>
+    if not refName.startsWith("refs/cache/"):
+      continue
+    let rest = refName[len("refs/cache/") .. ^1]
+    let slash = rest.find('/')
+    if slash <= 0:
+      continue
+    let ws = rest[0 ..< slash]
+    if ws notin seen:
+      seen.add(ws)
+  seen
+
+proc pruneDeadCacheRefs*(gitBin, barePath: string;
+                         liveWorkspaces: openArray[string]): seq[string] =
+  ## Delete every ``refs/cache/<ws>/*`` ref whose ``<ws>`` is not in
+  ## ``liveWorkspaces``. Returns the list of deleted ref names. A LIVE
+  ## workspace's refs are always preserved — this is the safety-critical
+  ## invariant (dropping a live workspace's cache refs would silently lose
+  ## not-yet-published objects on the next gc).
+  let res = runGit(gitBin,
+    ["-C", barePath, "for-each-ref", "--format=%(refname)", "refs/cache/"])
+  if res.code != 0:
+    return @[]
+  for line in res.output.splitLines:
+    let refName = line.strip()
+    if not refName.startsWith("refs/cache/"):
+      continue
+    let rest = refName[len("refs/cache/") .. ^1]
+    let slash = rest.find('/')
+    if slash <= 0:
+      continue
+    let ws = rest[0 ..< slash]
+    if ws in liveWorkspaces:
+      continue
+    let del = runGit(gitBin, ["-C", barePath, "update-ref", "-d", refName])
+    if del.code == 0:
+      result.add(refName)
+
+proc discoverLiveWorkspaceNames*(workspaceRoots: openArray[string]): seq[string] =
+  ## Map a set of live workspace ROOT directories to the workspace names used
+  ## in the cache-ref namespace. The name is the directory basename (the same
+  ## value RA-4/RA-5 namespace cache pushes under). Only directories that
+  ## still exist on disk are treated as live — that is the liveness predicate.
+  for root in workspaceRoots:
+    if root.len == 0:
+      continue
+    if dirExists(root):
+      let name = root.lastPathPart
+      if name.len > 0 and name notin result:
+        result.add(name)
+
+proc maintainSharedBare*(gitBin, barePath: string;
+                         liveWorkspaces: openArray[string];
+                         budget = defaultMaintenanceBudget();
+                         force = false): MaintenanceResult =
+  ## Run an opportunistic, best-effort maintenance pass over one shared bare:
+  ##
+  ##   1. prune dead-workspace ``refs/cache/*`` (workspaces not in
+  ##      ``liveWorkspaces``), then
+  ##   2. when the budget is exceeded (or ``force``), run ``git gc`` to fold
+  ##      loose objects into packs and drop now-unreachable objects.
+  ##
+  ## Never raises: a git failure is returned as ``ok = false`` with a
+  ## diagnostic so a caller on the init/commit path can ignore it. ``force``
+  ## bypasses the budget gate (used by the manual ``shared-clones gc``
+  ## trigger). When ``liveWorkspaces`` is empty the prune step is skipped (we
+  ## refuse to delete every cache ref just because no live set was supplied —
+  ## that would be the unsafe interpretation).
+  result.sharedBarePath = barePath
+  if not looksLikeGitDir(barePath):
+    result.ok = false
+    result.diagnostic = "shared bare missing for maintenance: " & barePath
+    return
+  result.ok = true
+  result.looseBefore = looseObjectCount(gitBin, barePath)
+
+  # (1) Dead-workspace ref prune. Only when we were actually given a live
+  # set; an empty set means "unknown", and pruning everything would be
+  # destructive, so we skip it.
+  if liveWorkspaces.len > 0:
+    result.prunedRefs = pruneDeadCacheRefs(gitBin, barePath, liveWorkspaces)
+
+  # (2) Budget-gated gc/repack.
+  let due = force or maintenanceDue(gitBin, barePath, budget)
+  if not due:
+    result.ran = false
+    result.looseAfter = result.looseBefore
+    return
+
+  # ``git gc --prune=now`` packs loose objects and expires unreachable ones
+  # (the dead-ref objects pruned above become collectable). ``--quiet`` keeps
+  # it silent on the fire-and-forget path.
+  let gc = runGit(gitBin, ["-C", barePath, "gc", "--quiet", "--prune=now"])
+  if gc.code != 0:
+    result.ok = false
+    result.ran = false
+    result.looseAfter = result.looseBefore
+    result.diagnostic = "git gc failed (" & $gc.code & "): " &
+      gc.output.strip()
+    return
+  result.ran = true
+  result.looseAfter = looseObjectCount(gitBin, barePath)
+  touchMaintenanceStamp(barePath)
 
 # ---- inspection (the `shared-clones list` surface) -------------------------
 

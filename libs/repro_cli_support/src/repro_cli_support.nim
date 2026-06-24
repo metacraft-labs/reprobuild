@@ -20471,6 +20471,14 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #                  already-checked-out repo that is missing it. Best-effort
 #                  per repo — a failure to populate one bare is reported but
 #                  does not abort the others.
+#   * ``gc`` (alias ``maintenance``) — RA-15 maintenance pass per unique
+#                  shared bare: prune ``refs/cache/<ws>/*`` for dead
+#                  workspaces (those whose directory no longer exists among
+#                  the live siblings), then ``git gc``/repack the bare when a
+#                  loose-object / size / age budget is exceeded. ``--force``
+#                  bypasses the budget gate. Best-effort — a maintenance error
+#                  is reported but never raised (it must never block a
+#                  clone/commit when run opportunistically).
 #
 # Exit codes:
 #   * 0 — verb completed (``list``/``root`` always 0 on success; ``rewire``
@@ -20485,6 +20493,7 @@ type
     workspaceRoot: string
     projectName: string
     json: bool
+    force: bool
 
   SharedClonesRepoReport* = object
     name*: string
@@ -20494,6 +20503,11 @@ type
     barePresent*: bool
     wired*: bool
     rewired*: bool
+    # RA-15 maintenance fields (populated for the ``gc`` verb).
+    maintenanceRan*: bool
+    looseBefore*: int
+    looseAfter*: int
+    prunedRefs*: seq[string]
     diagnostic*: string
 
   SharedClonesReport* = object
@@ -20520,6 +20534,13 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["barePresent"] = %entry.barePresent
     obj["wired"] = %entry.wired
     obj["rewired"] = %entry.rewired
+    obj["maintenanceRan"] = %entry.maintenanceRan
+    obj["looseBefore"] = %entry.looseBefore
+    obj["looseAfter"] = %entry.looseAfter
+    var pruned = newJArray()
+    for r in entry.prunedRefs:
+      pruned.add(%r)
+    obj["prunedRefs"] = pruned
     obj["diagnostic"] = %entry.diagnostic
     repos.add(obj)
   result["repos"] = repos
@@ -20538,6 +20559,10 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       " wired=" & $entry.wired
     if report.verb == "rewire":
       line.add(" rewired=" & $entry.rewired)
+    if report.verb == "gc":
+      line.add(" maintenanceRan=" & $entry.maintenanceRan &
+        " loose=" & $entry.looseBefore & "->" & $entry.looseAfter &
+        " prunedRefs=" & $entry.prunedRefs.len)
     if entry.diagnostic.len > 0:
       line.add(" diagnostic=" & entry.diagnostic)
     result.add(line)
@@ -20554,6 +20579,9 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
     elif arg == "--json":
       result.json = true
+    elif arg == "--force":
+      # RA-15: bypass the budget gate for the manual ``gc`` trigger.
+      result.force = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace shared-clones` flag: " & arg)
@@ -20568,13 +20596,39 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
     inc i
   if result.verb.len == 0:
     result.verb = "list"
-  if result.verb notin ["list", "rewire", "root"]:
+  # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
+  if result.verb == "maintenance":
+    result.verb = "gc"
+  if result.verb notin ["list", "rewire", "root", "gc"]:
     raise newException(ValueError,
-      "`repro workspace shared-clones` verb must be list|rewire|root, got: " &
-        result.verb)
+      "`repro workspace shared-clones` verb must be " &
+        "list|rewire|root|gc|maintenance, got: " & result.verb)
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
+  ## RA-15 liveness predicate for dead-workspace ref pruning. The cache-ref
+  ## namespace (``refs/cache/<workspace>/<branch>``) uses each workspace
+  ## directory's basename (see RA-4 ``spawnAsyncCachePush``). A shared bare is
+  ## shared by sibling workspaces that live next to each other on disk, so the
+  ## live set is: this workspace plus every *initialized* sibling workspace
+  ## directory under the same parent. A ``refs/cache/<ws>/*`` whose ``<ws>`` is
+  ## not in this set belongs to a workspace that no longer exists on disk and
+  ## is safe to prune. We err on the side of KEEPING a ref: only directories
+  ## that fail the initialized-workspace check are treated as dead.
+  var roots: seq[string]
+  roots.add(workspaceRoot)
+  let parent = workspaceRoot.parentDir
+  if parent.len > 0 and dirExists(parent):
+    for kind, entry in walkDir(parent):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      if entry == workspaceRoot:
+        continue
+      if isInitializedWorkspace(entry):
+        roots.add(entry)
+  discoverLiveWorkspaceNames(roots)
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -20592,13 +20646,21 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   let resolved = resolveWorkspaceListProject(listArgs)
   result.project = resolved.projectName
 
-  # ``rewire`` does live VCS work (refresh shared bares). ``list`` is
-  # read-only. Resolve git only when we will use it.
+  # ``rewire`` and ``gc`` do live VCS work. ``list`` is read-only. Resolve
+  # git only when we will use it.
   var identity: GitToolIdentity
-  if parsed.verb == "rewire":
+  if parsed.verb in ["rewire", "gc"]:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
 
+  # RA-15: the dead-workspace prune needs the live-workspace set. Compute it
+  # once for the whole pass (it is the same for every bare in this run).
+  var liveWorkspaces: seq[string]
+  if parsed.verb == "gc":
+    liveWorkspaces = liveWorkspaceNamesForCache(parsed.workspaceRoot)
+
   var sharedBareByUrl = initTable[string, SharedCloneResult]()
+  # RA-15: maintain each unique shared bare at most once per pass.
+  var maintainedBares = initHashSet[string]()
   for repo in resolved.repos:
     var entry = SharedClonesRepoReport(
       name: repo.name,
@@ -20640,6 +20702,26 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
           entry.diagnostic = "alternates wiring failed: " & wired.diagnostic
           # The bare WAS present but we could not wire — a genuine failure.
           result.exitCode = 1
+
+    elif parsed.verb == "gc":
+      # RA-15 maintenance: prune dead-workspace cache refs and gc/repack the
+      # shared bare, once per unique bare. Best-effort — a maintenance error
+      # is reported per repo but does not abort the others.
+      if not info.barePresent:
+        entry.diagnostic = "shared bare not present; nothing to maintain"
+      elif info.sharedBarePath in maintainedBares:
+        entry.diagnostic = "shared bare maintained via an earlier repo entry"
+      else:
+        maintainedBares.incl(info.sharedBarePath)
+        let m = maintainSharedBare(identity.binaryPath, info.sharedBarePath,
+          liveWorkspaces, defaultMaintenanceBudget(), parsed.force)
+        entry.maintenanceRan = m.ran
+        entry.looseBefore = m.looseBefore
+        entry.looseAfter = m.looseAfter
+        entry.prunedRefs = m.prunedRefs
+        if not m.ok:
+          entry.diagnostic = "maintenance failed: " & m.diagnostic
+          result.exitCode = 1
     result.repos.add(entry)
 
 proc writeSharedClonesReport(report: SharedClonesReport) =
@@ -20649,8 +20731,9 @@ proc writeSharedClonesReport(report: SharedClonesReport) =
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
-  ## ``repro workspace shared-clones [list|rewire|root] [<project>]
-  ## [--workspace-root=PATH] [--json]``.
+  ## ``repro workspace shared-clones [list|rewire|root|gc] [<project>]
+  ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
+  ## for ``gc``; ``--force`` bypasses the gc budget gate.
   let parsed = parseSharedClonesArgs(args)
   let report = executeSharedClones(parsed)
   # ``root`` prints just the path; do not write a report file for it (it
