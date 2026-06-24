@@ -277,7 +277,14 @@ proc writeLockFile*(lock: WorkspaceLockFile; path: string) =
   ## same lock content overwrites the file with identical bytes
   ## (the serializer is deterministic).
   createDir(parentDir(path))
-  writeFile(path, serializeLockToToml(lock))
+  let body = serializeLockToToml(lock)
+  # RA-7: never write an empty / zero-byte lock. A zero-byte lock would
+  # be silently committed and published as a "reproducible state" that
+  # reproduces nothing; reject it at the writer boundary (pilot 5884c31).
+  if body.strip().len == 0:
+    raise newException(ValueError,
+      "refusing to write empty/zero-byte lock file: " & path)
+  writeFile(path, body)
 
 # ---- convenience: ensure stable ordering of repos --------------------------
 

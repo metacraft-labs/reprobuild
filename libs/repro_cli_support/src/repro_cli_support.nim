@@ -7932,6 +7932,17 @@ proc vcsDispatcherContent(hookName: string): string =
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
     hookName & " logic.\n")
   result.add("set -eu\n\n")
+  # RA-7: re-entry guard. Lock publication PUSHES the manifest repo, and
+  # that repo carries these same managed hooks, so a publish-push would
+  # re-fire the dispatcher (and recurse: the nested push would publish
+  # again, …). On first entry we set ``REPROBUILD_HOOK_ACTIVE=1``; a nested
+  # invocation sees it already set and short-circuits with success before
+  # re-running any body. (pilot ``24252a0``.)
+  result.add("if [ \"${REPROBUILD_HOOK_ACTIVE:-}\" = \"1\" ]; then\n")
+  result.add("  exit 0\n")
+  result.add("fi\n")
+  result.add("REPROBUILD_HOOK_ACTIVE=1\n")
+  result.add("export REPROBUILD_HOOK_ACTIVE\n\n")
   result.add("HOOK_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n")
   result.add("LOCAL_HOOK=\"$HOOK_DIR/" & hookName & ".repro-local\"\n")
   result.add("MANAGED_HOOK=\"$HOOK_DIR/" & hookName & ".repro-managed\"\n\n")
@@ -17525,6 +17536,187 @@ proc writeWorkspaceLockReport(report: WorkspaceLockReport) =
   let reportPath = reportDir / "lock-report.json"
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
 
+# ---- RA-7: lock publication (commit + push) ------------------------------
+#
+# Writing a lock and *publishing* it are distinct (Workspace-Manifests.md
+# § "Lock publication (commit + push)"). The writer drops the TOML under
+# ``locks/<project>/<repo>/<sha>.toml`` in the manifest-repo checkout;
+# ``publishWorkspaceLock`` then commits and pushes that subtree to the
+# manifest repo's upstream so the lock actually reaches teammates.
+#
+# Contract (models repo-workspaces ``publishWorkspaceLock``, commits
+# ``8c60ca7`` + ``24252a0`` + ``5884c31``):
+#
+#   - Stage everything under ``locks/`` (``git add -- locks``).
+#   - REFUSE if the manifest repo is dirty OUTSIDE ``locks/`` — a publish
+#     commit must touch only locks, never sweep up unrelated edits. When
+#     refusing, unstage what we just staged so the index is left as we
+#     found it; the dirty file itself is never touched.
+#   - Reject empty / zero-byte staged lock files before committing.
+#   - Commit with a focused message (``Publish N workspace lock entr…``).
+#   - Push to the manifest repo's upstream (``git push <remote>
+#     HEAD:<branch>``), resolving the remote/branch from the current
+#     branch's ``@{u}``.
+#
+# Best-effort: every failure path (no upstream, dirty-outside-locks,
+# nothing to commit, network/push error) is logged and returns ``false``;
+# it never raises and never blocks the parent operation. Callers that gate
+# on publication (the pre-push path) treat ``false`` as "lock not
+# published" and decide their own policy; post-commit never calls this at
+# all (it stays strictly local — Workspace-Manifests.md publish table).
+
+type
+  LockPublishOutcome* = enum
+    lpoPublished       ## Staged locks committed AND pushed to upstream.
+    lpoNothingToPublish ## No staged lock changes; nothing to commit/push.
+    lpoRefusedDirty    ## Manifest repo dirty outside ``locks/``; refused.
+    lpoFailed          ## Empty lock, no upstream, or commit/push failed.
+
+  LockPublishResult* = object
+    outcome*: LockPublishOutcome
+    diagnostic*: string
+
+proc gitPorcelainEntries(identity: GitToolIdentity;
+                         repoRoot: string): seq[tuple[code, path: string]] =
+  ## Parse ``git status --porcelain=v1`` lines into (XY, path) pairs.
+  ## Renames (``R  old -> new``) surface the destination path, which is
+  ## what the dirty-outside-``locks/`` guard cares about.
+  let res = gitRunPlain(identity,
+    ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
+  if res.code != 0:
+    return
+  for rawLine in res.output.splitLines():
+    if rawLine.len < 4:
+      continue
+    let code = rawLine[0 .. 1]
+    var path = rawLine[3 .. ^1]
+    let arrow = path.find(" -> ")
+    if arrow >= 0:
+      path = path[(arrow + 4) .. ^1]
+    path = path.strip(chars = {'"'})
+    result.add((code: code, path: path))
+
+proc pathIsUnderLocks(path: string): bool =
+  ## A repo-relative status path is "in scope" for the lock commit when it
+  ## lives under the top-level ``locks/`` directory.
+  let normalized = path.replace('\\', '/')
+  normalized == "locks" or normalized.startsWith("locks/")
+
+proc publishWorkspaceLock*(identity: GitToolIdentity;
+                           manifestRepoRoot: string): LockPublishResult =
+  ## RA-7. Commit the staged-under-``locks/`` subtree and push it to the
+  ## manifest repo's upstream. Best-effort: never raises. See the block
+  ## comment above for the full contract.
+  result.outcome = lpoFailed
+
+  if manifestRepoRoot.len == 0 or
+      not dirExists(manifestRepoRoot / ".git"):
+    result.diagnostic =
+      "manifest repo root '" & manifestRepoRoot &
+        "' is not a git checkout; cannot publish lock"
+    return
+
+  # Stage only the locks subtree. ``git add`` of a non-existent path errors;
+  # guard so a manifest layer that has never produced a lock is a clean
+  # "nothing to publish", not a failure.
+  if dirExists(manifestRepoRoot / "locks"):
+    let addRes = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "add", "--", "locks"])
+    if addRes.code != 0:
+      result.diagnostic = "git add locks failed: " & addRes.output.strip()
+      return
+
+  # Dirty-outside-``locks/`` guard. We scan the FULL working-tree+index
+  # status; any tracked-or-untracked change whose path is not under
+  # ``locks/`` means the publish commit would either sweep up unrelated
+  # work (staged) or run against an inconsistent tree. Refuse, and unstage
+  # what we just staged so the operator's index is left untouched.
+  var dirtyOutside: seq[string]
+  for entry in gitPorcelainEntries(identity, manifestRepoRoot):
+    if not pathIsUnderLocks(entry.path):
+      dirtyOutside.add(entry.path)
+  if dirtyOutside.len > 0:
+    # Reset only the locks subtree we staged; leave any pre-existing
+    # staging of unrelated paths exactly as we found it.
+    discard gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    result.outcome = lpoRefusedDirty
+    result.diagnostic =
+      "manifest repo is dirty outside locks/ (" &
+        dirtyOutside.join(", ") & "); refusing to publish lock"
+    return
+
+  # Collect the staged lock paths and reject empty/zero-byte locks.
+  let stagedRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "diff", "--cached", "--name-only", "--", "locks"])
+  var stagedLocks: seq[string]
+  if stagedRes.code == 0:
+    for line in stagedRes.output.splitLines():
+      let p = line.strip()
+      if p.len > 0:
+        stagedLocks.add(p)
+
+  if stagedLocks.len == 0:
+    result.outcome = lpoNothingToPublish
+    result.diagnostic = "no staged lock changes to publish"
+    return
+
+  for rel in stagedLocks:
+    let abs = manifestRepoRoot / rel.replace('/', DirSep)
+    if fileExists(abs) and getFileSize(abs) == 0:
+      # Unstage the locks subtree; an empty lock must never be committed.
+      discard gitRunPlain(identity,
+        ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "refusing to publish empty/zero-byte lock file: " & rel
+      return
+
+  # Resolve the upstream (remote + remote branch) of the current branch.
+  let upstreamRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "rev-parse", "--abbrev-ref",
+     "--symbolic-full-name", "@{u}"])
+  if upstreamRes.code != 0 or upstreamRes.output.strip().len == 0:
+    discard gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    result.outcome = lpoFailed
+    result.diagnostic =
+      "manifest repo has no upstream (@{u}); cannot publish lock"
+    return
+  let upstream = upstreamRes.output.strip()    # e.g. "origin/latest"
+  let slash = upstream.find('/')
+  if slash < 0:
+    discard gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
+    result.outcome = lpoFailed
+    result.diagnostic = "unparseable upstream ref: " & upstream
+    return
+  let remote = upstream[0 ..< slash]
+  let remoteBranch = upstream[(slash + 1) .. ^1]
+
+  let plural = if stagedLocks.len == 1: "entry" else: "entries"
+  let message = "Publish " & $stagedLocks.len & " workspace lock " & plural
+  let commitRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "commit", "--quiet", "-m", message,
+     "--", "locks"])
+  if commitRes.code != 0:
+    result.outcome = lpoFailed
+    result.diagnostic = "git commit failed: " & commitRes.output.strip()
+    return
+
+  let pushRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "push", remote, "HEAD:" & remoteBranch])
+  if pushRes.code != 0:
+    result.outcome = lpoFailed
+    result.diagnostic =
+      "git push " & remote & " HEAD:" & remoteBranch & " failed: " &
+        pushRes.output.strip()
+    return
+
+  result.outcome = lpoPublished
+  result.diagnostic =
+    "published " & $stagedLocks.len & " lock " & plural & " to " & upstream
+
 proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
   ## [--manifest-layer-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
@@ -17543,6 +17735,23 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   writeWorkspaceLockReport(outcome.report)
   for line in renderLockTextLines(outcome.report):
     stdout.writeLine(line)
+  # RA-7: an explicit ``repro workspace lock`` PUBLISHES (commit + push)
+  # the lock to the manifest repo. Only attempt when the write succeeded
+  # (exit 0). Publication is best-effort: a refusal/failure is surfaced to
+  # the operator but does not change the lock command's exit code (the lock
+  # was still written locally; post-commit/next-push can re-publish).
+  if outcome.report.exitCode == 0 and
+      outcome.report.manifestLayerRoot.len > 0:
+    let identity = ensureGitToolResolvable(
+      parsed.toolProvisioning, getEnv("PATH"))
+    let pub = publishWorkspaceLock(identity, outcome.report.manifestLayerRoot)
+    case pub.outcome
+    of lpoPublished:
+      stdout.writeLine("workspace lock: " & pub.diagnostic)
+    of lpoNothingToPublish:
+      discard
+    else:
+      stderr.writeLine("workspace lock: " & pub.diagnostic)
   outcome.report.exitCode
 
 # ---- M19: post-commit lock refresh (best-effort) -------------------------
@@ -18187,6 +18396,11 @@ type
     pushedRefsPath*: string
     failures*: seq[CheckFailure]
     lockUpdate*: CheckLockUpdate
+    # RA-7: the manifest-layer checkout that owns the lock subtree, so the
+    # caller can publish (commit + push) the just-written lock after a
+    # successful gate. Empty when the gate short-circuited before the lock
+    # stage (e.g. a dirty sibling).
+    manifestLayerRoot*: string
     exitCode*: int
 
 proc lockUpdateKindTag(kind: CheckLockUpdateKind): string =
@@ -18224,6 +18438,7 @@ proc toJsonNode*(report: CheckReport): JsonNode =
   lockObj["triggerSha"] = %report.lockUpdate.triggerSha
   lockObj["diagnostic"] = %report.lockUpdate.diagnostic
   result["lockUpdate"] = lockObj
+  result["manifestLayerRoot"] = %report.manifestLayerRoot
   result["exitCode"] = %report.exitCode
 
 proc renderCheckTextLines*(report: CheckReport): seq[string] =
@@ -18923,6 +19138,9 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     workspaceRoot: parsed.workspaceRoot,
     toolProvisioning: parsed.toolProvisioning)
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
+  # RA-7: surface the manifest-layer root so the caller can publish
+  # (commit + push) the lock after the gate passes.
+  result.manifestLayerRoot = manifestLayerRoot
   # RA-1: resolve the latest lock via Git history over the per-repo lock
   # subtree (no shared index). ``latest.lockRelPath`` is "" when no lock
   # exists yet.
@@ -19164,6 +19382,24 @@ proc runCheckCommand*(args: openArray[string]): int =
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
+    # RA-7: on a passing pre-push gate (and only then), PUBLISH the lock —
+    # commit + push the ``locks/`` subtree to the manifest repo's upstream
+    # so the reproducible state actually reaches teammates. Publication is
+    # best-effort here (RA-21 later makes the pre-push gate refuse on a
+    # publish failure); a refusal/failure is surfaced but does not change
+    # the gate's exit code. We never publish a failed gate's lock.
+    if report.exitCode == 0 and report.manifestLayerRoot.len > 0:
+      let identity = ensureGitToolResolvable(
+        parsed.toolProvisioning, getEnv("PATH"))
+      let pub = publishWorkspaceLock(identity, report.manifestLayerRoot)
+      case pub.outcome
+      of lpoPublished:
+        stderr.writeLine("repro check: " & pub.diagnostic)
+      of lpoNothingToPublish:
+        discard
+      else:
+        stderr.writeLine("repro check: lock publish skipped: " &
+          pub.diagnostic)
     writeCheckReport(report)
     if parsed.json:
       stdout.writeLine(pretty(report.toJsonNode(), indent = 2))

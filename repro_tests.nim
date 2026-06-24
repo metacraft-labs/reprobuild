@@ -5958,6 +5958,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim",
+    binary: "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_m9r21_4_hardware_e2e.nim",
     binary: "build/test-bin/t_m9r21_4_hardware_e2e",
     defines: @[],
@@ -6000,6 +6008,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_post_commit_refreshes_lock_and_pushes_cache.nim",
     binary: "build/test-bin/t_post_commit_refreshes_lock_and_pushes_cache",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim",
+    binary: "build/test-bin/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
