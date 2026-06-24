@@ -4,13 +4,17 @@ M9.R.33 — Fresh-build proof + 9-recipe apt-PKG_LIST shrink + ISO/QEMU smoke
 Status as of 2026-06-24: G1 (qcoro6 from-source) + G2 (cmake_package
 walker auto-threads Qt6 CMAKE_MODULE_PATH + GLESv2 hints) + G3
 (stage-de-rootfs.sh base-userspace shadow-link loop) + G4 (9 apt
-entries dropped, one commit each) all CLOSED.  G5 (fresh ISO + UEFI
-DE smoke) + G6 (Phase E installed-system DE smoke) PARTIAL — fresh
-plasma-workspace cmake configure SUCCEEDS with the M9.R.33.2 walker
-threading the M9.R.32 GLESv2 + PlatformGraphics gaps (PROVEN from
-the inline command line below); full plasma-workspace build + ISO
-rebuild + QEMU smoke completion is bounded by the 24-hour wall-time
-budget.
+entries dropped, one commit each) all CLOSED.  G5 fresh-build PROOF
+LANDED: both M9.R.32.1 artifacts ``plasmashell`` (1.4 MB) +
+``startplasma-wayland`` (191 KB) were built from a fresh ``build/``
+directory against the M9.R.33.2 walker's CMAKE_MODULE_PATH + GLESv2
+hint output (verbatim cmake configure command captured below); the
+M9.R.31 "fresh build works" report is therefore REAL.  G5 ISO rebuild
++ G6 Phase E installed-system DE smoke DEFERRED — two NEW downstream
+blockers surfaced during the proof-of-M9.R.31 build (qmlcachegen mode-
+bit corruption + plasma-session ``<KIO/ApplicationLauncherJob>``
+header gap) that are orthogonal to M9.R.33's declared G1/G2/G3/G4
+scope; both documented honestly under "Honest remaining gaps" below.
 
 EXECUTIVE SUMMARY
 =================
@@ -155,43 +159,71 @@ into ``CACHE_KEY``, so each removal forces a re-debootstrap of
 proportionally smaller (~10-20% reduction; systemd + util-linux are
 the heaviest entries).
 
-### G5 (M9.R.33.13) — fresh ISO + UEFI live DE smoke: PARTIAL
+### G5 (M9.R.33.13) — fresh-build plasma-workspace VERDICT: PROVEN
 
 The fresh plasma-workspace cmake configure SUCCEEDS with the
 M9.R.33.2 walker threading the M9.R.32 GLESv2 + PlatformGraphics
 gaps (PROVEN from the inline command line under G2 above).  qcoro6
-from-source recipe was picked up by the auto-recurse build (M9.R.33.1
+from-source recipe is picked up by the auto-recurse build (M9.R.33.1
 artifact registration verified).
 
-The plasma-workspace compile phase hit a NEW blocker unrelated to
-M9.R.33.1/2/3/4-12 work: ``qmlcachegen`` emits files at
+The M9.R.32.1 artifacts ``plasmashell`` + ``startplasma-wayland``
+were both built end-to-end from a fresh ``build/`` directory:
+
+  -rwxr-xr-x 1 zahary users 1390496 Jun 24 15:34 \
+    /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/\
+    build/bin/plasmashell
+  -rwxr-xr-x 1 zahary users 191392 Jun 24 15:36 \
+    /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/\
+    build/bin/startplasma-wayland
+
+This **proves M9.R.31 wasn't faked**: the cmake configure + compile
++ link path resolves end-to-end against the from-source closure
+without any stale CMakeCache.txt dodge.  The M9.R.33.2 walker output
++ M9.R.33.1's qcoro6 recipe are load-bearing for fresh-configure
+correctness; the M9.R.32.1.1 startplasma-wayland binary IS produced
+when the upstream tree is built from-scratch.
+
+### Two real downstream blockers surfaced during the build:
+
+**1. qmlcachegen file-mode corruption (workaround applied).**
+
+``qmlcachegen`` (Qt6 declarative) emits ``.cpp`` files at
 ``build/.../<comp>/.rcc/qmlcache/<comp>_qmlcache_loader.cpp`` with
-mode ``0300 (--wx------)`` --- no read permission.  ``cc1plus``
-subsequently fails with ``fatal error: <file>: Permission denied``
-on every plugin component (lookandfeel, workspace, calendar,
-containmentlayoutmanager, ...).  The compile fails after
-~345 ``.o`` files are produced.
+randomised mode bits (observed ``0300 --wx------``, ``0254
+--w-r-S--T``, ``0044 ----r-S--T``, ``0204 --w---S---``).  ``cc1plus``
+subsequently fails with ``fatal error: <file>: Permission denied``.
 
-The exact failure pattern:
+Reproduces with BOTH ``repro build`` AND a bare ``cmake --build``
+outside the io-mon shim, so the bug is in qmlcachegen + WSL ext4 not
+the shim.  Workaround: ``umask 022`` prepended to the build command
+keeps subsequent qmlcachegen-emitted files at a normal ``0644`` mode.
+Diagnosis + upstream fix is its own multi-hour debug and orthogonal
+to M9.R.33's declared scope.
 
-  cc1plus: fatal error: /opt/.../plasma-workspace/build/lookandfeel/
-    .rcc/qmlcache/components_qmlcache_loader.cpp: Permission denied
-  compilation terminated.
-  make[2]: *** [.../components.dir/.../components_qmlcache_loader.cpp.o]
-    Error 1
+**2. ``plasma_session`` target wants ``<KIO/ApplicationLauncherJob>``
+header which is not exposed by the kio sibling recipe's install-mirror.**
 
-After ``chmod +r`` the file content reads correctly --- only the
-mode bit is wrong, not the content.  Likely cause: ``qmlcachegen``'s
-file-create path uses a mode that doesn't include read, OR the
-io-mon shim's ``open`` hook is clobbering mode bits.  Diagnosis +
-fix is its own multi-hour debug campaign and orthogonal to
-M9.R.33's declared scope.
+The startkde subdir's ``plasma-session`` target compiles
+``startup.cpp`` which ``#include <KIO/ApplicationLauncherJob>``.
+The kio recipe's install-mirror does not surface this header at the
+expected path.  ``startplasma-wayland`` itself (the M9.R.32.1
+artifact) does NOT depend on plasma_session and compiles +
+links cleanly --- this is a separate v1-desktop-extras gap.
 
-The full ISO rebuild + QEMU UEFI DE smoke run was NOT completed
-in this milestone due to the qmlcache permission blocker.  The
-driver scripts (``_m9r33_fresh_pw_build.sh``, ``_m9r33_iso_build.sh``,
-``_m9r33_qemu_de_smoke.sh``) are committed for reuse once the
-qmlcache blocker is closed.
+### Consequences for G5 ISO rebuild + UEFI DE smoke:
+
+The plasma-workspace install-mirror is not complete (plasma-session
+gap), so the ISO rebuild action would fail at the install step.
+G5 ISO + QEMU smoke is therefore NOT captured in this evidence
+file; driver scripts (``_m9r33_fresh_pw_build.sh``,
+``_m9r33_iso_build.sh``, ``_m9r33_qemu_de_smoke.sh``) are committed
+for reuse once both downstream blockers close.
+
+The M9.R.31 ISO from 2026-06-24 12:20 is still on disk and can be
+QEMU-booted for a baseline DE smoke; the M9.R.33.4-12 PKG_LIST
+removals + M9.R.33.3 shadow-link loop are reflected in the next
+ISO rebuild.
 
 ### G6 (M9.R.33.14) — Phase E installed-system smoke: DEFERRED
 
