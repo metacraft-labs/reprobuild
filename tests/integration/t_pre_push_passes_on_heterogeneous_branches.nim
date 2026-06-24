@@ -1,16 +1,25 @@
-## M18 — ``repro check --mode=pre-push`` publication gate.
+## RA-3 — ``repro check --mode=pre-push`` publication gate, no
+## branch-name enforcement.
 ##
-## Branch-mismatch failure mode: when the pushed branch (as parsed
-## from the git pre-push refs stream) differs from the M13 active
-## workspace branch, the gate refuses with property ``branch-mismatch``
-## + an actionable remediation. The hook propagates the non-zero exit
-## back to git, which aborts the push.
+## repo-workspaces removed the gate's branch-mismatch stage (commits
+## ``b5a823a`` / ``ff76825``): heterogeneous per-class branch policies
+## are first-class (product repos on ``dev``, spec repos on ``latest``,
+## infra on ``live``), and the lock pins commit SHAs so the published
+## state is reproducible regardless of which branch each repo is on.
 ##
-## Fixture pattern mirrors M17 (three local bare origins seeded with
-## one commit each; metadata-only workspace.toml supplies the project
-## name + active branch).
+## This test sets up three sibling repos on DIFFERENT branches
+## (``dev`` / ``latest`` / ``live``) that are all clean, published and
+## locked, then pushes from ``lib-c`` (on ``live``) while the recorded
+## workspace metadata branch is ``dev``. Under the OLD code the
+## branch-mismatch stage compared the pushed branch (``live``) against
+## the active workspace branch (``dev``) and refused with exit 2; under
+## RA-3 the gate ignores branch names entirely and PASSES (exit 0).
 ##
-## Skip rule: ``git`` missing on PATH (same convention as M9–M17).
+## Falsifiability: with the branch-mismatch stage present this test sees
+## exit 2 + a ``branch-mismatch`` failure; with the stage removed it
+## sees exit 0 and zero failures.
+##
+## Skip rule: ``git`` missing on PATH (same convention as M9-M17).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
@@ -34,24 +43,22 @@ proc requireGit(command: string; cwd = ""): string =
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
 
-# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
-# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
-# / the apps collection before tests run). Assert it exists and use it instead
-# of recompiling ``apps/repro/repro.nim`` at test runtime.
 proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
 proc seedGitOrigin(gitBin, originPath, workPath: string;
-                   branch = "main"): string =
+                   branch: string): string =
+  ## Bare origin with one commit on ``branch`` (the default branch of
+  ## the bare repo is set to ``branch`` so a clone checks it out).
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
     q(originPath))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name \"M18 Tester\"")
-  writeFile(workPath / "README.md", "M18 fixture\n")
+    " config user.name \"RA3 Tester\"")
+  writeFile(workPath / "README.md", "RA3 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " commit -m fixture")
@@ -68,15 +75,16 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name \"M18 Tester\"")
+    " config user.name \"RA3 Tester\"")
 
 proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
+  ## Heterogeneous per-repo revisions: ``dev`` / ``latest`` / ``live``.
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "default_revision = \"dev\"\n" &
+    "trunk = \"dev\"\n\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-c-origin\"\nfetch = \"" & libCUrl & "\"\n\n" &
@@ -93,7 +101,7 @@ schema = "reprobuild.workspace.repo.v1"
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+revision = "dev"
 """
 
 const libBFragmentToml = """
@@ -103,7 +111,7 @@ schema = "reprobuild.workspace.repo.v1"
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+revision = "latest"
 """
 
 const libCFragmentToml = """
@@ -113,17 +121,18 @@ schema = "reprobuild.workspace.repo.v1"
 name = "lib-c"
 path = "lib-c"
 remote = "lib-c-origin"
-revision = "main"
+revision = "live"
 """
 
 type
   RepoSeed = object
     name: string
+    branch: string
     origin: string
     seedPath: string
     sha: string
 
-  M18Fixture = object
+  Fixture = object
     scratch: string
     reproBin: string
     workspaceRoot: string
@@ -131,25 +140,30 @@ type
     libB: RepoSeed
     libC: RepoSeed
 
-proc setupFixture(gitBin, slug: string): M18Fixture =
-  result.scratch = createTempDir("repro-m18-" & slug & "-", "")
+proc setupFixture(gitBin, slug: string): Fixture =
+  result.scratch = createTempDir("repro-ra3-" & slug & "-", "")
   result.reproBin = reproBinary()
 
   result.libA.name = "lib-a"
+  result.libA.branch = "dev"
   result.libA.origin = result.scratch / "origin-lib-a.git"
   result.libA.seedPath = result.scratch / "seed-lib-a"
   result.libA.sha = seedGitOrigin(gitBin, result.libA.origin,
-    result.libA.seedPath)
+    result.libA.seedPath, "dev")
+
   result.libB.name = "lib-b"
+  result.libB.branch = "latest"
   result.libB.origin = result.scratch / "origin-lib-b.git"
   result.libB.seedPath = result.scratch / "seed-lib-b"
   result.libB.sha = seedGitOrigin(gitBin, result.libB.origin,
-    result.libB.seedPath)
+    result.libB.seedPath, "latest")
+
   result.libC.name = "lib-c"
+  result.libC.branch = "live"
   result.libC.origin = result.scratch / "origin-lib-c.git"
   result.libC.seedPath = result.scratch / "seed-lib-c"
   result.libC.sha = seedGitOrigin(gitBin, result.libC.origin,
-    result.libC.seedPath)
+    result.libC.seedPath, "live")
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
@@ -166,23 +180,33 @@ proc setupFixture(gitBin, slug: string): M18Fixture =
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
   result.workspaceRoot = workspaceRoot
 
-proc cloneAll(gitBin: string; fx: M18Fixture) =
+proc cloneAll(gitBin: string; fx: Fixture) =
+  ## Each clone checks out its origin's default branch, so the three
+  ## siblings end up on ``dev`` / ``latest`` / ``live`` respectively.
   cloneInto(gitBin, fx.libA.origin, fx.workspaceRoot / "lib-a")
   cloneInto(gitBin, fx.libB.origin, fx.workspaceRoot / "lib-b")
   cloneInto(gitBin, fx.libC.origin, fx.workspaceRoot / "lib-c")
 
-proc seedMetadataBranch(fx: M18Fixture; branch: string) =
+proc currentBranch(gitBin, repoPath: string): string =
+  requireGit(q(gitBin) & " -C " & q(repoPath) &
+    " symbolic-ref --short -q HEAD").strip()
+
+proc seedMetadataBranch(fx: Fixture; branch: string) =
   writeWorkspaceBranch(fx.workspaceRoot,
     project = "lib-a", branch = branch)
 
 proc writeRefsFile(path: string; localRef, localSha: string) =
-  ## Compose a single-line git pre-push refs stream of the documented
-  ## form ``<local-ref> <local-sha> <remote-ref> <remote-sha>``.
   let zeroSha = "0000000000000000000000000000000000000000"
   writeFile(path, localRef & " " & localSha & " " &
-    "refs/heads/main " & zeroSha & "\n")
+    "refs/heads/live " & zeroSha & "\n")
 
-proc invokeCheckPrePush(fx: M18Fixture; currentRepo, refsFile: string):
+proc invokeWorkspaceLock(fx: Fixture): CmdResult =
+  runShell(shellCommand(@[
+    fx.reproBin, "workspace", "lock",
+    "--workspace-root=" & fx.workspaceRoot,
+  ]))
+
+proc invokeCheckPrePush(fx: Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
     fx.reproBin, "check", "--mode=pre-push",
@@ -192,43 +216,61 @@ proc invokeCheckPrePush(fx: M18Fixture; currentRepo, refsFile: string):
     "--json",
   ]))
 
-proc readReport(fx: M18Fixture): JsonNode =
+proc readReport(fx: Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
-suite "M18 — repro check --mode=pre-push (branch-mismatch)":
+suite "RA-3 — pre-push gate: no branch-name enforcement":
 
-  test "t_workspace_pre_push_blocks_when_branch_mismatch":
+  test "t_pre_push_passes_on_heterogeneous_branches":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
     else:
-      let fx = setupFixture(gitBin, "branch-mismatch")
+      let fx = setupFixture(gitBin, "heterogeneous")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
 
-      # Active workspace branch is ``main``. We simulate pushing
-      # ``feature-x`` from lib-a — the gate must refuse.
-      seedMetadataBranch(fx, "main")
+      # The three siblings are genuinely on different branches.
+      check currentBranch(gitBin, fx.workspaceRoot / "lib-a") == "dev"
+      check currentBranch(gitBin, fx.workspaceRoot / "lib-b") == "latest"
+      check currentBranch(gitBin, fx.workspaceRoot / "lib-c") == "live"
+
+      # Record the workspace metadata branch as ``dev`` (the product
+      # default). The push will come from lib-c, which is on ``live`` —
+      # under the OLD branch-mismatch stage this is a refusal.
+      seedMetadataBranch(fx, "dev")
+
+      # Seed the workspace lock so the gate finds it already-current
+      # (all three siblings clean + published at their locked SHAs).
+      let lockRes = invokeWorkspaceLock(fx)
+      if lockRes.code != 0:
+        checkpoint("workspace lock output: " & lockRes.output)
+      check lockRes.code == 0
+
+      # Push lib-c on branch ``live`` while the active workspace branch
+      # is ``dev``.
       let refsFile = fx.scratch / "pushed-refs.txt"
-      writeRefsFile(refsFile, "refs/heads/feature-x", fx.libA.sha)
+      writeRefsFile(refsFile, "refs/heads/live", fx.libC.sha)
 
       let res = invokeCheckPrePush(fx,
-        currentRepo = fx.workspaceRoot / "lib-a",
+        currentRepo = fx.workspaceRoot / "lib-c",
         refsFile = refsFile)
-      check res.code == 2
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      # RA-3: the gate must PASS despite the branch mismatch.
+      check res.code == 0
 
       let report = readReport(fx)
       check report["mode"].getStr() == "pre-push"
-      check report["activeBranch"].getStr() == "main"
-      check report["pushedBranch"].getStr() == "feature-x"
-      check report["exitCode"].getInt() == 2
-      check report["failures"].len == 1
-      let failure = report["failures"][0]
-      check failure["property"].getStr() == "branch-mismatch"
-      check failure["repo"].getStr() == "lib-a"
-      check failure["remediation"].getStr().contains("repro checkout main")
-      # Lock pass never runs once the branch stage refuses.
-      check report["lockUpdate"]["kind"].getStr() == "none"
+      check report["exitCode"].getInt() == 0
+      check report["failures"].len == 0
+      # The branch fields are still observed (informational), proving
+      # the mismatch is real but no longer gates.
+      check report["pushedBranch"].getStr() == "live"
+      check report["activeBranch"].getStr() == "dev"
+      # No failure carries the retired ``branch-mismatch`` property.
+      for failure in report["failures"]:
+        check failure["property"].getStr() != "branch-mismatch"

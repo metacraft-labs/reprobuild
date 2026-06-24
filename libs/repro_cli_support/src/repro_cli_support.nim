@@ -17648,16 +17648,23 @@ proc runManifestRefreshHookCommand*(hookName: string;
 #
 # The installed pre-push hook (M17 dispatcher) routes into the gate by
 # calling ``repro check --mode=pre-push --current-repo=PATH
-# --pushed-refs=FILE``. The gate runs six checks in order; the first
+# --pushed-refs=FILE``. The gate runs five checks in order; the first
 # failure short-circuits with a structured ``CheckFailure`` record:
 #
-#   1. ``branch-mismatch``  — pushed local branch != active workspace
-#                             branch (M13 metadata).
-#   2. ``dirty``            — any sibling repo has a dirty working tree
+# RA-3 removed the former first stage, ``branch-mismatch`` (pushed local
+# branch != active workspace branch). repo-workspaces deleted that check
+# (`b5a823a`, `ff76825`): heterogeneous per-class branch policies are
+# first-class (product repos on ``dev``, spec repos on ``latest``, infra
+# on ``live``) and the lock pins SHAs, so the published state is
+# reproducible regardless of which branch each repo is on. The
+# ``pushedBranch`` / ``activeBranch`` fields are still observed and
+# surfaced in the report for informational purposes, but never gate.
+#
+#   1. ``dirty``            — any sibling repo has a dirty working tree
 #                             (M4 ``isCleanQuery`` evidence).
-#   3. ``unpublished``      — any sibling repo's HEAD is not reachable
+#   2. ``unpublished``      — any sibling repo's HEAD is not reachable
 #                             on a remote (M4 ``isPublishedQuery``).
-#   4. ``develop_override_*`` — M23: every M20 develop-mode override
+#   3. ``develop_override_*`` — M23: every M20 develop-mode override
 #                             must exist on disk, have a clean working
 #                             tree, and have its HEAD published.
 #                             Properties:
@@ -17668,13 +17675,13 @@ proc runManifestRefreshHookCommand*(hookName: string;
 #                             skips this stage entirely so the gate
 #                             stays bit-compatible with workspaces that
 #                             have never run ``repro develop``.
-#   5. ``lock-stale`` /     — workspace lock missing or any repo's
+#   4. ``lock-stale`` /     — workspace lock missing or any repo's
 #      ``lock-failure``        HEAD differs from the locked SHA;
 #                             the gate creates / refreshes the lock
 #                             (via the M11 ``executeWorkspaceLock``
 #                             driver) and only fails when creation
 #                             itself fails.
-#   6. ``lock_references_private_repo`` — M26: when the push touches
+#   5. ``lock_references_private_repo`` — M26: when the push touches
 #                             one or more ``locks/<project>/<file>.toml``
 #                             files in the current-repo (a manifest-layer
 #                             repo) AND that manifest layer is declared
@@ -17692,7 +17699,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # The exit-code contract matches the milestone:
 #   - 0 — every check passed (and the lock was created / refreshed
 #         if it had been missing or stale).
-#   - 2 — any of the six publication-gate checks failed.
+#   - 2 — any of the five publication-gate checks failed.
 #   - 1 — IO / resolve / VCS-tool failure unrelated to the gate logic.
 
 type
@@ -17702,9 +17709,9 @@ type
   CheckFailure* = object
     ## One structured failure record per gate failure. ``repo`` is the
     ## workspace-relative path of the offending repo (or the empty
-    ## string when the failure is workspace-wide, e.g. a missing
-    ## ``--current-repo`` for the branch-mismatch case); ``property``
-    ## is the short tag the spec mandates (``branch-mismatch`` /
+    ## string when the failure is workspace-wide, e.g. a malformed
+    ## develop-overrides file); ``property``
+    ## is the short tag the spec mandates (
     ## ``dirty`` / ``unpublished`` / ``lock-stale`` /
     ## ``lock-failure`` / ``develop_override_dirty`` /
     ## ``develop_override_unpublished`` / ``develop_override_missing`` /
@@ -17715,7 +17722,7 @@ type
     ## the operator can locate the offending checkout without having to
     ## re-read the override file, and by the M26 lock-visibility stage
     ## with the manifest-layer-relative path of the offending lock file.
-    ## For the four M18 sibling-repo stages ``source`` is left empty.
+    ## For the M18 sibling-repo stages ``source`` is left empty.
     repo*: string
     property*: string
     remediation*: string
@@ -17993,7 +18000,7 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
 
 # ---- M26 helpers: lock-visibility classification --------------------------
 #
-# The publication gate's sixth stage inspects the manifest-layer repo
+# The publication gate's fifth stage inspects the manifest-layer repo
 # the operator is pushing FROM. The three load-bearing pieces are:
 #
 #   (a) The on-disk path of every ``[[manifest]]`` layer the workspace
@@ -18240,13 +18247,15 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
         result.add(p)
 
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
-  ## Drive the six-stage gate. Each stage short-circuits on the first
+  ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
-  ## a time so the operator's next step is unambiguous. M23 inserted
+  ## a time so the operator's next step is unambiguous. RA-3 removed the
+  ## former branch-mismatch stage (no branch-name enforcement); the gate
+  ## now starts at the sibling-repo cleanliness check. M23 inserted
   ## the develop-override cleanliness stage between the sibling-repo
   ## ``unpublished`` stage and the lock-currency stage; the stage is a
   ## no-op when no ``.repro/develop-overrides.toml`` exists. M26 adds
-  ## the sixth ``lock_references_private_repo`` stage after the lock-
+  ## the fifth ``lock_references_private_repo`` stage after the lock-
   ## currency stage; the stage is a no-op when the current-repo is not
   ## a manifest-layer repo or when no lock files are being pushed.
   result.mode = "pre-push"
@@ -18279,23 +18288,13 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         currentRepoName = repo.name
         break
 
-  # ---- 1. branch-mismatch ------------------------------------------------
+  # RA-3: no branch-name enforcement. The pushed and active branch are
+  # still observed and surfaced in the report (informational), but a
+  # mismatch never gates the push — heterogeneous per-class branch
+  # policies are first-class and the lock pins SHAs, so the published
+  # state is reproducible regardless of which branch each repo is on.
   result.pushedBranch = parsePushedBranchFromRefs(parsed.pushedRefsPath)
-  if result.activeBranch.len > 0 and result.pushedBranch.len > 0 and
-      result.pushedBranch != result.activeBranch:
-    let repoLabel =
-      if currentRepoPath.len > 0: currentRepoPath
-      elif parsed.currentRepo.len > 0: parsed.currentRepo
-      else: ""
-    result.failures.add(CheckFailure(
-      repo: repoLabel,
-      property: "branch-mismatch",
-      remediation: "run 'repro checkout " & result.activeBranch &
-        "' or push the active workspace branch instead",
-      evidence: "pushed=" & result.pushedBranch &
-        " active=" & result.activeBranch))
-    result.exitCode = 2
-    return
+  discard currentRepoPath
 
   # Walk the participating repos for the cleanliness + publication
   # passes. We gather the M4 evidence triple for every repo so the
@@ -18351,7 +18350,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   discard observedAt
   discard currentRepoName
 
-  # ---- 2. dirty ----------------------------------------------------------
+  # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
     if not obs.hasGit:
       continue
@@ -18368,7 +18367,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.exitCode = 2
       return
 
-  # ---- 3. unpublished ----------------------------------------------------
+  # ---- 2. unpublished ----------------------------------------------------
   for obs in observations:
     if not obs.hasGit:
       continue
@@ -18385,7 +18384,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.exitCode = 2
       return
 
-  # ---- 4. develop-mode override cleanliness (M23) ------------------------
+  # ---- 3. develop-mode override cleanliness (M23) ------------------------
   # The blocking condition reproduces
   # ``Workspace-And-Develop-Mode.md`` §"Reproducibility And `repro check`":
   # a develop-mode dependency with uncommitted modifications, or one
@@ -18483,7 +18482,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.exitCode = 2
         return
 
-  # ---- 5. lock currency --------------------------------------------------
+  # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
   # latest locked SHA per repo path. If the locked map covers every
   # participating repo and matches every observed HEAD, the lock is
@@ -18570,7 +18569,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     result.lockUpdate.kind =
       if lockMissing: cluCreated else: cluRefreshed
 
-  # ---- 6. M26: lock visibility (public locks must not reference -----------
+  # ---- 5. M26: lock visibility (public locks must not reference -----------
   # private-only repos) ----------------------------------------------------
   # The stage is a no-op unless ALL of the following hold:
   #
