@@ -3,6 +3,31 @@
 ## THIRD (closing) recipe in the GNOME stack batch (mutter / gdm /
 ## gnome-shell).
 ##
+## ## M9.R.32.2 STATUS: artifact NOT produced (gjs/mozjs dep missing)
+##
+## The recipe registers fetch + meson options + library + executable
+## artifacts so the DSL surface is exercised, BUT the actual build
+## has never completed because gjs (the GNOME JavaScript engine,
+## upstream-required at meson configure time via ``js_min_version``
+## and the ``gjs-1.0`` pkg-config check) is only a Nix-channel stub
+## (``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/gjs.nim``)
+## — not a from-source recipe.
+##
+## gjs itself requires SpiderMonkey (``mozjs-128`` or newer) as its
+## C++ engine; building SpiderMonkey from source is a multi-day
+## effort (Rust toolchain + clang ≥15 + Python 3.10 + cbindgen + a
+## 1.5 GiB mozilla-central source tree).  Authoring both gjs +
+## mozjs from-source is out of M9.R.32 scope; see honest gap list
+## in ``run-evidence/m9r32_complete.txt``.
+##
+## v1 ships GNOME via mutter (the Wayland compositor, which DOES
+## build from-source per ``recipes/packages/source/mutter/``) +
+## an empty gnome-shell slot; the live ISO falls through to a
+## tty/sway session when the GNOME .desktop entry is selected.
+## A future fullbuild milestone (M9.R.34?) authoring mozjs + gjs
+## unblocks the gnome-shell + gnome-extensions-app + gnome-control-
+## center triplet.
+##
 ## Prior seventeen from-source recipes — fourteen meson (dbus-broker,
 ## libdrm, wayland, wlroots, sway, libxkbcommon, pixman, libinput,
 ## cairo, pango, gdk-pixbuf, glib2, mutter), one make (linux-kernel),
