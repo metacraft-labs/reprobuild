@@ -56,6 +56,8 @@ const
   SwitchReceiptHeader* = "reprobuild.workspace-vcs.switch-receipt.v1"
   BranchCreateReceiptHeader* =
     "reprobuild.workspace-vcs.branch-create-receipt.v1"
+  MergeFfReceiptHeader* =
+    "reprobuild.workspace-vcs.merge-ff-receipt.v1"
 
 type
   GitVcsOp* = enum
@@ -63,6 +65,7 @@ type
     gvoFetch
     gvoSwitch
     gvoBranchCreate
+    gvoMergeFf
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -134,6 +137,7 @@ proc opTag(op: GitVcsOp): string =
   of gvoFetch: "fetch"
   of gvoSwitch: "switch"
   of gvoBranchCreate: "branch-create"
+  of gvoMergeFf: "merge-ff"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -141,6 +145,7 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "fetch": gvoFetch
   of "switch": gvoSwitch
   of "branch-create": gvoBranchCreate
+  of "merge-ff": gvoMergeFf
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -239,7 +244,7 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch, gvoBranchCreate:
+  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf:
     result.writeString(payload.repoPath)
 
 proc actionFingerprint*(payload: GitVcsPayload): ContentDigest =
@@ -388,6 +393,17 @@ proc renderBranchCreateReceipt(payload: GitVcsPayload;
   result.add("repo-path\t" & payload.repoPath & "\n")
   result.add("head-sha\t" & headSha & "\n")
   result.add("outcome\t" & outcome & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
+proc renderMergeFfReceipt(payload: GitVcsPayload; headSha: string): string =
+  result = MergeFfReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tmerge-ff\n")
+  result.add("remote-name\t" & payload.remoteName & "\n")
+  result.add("branch\t" & payload.branchName & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
 
@@ -568,6 +584,44 @@ proc executeBranchCreate(payload: GitVcsPayload;
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc executeMergeFf(payload: GitVcsPayload;
+                    cwd, receiptPath: string): ActionResult =
+  ## RA-5c — fast-forward the working tree onto its tracked remote
+  ## branch as an engine action (the checkout phase's counterpart to the
+  ## network ``fetch``). The planner has already established that HEAD is
+  ## an ancestor of ``<remote>/<branch>`` (so the merge is a strict
+  ## fast-forward) and that the working tree is clean. ``merge --ff-only``
+  ## is the safe primitive: it refuses (non-zero exit) rather than
+  ## creating a merge commit if the relationship is not a pure
+  ## fast-forward, so a planner/observer race degrades to a reported
+  ## failure rather than a destructive merge. The remote-tracking ref is
+  ## assumed current because the action depends on its sibling ``fetch``.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("merge-ff-target-missing",
+      "merge-ff target is not a git working tree: " & target)
+  let cleanRes = workingTreeIsClean(payload, target)
+  if not cleanRes.ok:
+    return failed("merge-ff-status-probe-failed", cleanRes.diagnostic)
+  if not cleanRes.clean:
+    # Defensive: the planner only emits a fast-forward for a clean tree,
+    # but never merge into a dirty tree even if we are asked to.
+    return failed("dirty",
+      "git merge --ff-only refused: working tree is dirty at " & target)
+  let ref0 = "refs/remotes/" & payload.remoteName & "/" & payload.branchName
+  let res = runGit(payload,
+    ["-C", target, "merge", "--ff-only", ref0])
+  if res.exitCode != 0:
+    return failed("merge-ff-failed",
+      "git merge --ff-only exited " & $res.exitCode & ": " &
+        res.output.trimmed)
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("merge-ff-head-probe-failed", headRes.diagnostic)
+  let receipt = renderMergeFfReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 type
   WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Callback shape used by sibling VCS backends (currently
@@ -663,6 +717,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
   of gvoSwitch: result = executeSwitch(payload, action.cwd, receiptPath)
   of gvoBranchCreate:
     result = executeBranchCreate(payload, action.cwd, receiptPath)
+  of gvoMergeFf:
+    result = executeMergeFf(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -766,6 +822,30 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   ## with ``reason = "branch-collision"``.
   let payload = buildPayload(identity, gvoBranchCreate, "", "", branchName,
     "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitMergeFfAction*(id: string; identity: GitToolIdentity;
+                      remoteName, branchName, repoPath, receiptPath: string;
+                      cwd = ""; deps: openArray[string] = [];
+                      cacheable = false): BuildAction =
+  ## RA-5c — construct a fast-forward merge action used in the sync/pull
+  ## checkout phase. The executor runs ``git merge --ff-only
+  ## refs/remotes/<remoteName>/<branchName>`` in the named working tree;
+  ## it refuses on a dirty tree or a non-fast-forward relationship. This
+  ## replaces the synchronous ``gitRunPlain(["merge", "--ff-only", ...])``
+  ## the old serial sync path issued outside the engine: the merge is now
+  ## an engine action that can depend on its sibling ``fetch``.
+  ##
+  ## ``cacheable`` defaults to ``false``: a fast-forward is a mutation of
+  ## a working tree whose precondition (HEAD ↔ remote-tip relationship)
+  ## is observed live, not a deterministic function of declared inputs,
+  ## so caching its receipt would be unsound (mirrors why the query
+  ## operations are not cacheable).
+  let payload = buildPayload(identity, gvoMergeFf, "", remoteName,
+    branchName, "", repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

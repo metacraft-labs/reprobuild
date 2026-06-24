@@ -1,5 +1,5 @@
-import std/[algorithm, hashes, json, options, os, osproc, sequtils, sets, streams,
-    strutils, tables, terminal, times]
+import std/[algorithm, hashes, json, options, os, osproc, sequtils,
+    sets, streams, strutils, tables, terminal, times]
 import repro_core
 import repro_build_engine
 import repro_cmake_trycompile
@@ -16101,6 +16101,12 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
       revision = repo.revision,
       referencePath = sharedReferenceFor(repo.fetchUrl))
     action.cwd = args.workspaceRoot
+    # RA-5c: tag init's clones with the same ``vcs/fetch`` pool so init
+    # also respects ``jobs-network`` (the network-concurrency bound shared
+    # with sync/pull). The shared-bare refresh per URL is already done up
+    # front (above), so the pool only bounds the per-repo clones.
+    action.pool = "vcs/fetch"
+    action.poolUnits = 1'u32
     cloneActions.add(action)
     cloneEntries.add(WorkspaceInitClonedEntry(
       name: repo.name, path: repo.path,
@@ -16111,7 +16117,10 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
       "engine-cache"
     var config = defaultBuildEngineConfig(cacheRoot)
     config.suppressTrace = true
-    let res = runBuild(graph(cloneActions), config)
+    # RA-5c: declare the ``vcs/fetch`` pool so the clones' pool tag binds
+    # to a concrete capacity (the shared network-concurrency bound).
+    let res = runBuild(
+      graph(cloneActions, @[pool("vcs/fetch", 8'u32)]), config)
     # The build engine returns outcomes in completion order. Re-key
     # them by id so we can map each back to its source entry without
     # depending on the engine's emission order.
@@ -16311,6 +16320,46 @@ type
     workspaceRoot: string
     projectName: string
     toolProvisioning: ToolProvisioningMode
+    jobs: int            ## ``--jobs``/``-j``: default for both phases (0 = auto).
+    jobsNetwork: int     ## ``--jobs-network``: vcs/fetch pool capacity (0 = auto).
+    jobsCheckout: int    ## ``--jobs-checkout``: checkout (CPU) parallelism (0 = auto).
+    noInterleaved: bool  ## ``--no-interleaved``: explicit fetch→checkout barrier.
+    failFast: bool       ## ``--fail-fast``: stop on first fetch failure.
+
+const
+  SyncDefaultJobsNetwork = 8
+    ## ``repo``-equivalent default network concurrency when neither
+    ## ``--jobs`` nor ``--jobs-network`` is given. Bounded (not
+    ## ``countProcessors()``) because each fetch is network-bound, not
+    ## CPU-bound: oversubscribing the network rarely helps and risks
+    ## upstream rate-limiting.
+
+proc resolveJobs(explicit, jobsDefault, fallback: int): int =
+  ## ``--jobs-network`` / ``--jobs-checkout`` resolution order (RA-5c,
+  ## mirroring ``repo``'s ``--jobs`` baseline): the phase-specific flag
+  ## wins, then the shared ``--jobs`` default, then the built-in
+  ## fallback. The result is clamped to ``>= 1``.
+  let chosen =
+    if explicit > 0: explicit
+    elif jobsDefault > 0: jobsDefault
+    else: fallback
+  max(1, chosen)
+
+proc parseSyncJobsValue(raw, flag: string): int =
+  ## Parse a positive integer jobs value, raising a clear error rather
+  ## than silently coercing. ``0`` is rejected (use "omit the flag" for
+  ## auto) so a typo like ``--jobs-network=0`` doesn't quietly disable
+  ## the pool bound.
+  var value: int
+  try:
+    value = parseInt(raw.strip())
+  except ValueError:
+    raise newException(ValueError,
+      flag & " expects a positive integer, got: " & raw)
+  if value <= 0:
+    raise newException(ValueError,
+      flag & " expects a positive integer, got: " & raw)
+  value
 
 proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## ``repro workspace sync`` argv parser. Unlike M9's ``init`` there is
@@ -16331,6 +16380,18 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
         valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--jobs" or arg == "-j" or arg.startsWith("--jobs="):
+      result.jobs = parseSyncJobsValue(valueFromFlag(args, i, "--jobs"), "--jobs")
+    elif arg == "--jobs-network" or arg.startsWith("--jobs-network="):
+      result.jobsNetwork = parseSyncJobsValue(
+        valueFromFlag(args, i, "--jobs-network"), "--jobs-network")
+    elif arg == "--jobs-checkout" or arg.startsWith("--jobs-checkout="):
+      result.jobsCheckout = parseSyncJobsValue(
+        valueFromFlag(args, i, "--jobs-checkout"), "--jobs-checkout")
+    elif arg == "--no-interleaved":
+      result.noInterleaved = true
+    elif arg == "--fail-fast":
+      result.failFast = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace sync` flag: " & arg)
@@ -16603,84 +16664,127 @@ proc observeRepoForSync(identity: GitToolIdentity;
         "merge-base", "--is-ancestor", result.headSha, result.remoteBranchTip])
       result.hasUnpublishedCommits = ancestorRes.code != 0
 
-proc executeSyncPlanForRepo(
-    identity: GitToolIdentity;
-    workspaceRoot: string;
-    resolved: ResolvedRepo;
-    decision: RepoSyncDecision;
-    repoIdx: int): tuple[status: string; diagnostic: string] =
+# ---- RA-5c: parallel fetch / checkout phases ------------------------------
+#
+# The sync/pull path used to run repo-by-repo: a serial per-repo
+# pre-classification ``git fetch`` followed by a serial per-repo one-action
+# build graph for the checkout/merge/attach mutation. RA-5c replaces both
+# with two engine-scheduled phases, modelled after Google ``repo``'s
+# ``subcmds/sync.py``:
+#
+#   Phase A (network)  — one graph of per-repo ``git fetch`` actions, each
+#       tagged to the ``vcs/fetch`` named pool (capacity = jobs-network) so
+#       RunQuota bounds network concurrency. The fetch is a ``bakProcess``
+#       git subprocess (not a synchronous ``gitRunPlain``) so the engine's
+#       running-set genuinely overlaps the fetches. The single shared-state
+#       write — refreshing each unique upstream's shared bare — is done once
+#       up front before the graph runs, so concurrent fetches read a
+#       consistent object pool without racing a fetch into the same bare.
+#
+#   (classification) — the planner runs between the phases: it needs the
+#       post-fetch ``origin/<branch>`` tip to tell "clean at locked" from
+#       "fast-forwardable". This is exactly ``repo``'s ``--no-interleaved``
+#       barrier, which the planner-in-the-middle makes mandatory here.
+#
+#   Phase B (checkout) — one graph of per-repo mutating actions
+#       (``gitCloneAction`` / ``gitMergeFfAction`` / ``gitSwitchAction``),
+#       run once through the engine. These consume CPU slots
+#       (jobs-checkout).
+#
+# Determinism is preserved: a fetch only updates ``refs/remotes/origin/*``
+# (never the working tree), the planner classification is unchanged, and the
+# resolved revisions are identical to the old serial path. Dirty /
+# locally-unpublished / divergent-feature-branch checkouts are still
+# classified AFTER the fetch and never mutated.
+
+const SyncFetchPool = "vcs/fetch"
+
+proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
+                        repo: ResolvedRepo; repoIdx: int;
+                        sharedBareRefreshDep: string): BuildAction =
+  ## Build a ``vcs/fetch``-pooled ``git fetch --quiet origin`` action for
+  ## one existing checkout. The action runs as a ``bakProcess`` subprocess
+  ## (genuinely parallel through the engine's running set, RunQuota-bound
+  ## by the pool capacity) rather than a synchronous ``gitRunPlain``. It
+  ## declares ``dgNoRuntimeDependencies`` so no monitor is required, and
+  ## carries no declared outputs — its effect (updated remote-tracking
+  ## refs) is observed by the post-fetch classification, not cached.
+  let repoAbs = workspaceRoot / repo.path
+  let id = "workspace-sync-fetch-" & safeRepoIdSegment(repo.name) &
+    "-" & $repoIdx
+  var deps: seq[string]
+  if sharedBareRefreshDep.len > 0:
+    deps.add(sharedBareRefreshDep)
+  result = action(id,
+    @[identity.binaryPath, "-C", repoAbs, "fetch", "--quiet", "origin"],
+    cwd = workspaceRoot,
+    deps = deps,
+    pool = SyncFetchPool,
+    poolUnits = 1'u32,
+    dependencyPolicy = DependencyGatheringPolicy(
+      kind: dgNoRuntimeDependencies, completeness: decComplete))
+
+proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
+                           resolved: ResolvedRepo; decision: RepoSyncDecision;
+                           repoIdx: int): tuple[hasAction: bool;
+                           action: BuildAction; immediateStatus: string;
+                           immediateDiagnostic: string] =
   ## Translate one planner decision into a mutating ``bakWorkspaceVcs``
-  ## invocation. Returns the post-execution status string the JSON
-  ## report carries (``noop`` / ``refused`` / ``succeeded`` / ``failed``)
-  ## plus a diagnostic when ``failed``.
+  ## action for the checkout phase, OR an immediate status string for the
+  ## no-mutation cases (``noop`` / ``refused``). The returned actions are
+  ## collected into ONE graph and run together (jobs-checkout parallelism)
+  ## instead of a per-repo serial graph.
+  let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  let idSeg = safeRepoIdSegment(resolved.name) & "-" & $repoIdx
   case decision.action
   of saNone:
     if decision.syncCase in {scDirty, scLocallyUnpublished}:
-      return ("refused", decision.refusalReason)
-    return ("noop", "")
+      return (false, BuildAction(), "refused", decision.refusalReason)
+    return (false, BuildAction(), "noop", "")
   of saClone:
-    let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
-    createDir(receiptDir)
     let receiptRel = ".repro" / "workspace" / "receipts" /
-      ("sync-clone-" & safeRepoIdSegment(resolved.name) & "-" &
-        $repoIdx & ".receipt")
-    let actionId = "workspace-sync-clone-" &
-      safeRepoIdSegment(resolved.name) & "-" & $repoIdx
-    var action = gitCloneAction(actionId, identity,
+      ("sync-clone-" & idSeg & ".receipt")
+    var a = gitCloneAction("workspace-sync-clone-" & idSeg, identity,
       remoteUrl = resolved.fetchUrl,
       repoPath = resolved.path,
       receiptPath = receiptRel,
       revision = resolved.revision)
-    action.cwd = workspaceRoot
-    let cacheRoot = workspaceRoot / ".repro" / "workspace" /
-      "engine-cache"
-    var config = defaultBuildEngineConfig(cacheRoot)
-    config.suppressTrace = true
-    let res = runBuild(graph([action]), config)
-    if res.results.len == 0:
-      return ("failed", "build engine returned no results for clone action")
-    let outcome = res.results[0]
-    if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
-      return ("failed", "clone status=" & $outcome.status &
-        " reason=" & outcome.reason &
-        (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
-    return ("succeeded", "")
+    a.cwd = workspaceRoot
+    return (true, a, "", "")
   of saFetchFastForward:
-    # The dispatcher already issued a pre-classification fetch against
-    # ``origin`` so the remote-tracking ref is current. All that's
-    # left here is the merge. The planner established that HEAD is an
-    # ancestor of ``origin/<branch>`` (so the merge is a strict
-    # fast-forward) and that the working tree is clean (so the merge
-    # cannot disturb operator state). ``merge --ff-only`` is the safe
-    # primitive.
-    let repoAbsPath = workspaceRoot / resolved.path
-    let mergeRes = gitRunPlain(identity, ["-C", repoAbsPath,
-      "merge", "--ff-only", "refs/remotes/origin/" & decision.branch])
-    if mergeRes.code != 0:
-      return ("failed", "merge --ff-only refused: " &
-        mergeRes.output.strip())
-    return ("succeeded", "")
+    # The fetch phase already advanced ``origin/<branch>``. The planner
+    # established HEAD is an ancestor of it (strict fast-forward) on a
+    # clean tree. ``gitMergeFfAction`` runs ``git merge --ff-only`` as an
+    # engine action (RA-5c: no more synchronous ``gitRunPlain`` merge).
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("sync-merge-ff-" & idSeg & ".receipt")
+    var a = gitMergeFfAction("workspace-sync-merge-ff-" & idSeg, identity,
+      remoteName = "origin",
+      branchName = decision.branch,
+      repoPath = resolved.path,
+      receiptPath = receiptRel)
+    a.cwd = workspaceRoot
+    return (true, a, "", "")
   of saAttachBranch:
-    # Detached HEAD at the locked revision — re-attach by ``git switch
-    # --detach=false`` to the manifest's pinned branch. We assume the
-    # manifest names a branch (the detached case only applies when the
-    # locked tip matches HEAD; the planner already established that
-    # match holds). If the manifest pins a SHA we fall back to
-    # ``checkout -B`` on a synthetic branch derived from the SHA — but
-    # the seven-case spec explicitly limits ``attach_branch`` to
-    # branch-pinned manifests, so production hits the simple arm.
-    let repoAbsPath = workspaceRoot / resolved.path
+    # Detached HEAD at the locked revision — re-attach by switching to the
+    # manifest's pinned branch. ``gitSwitchAction`` (gvoSwitch) is the
+    # engine action; it refuses on a dirty tree, but the detached-at-locked
+    # case the planner emits this for is clean by construction.
     let targetBranch =
       if resolved.revision.len > 0 and not looksLikeSha(resolved.revision):
         resolved.revision
       else:
         "main"
-    let switchRes = gitRunPlain(identity, ["-C", repoAbsPath,
-      "switch", targetBranch])
-    if switchRes.code != 0:
-      return ("failed", "git switch '" & targetBranch & "' refused: " &
-        switchRes.output.strip())
-    return ("succeeded", "")
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("sync-attach-" & idSeg & ".receipt")
+    var a = gitSwitchAction("workspace-sync-attach-" & idSeg, identity,
+      branchName = targetBranch,
+      repoPath = resolved.path,
+      receiptPath = receiptRel,
+      cacheable = false)
+    a.cwd = workspaceRoot
+    return (true, a, "", "")
 
 proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
@@ -16712,23 +16816,76 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
-  # Step 3a: pre-fetch every existing repo so the post-fetch
-  # ``origin/<branch>`` ref reflects the remote's current tip BEFORE
-  # the planner classifies. Without this step, a clone that's strictly
-  # behind a now-advanced ``origin/main`` would be misclassified as
-  # "clean_at_locked_revision" — the local view of the lock would
-  # match HEAD because nobody told the local clone the upstream had
-  # advanced.
+  # RA-5c jobs resolution: ``--jobs-network`` (or ``--jobs``) bounds the
+  # ``vcs/fetch`` pool; ``--jobs-checkout`` (or ``--jobs``) bounds the
+  # checkout phase's CPU parallelism. Both default through built-in
+  # baselines when unset — these are RunQuota budgets, not a second engine
+  # knob (RA-13).
+  let jobsNetwork = resolveJobs(args.jobsNetwork, args.jobs,
+    SyncDefaultJobsNetwork)
+  let jobsCheckout = resolveJobs(args.jobsCheckout, args.jobs,
+    int(osproc.countProcessors()))
+  let engineCacheRoot = args.workspaceRoot / ".repro" / "workspace" /
+    "engine-cache"
+
+  # Step 3a (RA-5c): parallel pre-classification fetch. Every existing
+  # checkout is fetched so the post-fetch ``origin/<branch>`` ref reflects
+  # the remote's current tip BEFORE the planner classifies. Without this a
+  # clone strictly behind a now-advanced ``origin/main`` would be
+  # misclassified as "clean_at_locked_revision". A fetch only updates
+  # ``refs/remotes/origin/*``, never the working tree, so it is safe even
+  # on a dirty / locally-unpublished checkout (refuse-and-report
+  # classifications are still made AFTER this pass).
   #
-  # A pre-fetch on a dirty / locally-unpublished checkout is safe: it
-  # only updates ``refs/remotes/origin/*``, never the working tree
-  # itself. Refuse-and-report classifications are still made AFTER
-  # this pass, so the operator's working state is preserved.
-  for repo in resolved.repos:
+  # The fetches run as ONE graph of ``vcs/fetch``-pooled ``bakProcess``
+  # actions: the engine + RunQuota overlap them up to ``jobs-network``
+  # instead of the old repo-by-repo serial loop. The single shared-state
+  # write — refreshing each unique upstream's shared bare — is done once up
+  # front per URL and made a dependency of that URL's fetches so concurrent
+  # fetches read a consistent object pool without racing into the same
+  # bare.
+  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  var sharedBareRefreshAction = initTable[string, string]()
+  var fetchActions: seq[BuildAction]
+  for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    if dirExists(repoPath / ".git"):
-      discard gitRunPlain(identity, ["-C", repoPath, "fetch",
-        "--quiet", "origin"])
+    if not dirExists(repoPath / ".git"):
+      continue
+    # Refresh this URL's shared bare once, up front, and expose it as a
+    # dependency action id so the URL's fetches wait on it.
+    var refreshDepId = ""
+    if repo.fetchUrl.len > 0:
+      if not sharedBareRefreshAction.hasKey(repo.fetchUrl):
+        let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
+          repo.fetchUrl)
+        if not refreshed.ok and refreshed.diagnostic.len > 0:
+          stderr.writeLine("workspace sync: shared-clone cache miss for " &
+            repo.fetchUrl & " (continuing without shared bare): " &
+            refreshed.diagnostic)
+        sharedBareRefreshAction[repo.fetchUrl] = ""
+      refreshDepId = sharedBareRefreshAction[repo.fetchUrl]
+    fetchActions.add(syncFetchActionFor(identity, args.workspaceRoot,
+      repo, repoIdx, refreshDepId))
+
+  if fetchActions.len > 0:
+    var config = defaultBuildEngineConfig(engineCacheRoot)
+    config.suppressTrace = true
+    config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
+    config.fallbackToRunQuotaBypass = true
+    let res = runBuild(graph(fetchActions, @[pool(SyncFetchPool,
+      uint32(jobsNetwork))]), config)
+    var fetchById = initTable[string, ActionResult]()
+    for outcome in res.results:
+      fetchById[outcome.id] = outcome
+    for a in fetchActions:
+      let outcome = fetchById.getOrDefault(a.id)
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        # A pre-classification fetch failure is non-fatal (e.g. transient
+        # network): the planner still classifies against whatever the
+        # local remote-tracking refs already say. Surface a diagnostic.
+        stderr.writeLine("workspace sync: pre-classification fetch failed (" &
+          a.id & "): status=" & $outcome.status &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
 
   # Step 3b: observe each repo (now with fresh remote-tracking refs).
   # Read the workspace metadata once and propagate it onto every
@@ -16757,13 +16914,66 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # Step 4: planner.
   let planned = planSync(resolved.repos, observations)
 
-  # Step 5: execute.
+  # Step 5 (RA-5c): checkout phase. Collect every repo's mutating action
+  # (clone / merge-ff / attach) into ONE graph and run it once. No-op /
+  # refused cases carry an immediate status and contribute no action. The
+  # engine runs the mutations with up to ``jobs-checkout`` CPU parallelism
+  # instead of the old per-repo serial graph. (The planner already ran the
+  # ``--no-interleaved`` fetch barrier by construction; ``--no-interleaved``
+  # is therefore the only mode and the flag is accepted as a no-op /
+  # explicit affirmation.)
   var anyRefusal = false
   var anyFailure = false
+  # Per-repo immediate (non-action) status keyed by repo index.
+  var immediateStatus = initTable[int, (string, string)]()
+  var checkoutActions: seq[BuildAction]
+  var actionRepoIdx = initTable[string, int]()
   for repoIdx, decision in planned.report.decisions:
     let resolvedRepo = resolved.repos[repoIdx]
-    let (status, diagnostic) = executeSyncPlanForRepo(
+    let built = syncCheckoutActionFor(
       identity, args.workspaceRoot, resolvedRepo, decision, repoIdx)
+    if built.hasAction:
+      checkoutActions.add(built.action)
+      actionRepoIdx[built.action.id] = repoIdx
+    else:
+      immediateStatus[repoIdx] = (built.immediateStatus,
+        built.immediateDiagnostic)
+
+  # Run the checkout graph once. Results are re-keyed by action id (like
+  # ``executeWorkspaceInit``) so the per-repo report is rebuilt
+  # independent of the engine's completion order.
+  var checkoutStatus = initTable[int, (string, string)]()
+  if checkoutActions.len > 0:
+    var config = defaultBuildEngineConfig(engineCacheRoot)
+    config.suppressTrace = true
+    config.maxParallelism = uint32(max(1, jobsCheckout))
+    config.fallbackToRunQuotaBypass = true
+    let res = runBuild(graph(checkoutActions), config)
+    var byId = initTable[string, ActionResult]()
+    for outcome in res.results:
+      byId[outcome.id] = outcome
+    for a in checkoutActions:
+      let repoIdx = actionRepoIdx[a.id]
+      let outcome = byId.getOrDefault(a.id)
+      if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
+        checkoutStatus[repoIdx] = ("succeeded", "")
+      else:
+        checkoutStatus[repoIdx] = ("failed",
+          "action " & a.id & " status=" & $outcome.status &
+          " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+
+  for repoIdx, decision in planned.report.decisions:
+    var status = ""
+    var diagnostic = ""
+    if immediateStatus.hasKey(repoIdx):
+      (status, diagnostic) = immediateStatus[repoIdx]
+    elif checkoutStatus.hasKey(repoIdx):
+      (status, diagnostic) = checkoutStatus[repoIdx]
+    else:
+      # Should not happen: every decision is either immediate or has an
+      # action. Treat as a noop to avoid an empty status.
+      status = "noop"
     if status == "refused":
       anyRefusal = true
     elif status == "failed":
@@ -16798,7 +17008,16 @@ proc writeWorkspaceSyncReport(report: WorkspaceSyncReport) =
 
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop]``.
+  ## [--tool-provisioning=path|nix|tarball|scoop]
+  ## [--jobs N|-j N] [--jobs-network N] [--jobs-checkout N]
+  ## [--no-interleaved] [--fail-fast]``.
+  ##
+  ## RA-5c: ``--jobs-network`` bounds the ``vcs/fetch`` pool (parallel
+  ## network fetch concurrency); ``--jobs-checkout`` bounds the checkout
+  ## phase's CPU parallelism; ``--jobs``/``-j`` is the shared default for
+  ## both. ``--no-interleaved`` is the only (and intrinsic) phase model
+  ## here and is accepted as an explicit affirmation. ``--fail-fast`` is
+  ## accepted but currently a no-op (default continue-and-report).
   ##
   ## Exit codes (per M10 design):
   ##   - 0 — every repo is at its locked revision, was cleanly

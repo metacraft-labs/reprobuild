@@ -6446,6 +6446,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim",
+    binary: "build/test-bin/t_workspace_sync_fetches_repos_in_parallel",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim",
+    binary: "build/test-bin/t_workspace_sync_jobs_network_pool_bounds_concurrency",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_sync_seven_corner_cases.nim",
     binary: "build/test-bin/t_workspace_sync_seven_corner_cases",
     defines: @[],
