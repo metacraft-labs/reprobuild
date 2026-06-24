@@ -82,3 +82,11 @@ package `libbsd`:
     nixPackage "nixpkgs#libbsd", executablePath = "lib/libbsd.so",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+
+package `libcap`:
+  ## shadow-utils' helpers (``newuidmap``, ``newgidmap``) link against
+  ## libcap for fine-grained capability management.
+  provisioning:
+    nixPackage "nixpkgs#libcap", executablePath = "lib/libcap.so",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
