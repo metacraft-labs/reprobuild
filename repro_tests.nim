@@ -6190,6 +6190,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim",
+    binary: "build/test-bin/t_sync_clones_newly_declared_dependency_after_pull",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim",
     binary: "build/test-bin/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch",
     defines: @[],

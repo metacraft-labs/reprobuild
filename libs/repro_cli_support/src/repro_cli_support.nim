@@ -17194,7 +17194,8 @@ proc syncFetchActionFor(identity: GitToolIdentity; workspaceRoot: string;
 
 proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
                            resolved: ResolvedRepo; decision: RepoSyncDecision;
-                           repoIdx: int): tuple[hasAction: bool;
+                           repoIdx: int;
+                           cloneReferencePath = ""): tuple[hasAction: bool;
                            action: BuildAction; immediateStatus: string;
                            immediateDiagnostic: string] =
   ## Translate one planner decision into a mutating ``bakWorkspaceVcs``
@@ -17202,6 +17203,12 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   ## no-mutation cases (``noop`` / ``refused``). The returned actions are
   ## collected into ONE graph and run together (jobs-checkout parallelism)
   ## instead of a per-repo serial graph.
+  ##
+  ## RA-23: ``cloneReferencePath`` is the shared bare (RA-5) for a
+  ## ``missing_checkout`` → ``saClone`` repo's upstream URL, so cloning a
+  ## newly-declared dependency reuses the same shared-object-cache
+  ## acceleration the ``init`` clone path uses (an empty path falls back to
+  ## a standalone clone, exactly like init).
   let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
   createDir(receiptDir)
   let idSeg = safeRepoIdSegment(resolved.name) & "-" & $repoIdx
@@ -17232,10 +17239,13 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
       receiptPath = receiptRel,
       revision = resolved.revision,
       cacheable = false,
+      referencePath = cloneReferencePath,
       cloneFilter = resolved.cloneFilter,
       depth = resolved.depth,
       singleBranch = resolved.singleBranch)
     a.cwd = workspaceRoot
+    a.pool = SyncFetchPool
+    a.poolUnits = 1'u32
     return (true, a, "", "")
   of saFetchFastForward:
     # The fetch phase already advanced ``origin/<branch>``. The planner
@@ -17575,6 +17585,32 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   var checkoutActions: seq[BuildAction]
   var actionRepoIdx = initTable[string, int]()
 
+  # RA-23: ``sync`` clones newly-declared dependencies (the planner emits
+  # ``missing_checkout`` → ``saClone`` for a declared repo with no on-disk
+  # checkout — e.g. a repo a teammate just added). Such a clone reuses the
+  # SAME RA-5 shared-object-cache acceleration the ``init`` clone path uses:
+  # we refresh the missing repo's upstream shared bare once per URL and pass
+  # it as the clone's ``--reference``. ``cloneRepoIdx`` records which
+  # checkout actions are NEW-repo clones so a clone FAILURE (an unreadable /
+  # private repo a teammate added) is reported + SKIPPED rather than aborting
+  # the whole sync (RA-23 deliverable 2; consistent with RA-11's no-rollback
+  # partial-advance — the readable repos still converge).
+  var sharedBareForClone = initTable[string, string]()
+  proc cloneReferenceFor(fetchUrl: string): string =
+    if fetchUrl.len == 0:
+      return ""
+    if sharedBareForClone.hasKey(fetchUrl):
+      return sharedBareForClone[fetchUrl]
+    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
+    if not refreshed.ok and refreshed.diagnostic.len > 0:
+      stderr.writeLine("workspace sync: shared-clone cache miss for " &
+        fetchUrl & " (cloning newly-declared repo standalone): " &
+        refreshed.diagnostic)
+    sharedBareForClone[fetchUrl] = reference
+    reference
+  var cloneRepoIdx = initHashSet[int]()
+
   # RA-16 ``--force-sync``: the planner SKIPS-and-reports a divergent /
   # dirty / locally-unpublished checkout (``saNone``). With ``--force-sync``
   # the operator opts into OVERWRITING those to the locked revision. We
@@ -17641,8 +17677,15 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       checkoutActions.add(a)
       actionRepoIdx[a.id] = repoIdx
       continue
+    # RA-23: for a newly-declared (missing) repo the planner emits
+    # ``saClone``; resolve its shared bare so the clone reuses the RA-5
+    # acceleration, and remember it as a clone so a failure is skip-not-fatal.
+    var cloneRef = ""
+    if decision.action == saClone:
+      cloneRef = cloneReferenceFor(resolvedRepo.fetchUrl)
+      cloneRepoIdx.incl(repoIdx)
     let built = syncCheckoutActionFor(
-      identity, args.workspaceRoot, resolvedRepo, decision, repoIdx)
+      identity, args.workspaceRoot, resolvedRepo, decision, repoIdx, cloneRef)
     if built.hasAction:
       checkoutActions.add(built.action)
       actionRepoIdx[built.action.id] = repoIdx
@@ -17657,17 +17700,40 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   if checkoutActions.len > 0:
     var config = defaultBuildEngineConfig(engineCacheRoot)
     config.suppressTrace = true
-    config.maxParallelism = uint32(max(1, jobsCheckout))
+    config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
     config.fallbackToRunQuotaBypass = true
-    let res = runBuild(graph(checkoutActions), config)
+    # RA-23: newly-declared-repo clones carry the ``vcs/fetch`` pool tag
+    # (network economy), so the checkout graph must declare that pool with
+    # the same ``jobs-network`` capacity. Non-clone checkout actions
+    # (merge-ff / attach / force-reset) carry no pool and consume CPU slots.
+    let res = runBuild(graph(checkoutActions,
+      @[pool(SyncFetchPool, uint32(jobsNetwork))]), config)
     var byId = initTable[string, ActionResult]()
     for outcome in res.results:
       byId[outcome.id] = outcome
     for a in checkoutActions:
       let repoIdx = actionRepoIdx[a.id]
       let outcome = byId.getOrDefault(a.id)
+      let isClone = repoIdx in cloneRepoIdx
       if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
-        checkoutStatus[repoIdx] = ("succeeded", "")
+        # RA-23: a successful NEW-repo clone is named distinctly (``cloned``)
+        # from an updated existing checkout (``succeeded``).
+        checkoutStatus[repoIdx] =
+          (if isClone: ("cloned", "") else: ("succeeded", ""))
+      elif isClone:
+        # RA-23: cloning a newly-declared dependency failed (auth /
+        # unreadable / private repo a teammate added). Report + SKIP it —
+        # do NOT abort the whole sync. Consistent with RA-11's no-rollback
+        # partial-advance: readable repos still converge, the partial state
+        # is reported, nothing is rolled back.
+        checkoutStatus[repoIdx] = ("skipped",
+          "clone of newly-declared repo failed (reported, not fatal): " &
+          "status=" & $outcome.status & " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+        stderr.writeLine("workspace sync: skipped newly-declared repo '" &
+          resolved.repos[repoIdx].path & "' — clone failed (continuing): " &
+          (if outcome.stderr.len > 0: outcome.stderr.strip()
+           else: outcome.reason))
       else:
         checkoutStatus[repoIdx] = ("failed",
           "action " & a.id & " status=" & $outcome.status &
