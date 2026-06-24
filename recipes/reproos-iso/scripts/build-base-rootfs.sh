@@ -150,10 +150,13 @@ PKG_LIST=(
   #
   #   udev             FS:none    STAGE:no  (eudev recipe exists but
   #                                          install-mirror is empty)
-  #   tzdata           FS:done    STAGE:yes (iana-tzdata recipe ships
-  #                                          usr/share/zoneinfo;
-  #                                          M9.R.33.3 stage loop
-  #                                          shadows it)
+  # M9.R.33.12 dropped: ``tzdata`` -- FS:done iana-tzdata recipe
+  # ships usr/share/zoneinfo + 2 binaries in usr/bin (zdump, zic) +
+  # 1 in usr/sbin (zic alias).  The Phase 4b shadow-link loop emits
+  # the bin/sbin shadow + special-cases /usr/share/zoneinfo to a
+  # symlink at the iana-tzdata recipe's install-mirror.  Both date(1)
+  # + systemd-timesyncd probe /usr/share/zoneinfo at process start;
+  # the symlink keeps them happy.
   #
   # M9.R.33.11 dropped: ``passwd`` + ``login`` -- both ship via the
   # FS:done from-source shadow-utils recipe (11 binaries in usr/bin
@@ -167,7 +170,7 @@ PKG_LIST=(
   #   nano             FS:none    STAGE:no  (not in from-source corpus;
   #                                          editor convenience, no
   #                                          runtime dep)
-  udev tzdata procps less nano
+  udev procps less nano
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
