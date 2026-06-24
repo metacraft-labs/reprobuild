@@ -6310,6 +6310,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
+    binary: "build/test-bin/t_health_reports_each_layer_status_with_remedy",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_health_fix_remediates_safe_issues_only.nim",
+    binary: "build/test-bin/t_health_fix_remediates_safe_issues_only",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim",
     binary: "build/test-bin/t_workspace_lock_latest_resolves_via_git_history_per_repo",
     defines: @[],

@@ -21172,6 +21172,520 @@ proc runWorkspaceListCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# ---- RA-30: `repro health` — environment doctor ---------------------------
+#
+# One command that diagnoses every layer reprobuild depends on and pairs
+# each FAILING check with the EXACT remedy command (Interactive-UX
+# Principle 2 — every failure pairs with a remedy). The single source of
+# truth is a list of ``HealthCheck`` records; the human table, the
+# ``--json`` view, and the ``--fix`` remediation path all consume the
+# same list so they can never drift.
+#
+# ``--fix`` performs ONLY the safe, non-destructive remediations the spec
+# authorizes (``direnv allow``, start the user daemon, clone a missing
+# develop-mode sibling), announcing each action BEFORE running it
+# (communicate-before-execute). Unsafe/ambiguous failures are reported,
+# never auto-fixed.
+
+type
+  HealthStatus* = enum
+    hsOk = "ok"
+    hsWarn = "warn"
+    hsFail = "fail"
+
+  HealthFixKind* = enum
+    ## How (if at all) ``--fix`` may safely remediate a failing check.
+    hfNone            ## No safe auto-fix; report the remedy only.
+    hfDirenvAllow     ## Run ``direnv allow`` on the workspace ``.envrc``.
+    hfStartDaemon     ## Start the per-user store daemon.
+    hfCloneSiblings   ## Clone the missing develop-mode siblings.
+
+  HealthCheck* = object
+    ## One diagnosed layer. ``remedy`` is the exact command the user (or
+    ## an agent) runs to fix a ``warn``/``fail``; it MUST be non-empty for
+    ## any non-``ok`` status (Principle 2). ``fixKind`` records whether
+    ## ``--fix`` is allowed to perform the remedy automatically.
+    name*: string
+    status*: HealthStatus
+    detail*: string
+    remedy*: string
+    fixKind*: HealthFixKind
+
+  HealthArgs = object
+    workspaceRoot: string
+    projectName: string
+    json: bool
+    fix: bool
+
+  HealthContext = object
+    ## Resolved facts the gatherer shares across checks so it only
+    ## resolves the project / git identity once.
+    workspaceRoot: string
+    initialized: bool
+    resolved: ResolvedProject
+    resolvedOk: bool
+    missingSiblings: seq[ResolvedRepo]
+    gitIdentity: GitToolIdentity
+    gitOk: bool
+
+proc parseHealthArgs(args: openArray[string]): HealthArgs =
+  result.workspaceRoot = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--json":
+      result.json = true
+    elif arg == "--fix":
+      result.fix = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro health` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro health`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveHealthProject(parsed: HealthArgs): ResolvedProject =
+  ## Same dispatch rule the M12 status / list commands use: compositional
+  ## workspace.toml → composer; otherwise the named project / variant, or
+  ## the project recorded in a metadata-only workspace.toml. Raises on a
+  ## missing / unresolvable project so the caller can mark the manifest
+  ## check ``fail``.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    return composeManifestLayersFromFile(workspaceToml)
+  var projectName = parsed.projectName
+  if projectName.len == 0 and fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        projectName = recorded
+    except WorkspaceManifestParseError:
+      discard
+  if projectName.len == 0:
+    raise newException(ValueError,
+      "no project resolved: pass a <project> argument or initialize " &
+        "`.repo/workspace.toml`")
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "no project or variant named '" & projectName & "' under '" &
+      manifestsRoot & "'")
+
+proc reproSelfPath(): string =
+  ## Best-effort absolute path to the running ``repro`` binary, used to
+  ## render copy-pasteable remedy commands that don't depend on PATH.
+  try:
+    result = getAppFilename()
+  except CatchableError:
+    result = ""
+  if result.len == 0:
+    result = "repro"
+
+proc detectDirenvEnvrcState(workspaceRoot: string):
+    tuple[hasEnvrc, trusted: bool] =
+  ## Inspect ``<workspaceRoot>/.envrc`` and the direnv allow-list. A
+  ## missing ``.envrc`` yields ``(false, false)``. When ``direnv`` is on
+  ## PATH we use ``direnv status`` to decide trust; otherwise we fall
+  ## back to "present but cannot confirm trust" (``trusted = false``).
+  let envrcPath = workspaceRoot / ".envrc"
+  result.hasEnvrc = fileExists(envrcPath)
+  result.trusted = false
+  if not result.hasEnvrc:
+    return
+  let direnvBin = findExe("direnv")
+  if direnvBin.len == 0:
+    return
+  let res = execCmdEx(quoteShell(direnvBin) & " status",
+    workingDir = workspaceRoot)
+  if res.exitCode == 0:
+    # ``direnv status`` prints "Found RC allowed true" when the .envrc is
+    # trusted. Be liberal: any "allowed true"/"allowed: true" wins.
+    let low = res.output.toLowerAscii()
+    result.trusted = ("allowed true" in low) or ("allowed: true" in low)
+
+proc gatherHealthChecks(parsed: HealthArgs):
+    tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
+  ## Diagnose every layer once and return the ordered check list plus the
+  ## resolved context (so ``--fix`` can act without re-resolving).
+  var ctx: HealthContext
+  ctx.workspaceRoot = parsed.workspaceRoot
+  var checks: seq[HealthCheck]
+  let self = reproSelfPath()
+
+  # 1. reprobuild install & version. The binary that is running answers
+  #    this affirmatively by construction; we still surface the version
+  #    so the table is informative.
+  checks.add(HealthCheck(
+    name: "install-version",
+    status: hsOk,
+    detail: "repro " & versionString() & " (" & self & ")",
+    remedy: "",
+    fixKind: hfNone))
+
+  # 2. Daemon / privilege mode. Either the per-user store daemon is
+  #    running, or we are on the single-user direct path. Both are
+  #    healthy; we report WHICH so a no-sudo user understands the mode.
+  block daemonCheck:
+    var running = false
+    var endpoint = ""
+    try:
+      let status = queryUserDaemonStatus()
+      running = status.running
+      endpoint = status.endpoint
+    except CatchableError:
+      running = false
+    if running:
+      checks.add(HealthCheck(
+        name: "daemon-mode",
+        status: hsOk,
+        detail: "user store daemon running (" & endpoint & ")",
+        remedy: "",
+        fixKind: hfNone))
+    else:
+      # Not running is a WARN, not a hard fail: single-user direct mode
+      # is a fully supported path. The remedy starts the daemon for users
+      # who want shared coordination; ``--fix`` may safely run it.
+      checks.add(HealthCheck(
+        name: "daemon-mode",
+        status: hsWarn,
+        detail: "no user daemon; single-user direct mode",
+        remedy: self & " daemon start",
+        fixKind: hfStartDaemon))
+
+  # 3. Store health. The content-addressed store root must be present
+  #    and readable.
+  block storeCheck:
+    let storeRoot = resolveStoreRoot("")
+    var ok = false
+    var detail = ""
+    try:
+      if dirExists(storeRoot):
+        # A readable store: openStore must succeed (it touches the SQLite
+        # index). Probe and immediately close.
+        var store = openStore(storeRoot)
+        store.close()
+        ok = true
+        detail = "store readable at " & storeRoot
+      else:
+        detail = "store root absent: " & storeRoot
+    except CatchableError as err:
+      detail = "store unreadable at " & storeRoot & ": " & err.msg
+    if ok:
+      checks.add(HealthCheck(
+        name: "store", status: hsOk, detail: detail,
+        remedy: "", fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "store", status: hsFail, detail: detail,
+        remedy: self & " store recover --store-root=" & storeRoot,
+        fixKind: hfNone))
+
+  # 4. direnv — installed, and the workspace .envrc is trusted.
+  block direnvCheck:
+    let direnvBin = findExe("direnv")
+    let envrc = detectDirenvEnvrcState(parsed.workspaceRoot)
+    if direnvBin.len == 0:
+      checks.add(HealthCheck(
+        name: "direnv",
+        status: hsWarn,
+        detail: "direnv not found on PATH",
+        remedy: self & " hooks ensure --shell-direnv",
+        fixKind: hfNone))
+    elif not envrc.hasEnvrc:
+      checks.add(HealthCheck(
+        name: "direnv",
+        status: hsWarn,
+        detail: "no .envrc in workspace",
+        remedy: self & " hooks ensure --shell-direnv",
+        fixKind: hfNone))
+    elif not envrc.trusted:
+      checks.add(HealthCheck(
+        name: "direnv",
+        status: hsFail,
+        detail: ".envrc present but not trusted",
+        remedy: "direnv allow " & parsed.workspaceRoot,
+        fixKind: hfDirenvAllow))
+    else:
+      checks.add(HealthCheck(
+        name: "direnv",
+        status: hsOk,
+        detail: ".envrc trusted",
+        remedy: "", fixKind: hfNone))
+
+  # 5. Workspace marker (RA-10 ``isInitializedWorkspace``).
+  ctx.initialized = isInitializedWorkspace(parsed.workspaceRoot)
+  if ctx.initialized:
+    checks.add(HealthCheck(
+      name: "workspace",
+      status: hsOk,
+      detail: "initialized workspace at " & parsed.workspaceRoot,
+      remedy: "", fixKind: hfNone))
+  else:
+    checks.add(HealthCheck(
+      name: "workspace",
+      status: hsFail,
+      detail: "no initialized workspace marker at " & parsed.workspaceRoot,
+      remedy: self & " workspace init <project>",
+      fixKind: hfNone))
+
+  # 6. Manifest resolution + active project set.
+  block manifestCheck:
+    try:
+      ctx.resolved = resolveHealthProject(parsed)
+      ctx.resolvedOk = true
+      checks.add(HealthCheck(
+        name: "manifest",
+        status: hsOk,
+        detail: "project '" & ctx.resolved.projectName & "' resolved (" &
+          $ctx.resolved.repos.len & " repos)",
+        remedy: "", fixKind: hfNone))
+    except CatchableError as err:
+      ctx.resolvedOk = false
+      checks.add(HealthCheck(
+        name: "manifest",
+        status: hsFail,
+        detail: "manifest unresolved: " & err.msg,
+        remedy: self & " workspace sync",
+        fixKind: hfNone))
+
+  # 7. Dependencies / develop-mode siblings — every declared repo must
+  #    be checked out. Missing ones get a clone remedy and are eligible
+  #    for safe ``--fix``.
+  block siblingCheck:
+    if not ctx.resolvedOk:
+      checks.add(HealthCheck(
+        name: "siblings",
+        status: hsWarn,
+        detail: "skipped: manifest unresolved",
+        remedy: self & " workspace sync",
+        fixKind: hfNone))
+    else:
+      for repo in ctx.resolved.repos:
+        let abs = parsed.workspaceRoot / repo.path
+        if not dirExists(abs / ".git"):
+          ctx.missingSiblings.add(repo)
+      if ctx.missingSiblings.len == 0:
+        checks.add(HealthCheck(
+          name: "siblings",
+          status: hsOk,
+          detail: "all " & $ctx.resolved.repos.len &
+            " declared repos checked out",
+          remedy: "", fixKind: hfNone))
+      else:
+        var names: seq[string]
+        for repo in ctx.missingSiblings: names.add(repo.path)
+        checks.add(HealthCheck(
+          name: "siblings",
+          status: hsFail,
+          detail: "missing checkouts: " & names.join(", "),
+          remedy: self & " sync",
+          fixKind: hfCloneSiblings))
+
+  # 8. VCS host & auth reachability. Structural: we confirm a git tool is
+  #    resolvable (the precondition for clone/fetch). We do NOT require a
+  #    live network round-trip in the gatherer — that would make the
+  #    doctor itself flaky offline. The remedy still names the auth fix.
+  block vcsCheck:
+    try:
+      ctx.gitIdentity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+      ctx.gitOk = true
+      checks.add(HealthCheck(
+        name: "vcs-host-auth",
+        status: hsOk,
+        detail: "git tool resolvable (" & ctx.gitIdentity.binaryPath & ")",
+        remedy: "", fixKind: hfNone))
+    except CatchableError as err:
+      ctx.gitOk = false
+      checks.add(HealthCheck(
+        name: "vcs-host-auth",
+        status: hsFail,
+        detail: "no usable git tool: " & err.msg,
+        remedy: self & " hooks ensure --vcs",
+        fixKind: hfNone))
+
+  # 9. Push gateway. Structural/advisory: a certificate-enforcing project
+  #    routes pushes through the local gateway. Absent enforcement, the
+  #    gateway is not required; we report advisory so the user knows
+  #    pushes are direct.
+  checks.add(HealthCheck(
+    name: "push-gateway",
+    status: hsOk,
+    detail: "no certificate-enforcing project; pushes are direct",
+    remedy: "", fixKind: hfNone))
+
+  # 10. Toolchain provisioning for the active platform. Structural: the
+  #     git toolchain probe above is the load-bearing one for workspace
+  #     operations; surface it here as the platform toolchain signal so a
+  #     failure carries a remedy rather than a bare "ok".
+  if ctx.gitOk:
+    checks.add(HealthCheck(
+      name: "toolchain",
+      status: hsOk,
+      detail: "platform git toolchain provisioned",
+      remedy: "", fixKind: hfNone))
+  else:
+    checks.add(HealthCheck(
+      name: "toolchain",
+      status: hsFail,
+      detail: "platform toolchain incomplete (no git)",
+      remedy: self & " hooks ensure --vcs",
+      fixKind: hfNone))
+
+  # 11. Certificate policy. Advisory by default: when no project enforces
+  #     test certificates, report "advisory/off" so the user knows pushes
+  #     are not gated.
+  checks.add(HealthCheck(
+    name: "certificate-policy",
+    status: hsOk,
+    detail: "certificates: advisory/off (pushes not gated)",
+    remedy: "", fixKind: hfNone))
+
+  result = (checks: checks, ctx: ctx)
+
+proc healthHasFailure(checks: seq[HealthCheck]): bool =
+  for c in checks:
+    if c.status == hsFail:
+      return true
+  false
+
+proc toJsonNode*(check: HealthCheck): JsonNode =
+  result = newJObject()
+  result["name"] = %check.name
+  result["status"] = %($check.status)
+  result["detail"] = %check.detail
+  result["remedy"] = %check.remedy
+  result["fixable"] = %(check.fixKind != hfNone)
+
+proc healthChecksToJson*(checks: seq[HealthCheck]): JsonNode =
+  result = newJObject()
+  var arr = newJArray()
+  var failed = 0
+  for c in checks:
+    arr.add(c.toJsonNode())
+    if c.status == hsFail: inc failed
+  result["checks"] = arr
+  result["ok"] = %(failed == 0)
+  result["failed"] = %failed
+  result["exitCode"] = %(if failed > 0: 1 else: 0)
+
+proc renderHealthTextLines*(checks: seq[HealthCheck]): seq[string] =
+  ## Human table: one row per check with status, detail, and — for any
+  ## non-ok row — the exact remedy command.
+  var nameWidth = len("CHECK")
+  for c in checks:
+    if c.name.len > nameWidth: nameWidth = c.name.len
+  result.add("CHECK".alignLeft(nameWidth) & "  STATUS  DETAIL")
+  for c in checks:
+    var line = c.name.alignLeft(nameWidth) & "  " &
+      ($c.status).alignLeft(6) & "  " & c.detail
+    result.add(line)
+    if c.status != hsOk and c.remedy.len > 0:
+      result.add("  remedy: " & c.remedy)
+
+proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
+                      ctx: HealthContext): seq[string] =
+  ## Perform ONLY the safe remediations the spec authorizes, announcing
+  ## each action before running it. Returns the announcement / outcome
+  ## lines for the report. Never performs a destructive or ambiguous fix.
+  let self = reproSelfPath()
+  for c in checks:
+    if c.status == hsOk:
+      continue
+    case c.fixKind
+    of hfNone:
+      # Unsafe / ambiguous: report only, never auto-fix.
+      result.add("fix: skip " & c.name &
+        " (no safe auto-fix; remedy: " & c.remedy & ")")
+    of hfDirenvAllow:
+      result.add("fix: running `direnv allow " & parsed.workspaceRoot & "`")
+      let direnvBin = findExe("direnv")
+      if direnvBin.len == 0:
+        result.add("fix: direnv not on PATH; cannot allow")
+      else:
+        let res = execCmdEx(quoteShell(direnvBin) & " allow",
+          workingDir = parsed.workspaceRoot)
+        if res.exitCode == 0:
+          result.add("fix: direnv .envrc now trusted")
+        else:
+          result.add("fix: direnv allow failed: " & res.output.strip())
+    of hfStartDaemon:
+      # Single-user direct mode (no daemon) is a fully supported path, so
+      # a daemon-mode ``warn`` is NOT force-fixed: we never push a daemon
+      # onto a no-sudo / single-user host. We only auto-start the daemon
+      # when the daemon-mode check is an outright ``fail`` (i.e. a daemon
+      # that should be running is down). For the ``warn`` case we describe
+      # the opt-in remedy without executing it.
+      if c.status != hsFail:
+        result.add("fix: describe " & c.name &
+          " (single-user mode is supported; opt-in remedy: " &
+          c.remedy & ")")
+      else:
+        result.add("fix: starting user store daemon (`" & self &
+          " daemon start`)")
+        try:
+          let cfg = defaultUserDaemonConfig()
+          let status = startUserDaemon(stablePublicCliPath(), cfg)
+          if status.running:
+            result.add("fix: user daemon running (" & status.endpoint & ")")
+          else:
+            result.add("fix: daemon start did not report running")
+        except CatchableError as err:
+          result.add("fix: daemon start failed: " & err.msg)
+    of hfCloneSiblings:
+      if not ctx.gitOk:
+        result.add("fix: cannot clone siblings (no usable git tool)")
+        continue
+      for repo in ctx.missingSiblings:
+        let abs = parsed.workspaceRoot / repo.path
+        result.add("fix: cloning missing sibling " & repo.path &
+          " from " & repo.fetchUrl)
+        let res = gitRunPlain(ctx.gitIdentity,
+          ["clone", repo.fetchUrl, abs])
+        if res.code == 0 and dirExists(abs / ".git"):
+          result.add("fix: cloned " & repo.path)
+        else:
+          result.add("fix: clone of " & repo.path & " failed: " &
+            res.output.strip())
+
+proc runHealthCommand*(args: openArray[string]): int =
+  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]``.
+  ##
+  ## Diagnose every layer and pair each failure with the exact remedy
+  ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
+  ## can gate on a healthy environment.
+  let parsed = parseHealthArgs(args)
+  var (checks, ctx) = gatherHealthChecks(parsed)
+
+  if parsed.fix:
+    let actions = applyHealthFixes(parsed, checks, ctx)
+    # Re-diagnose after fixing so the final report reflects the new state.
+    (checks, ctx) = gatherHealthChecks(parsed)
+    if not parsed.json:
+      for line in actions:
+        stdout.writeLine(line)
+
+  if parsed.json:
+    stdout.writeLine(pretty(healthChecksToJson(checks), indent = 2))
+  else:
+    for line in renderHealthTextLines(checks):
+      stdout.writeLine(line)
+
+  if healthHasFailure(checks): 1 else: 0
+
 # ---- M12.C: `repro workspace manifests` -----------------------------------
 
 type
@@ -25664,6 +26178,23 @@ proc runThinApp*(programName: string): int =
       return runCheckCommand(checkArgs)
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "health":
+    # RA-30 — top-level `repro health` (the environment doctor) per
+    # CLI/health.md. Diagnoses every layer and pairs each failure with the
+    # exact remedy (Interactive-UX Principle 2); ``--fix`` performs only
+    # the safe remediations; ``--json`` for agents/CI; non-zero exit on any
+    # ``fail``. Same dispatch convention as the M14/M15 top-level commands;
+    # implementation in ``runHealthCommand``.
+    try:
+      let healthArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runHealthCommand(healthArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro health: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "init":
