@@ -36,6 +36,7 @@ package libxfont2Source:
     "xtrans"
     "freetype"
     "libfontenc"
+    "zlib"
 
   config:
     discard
