@@ -6582,6 +6582,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_forall_runs_command_in_every_participating_repo.nim",
+    binary: "build/test-bin/t_workspace_forall_runs_command_in_every_participating_repo",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_start_marks_feature_branch.nim",
     binary: "build/test-bin/t_workspace_start_marks_feature_branch",
     defines: @[],

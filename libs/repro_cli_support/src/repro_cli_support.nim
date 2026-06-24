@@ -22286,6 +22286,277 @@ proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# ---- RA-20: `repro workspace forall` --------------------------------------
+#
+# Native cross-repo command — the ``repo forall -c`` equivalent, since
+# reprobuild does not wrap Google's ``repo``. Built on
+# ``enumerateParticipatingRepos`` (the same repo set the M17 hook installer
+# and the workspace gate enumerate), so ``forall`` and the rest of the
+# workspace surface always agree on "which repos participate".
+#
+# Semantics mirror ``repo forall -c <cmd>``:
+#   * The command runs once per participating repo, via the shell, with the
+#     repo's working tree as the working directory.
+#   * Per-repo helper env vars are exported for the duration of each run
+#     (``REPRO_REPO_PATH`` / ``REPRO_REPO_NAME`` / ``REPRO_PROJECT`` plus the
+#     ``REPO_*`` aliases ``repo forall`` users expect), so the command body
+#     can branch on which repo it is in.
+#   * Each repo's success/failure + captured output is reported in the
+#     existing per-repo digest style (Interactive-UX Principle 1).
+#   * Exit code is non-zero if ANY repo's command failed.
+#
+# Failure policy is configurable per the deliverable:
+#   * default — run EVERY repo, report each, exit non-zero if any failed
+#     (this is ``repo forall``'s default and the safest cross-repo posture).
+#   * ``--fail-fast`` — stop at the first failing repo (skip the rest).
+# ``--keep-going`` is accepted as an explicit affirmation of the default.
+
+type
+  WorkspaceForallRepoResult* = object
+    ## One repo's outcome from a ``forall`` run.
+    name*: string
+    path*: string
+    exitCode*: int
+    output*: string    ## captured stdout+stderr of the command.
+    ran*: bool         ## false when skipped (fail-fast bailout, or the
+                       ## repo's working tree is not materialized yet).
+    skipReason*: string
+
+  WorkspaceForallReport* = object
+    project*: string
+    workspaceRoot*: string
+    command*: string
+    repos*: seq[WorkspaceForallRepoResult]
+    failed*: int
+    succeeded*: int
+    skipped*: int
+    exitCode*: int
+
+  WorkspaceForallArgs = object
+    workspaceRoot: string
+    projectName: string
+    command: string
+    haveCommand: bool
+    failFast: bool
+    json: bool
+    quiet: bool       ## suppress per-repo captured output in text mode.
+
+proc toJsonNode*(report: WorkspaceForallReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["command"] = %report.command
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["exitCode"] = %entry.exitCode
+    obj["output"] = %entry.output
+    obj["ran"] = %entry.ran
+    obj["skipReason"] = %entry.skipReason
+    repos.add(obj)
+  result["repos"] = repos
+  result["failed"] = %report.failed
+  result["succeeded"] = %report.succeeded
+  result["skipped"] = %report.skipped
+  result["exitCode"] = %report.exitCode
+
+proc parseWorkspaceForallArgs(args: openArray[string]):
+    WorkspaceForallArgs =
+  ## ``repro workspace forall [<project>] -c <cmd> [--workspace-root=PATH]
+  ## [--fail-fast] [--keep-going] [--quiet] [--json]``.
+  ##
+  ## ``-c`` / ``--command`` takes the shell command to run in every repo
+  ## (matching ``repo forall -c``). The first bare positional is an optional
+  ## project selector; anything after that is rejected so a stray word is
+  ## not silently swallowed.
+  result.workspaceRoot = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "-c":
+      # Short form: the next argv element is the command body.
+      if i + 1 >= args.len:
+        raise newException(ValueError, "-c requires a command")
+      inc i
+      result.command = args[i]
+      result.haveCommand = true
+    elif arg.startsWith("-c="):
+      result.command = arg.split("=", maxsplit = 1)[1]
+      result.haveCommand = true
+    elif arg == "--command" or arg.startsWith("--command="):
+      result.command = valueFromFlag(args, i, "--command")
+      result.haveCommand = true
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--fail-fast":
+      result.failFast = true
+    elif arg == "--keep-going" or arg == "--ignore-errors":
+      # Explicit affirmation of the default (run all, report each, exit
+      # non-zero if any failed). Accepted as a no-op so scripts can be
+      # explicit about the policy.
+      result.failFast = false
+    elif arg == "--quiet":
+      result.quiet = true
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace forall` flag: " & arg)
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro workspace forall`: " &
+          arg)
+    inc i
+  if not result.haveCommand or result.command.len == 0:
+    raise newException(ValueError,
+      "`repro workspace forall` requires a command: " &
+        "`repro workspace forall -c '<command>'`")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc runForallInRepo(repo: HookRepoTarget; command, projectName: string):
+    tuple[exitCode: int; output: string] =
+  ## Run ``command`` via the shell in ``repo``'s working tree with the
+  ## per-repo helper env vars set, capturing stdout+stderr. Mirrors the
+  ## env contract of ``repo forall`` (``REPO_PROJECT`` / ``REPO_PATH`` /
+  ## ``REPO_REMOTE``-style vars) plus reprobuild-namespaced equivalents.
+  let argv = @["sh", "-c", command]
+  # Export the per-repo context like ``repo forall`` does. We set them in
+  # the parent env around the spawn (restoring afterward) so the child and
+  # any subshells inherit them.
+  let saved = [
+    ("REPRO_REPO_PATH", getEnv("REPRO_REPO_PATH")),
+    ("REPRO_REPO_NAME", getEnv("REPRO_REPO_NAME")),
+    ("REPRO_PROJECT", getEnv("REPRO_PROJECT")),
+    ("REPO_PATH", getEnv("REPO_PATH")),
+    ("REPO_NAME", getEnv("REPO_NAME")),
+    ("REPO_PROJECT", getEnv("REPO_PROJECT"))]
+  let savedHad = [
+    existsEnv("REPRO_REPO_PATH"), existsEnv("REPRO_REPO_NAME"),
+    existsEnv("REPRO_PROJECT"), existsEnv("REPO_PATH"),
+    existsEnv("REPO_NAME"), existsEnv("REPO_PROJECT")]
+  putEnv("REPRO_REPO_PATH", repo.repoPath)
+  putEnv("REPRO_REPO_NAME", repo.name)
+  putEnv("REPRO_PROJECT", projectName)
+  putEnv("REPO_PATH", repo.repoPath)
+  putEnv("REPO_NAME", repo.name)
+  putEnv("REPO_PROJECT", projectName)
+  defer:
+    for idx, pair in saved:
+      if savedHad[idx]:
+        putEnv(pair[0], pair[1])
+      else:
+        delEnv(pair[0])
+  let process = startProcess(argv[0],
+    workingDir = repo.repoPath,
+    args = argv[1 .. ^1],
+    options = {poUsePath, poStdErrToStdOut})
+  defer: process.close()
+  let outStream = process.outputStream
+  var buf = ""
+  var line = ""
+  while outStream.readLine(line):
+    buf.add(line)
+    buf.add("\n")
+  let code = process.waitForExit()
+  (code, buf)
+
+proc executeWorkspaceForall(args: WorkspaceForallArgs):
+    WorkspaceForallReport =
+  var report: WorkspaceForallReport
+  report.workspaceRoot = args.workspaceRoot
+  report.command = args.command
+  let enumerated = enumerateParticipatingRepos(args.workspaceRoot)
+  report.project = enumerated.projectName
+  if enumerated.mode != "workspace" or enumerated.repos.len == 0:
+    raise newException(ValueError,
+      "`repro workspace forall` found no participating repos at " &
+        args.workspaceRoot &
+        " (is this an initialized workspace? run `repro workspace init`)")
+  var bailed = false
+  for repo in enumerated.repos:
+    if bailed:
+      report.repos.add(WorkspaceForallRepoResult(
+        name: repo.name, path: repo.repoPath, ran: false,
+        skipReason: "skipped after earlier failure (--fail-fast)"))
+      inc report.skipped
+      continue
+    if not dirExists(repo.repoPath):
+      report.repos.add(WorkspaceForallRepoResult(
+        name: repo.name, path: repo.repoPath, ran: false,
+        skipReason: "working tree not materialized"))
+      inc report.skipped
+      continue
+    let outcome = runForallInRepo(repo, args.command, enumerated.projectName)
+    report.repos.add(WorkspaceForallRepoResult(
+      name: repo.name, path: repo.repoPath, exitCode: outcome.exitCode,
+      output: outcome.output, ran: true))
+    if outcome.exitCode == 0:
+      inc report.succeeded
+    else:
+      inc report.failed
+      if args.failFast:
+        bailed = true
+  report.exitCode = if report.failed > 0: 1 else: 0
+  result = report
+
+proc renderForallTextLines(report: WorkspaceForallReport;
+    quiet: bool): seq[string] =
+  result.add("workspace forall: running `" & report.command &
+    "` in " & $report.repos.len & " repo(s) of project " &
+    report.project)
+  for entry in report.repos:
+    if not entry.ran:
+      result.add("  [skip] " & entry.path & " (" & entry.name & "): " &
+        entry.skipReason)
+      continue
+    let tag = if entry.exitCode == 0: "ok" else: "FAILED"
+    result.add("  [" & tag & "] " & entry.path & " (" & entry.name &
+      ") exit=" & $entry.exitCode)
+    if not quiet and entry.output.strip().len > 0:
+      for outLine in entry.output.strip(leading = false).splitLines():
+        result.add("    | " & outLine)
+  result.add("workspace forall: " & $report.succeeded & " ok, " &
+    $report.failed & " failed, " & $report.skipped & " skipped")
+  if report.failed > 0:
+    var names: seq[string]
+    for entry in report.repos:
+      if entry.ran and entry.exitCode != 0:
+        names.add(entry.name)
+    result.add("workspace forall: command failed in " & names.join(", ") &
+      " — re-run after fixing, or inspect with `repro workspace forall -c " &
+      "'<diagnostic>'`")
+
+proc writeWorkspaceForallReport(report: WorkspaceForallReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  try:
+    createDir(reportDir)
+    let reportPath = reportDir / "forall-report.json"
+    writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+  except CatchableError:
+    # The report file is a convenience artifact; never let it change the
+    # command's exit code.
+    discard
+
+proc runWorkspaceForallCommand*(args: openArray[string]): int =
+  ## ``repro workspace forall [<project>] -c <cmd> [flags]``. The
+  ## ``repo forall -c`` equivalent — runs ``<cmd>`` via the shell in every
+  ## participating repo (RA-20).
+  let parsed = parseWorkspaceForallArgs(args)
+  let report = executeWorkspaceForall(parsed)
+  writeWorkspaceForallReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderForallTextLines(report, parsed.quiet):
+      stdout.writeLine(line)
+  report.exitCode
+
 # ---- M14: `repro branch` (show / create) ----------------------------------
 #
 # Per ``reprobuild-specs/CLI/branch.md`` and Phase 4 of
@@ -26744,6 +27015,23 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceSharedClonesCommand(scArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace shared-clones: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "forall":
+    # RA-20 — `repro workspace forall -c <cmd>`. The `repo forall -c`
+    # equivalent: runs the command via the shell in every participating
+    # repo (enumerated via the same `enumerateParticipatingRepos` the M17
+    # hook installer uses). Same dispatch convention as the M9–M12 family;
+    # implementation in `runWorkspaceForallCommand`.
+    try:
+      let forallArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceForallCommand(forallArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace forall: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "branch":
     # M14 — `repro branch [<name>]`. Top-level subcommand per
