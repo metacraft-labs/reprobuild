@@ -1,4 +1,15 @@
-## M5 — `locks/<project>/index.toml` round-trip.
+## Legacy `locks/<project>/index.toml` parser round-trip (back-compat).
+##
+## RA-1 (pilot `418f109`) DROPPED the shared lock index: the writer no
+## longer emits `index.toml` and the "latest lock" lookup uses Git
+## history over the per-repo lock subtree instead (see
+## `t_workspace_lock_latest_resolves_via_git_history_per_repo`). The
+## `readLockIndex` strict parser is intentionally RETAINED so older
+## manifest history that still carries an `index.toml` can be read
+## without erroring — RA-1 specifies such legacy files are "ignored and
+## never updated", not that the parser is deleted. This test pins that
+## back-compat parser behavior. The "no new index is written" guarantee
+## is asserted in `t_workspace_lock_round_trips_through_resolver`.
 
 import std/[os, tempfiles, unittest]
 
@@ -67,7 +78,7 @@ proc writeFixture(dir, name, content: string): string =
   result = dir / name
   writeFile(result, content)
 
-suite "M5 — LockIndex round-trip":
+suite "Legacy LockIndex parser round-trip (RA-1 back-compat)":
   let dir = createTempDir("reprobuild-m5-lock-index-", "")
 
   test "happy path populates each entry":

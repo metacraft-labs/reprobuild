@@ -1,16 +1,17 @@
 ## repro_workspace_manifests/lock_writer.nim
 ##
-## M11 — Workspace lock writer + lock-index updater.
+## Workspace lock writer (RA-1 — per-repo lock directory, no index).
 ##
-## Generates ``locks/<project>/<trigger-repo>-<short-sha>.toml`` from
-## the live VCS state of the workspace (the per-repo HEAD SHAs M11's
+## Generates ``locks/<project>/<trigger-repo>/<full-sha>.toml`` from
+## the live VCS state of the workspace (the per-repo HEAD SHAs the
 ## CLI dispatcher gathers via the M2 ``headShaQuery`` observation
 ## surface) plus the project's ``ResolvedRepo`` records (which supply
 ## the stable identity tuple — ``name`` / ``path`` / ``remoteName`` /
 ## advisory branch).
 ##
 ## The on-disk shape is fixed by
-## ``reprobuild-specs/Workspace-Manifests.md`` §"locks/<project>/<sha>.toml":
+## ``reprobuild-specs/Workspace-Manifests.md``
+## §"locks/<project>/<repo>/<sha>.toml":
 ##
 ##     schema = "reprobuild.workspace.lock.v1"
 ##
@@ -27,34 +28,33 @@
 ##     revision = "<full HEAD SHA>"
 ##     branch = "<advisory branch>"             # optional
 ##
-## And the index TOML — the parallel ``locks/<project>/index.toml``
-## file mapping (trigger_repo, trigger_sha) tuples to lock files:
-##
-##     schema = "reprobuild.workspace.lock-index.v1"
-##
-##     [[entry]]
-##     trigger_repo = "<trigger>"
-##     trigger_sha = "<full SHA>"
-##     lock_file = "locks/<project>/<trigger>-<short-sha>.toml"
-##     created_at = "<RFC-3339 UTC timestamp>"
+## RA-1 aligns the writer with the ``repo-workspaces`` pilot (commit
+## ``418f109``): locks live under a **per-repo directory**, keyed by
+## the trigger repo whose commit produced the lock, and the filename
+## is the **full** commit SHA (``locks/<project>/<repo>/<sha>.toml``).
+## There is **no** committed lock index. The "latest published lock
+## for repo X" lookup is a Git-history query over the per-repo subtree
+## (``git log -1 -- locks/<project>/<repo>/``), implemented by the CLI
+## support layer (which owns the git plumbing). Any legacy
+## ``index.toml`` left in older manifest history is ignored and is
+## never written or updated by this module.
 ##
 ## Serializer policy: this module hand-rolls the TOML emission rather
-## than reflecting through ``nim-toml-serialization``. The lock and
-## index TOMLs are small and flat (one header table + an array of
-## tables); a hand-rolled writer (a) avoids re-decoding the entire
-## composed project to drop fields that the lock shape does not
-## carry, (b) keeps full control over key ordering so the round-trip
-## emit is byte-stable across runs, and (c) emits the bare-minimum
-## set of keys the M5 reader needs (no ``[extensions]`` section, no
+## than reflecting through ``nim-toml-serialization``. The lock TOML
+## is small and flat (one header table + an array of tables); a
+## hand-rolled writer (a) avoids re-decoding the entire composed
+## project to drop fields that the lock shape does not carry, (b)
+## keeps full control over key ordering so the round-trip emit is
+## byte-stable across runs, and (c) emits the bare-minimum set of
+## keys the M5 reader needs (no ``[extensions]`` section, no
 ## defaulted values for omitted optional keys). The output is then
-## fed back through the M5 strict reader (``readLock`` /
-## ``readLockIndex``) to prove round-trip parity.
+## fed back through the M5 strict reader (``readLock``) to prove
+## round-trip parity.
 
-import std/[algorithm, options, os, strutils, tables, times]
+import std/[algorithm, os, strutils, tables, times]
 
 import types
 import diagnostics
-import reader
 import resolver
 
 type
@@ -80,15 +80,6 @@ type
     workspaceBranch*: string
     repos*: seq[WorkspaceLockEntry]
 
-  WorkspaceLockIndexEntry* = object
-    triggerRepo*: string
-    triggerSha*: string
-    lockFile*: string
-    createdAt*: string
-
-  WorkspaceLockIndexFile* = object
-    entries*: seq[WorkspaceLockIndexEntry]
-
 # ---- helpers ---------------------------------------------------------------
 
 proc isoTimestampNow*(): string =
@@ -101,9 +92,9 @@ proc isoTimestampNow*(): string =
 
 proc shortSha*(sha: string; width: int = 8): string =
   ## Truncate a SHA-1 hex to the first ``width`` characters. Used to
-  ## build the ``<trigger>-<short>.toml`` filename and to render
-  ## human-facing diagnostics. ``width`` defaults to 8 — the length
-  ## the spec example uses (``reprobuild-a858633c.toml``).
+  ## render human-facing diagnostics. (RA-1 keys lock filenames by the
+  ## FULL SHA, so this no longer appears in lock paths — see
+  ## ``lockFileName``.) ``width`` defaults to 8.
   if sha.len <= width: sha
   else: sha[0 ..< width]
 
@@ -148,34 +139,41 @@ template emitKv(buf: var string; key, value: string) =
 
 # ---- lock file path convention --------------------------------------------
 
-proc lockFileName*(triggerRepo, triggerSha: string): string =
-  ## Build the basename of the lock file given the trigger repo's
-  ## bare name and the full HEAD SHA. The convention matches the
-  ## ``locks/reprobuild/reprobuild-a858633c.toml`` example in
-  ## ``Workspace-Manifests.md`` §"locks/<project>/<sha>.toml":
-  ## ``<safe-trigger>-<8-char-short-sha>.toml``.
-  safeFilenameSegment(triggerRepo) & "-" & shortSha(triggerSha) & ".toml"
+proc lockFileName*(triggerSha: string): string =
+  ## Build the basename of the lock file: the **full** trigger commit
+  ## SHA plus ``.toml``. RA-1 (pilot ``418f109``) keys the file by the
+  ## full SHA inside a per-repo directory, so the repo name is a path
+  ## segment (see ``lockFilePath``) rather than a filename prefix.
+  safeFilenameSegment(triggerSha) & ".toml"
 
 proc lockFilePath*(manifestLayerRoot, project, triggerRepo,
                    triggerSha: string): string =
   ## Full absolute path of the lock file under the manifest layer
   ## that owns the locks directory. ``manifestLayerRoot`` is the
   ## directory holding ``projects/`` / ``repos/`` (and now
-  ## ``locks/``). The path layout matches the spec verbatim:
-  ## ``<manifest-layer>/locks/<project>/<file>.toml``.
-  manifestLayerRoot / "locks" / project / lockFileName(triggerRepo, triggerSha)
+  ## ``locks/``). The path layout matches the RA-1 spec verbatim:
+  ## ``<manifest-layer>/locks/<project>/<repo>/<sha>.toml`` — a
+  ## **per-repo** subtree keyed by the trigger repo.
+  manifestLayerRoot / "locks" / project /
+    safeFilenameSegment(triggerRepo) / lockFileName(triggerSha)
 
 proc lockFileRepoRelativePath*(project, triggerRepo,
                                triggerSha: string): string =
-  ## The path the ``[[entry]].lock_file`` index field carries —
-  ## always with forward slashes, always relative to the manifest
-  ## layer's root (so the file is discoverable irrespective of where
-  ## the manifest repo is checked out).
-  "locks/" & project & "/" & lockFileName(triggerRepo, triggerSha)
+  ## The manifest-layer-relative path of the lock file — always with
+  ## forward slashes, always relative to the manifest layer's root
+  ## (so the file is discoverable irrespective of where the manifest
+  ## repo is checked out). RA-1 per-repo layout:
+  ## ``locks/<project>/<repo>/<sha>.toml``.
+  "locks/" & project & "/" & safeFilenameSegment(triggerRepo) & "/" &
+    lockFileName(triggerSha)
 
-proc lockIndexPath*(manifestLayerRoot, project: string): string =
-  ## Full absolute path of the per-project lock index file.
-  manifestLayerRoot / "locks" / project / "index.toml"
+proc lockRepoSubtreeRelativePath*(project, triggerRepo: string): string =
+  ## The manifest-layer-relative path of a repo's lock **subtree**
+  ## (forward slashes, trailing slash). This is the exact pathspec the
+  ## "latest published lock for repo X" Git-history query reads:
+  ## ``git log -1 -- locks/<project>/<repo>/``. RA-1 made this subtree
+  ## load-bearing in place of the dropped shared index.
+  "locks/" & project & "/" & safeFilenameSegment(triggerRepo) & "/"
 
 # ---- builder: live state -> lock model -------------------------------------
 
@@ -280,128 +278,6 @@ proc writeLockFile*(lock: WorkspaceLockFile; path: string) =
   ## (the serializer is deterministic).
   createDir(parentDir(path))
   writeFile(path, serializeLockToToml(lock))
-
-# ---- index updater ---------------------------------------------------------
-
-proc serializeLockIndexToToml*(index: WorkspaceLockIndexFile): string =
-  ## Render a ``WorkspaceLockIndexFile`` to the canonical index TOML.
-  ## Entries appear in source order; the caller is responsible for
-  ## sorting / deduplication policy (see ``updateLockIndex``).
-  result = newStringOfCap(128 + index.entries.len * 160)
-  result.add("schema = \"")
-  result.add(schemaLockIndexV1)
-  result.add("\"\n")
-  for entry in index.entries:
-    if entry.triggerRepo.len == 0:
-      raiseManifestError("", "entry[].trigger_repo",
-        schemaLockIndexV1, schemaLockIndexV1,
-        "serializeLockIndexToToml refuses to emit an entry with empty trigger_repo")
-    if entry.triggerSha.len == 0:
-      raiseManifestError("", "entry[].trigger_sha",
-        schemaLockIndexV1, schemaLockIndexV1,
-        "serializeLockIndexToToml refuses to emit an entry with empty trigger_sha")
-    if entry.lockFile.len == 0:
-      raiseManifestError("", "entry[].lock_file",
-        schemaLockIndexV1, schemaLockIndexV1,
-        "serializeLockIndexToToml refuses to emit an entry with empty lock_file")
-    if entry.createdAt.len == 0:
-      raiseManifestError("", "entry[].created_at",
-        schemaLockIndexV1, schemaLockIndexV1,
-        "serializeLockIndexToToml refuses to emit an entry with empty created_at")
-    result.add("\n[[entry]]\n")
-    emitKv(result, "trigger_repo", entry.triggerRepo)
-    emitKv(result, "trigger_sha", entry.triggerSha)
-    emitKv(result, "lock_file", entry.lockFile)
-    emitKv(result, "created_at", entry.createdAt)
-
-proc loadLockIndex*(indexPath: string): WorkspaceLockIndexFile =
-  ## Load an existing lock index from disk. A missing file yields an
-  ## empty index (the post-commit hook's first invocation hits this
-  ## arm). A malformed file surfaces as the strict reader's
-  ## ``WorkspaceManifestParseError``.
-  if not fileExists(indexPath):
-    return
-  let parsed = readLockIndex(indexPath)
-  for raw in parsed.entry:
-    result.entries.add(WorkspaceLockIndexEntry(
-      triggerRepo: raw.trigger_repo,
-      triggerSha: raw.trigger_sha,
-      lockFile: raw.lock_file,
-      createdAt: raw.created_at))
-
-proc updateLockIndex*(indexPath: string;
-                      newEntry: WorkspaceLockIndexEntry):
-                     tuple[index: WorkspaceLockIndexFile; replaced: bool] =
-  ## Read the index at ``indexPath`` (or start fresh), insert /
-  ## replace the entry keyed by ``(triggerRepo, triggerSha)``, and
-  ## write the result back. Returns the updated in-memory model and
-  ## a flag telling the caller whether the call replaced an existing
-  ## entry (true) or appended a new one (false). Replaced entries
-  ## keep their position in the entry list so the file's history
-  ## stays stable across re-locks at the same SHA.
-  result.index = loadLockIndex(indexPath)
-  result.replaced = false
-  var foundIdx = -1
-  for i, existing in result.index.entries:
-    if existing.triggerRepo == newEntry.triggerRepo and
-        existing.triggerSha == newEntry.triggerSha:
-      foundIdx = i
-      break
-  if foundIdx >= 0:
-    result.index.entries[foundIdx] = newEntry
-    result.replaced = true
-  else:
-    result.index.entries.add(newEntry)
-  createDir(parentDir(indexPath))
-  writeFile(indexPath, serializeLockIndexToToml(result.index))
-
-# ---- M12 helpers: lock-index lookup for `repro workspace status` -----------
-
-proc latestLockIndexEntry*(index: WorkspaceLockIndexFile):
-    Option[WorkspaceLockIndexEntry] =
-  ## Return the index entry with the lexicographically-largest
-  ## ``createdAt`` timestamp (the RFC-3339 ``Z``-suffixed string the
-  ## writer emits sorts identically to chronological order, so plain
-  ## string ``cmp`` is the right primitive). Empty indices yield
-  ## ``none(WorkspaceLockIndexEntry)``. Used by M12's
-  ## ``repro workspace status`` to compare each live HEAD against the
-  ## most-recently-locked SHA.
-  if index.entries.len == 0:
-    return none(WorkspaceLockIndexEntry)
-  var best = 0
-  for i in 1 ..< index.entries.len:
-    if cmp(index.entries[i].createdAt,
-        index.entries[best].createdAt) > 0:
-      best = i
-  some(index.entries[best])
-
-proc readLatestLockedShasByPath*(manifestLayerRoot, project: string):
-    Table[string, string] =
-  ## Return a ``path -> revision`` map for the repos recorded in the
-  ## most-recently-written lock file for ``project`` under
-  ## ``<manifestLayerRoot>/locks/<project>/``. An empty / missing
-  ## index, or a missing lock file on disk, yields an empty table —
-  ## the caller's M12 status renderer then reports each repo as
-  ## ``no-lock-recorded`` without erroring.
-  result = initTable[string, string]()
-  let indexPath = lockIndexPath(manifestLayerRoot, project)
-  if not fileExists(indexPath):
-    return
-  let index = loadLockIndex(indexPath)
-  let latest = latestLockIndexEntry(index)
-  if latest.isNone:
-    return
-  # The index entry's ``lockFile`` is the manifest-layer-relative path
-  # (M11 emits ``"locks/<project>/<file>.toml"`` with forward slashes
-  # so it round-trips across hosts). Resolve it relative to the
-  # manifest layer root, normalising separators for the host OS.
-  let relLockFile = latest.get().lockFile.replace('/', DirSep)
-  let lockPath = manifestLayerRoot / relLockFile
-  if not fileExists(lockPath):
-    return
-  let lock = readLock(lockPath)
-  for repo in lock.repo:
-    result[repo.path] = repo.revision
 
 # ---- convenience: ensure stable ordering of repos --------------------------
 

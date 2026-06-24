@@ -16378,6 +16378,138 @@ proc gitRunPlain(identity: GitToolIdentity;
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
   (code: res.exitCode, output: res.output)
 
+# ---- RA-1: per-repo lock resolution via Git history ------------------------
+#
+# RA-1 dropped the shared ``locks/<project>/index.toml`` mapping. The
+# "latest published lock for repo X" lookup is now a Git-history query
+# over the per-repo lock subtree (``git log -1 -- locks/<project>/<repo>/``)
+# rather than a read of a mutable index. The resolver walks first-parent
+# ancestry to the nearest locked commit when an exact commit has no lock
+# yet, and falls back to a working-tree filesystem scan for locks that
+# have been written but not yet committed (the common case while
+# ``repro check`` / ``repro workspace status`` run against a freshly
+# written lock).
+
+type
+  LockCandidate = object
+    relPath: string   ## manifest-layer-relative, forward slashes
+    committed: bool    ## true when the file is reachable from HEAD
+    commitOrder: int   ## position in `git log` (0 = newest); -1 when uncommitted
+
+proc orderedLockCandidates(identity: GitToolIdentity;
+    manifestLayerRoot, lockPrefix: string): seq[LockCandidate] =
+  ## Return the lock files under ``lockPrefix`` ordered newest-first.
+  ## Committed locks are ordered by first-parent ``git log`` recency
+  ## (the exact ordering source the spec names); uncommitted
+  ## working-tree locks sort ahead of every committed one (a lock just
+  ## written by the current operation is "newer" than anything in
+  ## history). ``lockPrefix`` carries a trailing slash.
+  let isGit = dirExists(manifestLayerRoot / ".git")
+  var committedOrder = initTable[string, int]()
+  if isGit:
+    # `git log --first-parent --name-only` over the subtree yields the
+    # touched lock paths newest-commit-first; the first time we see a
+    # path fixes its recency rank.
+    let logRes = gitRunPlain(identity,
+      ["-C", manifestLayerRoot, "log", "--first-parent",
+       "--format=%x01", "--name-only", "--", lockPrefix])
+    if logRes.code == 0:
+      var rank = 0
+      for raw in logRes.output.splitLines():
+        let p = raw.strip()
+        if p.len == 0 or p == "\x01":
+          continue
+        # Ignore any legacy ``index.toml`` left in older manifest
+        # history (RA-1: never written, never resolved).
+        if p.startsWith(lockPrefix) and p.endsWith(".toml") and
+            extractFilename(p) != "index.toml":
+          if p notin committedOrder:
+            committedOrder[p] = rank
+            inc rank
+  # Working-tree scan: enumerate every on-disk lock under the subtree,
+  # including not-yet-committed ones.
+  let subtreeAbs = manifestLayerRoot / lockPrefix.replace('/', DirSep)
+  var seen = initHashSet[string]()
+  var uncommitted: seq[string]
+  if dirExists(subtreeAbs):
+    for path in walkDirRec(subtreeAbs):
+      if not path.endsWith(".toml"):
+        continue
+      let base = extractFilename(path)
+      if base == "index.toml":
+        continue
+      var rel = path
+      if rel.startsWith(manifestLayerRoot):
+        rel = rel[manifestLayerRoot.len .. ^1]
+      rel = rel.strip(chars = {'/', '\\'}).replace('\\', '/')
+      seen.incl(rel)
+      if rel notin committedOrder:
+        uncommitted.add(rel)
+  # Uncommitted first (deterministic order), then committed by recency.
+  uncommitted.sort()
+  for rel in uncommitted:
+    result.add(LockCandidate(relPath: rel, committed: false, commitOrder: -1))
+  var committed: seq[(int, string)]
+  for rel, rank in committedOrder:
+    # Skip committed entries whose file was deleted in the working tree
+    # but still appears in history; only surface files we can read.
+    if fileExists(manifestLayerRoot / rel.replace('/', DirSep)):
+      committed.add((rank, rel))
+  committed.sort(proc (a, b: (int, string)): int = cmp(a[0], b[0]))
+  for (_, rel) in committed:
+    result.add(LockCandidate(relPath: rel, committed: true, commitOrder: 0))
+
+proc parseTriggerFromLockRelPath*(relPath: string):
+    tuple[repo: string; sha: string] =
+  ## Decompose a per-repo lock path
+  ## ``locks/<project>/<repo>/<sha>.toml`` into its trigger repo and
+  ## trigger SHA (the filename stem). Returns empty strings when the
+  ## path does not match the RA-1 layout. Forward slashes expected.
+  let parts = relPath.replace('\\', '/').split('/')
+  if parts.len < 4 or parts[0] != "locks":
+    return ("", "")
+  result.repo = parts[^2]
+  var base = parts[^1]
+  if base.endsWith(".toml"):
+    base = base[0 ..< base.len - ".toml".len]
+  result.sha = base
+
+proc latestLockRelPathForRepoViaGit*(identity: GitToolIdentity;
+    manifestLayerRoot, project, repo: string): string =
+  ## RA-1 per-repo "latest lock" query: the manifest-layer-relative
+  ## path (forward slashes) of the newest lock under
+  ## ``locks/<project>/<repo>/`` by Git first-parent history, falling
+  ## back to a working-tree scan for an as-yet-uncommitted lock.
+  ## Returns "" when no lock exists for the repo. This is the resolver
+  ## the dropped ``index.toml`` used to back; it reads **no** index.
+  let lockPrefix = lockRepoSubtreeRelativePath(project, repo)
+  let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
+  if candidates.len == 0:
+    return ""
+  candidates[0].relPath
+
+proc latestLockShasViaGit(identity: GitToolIdentity;
+    manifestLayerRoot, project: string): tuple[
+      shas: Table[string, string]; lockRelPath: string] =
+  ## Overall "latest lock" map for ``repro check`` stage 5 / ``repro
+  ## workspace status``: the ``path -> revision`` contents of the newest
+  ## lock file across **all** per-repo subtrees of ``project``, located
+  ## via Git history (uncommitted working-tree locks counted as newest).
+  ## Returns an empty table + "" when no lock exists. Replaces the
+  ## former index-backed ``readLatestLockedShasByPath``.
+  result.shas = initTable[string, string]()
+  let lockPrefix = "locks/" & project & "/"
+  let candidates = orderedLockCandidates(identity, manifestLayerRoot, lockPrefix)
+  if candidates.len == 0:
+    return
+  let lockPath = manifestLayerRoot / candidates[0].relPath.replace('/', DirSep)
+  if not fileExists(lockPath):
+    return
+  let lock = readLock(lockPath)
+  for repo in lock.repo:
+    result.shas[repo.path] = repo.revision
+  result.lockRelPath = candidates[0].relPath
+
 proc observeRepoForSync(identity: GitToolIdentity;
                         repoPath: string;
                         resolved: ResolvedRepo): RepoSyncObservation =
@@ -16663,9 +16795,10 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 
 # ---- M11: `repro workspace lock` ------------------------------------------
 #
-# Generate ``locks/<project>/<trigger>-<short-sha>.toml`` from the live
+# Generate ``locks/<project>/<repo>/<full-sha>.toml`` from the live
 # VCS state of the workspace, per Workspace-Manifests.md
-# §"locks/<project>/<sha>.toml". The same code path is invoked by the
+# §"locks/<project>/<repo>/<sha>.toml" (RA-1 per-repo layout, no
+# index). The same code path is invoked by the
 # M16 post-commit hook with an explicit ``--sha=<commit>`` so a fresh
 # commit lands as its own lock entry.
 #
@@ -16686,12 +16819,12 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 #      A repo whose checkout is dirty short-circuits to refuse-and-
 #      report (exit 2). A locked snapshot of a dirty tree would lie:
 #      its recorded SHA wouldn't reproduce the working tree.
-#   4. Build the in-memory ``WorkspaceLockFile`` and the matching
-#      ``WorkspaceLockIndexEntry``, write the lock TOML, update the
-#      index, emit the structured stdout + ``lock-report.json``.
+#   4. Build the in-memory ``WorkspaceLockFile``, write the per-repo
+#      lock TOML (RA-1: ``locks/<project>/<repo>/<sha>.toml``, no
+#      shared index), emit the structured stdout + ``lock-report.json``.
 #
 # Exit codes:
-#   0 — lock + index written (or already up-to-date).
+#   0 — lock written (or already up-to-date).
 #   1 — IO failure, VCS query failure, or a missing trigger repo.
 #   2 — at least one declared checkout is dirty.
 
@@ -16717,12 +16850,14 @@ type
 
   WorkspaceLockReport* = object
     ## Structured outcome of one ``repro workspace lock`` invocation.
-    ## ``lockFilePath`` and ``indexFilePath`` are the absolute paths
-    ## the writer landed on; ``triggerRepo`` + ``triggerSha`` reflect
-    ## the (repo, commit) tuple that anchored the lock filename.
-    ## ``replacedExistingEntry`` is true when the index updater
-    ## overwrote a pre-existing entry rather than appending — the
-    ## idempotent re-lock case.
+    ## ``lockFilePath`` is the absolute path the writer landed on;
+    ## ``triggerRepo`` + ``triggerSha`` reflect the (repo, commit) tuple
+    ## that anchors the per-repo lock path
+    ## ``locks/<project>/<repo>/<sha>.toml``. RA-1 dropped the shared
+    ## index: ``indexFilePath`` is always empty (kept for report-shape
+    ## stability) and ``replacedExistingEntry`` is true when a lock file
+    ## already existed at that path before this write — the idempotent
+    ## re-lock-at-same-SHA case.
     project*: string
     workspaceRoot*: string
     manifestLayerRoot*: string
@@ -16782,7 +16917,7 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
         entry.revision &
         (if entry.branch.len > 0: " (branch " & entry.branch & ")" else: ""))
     if report.replacedExistingEntry:
-      result.add("workspace lock: replaced existing index entry for (" &
+      result.add("workspace lock: overwrote existing lock for (" &
         report.triggerRepo & ", " & report.triggerSha & ")")
   for entry in report.dirty:
     result.add("workspace lock: refused — '" & entry.path &
@@ -17060,19 +17195,15 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
 
   let lockPath = lockFilePath(manifestLayerRoot, resolved.projectName,
     triggerRepo.name, triggerSha)
+  # RA-1: per-repo lock directory keyed by the full trigger SHA; no
+  # shared index is written. Re-locking the same SHA overwrites the
+  # same file, so "replaced an existing lock" is simply "the lock file
+  # already existed on disk before this write".
+  let lockAlreadyExisted = fileExists(lockPath)
   writeLockFile(lock, lockPath)
   report.lockFilePath = lockPath
-
-  let indexPath = lockIndexPath(manifestLayerRoot, resolved.projectName)
-  let indexUpdate = updateLockIndex(indexPath,
-    WorkspaceLockIndexEntry(
-      triggerRepo: triggerRepo.name,
-      triggerSha: triggerSha,
-      lockFile: lockFileRepoRelativePath(resolved.projectName,
-        triggerRepo.name, triggerSha),
-      createdAt: createdAt))
-  report.indexFilePath = indexPath
-  report.replacedExistingEntry = indexUpdate.replaced
+  report.indexFilePath = ""
+  report.replacedExistingEntry = lockAlreadyExisted
   report.triggerRepo = triggerRepo.name
   report.triggerSha = triggerSha
   report.createdAt = createdAt
@@ -17100,7 +17231,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ## [--tool-provisioning=path|nix|tarball|scoop]``.
   ##
   ## Exit codes (per M11 design):
-  ##   - 0 — lock TOML written; index updated.
+  ##   - 0 — per-repo lock TOML written (RA-1: no index).
   ##   - 1 — IO failure, VCS query failure, or a mis-specified
   ##         trigger repo / SHA. Distinct from refuse-and-report.
   ##   - 2 — at least one declared repo has a dirty working tree.
@@ -17135,7 +17266,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
 
 type
   PostCommitOutcome* = enum
-    pcoOk                ## Lock TOML + index updated.
+    pcoOk                ## Per-repo lock TOML written (RA-1: no index).
     pcoSkippedDirty      ## At least one sibling repo is dirty; strict
                          ## M11 would have refused with exit 2. The
                          ## post-commit policy is to skip silently.
@@ -18032,10 +18163,11 @@ proc visibilitySetLabel(tiers: set[WorkspaceVisibility]): string =
 proc lockPathsTouchedInPush(identity: GitToolIdentity;
     currentRepo, refsPath, projectName: string): seq[string] =
   ## Inspect the git ``pre-push`` refs stream and return the list of
-  ## ``locks/<project>/<file>.toml`` paths that the pushed commits
-  ## introduce or modify in ``currentRepo``. The lock-index TOML
-  ## (``index.toml``) is excluded — it's metadata, not a workspace
-  ## state record, and pruning it keeps M26's failure surface tight.
+  ## ``locks/<project>/<repo>/<sha>.toml`` paths that the pushed commits
+  ## introduce or modify in ``currentRepo``. RA-1 dropped the shared
+  ## ``index.toml``; with the index gone the check operates on the
+  ## whole per-repo lock path set under ``locks/<project>/`` with no
+  ## special-casing.
   ##
   ## Each ref-stream line is ``<local-ref> <local-sha> <remote-ref>
   ## <remote-sha>``. We treat the line specially when:
@@ -18080,8 +18212,7 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
         continue
       for raw in lsRes.output.splitLines():
         let p = raw.strip()
-        if p.startsWith(lockPrefix) and p.endsWith(".toml") and
-            not p.endsWith("/index.toml") and p != lockPrefix & "index.toml":
+        if p.startsWith(lockPrefix) and p.endsWith(".toml"):
           emitted.add(p)
     else:
       let diffRes = gitRunPlain(identity,
@@ -18096,14 +18227,12 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
           continue
         for raw in lsRes.output.splitLines():
           let p = raw.strip()
-          if p.startsWith(lockPrefix) and p.endsWith(".toml") and
-              not p.endsWith("/index.toml") and p != lockPrefix & "index.toml":
+          if p.startsWith(lockPrefix) and p.endsWith(".toml"):
             emitted.add(p)
       else:
         for raw in diffRes.output.splitLines():
           let p = raw.strip()
-          if p.startsWith(lockPrefix) and p.endsWith(".toml") and
-              not p.endsWith("/index.toml") and p != lockPrefix & "index.toml":
+          if p.startsWith(lockPrefix) and p.endsWith(".toml"):
             emitted.add(p)
     for p in emitted:
       if p notin seen:
@@ -18368,14 +18497,13 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     workspaceRoot: parsed.workspaceRoot,
     toolProvisioning: parsed.toolProvisioning)
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
-  let indexPath = lockIndexPath(manifestLayerRoot, resolved.projectName)
-  let hasLockIndex = fileExists(indexPath)
-  let lockedShas =
-    if hasLockIndex:
-      readLatestLockedShasByPath(manifestLayerRoot, resolved.projectName)
-    else:
-      initTable[string, string]()
-  var lockMissing = not hasLockIndex
+  # RA-1: resolve the latest lock via Git history over the per-repo lock
+  # subtree (no shared index). ``latest.lockRelPath`` is "" when no lock
+  # exists yet.
+  let latest = latestLockShasViaGit(
+    identity, manifestLayerRoot, resolved.projectName)
+  let lockedShas = latest.shas
+  var lockMissing = latest.lockRelPath.len == 0
   var lockStale = false
   if not lockMissing:
     if lockedShas.len == 0:
@@ -18393,15 +18521,14 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   if not lockMissing and not lockStale:
     result.lockUpdate.kind = cluAlreadyCurrent
     # Surface the most-recent lock file path so the operator can audit
-    # which lock backed the check.
-    let lockedIndex = loadLockIndex(indexPath)
-    let latest = latestLockIndexEntry(lockedIndex)
-    if latest.isSome:
-      let rel = latest.get().lockFile.replace('/', DirSep)
-      result.lockUpdate.lockFilePath = manifestLayerRoot / rel
-      result.lockUpdate.indexFilePath = indexPath
-      result.lockUpdate.triggerRepo = latest.get().triggerRepo
-      result.lockUpdate.triggerSha = latest.get().triggerSha
+    # which lock backed the check. RA-1 derives the trigger (repo, sha)
+    # from the per-repo lock path itself — ``locks/<p>/<repo>/<sha>.toml``.
+    result.lockUpdate.lockFilePath =
+      manifestLayerRoot / latest.lockRelPath.replace('/', DirSep)
+    result.lockUpdate.indexFilePath = ""
+    let (trigRepo, trigSha) = parseTriggerFromLockRelPath(latest.lockRelPath)
+    result.lockUpdate.triggerRepo = trigRepo
+    result.lockUpdate.triggerSha = trigSha
   else:
     # Create or refresh the lock via the M11 driver. The driver writes
     # the lock TOML, updates the index, and returns a structured report
@@ -18454,10 +18581,10 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   #     repo are out of scope: a private lock CAN reference private
   #     repos, that's literally the point of a private manifest.
   #   - The pushed refs introduce or modify at least one
-  #     ``locks/<project>/<file>.toml`` path in the current-repo (the
-  #     git-diff probe above). The lock-index TOML (``index.toml``) is
-  #     deliberately not treated as a "lock change" — it's metadata
-  #     about which locks exist, not the lock state itself.
+  #     ``locks/<project>/<repo>/<sha>.toml`` path in the current-repo
+  #     (the git-diff probe above). RA-1 dropped the shared
+  #     ``index.toml`` from the lock layout, so the check operates on
+  #     the whole per-repo lock path set with no special-casing.
   #
   # When triggered, the stage reads each touched lock file via the M5
   # strict ``readLock`` reader, gathers the set of declared repo paths,
@@ -18628,8 +18755,9 @@ proc runCheckCommand*(args: openArray[string]): int =
 #                     the resolver (or M8 composer) declares, gathers a
 #                     fresh ``WorkspaceVcsEvidence`` triple (head-sha,
 #                     is-clean, is-published), and compares each live
-#                     HEAD against the most-recently-locked SHA in the
-#                     M11 lock-index (when one is present). Emits a
+#                     HEAD against the most-recently-locked SHA from the
+#                     latest lock resolved via Git history over the
+#                     per-repo lock subtree (RA-1; no index). Emits a
 #                     workspace-level header (project, active branch,
 #                     manifest-layer drift flag) plus a per-repo body.
 #
@@ -18777,9 +18905,9 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
                     report.activeBranch
                   else: "<none>"))
   if report.hasLockIndex:
-    result.add("workspace status: lock-index=" & report.lockIndexPath)
+    result.add("workspace status: latest-lock=" & report.lockIndexPath)
   else:
-    result.add("workspace status: no lock-index recorded")
+    result.add("workspace status: no lock recorded")
   for entry in report.manifestLayers:
     result.add("workspace status: manifest-layer " & entry.provenance &
       " status=" & entry.status)
@@ -18889,7 +19017,7 @@ proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
 
 proc pickStatusManifestLayerRoot(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal]): string =
-  ## Resolve the manifest-layer root that OWNS the lock-index for
+  ## Resolve the manifest-layer root that OWNS the lock subtree for
   ## status's drift comparison. Mirrors M11's ``pickManifestLayerRoot``
   ## but without the ``--manifest-layer-root`` override (status is
   ## read-only and uses the same anchor M11 wrote to).
@@ -19010,20 +19138,24 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     args.workspaceRoot, workspaceLocal)
   report.manifestLayerRoot = manifestLayerRoot
 
-  let indexPath = lockIndexPath(manifestLayerRoot, resolved.projectName)
-  report.lockIndexPath = indexPath
-  report.hasLockIndex = fileExists(indexPath)
-  let lockedShas =
-    if report.hasLockIndex:
-      readLatestLockedShasByPath(manifestLayerRoot, resolved.projectName)
-    else:
-      initTable[string, string]()
-
   let identity = ensureGitToolResolvable(
     args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
   let toolDigest = digestHex(identity)
   let observedAt = getTime().toUnix * 1000
+
+  # RA-1: locate the latest lock via Git history over the per-repo lock
+  # subtree (no shared index). ``hasLockIndex`` now means "a lock was
+  # found at all"; ``lockIndexPath`` surfaces the resolved lock file
+  # path (empty when none).
+  let latestLock = latestLockShasViaGit(
+    identity, manifestLayerRoot, resolved.projectName)
+  let lockedShas = latestLock.shas
+  report.hasLockIndex = latestLock.lockRelPath.len > 0 and lockedShas.len > 0
+  report.lockIndexPath =
+    if report.hasLockIndex:
+      manifestLayerRoot / latestLock.lockRelPath.replace('/', DirSep)
+    else: ""
 
   for repo in resolved.repos:
     let repoAbsPath = args.workspaceRoot / repo.path
