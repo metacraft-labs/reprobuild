@@ -256,7 +256,7 @@ proc installTreeMirror*(r: MesonPackageResult) =
   ## that produces NEITHER an executable NOR a library (data-only or
   ## pure-header packages). See the AutotoolsPackageResult variant for
   ## the rationale.
-  emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
     currentOwningPackage())
 
 # ---------------------------------------------------------------------------
