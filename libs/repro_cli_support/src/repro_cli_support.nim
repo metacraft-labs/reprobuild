@@ -15931,6 +15931,13 @@ type
       ## RA-8 — the host bootstrap config's ``[projects] default`` set. Used
       ## to fill the project-to-init when the user did not pass an explicit
       ## positional project name.
+    verifySpec: ManifestVerifySpec
+      ## RA-17 — manifest provenance trust anchor resolved from the host
+      ## bootstrap config's ``[manifest] revision`` + ``[verify]`` table. When
+      ## ``isVerificationActive`` is false the verifier is a no-op and existing
+      ## init flows are unaffected; when ``require_signature`` (or a revision
+      ## pin) is configured, ``bootstrapManifestCache`` verifies the manifest
+      ## source's signature/pin and FAILS CLOSED on any mismatch.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -16238,6 +16245,11 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
     # project name was supplied.
     if args.projectName.len == 0 and args.defaultProjects.len > 0:
       args.projectName = args.defaultProjects[0]
+    # RA-17 — resolve the manifest-provenance trust anchor from the config's
+    # ``[manifest] revision`` + ``[verify]`` table. Paths in ``allowed_signers``
+    # are resolved relative to the config's directory. The resulting spec is a
+    # no-op unless the config opts into verification.
+    args.verifySpec = resolveVerifySpec(cfg, configPath.parentDir)
 
   # (3) Host repo origin — only when neither an explicit flag nor the config
   # supplied a manifest URL.
@@ -16279,6 +16291,23 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
       "could not bootstrap manifest repo '" & args.manifestUrl &
         "' into the manifest cache at '" & cacheRoot & "': " &
         cached.diagnostic)
+
+  # RA-17 — fail closed BEFORE the manifest checkout is trusted. When the host
+  # bootstrap config requires a signature (or pins a revision), verify the
+  # freshly-fetched manifest source's HEAD/pinned-tag signature against the
+  # configured allowed-signers set. An unsigned / wrong-key / tampered /
+  # moved-pin source raises here, so ``.repo/manifests`` is never materialised
+  # from an unverified source. When verification is NOT configured this is a
+  # guaranteed no-op and the flow is unchanged.
+  if isVerificationActive(args.verifySpec):
+    try:
+      verifyManifestProvenance(identity.binaryPath, cached.sharedBarePath,
+        args.verifySpec)
+    except ManifestProvenanceError as e:
+      raise newException(ValueError,
+        "refusing to initialise workspace: manifest provenance " &
+          "verification failed for '" & args.manifestUrl & "': " & e.msg)
+
   # Materialise the workspace's manifest checkout from the cache. A
   # symlink keeps a single cached copy shared across workspaces; on a
   # platform/filesystem that rejects the symlink we fall back to a copy.

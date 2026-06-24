@@ -274,16 +274,55 @@ type
       ## Optional private companion manifest URL. May also be supplied from a
       ## sibling `.repro-workspace-private.toml` file (see `readWorkspaceBootstrap`)
       ## that carries credentialed/SSH URLs the public config must not embed.
+    revision*: Option[string]
+      ## RA-17 — optional manifest-revision pin (a commit SHA or tag name). When
+      ## set, `init`/refresh verify the manifest source's HEAD resolves to this
+      ## exact revision so a moved branch can't silently swap the manifest out.
+      ## When signature verification is also required, the SIGNATURE is checked
+      ## against this pinned revision (a tag's signature, or the pinned commit's
+      ## signature) rather than whatever the branch currently points at.
 
   BootstrapProjectsBody* = object
     default*: seq[string]
       ## Default project set auto-layered when the user hasn't chosen an
       ## explicit project set (consumed by init / `projects add --default`).
 
+  BootstrapVerifyBody* = object
+    ## RA-17 — manifest provenance / trust anchor (Workspace-Manifests.md
+    ## §"Manifest Provenance and Verification"). Declared in the host
+    ## bootstrap config, NEVER hardcoded. When `require_signature` is true,
+    ## `init`/refresh verify that the manifest source's HEAD commit (or the
+    ## pinned `manifest_revision` tag) carries a VALID signature from a key in
+    ## the configured allowed-signers set, and FAIL CLOSED otherwise. When
+    ## `require_signature` is false/absent, no verification is performed and
+    ## behavior is unchanged.
+    ##
+    ## Verification uses git's SSH-signature path (`gpg.format=ssh` +
+    ## `gpg.ssh.allowedSignersFile`) so it is testable hermetically with a
+    ## generated ed25519 key — no system GPG keyring required, and it works on
+    ## every platform git ships SSH signing on.
+    require_signature*: bool
+      ## When true, an unsigned / wrong-key / tampered manifest source is a
+      ## hard error rather than a silent pass-through.
+    allowed_signers*: Option[string]
+      ## Path to a git `allowed_signers` file (the `gpg.ssh.allowedSignersFile`
+      ## format: `<principal> <key-type> <base64-key>` per line). Relative
+      ## paths are resolved against the bootstrap config's directory.
+    allowed_keys*: seq[string]
+      ## Inline allowed signer entries, each one line of the
+      ## `allowed_signers` format. Folded into a temporary allowed-signers file
+      ## together with `allowed_signers` when verification runs. Lets a config
+      ## pin trust keys without a sidecar file.
+    signer_identity*: Option[string]
+      ## Optional `--check-signatory`-style principal to match against the
+      ## allowed-signers `<principal>` column. Defaults to a wildcard
+      ## (`reprobuild@manifest`) the inline-key path uses when unset.
+
   WorkspaceBootstrap* = object
     schema*: string
     manifest*: BootstrapManifestBody
     projects*: BootstrapProjectsBody
+    verify*: BootstrapVerifyBody
     extensions*: Extensions
 
   # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----
