@@ -58,6 +58,53 @@
 ## hasn't been invoked yet) recognition still returns ``false`` cleanly
 ## so the harness SKIPs with a precise reason.
 ##
+## ## Mode B — Crude fallback (delegation)
+##
+## Mode A's per-source lift only understands the straightforward
+## ``<target>_SOURCES`` shape. Real gnulib-using GNU packages
+## (coreutils, gzip, tar, …) declare a ``Makefile.am`` that Mode A
+## cannot translate faithfully: a recursive ``SUBDIRS = lib …`` that
+## builds a gnulib sub-archive (``lib/libgnu.a``), ``noinst_LIBRARIES``
+## helper archives pulled in through ``<target>_LDADD``, custom recipe
+## rules / ``SUFFIXES`` blocks / ``*-hook`` targets, and ``automake``
+## conditionals. Mode A would compile the listed sources but never
+## build or link the gnulib sub-archive, so the link fails.
+##
+## Per ``reprobuild-specs/Language-Conventions/C-Cpp-Autotools.md``
+## §"Triggers that escape to Mode B" (lines ~113-120) and §"Mode B —
+## Crude fallback (delegation)" (lines ~121-137), the convention
+## DETECTS these triggers in ``Makefile.am`` and DELEGATES the whole
+## build to the package's own GNU build system, running the monitored
+## sequence verbatim from the spec:
+##
+## .. code-block::
+##
+##     # Both shapes (from a per-action build dir):
+##     <pkg>/configure --prefix=/ [--host=<triple>] \
+##                     --disable-dependency-tracking
+##     make -j<n>
+##     make DESTDIR=<stage> install
+##
+## Each action runs under the engine's monitor (Phase-1 SIP-safe launch
+## on macOS) so the real dependency set is captured by FS-snoop rather
+## than declared per-source. Artifacts are lifted from
+## ``<stage>/{bin,lib,include,share}/`` and declared as the package's
+## outputs (spec §137). The build is out-of-tree
+## (``mkdir _build && cd _build`` per spec line 37) so the source tree
+## stays clean.
+##
+## **Escape-trigger detection** (``detectModeBTrigger``): grounds in
+## spec §113-120. A ``Makefile.am`` escapes to Mode B when it declares
+## a recursive ``SUBDIRS`` (gnulib sub-archives live in a sub-dir),
+## pulls a helper archive in via ``<target>_LDADD`` /
+## ``noinst_LIBRARIES``, uses ``automake`` conditionals (``if FOO`` /
+## ``endif``), declares a custom ``SUFFIXES`` recipe, or ships any
+## custom recipe rule / ``*-hook`` / ``.PHONY`` target the per-source
+## translator does not recognise. A package can also FORCE Mode B
+## explicitly by setting ``REPRO_AUTOTOOLS_MODE=B`` in the environment
+## or dropping a ``.repro-autotools-mode-b`` marker file at the project
+## root (escape hatch for shapes the heuristic misses).
+##
 ## **Caveats**:
 ##   * Requires ``autoreconf`` (i.e. autoconf + automake) and ``make``
 ##     and a compiler on PATH at convention-emit time. The recognise step
@@ -67,14 +114,12 @@
 ##   * Requires ``sh`` on PATH (MSYS2 / Git Bash / Unix). The configure
 ##     script is ``/bin/sh`` and the autoreconf+configure compound runs
 ##     via ``sh -c``.
-##   * Per-source lift parses ``Makefile.am``; projects whose ``Makefile.am``
-##     relies on cpp conditionals or generated source lists are not yet
-##     supported (recognise returns ``false``).
-##   * Out-of-tree builds (the spec's recommended ``mkdir _build && cd
-##     _build``) are deferred — the M28 fixture builds in-tree under
-##     ``.repro/build/<member>/``.
+##   * Mode A per-source lift parses ``Makefile.am``; projects whose
+##     ``Makefile.am`` escapes (gnulib shape etc.) route to Mode B.
+##   * Mode A builds in-tree under ``.repro/build/<member>/``; Mode B
+##     builds out-of-tree under ``.repro/build/_build/`` per the spec.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, osproc, strutils]
 
 import repro_core
 import repro_provider_runtime
@@ -450,6 +495,158 @@ proc resolveAutotoolsTarget(projectRoot, makefileAmContent: string;
       result.sourceFiles = collected
       return
 
+# ---------------------------------------------------------------------------
+# Mode B — escape-trigger detection + crude delegation emit
+#
+# Grounded in C-Cpp-Autotools.md §"Triggers that escape to Mode B"
+# (lines ~113-120) and §"Mode B — Crude fallback (delegation)"
+# (lines ~121-137).
+# ---------------------------------------------------------------------------
+
+const
+  ModeBMarkerFileName* = ".repro-autotools-mode-b"
+    ## A package can force Mode B by dropping this marker file at its
+    ## project root — an escape hatch for ``Makefile.am`` shapes the
+    ## heuristic in ``detectModeBTrigger`` does not flag (spec is silent
+    ## on a forcing mechanism; this is the minimal spec-consistent
+    ## choice and noted for a spec clarification).
+  ModeBEnvVar* = "REPRO_AUTOTOOLS_MODE"
+    ## When set to ``B`` (case-insensitive) the convention forces Mode B
+    ## for every recognised autotools project in the current invocation.
+    ## Companion to ``ModeBMarkerFileName``; lets a caller opt the whole
+    ## build into delegation without editing source trees.
+  ModeBBuildSubdir* = "_build"
+    ## Out-of-tree build directory under the scratch root. Per the spec
+    ## (line 37) the provider "always builds out-of-tree
+    ## (``mkdir _build && cd _build``)".
+  ModeBStageSubdir* = "stage"
+    ## DESTDIR staging root under the scratch dir. ``make install``
+    ## writes ``<stage>/<prefix>/...``; with ``--prefix=/`` (spec line
+    ## 128) the install tree lands at ``<stage>/{bin,lib,include,share}``
+    ## (spec lines 136-137).
+
+proc modeBForcedByEnv(): bool =
+  ## True when ``REPRO_AUTOTOOLS_MODE`` resolves to ``B`` (case-folded).
+  getEnv(ModeBEnvVar).strip().toLowerAscii() == "b"
+
+proc looksLikeRecipeRule(line: string): bool =
+  ## Heuristic: a ``Makefile.am`` line of the form ``target: deps`` that
+  ## is NOT one of automake's recognised assignment forms. Custom recipe
+  ## rules (``version.c: Makefile``, ``gzip.doc: gzip.1``) and explicit
+  ## ``.PHONY`` / ``*-hook`` targets are the spec's escape triggers
+  ## (§lines 115-116: "custom recipes", ".PHONY calling arbitrary
+  ## scripts"). We treat any line whose first ``:`` precedes the first
+  ## ``=`` (or where there is no ``=`` at all) as a rule, after ruling
+  ## out ``:=`` make-style assignments.
+  let stripped = line.strip()
+  if stripped.len == 0 or stripped.startsWith("#"):
+    return false
+  let colonIdx = stripped.find(':')
+  if colonIdx <= 0:
+    return false
+  # ``VAR := value`` is an assignment, not a rule.
+  if colonIdx + 1 < stripped.len and stripped[colonIdx + 1] == '=':
+    return false
+  # ``double-colon`` rules (``target:: deps``) are still rules.
+  let eqIdx = stripped.find('=')
+  if eqIdx >= 0 and eqIdx < colonIdx:
+    return false
+  # The left-hand side must look like a make target (no spaces inside a
+  # single target token before the colon, but multi-target rules like
+  # ``a b: c`` are allowed — we just require the segment before ``:`` to
+  # be non-empty and contain only target-name-ish characters / spaces).
+  let lhs = stripped[0 ..< colonIdx].strip()
+  if lhs.len == 0:
+    return false
+  for ch in lhs:
+    if ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9',
+                 '.', '_', '-', '/', '+', '$', '(', ')', ' ', '\t', '%'}:
+      return false
+  true
+
+proc detectModeBTrigger*(makefileAmContent: string): bool =
+  ## Decide whether a ``Makefile.am`` escapes Mode A's per-source lift
+  ## and must be delegated to Mode B. Grounded in spec §lines 113-120.
+  ##
+  ## Triggers (any one is sufficient):
+  ##   * recursive ``SUBDIRS`` — gnulib sub-archives (``lib/libgnu.a``)
+  ##     live in a sub-directory Mode A never descends into; the
+  ##     top-level link pulls them in via ``LDADD``. This is the gnulib
+  ##     signature coreutils / gzip / tar all hit.
+  ##   * ``noinst_LIBRARIES`` / ``check_LIBRARIES`` helper archives — not
+  ##     installed products, linked into the real target via ``LDADD``;
+  ##     Mode A's primary-only recogniser ignores them.
+  ##   * any ``<target>_LDADD`` referencing a ``.a`` archive or a make
+  ##     variable — the link needs a helper/sub-archive Mode A won't
+  ##     build.
+  ##   * ``automake`` conditionals (``if FOO`` / ``else`` / ``endif``)
+  ##     — Mode A does not evaluate them, so the source list it lifts is
+  ##     incomplete (spec line 118 family).
+  ##   * a custom ``SUFFIXES`` block with its own recipe (spec line 115).
+  ##   * any custom recipe rule / ``*-hook`` / ``.PHONY`` target (spec
+  ##     lines 115-116).
+  for (name, value) in parseMakefileAmVariables(makefileAmContent):
+    let trimmed = name.strip()
+    if trimmed == "SUBDIRS":
+      # A bare ``SUBDIRS = .`` (single current-dir) is not recursive;
+      # anything naming a real sub-directory is.
+      for tok in value.split({' ', '\t'}):
+        let t = tok.strip()
+        if t.len > 0 and t != ".":
+          return true
+    if trimmed == "noinst_LIBRARIES" or trimmed == "check_LIBRARIES":
+      if value.strip().len > 0:
+        return true
+    if trimmed == "SUFFIXES":
+      if value.strip().len > 0:
+        return true
+    if trimmed.endsWith("_LDADD") or trimmed.endsWith("_LIBADD"):
+      # Linking a static helper archive or a make-variable expansion is
+      # the gnulib sub-archive pattern.
+      for tok in value.split({' ', '\t'}):
+        let t = tok.strip()
+        if t.endsWith(".a") or t.startsWith("$"):
+          return true
+  # Line-oriented scan for conditionals + custom recipe rules.
+  for rawLine in makefileAmContent.splitLines():
+    var line = rawLine
+    let commentIdx = line.find('#')
+    if commentIdx >= 0:
+      line = line[0 ..< commentIdx]
+    let stripped = line.strip()
+    if stripped.len == 0:
+      continue
+    # Automake conditionals.
+    if stripped.startsWith("if ") or stripped == "else" or
+        stripped == "endif" or stripped.startsWith("if\t"):
+      return true
+    # ``*-hook`` / ``*-local`` automake extension targets + ``.PHONY``
+    # are explicit escape triggers (spec line 116).
+    if stripped.startsWith(".PHONY"):
+      return true
+    if looksLikeRecipeRule(stripped):
+      let lhs = stripped[0 ..< stripped.find(':')].strip()
+      # ``install-exec-hook:``, ``check-local:``, ``dist-hook:`` etc. are
+      # custom recipes; any non-assignment rule with a recipe body is a
+      # Mode-A escape.
+      if lhs.endsWith("-hook") or lhs.endsWith("-local") or
+          lhs.contains('.') or lhs.contains('/') or
+          lhs.contains('%') or lhs.contains('$'):
+        return true
+      # A plain word target with a recipe (e.g. ``gen-ChangeLog:``) is
+      # also a custom rule the per-source translator cannot model.
+      return true
+  false
+
+proc shouldUseModeB(projectRoot, makefileAmContent: string): bool =
+  ## Final Mode-B routing decision: forced via env / marker file, or the
+  ## ``Makefile.am`` content fires an escape trigger.
+  if modeBForcedByEnv():
+    return true
+  if fileExists(extendedPath(projectRoot / ModeBMarkerFileName)):
+    return true
+  detectModeBTrigger(makefileAmContent)
+
 proc cCppAutotoolsRecognize(projectRoot: string;
                             request: ProviderGraphRequest):
                               bool {.gcsafe.} =
@@ -496,6 +693,15 @@ proc cCppAutotoolsRecognize(projectRoot: string;
   let makefileAm = try: readFile(extendedPath(makefileAmPath)) except CatchableError: ""
   if makefileAm.len == 0:
     return false
+  # Mode B escape (spec §lines 113-137): a gnulib-shaped ``Makefile.am``
+  # (recursive SUBDIRS / helper archive LDADD / conditionals / custom
+  # recipes) — or an explicit force — delegates the whole build to the
+  # package's own GNU build system. Per-source resolution is irrelevant
+  # there, so recognition accepts as soon as a member is declared.
+  if shouldUseModeB(projectRoot, makefileAm):
+    return true
+  # Mode A per-source lift: every declared member must resolve to at
+  # least one source file from ``Makefile.am``.
   for member in members:
     let resolved = resolveAutotoolsTarget(projectRoot, makefileAm, member)
     if resolved.sourceFiles.len == 0:
@@ -783,6 +989,192 @@ proc syntheticPackage(projectRoot: string;
     devEnvBodyHash: "",
     toolUses: @[])
 
+# ---------------------------------------------------------------------------
+# Mode B emitters (spec §lines 121-137)
+# ---------------------------------------------------------------------------
+
+proc modeBBuildDir(projectRoot: string): string =
+  ## Out-of-tree build dir (``<scratch>/_build``). Spec line 37 + 127.
+  scratchPathFor(projectRoot) / ModeBBuildSubdir
+
+proc modeBStageDir(projectRoot: string): string =
+  ## DESTDIR staging root (``<scratch>/stage``). Spec line 131.
+  scratchPathFor(projectRoot) / ModeBStageSubdir
+
+proc modeBConfigureScriptDir(projectRoot: string): string =
+  ## Directory that holds the ``configure`` script. For an in-tree
+  ## source the project root; for a fetched tarball the extracted ``src``
+  ## sub-tree. Mode B runs ``<pkg>/configure`` from the build dir, so we
+  ## need the relative path back to this directory.
+  if fileExists(extendedPath(projectRoot / "configure")) or
+      fileExists(extendedPath(projectRoot / "configure.ac")):
+    projectRoot
+  elif fileExists(extendedPath(projectRoot / "src" / "configure")) or
+      fileExists(extendedPath(projectRoot / "src" / "configure.ac")):
+    projectRoot / "src"
+  else:
+    projectRoot
+
+proc renderModeBConfigureScript(projectRoot: string;
+                                needAutoreconf: bool;
+                                configureFlags: seq[string];
+                                hostTriple: string): string =
+  ## sh-c body for the Mode-B configure action (spec §lines 124-129):
+  ##
+  ##   # Repo-checkout shape only:
+  ##   autoreconf -fi <pkg-source-root>
+  ##   # Both shapes (from a per-action build dir):
+  ##   <pkg>/configure --prefix=/ [--host=<triple>] \
+  ##                   --disable-dependency-tracking
+  ##
+  ## Runs out-of-tree: ``mkdir -p _build && cd _build`` then invokes the
+  ## ``configure`` script via its path relative to the build dir.
+  let srcDir = modeBConfigureScriptDir(projectRoot)
+  let buildDir = modeBBuildDir(projectRoot)
+  let escSrc = srcDir.replace("\\", "/").replace("\"", "\\\"")
+  let escBuild = buildDir.replace("\\", "/").replace("\"", "\\\"")
+  var parts: seq[string] = @[]
+  parts.add("set -e")
+  if needAutoreconf:
+    # Repo-checkout shape — regenerate the build machinery in the source
+    # tree before configuring (spec line 125).
+    parts.add("autoreconf -fi \"" & escSrc & "\"")
+  # Out-of-tree build directory (spec line 37 + 127).
+  parts.add("mkdir -p \"" & escBuild & "\"")
+  parts.add("cd \"" & escBuild & "\"")
+  # Absolute path to the configure script keeps the invocation robust
+  # regardless of the build dir's relative depth.
+  var configureCmd = "\"" & escSrc & "/configure\" --prefix=/"
+  if hostTriple.len > 0:
+    configureCmd.add(" --host=\"")
+    configureCmd.add(hostTriple.replace("\"", "\\\""))
+    configureCmd.add("\"")
+  configureCmd.add(" --disable-dependency-tracking")
+  for flag in configureFlags:
+    configureCmd.add(" \"")
+    configureCmd.add(flag.replace("\"", "\\\""))
+    configureCmd.add("\"")
+  parts.add(configureCmd)
+  parts.join("; ")
+
+proc emitModeBConfigureAction(projectRoot, shExe: string;
+                              needAutoreconf: bool;
+                              configureFlags: seq[string];
+                              hostTriple: string;
+                              extraDeps: seq[string];
+                              extraInputs: seq[string]): BuildActionDef =
+  ## Mode-B configure action. Inputs are declared as the full package
+  ## source tree (spec line 135 "Inputs declared as the full package
+  ## source tree; FS-snoop extends") plus any fetch-stamp dep; the
+  ## monitor captures the rest. Output is the generated build-dir
+  ## Makefile so downstream make actions sequence after it.
+  let buildDir = modeBBuildDir(projectRoot)
+  createDir(extendedPath(buildDir))
+  let script = renderModeBConfigureScript(projectRoot, needAutoreconf,
+    configureFlags, hostTriple)
+  let argv = @[shExe, "-c", script]
+  # Declare the full source tree as inputs (spec line 135). For a fetched
+  # tarball the tree is materialised by the fetch action; we still list
+  # the configure-relevant scaffolding so per-file invalidation works
+  # before the first monitored run, and FS-snoop extends the set.
+  var inputs = collectAutotoolsSources(modeBConfigureScriptDir(projectRoot))
+  for ei in extraInputs:
+    if ei notin inputs:
+      inputs.add(ei)
+  let outputs = @[buildDir / "Makefile"]
+  buildAction(
+    id = "ccpp-autotools-modeb-configure",
+    call = inlineExecCall(argv, projectRoot),
+    deps = extraDeps,
+    inputs = inputs,
+    outputs = outputs,
+    pool = "compile",
+    # Monitored: FS-snoop captures the real dependency set the
+    # autoconf/m4 cascade + compiler probes read (spec line 135 + the
+    # Phase-1 SIP-safe launch). Not degraded to declared-only.
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "ccpp-autotools.modeb.configure",
+    toolIdentityRefs = @["autoreconf", "make", "gcc", "sh"])
+
+proc emitModeBMakeAction(projectRoot, makeExe: string;
+                         jobs: int;
+                         configureActionId: string): BuildActionDef =
+  ## Mode-B ``make -j<n>`` action (spec line 130). Runs in the
+  ## out-of-tree build dir; depends on the configure action.
+  let buildDir = modeBBuildDir(projectRoot)
+  let argv = @[makeExe, "-C", buildDir, "-j" & $jobs]
+  buildAction(
+    id = "ccpp-autotools-modeb-make",
+    call = inlineExecCall(argv, projectRoot),
+    deps = @[configureActionId],
+    inputs = @[buildDir / "Makefile"],
+    # The full compiled tree lands under the build dir; we don't
+    # enumerate every object (the monitor + the install action's deps
+    # carry sequencing). Declare a sentinel so the engine records
+    # success.
+    outputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "ccpp-autotools.modeb.make",
+    toolIdentityRefs = @["make", "gcc", "sh"])
+
+proc emitModeBInstallAction(projectRoot, makeExe: string;
+                            jobs: int;
+                            makeActionId: string): BuildActionDef =
+  ## Mode-B ``make DESTDIR=<stage> install`` action (spec line 131).
+  ## Lifts the install tree into ``<stage>``; the declared outputs are
+  ## the four canonical install sub-trees (spec lines 136-137) so they
+  ## become the package's artifacts.
+  let buildDir = modeBBuildDir(projectRoot)
+  let stageDir = modeBStageDir(projectRoot)
+  createDir(extendedPath(stageDir))
+  # Pass DESTDIR as a make command-line override (always wins over a
+  # Makefile-level assignment) so the install tree is redirected into
+  # the staging root rather than the real ``/``.
+  let argv = @[makeExe, "-C", buildDir, "-j" & $jobs,
+    "DESTDIR=" & stageDir, "install"]
+  # Artifacts lifted from ``<stage>/{bin,lib,include,share}`` (spec
+  # lines 136-137). With ``--prefix=/`` these land directly under
+  # ``<stage>/{bin,lib,include,share}``.
+  let outputs = @[
+    stageDir / "bin",
+    stageDir / "lib",
+    stageDir / "include",
+    stageDir / "share",
+  ]
+  buildAction(
+    id = "ccpp-autotools-modeb-install",
+    call = inlineExecCall(argv, projectRoot),
+    deps = @[makeActionId],
+    inputs = @[],
+    outputs = outputs,
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "ccpp-autotools.modeb.install",
+    toolIdentityRefs = @["make", "gcc", "sh"])
+
+proc emitModeBActions(projectRoot, shExe, makeExe: string;
+                      needAutoreconf: bool;
+                      configureFlags: seq[string];
+                      hostTriple: string;
+                      configureDeps: seq[string];
+                      configureInputsExtra: seq[string]):
+                        seq[BuildActionDef] =
+  ## Emit the full Mode-B action triple: configure → make -j → make
+  ## DESTDIR install (spec §lines 121-137). Returns the actions in
+  ## dependency order so the caller can register them + build a target.
+  # ``-j<n>``: cap at 8 like the DSL constructor (M9.R.14c.1) to bound
+  # memory/CPU pressure; matches ``make -j<n>`` in the spec (line 130).
+  let jobs = max(1, min(countProcessors(), 8))
+  let configureAction = emitModeBConfigureAction(projectRoot, shExe,
+    needAutoreconf, configureFlags, hostTriple, configureDeps,
+    configureInputsExtra)
+  let makeAction = emitModeBMakeAction(projectRoot, makeExe, jobs,
+    configureAction.id)
+  let installAction = emitModeBInstallAction(projectRoot, makeExe, jobs,
+    makeAction.id)
+  @[configureAction, makeAction, installAction]
+
 proc cCppAutotoolsEmitFragment(projectRoot: string;
                                request: ProviderGraphRequest):
                                  GraphFragment {.gcsafe.} =
@@ -826,17 +1218,14 @@ proc cCppAutotoolsEmitFragment(projectRoot: string;
       raise newException(ValueError,
         "c-cpp-autotools convention: Makefile.am missing at " &
           makefileAmPath)
-    var targets: seq[CCppAutotoolsEmitTarget] = @[]
-    for member in members:
-      let target = resolveAutotoolsTarget(projectRoot, makefileAm, member)
-      if target.sourceFiles.len == 0:
-        raise newException(ValueError,
-          "c-cpp-autotools convention: no .c sources resolved for " &
-            "member '" & member.name & "' under " & projectRoot &
-            " (looked for a matching <target>_SOURCES line in " &
-            makefileAmPath & ")")
-      targets.add(target)
-    let pkg = syntheticPackage(projectRoot, members)
+    # Spec §lines 113-137: a gnulib-shaped ``Makefile.am`` (recursive
+    # SUBDIRS / helper-archive LDADD / conditionals / custom recipes) —
+    # or an explicit force — escapes Mode A's per-source lift and
+    # delegates the whole build to Mode B (configure → make -j → make
+    # DESTDIR install). Decide once, up front, so Mode A's strict
+    # per-member source resolution doesn't raise on a package destined
+    # for delegation.
+    let useModeB = shouldUseModeB(projectRoot, makefileAm)
     # DSL-port M9.K: look up the DSL package name and read the M9.H
     # fetch spec + M9.I configure flag seq against that key.
     let dslPackageName = extractFirstPackageName(source)
@@ -848,6 +1237,47 @@ proc cCppAutotoolsEmitFragment(projectRoot: string;
     # configureFlags through an explicit ``build:`` calling
     # ``autotools_package(...)``.
     let configureFlags: seq[string] = @[]
+    # Cross-compile triple (spec line 128 ``[--host=<triple>]`` + line
+    # 109). The standard request carries no cross target in this
+    # surface, so it stays empty (native build) — wired through here so
+    # a future cross-aware request slots in without touching the
+    # emitters.
+    let hostTriple = ""
+    let pkg = syntheticPackage(projectRoot, members)
+
+    if useModeB:
+      # ----- Mode B: crude delegation (spec §lines 121-137) -----
+      let registerModeB = proc() =
+        discard buildPool("compile", 8'u32)
+        var allActions: seq[BuildActionDef] = @[]
+        var configureDeps: seq[string] = @[]
+        var configureInputsExtra: seq[string] = @[]
+        if hasFetch:
+          discard buildPool("fetch", 2'u32)
+          let fetchAct = emitFetchAction(projectRoot, dslPackageName, fetchSpec)
+          allActions.add(fetchAct)
+          configureDeps.add(fetchAct.id)
+          configureInputsExtra.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
+        for act in emitModeBActions(projectRoot, shExe, makeExe,
+            needAutoreconf, configureFlags, hostTriple,
+            configureDeps, configureInputsExtra):
+          allActions.add(act)
+        defaultTarget(target("default", allActions))
+      result = buildPackageFragment(pkg, request, registerModeB,
+        includeDefault = false)
+      return
+
+    # ----- Mode A: fine-grained per-source build (primary) -----
+    var targets: seq[CCppAutotoolsEmitTarget] = @[]
+    for member in members:
+      let target = resolveAutotoolsTarget(projectRoot, makefileAm, member)
+      if target.sourceFiles.len == 0:
+        raise newException(ValueError,
+          "c-cpp-autotools convention: no .c sources resolved for " &
+            "member '" & member.name & "' under " & projectRoot &
+            " (looked for a matching <target>_SOURCES line in " &
+            makefileAmPath & ")")
+      targets.add(target)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
       var allActions: seq[BuildActionDef] = @[]
