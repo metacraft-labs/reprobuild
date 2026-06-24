@@ -3758,6 +3758,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "recipes/packages/source/qcoro6/test_qcoro6_source.nim",
+    binary: "build/test-bin/test_qcoro6_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/qt6-base/test_qt6_base_source.nim",
     binary: "build/test-bin/test_qt6_base_source",
     defines: @[],
