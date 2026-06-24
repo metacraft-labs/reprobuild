@@ -93,9 +93,14 @@ suite "plasmaWorkspaceSource — from-source recipe smoke test":
     # ``libPlasma_workspace`` variants none of which match the
     # assertion below.
     let arts = registeredArtifacts("plasmaWorkspaceSource")
-    check arts.len == 2
+    # M9.R.32.1 added ``startplasmaWayland`` so the artifact count went
+    # from 2 (plasmashell + libPlasmaWorkspace) to 3.  The session
+    # entry-point binary's name kebabs to ``startplasma-wayland`` for
+    # the stage-copy probe; the registered identifier stays camelCase.
+    check arts.len == 3
     var seenBin = false
     var seenLib = false
+    var seenStartplasma = false
     for art in arts:
       check art.packageName == "plasmaWorkspaceSource"
       case art.artifactName
@@ -105,10 +110,14 @@ suite "plasmaWorkspaceSource — from-source recipe smoke test":
       of "libPlasmaWorkspace":
         seenLib = true
         check art.kind == dakLibrary
+      of "startplasmaWayland":
+        seenStartplasma = true
+        check art.kind == dakExecutable
       else:
         discard
     check seenBin
     check seenLib
+    check seenStartplasma
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream download.kde.org release tag
