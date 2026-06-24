@@ -122,6 +122,14 @@ type
     copyfile*: seq[CopyLinkFileEntry]
     linkfile*: seq[CopyLinkFileEntry]
     groups*: seq[string]
+    # RA-21 — develop-set dependency edges. Names the OTHER repos in the
+    # same workspace that THIS repo depends on (a develop-mode sibling is
+    # a git-submodule replacement; see Workspace-And-Develop-Mode.md
+    # §"VCS Hook Integration"). The pre-push gate scopes its clean/published
+    # checks to the pushed repo plus the transitive closure of these edges,
+    # not the whole workspace. A missing/empty `depends` means the repo has
+    # no develop-set dependencies (it forms a singleton closure).
+    depends*: seq[string]
 
   RepoFragment* = object
     schema*: string

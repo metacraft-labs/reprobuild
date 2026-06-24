@@ -6054,6 +6054,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
+    binary: "build/test-bin/t_pre_push_gate_checks_only_pushed_repo_dependency_closure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim",
+    binary: "build/test-bin/t_pre_push_refuses_when_lock_publish_fails",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_project_dsl_build_action_payload.nim",
     binary: "build/test-bin/t_project_dsl_build_action_payload",
     defines: @[],

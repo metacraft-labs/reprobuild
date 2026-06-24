@@ -18334,6 +18334,14 @@ type
     triggerRepo: string
     triggerSha: string
     toolProvisioning: ToolProvisioningMode
+    # RA-21 — when non-empty, the dirty-tree refusal only considers repos
+    # whose NAME is in this set (the pushed repo's develop-set dependency
+    # closure). The lock body still records EVERY workspace repo (full
+    # reproducibility); only the refusal is scoped, so an out-of-closure
+    # dirty repo cannot block a scoped pre-push lock refresh. Empty means
+    # the legacy whole-workspace refusal (explicit ``repro workspace lock``
+    # and post-commit keep that behavior).
+    dirtyScopeNames: HashSet[string]
 
 proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
   ## ``repro workspace lock`` argv parser. The single optional
@@ -18530,24 +18538,37 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
   var headShas = initTable[string, string]()
   var currentBranches = initTable[string, string]()
   var dirtyEntries: seq[WorkspaceLockDirtyEntry]
+  # RA-21 — the dirty refusal is scoped to ``dirtyScopeNames`` when the
+  # caller supplied one (the pre-push gate passes the pushed repo's
+  # dependency closure). An empty scope means "consider every repo" (the
+  # legacy whole-workspace behavior). A repo outside the scope still has
+  # its HEAD recorded in the lock, but its dirtiness/absence never refuses.
+  let scopeDirty = args.dirtyScopeNames.len > 0
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
+    let inDirtyScope = (not scopeDirty) or repo.name in args.dirtyScopeNames
     if not dirExists(repoPath / ".git"):
-      raise newException(ValueError,
-        "repo '" & repo.path &
-          "' has no on-disk checkout at '" & repoPath &
-          "'; run `repro workspace init` or `repro workspace sync` first")
+      if inDirtyScope:
+        raise newException(ValueError,
+          "repo '" & repo.path &
+            "' has no on-disk checkout at '" & repoPath &
+            "'; run `repro workspace init` or `repro workspace sync` first")
+      # Out-of-scope repo without a checkout: skip it entirely (it can't
+      # contribute a HEAD to the lock and it is not part of the gate scope).
+      continue
     let headRes = queryGitState(headShaQuery(repoPath), identity)
     if headRes.status != gqsOk:
-      raise newException(ValueError,
-        "could not query HEAD SHA for repo '" & repo.path &
-          "': " & headRes.diagnostic)
+      if inDirtyScope:
+        raise newException(ValueError,
+          "could not query HEAD SHA for repo '" & repo.path &
+            "': " & headRes.diagnostic)
+      continue
     headShas[repo.path] = headRes.headSha
     let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
     let isClean =
       if cleanRes.status == gqsOk: cleanRes.isClean
       else: false
-    if not isClean:
+    if not isClean and inDirtyScope:
       let reason =
         if cleanRes.status != gqsOk:
           "clean/dirty probe failed: " & cleanRes.diagnostic
@@ -18587,12 +18608,23 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
   elif resolved.trunk.len > 0:
     workspaceBranch = resolved.trunk
 
+  # RA-21 — record every repo we actually observed. In the normal
+  # (whole-workspace) path that is every declared repo; in a scoped
+  # pre-push refresh, an out-of-scope repo that has no on-disk checkout is
+  # skipped above and therefore omitted from the lock body (we cannot
+  # record a SHA we never observed). In-scope repos are always observed,
+  # so the lock always covers the pushed repo's dependency closure.
+  var lockRepos: seq[ResolvedRepo]
+  for repo in resolved.repos:
+    if repo.path in headShas:
+      lockRepos.add(repo)
+
   var lock = buildLockFromLiveState(
     project = resolved.projectName,
     workspaceBranch = workspaceBranch,
     createdAt = createdAt,
     createdBy = createdBy,
-    resolved = resolved.repos,
+    resolved = lockRepos,
     headShasByPath = headShas,
     currentBranchesByPath = currentBranches)
 
@@ -18662,7 +18694,14 @@ type
     lpoPublished       ## Staged locks committed AND pushed to upstream.
     lpoNothingToPublish ## No staged lock changes; nothing to commit/push.
     lpoRefusedDirty    ## Manifest repo dirty outside ``locks/``; refused.
-    lpoFailed          ## Empty lock, no upstream, or commit/push failed.
+    lpoNotPublishable  ## Manifest layer is not a git checkout / has no
+                       ## upstream — this workspace is not configured to
+                       ## publish locks at all. RA-21 treats this as a
+                       ## benign best-effort skip (NOT a loud refusal):
+                       ## there is no publication boundary to honour.
+    lpoFailed          ## A real publish ATTEMPT failed (empty lock, commit
+                       ## or push error). RA-21 treats this as a loud
+                       ## refusal in the pre-push gate.
 
   LockPublishResult* = object
     outcome*: LockPublishOutcome
@@ -18703,6 +18742,10 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
 
   if manifestRepoRoot.len == 0 or
       not dirExists(manifestRepoRoot / ".git"):
+    # The manifest layer is a plain directory, not a publishable git
+    # checkout — this workspace simply has no manifest remote to publish
+    # to. That is a benign skip, not a publish-attempt failure (RA-21).
+    result.outcome = lpoNotPublishable
     result.diagnostic =
       "manifest repo root '" & manifestRepoRoot &
         "' is not a git checkout; cannot publish lock"
@@ -18771,7 +18814,10 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   if upstreamRes.code != 0 or upstreamRes.output.strip().len == 0:
     discard gitRunPlain(identity,
       ["-C", manifestRepoRoot, "reset", "--quiet", "HEAD", "--", "locks"])
-    result.outcome = lpoFailed
+    # A manifest repo with no upstream branch is not configured to publish
+    # (e.g. a brand-new local manifest with no remote). Benign skip, not a
+    # loud publish-attempt failure (RA-21).
+    result.outcome = lpoNotPublishable
     result.diagnostic =
       "manifest repo has no upstream (@{u}); cannot publish lock"
     return
@@ -19996,6 +20042,41 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
         seen.incl(p)
         result.add(p)
 
+proc developSetClosure(repos: seq[ResolvedRepo];
+                       pushedRepoName: string): HashSet[string] =
+  ## RA-21 — compute the transitive develop-set dependency closure of the
+  ## pushed repo, as a set of repo NAMES. The closure is the pushed repo
+  ## itself plus every repo reachable through the per-repo ``depends``
+  ## edges (Workspace-And-Develop-Mode.md §"VCS Hook Integration": a
+  ## develop-mode sibling is a git-submodule replacement, so only the
+  ## pushed repo's own dependency closure can break a teammate's build of
+  ## it). Unknown dependency names (a ``depends`` entry that names no repo
+  ## in the resolved set) are skipped — the closure only ever contains
+  ## repos that actually participate in this workspace.
+  ##
+  ## When ``pushedRepoName`` is empty (the hook was invoked without a
+  ## resolvable ``--current-repo``), the closure is empty and the caller
+  ## falls back to the whole-workspace scope so the gate never silently
+  ## under-checks.
+  result = initHashSet[string]()
+  if pushedRepoName.len == 0:
+    return
+  var byName = initTable[string, ResolvedRepo]()
+  for repo in repos:
+    byName[repo.name] = repo
+  if pushedRepoName notin byName:
+    return
+  var pending = @[pushedRepoName]
+  while pending.len > 0:
+    let name = pending.pop()
+    if name in result:
+      continue
+    result.incl(name)
+    if name in byName:
+      for dep in byName[name].depends:
+        if dep.len > 0 and dep notin result:
+          pending.add(dep)
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -20046,10 +20127,25 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   result.pushedBranch = parsePushedBranchFromRefs(parsed.pushedRefsPath)
   discard currentRepoPath
 
+  # RA-21: scope the gate to the pushed repo's transitive develop-set
+  # dependency closure, NOT the whole workspace. A develop-mode sibling is
+  # a git-submodule replacement: only the pushed repo's own dependency
+  # closure can break a teammate's build of it, so an unrelated dirty repo
+  # elsewhere in the workspace MUST NOT block the push. The closure is a
+  # set of repo NAMES (pushed repo + everything reachable via the per-repo
+  # ``depends`` edges). When ``--current-repo`` does not resolve to a
+  # declared repo (the closure is empty), we fall back to the whole
+  # workspace so the gate can never silently under-check.
+  let scopeClosure = developSetClosure(resolved.repos, currentRepoName)
+  let scopeIsWholeWorkspace = scopeClosure.len == 0
+  proc repoInScope(name: string): bool =
+    scopeIsWholeWorkspace or name in scopeClosure
+
   # Walk the participating repos for the cleanliness + publication
   # passes. We gather the M4 evidence triple for every repo so the
   # second / third stages can short-circuit cleanly while preserving
-  # the full observed state for the lock stage.
+  # the full observed state for the lock stage. Repos OUTSIDE the pushed
+  # repo's dependency closure are skipped entirely (RA-21).
   type
     RepoObs = object
       name: string
@@ -20064,6 +20160,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       hasGit: bool
   var observations: seq[RepoObs]
   for repo in resolved.repos:
+    if not repoInScope(repo.name):
+      continue
     let absRepo = parsed.workspaceRoot / repo.path
     var obs = RepoObs(name: repo.name, path: repo.path, absPath: absRepo)
     if not dirExists(absRepo / ".git"):
@@ -20098,7 +20196,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # re-querying the M1 identity binding.
   discard toolDigest
   discard observedAt
-  discard currentRepoName
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -20235,16 +20332,21 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
   # latest locked SHA per repo path. If the locked map covers every
-  # participating repo and matches every observed HEAD, the lock is
+  # IN-SCOPE repo and matches every observed HEAD, the lock is
   # ``already-current``. Otherwise the gate creates or refreshes the
   # lock by delegating to the M11 driver — its refusal arm (a dirty
-  # sibling, exit 2) is unreachable here because stage 2 already
-  # short-circuited on any dirty tree. Stage 4 (M23 develop-override
-  # cleanliness) also has to have passed: a dirty or unpublished
+  # in-scope sibling, exit 2) is unreachable here because stage 1 already
+  # short-circuited on any in-scope dirty tree. Stage 3 (M23 develop-
+  # override cleanliness) also has to have passed: a dirty or unpublished
   # override would otherwise be silently encoded into the lock.
+  #
+  # RA-21: the lock refresh is scoped to the pushed repo's dependency
+  # closure — an out-of-closure dirty repo must NOT make the refresh
+  # refuse (the lock still records every repo it can observe).
   var lockArgs = WorkspaceLockArgs(
     workspaceRoot: parsed.workspaceRoot,
-    toolProvisioning: parsed.toolProvisioning)
+    toolProvisioning: parsed.toolProvisioning,
+    dirtyScopeNames: scopeClosure)
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
   # RA-7: surface the manifest-layer root so the caller can publish
   # (commit + push) the lock after the gate passes.
@@ -20503,12 +20605,17 @@ proc runCheckCommand*(args: openArray[string]): int =
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
-    # RA-7: on a passing pre-push gate (and only then), PUBLISH the lock —
-    # commit + push the ``locks/`` subtree to the manifest repo's upstream
-    # so the reproducible state actually reaches teammates. Publication is
-    # best-effort here (RA-21 later makes the pre-push gate refuse on a
-    # publish failure); a refusal/failure is surfaced but does not change
-    # the gate's exit code. We never publish a failed gate's lock.
+    # RA-7 / RA-21: on a passing pre-push gate (and only then), PUBLISH the
+    # lock — commit + push the ``locks/`` subtree to the manifest repo's
+    # upstream so the reproducible state actually reaches teammates. The
+    # lock *write/refresh* is best-effort, but the *publication the push
+    # depends on* is part of the publication boundary: RA-21 makes a
+    # publish FAILURE (network / non-fast-forward / manifest dirty outside
+    # ``locks/``) REFUSE the push with a clear diagnostic rather than
+    # silently allow a commit whose lock never reached the manifest repo
+    # (Workspace-And-Develop-Mode.md §"Lock publication is loud on
+    # failure"). ``lpoNothingToPublish`` is benign (the lock was already
+    # current and committed earlier). We never publish a failed gate's lock.
     if report.exitCode == 0 and report.manifestLayerRoot.len > 0:
       let identity = ensureGitToolResolvable(
         parsed.toolProvisioning, getEnv("PATH"))
@@ -20518,9 +20625,29 @@ proc runCheckCommand*(args: openArray[string]): int =
         stderr.writeLine("repro check: " & pub.diagnostic)
       of lpoNothingToPublish:
         discard
-      else:
+      of lpoNotPublishable:
+        # The workspace is not configured to publish (no manifest git
+        # checkout / no upstream). There is no publication boundary to
+        # honour, so this stays a benign best-effort skip — surfaced but
+        # not gating.
         stderr.writeLine("repro check: lock publish skipped: " &
           pub.diagnostic)
+      of lpoRefusedDirty, lpoFailed:
+        # Loud-on-failure (RA-21): the reproducible state COULD be published
+        # but the attempt was refused (manifest dirty outside ``locks/``) or
+        # failed (commit / push / network error). A teammate must never pull
+        # a commit whose lock never reached the manifest repo, so the push is
+        # refused: record the failure and flip the gate to a non-zero exit.
+        let diag = "lock publication failed: " & pub.diagnostic
+        stderr.writeLine("repro check: " & diag)
+        report.failures.add(CheckFailure(
+          repo: "",
+          property: "lock-publish-failure",
+          remediation:
+            "publish the workspace lock to the manifest repo and re-push " &
+            "(fix the network / non-fast-forward / manifest-dirty cause above)",
+          evidence: pub.diagnostic))
+        report.exitCode = 2
     writeCheckReport(report)
     if parsed.json:
       stdout.writeLine(pretty(report.toJsonNode(), indent = 2))

@@ -114,6 +114,11 @@ type
     copyfile*: seq[CopyLinkFileEntry]
     linkfile*: seq[CopyLinkFileEntry]
     groups*: seq[string]
+    # RA-21 — develop-set dependency edges carried verbatim from the
+    # fragment. Names the other repos this repo depends on; the pre-push
+    # gate uses these to compute the pushed repo's transitive dependency
+    # closure (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
+    depends*: seq[string]
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -325,6 +330,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     resolved.copyfile = fragment.repo.copyfile
     resolved.linkfile = fragment.repo.linkfile
     resolved.groups = fragment.repo.groups
+
+    # RA-21 — carry the develop-set dependency edges through verbatim.
+    resolved.depends = fragment.repo.depends
 
     # Duplicate check on the `(name, path, remoteName)` triple. We use
     # a tab-joined key because none of the three components legally
@@ -563,6 +571,9 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
     resolved.copyfile = fragment.repo.copyfile
     resolved.linkfile = fragment.repo.linkfile
     resolved.groups = fragment.repo.groups
+
+    # RA-21 — carry the develop-set dependency edges through verbatim.
+    resolved.depends = fragment.repo.depends
 
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
     if triple in seen:

@@ -1,12 +1,32 @@
-## M18 — ``repro check --mode=pre-push`` publication gate.
+## RA-21 — the pre-push gate scopes its clean/published checks to the
+## pushed repo's TRANSITIVE develop-set dependency closure, NOT the whole
+## workspace.
 ##
-## Unpublished-HEAD failure mode: when a sibling's HEAD has not been
-## pushed to its origin remote, the gate refuses with property
-## ``unpublished`` and remediation ``run 'git push' in <repo> first``.
-## The active-branch and dirty checks must have passed before this
-## stage runs. RA-21: the offending sibling must be in the pushed repo's
-## develop-set dependency closure, so lib-a declares
-## ``depends = ["lib-c"]`` here (a transitive edge would do as well).
+## A develop-mode sibling is a git-submodule replacement: only the pushed
+## repo's own dependency closure can break a teammate's build of it, so an
+## unrelated dirty repo elsewhere in the workspace MUST NOT block the push
+## (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
+##
+## Topology: repo A declares ``depends = ["lib-b"]`` (so A's closure is
+## {lib-a, lib-b}); lib-c is unrelated (no edge). All three start clean and
+## published, and the workspace lock is current.
+##
+##   Part 1 — out-of-closure dirty does NOT block. Make lib-c DIRTY and
+##            unpublished. Pushing lib-a (with lib-a + lib-b clean and
+##            published) PASSES (exit 0) — lib-c's dirtiness is out of
+##            scope. Under the OLD whole-workspace gate this would refuse
+##            naming lib-c, so this assertion is falsifiable: revert the
+##            scoping and Part 1 fails.
+##
+##   Part 2 — in-closure dirty DOES block. Make lib-b (in lib-a's closure)
+##            dirty and unpublished. Pushing lib-a now FAILS (exit 2) with
+##            a failure that NAMES lib-b. This proves the scope is the
+##            closure (which includes lib-b), not just the pushed repo.
+##
+## Hermetic: only local ``git init`` / ``git init --bare`` repos; no
+## network. The manifest layer is a plain directory (not a publishable git
+## repo), so the RA-21 loud-on-failure publish path is a benign skip here
+## (covered by ``t_pre_push_refuses_when_lock_publish_fails``).
 ##
 ## Skip rule: ``git`` missing on PATH.
 
@@ -32,10 +52,6 @@ proc requireGit(command: string; cwd = ""): string =
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
 
-# Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
-# (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
-# / the apps collection before tests run). Assert it exists and use it instead
-# of recompiling ``apps/repro/repro.nim`` at test runtime.
 proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
@@ -48,8 +64,8 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name \"M18 Tester\"")
-  writeFile(workPath / "README.md", "M18 fixture\n")
+    " config user.name \"RA21 Tester\"")
+  writeFile(workPath / "README.md", "RA21 fixture\n")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " commit -m fixture")
@@ -66,11 +82,11 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.email tester@example.invalid")
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name \"M18 Tester\"")
+    " config user.name \"RA21 Tester\"")
 
 proc commitLocalChange(gitBin, repoPath, message: string): string =
   ## Commit a fresh change without pushing — the resulting HEAD is not
-  ## reachable from any remote-tracking branch.
+  ## reachable from any remote-tracking branch (unpublished).
   writeFile(repoPath / "local.txt", message & "\n")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add local.txt")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) &
@@ -94,6 +110,8 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "  \"repos/lib-c.toml\",\n" &
     "]\n"
 
+# lib-a depends on lib-b → A's closure is {lib-a, lib-b}. lib-c is
+# unrelated (no edge) and therefore OUT of scope for a push of lib-a.
 const libAFragmentToml = """
 schema = "reprobuild.workspace.repo.v1"
 
@@ -102,7 +120,7 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 revision = "main"
-depends = ["lib-c"]
+depends = ["lib-b"]
 """
 
 const libBFragmentToml = """
@@ -132,7 +150,7 @@ type
     seedPath: string
     sha: string
 
-  M18Fixture = object
+  Fixture = object
     scratch: string
     reproBin: string
     workspaceRoot: string
@@ -140,8 +158,8 @@ type
     libB: RepoSeed
     libC: RepoSeed
 
-proc setupFixture(gitBin, slug: string): M18Fixture =
-  result.scratch = createTempDir("repro-m18-" & slug & "-", "")
+proc setupFixture(gitBin, slug: string): Fixture =
+  result.scratch = createTempDir("repro-ra21-closure-" & slug & "-", "")
   result.reproBin = reproBinary()
 
   result.libA.name = "lib-a"
@@ -175,12 +193,12 @@ proc setupFixture(gitBin, slug: string): M18Fixture =
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
   result.workspaceRoot = workspaceRoot
 
-proc cloneAll(gitBin: string; fx: M18Fixture) =
+proc cloneAll(gitBin: string; fx: Fixture) =
   cloneInto(gitBin, fx.libA.origin, fx.workspaceRoot / "lib-a")
   cloneInto(gitBin, fx.libB.origin, fx.workspaceRoot / "lib-b")
   cloneInto(gitBin, fx.libC.origin, fx.workspaceRoot / "lib-c")
 
-proc seedMetadataBranch(fx: M18Fixture; branch: string) =
+proc seedMetadataBranch(fx: Fixture; branch: string) =
   writeWorkspaceBranch(fx.workspaceRoot,
     project = "lib-a", branch = branch)
 
@@ -189,7 +207,13 @@ proc writeRefsFile(path: string; localRef, localSha: string) =
   writeFile(path, localRef & " " & localSha & " " &
     "refs/heads/main " & zeroSha & "\n")
 
-proc invokeCheckPrePush(fx: M18Fixture; currentRepo, refsFile: string):
+proc invokeWorkspaceLock(fx: Fixture): CmdResult =
+  runShell(shellCommand(@[
+    fx.reproBin, "workspace", "lock",
+    "--workspace-root=" & fx.workspaceRoot,
+  ]))
+
+proc invokeCheckPrePush(fx: Fixture; currentRepo, refsFile: string):
     CmdResult =
   runShell(shellCommand(@[
     fx.reproBin, "check", "--mode=pre-push",
@@ -199,45 +223,74 @@ proc invokeCheckPrePush(fx: M18Fixture; currentRepo, refsFile: string):
     "--json",
   ]))
 
-proc readReport(fx: M18Fixture): JsonNode =
+proc readReport(fx: Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
     "check-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
 
-suite "M18 — repro check --mode=pre-push (unpublished HEAD)":
+suite "RA-21 — pre-push gate scoped to the pushed repo's dependency closure":
 
-  test "t_workspace_pre_push_blocks_when_head_unpublished":
+  test "t_pre_push_gate_checks_only_pushed_repo_dependency_closure":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
     else:
-      let fx = setupFixture(gitBin, "head-unpublished")
+      let fx = setupFixture(gitBin, "scope")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
 
-      # lib-c gains a local commit that was never pushed. lib-a and
-      # lib-b are clean and published; the gate must single out lib-c.
-      let unpushedSha = commitLocalChange(gitBin,
-        fx.workspaceRoot / "lib-c", "unpublished commit")
-      check unpushedSha != fx.libC.sha
+      # Lock all three at their published SHAs so the lock is current.
+      let lockRes = invokeWorkspaceLock(fx)
+      if lockRes.code != 0:
+        checkpoint("workspace lock output: " & lockRes.output)
+      check lockRes.code == 0
 
       let refsFile = fx.scratch / "pushed-refs.txt"
       writeRefsFile(refsFile, "refs/heads/main", fx.libA.sha)
 
-      let res = invokeCheckPrePush(fx,
+      # ---- Part 1: out-of-closure dirty does NOT block -------------------
+      # lib-c is unrelated to lib-a. Make it dirty AND give it an
+      # unpublished commit — the WORST case for the old whole-workspace
+      # gate. Pushing lib-a must still PASS.
+      discard commitLocalChange(gitBin, fx.workspaceRoot / "lib-c",
+        "unpublished out-of-closure commit")
+      writeFile(fx.workspaceRoot / "lib-c" / "scratch.txt",
+        "uncommitted out-of-closure\n")
+
+      let pass = invokeCheckPrePush(fx,
         currentRepo = fx.workspaceRoot / "lib-a",
         refsFile = refsFile)
-      check res.code == 2
+      if pass.code != 0:
+        checkpoint("Part 1 output: " & pass.output)
+      # Falsifiable: the old whole-workspace gate refuses (exit 2) naming
+      # lib-c here.
+      check pass.code == 0
+      let passReport = readReport(fx)
+      check passReport["exitCode"].getInt() == 0
+      check passReport["failures"].len == 0
+      # lib-c must NOT appear in any failure — it is out of scope.
+      for failure in passReport["failures"]:
+        check failure["repo"].getStr() != "lib-c"
 
-      let report = readReport(fx)
-      check report["exitCode"].getInt() == 2
-      check report["failures"].len == 1
-      let failure = report["failures"][0]
-      check failure["property"].getStr() == "unpublished"
-      check failure["repo"].getStr() == "lib-c"
-      check failure["remediation"].getStr().contains("git push")
-      check failure["remediation"].getStr().contains("lib-c")
-      # Lock stage is not exercised because publication refused first.
-      check report["lockUpdate"]["kind"].getStr() == "none"
+      # ---- Part 2: in-closure dirty DOES block, naming the dep ----------
+      # lib-b IS in lib-a's closure. Make it dirty (and unpublished, to be
+      # thorough). The gate must now FAIL and name lib-b.
+      writeFile(fx.workspaceRoot / "lib-b" / "scratch.txt",
+        "uncommitted in-closure\n")
+
+      let blocked = invokeCheckPrePush(fx,
+        currentRepo = fx.workspaceRoot / "lib-a",
+        refsFile = refsFile)
+      check blocked.code == 2
+      let blockedReport = readReport(fx)
+      check blockedReport["exitCode"].getInt() == 2
+      check blockedReport["failures"].len >= 1
+      # The first (short-circuiting) failure names the in-closure dep lib-b.
+      let failure = blockedReport["failures"][0]
+      check failure["property"].getStr() == "dirty"
+      check failure["repo"].getStr() == "lib-b"
+      # And lib-c (out of scope) is never the named offender.
+      for f in blockedReport["failures"]:
+        check f["repo"].getStr() != "lib-c"

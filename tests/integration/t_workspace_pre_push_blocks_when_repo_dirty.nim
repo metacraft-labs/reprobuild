@@ -4,7 +4,11 @@
 ## active workspace branch, the gate refuses on the first dirty sibling
 ## with property ``dirty`` + remediation ``commit or stash changes in
 ## <repo>``. The dirty sibling NEED NOT be the repo the operator ran
-## ``git push`` in — workspace consistency is the contract.
+## ``git push`` in — but it MUST be in the pushed repo's develop-set
+## dependency closure for the gate to refuse (RA-21). Here lib-a declares
+## ``depends = ["lib-b"]``, so a dirty lib-b blocks a push of lib-a; an
+## unrelated lib-c (no edge) is out of scope and is covered separately by
+## ``t_pre_push_gate_checks_only_pushed_repo_dependency_closure``.
 ##
 ## Fixture pattern mirrors M17 / the M18 branch-mismatch test.
 ##
@@ -92,6 +96,7 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 revision = "main"
+depends = ["lib-b"]
 """
 
 const libBFragmentToml = """
