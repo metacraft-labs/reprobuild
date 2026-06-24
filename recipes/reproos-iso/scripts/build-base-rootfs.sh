@@ -79,33 +79,114 @@ BASE_IMAGE='debian:trixie-slim'
 #   - keyboard data (xkb-data, console-data) -- data packages
 #   - CA certificate bundle (data package)
 #
+## M9.R.32.4 -- per-entry from-source audit (user's "no apt" principle).
+##
+## Each line of PKG_LIST below carries an audit annotation:
+##   FS:done|partial|none -- from-source recipe state:
+##     done    -- recipe exists AND has a populated install-mirror
+##     partial -- recipe exists but install-mirror is empty/incomplete
+##     none    -- no from-source recipe authored yet
+##   STAGE:yes|no -- whether stage-de-rootfs.sh currently mirrors the
+##     from-source artifacts into the live ISO (the architectural piece
+##     gating apt removal: even with FS:done, removing the apt entry
+##     breaks the live ISO when STAGE:no).
+##
+## DROP-CRITERION (when both hold the apt entry is removable):
+##   1. FS:done -- the from-source recipe has a real install mirror.
+##   2. STAGE:yes -- stage-de-rootfs.sh mirrors that install-mirror
+##                   tree onto the live ISO.
+##
+## At M9.R.32 NO entry satisfies BOTH criteria simultaneously: every
+## from-source replacement that exists (FS:done) is NOT mirrored by
+## stage-de-rootfs.sh (STAGE:no, because the script only mirrors the
+## DE entry-point binaries -- sway/kwin/mutter/sddm/plasma-workspace/
+## gdm -- not the base userspace).  The honest M9.R.33 work shape is:
+##   * Extend stage-de-rootfs.sh with a per-recipe base-mirror loop
+##     that walks every PKG_LIST entry's from-source equivalent and
+##     mirrors install/usr/{bin,sbin,lib,lib64,share} into the rootfs.
+##   * Once that lands, this PKG_LIST shrinks to ONLY the FS:none
+##     entries (data packages + recipes not yet authored).
+##
+## The annotations below were measured 2026-06-24 by checking each
+## ``recipes/packages/source/<recipe>/.repro/output/install/`` tree.
+##
 PKG_LIST=(
-  # init shim + libc -- needed by PID 1 until the from-source systemd
-  # + glibc install-mirrors are wired into the boot chain.  When
-  # M9.R.26 lands the from-source systemd init unit + glibc shim,
-  # systemd / systemd-sysv / libpam* drop out of this list.
+  # PID 1 / dbus -- core init stack.
+  #   systemd          FS:done    STAGE:no
+  #   systemd-sysv     FS:done    STAGE:no  (alias for systemd)
+  #   libpam-systemd   FS:partial STAGE:no  (`pam` recipe install dir
+  #                                          exists but no usr/bin yet)
+  #   dbus             FS:done    STAGE:no
+  #   dbus-user-session FS:partial STAGE:no  (uses dbus recipe; user
+  #                                           session unit files aren't
+  #                                           shipped by from-source)
   systemd systemd-sysv libpam-systemd dbus dbus-user-session
-  # Essential userspace -- bootstrap busybox-equivalents until the
-  # from-source coreutils/util-linux/grep recipes are wired through.
+  # Essential userspace.
+  #   util-linux       FS:done    STAGE:no  (63 binaries in usr/bin)
+  #   mount            FS:none    STAGE:no  (part of util-linux pkg)
+  #   kmod             FS:done    STAGE:no  (7 binaries in usr/bin)
+  #   udev             FS:none    STAGE:no  (eudev recipe exists but
+  #                                          install-mirror is empty)
+  #   tzdata           FS:done    STAGE:no  (iana-tzdata recipe ships
+  #                                          usr/share/zoneinfo;
+  #                                          STAGE:no blocks dropping)
+  #   passwd           FS:done    STAGE:no  (shadow-utils recipe)
+  #   login            FS:done    STAGE:no  (shadow-utils recipe)
+  #   procps           FS:partial STAGE:no  (recipe exists; install dir
+  #                                          missing)
+  #   less             FS:done    STAGE:no
+  #   nano             FS:none    STAGE:no  (not in from-source corpus;
+  #                                          editor convenience, no
+  #                                          runtime dep)
   util-linux mount kmod udev tzdata passwd login procps less nano
   # Locale data (no build cost; pure data).
+  #   locales          FS:none    STAGE:no  (glibc recipe exists but
+  #                                          locale-gen is a runtime
+  #                                          glibc helper; locale data
+  #                                          generation needs the
+  #                                          glibc install-mirror's
+  #                                          localedef + locales
+  #                                          source tree)
   locales
   # Keyboard + console data.
+  #   xkb-data         FS:partial STAGE:no  (xkeyboard-config recipe
+  #                                          exists; not built)
+  #   console-data     FS:none    STAGE:no
+  #   console-setup    FS:none    STAGE:no
+  #   keyboard-configuration FS:none STAGE:no
   xkb-data console-data console-setup keyboard-configuration
   # Network / CA / users.
+  #   ca-certificates  FS:partial STAGE:no  (recipe exists but install
+  #                                          dir empty; needs upstream
+  #                                          ca-cert-bundle staging)
+  #   iputils-ping     FS:none    STAGE:no
+  #   iproute2         FS:partial STAGE:no  (recipe exists; not built)
+  #   sudo             FS:done    STAGE:no  (4 binaries in usr/bin)
   ca-certificates iputils-ping iproute2 sudo
   # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
-  # from-source recipe in stage-de-rootfs.sh; we keep the package to
-  # pick up the .service file and the /etc/pam.d/sddm policy until a
-  # from-source sddm recipe ships those files itself (TODO M9.R.26).
+  # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
+  # apt entry to pick up the .service file + /etc/pam.d/sddm policy.
+  #   sddm             FS:done    STAGE:partial (binary staged; service
+  #                                              + PAM files NOT staged)
   sddm
   # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
   # shells out to.  These are the on-target install-time utilities;
   # the from-source equivalents are part of a longer-tail recipe
-  # campaign (TODO M9.R.27).
+  # campaign (TODO M9.R.33).
+  #   gdisk            FS:partial STAGE:no
+  #   parted           FS:partial STAGE:no
+  #   e2fsprogs        FS:done    STAGE:no  (28 bins+sbins)
+  #   dosfstools       FS:partial STAGE:no
+  #   btrfs-progs      FS:done    STAGE:no  (9 binaries)
+  #   cryptsetup       FS:partial STAGE:no
+  #   lvm2             FS:partial STAGE:no
   gdisk parted e2fsprogs dosfstools btrfs-progs cryptsetup lvm2
   # Bootloader tools the installer's Phase 5 (system apply) shells
-  # out to.  GRUB has no from-source recipe yet (TODO M9.R.27).
+  # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
+  #   grub-efi-amd64-bin     FS:none STAGE:no
+  #   grub-pc-bin            FS:none STAGE:no
+  #   grub-common            FS:none STAGE:no
+  #   grub2-common           FS:none STAGE:no
   grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
 )
 
