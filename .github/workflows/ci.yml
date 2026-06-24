@@ -42,6 +42,11 @@ jobs:
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
       - name: just lint
         run: dev-exec just lint
       - name: Upload logs
@@ -154,6 +159,11 @@ jobs:
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           flake-override-inputs: |
             ct-test-src=../ct-test
             runquota-src=../runquota
@@ -184,6 +194,11 @@ jobs:
         with:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
       - name: nix build
         run: dev-exec nix build .#default
       - name: Upload logs
