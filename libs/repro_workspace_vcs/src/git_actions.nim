@@ -80,6 +80,17 @@ type
     identityDigestHex*: string
     identityVersion*: string
     binaryPath*: string
+    referencePath*: string
+      ## RA-5 — when non-empty (clone only), the shared bare clone to
+      ## pass as ``git clone --reference``. The clone keeps
+      ## ``objects/info/alternates`` pointing at the shared bare's
+      ## ``objects/`` dir (we deliberately do NOT ``--dissociate``), so a
+      ## later fetch transfers only objects not already in the shared
+      ## pool. This is a pure acceleration field: it is intentionally
+      ## EXCLUDED from the clone fingerprint so a cold-cache run (no
+      ## reference) and a warm-cache run (reference present) share the
+      ## same receipt and produce a byte-identical resolved tree
+      ## (transparency).
 
   GitQueryKind* = enum
     gqkHeadSha
@@ -157,6 +168,7 @@ proc encodePayload(payload: GitVcsPayload): string =
   result.add("identity-digest=" & payload.identityDigestHex & "\n")
   result.add("identity-version=" & esc(payload.identityVersion) & "\n")
   result.add("binary-path=" & esc(payload.binaryPath) & "\n")
+  result.add("reference-path=" & esc(payload.referencePath) & "\n")
 
 proc decodePayload(text: string): GitVcsPayload =
   proc unesc(value: string): string =
@@ -198,6 +210,7 @@ proc decodePayload(text: string): GitVcsPayload =
     of "identity-digest": result.identityDigestHex = value
     of "identity-version": result.identityVersion = value
     of "binary-path": result.binaryPath = value
+    of "reference-path": result.referencePath = value
     else:
       # Forward-compatible: ignore unknown keys so a payload written
       # by a newer M2.x build still decodes.
@@ -408,11 +421,37 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # will be a different action (M9+).
     return failed("clone-target-exists",
       "clone target already exists: " & target)
-  var args = @["clone", payload.remoteUrl, target]
+  var args = @["clone"]
+  # RA-5: accelerate via the shared bare clone. ``--reference <bare>``
+  # leaves ``objects/info/alternates`` pointing at the shared pool (no
+  # ``--dissociate``), so the clone reads objects already present in the
+  # cache instead of re-downloading them. This is transparent: the
+  # resolved tree at the pinned revision is byte-identical to a plain
+  # clone. If the reference path turns out to be unusable, retry once as
+  # a plain clone so the accelerator never breaks the clone itself.
+  let useReference = payload.referencePath.len > 0 and
+    (dirExists(payload.referencePath / "objects") or
+     dirExists(payload.referencePath / ".git"))
+  if useReference:
+    args.add("--reference")
+    args.add(payload.referencePath)
+  args.add(payload.remoteUrl)
+  args.add(target)
   if payload.revision.len > 0:
     args.add("--branch")
     args.add(payload.revision)
-  let cloneRes = runGit(payload, args)
+  var cloneRes = runGit(payload, args)
+  if cloneRes.exitCode != 0 and useReference:
+    # Best-effort fallback: drop the reference and clone standalone so a
+    # broken/locked shared bare never breaks init.
+    if dirExists(target):
+      try: removeDir(target)
+      except OSError: discard
+    var plain = @["clone", payload.remoteUrl, target]
+    if payload.revision.len > 0:
+      plain.add("--branch")
+      plain.add(payload.revision)
+    cloneRes = runGit(payload, plain)
   if cloneRes.exitCode != 0:
     return failed("clone-failed",
       "git clone exited " & $cloneRes.exitCode & ": " &
@@ -642,7 +681,8 @@ installGitVcsExecutor()
 
 proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
                   remoteUrl, remoteName, branchName, revision,
-                  repoPath, receiptPath: string): GitVcsPayload =
+                  repoPath, receiptPath: string;
+                  referencePath = ""): GitVcsPayload =
   GitVcsPayload(
     op: op,
     remoteUrl: remoteUrl,
@@ -653,12 +693,13 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
     receiptPath: receiptPath,
     identityDigestHex: identity.digestHex(),
     identityVersion: identity.version,
-    binaryPath: identity.binaryPath)
+    binaryPath: identity.binaryPath,
+    referencePath: referencePath)
 
 proc gitCloneAction*(id: string; identity: GitToolIdentity;
                      remoteUrl, repoPath, receiptPath: string;
                      revision = ""; cwd = ""; deps: openArray[string] = [];
-                     cacheable = true): BuildAction =
+                     cacheable = true; referencePath = ""): BuildAction =
   ## Construct a cacheable clone action. The receipt path is the
   ## action's declared output and the unit of caching (per M2 design
   ## rule 1). ``revision``, when non-empty, is passed as ``--branch``
@@ -667,8 +708,15 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
   ## The action fingerprint folds the ``GitToolIdentity.digest`` so
   ## two workspaces resolving to different git binaries cannot share
   ## a cache entry (per M2 design rule 2).
+  ##
+  ## RA-5 — ``referencePath``, when set, names the shared bare clone to
+  ## pass as ``git clone --reference`` so the clone reads objects from
+  ## the shared pool instead of re-downloading them. It is deliberately
+  ## OMITTED from the fingerprint (see ``fingerprintPayload``) so a
+  ## cold-cache clone and a warm-cache clone share the same receipt and
+  ## produce a byte-identical resolved tree (transparency).
   let payload = buildPayload(identity, gvoClone, remoteUrl, "", "",
-    revision, repoPath, receiptPath)
+    revision, repoPath, receiptPath, referencePath = referencePath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

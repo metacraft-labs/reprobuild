@@ -38,6 +38,7 @@ import evidence as workspaceVcsEvidence
 import repro_workspace_manifests
 import git_tool
 import git_actions
+import shared_clones
 import repro_tool_profiles
 import repro_local_store
 import repro_store_daemon
@@ -16052,6 +16053,29 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
+  # RA-5: resolve the shared object-cache root once for this workspace and
+  # refresh each unique upstream's shared bare BEFORE scheduling the
+  # per-repo clones. The refresh is the single shared-state write per URL;
+  # doing it up front means concurrent clones read a consistent pool
+  # without racing a fetch into the same bare. Every step is best-effort:
+  # if a shared bare can't be populated, the affected clone simply runs
+  # standalone (no ``--reference``) and the accelerator is a no-op for it.
+  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  var sharedBareByUrl = initTable[string, string]()
+  proc sharedReferenceFor(fetchUrl: string): string =
+    if fetchUrl.len == 0:
+      return ""
+    if sharedBareByUrl.hasKey(fetchUrl):
+      return sharedBareByUrl[fetchUrl]
+    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
+    if not refreshed.ok and refreshed.diagnostic.len > 0:
+      stderr.writeLine("workspace init: shared-clone cache miss for " &
+        fetchUrl & " (falling back to standalone clone): " &
+        refreshed.diagnostic)
+    sharedBareByUrl[fetchUrl] = reference
+    reference
+
   var cloneActions: seq[BuildAction]
   var cloneEntries: seq[WorkspaceInitClonedEntry]
   for idx, repo in resolved.repos:
@@ -16074,7 +16098,8 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
       remoteUrl = repo.fetchUrl,
       repoPath = repo.path,
       receiptPath = receiptRel,
-      revision = repo.revision)
+      revision = repo.revision,
+      referencePath = sharedReferenceFor(repo.fetchUrl))
     action.cwd = args.workspaceRoot
     cloneActions.add(action)
     cloneEntries.add(WorkspaceInitClonedEntry(
@@ -19692,6 +19717,216 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
     for line in renderManifestsTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
+# ---- RA-5: `repro workspace shared-clones [list|rewire|root]` --------------
+#
+# Inspection / repair surface for the shared object-cache (per-upstream bare
+# clones + per-repo ``objects/info/alternates`` wiring). The accelerator is
+# transparent — it never changes what is built — so these verbs are purely
+# operational:
+#
+#   * ``root``   — print the resolved cache root for this workspace and exit.
+#   * ``list``   — for each resolved repo, show its shared bare path, whether
+#                  the bare is present on disk, and whether the per-workspace
+#                  repo is wired to it via alternates. Read-only; no network.
+#   * ``rewire`` — idempotently retrofit an existing workspace: refresh each
+#                  unique upstream's shared bare (clone-if-missing /
+#                  fetch-if-present) and write the alternates entry into every
+#                  already-checked-out repo that is missing it. Best-effort
+#                  per repo — a failure to populate one bare is reported but
+#                  does not abort the others.
+#
+# Exit codes:
+#   * 0 — verb completed (``list``/``root`` always 0 on success; ``rewire``
+#         0 when every wiring step that had a present bare succeeded).
+#   * 1 — bad usage, resolve/IO failure, or a ``rewire`` that could not wire
+#         a repo whose bare WAS present (a genuine failure, distinct from a
+#         best-effort cache miss which is only reported).
+
+type
+  SharedClonesArgs = object
+    verb: string
+    workspaceRoot: string
+    projectName: string
+    json: bool
+
+  SharedClonesRepoReport* = object
+    name*: string
+    path*: string
+    fetchUrl*: string
+    sharedBarePath*: string
+    barePresent*: bool
+    wired*: bool
+    rewired*: bool
+    diagnostic*: string
+
+  SharedClonesReport* = object
+    verb*: string
+    workspaceRoot*: string
+    cacheRoot*: string
+    project*: string
+    repos*: seq[SharedClonesRepoReport]
+    exitCode*: int
+
+proc toJsonNode*(report: SharedClonesReport): JsonNode =
+  result = newJObject()
+  result["verb"] = %report.verb
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["cacheRoot"] = %report.cacheRoot
+  result["project"] = %report.project
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["fetchUrl"] = %entry.fetchUrl
+    obj["sharedBarePath"] = %entry.sharedBarePath
+    obj["barePresent"] = %entry.barePresent
+    obj["wired"] = %entry.wired
+    obj["rewired"] = %entry.rewired
+    obj["diagnostic"] = %entry.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+  result["exitCode"] = %report.exitCode
+
+proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
+  if report.verb == "root":
+    result.add(report.cacheRoot)
+    return
+  result.add("workspace shared-clones: root=" & report.cacheRoot &
+    " project=" & report.project & " repos=" & $report.repos.len)
+  for entry in report.repos:
+    var line = "workspace shared-clones: " & entry.path &
+      " bare=" & entry.sharedBarePath &
+      " present=" & $entry.barePresent &
+      " wired=" & $entry.wired
+    if report.verb == "rewire":
+      line.add(" rewired=" & $entry.rewired)
+    if entry.diagnostic.len > 0:
+      line.add(" diagnostic=" & entry.diagnostic)
+    result.add(line)
+
+proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
+  ## ``repro workspace shared-clones <verb> [<project>] [--workspace-root]
+  ## [--json]``. ``verb`` defaults to ``list`` when omitted.
+  result.verb = ""
+  result.workspaceRoot = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro workspace shared-clones` flag: " & arg)
+    elif result.verb.len == 0:
+      result.verb = arg
+    elif result.projectName.len == 0:
+      result.projectName = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to " &
+          "`repro workspace shared-clones`: " & arg)
+    inc i
+  if result.verb.len == 0:
+    result.verb = "list"
+  if result.verb notin ["list", "rewire", "root"]:
+    raise newException(ValueError,
+      "`repro workspace shared-clones` verb must be list|rewire|root, got: " &
+        result.verb)
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
+  result.verb = parsed.verb
+  result.workspaceRoot = parsed.workspaceRoot
+  result.cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
+  result.exitCode = 0
+  if parsed.verb == "root":
+    return
+
+  # ``list`` and ``rewire`` enumerate the resolved repos. Reuse the M12
+  # list resolver so the project-selection rules stay identical.
+  var listArgs: WorkspaceListArgs
+  listArgs.workspaceRoot = parsed.workspaceRoot
+  listArgs.projectName = parsed.projectName
+  let resolved = resolveWorkspaceListProject(listArgs)
+  result.project = resolved.projectName
+
+  # ``rewire`` does live VCS work (refresh shared bares). ``list`` is
+  # read-only. Resolve git only when we will use it.
+  var identity: GitToolIdentity
+  if parsed.verb == "rewire":
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+
+  var sharedBareByUrl = initTable[string, SharedCloneResult]()
+  for repo in resolved.repos:
+    var entry = SharedClonesRepoReport(
+      name: repo.name,
+      path: repo.path,
+      fetchUrl: repo.fetchUrl)
+    let info = inspectRepoWiring(parsed.workspaceRoot, result.cacheRoot,
+      repo.path, repo.fetchUrl)
+    entry.sharedBarePath = info.sharedBarePath
+    entry.barePresent = info.barePresent
+    entry.wired = info.wired
+
+    if parsed.verb == "rewire":
+      let repoAbs = parsed.workspaceRoot / repo.path
+      if not dirExists(repoAbs):
+        # Nothing to retrofit for a repo that isn't checked out yet.
+        entry.diagnostic = "repo not checked out; nothing to rewire"
+        result.repos.add(entry)
+        continue
+      # Refresh the shared bare for this URL once.
+      if not sharedBareByUrl.hasKey(repo.fetchUrl):
+        sharedBareByUrl[repo.fetchUrl] =
+          refreshSharedBare(identity.binaryPath, result.cacheRoot,
+            repo.fetchUrl)
+      let refreshed = sharedBareByUrl[repo.fetchUrl]
+      if not refreshed.ok:
+        entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
+        result.repos.add(entry)
+        continue
+      entry.barePresent = true
+      if info.wired:
+        entry.wired = true
+        entry.rewired = false
+      else:
+        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath)
+        if wired.ok:
+          entry.wired = true
+          entry.rewired = true
+        else:
+          entry.diagnostic = "alternates wiring failed: " & wired.diagnostic
+          # The bare WAS present but we could not wire — a genuine failure.
+          result.exitCode = 1
+    result.repos.add(entry)
+
+proc writeSharedClonesReport(report: SharedClonesReport) =
+  let reportDir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(reportDir)
+  let reportPath = reportDir / "shared-clones-report.json"
+  writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+
+proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
+  ## ``repro workspace shared-clones [list|rewire|root] [<project>]
+  ## [--workspace-root=PATH] [--json]``.
+  let parsed = parseSharedClonesArgs(args)
+  let report = executeSharedClones(parsed)
+  # ``root`` prints just the path; do not write a report file for it (it
+  # makes no per-repo claims).
+  if parsed.verb != "root":
+    writeSharedClonesReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderSharedClonesTextLines(report):
       stdout.writeLine(line)
   report.exitCode
 
@@ -23756,6 +23991,22 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceManifestsCommand(manifestsArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace manifests: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "shared-clones":
+    # RA-5 — `repro workspace shared-clones [list|rewire|root]`. Inspect
+    # or repair the shared object-cache wiring. Same dispatch convention
+    # as the M9–M12 family: the implementation lives in
+    # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.
+    try:
+      let scArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceSharedClonesCommand(scArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace shared-clones: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "branch":
     # M14 — `repro branch [<name>]`. Top-level subcommand per
