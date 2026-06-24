@@ -45,7 +45,7 @@
 ##   8. Determinism: two invocations against the same on-disk graph
 ##      produce identical output ordering.
 
-import std/[os, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/types/package_result
 import repro_project_dsl
