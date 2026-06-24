@@ -19,6 +19,7 @@ import repro_profile/hardware_id
 import repro_profile/hardware_probe
 import repro_profile/disk_tools
 import repro_profile/disk_apply
+import repro_profile/build_actions
 
 export types
 export predicates
@@ -31,3 +32,4 @@ export hardware_id
 export hardware_probe
 export disk_tools
 export disk_apply
+export build_actions

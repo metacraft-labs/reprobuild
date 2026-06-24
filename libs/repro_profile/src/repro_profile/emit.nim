@@ -175,11 +175,48 @@ proc encodeAdapterPreference(ap: OrderedTable[string, seq[string]]): string =
     result.add "]"
   result.add "}"
 
+proc encodeStringArray(items: seq[string]): string =
+  result = "["
+  for i, it in items:
+    if i > 0:
+      result.add ","
+    result.add encodeStr(it)
+  result.add "]"
+
+proc encodeBuildAction(b: ProfileBuildAction): string =
+  ## Windows-System-Resources Phase G: deterministic JSON form for a
+  ## profile-side action edge. Field order is fixed; every seq prints
+  ## as a JSON array of strings. Used by the JSON debug emitter; the
+  ## RBPI binary codec is in the Phase B side-track and is independent
+  ## of this surface.
+  result = "{"
+  result.add "\"id\":" & encodeStr(b.id)
+  result.add ",\"argv\":" & encodeStringArray(b.argv)
+  result.add ",\"cwd\":" & encodeStr(b.cwd)
+  result.add ",\"deps\":" & encodeStringArray(b.deps)
+  result.add ",\"inputs\":" & encodeStringArray(b.inputs)
+  result.add ",\"outputs\":" & encodeStringArray(b.outputs)
+  result.add ",\"commandStatsId\":" & encodeStr(b.commandStatsId)
+  result.add ",\"toolIdentityRefs\":" &
+    encodeStringArray(b.toolIdentityRefs)
+  result.add ",\"requiresElevation\":" &
+    (if b.requiresElevation: "true" else: "false")
+  result.add ",\"cacheable\":" &
+    (if b.cacheable: "true" else: "false")
+  result.add "}"
+
 proc emitProfileIntentJson*(p: ProfileIntent): string =
   ## Serialise `p` to a deterministic JSON form. Field order is
-  ## fixed (name, activities, configOverrides, hosts, resources).
-  ## Map keys (host names, resource fields) are emitted in sorted
-  ## order. The encoder does NOT pretty-print -- one line, no spaces.
+  ## fixed (name, activities, configOverrides, hosts, resources,
+  ## buildActions). Map keys (host names, resource fields) are emitted
+  ## in sorted order. The encoder does NOT pretty-print -- one line,
+  ## no spaces.
+  ##
+  ## Windows-System-Resources Phase G: ``buildActions`` is appended
+  ## AFTER ``resources`` so the JSON shape stays backward-compatible
+  ## (a pre-Phase-G decoder that doesn't recognise the new key still
+  ## decodes the live-state half successfully). The decoder treats
+  ## the key as optional for the same reason.
   result = "{"
   result.add "\"name\":" & encodeStr(p.name)
   result.add ",\"activities\":["
@@ -200,6 +237,12 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
     if i > 0:
       result.add ","
     result.add encodeResource(r)
+  result.add "]"
+  result.add ",\"buildActions\":["
+  for i, b in p.buildActions:
+    if i > 0:
+      result.add ","
+    result.add encodeBuildAction(b)
   result.add "]"
   result.add ",\"adapterPreference\":" &
     encodeAdapterPreference(p.adapterPreference)
@@ -292,6 +335,28 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     for dep in r["dependsOn"]:
       ri.dependsOn.add parseAddress(dep)
     result.resources.add ri
+  # Windows-System-Resources Phase G: ``buildActions`` is an optional
+  # JSON key. Pre-Phase-G envelopes don't carry it; we decode them as
+  # an empty seq so existing fixtures survive without re-serialisation.
+  if root.hasKey("buildActions"):
+    for b in root["buildActions"]:
+      var ba = ProfileBuildAction(
+        id: b["id"].getStr(),
+        cwd: b["cwd"].getStr(),
+        commandStatsId: b["commandStatsId"].getStr(),
+        requiresElevation: b["requiresElevation"].getBool(),
+        cacheable: b["cacheable"].getBool())
+      for it in b["argv"]:
+        ba.argv.add it.getStr()
+      for it in b["deps"]:
+        ba.deps.add it.getStr()
+      for it in b["inputs"]:
+        ba.inputs.add it.getStr()
+      for it in b["outputs"]:
+        ba.outputs.add it.getStr()
+      for it in b["toolIdentityRefs"]:
+        ba.toolIdentityRefs.add it.getStr()
+      result.buildActions.add ba
   # M2.5: `adapterPreference` is a JSON object whose values are arrays of
   # adapter-name strings. Backward-compat: the key is optional — a JSON
   # blob emitted by a pre-M2.5 producer simply yields an empty table.

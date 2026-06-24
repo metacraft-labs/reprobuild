@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 2'u16            ## Current envelope schema version.
+  RbpiSchemaVersion* = 3'u16            ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -49,6 +49,17 @@ const
     ##     are also rejected by the strict reader at read time
     ##     (`unsupported RBPI schema version`), which the cache validity
     ##     check (`cachedArtifactIsValid`) catches as "miss → recompile".
+    ##   3 (Windows-System-Resources Phase G): ProfileIntent gains a
+    ##     new top-level CBOR key ``"buildActions"`` carrying the list
+    ##     of profile-scope action-edge intents (typed-tool
+    ##     ``.build(...)`` and bare ``inlineExecCall(...)`` calls
+    ##     emitted from inside a profile ``resources:`` block — see
+    ##     ``repro_profile.types.ProfileBuildAction``). The decoder
+    ##     treats the key as OPTIONAL so a v2 artifact still decodes
+    ##     (degrading to an empty seq); the version bump exists so the
+    ##     cache-hit path's strict-reader rejection re-runs the macro
+    ##     after this build upgrades, in case the new macro path is
+    ##     reachable from a profile that compiled cleanly under v2.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

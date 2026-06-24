@@ -41,6 +41,24 @@ const
     ## M2.5: per-OS adapter chain table. Backward-compat: the key is
     ## OPTIONAL in the decoder — a pre-M2.5 RBPI artifact has no entry
     ## and decodes to an empty adapterPreference table.
+  KeyBuildActions = "buildActions"
+    ## Windows-System-Resources Phase G: action-edge intent items
+    ## emitted by typed-tool ``.build(...)`` and ``inlineExecCall(...)``
+    ## calls inside a profile ``resources:`` block. Backward-compat:
+    ## the key is OPTIONAL in the decoder — a pre-Phase-G RBPI artifact
+    ## (cached before this codec extension) has no entry and decodes
+    ## with an empty ``buildActions`` seq, so existing profile-compile
+    ## fixtures survive the codec bump without a re-encode.
+  KeyArgv         = "argv"
+  KeyCwd          = "cwd"
+  KeyDeps         = "deps"
+  KeyInputs       = "inputs"
+  KeyOutputs      = "outputs"
+  KeyCommandStatsId = "commandStatsId"
+  KeyToolIdentityRefs = "toolIdentityRefs"
+  KeyRequiresElevation = "requiresElevation"
+  KeyCacheable    = "cacheable"
+  KeyId           = "id"
   KeyBody         = "body"
   KeyPredicate    = "predicate"
   KeyPkg          = "pkg"
@@ -209,6 +227,30 @@ proc encodeAdapterPreference(ap: OrderedTable[string, seq[string]]):
   apEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
   cborMap(apEntries)
 
+proc encodeStringArray(items: seq[string]): DynamicValue =
+  var arr: seq[DynamicValue] = @[]
+  for it in items:
+    arr.add cborText(it)
+  cborArray(arr)
+
+proc encodeBuildAction(b: ProfileBuildAction): DynamicValue =
+  ## Windows-System-Resources Phase G: CBOR map for one
+  ## ``ProfileBuildAction``. Every field is required on the wire — the
+  ## flattened mirror has fixed shape, no optional keys. ``cacheable``
+  ## defaults to true at the helper level so a decoded value never
+  ## carries an undefined cacheability semantic.
+  cborMap(@[
+    entry(KeyId, cborText(b.id)),
+    entry(KeyArgv, encodeStringArray(b.argv)),
+    entry(KeyCwd, cborText(b.cwd)),
+    entry(KeyDeps, encodeStringArray(b.deps)),
+    entry(KeyInputs, encodeStringArray(b.inputs)),
+    entry(KeyOutputs, encodeStringArray(b.outputs)),
+    entry(KeyCommandStatsId, cborText(b.commandStatsId)),
+    entry(KeyToolIdentityRefs, encodeStringArray(b.toolIdentityRefs)),
+    entry(KeyRequiresElevation, cborBool(b.requiresElevation)),
+    entry(KeyCacheable, cborBool(b.cacheable))])
+
 proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var acts: seq[DynamicValue] = @[]
   for a in p.activities:
@@ -219,11 +261,15 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var ress: seq[DynamicValue] = @[]
   for r in p.resources:
     ress.add encodeResource(r)
+  var bas: seq[DynamicValue] = @[]
+  for b in p.buildActions:
+    bas.add encodeBuildAction(b)
   cborMap(@[entry(KeyName, cborText(p.name)),
             entry(KeyActivities, cborArray(acts)),
             entry(KeyConfigOverrides, cborArray(cfgs)),
             entry(KeyHosts, encodeHosts(p.hosts)),
             entry(KeyResources, cborArray(ress)),
+            entry(KeyBuildActions, cborArray(bas)),
             entry(KeyAdapterPreference,
               encodeAdapterPreference(p.adapterPreference))])
 
@@ -428,6 +474,46 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
   for r in expectArray(
       lookup(entries, KeyResources, "ProfileIntent"), KeyResources):
     result.resources.add decodeResource(r)
+  # Windows-System-Resources Phase G: ``buildActions`` is OPTIONAL on
+  # the wire — a pre-Phase-G RBPI artifact (cached before this codec
+  # extension) has no ``KeyBuildActions`` entry and decodes with an
+  # empty seq. New artifacts ALWAYS carry the key (even when the seq
+  # is empty) so a structural integrity check at apply time can
+  # distinguish "this profile has no action edges" from "this artifact
+  # predates the action-edge feature".
+  var baFound = false
+  let baNode = lookupOpt(entries, KeyBuildActions, baFound)
+  if baFound:
+    for b in expectArray(baNode, KeyBuildActions):
+      let bEntries = expectMap(b, "ProfileBuildAction")
+      var ba = ProfileBuildAction(
+        id: expectText(lookup(bEntries, KeyId, "ProfileBuildAction"),
+          KeyId),
+        cwd: expectText(lookup(bEntries, KeyCwd, "ProfileBuildAction"),
+          KeyCwd),
+        commandStatsId: expectText(lookup(bEntries, KeyCommandStatsId,
+          "ProfileBuildAction"), KeyCommandStatsId),
+        requiresElevation: expectBool(lookup(bEntries,
+          KeyRequiresElevation, "ProfileBuildAction"),
+          KeyRequiresElevation),
+        cacheable: expectBool(lookup(bEntries, KeyCacheable,
+          "ProfileBuildAction"), KeyCacheable))
+      for it in expectArray(lookup(bEntries, KeyArgv,
+          "ProfileBuildAction"), KeyArgv):
+        ba.argv.add expectText(it, KeyArgv)
+      for it in expectArray(lookup(bEntries, KeyDeps,
+          "ProfileBuildAction"), KeyDeps):
+        ba.deps.add expectText(it, KeyDeps)
+      for it in expectArray(lookup(bEntries, KeyInputs,
+          "ProfileBuildAction"), KeyInputs):
+        ba.inputs.add expectText(it, KeyInputs)
+      for it in expectArray(lookup(bEntries, KeyOutputs,
+          "ProfileBuildAction"), KeyOutputs):
+        ba.outputs.add expectText(it, KeyOutputs)
+      for it in expectArray(lookup(bEntries, KeyToolIdentityRefs,
+          "ProfileBuildAction"), KeyToolIdentityRefs):
+        ba.toolIdentityRefs.add expectText(it, KeyToolIdentityRefs)
+      result.buildActions.add ba
   # M2.5: adapter preference is OPTIONAL — a pre-M2.5 RBPI artifact
   # (cached before this codec extension) has no `KeyAdapterPreference`
   # entry, in which case the decoded value carries an empty table.
