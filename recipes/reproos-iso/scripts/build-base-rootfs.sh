@@ -112,15 +112,23 @@ BASE_IMAGE='debian:trixie-slim'
 ##
 PKG_LIST=(
   # PID 1 / dbus -- core init stack.
-  #   systemd          FS:done    STAGE:no
-  #   systemd-sysv     FS:done    STAGE:no  (alias for systemd)
+  #
+  # M9.R.33.4 dropped: ``systemd`` + ``systemd-sysv`` -- the FS:done
+  # systemd recipe ships /usr/sbin/init + /usr/sbin/{halt,poweroff,
+  # reboot,shutdown,telinit,runlevel} + /usr/lib/systemd/systemd; the
+  # M9.R.33.3 stage-de-rootfs.sh Phase 4b shadow-link loop emits the
+  # /usr/{bin,sbin}/<name> symlinks at staging time.  Note that
+  # ``systemd-sysv`` is dropped alongside systemd because it's an
+  # alias-only Debian package (provides the /sbin/init -> systemd
+  # symlink) which our recipe already covers.
+  #
   #   libpam-systemd   FS:partial STAGE:no  (`pam` recipe install dir
   #                                          exists but no usr/bin yet)
-  #   dbus             FS:done    STAGE:no
+  #   dbus             FS:done    STAGE:yes (M9.R.33.3 stage loop)
   #   dbus-user-session FS:partial STAGE:no  (uses dbus recipe; user
   #                                           session unit files aren't
   #                                           shipped by from-source)
-  systemd systemd-sysv libpam-systemd dbus dbus-user-session
+  libpam-systemd dbus dbus-user-session
   # Essential userspace.
   #   util-linux       FS:done    STAGE:no  (63 binaries in usr/bin)
   #   mount            FS:none    STAGE:no  (part of util-linux pkg)
