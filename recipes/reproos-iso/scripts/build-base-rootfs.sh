@@ -163,8 +163,20 @@ mkdir -p /etc/systemd/system/getty@tty1.service.d
 cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF2
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin live --noclear %I \\\$TERM
+ExecStart=-/sbin/agetty --autologin root --noclear %I \\\$TERM
 EOF2
+## M9.R.29.17 — serial-console autologin for QEMU -nographic boots
+## (the M9.R.28 smoke ran into 'localhost login: Login incorrect'
+## because tty1's autologin doesn't help when the kernel cmdline
+## sends console=ttyS0). Enable serial-getty@ttyS0 with autologin
+## root, mirroring the tty1 override.
+mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+cat > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf <<EOF2
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,38400,9600 %I \\\$TERM
+EOF2
+systemctl enable serial-getty@ttyS0.service 2>/dev/null || true
 "
 
 TMP_TAR="$(mktemp -t reproos-base-XXXXXX.tar)"
