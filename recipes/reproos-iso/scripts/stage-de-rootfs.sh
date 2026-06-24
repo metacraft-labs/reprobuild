@@ -228,6 +228,21 @@ while :; do
           177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
         esac
       done
+    # M9.R.29.19 — also walk symlink targets that point into
+    # /nix/store. nix's multi-output gcc-lib library ships
+    # libgcc_s.so.1 as a symlink into a SEPARATE store path
+    # (gcc-X.Y.Z-libgcc), and the loader follows the symlink at
+    # dlopen() time. Without this walk the closure missed every
+    # gcc-libgcc output and plasmashell + kwin_wayland + sway
+    # crashed at startup with 'cannot open shared object file:
+    # libgcc_s.so.1'.
+    find "$staged_prefix" -type l 2>/dev/null | \
+      while IFS= read -r lnk; do
+        target=$(readlink "$lnk" 2>/dev/null || true)
+        case "$target" in
+          /nix/store/*) printf '%s\n' "$target" | sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p' ;;
+        esac
+      done
   done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
 
   # Filter out prefixes we already mirrored.
