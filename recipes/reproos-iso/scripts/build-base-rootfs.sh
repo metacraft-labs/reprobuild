@@ -110,7 +110,12 @@ PKG_LIST=(
 )
 
 PKG_DIGEST="$(printf '%s\n' "${PKG_LIST[@]}" | LC_ALL=C sort | sha256sum | awk '{print $1}')"
-CACHE_KEY="trixie-slim-${PKG_DIGEST:0:16}"
+## M9.R.29.17 — also hash the script body so shadow / autologin /
+## serial-getty changes invalidate the cache. Without this the cache
+## key only changes when PKG_LIST changes, and post-debootstrap
+## customisations silently stick from a stale tarball.
+SCRIPT_DIGEST="$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
+CACHE_KEY="trixie-slim-${PKG_DIGEST:0:8}-${SCRIPT_DIGEST:0:8}"
 CACHED_TAR="$CACHE_DIR/$CACHE_KEY.tar.xz"
 
 if [ -f "$CACHED_TAR" ]; then
