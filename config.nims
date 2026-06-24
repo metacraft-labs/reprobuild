@@ -339,6 +339,18 @@ addPackagePath("VM_HARNESS_SRC", [
   ".." / "vm-harness" / "src",
 ], "vm_harness.nim")
 
+# Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
+# actually present. The R2/R9 boot integration tests guard their
+# ``import vm_harness`` on this symbol so they skip-compile when the sibling is
+# absent, instead of hard-failing the whole test-build. A missing optional
+# sibling must skip, not be fatal (Workspace-alignment RA-23;
+# Interactive-UX-And-Progress.md Principle 2).
+block:
+  let vmhEnv = getEnv("VM_HARNESS_SRC")
+  if (vmhEnv.len > 0 and fileExists(vmhEnv / "vm_harness.nim")) or
+     fileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
+    switch("define", "vmHarnessAvailable")
+
 let runquotaRoot = block:
   let fromEnv = getEnv("RUNQUOTA_SRC")
   if fromEnv.len > 0:
