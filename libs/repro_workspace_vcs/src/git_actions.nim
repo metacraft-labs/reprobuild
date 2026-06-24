@@ -58,6 +58,8 @@ const
     "reprobuild.workspace-vcs.branch-create-receipt.v1"
   MergeFfReceiptHeader* =
     "reprobuild.workspace-vcs.merge-ff-receipt.v1"
+  ForceResetReceiptHeader* =
+    "reprobuild.workspace-vcs.force-reset-receipt.v1"
 
 type
   GitVcsOp* = enum
@@ -66,6 +68,7 @@ type
     gvoSwitch
     gvoBranchCreate
     gvoMergeFf
+    gvoForceReset
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -160,6 +163,7 @@ proc opTag(op: GitVcsOp): string =
   of gvoSwitch: "switch"
   of gvoBranchCreate: "branch-create"
   of gvoMergeFf: "merge-ff"
+  of gvoForceReset: "force-reset"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -168,6 +172,7 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "switch": gvoSwitch
   of "branch-create": gvoBranchCreate
   of "merge-ff": gvoMergeFf
+  of "force-reset": gvoForceReset
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -283,7 +288,7 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf:
+  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset:
     result.writeString(payload.repoPath)
 
 proc actionFingerprint*(payload: GitVcsPayload): ContentDigest =
@@ -446,6 +451,16 @@ proc renderMergeFfReceipt(payload: GitVcsPayload; headSha: string): string =
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
 
+proc renderForceResetReceipt(payload: GitVcsPayload; headSha: string): string =
+  result = ForceResetReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tforce-reset\n")
+  result.add("revision\t" & payload.revision & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
 proc failed(reason, diagnostic: string): ActionResult =
   ## Structured failure result: ``reason`` is the contract field the
   ## test suite asserts on (e.g. ``"dirty"`` for the M2 switch-on-dirty
@@ -471,11 +486,22 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if parent.len > 0:
     createDir(parent)
   if dirExists(target):
-    # A pre-existing target is a hard error: clone must be the act of
-    # creating the working tree. The CLI-level "init-or-resync" flow
-    # will be a different action (M9+).
-    return failed("clone-target-exists",
-      "clone target already exists: " & target)
+    if dirExists(target / ".git"):
+      # A pre-existing *git* tree is a hard error: clone must be the act
+      # of creating the working tree. The CLI-level "init-or-resync"
+      # flow uses fetch/merge/force-reset, not clone, on an existing tree.
+      return failed("clone-target-exists",
+        "clone target already exists: " & target)
+    # RA-16 resume correctness: a leftover directory with NO ``.git`` is a
+    # half-cloned / interrupted-clone artifact (no receipt was written, so
+    # the engine re-schedules this clone). Remove it so the re-run redoes
+    # just this repo cleanly instead of being confused by the partial
+    # state. We only remove a non-git directory — a real tree above.
+    try:
+      removeDir(target)
+    except OSError as err:
+      return failed("clone-partial-cleanup-failed",
+        "could not remove half-cloned target " & target & ": " & err.msg)
   # RA-14 acceleration flags. These are network/disk knobs that do NOT
   # change the working tree at the pinned revision (see
   # ``fingerprintPayload``): ``--single-branch`` narrows the fetched
@@ -696,6 +722,48 @@ proc executeMergeFf(payload: GitVcsPayload;
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc executeForceReset(payload: GitVcsPayload;
+                       cwd, receiptPath: string): ActionResult =
+  ## RA-16 ``--force-sync`` — OVERWRITE a divergent / dirty / locally
+  ## mangled checkout so it matches the manifest-locked revision exactly.
+  ## This is the explicit-opt-in destructive arm the normal sync planner
+  ## never reaches: a normal sync report-only-SKIPS a divergent or dirty
+  ## tree; only the force path resets it.
+  ##
+  ## The reset is deliberately thorough so the tree ends byte-identical to
+  ## a fresh checkout at the locked SHA: ``git reset --hard <revision>``
+  ## moves HEAD and the index, and ``git clean -ffdx`` removes any
+  ## untracked / ignored leftovers (a half-applied merge, stray build
+  ## output, a manually-dropped file). ``revision`` is the concrete locked
+  ## SHA (or a ref) the caller resolved; it must already be present in the
+  ## object store (the fetch phase / shared bare guarantees this for a
+  ## divergent tree, since the locked commit is reachable).
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("force-reset-target-missing",
+      "force-reset target is not a git working tree: " & target)
+  if payload.revision.len == 0:
+    return failed("force-reset-no-revision",
+      "force-reset requires a target revision to reset onto")
+  let resetRes = runGit(payload,
+    ["-C", target, "reset", "--hard", payload.revision])
+  if resetRes.exitCode != 0:
+    return failed("force-reset-failed",
+      "git reset --hard " & payload.revision & " exited " &
+        $resetRes.exitCode & ": " & resetRes.output.trimmed)
+  # Remove untracked and ignored leftovers so the overwrite is complete.
+  let cleanRes = runGit(payload, ["-C", target, "clean", "-ffdx"])
+  if cleanRes.exitCode != 0:
+    return failed("force-reset-clean-failed",
+      "git clean -ffdx exited " & $cleanRes.exitCode & ": " &
+        cleanRes.output.trimmed)
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("force-reset-head-probe-failed", headRes.diagnostic)
+  let receipt = renderForceResetReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 type
   WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Callback shape used by sibling VCS backends (currently
@@ -793,6 +861,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
     result = executeBranchCreate(payload, action.cwd, receiptPath)
   of gvoMergeFf:
     result = executeMergeFf(payload, action.cwd, receiptPath)
+  of gvoForceReset:
+    result = executeForceReset(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -940,6 +1010,27 @@ proc gitMergeFfAction*(id: string; identity: GitToolIdentity;
   ## operations are not cacheable).
   let payload = buildPayload(identity, gvoMergeFf, "", remoteName,
     branchName, "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitForceResetAction*(id: string; identity: GitToolIdentity;
+                      revision, repoPath, receiptPath: string;
+                      cwd = ""; deps: openArray[string] = [];
+                      cacheable = false): BuildAction =
+  ## RA-16 ``--force-sync`` — construct the destructive overwrite action
+  ## the force path schedules for a divergent / dirty checkout. The
+  ## executor runs ``git reset --hard <revision>`` + ``git clean -ffdx``
+  ## in the named working tree so it ends byte-identical to a fresh
+  ## checkout at the locked SHA.
+  ##
+  ## ``cacheable`` defaults to ``false``: like ``merge-ff``, the action
+  ## mutates a working tree whose precondition (the divergence) is
+  ## observed live, not a deterministic function of declared inputs, so
+  ## caching its receipt would be unsound.
+  let payload = buildPayload(identity, gvoForceReset, "", "",
+    "", revision, repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

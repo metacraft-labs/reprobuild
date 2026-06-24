@@ -16395,6 +16395,8 @@ type
     jobsCheckout: int    ## ``--jobs-checkout``: checkout (CPU) parallelism (0 = auto).
     noInterleaved: bool  ## ``--no-interleaved``: explicit fetch→checkout barrier.
     failFast: bool       ## ``--fail-fast``: stop on first fetch failure.
+    forceSync: bool      ## ``--force-sync``: OVERWRITE divergent/dirty checkouts (RA-16).
+    assumeYes: bool      ## ``--yes``/``--force``: skip the destructive-action confirmation.
 
 const
   SyncDefaultJobsNetwork = 8
@@ -16462,6 +16464,10 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       result.noInterleaved = true
     elif arg == "--fail-fast":
       result.failFast = true
+    elif arg == "--force-sync":
+      result.forceSync = true
+    elif arg == "--yes" or arg == "--force":
+      result.assumeYes = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace sync` flag: " & arg)
@@ -16835,11 +16841,25 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   of saClone:
     let receiptRel = ".repro" / "workspace" / "receipts" /
       ("sync-clone-" & idSeg & ".receipt")
+    # RA-16 resume correctness: a clone the planner schedules is, by
+    # construction, for a checkout that is genuinely MISSING (the planner
+    # only emits ``missing_checkout`` → ``saClone`` when ``.git`` is
+    # absent). The clone's cached receipt records only the resolved SHA,
+    # NOT the materialized working tree, so a cache hit would replay the
+    # receipt WITHOUT re-creating a deleted / half-cloned tree — the exact
+    # "interrupted clone, no usable checkout" case resume must redo. We
+    # therefore make the sync clone NON-CACHEABLE so a re-run always
+    # actually re-materializes the missing repo. This does not slow the
+    # common resume case: a COMPLETED repo classifies as
+    # ``clean_at_locked_revision`` (a planner-level noop), so no clone
+    # action is scheduled for it at all — only the genuinely-incomplete
+    # repo pays for the re-clone.
     var a = gitCloneAction("workspace-sync-clone-" & idSeg, identity,
       remoteUrl = resolved.fetchUrl,
       repoPath = resolved.path,
       receiptPath = receiptRel,
       revision = resolved.revision,
+      cacheable = false,
       cloneFilter = resolved.cloneFilter,
       depth = resolved.depth,
       singleBranch = resolved.singleBranch)
@@ -16878,6 +16898,58 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
       cacheable = false)
     a.cwd = workspaceRoot
     return (true, a, "", "")
+
+type
+  ForceSyncGuardOutcome = enum
+    ## Result of the RA-16 / RA-9 destructive-command safety gate for
+    ## ``--force-sync``.
+    fsgNoTargets       ## no divergent/dirty repos → nothing to force, sync as normal.
+    fsgConfirmed       ## the overwrite is authorized (``--yes``/``--force`` or a TTY confirm).
+    fsgRefusedNonTty   ## non-TTY with no ``--yes`` → refuse cleanly (do not hang, do not overwrite).
+    fsgDeclined        ## interactive operator answered "no".
+
+  ForceSyncTarget = object
+    repoIdx: int
+    path: string
+    syncCase: SyncCase
+    observed: string
+    expected: string
+
+proc forceSyncGuard(args: WorkspaceSyncArgs;
+                    targets: seq[ForceSyncTarget]): ForceSyncGuardOutcome =
+  ## RA-16 ``--force-sync`` is a destructive multi-repo command, so it is
+  ## subject to the RA-9 destructive-command safety rules: PREVIEW the
+  ## per-repo effect, then CONFIRM. ``--yes``/``--force`` opts out of the
+  ## prompt. In a non-interactive context (no TTY) WITHOUT the flag we
+  ## REFUSE cleanly with a clear message rather than hanging on a prompt
+  ## that can never be answered. A normal sync (no ``--force-sync``) never
+  ## reaches this gate and keeps report-only-skipping divergent repos.
+  if targets.len == 0:
+    return fsgNoTargets
+  # Preview: one line per repo we are about to OVERWRITE.
+  stderr.writeLine("repro workspace sync --force-sync will OVERWRITE " &
+    $targets.len & " checkout(s) to the locked revision (discarding local " &
+    "changes):")
+  for t in targets:
+    stderr.writeLine("  " & t.path & " [" & syncCaseTag(t.syncCase) & "]" &
+      (if t.observed.len > 0: " " & t.observed else: "") &
+      " → " & t.expected)
+  if args.assumeYes:
+    return fsgConfirmed
+  # No explicit opt-out: a prompt is only answerable on a TTY.
+  if not isatty(stdin):
+    stderr.writeLine("refusing to --force-sync in a non-interactive context " &
+      "without --yes/--force (would discard local changes); re-run with " &
+      "--yes to confirm")
+    return fsgRefusedNonTty
+  stderr.write("Overwrite the checkout(s) above? This DISCARDS local " &
+    "changes. [y/N] ")
+  stderr.flushFile()
+  let answer = stdin.readLine().strip().toLowerAscii()
+  if answer == "y" or answer == "yes":
+    return fsgConfirmed
+  stderr.writeLine("force-sync declined; leaving divergent checkouts untouched")
+  fsgDeclined
 
 proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
@@ -17062,8 +17134,73 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   var immediateStatus = initTable[int, (string, string)]()
   var checkoutActions: seq[BuildAction]
   var actionRepoIdx = initTable[string, int]()
+
+  # RA-16 ``--force-sync``: the planner SKIPS-and-reports a divergent /
+  # dirty / locally-unpublished checkout (``saNone``). With ``--force-sync``
+  # the operator opts into OVERWRITING those to the locked revision. We
+  # gather the candidate set, run them through the destructive-command
+  # safety gate ONCE (preview + confirm, or refuse cleanly in a non-TTY
+  # without ``--yes``), and only then schedule the force-reset actions. A
+  # normal sync (no flag) never enters this branch — it keeps skipping.
+  var forceResetRepos = initHashSet[int]()
+  var forceResetTarget = initTable[int, string]()
+  if args.forceSync:
+    var targets: seq[ForceSyncTarget]
+    for repoIdx, decision in planned.report.decisions:
+      if decision.action != saNone:
+        continue
+      if decision.syncCase notin
+          {scDirty, scLocallyUnpublished, scDivergentFeatureBranch}:
+        continue
+      let repo = resolved.repos[repoIdx]
+      # The concrete commit to reset onto: the SHA-pinned revision itself,
+      # else the lock file's recorded SHA, else the post-fetch remote
+      # tracking tip ``origin/<branch>`` for a branch pin (the fetch phase
+      # already advanced it), else the bare revision as a last resort. The
+      # fetch phase made the locked commit reachable for a tree with
+      # ``.git``.
+      var target = lockedShaFor(repo)
+      if target.len == 0 and repo.revision.len > 0:
+        if looksLikeSha(repo.revision):
+          target = repo.revision
+        else:
+          # Branch pin: reset onto the remote-tracking tip so the overwrite
+          # converges to the published revision, not a stale local branch.
+          let repoAbs = args.workspaceRoot / repo.path
+          let remoteTip = revParse(identity, repoAbs,
+            "refs/remotes/origin/" & repo.revision)
+          target = if remoteTip.len > 0: remoteTip else: repo.revision
+      if target.len == 0:
+        continue
+      forceResetTarget[repoIdx] = target
+      targets.add(ForceSyncTarget(
+        repoIdx: repoIdx, path: decision.path, syncCase: decision.syncCase,
+        observed: decision.observed, expected: decision.expected))
+    let guard = forceSyncGuard(args, targets)
+    if guard == fsgConfirmed:
+      for t in targets:
+        forceResetRepos.incl(t.repoIdx)
+
   for repoIdx, decision in planned.report.decisions:
     let resolvedRepo = resolved.repos[repoIdx]
+    if repoIdx in forceResetRepos:
+      # RA-16 overwrite path. Build a ``git reset --hard <sha>`` +
+      # ``git clean -ffdx`` engine action that resets the divergent tree
+      # to the locked revision.
+      let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
+      createDir(receiptDir)
+      let idSeg = safeRepoIdSegment(resolvedRepo.name) & "-" & $repoIdx
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("sync-force-reset-" & idSeg & ".receipt")
+      var a = gitForceResetAction("workspace-sync-force-reset-" & idSeg,
+        identity,
+        revision = forceResetTarget[repoIdx],
+        repoPath = resolvedRepo.path,
+        receiptPath = receiptRel)
+      a.cwd = args.workspaceRoot
+      checkoutActions.add(a)
+      actionRepoIdx[a.id] = repoIdx
+      continue
     let built = syncCheckoutActionFor(
       identity, args.workspaceRoot, resolvedRepo, decision, repoIdx)
     if built.hasAction:
@@ -17112,16 +17249,26 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       anyRefusal = true
     elif status == "failed":
       anyFailure = true
+    # RA-16: surface the force-reset overwrite in the report so it is
+    # distinguishable from the planner's original report-only decision.
+    let wasForceReset = repoIdx in forceResetRepos
+    let actionTag =
+      if wasForceReset: "force_reset" else: syncActionTag(decision.action)
+    let message =
+      if wasForceReset:
+        "force-sync overwrote '" & decision.path & "' to " &
+          forceResetTarget.getOrDefault(repoIdx)
+      else: decision.message
     report.repos.add(WorkspaceSyncRepoEntry(
       name: decision.name,
       path: decision.path,
       syncCase: syncCaseTag(decision.syncCase),
-      action: syncActionTag(decision.action),
+      action: actionTag,
       expected: decision.expected,
       observed: decision.observed,
       branch: decision.branch,
-      message: decision.message,
-      refusalReason: decision.refusalReason,
+      message: message,
+      refusalReason: (if wasForceReset: "" else: decision.refusalReason),
       executionStatus: status,
       executionDiagnostic: diagnostic))
 
@@ -17144,7 +17291,7 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
   ## [--jobs N|-j N] [--jobs-network N] [--jobs-checkout N]
-  ## [--no-interleaved] [--fail-fast]``.
+  ## [--no-interleaved] [--fail-fast] [--force-sync] [--yes|--force]``.
   ##
   ## RA-5c: ``--jobs-network`` bounds the ``vcs/fetch`` pool (parallel
   ## network fetch concurrency); ``--jobs-checkout`` bounds the checkout
@@ -17152,6 +17299,22 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## both. ``--no-interleaved`` is the only (and intrinsic) phase model
   ## here and is accepted as an explicit affirmation. ``--fail-fast`` is
   ## accepted but currently a no-op (default continue-and-report).
+  ##
+  ## RA-16 resume + force:
+  ##   - Re-running an interrupted sync RESUMES at the first incomplete
+  ##     repo: completed per-repo clone/fetch actions are receipt cache
+  ##     hits (engine cache root persists under
+  ##     ``.repro/workspace/engine-cache``), and a half-cloned tree with
+  ##     no ``.git`` (no receipt) is cleaned up and re-cloned.
+  ##   - ``--force-sync`` OVERWRITES a checkout that diverged from the
+  ##     manifest revision (``divergent`` / ``dirty`` /
+  ##     ``locally_unpublished``) to the locked SHA via
+  ##     ``git reset --hard`` + ``git clean -ffdx``. It is destructive, so
+  ##     it previews the per-repo effect and CONFIRMS; ``--yes``/``--force``
+  ##     opts out of the prompt, and a non-TTY without the flag REFUSES
+  ##     cleanly (never hangs, never overwrites). A NORMAL sync (no
+  ##     ``--force-sync``) still report-only-skips divergent/dirty repos —
+  ##     force is the only overwrite path.
   ##
   ## Exit codes (per M10 design):
   ##   - 0 — every repo is at its locked revision, was cleanly
