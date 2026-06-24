@@ -124,11 +124,17 @@ PKG_LIST=(
   #
   #   libpam-systemd   FS:partial STAGE:no  (`pam` recipe install dir
   #                                          exists but no usr/bin yet)
-  #   dbus             FS:done    STAGE:yes (M9.R.33.3 stage loop)
+  #
+  # M9.R.33.7 dropped: ``dbus`` -- FS:done recipe ships 9 binaries in
+  # usr/bin (dbus-daemon, dbus-launch, dbus-monitor, dbus-send,
+  # dbus-cleanup-sockets, dbus-uuidgen, dbus-update-activation-environment,
+  # dbus-test-tool, dbus-run-session); the Phase 4b shadow-link loop
+  # covers them.
+  #
   #   dbus-user-session FS:partial STAGE:no  (uses dbus recipe; user
   #                                           session unit files aren't
   #                                           shipped by from-source)
-  libpam-systemd dbus dbus-user-session
+  libpam-systemd dbus-user-session
   # Essential userspace.
   #
   # M9.R.33.5 dropped: ``util-linux`` -- FS:done recipe ships 63
