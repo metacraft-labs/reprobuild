@@ -125,6 +125,8 @@
 ## variants need different strategies (e.g. an X11-supporting variant
 ## that flips ``KWIN_BUILD_X11=ON`` for legacy bundles).
 
+import std/os
+
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
@@ -642,7 +644,41 @@ package plasmaWorkspaceSource:
         "sed -i 's|^        KX11Extras::setType(winId(), NET::Dock);$|#if HAVE_X11\\n        KX11Extras::setType(winId(), NET::Dock);|' src/shell/panelconfigview.cpp",
         "sed -i 's|^        KX11Extras::setState(winId(), NET::KeepAbove);$|        KX11Extras::setState(winId(), NET::KeepAbove);\\n#endif|' src/shell/panelconfigview.cpp",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+      # M9.R.32.1 — explicitly thread the Qt6 platforms cmake-module
+      # dir into CMAKE_MODULE_PATH so the Qt6Gui find_package's
+      # PlatformGraphics + GLESv2 dependency resolves via the
+      # ``FindPlatformGraphics.cmake`` shipped at
+      # ``qt6-base/.../usr/lib/cmake/Qt6/platforms/`` AND set the
+      # GLESv2_INCLUDE_DIR + GLESv2_LIBRARY hints so FindPlatformGraphics
+      # locates the mesa-shipped GLESv2 library.  Without this, a fresh
+      # ``cmake configure`` (no cached ``build/CMakeCache.txt``) fails
+      # with "Qt6Gui could not be found because dependency GLESv2 could
+      # not be found" + "By not providing FindPlatformGraphics.cmake in
+      # CMAKE_MODULE_PATH".  Prior M9.R.31 builds dodged this trip by
+      # inheriting a stale-but-working CMakeCache.txt from before the
+      # M9.R.15i.5 walker existed; a fresh build dir loses those entries.
+      #
+      # The PROPER long-term fix is to extend ``cmake_package``'s
+      # M9.R.15o-family walker to thread CMAKE_MODULE_PATH from every
+      # Qt6* dep's ``cmake/Qt6/platforms/`` dir AND surface GLESv2 from
+      # mesa's pkg-config.  M9.R.33 work shape.  Until that lands, the
+      # recipe-local fallback below keeps plasma-workspace buildable.
+      let pwProjectRoot = activeProviderProjectRoot()
+      let recipesRoot =
+        if pwProjectRoot.len > 0: parentDir(pwProjectRoot)
+        else: ""
+      var m9r321Opts = opts
+      if recipesRoot.len > 0:
+        let mesaInstall =
+          recipesRoot & "/mesa/.repro/output/install/usr"
+        let qt6Platforms =
+          recipesRoot &
+            "/qt6-base/.repro/output/install/usr/lib/cmake/Qt6/platforms"
+        m9r321Opts.add("CMAKE_MODULE_PATH=" & qt6Platforms)
+        m9r321Opts.add("GLESv2_INCLUDE_DIR=" & mesaInstall & "/include")
+        m9r321Opts.add("GLESv2_LIBRARY=" & mesaInstall &
+                       "/lib64/libGLESv2.so")
+      let pkg = cmake_package(srcDir = "./src", cacheVars = m9r321Opts,
                               extraEnv = env, srcPatches = patches)
       discard pkg.executable("plasmashell")
       discard pkg.executable("startplasmaWayland")
