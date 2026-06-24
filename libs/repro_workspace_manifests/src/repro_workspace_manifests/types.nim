@@ -89,6 +89,13 @@ type
     revision*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
+    # RA-14 — optional fetch-acceleration hints (Workspace-Manifests.md
+    # §"Optional fetch-acceleration hints"). These never change the
+    # resolved tree at the pinned revision; they only change how much is
+    # downloaded.
+    clone_filter*: Option[string]  ## partial clone: "blob:none" / "tree:0"
+    depth*: Option[int]            ## shallow clone depth (deepened on demand)
+    single_branch*: Option[bool]   ## fetch only the pinned revision's branch
 
   RepoFragment* = object
     schema*: string

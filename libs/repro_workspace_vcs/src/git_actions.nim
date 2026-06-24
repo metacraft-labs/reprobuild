@@ -94,6 +94,28 @@ type
       ## reference) and a warm-cache run (reference present) share the
       ## same receipt and produce a byte-identical resolved tree
       ## (transparency).
+    cloneFilter*: string
+      ## RA-14 — partial-clone filter (``--filter=<spec>``), e.g.
+      ## ``blob:none`` (blobless) or ``tree:0`` (treeless). When
+      ## non-empty the clone is created as a promisor/partial clone:
+      ## history is fetched but blobs (or trees) are lazily fetched on
+      ## demand at checkout. The *checked-out* tree at the pinned
+      ## revision is byte-identical to a full clone — only the on-disk
+      ## ``.git`` object population differs — so this is an acceleration
+      ## knob, EXCLUDED from the fingerprint (like ``referencePath``).
+    depth*: int
+      ## RA-14 — shallow-clone depth (``--depth <n>``). ``0`` means "no
+      ## ``--depth``" (full history). A positive value truncates history
+      ## to the last ``n`` commits of the pinned branch; a repo later
+      ## promoted to develop-mode is deepened on demand (``git fetch
+      ## --unshallow``). The checked-out tree at the tip is identical to
+      ## a full clone, so this is also EXCLUDED from the fingerprint.
+    singleBranch*: bool
+      ## RA-14 — narrow fetch (``--single-branch``): clone/fetch only the
+      ## pinned revision's branch's remote-tracking ref rather than every
+      ## remote head (the ``repo sync -c`` equivalent). EXCLUDED from the
+      ## fingerprint: the resolved tree at the pin is unchanged; only the
+      ## set of remote-tracking refs differs.
 
   GitQueryKind* = enum
     gqkHeadSha
@@ -174,6 +196,9 @@ proc encodePayload(payload: GitVcsPayload): string =
   result.add("identity-version=" & esc(payload.identityVersion) & "\n")
   result.add("binary-path=" & esc(payload.binaryPath) & "\n")
   result.add("reference-path=" & esc(payload.referencePath) & "\n")
+  result.add("clone-filter=" & esc(payload.cloneFilter) & "\n")
+  result.add("depth=" & $payload.depth & "\n")
+  result.add("single-branch=" & (if payload.singleBranch: "1" else: "0") & "\n")
 
 proc decodePayload(text: string): GitVcsPayload =
   proc unesc(value: string): string =
@@ -216,6 +241,14 @@ proc decodePayload(text: string): GitVcsPayload =
     of "identity-version": result.identityVersion = value
     of "binary-path": result.binaryPath = value
     of "reference-path": result.referencePath = value
+    of "clone-filter": result.cloneFilter = value
+    of "depth":
+      # A malformed/empty depth decodes to 0 ("no --depth") rather than
+      # raising: the field is a pure accelerator and a missing value must
+      # never break decode of an otherwise valid payload.
+      try: result.depth = parseInt(value.strip())
+      except ValueError: result.depth = 0
+    of "single-branch": result.singleBranch = value.strip() == "1"
     else:
       # Forward-compatible: ignore unknown keys so a payload written
       # by a newer M2.x build still decodes.
@@ -237,6 +270,12 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   result.writeString(payload.remoteName)
   result.writeString(payload.branchName)
   result.writeString(payload.revision)
+  # RA-5 ``referencePath`` and RA-14 ``cloneFilter`` / ``depth`` /
+  # ``singleBranch`` are DELIBERATELY NOT folded in here. They are pure
+  # network/disk acceleration knobs: a blobless/shallow/single-branch
+  # clone and a full clone of the same (remote, revision, identity)
+  # resolve to a byte-identical working tree at the pinned revision, so
+  # they must share one receipt / cache entry (transparency).
   # ``repoPath`` participates in fetch/switch fingerprints (those are
   # working-tree-local operations) but NOT in clone (M2 design rule 1:
   # the clone receipt for the same (remote, revision, identity) must
@@ -437,6 +476,22 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # will be a different action (M9+).
     return failed("clone-target-exists",
       "clone target already exists: " & target)
+  # RA-14 acceleration flags. These are network/disk knobs that do NOT
+  # change the working tree at the pinned revision (see
+  # ``fingerprintPayload``): ``--single-branch`` narrows the fetched
+  # remote heads, ``--filter`` makes a partial (promisor) clone, and
+  # ``--depth`` truncates history. They are appended to BOTH the
+  # accelerated and the fallback plain-clone command lines.
+  proc accelFlags(): seq[string] =
+    result = @[]
+    if payload.singleBranch:
+      result.add("--single-branch")
+    if payload.cloneFilter.len > 0:
+      result.add("--filter=" & payload.cloneFilter)
+    if payload.depth > 0:
+      result.add("--depth")
+      result.add($payload.depth)
+
   var args = @["clone"]
   # RA-5: accelerate via the shared bare clone. ``--reference <bare>``
   # leaves ``objects/info/alternates`` pointing at the shared pool (no
@@ -451,6 +506,8 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if useReference:
     args.add("--reference")
     args.add(payload.referencePath)
+  for f in accelFlags():
+    args.add(f)
   args.add(payload.remoteUrl)
   args.add(target)
   if payload.revision.len > 0:
@@ -459,11 +516,16 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   var cloneRes = runGit(payload, args)
   if cloneRes.exitCode != 0 and useReference:
     # Best-effort fallback: drop the reference and clone standalone so a
-    # broken/locked shared bare never breaks init.
+    # broken/locked shared bare never breaks init. The RA-14 accelerators
+    # are kept — they are independent of the shared bare.
     if dirExists(target):
       try: removeDir(target)
       except OSError: discard
-    var plain = @["clone", payload.remoteUrl, target]
+    var plain = @["clone"]
+    for f in accelFlags():
+      plain.add(f)
+    plain.add(payload.remoteUrl)
+    plain.add(target)
     if payload.revision.len > 0:
       plain.add("--branch")
       plain.add(payload.revision)
@@ -484,7 +546,19 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if not dirExists(target / ".git"):
     return failed("fetch-target-missing",
       "fetch target is not a git working tree: " & target)
-  let res = runGit(payload, ["-C", target, "fetch", payload.remoteName])
+  var fetchArgs = @["-C", target, "fetch"]
+  # RA-14 — carry the partial-clone filter and shallow depth onto the
+  # fetch so a develop-mode "deepen on demand" (``--depth``/``--unshallow``)
+  # or a widening of the promisor filter is expressible as the same
+  # action. These never change the resolved tree, only how much is
+  # downloaded.
+  if payload.cloneFilter.len > 0:
+    fetchArgs.add("--filter=" & payload.cloneFilter)
+  if payload.depth > 0:
+    fetchArgs.add("--depth")
+    fetchArgs.add($payload.depth)
+  fetchArgs.add(payload.remoteName)
+  let res = runGit(payload, fetchArgs)
   if res.exitCode != 0:
     return failed("fetch-failed",
       "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
@@ -738,7 +812,8 @@ installGitVcsExecutor()
 proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
                   remoteUrl, remoteName, branchName, revision,
                   repoPath, receiptPath: string;
-                  referencePath = ""): GitVcsPayload =
+                  referencePath = "";
+                  cloneFilter = ""; depth = 0; singleBranch = false): GitVcsPayload =
   GitVcsPayload(
     op: op,
     remoteUrl: remoteUrl,
@@ -750,12 +825,17 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
     identityDigestHex: identity.digestHex(),
     identityVersion: identity.version,
     binaryPath: identity.binaryPath,
-    referencePath: referencePath)
+    referencePath: referencePath,
+    cloneFilter: cloneFilter,
+    depth: depth,
+    singleBranch: singleBranch)
 
 proc gitCloneAction*(id: string; identity: GitToolIdentity;
                      remoteUrl, repoPath, receiptPath: string;
                      revision = ""; cwd = ""; deps: openArray[string] = [];
-                     cacheable = true; referencePath = ""): BuildAction =
+                     cacheable = true; referencePath = "";
+                     cloneFilter = ""; depth = 0;
+                     singleBranch = false): BuildAction =
   ## Construct a cacheable clone action. The receipt path is the
   ## action's declared output and the unit of caching (per M2 design
   ## rule 1). ``revision``, when non-empty, is passed as ``--branch``
@@ -771,8 +851,16 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
   ## OMITTED from the fingerprint (see ``fingerprintPayload``) so a
   ## cold-cache clone and a warm-cache clone share the same receipt and
   ## produce a byte-identical resolved tree (transparency).
+  ##
+  ## RA-14 — ``cloneFilter`` (``--filter=blob:none``/``tree:0``),
+  ## ``depth`` (``--depth``), and ``singleBranch`` (``--single-branch``)
+  ## are the network-economy accelerators. Like ``referencePath`` they
+  ## are OMITTED from the fingerprint so a partial/shallow/narrow clone
+  ## and a full clone of the same pin share one receipt and resolve to a
+  ## byte-identical working tree.
   let payload = buildPayload(identity, gvoClone, remoteUrl, "", "",
-    revision, repoPath, receiptPath, referencePath = referencePath)
+    revision, repoPath, receiptPath, referencePath = referencePath,
+    cloneFilter = cloneFilter, depth = depth, singleBranch = singleBranch)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
@@ -781,13 +869,19 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
 proc gitFetchAction*(id: string; identity: GitToolIdentity;
                      remoteName, repoPath, receiptPath: string;
                      cwd = ""; deps: openArray[string] = [];
-                     cacheable = true): BuildAction =
+                     cacheable = true;
+                     cloneFilter = ""; depth = 0): BuildAction =
   ## Construct a cacheable fetch action. The fingerprint includes the
   ## ``repoPath`` because a fetch is a working-tree-local operation:
   ## two workspaces with the same remote name but different working
   ## trees must NOT share a cache entry.
+  ##
+  ## RA-14 — ``cloneFilter``/``depth`` carry the partial/shallow knobs
+  ## onto the fetch (``--filter``/``--depth``) for develop-mode
+  ## deepen-on-demand. They are excluded from the fingerprint (they do
+  ## not change the resolved tree).
   let payload = buildPayload(identity, gvoFetch, "", remoteName, "",
-    "", repoPath, receiptPath)
+    "", repoPath, receiptPath, cloneFilter = cloneFilter, depth = depth)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

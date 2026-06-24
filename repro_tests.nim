@@ -5422,6 +5422,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
+    binary: "build/test-bin/t_clone_action_honors_partial_blobless_and_single_branch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
     defines: @[],
@@ -6136,6 +6144,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_sync_ff_only_per_repo_upstream.nim",
     binary: "build/test-bin/t_sync_ff_only_per_repo_upstream",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim",
+    binary: "build/test-bin/t_sync_skips_fetch_when_locked_sha_already_present",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

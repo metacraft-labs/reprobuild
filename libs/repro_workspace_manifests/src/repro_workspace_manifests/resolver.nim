@@ -102,6 +102,12 @@ type
     fragmentPath*: string
     manifestLayer*: string
     visibility*: WorkspaceVisibility
+    # RA-14 — fetch-acceleration hints carried from the fragment. Empty /
+    # zero / false means "no acceleration" (full clone of every head).
+    # These never change the resolved tree at the pinned revision.
+    cloneFilter*: string
+    depth*: int
+    singleBranch*: bool
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -263,6 +269,16 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         fragment.repo.stability.get()
       else:
         defaultRepoStability
+
+    # RA-14 — carry the fetch-acceleration hints through unchanged. They
+    # are pure download knobs; the resolved revision above is the single
+    # source of truth for what the checkout resolves to.
+    if fragment.repo.clone_filter.isSome:
+      resolved.cloneFilter = fragment.repo.clone_filter.get()
+    if fragment.repo.depth.isSome:
+      resolved.depth = fragment.repo.depth.get()
+    if fragment.repo.single_branch.isSome:
+      resolved.singleBranch = fragment.repo.single_branch.get()
 
     # Duplicate check on the `(name, path, remoteName)` triple. We use
     # a tab-joined key because none of the three components legally
@@ -485,6 +501,16 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
         fragment.repo.stability.get()
       else:
         defaultRepoStability
+
+    # RA-14 — carry the fetch-acceleration hints through unchanged. They
+    # are pure download knobs; the resolved revision above is the single
+    # source of truth for what the checkout resolves to.
+    if fragment.repo.clone_filter.isSome:
+      resolved.cloneFilter = fragment.repo.clone_filter.get()
+    if fragment.repo.depth.isSome:
+      resolved.depth = fragment.repo.depth.get()
+    if fragment.repo.single_branch.isSome:
+      resolved.singleBranch = fragment.repo.single_branch.get()
 
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
     if triple in seen:

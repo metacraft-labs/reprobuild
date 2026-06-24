@@ -16166,7 +16166,10 @@ proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
       repoPath = repo.path,
       receiptPath = receiptRel,
       revision = repo.revision,
-      referencePath = sharedReferenceFor(repo.fetchUrl))
+      referencePath = sharedReferenceFor(repo.fetchUrl),
+      cloneFilter = repo.cloneFilter,
+      depth = repo.depth,
+      singleBranch = repo.singleBranch)
     action.cwd = args.workspaceRoot
     # RA-5c: tag init's clones with the same ``vcs/fetch`` pool so init
     # also respects ``jobs-network`` (the network-concurrency bound shared
@@ -16663,6 +16666,26 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
     result.shas[repo.path] = repo.revision
   result.lockRelPath = candidates[0].relPath
 
+proc commitReachableLocally(identity: GitToolIdentity;
+                            repoPath, sha: string): bool =
+  ## RA-14 optimized-fetch predicate. Return ``true`` iff ``sha`` names a
+  ## commit object that is already present (reachable) in the
+  ## per-workspace repo at ``repoPath`` — counting objects borrowed from
+  ## the shared bare via ``objects/info/alternates`` (RA-5), since
+  ## ``git cat-file`` reads through alternates transparently.
+  ##
+  ## ``cat-file -e <sha>^{commit}`` exits 0 only when the object exists
+  ## AND peels to a commit, so a partial/blobless clone that has the
+  ## commit but lazily-absent blobs still counts as present (the commit
+  ## object itself is always fetched). It exits non-zero — and we return
+  ## ``false``, forcing the fetch — whenever the SHA is genuinely absent,
+  ## which is exactly the case the optimization must NOT skip.
+  if sha.len == 0 or not looksLikeSha(sha):
+    return false
+  let res = gitRunPlain(identity,
+    ["-C", repoPath, "cat-file", "-e", sha & "^{commit}"])
+  res.code == 0
+
 proc observeRepoForSync(identity: GitToolIdentity;
                         repoPath: string;
                         resolved: ResolvedRepo): RepoSyncObservation =
@@ -16816,7 +16839,10 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
       remoteUrl = resolved.fetchUrl,
       repoPath = resolved.path,
       receiptPath = receiptRel,
-      revision = resolved.revision)
+      revision = resolved.revision,
+      cloneFilter = resolved.cloneFilter,
+      depth = resolved.depth,
+      singleBranch = resolved.singleBranch)
     a.cwd = workspaceRoot
     return (true, a, "", "")
   of saFetchFastForward:
@@ -16912,11 +16938,48 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # fetches read a consistent object pool without racing into the same
   # bare.
   let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+
+  # RA-14 optimized-fetch: load the locked ``path -> sha`` map once so the
+  # fetch loop can skip the network round-trip for any repo already at (or
+  # past) its locked SHA. A branch-pinned fragment records its concrete
+  # SHA in the lock file; a SHA-pinned fragment carries it inline. When no
+  # lock exists the map is empty and every existing tree is fetched (the
+  # pre-RA-14 behavior), so the optimization can never skip a fetch the
+  # workspace genuinely needs.
+  var lockedShasByPath = initTable[string, string]()
+  block:
+    let manifestsRoot = args.workspaceRoot / ".repo" / "manifests"
+    if dirExists(manifestsRoot) and resolved.projectName.len > 0:
+      try:
+        lockedShasByPath = latestLockShasViaGit(
+          identity, manifestsRoot, resolved.projectName).shas
+      except CatchableError:
+        lockedShasByPath = initTable[string, string]()
+
+  proc lockedShaFor(repo: ResolvedRepo): string =
+    ## The concrete SHA the fetch would need to make reachable for this
+    ## repo: a SHA-pinned revision is itself; otherwise the lock file's
+    ## recorded SHA for this path (empty when unknown → never skip).
+    if repo.revision.len > 0 and looksLikeSha(repo.revision):
+      return repo.revision
+    lockedShasByPath.getOrDefault(repo.path)
+
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
+  var optimizedFetchSkips = 0
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if not dirExists(repoPath / ".git"):
+      continue
+    # RA-14 optimized-fetch (``repo --optimized-fetch`` equivalent): if the
+    # locked SHA is already reachable in this checkout (counting objects
+    # borrowed from the shared bare via alternates), the network fetch
+    # would transfer nothing the planner needs. Skip it entirely — this is
+    # the single biggest re-``sync`` win for an already-current workspace.
+    let lockedSha = lockedShaFor(repo)
+    if lockedSha.len > 0 and
+        commitReachableLocally(identity, repoPath, lockedSha):
+      inc optimizedFetchSkips
       continue
     # Refresh this URL's shared bare once, up front, and expose it as a
     # dependency action id so the URL's fetches wait on it.
@@ -16933,6 +16996,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       refreshDepId = sharedBareRefreshAction[repo.fetchUrl]
     fetchActions.add(syncFetchActionFor(identity, args.workspaceRoot,
       repo, repoIdx, refreshDepId))
+
+  if optimizedFetchSkips > 0:
+    stderr.writeLine("workspace sync: optimized-fetch skipped " &
+      $optimizedFetchSkips & " repo(s) already at the locked revision")
 
   if fetchActions.len > 0:
     var config = defaultBuildEngineConfig(engineCacheRoot)
