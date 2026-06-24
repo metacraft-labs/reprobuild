@@ -78,6 +78,7 @@ const
   schemaSnapshotV1*         = "reprobuild.workspace.snapshot.v1"
   schemaWorkspaceLocalV1*   = "reprobuild.workspace.local.v1"
   schemaDevelopOverridesV1* = "reprobuild.workspace.develop-overrides.v1"
+  schemaWorkspaceBootstrapV1* = "reprobuild.workspace.bootstrap.v1"
 
 type
   # --- repos/<repo>.toml -----------------------------------------------------
@@ -231,6 +232,48 @@ type
   DevelopOverrides* = object
     schema*: string
     `override`*: seq[DevelopOverrideEntry]
+    extensions*: Extensions
+
+  # --- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
+  #
+  # Committed by the *host* product repo (canonical home `<org>/repro-workspace`)
+  # so a new user joins a workspace with a single `repro workspace init` and no
+  # `--manifest-url` flag. The `repro` binary ships NO org-specific default URL;
+  # this file is the org-config side of the generic-tool-vs-host-config split
+  # (Workspace-Manifests.md §"Host Bootstrap Config").
+
+  BootstrapManifestBody* = object
+    url*: string
+    branch*: Option[string]
+    private_url*: Option[string]
+      ## Optional private companion manifest URL. May also be supplied from a
+      ## sibling `.repro-workspace-private.toml` file (see `readWorkspaceBootstrap`)
+      ## that carries credentialed/SSH URLs the public config must not embed.
+
+  BootstrapProjectsBody* = object
+    default*: seq[string]
+      ## Default project set auto-layered when the user hasn't chosen an
+      ## explicit project set (consumed by init / `projects add --default`).
+
+  WorkspaceBootstrap* = object
+    schema*: string
+    manifest*: BootstrapManifestBody
+    projects*: BootstrapProjectsBody
+    extensions*: Extensions
+
+  # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----
+  #
+  # Sibling of the public bootstrap config. Carries credentialed/SSH manifest
+  # URLs so the committed public file never embeds a secret-bearing URL. Read
+  # only for its `[manifest] private_url`; intentionally not committed where the
+  # URL is credentialed.
+
+  BootstrapPrivateManifestBody* = object
+    private_url*: string
+
+  WorkspaceBootstrapPrivate* = object
+    schema*: string
+    manifest*: BootstrapPrivateManifestBody
     extensions*: Extensions
 
   # NOTE on the schema probe: the reader does NOT define a typed "probe"

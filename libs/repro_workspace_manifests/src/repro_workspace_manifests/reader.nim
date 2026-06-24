@@ -284,3 +284,46 @@ proc readDevelopOverrides*(path: string): DevelopOverrides =
       raiseManifestError(path, "override[" & $i & "].created_at",
         schemaDevelopOverridesV1, schemaDevelopOverridesV1,
         "required key `override[].created_at` is missing or empty")
+
+# ---- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
+
+const
+  bootstrapConfigFileName* = ".repro-workspace.toml"
+    ## Canonical file name of the committed host bootstrap config.
+  bootstrapPrivateConfigFileName* = ".repro-workspace-private.toml"
+    ## Sibling file carrying credentialed/SSH manifest URLs.
+
+proc readWorkspaceBootstrapPrivate*(path: string): WorkspaceBootstrapPrivate =
+  ## Read the private companion config (`.repro-workspace-private.toml`). The
+  ## only load-bearing key is `[manifest] private_url`.
+  let content = slurpManifest(path, schemaWorkspaceBootstrapV1)
+  validateSchema(path, content, schemaWorkspaceBootstrapV1)
+  result = decodeStrict(path, content, schemaWorkspaceBootstrapV1,
+                        WorkspaceBootstrapPrivate)
+  requireNonEmpty(path, schemaWorkspaceBootstrapV1, "manifest.private_url",
+                  result.manifest.private_url)
+
+proc readWorkspaceBootstrap*(path: string): WorkspaceBootstrap =
+  ## Read a host bootstrap config (`.repro-workspace.toml`). The only
+  ## load-bearing required key is `[manifest] url` — without a manifest URL the
+  ## config does not configure anything and the caller must fail loud rather
+  ## than fall back to a baked-in org default.
+  ##
+  ## When a sibling `.repro-workspace-private.toml` exists next to `path` and
+  ## the public config did not already set `[manifest] private_url`, the
+  ## private companion's `[manifest] private_url` is folded into the returned
+  ## record so credentialed URLs never have to live in the committed file.
+  let content = slurpManifest(path, schemaWorkspaceBootstrapV1)
+  validateSchema(path, content, schemaWorkspaceBootstrapV1)
+  result = decodeStrict(path, content, schemaWorkspaceBootstrapV1,
+                        WorkspaceBootstrap)
+  requireNonEmpty(path, schemaWorkspaceBootstrapV1, "manifest.url",
+                  result.manifest.url)
+
+  let privatePath = path.parentDir / bootstrapPrivateConfigFileName
+  if (result.manifest.private_url.isNone or
+      result.manifest.private_url.get().len == 0) and
+      fileExists(privatePath):
+    let priv = readWorkspaceBootstrapPrivate(privatePath)
+    if priv.manifest.private_url.len > 0:
+      result.manifest.private_url = some(priv.manifest.private_url)

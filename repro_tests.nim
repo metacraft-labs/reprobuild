@@ -6182,6 +6182,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim",
+    binary: "build/test-bin/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim",
     binary: "build/test-bin/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty",
     defines: @[],

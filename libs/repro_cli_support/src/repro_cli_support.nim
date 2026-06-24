@@ -15898,6 +15898,15 @@ type
       ## RA-11 — optional private companion manifest URL. Cloned into the
       ## PARALLEL private cache (``…/manifests-private``) so a private
       ## companion never shares a slug namespace with the public manifest.
+    manifestUrlExplicit: bool
+      ## RA-8 — set when ``--manifest-url`` was passed on the command line.
+      ## The resolution order treats an explicit flag as the highest
+      ## precedence source; without it the manifest URL/branch are resolved
+      ## from the host bootstrap config and then the host repo's ``origin``.
+    defaultProjects: seq[string]
+      ## RA-8 — the host bootstrap config's ``[projects] default`` set. Used
+      ## to fill the project-to-init when the user did not pass an explicit
+      ## positional project name.
 
   WorkspaceInitResolution = object
     project: ResolvedProject
@@ -15930,7 +15939,10 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
     elif arg == "--manifest-url" or arg.startsWith("--manifest-url="):
       # RA-11 — bootstrap manifest URL (init outside an existing
       # workspace). Clones the manifest repo into the bootstrap cache.
+      # RA-8 — an explicit flag is the highest-precedence source in the
+      # manifest resolution order.
       result.manifestUrl = valueFromFlag(args, i, "--manifest-url")
+      result.manifestUrlExplicit = true
     elif arg == "--manifest-branch" or arg.startsWith("--manifest-branch="):
       result.manifestBranch = valueFromFlag(args, i, "--manifest-branch")
     elif arg == "--private-manifest-url" or
@@ -15948,9 +15960,11 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
       raise newException(ValueError,
         "unexpected positional argument to `repro workspace init`: " & arg)
     inc i
-  if result.projectName.len == 0:
-    raise newException(ValueError,
-      "`repro workspace init` requires a <project-or-variant> name")
+  # RA-8 — the positional project name is OPTIONAL: when omitted, the
+  # project-to-init is taken from the host bootstrap config's
+  # ``[projects] default`` (resolved later in ``resolveBootstrapConfig``).
+  # ``executeWorkspaceInit`` raises a clear error if neither a positional
+  # nor a config default resolves a project name.
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -16126,6 +16140,89 @@ proc safeRepoIdSegment(value: string): string =
   if result.len == 0:
     result = "repo"
 
+proc gitRemoteOriginUrl(identity: GitToolIdentity; repoPath: string): string =
+  ## RA-8 — read ``remote.origin.url`` for the host repo at ``repoPath``.
+  ## Returns the empty string when the directory is not a git repo or has no
+  ## ``origin`` remote; the resolution order treats that as "origin did not
+  ## resolve" and continues to fail-loud rather than guessing.
+  if not dirExists(repoPath):
+    return ""
+  let res = execCmdEx(
+    quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
+      " config --get remote.origin.url",
+    options = {poStdErrToStdOut, poUsePath})
+  if res.exitCode == 0:
+    res.output.strip()
+  else:
+    ""
+
+proc findBootstrapConfigPath(workspaceRoot: string): string =
+  ## RA-8 — locate the host bootstrap config (``.repro-workspace.toml``).
+  ## Resolution of the FILE PATH:
+  ##   1. ``REPRO_WORKSPACE_CONFIG`` env override (an explicit path).
+  ##   2. ``<workspaceRoot>/.repro-workspace.toml`` and then each ancestor
+  ##      directory (the host product repo committing the config may be a
+  ##      parent of the directory ``init`` runs in).
+  ## Returns the empty string when no config file is found.
+  let override = getEnv("REPRO_WORKSPACE_CONFIG")
+  if override.len > 0:
+    return (if fileExists(override): absolutePath(override) else: "")
+  var dir = absolutePath(workspaceRoot)
+  while true:
+    let candidate = dir / bootstrapConfigFileName
+    if fileExists(candidate):
+      return candidate
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  ""
+
+proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
+  ## RA-8 — resolve the manifest URL/branch (+ default projects) for ``init``
+  ## from the host bootstrap config, with NO hardcoded org default.
+  ##
+  ## Resolution order for the manifest URL/branch:
+  ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
+  ##   2. the host bootstrap config ``.repro-workspace.toml``
+  ##      (``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo);
+  ##   3. the host repo's own ``remote.origin.url``.
+  ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
+  ## NO built-in/hardcoded manifest URL fallback.
+  ##
+  ## When the workspace already has a ``.repo/manifests`` checkout (a sibling
+  ## checkout or a prior bootstrap), no manifest URL is needed at all and the
+  ## resolution is skipped; ``init`` reads the existing checkout directly.
+  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
+  if dirExists(manifestsDir):
+    return
+
+  # (1) Explicit flag wins outright — and may still pull default projects /
+  # a private URL from the config below without overriding the URL/branch.
+  let configPath = findBootstrapConfigPath(args.workspaceRoot)
+  if configPath.len > 0:
+    let cfg = readWorkspaceBootstrap(configPath)
+    if not args.manifestUrlExplicit:
+      args.manifestUrl = cfg.manifest.url
+      if cfg.manifest.branch.isSome and args.manifestBranch.len == 0:
+        args.manifestBranch = cfg.manifest.branch.get()
+    if args.privateManifestUrl.len == 0 and cfg.manifest.private_url.isSome:
+      args.privateManifestUrl = cfg.manifest.private_url.get()
+    if cfg.projects.default.len > 0:
+      args.defaultProjects = cfg.projects.default
+    # Fill the project-to-init from the config default when no positional
+    # project name was supplied.
+    if args.projectName.len == 0 and args.defaultProjects.len > 0:
+      args.projectName = args.defaultProjects[0]
+
+  # (3) Host repo origin — only when neither an explicit flag nor the config
+  # supplied a manifest URL.
+  if args.manifestUrl.len == 0:
+    let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
+    let origin = gitRemoteOriginUrl(identity, args.workspaceRoot)
+    if origin.len > 0:
+      args.manifestUrl = origin
+
 proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
   ## the workspace has no ``.repo/manifests`` checkout yet, clone the
@@ -16182,13 +16279,32 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
       except OSError, IOError:
         copyDir(privCached.sharedBarePath, privateDir)
 
-proc executeWorkspaceInit(args: WorkspaceInitArgs): WorkspaceInitOutcome =
+proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
   ## ``bakWorkspaceVcs.clone`` build plan for the missing ones, then
   ## emits the structured report.
+  var args = argsIn
+  # RA-8: resolve the manifest URL/branch (+ default projects, project name)
+  # from the host bootstrap config / host repo origin BEFORE bootstrapping,
+  # with NO hardcoded org default. The resolution is a no-op when a manifest
+  # checkout already exists.
+  resolveBootstrapConfig(args)
+  let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
+  if not dirExists(manifestsDir) and args.manifestUrl.len == 0:
+    raise newException(ValueError,
+      "no manifest configured for `repro workspace init`: pass " &
+        "`--manifest-url=…`, commit a `" & bootstrapConfigFileName &
+        "` host bootstrap config (or set `REPRO_WORKSPACE_CONFIG`), or run " &
+        "inside a host repo whose `origin` is the manifest source. `repro` " &
+        "ships no built-in manifest URL.")
+  if args.projectName.len == 0:
+    raise newException(ValueError,
+      "`repro workspace init` requires a <project-or-variant> name " &
+        "(none was given and the host bootstrap config declared no " &
+        "`[projects] default`)")
   # RA-11: bootstrap the manifest repo into the tool-managed cache when
-  # ``--manifest-url`` is given and no manifest checkout exists yet, so
+  # a manifest URL resolved and no manifest checkout exists yet, so
   # ``init`` works OUTSIDE an existing workspace.
   bootstrapManifestCache(args)
   let resolution = resolveWorkspaceInitProject(args)
