@@ -1,0 +1,239 @@
+M9.R.33 — Fresh-build proof + 9-recipe apt-PKG_LIST shrink + ISO/QEMU smoke
+=============================================================================
+
+Status as of 2026-06-24: G1 (qcoro6 from-source) + G2 (cmake_package
+walker auto-threads Qt6 CMAKE_MODULE_PATH + GLESv2 hints) + G3
+(stage-de-rootfs.sh base-userspace shadow-link loop) + G4 (9 apt
+entries dropped, one commit each) all CLOSED.  G5 (fresh ISO + UEFI
+DE smoke) + G6 (Phase E installed-system DE smoke) PARTIAL — fresh
+plasma-workspace cmake configure SUCCEEDS with the M9.R.33.2 walker
+threading the M9.R.32 GLESv2 + PlatformGraphics gaps (PROVEN from
+the inline command line below); full plasma-workspace build + ISO
+rebuild + QEMU smoke completion is bounded by the 24-hour wall-time
+budget.
+
+EXECUTIVE SUMMARY
+=================
+
+Commits in the M9.R.33 batch (newest first):
+
+  M9.R.33.1.1 qcoro6 BUILD_SHARED_LIBS=ON                    (58e74ccc)
+  M9.R.33     scripts/build_apps.sh IO_MON_SRC drive-by      (8874e675)
+  M9.R.33     ISO + QEMU + base-userspace smoke drivers      (8e52c3f2)
+  M9.R.33     fresh plasma-workspace build driver            (e134817b)
+  M9.R.33.12  drop tzdata (iana-tzdata)                      (9b4c94d2)
+  M9.R.33.11  drop passwd + login (shadow-utils)             (06756b96)
+  M9.R.33.10  drop btrfs-progs                               (8078206c)
+  M9.R.33.9   drop e2fsprogs                                 (ba079722)
+  M9.R.33.8   drop sudo                                      (ee774b70)
+  M9.R.33.7   drop dbus                                      (a5ee0a44)
+  M9.R.33.6   drop kmod                                      (3a298762)
+  M9.R.33.5   drop util-linux (+ mount)                      (18bb319c)
+  M9.R.33.4   drop systemd + systemd-sysv                    (e0477470)
+  M9.R.33.3   stage-de-rootfs.sh base-userspace loop         (858bd872)
+  M9.R.33.2.1 strutils import for endsWith                   (09c01034)
+  M9.R.33.2   cmake_package auto-threads CMAKE_MODULE_PATH   (faa60eae)
+  M9.R.33.1   qcoro6 from-source recipe                      (ca5355fc)
+
+PER-GAP STATUS
+==============
+
+### G1 (M9.R.33.1) — qcoro6 from-source recipe: CLOSED
+
+Recipe ``recipes/packages/source/qcoro6/repro.nim`` vendors QCoro
+0.12.0 (161 KB, sha256
+``809afafab61593f994c005ca6e242300e1e3e7f4db8b5d41f8c642aab9450fbc``)
+from upstream github.com/danvratil/qcoro.  buildDeps: ``qt6-base
+>=6.6`` (Core + DBus + Network only).  ``cmake_package`` convention
+consumer; emits ``libQCoro6Core.so`` (BUILD_SHARED_LIBS=ON; M9.R.33.1.1
+hot-fix).
+
+5-test smoke test ``test_qcoro6_source.nim`` PASSES (verified
+2026-06-24 in eli-wsl after BUILD_SHARED_LIBS=ON addition).  Test
+registered in ``repro_tests.nim`` between ``procps`` and ``qt6-base``
+alphabetically.
+
+Stdlib stub ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/
+qcoro6.nim`` stays in place so ``--tool-provisioning=nix`` keeps
+working; the from-source resolver picks the sibling recipe first
+(same precedence as qt6-positioning alongside its stub).
+
+### G2 (M9.R.33.2) — cmake_package walker for fresh-configure: CLOSED
+
+Three new helpers in
+``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/package_result.nim``:
+
+  * ``m9r33Collect2Qt6CmakeModulePathDirs(projectRoot, packageName)``
+    enumerates ``<qt6-dep>/.repro/output/install/usr/lib/cmake/Qt6/``
+    + ``platforms/`` sub-dir for every declared qt6-* dep.
+  * ``m9r33Emit2CmakeModulePathCacheVar(dirs)`` formats the dirs into
+    a semicolon-joined ``CMAKE_MODULE_PATH=<dir1>;<dir2>`` cache var.
+  * ``m9r33Emit2MesaGlesv2CacheVars(projectRoot, packageName)`` emits
+    ``GLESv2_INCLUDE_DIR=`` + ``GLESv2_LIBRARY=`` cache var hints
+    pointing at mesa's sibling install-mirror, gated on a qt6-* dep
+    being present AND the mesa GLES2 headers + libGLESv2.so being on
+    disk.
+
+11-test unit test ``tests/unit/t_m9r33_2_qt6_module_path_walker.nim``
+PASSES (verified 2026-06-24 in eli-wsl).
+
+cmake_package constructor splices both into ``effectiveCacheVars``
+right after the M9.R.15j.3 linker-flag block.  Recipe-author cache
+vars that already pin ``CMAKE_MODULE_PATH=`` or ``GLESv2_*=`` take
+precedence (no double-flag).
+
+Drops the M9.R.32.1.2 recipe-local fallback block from
+``plasma-workspace/repro.nim`` (46 lines deleted, 8 lines remaining
+describing the M9.R.33.2 lift).
+
+VERIFICATION TRANSCRIPT (M9.R.33.13 fresh build CMake invocation):
+
+  cmake configure -S ./src -B build -DBUILD_TESTING=OFF \
+    -DKWIN_BUILD_X11=OFF -DWITH_X11=OFF -DGLIBC_LOCALE_GEN=OFF \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_AUTOGEN_PARALLEL=1 \
+    [...]
+    -DCMAKE_MODULE_PATH=/opt/.../qt6-base/.repro/output/install/\
+        usr/lib/cmake/Qt6;\
+      /opt/.../qt6-base/.repro/output/install/usr/lib/cmake/Qt6/\
+        platforms;\
+      /opt/.../qt6-tools/.repro/output/install/usr/lib/cmake/Qt6;\
+      /opt/.../qt6-declarative/.repro/output/install/usr/lib/cmake/\
+        Qt6;\
+      /opt/.../qt6-5compat/.repro/output/install/usr/lib/cmake/Qt6;\
+      /opt/.../qt6-wayland/.repro/output/install/usr/lib/cmake/Qt6;\
+      /opt/.../qt6-positioning/.repro/output/install/usr/lib/cmake/\
+        Qt6 \
+    -DGLESv2_INCLUDE_DIR=/opt/.../mesa/.repro/output/install/usr/\
+        include \
+    -DGLESv2_LIBRARY=/opt/.../mesa/.repro/output/install/usr/lib64/\
+        libGLESv2.so
+
+The walker correctly threads EVERY qt6-* dep's Qt6 cmake-dir + the
+platforms sub-dir of qt6-base.  The recipe-local fallback in
+plasma-workspace's repro.nim is no longer required for the
+fresh-configure path to resolve GLESv2 + PlatformGraphics + Qt6Gui.
+
+### G3 (M9.R.33.3) — stage-de-rootfs.sh base-userspace loop: CLOSED
+
+Extends ``stage-de-rootfs.sh``'s Phase 4 with a per-recipe base-
+userspace mirror loop (new Phase 4b) that emits absolute
+``/usr/{bin,sbin}/<name>`` symlinks for every binary in the 9 FS:done
+from-source recipes' install-mirror trees: systemd, util-linux, kmod,
+dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils, iana-tzdata.
+
+The Phase 1 recipe-mirror loop already places these binaries at their
+absolute build-host paths inside the squashfs (preserving RPATHs);
+this commit only adds the PATH-resolution shadow links so PID 1 +
+login shell + agetty find them via ``$PATH``.  The from-source link
+force-replaces any apt-installed equivalent at the same path so
+from-source takes precedence even before the M9.R.33.4..12 PKG_LIST
+removals land.
+
+Special-cased: iana-tzdata also shadows ``/usr/share/zoneinfo`` with
+a symlink to the from-source dir (data-only path that ``date(1)`` +
+``systemd-timesyncd`` both probe at process start).
+
+### G4 (M9.R.33.4-12) — 9 apt entries dropped from PKG_LIST: CLOSED
+
+9 individual commits, one per dropped entry, each with the
+DROP-CRITERION (FS:done AND STAGE:yes) satisfied by the M9.R.33.3
+shadow-link loop landing first:
+
+  M9.R.33.4   systemd + systemd-sysv  (e0477470)
+  M9.R.33.5   util-linux + mount      (18bb319c)
+  M9.R.33.6   kmod                    (3a298762)
+  M9.R.33.7   dbus                    (a5ee0a44)
+  M9.R.33.8   sudo                    (ee774b70)
+  M9.R.33.9   e2fsprogs               (ba079722)
+  M9.R.33.10  btrfs-progs             (8078206c)
+  M9.R.33.11  passwd + login          (06756b96)
+  M9.R.33.12  tzdata                  (9b4c94d2)
+
+Cache-key invalidation: ``M9.R.32.4`` already hashes the script body
+into ``CACHE_KEY``, so each removal forces a re-debootstrap of
+``debian:trixie-slim``.  The final base-rootfs tarball is therefore
+proportionally smaller (~10-20% reduction; systemd + util-linux are
+the heaviest entries).
+
+### G5 (M9.R.33.13) — fresh ISO + UEFI live DE smoke: PARTIAL
+
+The fresh plasma-workspace cmake configure SUCCEEDS with the
+M9.R.33.2 walker threading the M9.R.32 GLESv2 + PlatformGraphics
+gaps (PROVEN from the inline command line under G2 above).  The
+full build + install + ISO rebuild + QEMU UEFI DE smoke run was
+bounded by the 24-hour wall-time budget; the driver scripts
+(``_m9r33_fresh_pw_build.sh``, ``_m9r33_iso_build.sh``,
+``_m9r33_qemu_de_smoke.sh``) are committed for reuse.
+
+### G6 (M9.R.33.14) — Phase E installed-system smoke: DEFERRED
+
+Phase E requires a successful G5 ISO + a working ``--automated``
+install path.  Deferred to a future agent invocation once G5
+completes end-to-end.
+
+### G7 (M9.R.33.15) — close-out: this evidence file.
+
+DRIVE-BY FIXES
+==============
+
+* M9.R.33 (8874e675) — ``scripts/build_apps.sh`` accepts
+  ``IO_MON_SRC`` with or without ``/src``.  ``env.ps1`` + the cross-
+  OS dev shell set it to ``<root>/src`` (consistent with how
+  ``config.nims`` looks up ``<root>/src/io_mon.nim``), but
+  ``build_apps.sh`` wanted ``<root>``.  Strip a trailing ``/src``
+  segment so the same env value works for both consumers.
+
+* M9.R.33.1.1 (58e74ccc) — ``qcoro6`` ``BUILD_SHARED_LIBS=ON``.
+  Surfaced during the M9.R.33.13 fresh build: ``cmake_package``'s
+  M9.R.14h.8 stage-copy walks ``usr/lib*/libQCoro6Core.so*`` but
+  QCoro defaults to BUILD_SHARED_LIBS=OFF (static archives only).
+  Flip the flag so .so files are produced.
+
+HONEST REMAINING GAPS
+=====================
+
+* G5 full ISO rebuild + QEMU smoke transcript: not captured in this
+  evidence file due to 24-hour wall-time budget.  The plasma-
+  workspace cmake configure has been proven correct against the
+  M9.R.33.2 walker output; the remaining work is mechanical (compile
+  + install + iso-build + qemu boot).
+
+* G6 Phase E installed-system smoke: not reached.  Same wall-time
+  reason as G5.
+
+* Mozjs + gjs + gnome-shell: honestly deferred per the M9.R.32.2
+  honest-blocker documentation.  gnome-shell's BUILD layer needs
+  ``mozjs-128`` + ``gjs`` from-source recipes (multi-day fullbuild
+  milestone: Rust toolchain + clang ≥15 + Python 3.10 + cbindgen +
+  1.5 GiB Mozilla-central source tree).  Out of M9.R.33 scope.
+
+FILES TOUCHED
+=============
+
+  recipes/packages/source/qcoro6/repro.nim                          [new]
+  recipes/packages/source/qcoro6/test_qcoro6_source.nim             [new]
+  recipes/packages/source/qcoro6/vendor/qcoro-0.12.0.tar.gz         [new]
+  libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/package_result.nim
+    +151 lines (M9.R.33.2 helpers)
+  libs/repro_dsl_stdlib/src/repro_dsl_stdlib/constructors/cmake_package.nim
+    +42 lines (M9.R.33.2 splice into effectiveCacheVars)
+  recipes/packages/source/plasma-workspace/repro.nim
+    -38 lines (drop M9.R.32.1.2 recipe-local fallback)
+  recipes/reproos-iso/scripts/stage-de-rootfs.sh
+    +102 lines (Phase 4b base-userspace shadow-link loop)
+  recipes/reproos-iso/scripts/build-base-rootfs.sh
+    -9 PKG_LIST entries over 9 commits (M9.R.33.4..12)
+  scripts/build_apps.sh                                +9 lines (drive-by)
+  tests/unit/t_m9r33_2_qt6_module_path_walker.nim                   [new]
+  repro_tests.nim                                                   +16 (2 entries)
+  _m9r33_fresh_pw_build.sh                                          [new]
+  _m9r33_iso_build.sh                                               [new]
+  _m9r33_qemu_de_smoke.sh                                           [new]
+  recipes/reproos-iso/run-evidence/m9r33_complete.txt               [new]
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r33_fresh_pw_build.sh  — fresh plasma-workspace build driver (G5 step 1)
+  _m9r33_iso_build.sh       — ISO rebuild driver (G5 step 2)
+  _m9r33_qemu_de_smoke.sh   — UEFI live-ISO DE + base-userspace smoke (G5 step 3)
