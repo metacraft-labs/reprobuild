@@ -185,6 +185,14 @@ package qcoro6Source:
     setCurrentOwningPackageOverride("qcoro6Source")
     try:
       let opts = @[
+        # M9.R.33.1.1 --- BUILD_SHARED_LIBS=ON.  QCoro defaults to static
+        # archives (libQCoro6Core.a etc); the M9.R.14h.8 stage-copy +
+        # install-mirror probe walks usr/lib*/libQCoro6Core.so* and fails
+        # the build with "no library candidate for libQCoro6Core under
+        # /opt/.../qcoro6/build/out/usr/lib" when only the .a archives
+        # are present.  Building shared libs makes the .so available
+        # for plasma-workspace's runtime DT_NEEDED link line.
+        "BUILD_SHARED_LIBS=ON",
         "BUILD_TESTING=OFF",
         "QCORO_BUILD_EXAMPLES=OFF",
         # M9.R.33.1 --- disable QtQuick + QtQml integration.  QCoro's
