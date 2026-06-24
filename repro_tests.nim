@@ -7094,6 +7094,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_runquota_grant_wait_unresponsive.nim",
+    binary: "build/test-bin/t_runquota_grant_wait_unresponsive",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/unit/t_runquota_grant_wait_wedged_connected.nim",
+    binary: "build/test-bin/t_runquota_grant_wait_wedged_connected",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_version.nim",
     binary: "build/test-bin/t_version",
     defines: @[],
