@@ -60,6 +60,10 @@ package cryptsetupSource:
   build:
     setCurrentOwningPackageOverride("cryptsetupSource")
     try:
+      # M9.R.29.9b — disable the optional plugins that pull in libssh /
+      # libfido2 / libpwquality / libpasswdqc / udev. None are needed
+      # for the v1 live-ISO LUKS-via-passphrase installer flow; their
+      # absence keeps configure from hard-erroring at pkg-config.
       let opts = @[
         "--disable-static",
         "--enable-shared",
@@ -67,20 +71,11 @@ package cryptsetupSource:
         "--with-crypto_backend=gcrypt",
         "--disable-nls",
         "--disable-asciidoc",
-        ## ssh-token plugin needs libssh; not required for the v1
-        ## live-ISO installer flow.
         "--disable-ssh-token",
-        ## the FIDO2-token plugin needs libfido2; disable.
         "--disable-fido2-token",
-        ## external pwquality not needed for the installer.
         "--disable-pwquality",
-        ## passwd-quality plugin disable.
         "--disable-passwdqc",
-        ## blkid integration uses util-linux's libblkid; keep enabled.
-        ## udev integration off — the installer runs in initramfs,
-        ## udev cold-plug already ran upstream.
         "--disable-udev",
-        ## skip the test/regress fixture build.
         "--enable-internal-argon2",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
