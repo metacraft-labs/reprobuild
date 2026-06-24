@@ -202,12 +202,17 @@ PKG_LIST=(
   # campaign (TODO M9.R.33).
   #   gdisk            FS:partial STAGE:no
   #   parted           FS:partial STAGE:no
-  #   e2fsprogs        FS:done    STAGE:no  (28 bins+sbins)
+  #
+  # M9.R.33.9 dropped: ``e2fsprogs`` -- FS:done recipe ships 4 binaries
+  # in usr/bin (chattr, lsattr, ...) + 24 in usr/sbin (mke2fs, tune2fs,
+  # fsck.ext2/3/4, dumpe2fs, debugfs, ...); the Phase 4b shadow-link
+  # loop covers them.
+  #
   #   dosfstools       FS:partial STAGE:no
-  #   btrfs-progs      FS:done    STAGE:no  (9 binaries)
+  #   btrfs-progs      FS:done    STAGE:yes (M9.R.33.3 stage loop)
   #   cryptsetup       FS:partial STAGE:no
   #   lvm2             FS:partial STAGE:no
-  gdisk parted e2fsprogs dosfstools btrfs-progs cryptsetup lvm2
+  gdisk parted dosfstools btrfs-progs cryptsetup lvm2
   # Bootloader tools the installer's Phase 5 (system apply) shells
   # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
   #   grub-efi-amd64-bin     FS:none STAGE:no
