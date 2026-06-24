@@ -199,7 +199,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n       " &
           programName &
-      " debug fs-snoop [inspect <depfile> | [options] -- <command> [args...]]\n       " &
+      " debug io monitor [inspect <depfile> | [options] -- <command> [args...]]\n       " &
           programName &
       " debug artifact <path> [--format=text|json]\n       " &
           programName &
@@ -249,8 +249,8 @@ proc renderInternalUsage*(programName: string): string =
     "usage: " & programName & " internal <subcommand> [args...]\n\n" &
     "internal subcommands (role processes; not part of `" & programName &
       " help`):\n" &
-    "  fs-snoop [options] -- <command> [args...]   filesystem-monitor shim " &
-      "(user form: " & programName & " debug fs-snoop)\n" &
+    "  io monitor [options] -- <command> [args...] filesystem-monitor shim " &
+      "(user form: " & programName & " debug io monitor)\n" &
     "  runquota-helper …                           RunQuota lease helper " &
       "(alias of __repro-runquota-helper)\n" &
     "  compile-provider …                          provider-compile helper " &
@@ -995,7 +995,7 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   if sourceRoot.len > 0:
     env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
   # The regeneration edge runs under the automatic fs-snoop monitor
-  # (dependencyPolicy below). ``repro internal fs-snoop`` needs to locate
+  # (dependencyPolicy below). ``repro internal io monitor`` needs to locate
   # librepro_monitor_shim.{so,dylib,dll}; when this action runs daemon-hosted
   # — or the inner ``repro build`` is invoked by the forked CMake, which
   # sanitizes the environment — the shim path is not inherited, so fs-snoop
@@ -3781,11 +3781,11 @@ proc stablePublicCliPath(): string =
 
 # Executable-Consolidation M1: the internal filesystem-monitor shim is no
 # longer a standalone ``repro-fs-snoop`` binary. ``repro`` self-spawns its own
-# image with this subcommand selector (``repro internal fs-snoop …``). The
+# image with this subcommand selector (``repro internal io monitor …``). The
 # executable path is ``getAppFilename()`` (more robust than argv[0]/sibling
 # lookup) and the selector below is prepended by the build engine via
 # ``BuildEngineConfig.monitorCliArgs``.
-const internalFsSnoopArgs* = @["internal", "fs-snoop"]
+const internalFsSnoopArgs* = @["internal", "io", "monitor"]
 
 proc selfSpawnFsSnoopPath(): string =
   ## Path to the running ``repro`` image used to self-spawn the internal
@@ -6482,7 +6482,7 @@ proc parseDevEnvShellArgs(args: openArray[string]): ParsedDevEnvShell =
 proc publicDevEnvFsSnoop(publicCliPath: string):
     tuple[path: string, args: seq[string]] =
   ## Executable-Consolidation M1: the dev-env monitor self-spawns the ``repro``
-  ## image (``internal fs-snoop`` selector returned in ``args``, threaded via
+  ## image (``internal io monitor`` selector returned in ``args``, threaded via
   ## ``DevEnvEdgeConfig.monitorCliArgs``) rather than locating a standalone
   ## ``repro-fs-snoop`` binary. ``REPRO_FS_SNOOP`` is still honored as an
   ## override escape hatch for tests / custom monitor drivers; when set it is a
@@ -9053,7 +9053,7 @@ const
     # ``canonicalVariantAssignments`` / ``loweredGraphCacheKey``), which means
     # ``--release`` would reuse the cached ``debug`` graph.
     "REPRO_VARIANTS",
-    # Monitor-shim lookup override. ``repro internal fs-snoop`` (the
+    # Monitor-shim lookup override. ``repro internal io monitor`` (the
     # automatic-monitor launcher) needs to locate librepro_monitor_shim.{dylib,so}
     # when repro runs against an arbitrary project outside its own build tree;
     # the launchd/systemd-spawned daemon does not inherit the user's shell, so
@@ -22950,9 +22950,9 @@ const internalHelperAliases = {
   # Documented ``repro internal <name>`` spellings (Executable-Consolidation
   # M1) mapped to the historical ``__repro-<name>`` argument forms. The
   # ``__``-prefixed forms remain accepted as compatibility aliases for one
-  # release; both route to the identical handler. ``fs-snoop`` is handled
+  # release; both route to the identical handler. ``io monitor`` is handled
   # separately because it has no ``__repro-`` form (its user-facing spelling
-  # is ``repro debug fs-snoop``).
+  # is ``repro debug io monitor``).
   "runquota-helper": "__repro-runquota-helper",
   "compile-provider": "__repro-compile-provider",
   "compile-profile": "__repro-compile-profile",
@@ -22969,9 +22969,9 @@ proc normalizeInternalArgs(args: seq[string]): seq[string] =
   ## Map ``internal <name> <rest…>`` onto the same argument vector the
   ## ``__repro-<name>`` helper forms use, so the documented ``internal``
   ## namespace and the historical ``__``-prefixed aliases share one set of
-  ## handlers below. Subcommands without a ``__repro-`` equivalent (``fs-snoop``,
-  ## usage/help) are left untouched for the dedicated ``internal`` arm in
-  ## ``runThinApp`` to handle.
+  ## handlers below. Subcommands without a ``__repro-`` equivalent
+  ## (``io monitor``, usage/help) are left untouched for the dedicated
+  ## ``internal`` arm in ``runThinApp`` to handle.
   if args.len >= 1 and args[0] == "internal" and args.len >= 2 and
       internalHelperAliases.hasKey(args[1]):
     result = @[internalHelperAliases[args[1]]]
@@ -23007,24 +23007,25 @@ proc runThinApp*(programName: string): int =
     # proc.
     echo renderUsage(programName)
     return 0
-  # ``internal fs-snoop`` is the canonical self-spawn argv the build
+  # ``internal io monitor`` is the canonical self-spawn argv the build
   # engine's monitor wrapper uses (``getAppFilename() internal
-  # fs-snoop …``). Because the engine prepends those args to
+  # io monitor …``). Because the engine prepends those args to
   # ``getAppFilename()`` — whichever binary is currently running — we
-  # have to dispatch fs-snoop BEFORE the per-program arms below.
+  # have to dispatch the monitor BEFORE the per-program arms below.
   # Otherwise a ``repro-daemon``-hosted build run would route the
   # monitor's self-spawn into ``runUserDaemonCommand``, which only
   # parses daemon-config flags and rejects ``internal`` with
   # ``repro-daemon: unexpected argument: internal`` and exit code 2.
-  # Mirrors ``repro debug fs-snoop``: forward the remaining args to
+  # Mirrors ``repro debug io monitor``: forward the remaining args to
   # the shared fs-snoop CLI.
-  if args.len >= 2 and args[0] == "internal" and args[1] == "fs-snoop":
+  if args.len >= 3 and args[0] == "internal" and args[1] == "io" and
+      args[2] == "monitor":
     let fsArgs =
-      if args.len > 2:
-        args[2 .. ^1]
+      if args.len > 3:
+        args[3 .. ^1]
       else:
         @[]
-    return runFsSnoopCli(programName & " internal fs-snoop", fsArgs)
+    return runFsSnoopCli(programName & " internal io monitor", fsArgs)
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
@@ -23038,7 +23039,7 @@ proc runThinApp*(programName: string): int =
   # ``internal <helper>`` spellings for the role helpers were already rewritten
   # to their ``__repro-<helper>`` argument form by ``normalizeInternalArgs``
   # above, so any ``internal`` argv still reaching here is either an explicit
-  # ``--help`` or an unknown/bare subcommand. (``internal fs-snoop`` was
+  # ``--help`` or an unknown/bare subcommand. (``internal io monitor`` was
   # already routed to the fs-snoop CLI at the top of this proc so any
   # self-spawn from a non-``repro`` binary like ``repro-daemon`` reaches
   # the right handler.) ``repro internal`` is intentionally absent from
@@ -23144,14 +23145,14 @@ proc runThinApp*(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "debug" and
-      args[1] == "fs-snoop":
+  if programName == "repro" and args.len >= 3 and args[0] == "debug" and
+      args[1] == "io" and args[2] == "monitor":
     let fsArgs =
-      if args.len > 2:
-        args[2 .. ^1]
+      if args.len > 3:
+        args[3 .. ^1]
       else:
         @[]
-    return runFsSnoopCli("repro debug fs-snoop", fsArgs)
+    return runFsSnoopCli("repro debug io monitor", fsArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "debug" and
       args[1] == "artifact":
     try:

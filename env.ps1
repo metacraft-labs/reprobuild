@@ -95,6 +95,35 @@ if ($stackableHooksDir) {
     $env:STACKABLE_HOOKS_SRC = Join-Path $stackableHooksDir "src"
 }
 
+# --- io-mon live interpose snoop wiring (Incremental-Test-Runner M8) ----------
+# Make io-mon's standalone `io-mon-snoop` CLI + interpose shim discoverable on
+# PATH / via env when the io-mon sibling is present and built, so the CodeTracer
+# incremental test runner's live read-file capture can resolve them
+# out-of-process. Mirrors codetracer/.envrc + .envrc (POSIX) on the Windows DIY
+# path.
+#
+# TODO(io-mon live interpose, Windows): the Windows capture path uses the
+# CreateRemoteThread + LoadLibraryW injector (io_mon/windows_injector.nim), NOT
+# the POSIX DYLD/LD_PRELOAD env var. This block only seeds discovery of the
+# already-built artifacts; the Windows interpose path itself still needs
+# end-to-end validation under the DIY toolchain (build the shim DLL via
+# `nimble buildShim`, build io-mon-snoop.exe via `nimble buildSnoop`, then
+# confirm a user-binary capture writes a non-empty depfile). Until validated,
+# the runner fails safe to a re-run when the capture is empty/failed.
+$ioMonDir = Test-SiblingRepo -Name "io-mon" -Marker "io_mon.nimble"
+if ($ioMonDir) {
+    $ioMonSnoopExe = Join-Path $ioMonDir "build\bin\io-mon-snoop.exe"
+    if (Test-Path -LiteralPath $ioMonSnoopExe) {
+        $env:IO_MON_SNOOP = $ioMonSnoopExe
+        $env:PATH = (Join-Path $ioMonDir "build\bin") + [IO.Path]::PathSeparator + $env:PATH
+    }
+    $ioMonShimDll = Join-Path $ioMonDir "build\lib\librepro_monitor_shim.dll"
+    if (Test-Path -LiteralPath $ioMonShimDll) {
+        $env:REPRO_MONITOR_SHIM_LIB = $ioMonShimDll
+    }
+    $env:IO_MON_SRC = Join-Path $ioMonDir "src"
+}
+
 # --- 3. Status summary -------------------------------------------------------
 function Get-CommandSource {
     # `repo-workspaces/env.ps1` exposes nim / just / python / gh / repo as

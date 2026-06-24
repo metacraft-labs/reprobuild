@@ -192,7 +192,7 @@ package reprobuild:
   # Executable-Consolidation M1 retired the five placeholder /
   # standalone-fs-snoop entry points (repro-controller, repro-worker,
   # repro-provider-host, repro-hcr-link, repro-fs-snoop); fs-snoop logic is
-  # now reached via `repro internal fs-snoop` / `repro debug fs-snoop`.
+  # now reached via `repro internal io monitor` / `repro debug io monitor`.
   executable repro:
     discard
 

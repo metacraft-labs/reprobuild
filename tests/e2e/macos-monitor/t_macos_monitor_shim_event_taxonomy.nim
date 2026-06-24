@@ -211,9 +211,9 @@ int main(int argc, char **argv) {
       let shimDylib = requireBinary(monitorShimPath(repoRoot),
         "reprobuild.test_fixtures.monitor_shim")
       # Test-Fixtures-In-Build-Graph M3: the standalone fs-snoop driver is now
-      # the graph-built ``build/bin/repro`` reached via ``internal fs-snoop``
+      # the graph-built ``build/bin/repro`` reached via ``internal io monitor``
       # (Executable-Consolidation M1). Assert the artifact exists instead of
-      # compiling a wrapper; the invocation prepends ``internal fs-snoop``.
+      # compiling a wrapper; the invocation prepends ``internal io monitor``.
       let fsSnoopBin = requireBinary(
         repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
         "reprobuild.apps.repro")
@@ -231,7 +231,7 @@ int main(int argc, char **argv) {
       compileFixture(fixtureSource, fixtureBin)
 
       discard requireSuccess(shellCommand([
-        fsSnoopBin, "internal", "fs-snoop",
+        fsSnoopBin, "internal", "io", "monitor",
         "--depfile", depfile,
         "--events", "jsonl",
         "--event-stream", eventsPath,

@@ -83,6 +83,18 @@ proc metadataOps(artifact: DevEnvArtifact; artifactPath = ""): seq[DevEnvShellOp
 
 proc activationOps(artifact: DevEnvArtifact; artifactPath = ""):
     seq[DevEnvShellOp] =
+  # TODO(io-mon live interpose): when a dev-env artifact carries io-mon's
+  # snoop/shim build outputs, the Incremental-Test-Runner M8 live read-file
+  # capture expects $IO_MON_SNOOP (the standalone `io-mon-snoop` CLI), the
+  # binary's dir on PATH, and $REPRO_MONITOR_SHIM_LIB (the interpose shim) to be
+  # part of the activated environment — mirroring codetracer/.envrc (POSIX) and
+  # env.ps1 (Windows DIY). These are emitted via the artifact's own `shellOps`
+  # (deskSetEnv / deskSetPathList) by whatever produces the artifact; this
+  # renderer stays generic. The wiring is plumbed in the shell-level activation
+  # points (`.envrc`, `env.ps1`); the artifact-driven path is left to the
+  # artifact producer. The honest platform gaps (macOS chained-fixups interpose,
+  # Linux LD_PRELOAD validation, Windows CreateRemoteThread path) are tracked in
+  # io-mon/cmd/io_mon_snoop.nim and codetracer/src/ct_test/incremental/io_mon_capture.nim.
   result = artifact.shellOps
   result.add(metadataOps(artifact, artifactPath))
 

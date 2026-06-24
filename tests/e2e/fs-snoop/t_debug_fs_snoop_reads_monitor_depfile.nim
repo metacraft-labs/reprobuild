@@ -243,7 +243,7 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     compileFixture(fixtureSource, fixtureBin)
 
     let fsOutput = requireSuccess(shellCommand([
-      fsSnoopBin, "internal", "fs-snoop",
+      fsSnoopBin, "internal", "io", "monitor",
       "--depfile", depfile,
       "--events", "jsonl",
       "--event-stream", eventsPath,
@@ -281,7 +281,7 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     check countRecordEvents(eventStream) == dep.records.len
 
     let inspectJsonText = requireSuccess(shellCommand([
-      reproBin, "debug", "fs-snoop", "inspect", depfile, "--format", "json"
+      reproBin, "debug", "io", "monitor", "inspect", depfile, "--format", "json"
     ]), repoRoot)
     let inspection = parseJson(inspectJsonText)
     check inspection["summary"]["recordCount"].getInt() == dep.records.len
@@ -292,7 +292,7 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
 
     discard requireSuccess(shellCommand([
       reproBin,
-      "debug", "fs-snoop",
+      "debug", "io", "monitor",
       "--depfile", debugDepfile,
       "--events", "text",
       "--event-stream", debugEventsPath,
