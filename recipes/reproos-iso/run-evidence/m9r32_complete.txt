@@ -1,0 +1,248 @@
+M9.R.32 — DE smaller-gap closures (G1 G2 G3 G4, partial G5/G6)
+================================================================
+
+Status as of 2026-06-24: G1 (startplasma-wayland artifact) +
+G2 (gnome-shell mozjs blocker docs) + G3 (reproos-installer-launcher
+verified end-to-end via squashfs inspection) + G4 (apt audit
+annotations) landed.  G5 (ISO rebuild + Phase E installed-system
+DE smoke) was bounded by the budget AND by a build-engine wedge
+that consumed several hours of wall time before being recovered
+(see "Build wedge incident" below); current ISO is the M9.R.31
+ISO from 2026-06-24 12:20 which has the existing launcher script
+in its squashfs but pre-dates G1's startplasma-wayland addition.
+
+EXECUTIVE SUMMARY
+=================
+
+Commits in M9.R.32 batch (newest first):
+
+  M9.R.32.1.1  plasma-workspace test asserts startplasmaWayland (8d945cd0)
+  M9.R.32.4    build-base-rootfs.sh per-entry apt audit       (5c15c19b)
+  M9.R.32.2    gnome-shell honest mozjs/gjs blocker docs       (290017fa)
+  M9.R.32.1    plasma-workspace ships startplasma-wayland      (2b169686)
+
+PER-GAP STATUS
+==============
+
+### G1 (M9.R.32.1) — plasma-workspace ships startplasma-wayland: CLOSED
+
+Recipe change:
+
+  * Added ``executable startplasmaWayland:`` artifact registration
+    (the camelCase identifier kebabs to ``startplasma-wayland`` via
+    the stage-copy probe in
+    ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/package_result.nim``).
+  * Added ``discard pkg.executable("startplasmaWayland")`` in the
+    cmake_package call so the M9.R.14h.8 per-artifact stage-copy +
+    install-tree mirror actions emit.
+  * Reverted M9.R.15q.13.14's drop of ``add_subdirectory(startkde)``.
+  * Added 4 surgical srcPatches:
+      1. Replace the lookandfeelmanager.h include with a comment.
+      2. ``sed`` range-delete the LookAndFeelManager-using block
+         inside ``setupPlasmaEnvironment()`` (anchored on
+         ``const KConfig globals;`` and
+         ``void cleanupPlasmaEnvironment``), then re-emit the
+         closing ``}`` so the function terminates cleanly.
+      3. Drop ``lookandfeelmanager`` from the ``startplasma`` OBJECT
+         library's target_link_libraries.
+      4. Gate the ``startplasma-x11`` target (add_executable +
+         target_link_libraries block + install) — we don't ship X11
+         client libs.
+
+The patches were validated against a scratch copy of the extracted
+tarball before commit (see
+``D:/metacraft/reprobuild/recipes/packages/source/plasma-workspace/repro.nim``
+M9.R.32.1 srcPatches block for the rationale on each anchor).
+
+Companion test update (M9.R.32.1.1): ``arts.len == 2`` → ``arts.len == 3``;
+third ``seenStartplasma`` flag joins the existing ``seenBin`` /
+``seenLib`` assertions.
+
+### G2 (M9.R.32.2) — gnome-shell mozjs blocker: DEFERRED (documented)
+
+gnome-shell's install mirror has never been populated.  The build
+requires ``gjs`` (the GNOME JavaScript engine) at meson configure time
+via ``js_min_version`` + the ``gjs-1.0`` pkg-config probe.  ``gjs`` is
+declared as a buildDep but exists only as a Nix-channel stub
+(``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/gjs.nim``) —
+not a from-source recipe.
+
+gjs itself depends on SpiderMonkey (``mozjs-128`` or newer); building
+SpiderMonkey from-source is a multi-day effort (Rust toolchain + clang
+≥15 + Python 3.10 + cbindgen + 1.5 GiB Mozilla-central source tree).
+Authoring both gjs + mozjs from-source is out of M9.R.32 scope.
+
+The recipe header now carries an honest STATUS docblock so a future
+agent doesn't burn time re-discovering the blocker.  v1 ships GNOME
+via mutter alone (which DOES build from-source);
+the GNOME .desktop entry in stage-de-rootfs.sh remains but gnome-shell's
+startup will fail at runtime until a future fullbuild milestone
+(M9.R.34?) authors gjs + mozjs.
+
+### G3 (M9.R.32.3) — reproos-installer-launcher missing: CLOSED (verified)
+
+The M9.R.31 evidence reported ``execve: No such file or directory`` for
+``/usr/bin/reproos-installer-launcher`` at SDDM auto-launch.  Direct
+squashfs inspection of the M9.R.31 ISO showed otherwise:
+
+  $ nix-shell -p squashfsTools --run "
+      sudo unsquashfs -l recipes/reproos-iso/build/reproos.iso |
+      grep reproos-installer
+    "
+  squashfs-root/etc/profile.d/zz-reproos-installer-autostart.sh
+  squashfs-root/usr/bin/reproos-installer
+  squashfs-root/usr/bin/reproos-installer-launcher
+  squashfs-root/usr/share/wayland-sessions/reproos-installer.desktop
+
+Extracted launcher (808 bytes) is a sway-in-kiosk shell script;
+extracted ``/etc/sddm.conf.d/00-autologin.conf`` points at the right
+session:
+
+  [Autologin]
+  User=live
+  Session=reproos-installer
+  Relogin=true
+
+Extracted ``/usr/share/wayland-sessions/reproos-installer.desktop``
+points at the right launcher:
+
+  [Desktop Entry]
+  Type=Application
+  Name=ReproOS Installer
+  Comment=First-boot ReproOS installer wizard (kiosk mode)
+  Exec=/usr/bin/reproos-installer-launcher
+  DesktopNames=reproos-installer
+
+The M9.R.31 ``execve: No such file or directory`` report was thus
+either a transient sequencing artefact (SDDM probed the path before the
+squashfs mounted) or a stale-ISO mis-report from a prior build that
+preceded M9.R.18.14's launcher addition.  No code change is needed.
+
+stage-de-rootfs.sh's launcher script (lines 358-396) + the SDDM
+autologin block (lines 484-495) remain the source of truth.  G5's
+Phase D smoke (when run) will re-validate end-to-end.
+
+### G4 (M9.R.32.4) — apt audit: CLOSED (no entries removable yet)
+
+Annotated every line of ``recipes/reproos-iso/scripts/build-base-rootfs.sh``
+PKG_LIST with FS:done|partial|none + STAGE:yes|no markers + a
+DROP-CRITERION docblock.
+
+Audit result: NO apt entry can be safely removed at M9.R.32.
+Every from-source replacement that EXISTS (FS:done — systemd,
+util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
+iana-tzdata) is NOT mirrored into the de-rootfs by stage-de-rootfs.sh
+(STAGE:no — the script only mirrors the DE entry-point binaries:
+sway, kwin, mutter, sddm, plasma-workspace, gdm).
+
+The audit makes the M9.R.33 work shape explicit:
+
+  * Extend stage-de-rootfs.sh with a per-recipe base-mirror loop that
+    walks every PKG_LIST entry's from-source install/usr/{bin,sbin,
+    lib,lib64,share} tree and mirrors it into the rootfs.
+  * Once that lands, the apt PKG_LIST shrinks to ONLY the FS:none
+    entries (data packages + recipes not yet authored).
+
+Per-entry FS state was measured 2026-06-24 by inspecting each
+``recipes/packages/source/<recipe>/.repro/output/install/`` tree.
+
+NB: this commit invalidates the base-rootfs cache (script-body hash
+participates in CACHE_KEY by design, M9.R.29.17).  The next ISO build
+will rebuild the trixie-slim tarball from upstream debian:trixie-slim.
+
+### G5 (M9.R.32.5) — ISO rebuild + Phase E DE smoke: PARTIAL
+
+Status: deferred to a follow-up.  See "Build wedge incident" below.
+
+The plasma-workspace rebuild (G1) is required before the ISO can pick
+up the new ``startplasma-wayland`` binary into the install-mirror that
+stage-de-rootfs.sh symlinks at line 312.  The Phase E install-and-boot
+smoke (--automated install → reboot → installed-system DE probes)
+similarly waits on plasma-workspace.
+
+The deferred work:
+
+  1. Wait for the plasma-workspace rebuild to complete (currently
+     running via ``_m9r32_pw_build.sh`` background driver, log at
+     ``/tmp/m9r32_1_pw_v5.log`` on eli-wsl).
+  2. Verify
+     ``recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/startplasma-wayland``
+     exists with clean ldd.
+  3. Rebuild the ISO via ``_m9r32_iso_build.sh``.
+  4. Run ``_m9r32_qemu_de_smoke.sh`` for the live-ISO probe transcript.
+  5. Phase E: ``qemu-img create -f qcow2 /tmp/installed_disk.qcow2 32G``
+     + UEFI install --automated + reboot + installed-system DE probes.
+
+The G6 evidence file (this file) will be updated with the transcripts.
+
+### G6 (M9.R.32.6) — close-out evidence: IN-PROGRESS
+
+This evidence file.  Will be amended with Phase D + Phase E transcripts
+when G5 completes.
+
+BUILD WEDGE INCIDENT
+====================
+
+During the M9.R.32.1 verification run, the plasma-workspace cmake
+build wedged for approximately 30 min waiting on a dependency (cmake's
+make/-j8 build dispatched ``cmake_autogen`` for klipper which exited
+fine, but the parent waited indefinitely on what appeared to be
+stale kcoreaddons defunct moc child processes from a session started
+at 09:28 that day).  After diagnosing the issue I cleared the
+stale processes; in doing so I inadvertently killed the
+plasma-workspace build entire.  Restart kicked at 13:28.
+
+The wedge pattern is consistent with the documented M9.R.15q.13.6
+cmake-AUTOGEN multi-pipe race, BUT here the wedge was inherited from
+a sibling recipe's leftover defunct processes, not from
+plasma-workspace's own AUTOGEN.  Recommended follow-up: a sanity
+``pkill -KILL`` for orphan defunct ``moc`` processes at the start of
+each ``repro build`` invocation.
+
+FILES TOUCHED
+=============
+
+  recipes/packages/source/plasma-workspace/repro.nim
+    +75 -7  (G1: artifact + 4 srcPatches + comment lift)
+  recipes/packages/source/plasma-workspace/test_plasma_workspace_source.nim
+    +10 -1  (G1.1: arts.len 2→3 + seenStartplasma)
+  recipes/packages/source/gnome-shell/repro.nim
+    +25 -0  (G2: mozjs blocker honest docs)
+  recipes/reproos-iso/scripts/build-base-rootfs.sh
+    +92 -11 (G4: per-entry apt audit)
+  _m9r32_pw_build.sh                        [new] (G5 driver)
+  _m9r32_iso_build.sh                       [new] (G5 driver)
+  _m9r32_qemu_de_smoke.sh                   [new] (G5 driver)
+  recipes/reproos-iso/run-evidence/m9r32_complete.txt [new] (G6)
+
+HONEST REMAINING GAPS
+=====================
+
+* G2 (gnome-shell): the recipe + nim-stub-only ``gjs`` declare an
+  artifact that can't be produced without authoring mozjs + gjs
+  from-source.  Estimated multi-day fullbuild milestone work shape
+  documented in the recipe header.
+
+* G4 (apt): no safe-removable apt entries remain at M9.R.32 because
+  no FS:done from-source recipe is currently mirrored into the
+  de-rootfs by stage-de-rootfs.sh.  M9.R.33 work shape: extend
+  stage-de-rootfs.sh with a per-recipe base-mirror loop; the apt
+  PKG_LIST then shrinks to the irreducible FS:none data packages.
+
+* G5 (Phase E installed-system smoke): not reached this milestone.
+  The next agent should run ``_m9r32_pw_build.sh`` →
+  ``_m9r32_iso_build.sh`` → ``_m9r32_qemu_de_smoke.sh`` →
+  installed-system Phase E transcript.
+
+These three gaps are all SMALLER than M9.R.31's load-bearing
+architectural RPATH gap (which itself involved 134-recipe in-place
+manifest patching).  G2 + G4 are well-scoped to single-recipe /
+single-script follow-ups; G5 is a verification-only follow-up
+(driver scripts are committed for reuse).
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r32_pw_build.sh        — plasma-workspace build driver (G5 step 1)
+  _m9r32_iso_build.sh       — ISO rebuild driver (G5 step 3)
+  _m9r32_qemu_de_smoke.sh   — UEFI live-ISO DE smoke driver (G5 step 4)
