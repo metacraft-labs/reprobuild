@@ -200,6 +200,22 @@ type
       ## value; the engine then mixes it into the canonical key
       ## bytes so two ``targetTriple`` resolutions produce two
       ## distinct entry-key hexes for the same recipe.
+    requiresElevation*: bool
+      ## Windows-System-Resources Phase E. Marks an action edge whose
+      ## execution must cross the privileged-operation broker. When
+      ## ``true`` AND the engine's
+      ## ``BuildEngineConfig.brokerSpawn`` hook is non-nil, the
+      ## scheduler's pre-launch decision point hands the action's
+      ## argv + env + cwd to the broker (via a ``pokInlineExecCall``
+      ## typed operation, built inside the wired closure) instead of
+      ## forking directly. ``false`` (the default) keeps the legacy
+      ## direct-fork path, so every pre-Phase-E action is byte-
+      ## identical to today. When ``true`` AND ``brokerSpawn`` is
+      ## ``nil`` the engine FAILS CLOSED inside ``runBuild`` with a
+      ## ``BuildEngineError`` — no silent fallback to a non-elevated
+      ## direct fork. The DSL's ``BuildActionDef.requiresElevation``
+      ## field propagates here through ``lowerGraphAction`` so the
+      ## engine consumes the same flag the build-graph author set.
 
   BuildPool* = object
     name*: string
@@ -313,6 +329,24 @@ type
       ## fixtures that construct a ``BuildEngineConfig`` via
       ## ``defaultBuildEngineConfig`` get a ``nil`` resolver, which
       ## is the desired pre-M9.R.7-equivalent behaviour.
+    brokerSpawn*: ElevatedExecSpawner
+      ## Windows-System-Resources Phase E. Optional broker-spawn
+      ## closure consulted at the pre-launch decision point when a
+      ## ``BuildAction.requiresElevation`` flag is set. When non-nil
+      ## the engine packages the action's argv + cwd + env into an
+      ## ``ElevatedExecRequest`` and delegates the fork to the
+      ## broker; the returned ``ElevatedExecResult`` is projected
+      ## back into the action's ``ActionResult`` so the cache layer
+      ## treats the elevated execution byte-identically to a direct
+      ## fork. When ``nil`` AND a ``requiresElevation = true`` edge
+      ## is encountered, ``runBuild`` FAILS CLOSED with a
+      ## ``BuildEngineError`` — the engine MUST NOT silently fall
+      ## back to a non-elevated direct fork. The CLI's
+      ## ``repro infra apply`` path wires a closure that funnels
+      ## the request through ``repro_elevation.dispatchOperation``;
+      ## the standalone ``repro build`` driver leaves the field
+      ## ``nil`` so an inadvertent elevated edge surfaces with the
+      ## spec-mandated diagnostic instead of running.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -479,6 +513,76 @@ type
     ## standard-provider / CLI binding layer (reading the
     ## ``REPRO_BINARY_CACHE_*`` env vars + calling
     ## ``publishInProcess``).
+
+  ElevatedExecRequest* = object
+    ## Windows-System-Resources Phase E. Passed to the
+    ## ``brokerSpawn`` hook when the engine encounters a
+    ## ``requiresElevation = true`` build edge. Decoupled by a struct
+    ## value so the engine stays free of a hard ``repro_elevation``
+    ## dependency — the broker-spawning closure (wired by
+    ## ``repro_cli_support`` / ``repro infra apply``) constructs a
+    ## ``pokInlineExecCall`` ``PrivilegedOperation`` from this
+    ## request, dispatches it through the broker, and projects the
+    ## ``DispatchResult`` back into an ``ElevatedExecResult``.
+    ##
+    ## Fields (engine-populated, all verbatim from the build edge):
+    ##   * ``actionId`` — ``BuildAction.id`` for diagnostics and the
+    ##     ``PrivilegedOperation.address`` the hook stamps onto the
+    ##     constructed operation.
+    ##   * ``argv`` — argv[0] + argv[1..]. The literal
+    ##     ``@FILE:<path>`` tokens are preserved here (the broker side
+    ##     re-expands them under elevation, matching spec §2.1).
+    ##     ``argv[0]`` becomes ``iecExecutable``; the rest become
+    ##     ``iecArguments``.
+    ##   * ``cwd`` — ``BuildAction.cwd``; empty means "broker's cwd at
+    ##     fork time", same convention as ``pokInlineExecCall``.
+    ##   * ``env`` — the action's ``env`` list (``NAME=VALUE`` shape)
+    ##     passed straight through to ``iecEnvironment``.
+    actionId*: string
+    argv*: seq[string]
+    cwd*: string
+    env*: seq[string]
+
+  ElevatedExecResult* = object
+    ## Returned by the ``brokerSpawn`` hook. The engine projects this
+    ## into the action's ``ActionResult`` (exit code, stdout/stderr,
+    ## status) so the cache layer + downstream consumers see the same
+    ## shape they would see from a direct fork.
+    ##
+    ##   * ``ok``       — true when the broker reported the operation
+    ##                    as ``applied`` (or ``no-op``); false when the
+    ##                    broker reported drift or driver failure.
+    ##   * ``exitCode`` — the elevated process's exit code as captured
+    ##                    by ``runInlineExecCall``. ``0`` when the
+    ##                    operation succeeded inside the spec's
+    ##                    ``iecAcceptExitCodes`` set.
+    ##   * ``stdout`` / ``stderr`` — the captured tails; the broker
+    ##                    side merges stderr into stdout (see
+    ##                    ``runInlineExecCall``), so ``stderr`` is
+    ##                    typically empty and the operator reads
+    ##                    everything from ``stdout``.
+    ##   * ``diagnostic`` — empty on success; on failure the broker's
+    ##                    rendered ``DispatchResult.detail``.
+    ok*: bool
+    exitCode*: int
+    stdout*: string
+    stderr*: string
+    diagnostic*: string
+
+  ElevatedExecSpawner* = proc(req: ElevatedExecRequest):
+    ElevatedExecResult {.gcsafe, closure.}
+    ## Windows-System-Resources Phase E. The engine's seam to the
+    ## privileged-operation broker. When ``nil`` (the default) every
+    ## ``requiresElevation = true`` build edge FAILS CLOSED inside
+    ## ``runBuild`` with a ``BuildEngineError`` — the engine NEVER
+    ## silently spawns an elevation-required edge under the
+    ## non-elevated path. ``repro infra apply`` wires a non-nil
+    ## closure that constructs the matching ``pokInlineExecCall``
+    ## ``PrivilegedOperation`` and runs it through
+    ## ``repro_elevation.dispatchOperation``; the standalone
+    ## ``repro build`` driver leaves the field ``nil`` so an
+    ## inadvertent elevated edge on a non-infra-apply path surfaces
+    ## with the spec-mandated diagnostic instead of running.
 
   ResolvedToolIdentity* = object
     ## M9.N Batch B. Opaque engine-side view of the catalog's
@@ -731,7 +835,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
-             env: openArray[string] = []): BuildAction =
+             env: openArray[string] = [];
+             requiresElevation = false): BuildAction =
   let effectiveDependencyPolicy =
     if depfile.len > 0 and monitorDepfile.len == 0 and
         dependencyPolicy.kind == dgAutomaticMonitor:
@@ -759,7 +864,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
-    dependencyPolicy: effectiveDependencyPolicy)
+    dependencyPolicy: effectiveDependencyPolicy,
+    requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     deps: openArray[string] = [];
@@ -3572,6 +3678,129 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idx].wouldLaunch = true
           completeSuccess(id, asWouldRun, runResult.results[idx].cacheDecision,
             false, reason)
+          inc completed
+          launchedAny = true
+          continue
+
+        # Windows-System-Resources Phase E — the pre-launch broker-
+        # dispatch decision point. This branch sits BEFORE the
+        # ``monitoredAction`` / RunQuota launch sites because an
+        # elevated edge:
+        #   * is a one-shot side-effecting spawn (no monitor depfile);
+        #   * never goes through RunQuota (the broker is the resource
+        #     boundary, not runquotad);
+        #   * still flows through the cache layer above — an elevated
+        #     edge that hits the action cache returned earlier at
+        #     ``aclHit`` and never reaches this point.
+        # When ``brokerSpawn`` is nil we FAIL CLOSED here rather than
+        # silently fall through to the legacy direct-fork path: a
+        # ``requiresElevation`` edge that runs unelevated is a far
+        # worse outcome than a clear diagnostic that points the
+        # operator at ``repro infra apply``.
+        if action.requiresElevation:
+          if config.brokerSpawn == nil:
+            raiseEngine(
+              "requiresElevation set but brokerSpawn not configured: " &
+                action.id &
+                " (this build edge must be dispatched via " &
+                "`repro infra apply` so the privileged-operation " &
+                "broker can fork it; the standalone `repro build` " &
+                "driver leaves the broker hook unset by design)")
+          let elevatedStart = statStart()
+          let req = ElevatedExecRequest(
+            actionId: action.id,
+            argv: action.argv,
+            cwd: action.cwd,
+            env: action.env)
+          var brokerOutcome: ElevatedExecResult
+          var brokerFailure = ""
+          try:
+            brokerOutcome = config.brokerSpawn(req)
+          except CatchableError as err:
+            brokerFailure = err.msg
+          finishStat("repro broker dispatch", elevatedStart)
+          let idx = idToIndex.resultIndex(id)
+          let previousCacheDecision = runResult.results[idx].cacheDecision
+          if brokerFailure.len > 0:
+            runResult.results[idx] = ActionResult(
+              id: id,
+              status: asFailed,
+              exitCode: 1,
+              launched: true,
+              cacheDecision: previousCacheDecision,
+              dependencyPolicyKind: action.dependencyPolicy.kind,
+              stderr: "broker dispatch raised: " & brokerFailure,
+              runQuotaBackend: "broker")
+            statuses[id] = asFailed
+            runResult.trace(id, "failed", "broker dispatch raised")
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
+          let status =
+            if brokerOutcome.ok and brokerOutcome.exitCode == 0:
+              asSucceeded
+            else: asFailed
+          runResult.results[idx] = ActionResult(
+            id: id,
+            status: status,
+            exitCode: brokerOutcome.exitCode,
+            launched: true,
+            cacheDecision:
+              if action.cacheable and previousCacheDecision == cdNotCacheable:
+                cdMiss
+              else: previousCacheDecision,
+            dependencyPolicyKind: action.dependencyPolicy.kind,
+            stdout: brokerOutcome.stdout,
+            stderr:
+              if brokerOutcome.stderr.len > 0: brokerOutcome.stderr
+              else: brokerOutcome.diagnostic,
+            runQuotaBackend: "broker")
+          statuses[id] = status
+          if status == asSucceeded:
+            invalidateCachedOutputs(action)
+            let evidenceStart = statStart()
+            let evidence = collectEvidence(action, strict = true)
+            finishStat("repro evidence collect", evidenceStart)
+            runResult.results[idx].evidence = evidence.evidence
+            if not evidence.publishable:
+              runResult.results[idx].status = asFailed
+              runResult.results[idx].stderr =
+                evidence.evidence.diagnostics.join("\n")
+              statuses[id] = asFailed
+              runResult.trace(id, "failed", "dependency evidence invalid")
+              blockClosure(id, id)
+              emitProgress(bpkActionCompleted, id)
+              completed = terminalCount()
+              launchedAny = true
+              continue
+            invalidateCachedWrites(action, evidence.evidence)
+            if action.cacheable:
+              let recordStart = statStart()
+              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
+                config.peerCacheActionPublisher != nil or
+                (config.binaryCachePublisher != nil and
+                  action.publishToBinaryCache)
+              let record = cache.recordActionResult(cas,
+                action.weakFingerprint,
+                action.actionCachePolicy,
+                action.cacheInputPaths(evidence.evidence),
+                action.outputs, action.cwd,
+                storeOutputBlobs = storeOutputBlobs,
+                metadataCache = addr fileMetadataCache)
+              finishStat("repro cache record", recordStart)
+              writeActionResultRecordFile(
+                dependencyEvidencePath(cacheRoot, action.id), record)
+              publishPeerCacheBundle(action.weakFingerprint, record)
+              publishBinaryCacheBundle(action, record)
+            completeSuccess(id, asSucceeded,
+              runResult.results[idx].cacheDecision, true, "elevated")
+          else:
+            runResult.trace(id, "failed",
+              "exit=" & $brokerOutcome.exitCode)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
           inc completed
           launchedAny = true
           continue

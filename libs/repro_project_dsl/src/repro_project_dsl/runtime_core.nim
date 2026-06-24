@@ -170,7 +170,15 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 18'u16
+  BuildActionPayloadVersion = 19'u16
+    ## v19: Windows-System-Resources Phase E — appends a single
+    ## ``requiresElevation`` sentinel byte (0/1) carrying the new edge
+    ## attribute that routes elevated edges through the privileged
+    ## broker instead of the engine's direct fork path. v18-and-
+    ## earlier payloads decode with ``requiresElevation = false`` so
+    ## every legacy artefact takes the non-elevated fork path —
+    ## byte-identical engine behaviour to today.
+    ##
     ## v17: M9.N Batch B — appends a length-prefixed string array of
     ## ``BuildAction.toolIdentityRefs`` so the engine can resolve each
     ## referenced tool through the catalog at fork time and prepend
@@ -790,7 +798,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   env: openArray[(string, string)] = [];
                   publishToBinaryCache = false;
                   cacheEntryIdentity = none(CacheEntryIdentity);
-                  toolIdentityRefs: openArray[string] = []):
+                  toolIdentityRefs: openArray[string] = [];
+                  requiresElevation = false):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -814,6 +823,14 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## at fork time and prepends the resolved binary directory to the
   ## action's PATH. Empty (the default) keeps legacy behaviour where
   ## the action's argv must reference absolute paths.
+  ##
+  ## ``requiresElevation`` (Windows-System-Resources Phase E): when
+  ## ``true`` marks the edge as one whose execution must cross the
+  ## privileged-operation broker — the engine's
+  ## ``reprobuild.builtin.exec`` lowering packages the action into a
+  ## ``pokInlineExecCall`` ``PrivilegedOperation`` instead of forking
+  ## directly. ``false`` (the default) preserves the existing direct-
+  ## fork path so every legacy edge is byte-identical to today.
   result = BuildActionDef(
     id: id,
     call: call,
@@ -832,7 +849,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     env: @env,
     publishToBinaryCache: publishToBinaryCache,
     cacheEntryIdentity: cacheEntryIdentity,
-    toolIdentityRefs: @toolIdentityRefs)
+    toolIdentityRefs: @toolIdentityRefs,
+    requiresElevation: requiresElevation)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -1889,6 +1907,11 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   payload.writeU32Le(uint32(action.toolIdentityRefs.len))
   for refName in action.toolIdentityRefs:
     payload.writeString(refName)
+  # v19: Windows-System-Resources Phase E — a single sentinel byte
+  # carrying the ``requiresElevation`` edge attribute. v18-and-earlier
+  # payloads decode with ``false`` so the engine's exec lowering
+  # continues to fork every legacy edge directly.
+  payload.writeByte(if action.requiresElevation: 1'u8 else: 0'u8)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1905,7 +1928,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      BuildActionPayloadVersion}:
+      17'u16, 18'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -1992,6 +2015,23 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
       result.toolIdentityRefs[i] = readString(bytes, pos)
   else:
     result.toolIdentityRefs = @[]
+  if version >= 19'u16:
+    # Windows-System-Resources Phase E v19: ``requiresElevation``
+    # sentinel byte. Strict 0-or-1; anything else fails closed so a
+    # mutation / encoding-drift surfaces as a structured payload error
+    # instead of silently picking a default — matches the strictness
+    # the v16 publish + identity sentinel bytes use.
+    let elevByte = readByte(bytes, pos)
+    if elevByte > 1'u8:
+      raisePayload("invalid requiresElevation sentinel in build " &
+        "action payload")
+    result.requiresElevation = elevByte == 1'u8
+  else:
+    # v18-and-earlier payloads predate the Phase E edge attribute;
+    # legacy artefacts decode with ``requiresElevation = false`` so
+    # the engine's exec lowering keeps every legacy edge on the
+    # direct-fork path.
+    result.requiresElevation = false
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

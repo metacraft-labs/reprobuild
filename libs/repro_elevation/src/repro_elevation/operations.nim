@@ -20,6 +20,7 @@
 
 import std/[strutils]
 
+import ./errors
 import ./os_system_parse
 import ./posix_system_parse
 import ./system_value
@@ -330,6 +331,29 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokInlineExecCall = "reprobuild.inlineExecCall"
+      ## Windows-System-Resources Phase E: the cross-cutting privileged
+      ## execution of an `inlineExecCall(...)` build-graph edge tagged
+      ## `requiresElevation = true`. Unlike the per-resource typed kinds
+      ## above, this one carries the literal argv + tool refs + env the
+      ## build engine produced for the edge; the broker is asked to
+      ## spawn the process *as authored* (no per-resource convergence /
+      ## observe / drift). This is the build-engine's hand-off to the
+      ## broker for edges that mutate system state — the engine handles
+      ## input hashing / output caching as usual; the broker handles the
+      ## elevated fork only.
+      ##
+      ## Closed-set posture: `iecExecutable` is a closed string (no NUL
+      ## byte / control character); each `iecArguments` entry is also
+      ## NUL-free; `iecEnvironment` entries must match the
+      ## `NAME=VALUE` shape. The `@FILE:<path>` argv substitution is
+      ## applied AT EXEC TIME (the plan stores the literal token, the
+      ## audit log records `<arg redacted: read from <path>>` instead
+      ## of the substituted bytes). The closed-set guard fires on the
+      ## literal `@FILE:<path>` form — a malformed token (`@FILE:`
+      ## with no payload, or a relative path) is rejected at the
+      ## codec boundary; a missing / unreadable file at exec time
+      ## raises `EProtocol("@FILE: not found")`.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -759,6 +783,42 @@ type
       fsbFhsTreeRoots*: seq[string]
       fsbArgv*: seq[string]
       fsbDestroy*: bool
+    of pokInlineExecCall:
+      ## Windows-System-Resources Phase E: the elevated execution of a
+      ## `requiresElevation = true` `inlineExecCall(...)` build edge.
+      ##
+      ## * `iecExecutable`        — argv[0]; the program the broker
+      ##                            spawns. NUL bytes are refused at the
+      ##                            codec boundary; empty is refused by
+      ##                            the validator.
+      ## * `iecArguments`         — argv[1..]; each entry passes through
+      ##                            the `@FILE:<path>` expander at the
+      ##                            moment of execution (the plan stores
+      ##                            the literal token).
+      ## * `iecWorkingDirectory`  — optional cwd; empty means "broker's
+      ##                            cwd at fork time."
+      ## * `iecEnvironment`       — list of `NAME=VALUE` strings the
+      ##                            broker prepends to the spawned
+      ##                            process's environment.
+      ## * `iecToolIdentityRefs`  — names of `uses:` tools the build
+      ##                            engine resolved on the apply side;
+      ##                            carried through to the broker so its
+      ##                            PATH-prepending hook (mirror of the
+      ##                            engine's `toolIdentityResolver`) can
+      ##                            still find the right binaries.
+      ## * `iecAcceptExitCodes`   — closed set of exit codes the broker
+      ##                            should treat as success. Default
+      ##                            `@[0]`; a longer list lets a profile
+      ##                            opt into e.g. `@[0, 3010]` (the
+      ##                            "operation succeeded; reboot
+      ##                            required" code Windows installers
+      ##                            return).
+      iecExecutable*: string
+      iecArguments*: seq[string]
+      iecWorkingDirectory*: string
+      iecEnvironment*: seq[string]
+      iecToolIdentityRefs*: seq[string]
+      iecAcceptExitCodes*: seq[int]
 
 # ---------------------------------------------------------------------------
 # linux.fhsSandbox — closed-set charset / shape helpers.
@@ -810,6 +870,153 @@ proc containsNul*(s: string): bool =
   return false
 
 # ---------------------------------------------------------------------------
+# Windows-System-Resources Phase E — `@FILE:<path>` argv preprocessor.
+#
+# Every `inlineExecCall(...)` argv entry is screened at execution time:
+# a token of the form `@FILE:<path>` is replaced by the trimmed
+# contents of `<path>`. The plan stores the literal `@FILE:...` (no
+# secret baked into the plan); the audit log records the substitution
+# as `<arg redacted: read from <path>>` so secrets never leak to logs.
+#
+# This helper lives in `repro_elevation` so both the broker dispatch
+# path (`pokInlineExecCall`) and the build engine's non-elevated exec
+# lowering (`reprobuild.builtin.exec`) call the same pure function —
+# the spec mandates identical semantics on both paths.
+# ---------------------------------------------------------------------------
+
+const ArgFilePrefix* = "@FILE:"
+  ## The literal prefix the argv preprocessor recognises. Spec-fixed.
+
+proc isArgFileToken*(arg: string): bool =
+  ## True when `arg` literally starts with the `@FILE:` prefix. Does
+  ## NOT validate the payload — that is the validator's / expander's
+  ## job; this is the cheap branch the lowering uses to skip ordinary
+  ## arguments. A bare `@FILE:` (no payload) IS classified as a token
+  ## here so the validator / expander catches it (it would otherwise
+  ## fall through unmolested as if it were an ordinary argument).
+  arg.len >= ArgFilePrefix.len and arg.startsWith(ArgFilePrefix)
+
+proc argFilePath*(arg: string): string =
+  ## Return the `<path>` portion of an `@FILE:<path>` token, or "" if
+  ## `arg` is not a well-formed token. Pure — used by the validator
+  ## and the expander.
+  if not isArgFileToken(arg):
+    return ""
+  result = arg[ArgFilePrefix.len .. ^1]
+
+proc isAbsoluteArgFilePath*(p: string): bool =
+  ## Closed-set defence-in-depth: the spec doesn't pin the syntactic
+  ## form, but the expander rejects RELATIVE `@FILE:<path>` tokens at
+  ## apply time. "Absolute" here is the cross-platform union: POSIX
+  ## leading `/` OR Windows drive-letter `X:\\...` / `X:/...`. The
+  ## helper is a documented decision (see the `@FILE:` validator
+  ## branch below) so a profile author who tries `@FILE:secret.tok`
+  ## from a non-deterministic cwd is refused at the codec boundary
+  ## with a clear diagnostic.
+  if p.len == 0:
+    return false
+  if p[0] == '/':
+    return true
+  if p.len >= 3 and p[1] == ':' and (p[2] == '\\' or p[2] == '/'):
+    return true
+  return false
+
+proc argFileTokenError*(arg: string): string =
+  ## Returns "" when the token is well-formed, otherwise a human
+  ## diagnostic the validator turns into `EProtocol`. Rejects:
+  ##
+  ##   * `@FILE:`              — empty payload, no path supplied.
+  ##   * `@FILE:rel/path`      — relative path; the broker's cwd is
+  ##                             not a guaranteed identity, so a
+  ##                             relative path is non-deterministic.
+  ##   * `@FILE:<…NUL…>`       — NUL byte in the path; `open` /
+  ##                             `readFile` would refuse it and the
+  ##                             ensuing error is inscrutable.
+  ##
+  ## Callers that hold a non-token argv entry MUST NOT call this —
+  ## use `isArgFileToken` to dispatch first.
+  if not isArgFileToken(arg):
+    return "argument '" & arg & "' is not an @FILE:<path> token"
+  let path = argFilePath(arg)
+  if path.len == 0:
+    return "@FILE: token has an empty path (expected @FILE:<path>)"
+  if containsNul(path):
+    return "@FILE: token path contains a NUL byte (refused — open(2) " &
+      "would reject it)"
+  if not isAbsoluteArgFilePath(path):
+    return "@FILE: token path '" & path & "' is not absolute — " &
+      "relative paths are refused because the broker's cwd is not a " &
+      "stable identity (use a POSIX absolute path or a Windows " &
+      "drive-letter form)"
+  return ""
+
+proc expandArgFileToken*(arg: string;
+                         readPath: proc (path: string): string): string =
+  ## Substitute a SINGLE `@FILE:<path>` token. Non-token args are
+  ## returned unchanged. The `readPath` injection lets the broker
+  ## thread its own filesystem-backed reader; tests inject a pure
+  ## table-backed reader so the substitution semantics are exercised
+  ## cross-platform without a real disk.
+  ##
+  ## Semantics:
+  ##   * the trailing `\r` / `\n` of the file contents is stripped
+  ##     (the spec calls for "trimmed contents"; trailing CR/LF is the
+  ##     common case for text-file secrets);
+  ##   * an empty file (after the trim) substitutes to an empty arg —
+  ##     the downstream command decides whether that is valid;
+  ##   * `readPath` failures and missing files raise `EProtocol(
+  ##     "@FILE: not found at <path>: <reason>")` — the spec is
+  ##     explicit on the diagnostic.
+  if not isArgFileToken(arg):
+    return arg
+  let path = argFilePath(arg)
+  # Well-formed token guard. The codec-time validator already rejects
+  # malformed tokens, but defence-in-depth: we re-check here so a
+  # call-site that bypassed the codec (in-process construction) still
+  # fails closed.
+  let tokenErr = argFileTokenError(arg)
+  if tokenErr.len > 0:
+    raiseProtocol("@FILE: " & tokenErr)
+  var contents: string
+  try:
+    contents = readPath(path)
+  except IOError as e:
+    raiseProtocol("@FILE: not found at '" & path & "': " & e.msg)
+  except OSError as e:
+    raiseProtocol("@FILE: not found at '" & path & "': " & e.msg)
+  # Strip a trailing newline (and CR) — the trimming the spec calls
+  # out. Leading whitespace is preserved (a leading space in a token
+  # file is presumably load-bearing).
+  while contents.len > 0 and
+        (contents[contents.high] == '\n' or contents[contents.high] == '\r'):
+    contents.setLen(contents.len - 1)
+  result = contents
+
+proc expandArgFiles*(argv: openArray[string];
+                     readPath: proc (path: string): string): seq[string] =
+  ## Run the `@FILE:` expander across an entire argv. The order of
+  ## entries is preserved; non-token args pass through unchanged.
+  ## Used by both the broker dispatch path (`pokInlineExecCall`) and
+  ## the engine's non-elevated `reprobuild.builtin.exec` lowering so
+  ## both run the SAME expansion semantics (spec §2.1).
+  result = newSeqOfCap[string](argv.len)
+  for arg in argv:
+    result.add(expandArgFileToken(arg, readPath))
+
+proc auditArgvWithRedaction*(argv: openArray[string]): seq[string] =
+  ## The audit-log rendering of an argv. Each `@FILE:<path>` token is
+  ## replaced by `<arg redacted: read from <path>>` so the substituted
+  ## contents (typically a secret) never reach the apply log. Non-
+  ## token args pass through verbatim. Spec §2.1.
+  result = newSeqOfCap[string](argv.len)
+  for arg in argv:
+    if isArgFileToken(arg):
+      let path = argFilePath(arg)
+      result.add("<arg redacted: read from " & path & ">")
+    else:
+      result.add(arg)
+
+# ---------------------------------------------------------------------------
 # requiresElevation predicate.
 # ---------------------------------------------------------------------------
 
@@ -857,6 +1064,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -898,6 +1106,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -2312,6 +2521,62 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       if containsNul(arg):
         return "linux.fhsSandbox argv entry contains a NUL byte " &
           "(refused — execve would reject the argv element)"
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: closed-set posture for the
+    # elevated build-engine inline-exec hand-off. The plan stores the
+    # LITERAL `@FILE:<path>` argv entries (no secret in the plan); the
+    # @FILE expander runs at apply time in the broker dispatch path.
+    # We refuse here:
+    #   * an empty executable                — argv[0] is required;
+    #   * NUL bytes in any closed field      — `execve` would reject
+    #                                          them, and a typed
+    #                                          parse error is a much
+    #                                          better diagnostic;
+    #   * a malformed `@FILE:` token         — the codec boundary is
+    #                                          the place to catch a
+    #                                          relative-path / empty-
+    #                                          payload mistake (the
+    #                                          apply-time expander
+    #                                          re-checks as defence-
+    #                                          in-depth);
+    #   * an environment entry missing `=`   — `NAME=VALUE` is the
+    #                                          only shape the spawn
+    #                                          primitive accepts.
+    if op.iecExecutable.strip().len == 0:
+      return "reprobuild.inlineExecCall operation has an empty executable"
+    if containsNul(op.iecExecutable):
+      return "reprobuild.inlineExecCall executable contains a NUL byte " &
+        "(refused — exec primitives reject NUL in argv)"
+    for idx, arg in op.iecArguments:
+      if containsNul(arg):
+        return "reprobuild.inlineExecCall arguments[" & $idx &
+          "] contains a NUL byte (refused — exec primitives reject " &
+          "NUL in argv)"
+      if isArgFileToken(arg):
+        let tokenErr = argFileTokenError(arg)
+        if tokenErr.len > 0:
+          return "reprobuild.inlineExecCall arguments[" & $idx & "] " &
+            tokenErr
+    if containsNul(op.iecWorkingDirectory):
+      return "reprobuild.inlineExecCall workingDirectory contains a " &
+        "NUL byte (refused)"
+    for idx, entry in op.iecEnvironment:
+      if containsNul(entry):
+        return "reprobuild.inlineExecCall environment[" & $idx &
+          "] contains a NUL byte (refused — exec primitives reject " &
+          "NUL in env)"
+      let eq = entry.find('=')
+      if eq <= 0:
+        return "reprobuild.inlineExecCall environment[" & $idx &
+          "] '" & entry & "' is not a NAME=VALUE entry (the broker " &
+          "spawn primitive requires the conventional shape)"
+    for idx, refName in op.iecToolIdentityRefs:
+      if containsNul(refName):
+        return "reprobuild.inlineExecCall toolIdentityRefs[" & $idx &
+          "] contains a NUL byte (refused)"
+      if refName.strip().len == 0:
+        return "reprobuild.inlineExecCall toolIdentityRefs[" & $idx &
+          "] is empty (each ref must name a `uses:` tool)"
   return ""
 
 # ---------------------------------------------------------------------------

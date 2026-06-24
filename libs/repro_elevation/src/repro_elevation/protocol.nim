@@ -454,6 +454,30 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     for a in op.fsbArgv:
       body.writeString(a)
     body.writeBool(op.fsbDestroy)
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: the elevated build-edge
+    # hand-off. Strings written via the shared length-prefixed
+    # helpers; the integer exit-code list is written as u32 LE
+    # counts (the codec's standard shape).
+    body.writeString(op.iecExecutable)
+    body.writeU32Le(uint32(op.iecArguments.len))
+    for a in op.iecArguments:
+      body.writeString(a)
+    body.writeString(op.iecWorkingDirectory)
+    body.writeU32Le(uint32(op.iecEnvironment.len))
+    for e in op.iecEnvironment:
+      body.writeString(e)
+    body.writeU32Le(uint32(op.iecToolIdentityRefs.len))
+    for r in op.iecToolIdentityRefs:
+      body.writeString(r)
+    body.writeU32Le(uint32(op.iecAcceptExitCodes.len))
+    for c in op.iecAcceptExitCodes:
+      # The exit-code range is `int` in the type, but the wire
+      # format pins each entry as a 32-bit signed value
+      # (cast-through-uint32 keeps negative codes representable on
+      # platforms that have them — Windows surfaces e.g. -2147483648
+      # for STATUS_FATAL_APP_EXIT).
+      body.writeU32Le(uint32(c))
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -778,6 +802,39 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     for _ in 0 ..< argvCount:
       result.operation.fsbArgv.add(readString(body, pos))
     result.operation.fsbDestroy = readBool(body, pos, "fsbDestroy")
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: counter-side of the encoder
+    # above. Each count is u32 LE; implausible counts (claiming more
+    # bytes than the remainder of the frame can supply) fail closed
+    # as `EProtocol` — matches the pattern every other variant uses.
+    result.operation = PrivilegedOperation(kind: pokInlineExecCall,
+      address: address)
+    result.operation.iecExecutable = readString(body, pos)
+    let argCount = int(readU32Le(body, pos))
+    if argCount < 0 or pos + argCount > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "arguments count")
+    for _ in 0 ..< argCount:
+      result.operation.iecArguments.add(readString(body, pos))
+    result.operation.iecWorkingDirectory = readString(body, pos)
+    let envCount = int(readU32Le(body, pos))
+    if envCount < 0 or pos + envCount > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "environment count")
+    for _ in 0 ..< envCount:
+      result.operation.iecEnvironment.add(readString(body, pos))
+    let refCount = int(readU32Le(body, pos))
+    if refCount < 0 or pos + refCount > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "toolIdentityRefs count")
+    for _ in 0 ..< refCount:
+      result.operation.iecToolIdentityRefs.add(readString(body, pos))
+    let exitCount = int(readU32Le(body, pos))
+    if exitCount < 0 or pos + exitCount * 4 > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "acceptExitCodes count")
+    for _ in 0 ..< exitCount:
+      result.operation.iecAcceptExitCodes.add(int(cast[int32](readU32Le(body, pos))))
 
 # ---- OperationResult -------------------------------------------------------
 

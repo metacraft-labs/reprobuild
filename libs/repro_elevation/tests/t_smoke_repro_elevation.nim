@@ -4599,3 +4599,445 @@ ScheduleStartAt=2030-01-01T00:00:00Z
         delaySeconds: -5),
       wstRunAsUser: "SYSTEM")
     check operationValidationError(bad).len > 0
+
+# ---------------------------------------------------------------------------
+# Windows-System-Resources Phase E — `pokInlineExecCall` + `@FILE:` argv
+# preprocessor.
+#
+# The cross-cutting bridge between the build engine and the broker:
+# every `inlineExecCall(...)` build-graph edge tagged
+# `requiresElevation = true` becomes a `pokInlineExecCall`
+# `PrivilegedOperation` the broker spawns under elevation. The argv
+# `@FILE:<path>` preprocessor runs on BOTH the elevated and the non-
+# elevated paths so the substitution semantics are uniform.
+# ---------------------------------------------------------------------------
+
+suite "repro_elevation: pokInlineExecCall is in the closed set":
+
+  test "pokInlineExecCall requires elevation and is a known kind tag":
+    check requiresElevation(pokInlineExecCall)
+    check isKnownPrivilegedOperationKind($pokInlineExecCall)
+    check $pokInlineExecCall == "reprobuild.inlineExecCall"
+
+  test "an unknown inline-exec-like tag is rejected":
+    # Defence-in-depth: a frame that NAMES inlineExecCall via a typo /
+    # forged tag must NOT be accepted as a recognized kind.
+    check not isKnownPrivilegedOperationKind("reprobuild.inline_exec_call")
+    check not isKnownPrivilegedOperationKind("inlineExecCall")
+    check not isKnownPrivilegedOperationKind("reprobuild.inlineExec")
+
+suite "repro_elevation: pokInlineExecCall codec round-trip":
+
+  test "every field round-trips through the wire codec":
+    # Build a fully-populated operation, encode + decode it, and assert
+    # on every field. The codec must preserve every closed string +
+    # the typed exit-code list verbatim.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-runner-config",
+      iecExecutable: "C:\\actions-runner\\config.cmd",
+      iecArguments: @[
+        "--unattended", "--replace",
+        "--url", "https://github.com/metacraft-labs",
+        "--token", "@FILE:C:\\actions-runner-tokens\\mcl.token",
+        "--name", "windows-runner-001"],
+      iecWorkingDirectory: "C:\\actions-runner",
+      iecEnvironment: @["RUNNER_LOG_DIR=C:\\actions-runner\\logs",
+        "RUNNER_TIMEOUT=300"],
+      iecToolIdentityRefs: @["C:\\actions-runner\\config.cmd"],
+      iecAcceptExitCodes: @[0, 3010])
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: "baseline-phaseE"))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.kind == pokInlineExecCall
+    check dec.operation.address == "phaseE-runner-config"
+    check dec.baselineDigestHex == "baseline-phaseE"
+    check dec.operation.iecExecutable == op.iecExecutable
+    check dec.operation.iecArguments == op.iecArguments
+    check dec.operation.iecWorkingDirectory == op.iecWorkingDirectory
+    check dec.operation.iecEnvironment == op.iecEnvironment
+    check dec.operation.iecToolIdentityRefs == op.iecToolIdentityRefs
+    check dec.operation.iecAcceptExitCodes == @[0, 3010]
+
+  test "defaults round-trip (empty fields, empty exit-code list)":
+    # A bare-minimum operation: only executable + one argument. The
+    # codec must round-trip the empty fields without inventing a value.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-bare",
+      iecExecutable: "/bin/sh",
+      iecArguments: @[],
+      iecWorkingDirectory: "",
+      iecEnvironment: @[],
+      iecToolIdentityRefs: @[],
+      iecAcceptExitCodes: @[])
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: ""))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.iecExecutable == "/bin/sh"
+    check dec.operation.iecArguments.len == 0
+    check dec.operation.iecWorkingDirectory == ""
+    check dec.operation.iecEnvironment.len == 0
+    check dec.operation.iecToolIdentityRefs.len == 0
+    check dec.operation.iecAcceptExitCodes.len == 0
+
+  test "negative exit code (Windows STATUS code) round-trips":
+    # Windows installers surface negative `NTSTATUS` codes; the codec
+    # casts through `int32` so the sign bit survives a round-trip.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-signed",
+      iecExecutable: "C:\\Windows\\System32\\msiexec.exe",
+      iecAcceptExitCodes: @[0, 3010, -2147483647])
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: ""))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.iecAcceptExitCodes == @[0, 3010, -2147483647]
+
+suite "repro_elevation: pokInlineExecCall validator":
+
+  test "accepts a well-formed operation":
+    let ok = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-ok",
+      iecExecutable: "/bin/echo",
+      iecArguments: @["hello"],
+      iecEnvironment: @["TZ=UTC"],
+      iecToolIdentityRefs: @["echo"])
+    check operationValidationError(ok) == ""
+
+  test "rejects an empty executable":
+    let bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-empty",
+      iecExecutable: "",
+      iecArguments: @[])
+    let err = operationValidationError(bad)
+    check err.len > 0
+    check err.contains("empty executable")
+
+  test "rejects a NUL byte in executable / arg / env / toolref":
+    var bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo\x00malicious")
+    check operationValidationError(bad).contains("NUL")
+    bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo",
+      iecArguments: @["hello\x00world"])
+    check operationValidationError(bad).contains("NUL")
+    bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo",
+      iecEnvironment: @["FOO=bar\x00baz"])
+    check operationValidationError(bad).contains("NUL")
+    bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo",
+      iecToolIdentityRefs: @["sh\x00"])
+    check operationValidationError(bad).contains("NUL")
+
+  test "rejects an environment entry that is not NAME=VALUE":
+    let bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-env",
+      iecExecutable: "/bin/echo",
+      iecEnvironment: @["NOT_A_KEY_VALUE_PAIR"])
+    let err = operationValidationError(bad)
+    check err.len > 0
+    check err.contains("NAME=VALUE")
+
+  test "rejects an empty tool identity ref":
+    let bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-emptyref",
+      iecExecutable: "/bin/echo",
+      iecToolIdentityRefs: @[""])
+    let err = operationValidationError(bad)
+    check err.len > 0
+    check err.contains("empty")
+
+  test "rejects malformed @FILE: tokens at the codec boundary":
+    # `@FILE:` with no payload is malformed — the apply-time expander
+    # would fail closed, but the validator catches it earlier so the
+    # operator sees a clean diagnostic instead of an obscure runtime.
+    let bareToken = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-bare-token",
+      iecExecutable: "/bin/cat",
+      iecArguments: @["@FILE:"])
+    check operationValidationError(bareToken).len > 0
+    # Relative `@FILE:` path: refused because the broker's cwd is not
+    # a stable identity (defensible-decision documented in the helper).
+    let relativeToken = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-rel-token",
+      iecExecutable: "/bin/cat",
+      iecArguments: @["@FILE:secret.tok"])
+    let relErr = operationValidationError(relativeToken)
+    check relErr.len > 0
+    check relErr.contains("absolute") or relErr.contains("relative")
+    # NUL byte in `@FILE:` path: refused because the OS reader would
+    # reject it.
+    let nulToken = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul-token",
+      iecExecutable: "/bin/cat",
+      iecArguments: @["@FILE:/tmp/secret\x00.tok"])
+    check operationValidationError(nulToken).contains("NUL")
+
+suite "repro_elevation: @FILE: argv preprocessor (pure helper)":
+
+  test "isArgFileToken / argFilePath classify and split":
+    check isArgFileToken("@FILE:/abs/path")
+    check not isArgFileToken("not-a-token")
+    # A bare `@FILE:` (no payload) IS classified as a token here so
+    # the validator / expander catches it as a hard error rather than
+    # letting it fall through as if it were a literal argument.
+    check isArgFileToken("@FILE:")
+    check argFilePath("@FILE:/secret.tok") == "/secret.tok"
+    check argFilePath("plain") == ""
+    # The bare-prefix token's payload is empty — argFilePath returns
+    # an empty string so the downstream validator's empty-payload
+    # check fires cleanly.
+    check argFilePath("@FILE:") == ""
+
+  test "expandArgFileToken substitutes well-formed tokens":
+    # Inject a pure table-backed reader so the test exercises the
+    # substitution semantics without touching real disk.
+    proc r(path: string): string =
+      if path == "/etc/runner.tok": "abc123\n"
+      elif path == "/etc/empty.tok": ""
+      else: raise newException(IOError, "no such test path " & path)
+    check expandArgFileToken("@FILE:/etc/runner.tok", r) == "abc123"
+    check expandArgFileToken("plain", r) == "plain"
+
+  test "expandArgFileToken strips trailing CR / LF":
+    # Common case for text-file secrets that end with a newline. The
+    # spec asks for the trimmed contents.
+    proc r(path: string): string =
+      case path
+      of "/a": "value\n"
+      of "/b": "value\r\n"
+      of "/c": "value\r"
+      of "/d": "value"
+      else: raise newException(IOError, "no such path")
+    check expandArgFileToken("@FILE:/a", r) == "value"
+    check expandArgFileToken("@FILE:/b", r) == "value"
+    check expandArgFileToken("@FILE:/c", r) == "value"
+    check expandArgFileToken("@FILE:/d", r) == "value"
+
+  test "expandArgFileToken returns empty string for an empty file":
+    # Spec: "Empty file ⇒ pass empty arg (caller decides if that's
+    # valid)." The expander does NOT raise here.
+    proc r(path: string): string = ""
+    check expandArgFileToken("@FILE:/empty.tok", r) == ""
+
+  test "expandArgFileToken raises EProtocol when the file is missing":
+    proc r(path: string): string =
+      raise newException(IOError, "no such file")
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:/missing.tok", r)
+
+  test "expandArgFileToken raises EProtocol on OSError too":
+    # Permission-denied / other OS errors surface with the same
+    # spec-mandated `@FILE: not found` shape.
+    proc r(path: string): string =
+      raise newException(OSError, "permission denied")
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:/forbidden.tok", r)
+
+  test "expandArgFileToken EProtocol diagnostic includes the path":
+    # The audit log uses this diagnostic; it MUST cite which path
+    # failed.
+    proc r(path: string): string =
+      raise newException(IOError, "boom")
+    try:
+      discard expandArgFileToken("@FILE:/path/to/missing.tok", r)
+      check false  # unreachable
+    except EProtocol as e:
+      check e.msg.contains("@FILE:")
+      check e.msg.contains("/path/to/missing.tok")
+
+  test "expandArgFileToken re-checks malformed tokens (defence in depth)":
+    # A call site that constructs the operation in-process and skips
+    # the codec validator must STILL fail closed if it carries a
+    # malformed token. The expander double-checks.
+    proc r(path: string): string = ""
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:", r)
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:relative-path", r)
+
+  test "expandArgFiles preserves order across mixed argv":
+    proc r(path: string): string =
+      case path
+      of "/tok1": "value1\n"
+      of "/tok2": "value2"
+      else: raise newException(IOError, "missing")
+    let expanded = expandArgFiles(@["--first", "@FILE:/tok1", "--mid",
+      "@FILE:/tok2", "--last"], r)
+    check expanded == @["--first", "value1", "--mid", "value2", "--last"]
+
+  test "auditArgvWithRedaction replaces tokens with the redaction":
+    # Spec §2.1: the audit log records the substitution as `<arg
+    # redacted: read from <path>>` — the substituted bytes never reach
+    # the log.
+    let argv = @["config.cmd", "--token", "@FILE:/secrets/x.tok",
+      "--name", "runner"]
+    let safe = auditArgvWithRedaction(argv)
+    check safe.len == argv.len
+    check safe[0] == "config.cmd"
+    check safe[1] == "--token"
+    check safe[2] == "<arg redacted: read from /secrets/x.tok>"
+    check safe[3] == "--name"
+    check safe[4] == "runner"
+
+suite "repro_elevation: inline-exec driver dispatch":
+
+  test "expandExecCallArgv prepends the executable to the expanded argv":
+    proc r(path: string): string = "tok-bytes"
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-expand",
+      iecExecutable: "/usr/bin/curl",
+      iecArguments: @["-H", "@FILE:/tmp/auth.tok", "https://example/"])
+    let argv = expandExecCallArgv(op, r)
+    check argv == @["/usr/bin/curl", "-H", "tok-bytes",
+      "https://example/"]
+
+  test "expandExecCallArgv on a non-inline-exec kind raises ValueError":
+    let op = PrivilegedOperation(kind: pokFixtureFile,
+      address: "wrong-kind", fileRelPath: "x", fileContent: "")
+    expect ValueError:
+      discard expandExecCallArgv(op)
+
+  test "inlineExecCallAuditDetail uses the redacted argv form":
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-audit",
+      iecExecutable: "config.cmd",
+      iecArguments: @["--token", "@FILE:/secrets/x.tok", "--name",
+        "runner"])
+    let detail = inlineExecCallAuditDetail(op,
+      InlineExecCallOutcome(exitCode: 0))
+    check detail.contains("config.cmd")
+    check detail.contains("<arg redacted: read from /secrets/x.tok>")
+    check detail.contains("exit 0")
+    # Critically: the literal `@FILE:` token MUST appear inside the
+    # redaction placeholder — not the substituted bytes.
+    check not detail.contains("tok-bytes")
+
+  test "runInlineExecCall: success on exit code 0 via /bin/true":
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-true",
+        iecExecutable: "true",
+        iecAcceptExitCodes: @[0])
+      let outcome = runInlineExecCall(op)
+      check outcome.exitCode == 0
+
+  test "runInlineExecCall: non-zero exit raises EProtocol":
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-false",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[0])
+      expect EProtocol:
+        discard runInlineExecCall(op)
+
+  test "runInlineExecCall: configured acceptable exit code is success":
+    when defined(linux) or defined(macosx):
+      # /bin/false exits 1; accepting {0, 1} treats it as success.
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-accept-1",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[0, 1])
+      let outcome = runInlineExecCall(op)
+      check outcome.exitCode == 1
+
+  test "runInlineExecCall: default acceptable set is @[0]":
+    when defined(linux) or defined(macosx):
+      # An empty `iecAcceptExitCodes` defaults to @[0] inside the
+      # driver — exit 1 must still raise.
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-default-accept",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[])
+      expect EProtocol:
+        discard runInlineExecCall(op)
+
+  test "runInlineExecCall: @FILE: missing file raises EProtocol before spawn":
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-missing-token",
+        iecExecutable: "true",
+        iecArguments: @["@FILE:/this/path/does/not/exist.tok"])
+      expect EProtocol:
+        discard runInlineExecCall(op)
+
+  test "runInlineExecCall: empty @FILE: file passes empty arg through":
+    when defined(linux) or defined(macosx):
+      # Create a real empty file and confirm the spawn succeeds with
+      # an empty arg passed to `/bin/true` (which ignores its argv).
+      let emptyPath = "/tmp/repro_phaseE_empty_" & $getCurrentProcessId() &
+        ".tok"
+      writeFile(emptyPath, "")
+      defer:
+        try: removeFile(emptyPath)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-empty-token",
+        iecExecutable: "true",
+        iecArguments: @["@FILE:" & emptyPath])
+      let outcome = runInlineExecCall(op)
+      check outcome.exitCode == 0
+
+  test "runInlineExecCall raises ValueError for a non-inline-exec kind":
+    let op = PrivilegedOperation(kind: pokFixtureFile,
+      address: "phaseE-wrong-kind",
+      fileRelPath: "x", fileContent: "")
+    expect ValueError:
+      discard runInlineExecCall(op)
+
+suite "repro_elevation: pokInlineExecCall dispatch via the broker":
+
+  test "dispatchOperation: a successful inline-exec edge is doApplied":
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("phaseE-dispatch-", "")
+      defer:
+        try: removeDir(dir)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-dispatch-true",
+        iecExecutable: "true",
+        iecAcceptExitCodes: @[0])
+      let planned = PlannedOperation(operation: op,
+        baselineDigestHex: "")
+      let res = dispatchOperation(FixtureContext(filePrefix: dir),
+        planned)
+      check res.outcome == doApplied
+      check res.address == "phaseE-dispatch-true"
+      check res.kind == pokInlineExecCall
+      check res.detail.contains("exit 0")
+
+  test "dispatchOperation: a failing inline-exec edge raises EProtocol":
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("phaseE-dispatch-fail-", "")
+      defer:
+        try: removeDir(dir)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-dispatch-false",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[0])
+      let planned = PlannedOperation(operation: op,
+        baselineDigestHex: "")
+      expect EProtocol:
+        discard dispatchOperation(FixtureContext(filePrefix: dir),
+          planned)
+
+  test "dispatchOperation rejects an in-policy-broken inline-exec op":
+    # Defence-in-depth: even though the codec already validated, the
+    # dispatch re-runs the validator and fails closed.
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("phaseE-dispatch-bad-", "")
+      defer:
+        try: removeDir(dir)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-bad",
+        iecExecutable: "")   # empty executable, fails the validator
+      let planned = PlannedOperation(operation: op,
+        baselineDigestHex: "")
+      expect EProtocol:
+        discard dispatchOperation(FixtureContext(filePrefix: dir),
+          planned)

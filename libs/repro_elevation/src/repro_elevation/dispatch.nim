@@ -46,6 +46,7 @@ import std/os
 
 import ./errors
 import ./fixture_driver
+import ./inline_exec_driver
 import ./operations
 import ./posix_system_driver
 import ./protocol
@@ -111,6 +112,16 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxFirewallRule, pokLinuxNixosSystemModule,
      pokMacosDarwinSystemModule, pokLinuxFhsSandbox:
     posixSystemDesiredDigestHex(op)
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: an inline-exec edge has no
+    # observable steady state — `dispatchOperation` special-cases the
+    # kind before calling `desiredDigest`. This branch keeps the
+    # `case` exhaustive so the compiler enforces wiring; reaching it
+    # is a programming error.
+    raise newException(ValueError,
+      "desiredDigest: pokInlineExecCall has no observable steady " &
+        "state; dispatch must take the inline-exec spawn path before " &
+        "this proc is called")
   of pokOsTimezone, pokOsHostname:
     # Cross-platform: every platform's desired digest is the canonical
     # IANA / lowercase-hostname rendering. Both `systemDesiredDigest
@@ -205,6 +216,14 @@ proc reobserve*(ctx: FixtureContext;
     observeMacosDarwinSystemModule(op)
   of pokLinuxFhsSandbox:
     observeLinuxFhsSandbox(op)
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: an inline-exec edge has no
+    # observable steady state. Dispatch special-cases the kind before
+    # this point; reaching this branch is a programming error.
+    raise newException(ValueError,
+      "reobserve: pokInlineExecCall has no observable steady state; " &
+        "dispatch must take the inline-exec spawn path before this " &
+        "proc is called")
 
 proc applyOne(ctx: FixtureContext;
               op: PrivilegedOperation): ObservedOperationState =
@@ -286,6 +305,14 @@ proc applyOne(ctx: FixtureContext;
     result = applyMacosDarwinSystemModule(op)
   of pokLinuxFhsSandbox:
     result = applyLinuxFhsSandbox(op)
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: an inline-exec edge does not
+    # converge a resource — `dispatchOperation` special-cases it via
+    # `runInlineExecCall` before reaching `applyOne`. Reaching this
+    # branch would be a programming error.
+    raise newException(ValueError,
+      "applyOne: pokInlineExecCall is dispatched via runInlineExecCall " &
+        "in dispatchOperation; this proc is never called for the kind")
 
 # ---------------------------------------------------------------------------
 # Dispatch one planned operation with the re-observe / drift gate.
@@ -316,6 +343,27 @@ proc dispatchOperation*(ctx: FixtureContext;
   let policyErr = operationValidationError(op)
   if policyErr.len > 0:
     raiseProtocol(policyErr)
+
+  # Windows-System-Resources Phase E: `pokInlineExecCall` does NOT
+  # converge a resource — there is no observable steady state. The
+  # build engine already decided (via input hashing + output caching)
+  # that the edge needs to run; the broker's role is purely to fork
+  # the process under elevation. The reobserve/drift contract that
+  # gates every other kind doesn't apply here, so we short-circuit
+  # before calling `reobserve` / `desiredDigest`.
+  if op.kind == pokInlineExecCall:
+    let outcome = runInlineExecCall(op)
+    result.outcome = doApplied
+    result.detail = inlineExecCallAuditDetail(op, outcome)
+    # The pre/post-write digests are not meaningful for a one-shot
+    # spawn; the audit-log "outcome=applied" + the rendered argv is
+    # the diagnostic the parent stores. Leave the digest fields at
+    # the absent sentinel so a downstream consumer can distinguish
+    # "side-effecting edge that ran" from "steady-state resource
+    # whose digest was recorded".
+    result.preWriteDigestHex = ZeroDigestHex
+    result.postWriteDigestHex = ZeroDigestHex
+    return
 
   # 1. Re-observe.
   var observed = reobserve(ctx, op)

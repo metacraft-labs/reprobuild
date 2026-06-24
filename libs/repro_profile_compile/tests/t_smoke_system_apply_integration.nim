@@ -512,3 +512,48 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     let txt = renderSystemProfileToText(sp)
     let plan = producePlan(txt, "phaseD-sys-host")
     check plan.envelope.operations.len == 2
+
+  test "Phase E inline-exec broker hand-off: pokInlineExecCall is in the closed set":
+    # Windows-System-Resources Phase E — the elevated `inlineExecCall`
+    # edge crosses the broker via a new `pokInlineExecCall` typed
+    # operation. The profile-side adapter (Phase F+) lowers an
+    # `inlineExecCall(...)` resource to this kind; this integration
+    # test pins the broker / closed-set posture WITHOUT relying on
+    # a profile-side adapter (which is out of scope for Phase E).
+    #
+    # The test builds the `PrivilegedOperation` in-process, walks it
+    # through the codec, validates it, and runs the @FILE: expander
+    # — exactly the path a Phase-F-emitted `pokInlineExecCall` will
+    # take on its way to the broker.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-runner-config",
+      iecExecutable: "C:\\actions-runner\\config.cmd",
+      iecArguments: @[
+        "--unattended", "--replace",
+        "--url", "https://github.com/metacraft-labs",
+        "--token", "@FILE:C:\\actions-runner-tokens\\mcl.token",
+        "--name", "windows-runner-001"],
+      iecWorkingDirectory: "C:\\actions-runner",
+      iecEnvironment: @["RUNNER_LOG_DIR=C:\\actions-runner\\logs"],
+      iecToolIdentityRefs: @["C:\\actions-runner\\config.cmd"],
+      iecAcceptExitCodes: @[0])
+    # Closed-set: the kind requires elevation + is a recognised tag.
+    check requiresElevation(pokInlineExecCall)
+    check isKnownPrivilegedOperationKind($pokInlineExecCall)
+    # Validator accepts the in-policy operation.
+    check operationValidationError(op) == ""
+    # Codec round-trip across the wire envelope.
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: ""))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.kind == pokInlineExecCall
+    check dec.operation.iecExecutable == op.iecExecutable
+    check dec.operation.iecArguments == op.iecArguments
+    check dec.operation.iecAcceptExitCodes == @[0]
+    # Audit log redacts the `@FILE:` token (spec §2.1).
+    let redacted = auditArgvWithRedaction(dec.operation.iecArguments)
+    var sawRedaction = false
+    for entry in redacted:
+      if entry.contains("<arg redacted: read from "):
+        sawRedaction = true
+    check sawRedaction

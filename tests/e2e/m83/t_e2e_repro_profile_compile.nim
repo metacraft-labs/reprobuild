@@ -9,6 +9,7 @@
 
 import std/[os, osproc, sets, strutils, tables, unittest]
 
+import repro_elevation
 import repro_profile
 
 const
@@ -393,6 +394,26 @@ suite "M83 Phase A e2e: compile + run user profiles":
     let js1 = compileAndRun("home_basic.nim")
     let js2 = compileAndRun("home_basic.nim")
     check js1 == js2
+
+  test "Phase E: pokInlineExecCall is in the elevation closed-set":
+    # Windows-System-Resources Phase E e2e — the privileged-operation
+    # broker's closed-set now includes `pokInlineExecCall` (the
+    # elevated `inlineExecCall` build-graph hand-off). This e2e check
+    # pins the kind tag + the `requiresElevation` predicate so a
+    # downstream profile change that drops the new kind from the set
+    # surfaces here (not at apply time on a Windows host).
+    #
+    # The fixture-driven path (a profile that declares an elevated
+    # `inlineExecCall(...)` resource) is Phase F+ territory — Phase E
+    # is the engine + broker plumbing only. This test stays in the
+    # e2e binary so the gate set is consistent across phases.
+    block:
+      check $repro_elevation.pokInlineExecCall ==
+        "reprobuild.inlineExecCall"
+      check repro_elevation.requiresElevation(
+        repro_elevation.pokInlineExecCall)
+      check repro_elevation.isKnownPrivilegedOperationKind(
+        $repro_elevation.pokInlineExecCall)
 
   test "byte-exact home_basic JSON matches the in-process construction":
     # Sanity check that the JSON the compiled fixture emits matches

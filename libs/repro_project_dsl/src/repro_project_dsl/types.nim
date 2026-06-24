@@ -456,6 +456,19 @@ type
       ## the engine resolves them at fork time, and PATH is
       ## populated with the resolved store paths so the bare tool
       ## name finds the right binary.
+    requiresElevation*: bool
+      ## Windows-System-Resources Phase E: marks an action edge as
+      ## one whose execution must cross the privileged-operation
+      ## broker. The engine's ``reprobuild.builtin.exec`` lowering
+      ## consults this flag: ``false`` (the default) routes through
+      ## the standard build engine fork path; ``true`` packages the
+      ## action's argv + tool refs + env into a ``pokInlineExecCall``
+      ## ``PrivilegedOperation`` and dispatches via the broker.
+      ##
+      ## Payload codec v19+. v18-and-earlier payloads decode with
+      ## ``requiresElevation = false`` so legacy artefacts continue
+      ## to take the non-elevated fork path. Default ``false`` keeps
+      ## every existing build-graph edge byte-identical to today.
     sourceFile*: string
     sourceLine*: int
 
