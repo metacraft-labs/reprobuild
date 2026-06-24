@@ -208,7 +208,9 @@ proc autotools_package*(srcDir: string;
                         configureScriptName = "configure";
                         prefixFlagFormat = "--prefix=";
                         patchHardcodedFile = false;
-                        skipConfigure = false): AutotoolsPackageResult =
+                        skipConfigure = false;
+                        installMakeVars: seq[string] = @[]):
+                        AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
   ## the engine skips path-mode profile lookup for ``sh`` (recipes
@@ -477,6 +479,15 @@ proc autotools_package*(srcDir: string;
   if skipConfigure:
     for o in configureOptions:
       installVars.add(o)
+  # M9.R.29.3 — sudo's ``install:`` target runs ``install -o 0 -g 0``
+  # to set the binary uid/gid to root. The non-privileged build user
+  # can't chown to root so the action fails with "Operation not
+  # permitted". Recipes can opt into a make-time override of
+  # ``install_uid`` / ``install_gid`` via the ``installMakeVars``
+  # constructor parameter; they end up as GNU-make command-line VAR=val
+  # assignments which beat any Makefile-level default.
+  for v in installMakeVars:
+    installVars.add(v)
   let installEdge = make(
     workDir = buildDir,
     targets = @[installTarget],

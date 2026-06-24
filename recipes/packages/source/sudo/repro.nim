@@ -19,6 +19,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
 import repro_dsl_stdlib/types/package_result
+import posix
 
 package sudoSource:
   versions:
@@ -63,6 +64,17 @@ package sudoSource:
       ## ``'_PATH_MV' undeclared``. Pin the runtime paths to the
       ## live-ISO layout (``/usr/bin/mv`` from coreutils, ``/usr/bin/vi``
       ## from the from-source vim recipe / ``nvi`` fallback).
+      ##
+      ## M9.R.29.3b — sudo's ``install:`` target runs
+      ## ``install -o 0 -g 0`` to set the binary uid/gid to root;
+      ## the non-privileged build user can't chown to root so the
+      ## install action fails with ``chown: Operation not permitted``.
+      ## Override ``install_uid`` / ``install_gid`` to the current
+      ## user's ids; the live-ISO install glue runs ``chmod u+s
+      ## /usr/bin/sudo`` and ``chown root:root /usr/bin/sudo`` after
+      ## the install-mirror lands at the final FHS path (Phase 1 of
+      ## ``stage-de-rootfs.sh`` already runs the suid bit setup for
+      ## the from-source binaries that need it).
       let opts = @[
         "--disable-static",
         "--enable-shared",
@@ -76,8 +88,15 @@ package sudoSource:
         "VIPROG=/usr/bin/vi",
         "BSHELLPROG=/bin/sh",
         "SENDMAILPROG=/usr/sbin/sendmail",
+        "--with-rundir=/run/sudo",
+        "--with-vardir=/var/db/sudo",
+        "--disable-setreuid",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+        installMakeVars = @["install_uid=" & $getuid(),
+                           "install_gid=" & $getgid(),
+                           "sudoers_uid=" & $getuid(),
+                           "sudoers_gid=" & $getgid()])
       discard pkg.executable("sudo")
       discard pkg.executable("sudoedit")
     finally:
