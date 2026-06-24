@@ -23945,6 +23945,451 @@ proc runCheckoutCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# --- RA-22: `repro add <repo>` (workspace membership / develop-mode policy) -
+#
+# Per CLI/add.md §"Develop-Mode Policy" + Workspace-And-Develop-Mode.md
+# §"Workspace Membership": `repro add` is the single verb for bringing a
+# dependency into the workspace. Whether the dependency materializes as a
+# DEVELOP-mode local sibling checkout (a `depends`-graph repo fragment that is
+# cloned) or a BINARY pinned dependency (recorded but NOT checked out) is
+# decided by POLICY, with `--develop`/`--binary` per-invocation overrides.
+#
+# The policy default is DATA, never a hardcoded org: the RA-8 host bootstrap
+# config's `[develop] org_urls` lists fetch-URL prefixes whose repos default
+# to develop mode; everything else defaults to binary. An explicit, NON-default
+# `--no-membership` mode clones a repo WITHOUT making it a workspace
+# dependency (useful to inspect a repo you don't intend to depend on).
+
+type
+  AddMode = enum
+    amPolicy        ## decide develop vs binary from the bootstrap policy.
+    amDevelop       ## `--develop`: force a local sibling checkout.
+    amBinary        ## `--binary` / `--no-develop`: force a pinned artifact.
+    amNoMembership  ## `--no-membership`: clone WITHOUT adding a dependency.
+
+  AddArgs = object
+    workspaceRoot: string
+    projectName: string
+    target: string            ## repo NAME to add (a logical dependency).
+    remoteUrl: string         ## fetch URL (drives the develop/binary policy).
+    revision: string          ## revision/branch pin (defaults to project default).
+    dependsOf: string         ## optional repo whose `depends` gains the new edge.
+    mode: AddMode
+    dryRun: bool
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+  AddReport* = object
+    project*: string
+    workspaceRoot*: string
+    target*: string
+    resolvedMode*: string     ## ``develop`` / ``binary`` / ``no-membership``.
+    policyDefault*: string    ## the policy's default before any override.
+    overridden*: bool         ## whether a flag overrode the policy default.
+    checkedOut*: bool         ## whether a sibling checkout was created.
+    declarationChanged*: bool
+    dependsEdgeOn*: string    ## the repo whose `depends` gained an edge, if any.
+    diagnostic*: string
+    exitCode*: int
+
+proc toJsonNode*(report: AddReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["target"] = %report.target
+  result["resolvedMode"] = %report.resolvedMode
+  result["policyDefault"] = %report.policyDefault
+  result["overridden"] = %report.overridden
+  result["checkedOut"] = %report.checkedOut
+  result["declarationChanged"] = %report.declarationChanged
+  result["dependsEdgeOn"] = %report.dependsEdgeOn
+  result["diagnostic"] = %report.diagnostic
+  result["exitCode"] = %report.exitCode
+
+proc parseAddArgs*(args: openArray[string]): AddArgs =
+  ## ``repro add <repo> --remote=URL [--revision=R] [--develop|--binary|
+  ## --no-develop|--no-membership] [--depends-of=REPO] [--workspace-root=PATH]
+  ## [--dry-run] [--json] [--tool-provisioning=...]``.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  result.mode = amPolicy
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--remote" or arg.startsWith("--remote="):
+      result.remoteUrl = valueFromFlag(args, i, "--remote")
+    elif arg == "--revision" or arg.startsWith("--revision="):
+      result.revision = valueFromFlag(args, i, "--revision")
+    elif arg == "--depends-of" or arg.startsWith("--depends-of="):
+      result.dependsOf = valueFromFlag(args, i, "--depends-of")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--develop":
+      result.mode = amDevelop
+    elif arg == "--binary" or arg == "--no-develop":
+      result.mode = amBinary
+    elif arg == "--no-membership":
+      result.mode = amNoMembership
+    elif arg == "--dry-run":
+      result.dryRun = true
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro add` flag: " & arg)
+    elif result.target.len == 0:
+      result.target = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro add`: " & arg)
+    inc i
+  if result.target.len == 0:
+    raise newException(ValueError,
+      "`repro add` requires a repo name positional argument")
+  if result.remoteUrl.len == 0:
+    raise newException(ValueError,
+      "`repro add` requires `--remote=<fetch-url>` so the develop-vs-binary " &
+        "policy can classify the dependency's origin")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveAddProject(parsed: AddArgs): ResolvedProject =
+  ## Same single-project resolution rule as ``remove`` (RA-9): a
+  ## metadata-only ``.repo/workspace.toml`` (``[workspace].project``) or a
+  ## compositional one both resolve to a flat repo set. ``add`` only supports
+  ## the single-project (non-compositional) form because it MUTATES the
+  ## project file; a compositional workspace has no single owning file to
+  ## append the new include to.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    raise newException(ValueError,
+      "`repro add` is not supported in a compositional (multi-layer) " &
+        "workspace; add the repo to the owning manifest layer directly")
+  var projectName = parsed.projectName
+  if projectName.len == 0 and fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        projectName = recorded
+    except WorkspaceManifestParseError:
+      discard
+  if projectName.len == 0:
+    raise newException(ValueError,
+      "`repro add <repo>` requires either `.repo/workspace.toml` or a " &
+        "project name recoverable from one; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  raise newException(ValueError,
+    "no project named '" & projectName & "' found under '" & manifestsRoot & "'")
+
+proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
+  ## RA-22 develop-vs-binary POLICY DEFAULT. The decision is driven ENTIRELY
+  ## by the RA-8 host bootstrap config's ``[develop] org_urls`` prefix list —
+  ## there is NO hardcoded org name in the binary. A dependency whose fetch
+  ## URL begins with one of the configured prefixes defaults to develop mode;
+  ## everything else (and the case of no config / empty list) defaults to
+  ## binary. The config is located with the same ``findBootstrapConfigPath``
+  ## resolution ``init`` uses (``REPRO_WORKSPACE_CONFIG`` or an ancestor
+  ## ``.repro-workspace.toml``).
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0:
+    return false
+  let cfg = readWorkspaceBootstrap(configPath)
+  for prefix in cfg.develop.org_urls:
+    if prefix.len > 0 and remoteUrl.startsWith(prefix):
+      return true
+  false
+
+proc ensureRemoteEntry(projectFile, remoteName, fetchUrl: string) =
+  ## Append a ``[[remote]]`` entry naming ``fetchUrl`` if the project file
+  ## does not already declare a remote with that name. The new entry is
+  ## inserted right before the ``includes = [`` array so it sits with the
+  ## other remotes; when no includes array is present it is appended.
+  let content = readFile(projectFile)
+  if ("name = \"" & remoteName & "\"") in content:
+    return
+  let remoteBlock = "[[remote]]\nname = \"" & remoteName & "\"\nfetch = \"" &
+    fetchUrl & "\"\n\n"
+  let idx = content.find("includes")
+  if idx >= 0:
+    writeFile(projectFile, content[0 ..< idx] & remoteBlock & content[idx .. ^1])
+  else:
+    writeFile(projectFile, content & "\n" & remoteBlock)
+
+proc appendFragmentInclude(projectFile, includePath: string): bool =
+  ## Append ``"<includePath>",`` to the project's ``includes = [ … ]`` array.
+  ## Returns true when the include was added; false when it was already
+  ## present (idempotent). The append preserves the existing array entries.
+  let content = readFile(projectFile)
+  let quoted = "\"" & includePath & "\""
+  if quoted in content:
+    return false
+  var outLines: seq[string]
+  var inserted = false
+  for line in content.splitLines():
+    # Insert before the closing ``]`` of the includes array. The closing
+    # bracket sits alone on its own line in the canonical multi-line form.
+    if not inserted and line.strip() == "]":
+      outLines.add("  " & quoted & ",")
+      inserted = true
+    outLines.add(line)
+  if not inserted:
+    # No multi-line includes array to extend — append a fresh one.
+    outLines.add("")
+    outLines.add("includes = [")
+    outLines.add("  " & quoted & ",")
+    outLines.add("]")
+  writeFile(projectFile, outLines.join("\n"))
+  true
+
+proc addDependsEdge(fragmentPath, depName: string): bool =
+  ## Add ``depName`` to the ``depends`` array of the repo fragment at
+  ## ``fragmentPath`` (RA-21 develop-set edge). Returns true when the edge
+  ## was added; false when it was already present. Rewrites/creates the
+  ## ``depends = [ … ]`` inline array under ``[repo]``.
+  let content = readFile(fragmentPath)
+  var lines = content.splitLines()
+  var dependsIdx = -1
+  for idx, line in lines:
+    if line.strip().startsWith("depends"):
+      dependsIdx = idx
+      break
+  if dependsIdx >= 0:
+    let line = lines[dependsIdx]
+    if ("\"" & depName & "\"") in line:
+      return false
+    let open = line.find('[')
+    let close = line.rfind(']')
+    if open < 0 or close < 0 or close <= open:
+      raise newException(ValueError,
+        "malformed `depends` array in fragment: " & fragmentPath)
+    let inner = line[open + 1 ..< close].strip()
+    let newInner =
+      if inner.len == 0: "\"" & depName & "\""
+      else: inner & ", \"" & depName & "\""
+    lines[dependsIdx] = line[0 .. open] & newInner & line[close .. ^1]
+    writeFile(fragmentPath, lines.join("\n"))
+    return true
+  # No `depends` key yet — append one to the `[repo]` table. The fragment's
+  # `[repo]` table is the last table in the file, so a trailing append lands
+  # inside it.
+  var trimmed = content
+  while trimmed.len > 0 and trimmed[^1] in {'\n', '\r'}:
+    trimmed.setLen(trimmed.len - 1)
+  writeFile(fragmentPath,
+    trimmed & "\ndepends = [\"" & depName & "\"]\n")
+  true
+
+proc appendBinaryDependency(projectFile, name, remoteUrl, revision: string):
+    bool =
+  ## Record a BINARY-mode dependency in the project manifest as a
+  ## ``[[binary_dependency]]`` entry. A binary dependency is NEVER an
+  ## ``includes`` repo fragment, so it is never cloned, synced, or part of
+  ## the checkout GC graph. Returns true when the entry was added; false when
+  ## an entry of the same name already existed (idempotent).
+  let content = readFile(projectFile)
+  if ("name = \"" & name & "\"") in content and
+      "[[binary_dependency]]" in content:
+    # A binary_dependency or remote with this name may already exist; only
+    # skip when a binary_dependency block already names it.
+    for blk in content.split("[[binary_dependency]]"):
+      if ("name = \"" & name & "\"") in blk:
+        return false
+  var entry = "\n[[binary_dependency]]\nname = \"" & name & "\"\nremote = \"" &
+    remoteUrl & "\"\n"
+  if revision.len > 0:
+    entry.add("revision = \"" & revision & "\"\n")
+  var trimmed = content
+  while trimmed.len > 0 and trimmed[^1] in {'\n', '\r'}:
+    trimmed.setLen(trimmed.len - 1)
+  writeFile(projectFile, trimmed & "\n" & entry)
+  true
+
+proc cloneAddSibling(workspaceRoot, repoPath, fetchUrl, revision: string;
+                     identity: GitToolIdentity):
+    tuple[ok: bool; diagnostic: string] =
+  ## Arrange the develop-mode sibling checkout for ``repro add --develop`` by
+  ## scheduling a one-shot ``bakWorkspaceVcs`` clone through the SAME
+  ## ``gitCloneAction`` engine path ``init``/``sync`` use (RA-5c). The target
+  ## ``<workspaceRoot>/<repoPath>`` must not pre-exist.
+  let absTarget = workspaceRoot / repoPath
+  if dirExists(absTarget):
+    return (ok: false,
+      diagnostic: "add clone target already exists: " & absTarget)
+  let receiptDir = workspaceRoot / ".repro" / "workspace" / "receipts"
+  createDir(receiptDir)
+  let idSeg = safeRepoIdSegment(repoPath)
+  let receiptRel = ".repro" / "workspace" / "receipts" /
+    ("add-clone-" & idSeg & ".receipt")
+  var action = gitCloneAction("workspace-add-clone-" & idSeg, identity,
+    remoteUrl = fetchUrl,
+    repoPath = repoPath,
+    receiptPath = receiptRel,
+    revision = revision)
+  action.cwd = workspaceRoot
+  let cacheRoot = workspaceRoot / ".repro" / "workspace" / "engine-cache"
+  var config = defaultBuildEngineConfig(cacheRoot)
+  config.suppressTrace = true
+  let res = runBuild(graph([action]), config)
+  if res.results.len == 0:
+    return (ok: false, diagnostic: "build engine returned no clone results")
+  let outcome = res.results[0]
+  if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+    return (ok: false,
+      diagnostic: "add clone failed: status=" & $outcome.status &
+        " reason=" & outcome.reason &
+        (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+  (ok: true, diagnostic: "")
+
+proc executeAdd(parsed: AddArgs): AddReport =
+  result.workspaceRoot = parsed.workspaceRoot
+  result.target = parsed.target
+
+  let resolved = resolveAddProject(parsed)
+  result.project = resolved.projectName
+
+  # Decide develop vs binary. The POLICY DEFAULT comes from the bootstrap
+  # config (`[develop] org_urls`); `--develop`/`--binary` override it;
+  # `--no-membership` is a distinct standalone-checkout mode.
+  let policyDevelop = developPolicyMatches(parsed.remoteUrl, parsed.workspaceRoot)
+  result.policyDefault = if policyDevelop: "develop" else: "binary"
+
+  var mode = parsed.mode
+  result.overridden =
+    (mode == amDevelop and not policyDevelop) or
+    (mode == amBinary and policyDevelop)
+  if mode == amPolicy:
+    mode = if policyDevelop: amDevelop else: amBinary
+
+  let revision =
+    if parsed.revision.len > 0: parsed.revision
+    elif resolved.defaultRevision.len > 0: resolved.defaultRevision
+    else: "main"
+
+  case mode
+  of amPolicy:
+    # Unreachable: ``amPolicy`` is resolved to ``amDevelop``/``amBinary``
+    # above before this dispatch. Kept for case exhaustiveness.
+    result.exitCode = 1
+    result.diagnostic = "internal: unresolved add policy mode"
+  of amBinary:
+    result.resolvedMode = "binary"
+    result.checkedOut = false
+    if parsed.dryRun:
+      result.exitCode = 0
+      stderr.writeLine("repro add would record '" & parsed.target &
+        "' as a BINARY dependency of project '" & resolved.projectName &
+        "' (no checkout)")
+      return
+    result.declarationChanged =
+      appendBinaryDependency(resolved.projectFile, parsed.target,
+        parsed.remoteUrl, revision)
+    result.exitCode = 0
+  of amDevelop, amNoMembership:
+    let isMembership = mode == amDevelop
+    result.resolvedMode = if isMembership: "develop" else: "no-membership"
+    let repoPath = parsed.target
+    if dirExists(parsed.workspaceRoot / repoPath):
+      result.exitCode = 1
+      result.diagnostic = "checkout target already exists: " &
+        (parsed.workspaceRoot / repoPath)
+      return
+    if parsed.dryRun:
+      result.exitCode = 0
+      stderr.writeLine("repro add would clone '" & parsed.target & "' as a " &
+        (if isMembership: "DEVELOP-mode sibling" else: "standalone checkout") &
+        " of project '" & resolved.projectName & "'" &
+        (if isMembership: " and record it as a dependency" else: ""))
+      return
+    # Arrange the sibling checkout via the shared clone engine path (RA-5c).
+    let identity = ensureGitToolResolvable(
+      parsed.toolProvisioning, getEnv("PATH"))
+    installGitVcsExecutor()
+    let cloneRes = cloneAddSibling(parsed.workspaceRoot, repoPath,
+      parsed.remoteUrl, revision, identity)
+    if not cloneRes.ok:
+      result.exitCode = 1
+      result.diagnostic = cloneRes.diagnostic
+      return
+    result.checkedOut = true
+    if not isMembership:
+      # `--no-membership`: cloned, but NOT a workspace dependency. No
+      # manifest mutation, no `depends` edge.
+      result.declarationChanged = false
+      result.exitCode = 0
+      return
+    # Develop membership: record the remote, the repo fragment, and the
+    # `includes` edge so the dependency participates in the workspace.
+    let remoteName = parsed.target & "-origin"
+    ensureRemoteEntry(resolved.projectFile, remoteName, parsed.remoteUrl)
+    let manifestsRoot =
+      parsed.workspaceRoot / ".repo" / "manifests"
+    createDir(manifestsRoot / "repos")
+    let fragmentRel = "repos/" & parsed.target & ".toml"
+    let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
+    if not fileExists(fragmentAbs):
+      writeFile(fragmentAbs,
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\n" &
+        "name = \"" & parsed.target & "\"\n" &
+        "path = \"" & repoPath & "\"\n" &
+        "remote = \"" & remoteName & "\"\n" &
+        "revision = \"" & revision & "\"\n")
+    result.declarationChanged =
+      appendFragmentInclude(resolved.projectFile, fragmentRel)
+    # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
+    # that the named repo depends on the newly added one.
+    if parsed.dependsOf.len > 0:
+      var dependentFragment = ""
+      for repo in resolved.repos:
+        if repo.name == parsed.dependsOf:
+          dependentFragment = repo.fragmentPath
+          break
+      if dependentFragment.len == 0:
+        result.exitCode = 1
+        result.diagnostic = "`--depends-of` names '" & parsed.dependsOf &
+          "' which is not a repo in project '" & resolved.projectName & "'"
+        return
+      if addDependsEdge(dependentFragment, parsed.target):
+        result.dependsEdgeOn = parsed.dependsOf
+    result.exitCode = 0
+
+proc renderAddTextLines*(report: AddReport): seq[string] =
+  if report.exitCode != 0:
+    result.add("repro add: error: " & report.diagnostic)
+    return
+  var line = "repro add: " & report.target & " -> " & report.resolvedMode
+  if report.overridden:
+    line.add(" (override; policy default was " & report.policyDefault & ")")
+  result.add(line)
+  if report.checkedOut:
+    result.add("repro add: checked out '" & report.target & "'")
+  if report.dependsEdgeOn.len > 0:
+    result.add("repro add: recorded depends edge: '" & report.dependsEdgeOn &
+      "' -> '" & report.target & "'")
+
+proc runAddCommand*(args: openArray[string]): int =
+  ## ``repro add <repo> --remote=URL [--develop|--binary|--no-membership]
+  ## [--depends-of=REPO] …``. RA-22 develop-mode policy + workspace
+  ## membership (CLI/add.md, Workspace-And-Develop-Mode.md).
+  let parsed = parseAddArgs(args)
+  let report = executeAdd(parsed)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderAddTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 # --- RA-9: `repro remove <repo>` (workspace context) ----------------------
 #
 # Per CLI/remove.md (workspace/develop-mode responsibilities) + the RA-10
@@ -24104,6 +24549,35 @@ proc dropFragmentInclude(projectFile, fragmentAbs: string): bool =
     writeFile(projectFile, outLines.join("\n"))
   dropped
 
+proc reachableExcluding(repos: seq[ResolvedRepo];
+                        rootNames: HashSet[string];
+                        excluded: string): HashSet[string] =
+  ## RA-22 reachability for removal GC. Compute the set of repo NAMES
+  ## reachable from ``rootNames`` by walking the per-repo ``depends`` edges
+  ## (RA-21), treating ``excluded`` (the repo being removed) as a DELETED
+  ## node: it is never entered and never traversed through. A repo that is
+  ## still reachable from a remaining root WITHOUT routing through the
+  ## removed repo is kept; anything only the removed repo brought in is
+  ## eligible for GC. This mirrors the pilot's ``projects remove``, which
+  ## deletes only repos unique to the removed project and keeps shared ones.
+  result = initHashSet[string]()
+  var byName = initTable[string, ResolvedRepo]()
+  for repo in repos:
+    byName[repo.name] = repo
+  var pending: seq[string]
+  for r in rootNames:
+    if r != excluded:
+      pending.add(r)
+  while pending.len > 0:
+    let name = pending.pop()
+    if name == excluded or name in result:
+      continue
+    result.incl(name)
+    if name in byName:
+      for dep in byName[name].depends:
+        if dep.len > 0 and dep != excluded and dep notin result:
+          pending.add(dep)
+
 proc executeRemove(parsed: RemoveArgs): RemoveReport =
   result.workspaceRoot = parsed.workspaceRoot
   result.target = parsed.target
@@ -24125,75 +24599,155 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
         "' is declared in project '" & resolved.projectName & "'"))
     return
 
-  let repo = resolved.repos[matchIdx]
-  let repoPath = parsed.workspaceRoot / repo.path
+  let target = resolved.repos[matchIdx]
 
-  # Dirty-detection: a working tree with uncommitted changes is what makes
-  # this destructive. A missing/clean tree is safe to remove without a
-  # discard.
-  var dirty = false
-  var dirtyDiag = ""
-  if dirExists(repoPath / ".git"):
-    let identity = ensureGitToolResolvable(
-      parsed.toolProvisioning, getEnv("PATH"))
-    let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
-    if cleanRes.status != gqsOk:
-      # A probe failure is treated conservatively as "possibly dirty" so we
-      # never silently discard on an unknown state.
-      dirty = true
-      dirtyDiag = "clean/dirty probe failed: " & cleanRes.diagnostic
-    elif not cleanRes.isClean:
-      dirty = true
-      dirtyDiag = "working tree has uncommitted changes"
+  # RA-22 reachability GC. The removed dependency is the target. The set of
+  # checkouts considered for collection (the CANDIDATE set) is the target
+  # plus everything in the target's ``depends`` closure. A candidate is GC'd
+  # ONLY when it is no longer reachable from a SURVIVING root — a membership
+  # root that remains after the removal — once the target is treated as a
+  # deleted node. Shared repos that a surviving root still reaches STAY. The
+  # graph boundary, not name matching, decides — so removing one dependency
+  # never blindly deletes a checkout that something else needs.
+  #
+  # In reprobuild's model every entry in ``resolved.repos`` is a directly
+  # declared project membership (an ``includes`` edge), and ``depends`` are
+  # the transitive develop-set edges between them (RA-21). The membership
+  # set is therefore the universe of roots; ``depends`` is the universe of
+  # graph edges walked for reachability.
+
+  # Candidate GC set: the target's own ``depends`` closure, walked through
+  # the FULL graph (the target itself is a root of this walk).
+  var candidatesSet = initHashSet[string]()
+  block:
+    var byName = initTable[string, ResolvedRepo]()
+    for repo in resolved.repos:
+      byName[repo.name] = repo
+    var pending = @[target.name]
+    while pending.len > 0:
+      let name = pending.pop()
+      if name in candidatesSet:
+        continue
+      candidatesSet.incl(name)
+      if name in byName:
+        for dep in byName[name].depends:
+          if dep.len > 0 and dep notin candidatesSet:
+            pending.add(dep)
+
+  # Surviving roots: the membership roots that REMAIN after the removal —
+  # every project membership EXCEPT the target and EXCEPT the candidates
+  # being considered for GC. A candidate must not seed itself as its own
+  # root (that is precisely the bug that makes a transitive-only repo
+  # trivially "reachable" and never collected); it survives only if a
+  # genuinely independent surviving root still reaches it via ``depends``.
+  var survivingRoots = initHashSet[string]()
+  for repo in resolved.repos:
+    if repo.name != target.name and repo.name notin candidatesSet:
+      survivingRoots.incl(repo.name)
+  let stillReachable = reachableExcluding(
+    resolved.repos, survivingRoots, excluded = target.name)
+  # Final GC set: candidates that are NOT still reachable from a surviving
+  # root. The target itself is always collected.
+  var gcNames: seq[string]
+  for repo in resolved.repos:
+    if repo.name in candidatesSet and
+        (repo.name == target.name or repo.name notin stillReachable):
+      gcNames.add(repo.name)
+  var gcRepos: seq[ResolvedRepo]
+  for repo in resolved.repos:
+    if repo.name in gcNames:
+      gcRepos.add(repo)
+
+  # Dirty-detection per GC repo: a working tree with uncommitted changes is
+  # what makes the removal destructive. A missing/clean tree is safe to
+  # remove without a discard. A dirty/unpublished tree is NEVER silently
+  # deleted (RA-9 destructive-command safety).
+  var identityResolved = false
+  var identity: GitToolIdentity
+  proc gitIdentity(): GitToolIdentity =
+    if not identityResolved:
+      identity = ensureGitToolResolvable(parsed.toolProvisioning, getEnv("PATH"))
+      identityResolved = true
+    identity
+  type GcEntry = object
+    repo: ResolvedRepo
+    dirty: bool
+    dirtyDiag: string
+  var plan: seq[GcEntry]
+  var anyDirty = false
+  for repo in gcRepos:
+    let repoPath = parsed.workspaceRoot / repo.path
+    var dirty = false
+    var dirtyDiag = ""
+    if dirExists(repoPath / ".git"):
+      let cleanRes = queryGitState(isCleanQuery(repoPath), gitIdentity())
+      if cleanRes.status != gqsOk:
+        dirty = true
+        dirtyDiag = "clean/dirty probe failed: " & cleanRes.diagnostic
+      elif not cleanRes.isClean:
+        dirty = true
+        dirtyDiag = "working tree has uncommitted changes"
+    if dirty: anyDirty = true
+    plan.add(GcEntry(repo: repo, dirty: dirty, dirtyDiag: dirtyDiag))
 
   # Preview the per-repo effect BEFORE mutating anything.
   let effectVerb = if parsed.dryRun: "would remove" else: "remove"
-  stderr.writeLine("repro remove will " & effectVerb & " 1 repo from " &
-    "project '" & resolved.projectName & "':")
-  stderr.writeLine("  " & repo.path & " (name=" & repo.name & ")" &
-    (if dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
-     else: " [clean]"))
-
-  var entry = RemoveRepoEntry(name: repo.name, path: repo.path, dirty: dirty)
+  stderr.writeLine("repro remove will " & effectVerb & " " & $plan.len &
+    " repo(s) from project '" & resolved.projectName & "':")
+  for p in plan:
+    stderr.writeLine("  " & p.repo.path & " (name=" & p.repo.name & ")" &
+      (if p.dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
+       else: " [clean]"))
 
   if parsed.dryRun:
-    entry.effect = "would_remove"
-    if dirty: entry.diagnostic = dirtyDiag
-    result.repos.add(entry)
+    for p in plan:
+      var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
+        dirty: p.dirty, effect: "would_remove")
+      if p.dirty: entry.diagnostic = p.dirtyDiag
+      result.repos.add(entry)
     result.exitCode = 0
     return
 
-  # RA-9 confirmation: only DIRTY removals need the destructive prompt
-  # (discarding uncommitted work). A clean removal is allowed without a
-  # prompt — there is nothing to discard.
-  if dirty:
+  # RA-9 confirmation: a DIRTY removal in the GC set needs the destructive
+  # prompt (discarding uncommitted work). A wholly-clean GC set proceeds
+  # without a prompt. The whole removal is gated on a single confirmation so
+  # the operator answers once for the destructive batch.
+  if anyDirty:
     let decision = confirmDestructive(
-      prompt = "Remove '" & repo.path & "' and DISCARD its uncommitted " &
+      prompt = "Remove " & $plan.len & " repo(s) and DISCARD uncommitted " &
         "changes? [y/N] ",
       autoYes = parsed.force,
       isTty = isatty(stdin),
       flagName = "--force",
-      refuseMessage = "refusing to remove '" & repo.path &
-        "' in a non-interactive context without --force (would discard " &
-        "uncommitted changes)",
-      declineMessage = "remove declined; '" & repo.path & "' left intact")
+      refuseMessage = "refusing to remove in a non-interactive context " &
+        "without --force (would discard uncommitted changes)",
+      declineMessage = "remove declined; nothing removed")
     if decision != ddConfirmed:
-      entry.effect =
-        if decision == ddRefusedNonTty: "refused" else: "declined"
-      entry.diagnostic = dirtyDiag
-      result.repos.add(entry)
+      for p in plan:
+        var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
+          dirty: p.dirty)
+        entry.effect =
+          if decision == ddRefusedNonTty: "refused" else: "declined"
+        if p.dirty: entry.diagnostic = p.dirtyDiag
+        result.repos.add(entry)
       result.exitCode = 2
       result.declarationChanged = false
       return
 
-  # Proceed: drop the declaration, then clean the working tree (path) and
-  # its object store (the per-repo ``.git``, removed with the tree).
-  let changed = dropFragmentInclude(resolved.projectFile, repo.fragmentPath)
+  # Proceed: drop the target's declaration, then clean each GC repo's working
+  # tree (path) and its object store (the per-repo ``.git``, removed with the
+  # tree). Only the target's include is dropped; transitive develop-set
+  # siblings are GC'd as CHECKOUTS (their fragments are not the user's direct
+  # dependency, so the declaration drop is scoped to the named target).
+  let changed = dropFragmentInclude(resolved.projectFile, target.fragmentPath)
   result.declarationChanged = changed
-  if dirExists(repoPath):
-    removeDir(repoPath)
-  entry.effect = "removed"
-  result.repos.add(entry)
+  for p in plan:
+    let repoPath = parsed.workspaceRoot / p.repo.path
+    if dirExists(repoPath):
+      removeDir(repoPath)
+    var entry = RemoveRepoEntry(name: p.repo.name, path: p.repo.path,
+      dirty: p.dirty, effect: "removed")
+    result.repos.add(entry)
   result.exitCode = 0
 
 proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
@@ -27256,6 +27810,22 @@ proc runThinApp*(programName: string): int =
       return runCheckoutCommand(checkoutArgs)
     except CatchableError as err:
       stderr.writeLine("repro " & args[0] & ": error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "add":
+    # RA-22 — `repro add <repo>` (workspace membership / develop-mode policy
+    # per CLI/add.md + Workspace-And-Develop-Mode.md §"Workspace Membership").
+    # Policy (RA-8 `[develop] org_urls`) decides develop vs binary by default;
+    # `--develop`/`--binary` override; `--no-membership` clones without adding.
+    # Implementation in ``runAddCommand``.
+    try:
+      let addArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runAddCommand(addArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro add: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "remove":
     # RA-9 — `repro remove <repo>` (workspace context per CLI/remove.md +

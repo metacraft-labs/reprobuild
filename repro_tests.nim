@@ -6222,6 +6222,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim",
+    binary: "build/test-bin/t_add_respects_develop_mode_policy_and_overrides",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim",
+    binary: "build/test-bin/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_init_bootstraps_manifest_cache_outside_workspace.nim",
     binary: "build/test-bin/t_workspace_init_bootstraps_manifest_cache_outside_workspace",
     defines: @[],

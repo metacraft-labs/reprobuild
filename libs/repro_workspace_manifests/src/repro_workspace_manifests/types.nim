@@ -148,11 +148,29 @@ type
     name*: string
     fetch*: string
 
+  BinaryDependencyEntry* = object
+    ## RA-22 — a dependency added in BINARY mode: a pinned, published
+    ## artifact rather than a local develop-mode sibling checkout. Recorded
+    ## directly in the project manifest (NOT as an `includes` repo fragment)
+    ## so a binary dependency is never cloned, synced, or part of the
+    ## checkout garbage-collection graph (Workspace-And-Develop-Mode.md
+    ## §"Workspace Membership": binary = "no checkout"). Authored as an
+    ## inline-table-array element:
+    ##   binary_dependency = [{ name = "zlib", remote = "https://…", revision = "v1.3" }]
+    name*: string
+    remote*: string
+    revision*: Option[string]
+
   ProjectManifest* = object
     schema*: string
     project*: ProjectBody
     remote*: seq[RemoteEntry]
     includes*: seq[string]
+    binary_dependency*: seq[BinaryDependencyEntry]
+      ## RA-22 — binary-mode dependencies (see `BinaryDependencyEntry`). A
+      ## missing/empty array means the project declares no binary
+      ## dependencies; backward-compatible with manifests authored before
+      ## RA-22.
     extensions*: Extensions
 
   # --- variants/<...>.toml ---------------------------------------------------
@@ -326,11 +344,27 @@ type
       ## allowed-signers `<principal>` column. Defaults to a wildcard
       ## (`reprobuild@manifest`) the inline-key path uses when unset.
 
+  BootstrapDevelopBody* = object
+    ## RA-22 — host/workspace policy for `repro add`'s develop-vs-binary
+    ## default (Workspace-And-Develop-Mode.md §"`repro add` and develop-mode
+    ## policy"). A dependency whose fetch URL begins with one of the
+    ## `org_urls` prefixes is added in DEVELOP mode by default (a local
+    ## sibling checkout); every other dependency defaults to BINARY. The
+    ## policy is data, NEVER a hardcoded org name in the binary — an empty /
+    ## absent `org_urls` means "no org defaults to develop" and every `add`
+    ## defaults to binary unless `--develop` is passed. Per-`add` `--develop`
+    ## / `--binary` flags override the default each time.
+    org_urls*: seq[string]
+      ## Fetch-URL prefixes (e.g. `https://github.com/our-org/`) whose repos
+      ## default to develop mode. Matched as a literal string prefix against
+      ## the dependency's remote URL.
+
   WorkspaceBootstrap* = object
     schema*: string
     manifest*: BootstrapManifestBody
     projects*: BootstrapProjectsBody
     verify*: BootstrapVerifyBody
+    develop*: BootstrapDevelopBody
     extensions*: Extensions
 
   # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----
