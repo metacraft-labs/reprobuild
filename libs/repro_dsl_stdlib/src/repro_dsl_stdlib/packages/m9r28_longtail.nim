@@ -5,66 +5,80 @@
 ## dosfstools, gdisk, cryptsetup, lvm2, btrfs-progs). Each is a
 ## single-channel nix stub; richer provisioning arrives when (and if)
 ## a sibling from-source recipe is authored later.
+##
+## M9.R.29.1 — the macro layer's ``stringLiteral`` helper falls back to
+## ``node.repr`` for non-string-literal arguments. Passing ``nixpkgsRev =
+## NixpkgsRev`` (a top-level ``const``) therefore emitted the literal
+## identifier ``"NixpkgsRev"`` into the nix invocation and the build
+## failed with ``error: hash 'NixpkgsNarHash' is not SRI``. Inline the
+## values per the sibling stubs (``audit.nim``, ``libxcrypt.nim``, ...).
 
 import repro_project_dsl
-
-const NixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8"
-const NixpkgsNarHash =
-  "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `ncurses`:
   provisioning:
     nixPackage "nixpkgs#ncurses", executablePath = "lib/libncurses.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `popt`:
   provisioning:
     nixPackage "nixpkgs#popt", executablePath = "lib/libpopt.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `readline`:
   provisioning:
     nixPackage "nixpkgs#readline", executablePath = "lib/libreadline.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `zlib`:
   provisioning:
     nixPackage "nixpkgs#zlib", executablePath = "lib/libz.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `lzo`:
   provisioning:
     nixPackage "nixpkgs#lzo", executablePath = "lib/liblzo2.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `libgcrypt`:
   provisioning:
     nixPackage "nixpkgs#libgcrypt", executablePath = "lib/libgcrypt.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `json-c`:
   provisioning:
     nixPackage "nixpkgs#json_c", executablePath = "lib/libjson-c.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `device-mapper`:
   provisioning:
     nixPackage "nixpkgs#lvm2.lib", executablePath = "lib/libdevmapper.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `util-linux`:
   provisioning:
     nixPackage "nixpkgs#util-linux", executablePath = "lib/libblkid.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `pam`:
   provisioning:
     nixPackage "nixpkgs#linux-pam", executablePath = "lib/libpam.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
 
 package `libbsd`:
   ## shadow-utils' configure tests for ``readpassphrase()`` which
   ## glibc lacks; libbsd provides it.
   provisioning:
     nixPackage "nixpkgs#libbsd", executablePath = "lib/libbsd.so",
-      nixpkgsRev = NixpkgsRev, nixpkgsNarHash = NixpkgsNarHash
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
