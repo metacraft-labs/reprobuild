@@ -68,7 +68,8 @@ package cryptsetupSource:
         "--disable-nls",
         "--disable-asciidoc",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  patchHardcodedFile = true)
       discard pkg.executable("cryptsetup")
       discard pkg.executable("veritysetup")
       discard pkg.executable("integritysetup")
