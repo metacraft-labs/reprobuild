@@ -54,6 +54,15 @@ package sudoSource:
   build:
     setCurrentOwningPackageOverride("sudoSource")
     try:
+      ## M9.R.29.3 — sudo's configure probes for ``mv``, ``vi``,
+      ## ``sendmail``, and ``sh`` in PATH and bakes the absolute path
+      ## into ``_PATH_MV`` / ``_PATH_VI`` / etc. via ``#define`` in
+      ## ``confdefs.h``. Under the nix build shell only ``sh`` is on
+      ## PATH (coreutils' ``mv`` is not), so the probe leaves
+      ## ``_PATH_MV`` undefined and ``visudo.c`` fails to compile with
+      ## ``'_PATH_MV' undeclared``. Pin the runtime paths to the
+      ## live-ISO layout (``/usr/bin/mv`` from coreutils, ``/usr/bin/vi``
+      ## from the from-source vim recipe / ``nvi`` fallback).
       let opts = @[
         "--disable-static",
         "--enable-shared",
@@ -63,6 +72,10 @@ package sudoSource:
         "--without-aixauth",
         "--without-kerb5",
         "--disable-nls",
+        "MVPROG=/usr/bin/mv",
+        "VIPROG=/usr/bin/vi",
+        "BSHELLPROG=/bin/sh",
+        "SENDMAILPROG=/usr/sbin/sendmail",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("sudo")
