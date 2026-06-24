@@ -17271,6 +17271,60 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     a.cwd = workspaceRoot
     return (true, a, "", "")
 
+# ---- RA-9: shared destructive-command confirmation ------------------------
+#
+# ``remove`` / ``checkout`` / ``sync --force-sync`` all DISCARD uncommitted
+# sibling work when they proceed. Per RA-9 (and Interactive-UX-And-Progress
+# §"communicate before execute") they must share ONE confirmation contract:
+#
+#   1. The CALLER prints a per-repo PREVIEW of the effect first (so the
+#      operator sees what is about to be discarded BEFORE any mutation).
+#   2. ``--yes`` / ``--force`` opts out of the prompt and proceeds.
+#   3. Otherwise a prompt is only answerable on a TTY. In a non-interactive
+#      context (stdin is not a TTY — the natural state under ``execCmdEx``)
+#      we REFUSE CLEANLY with a clear message naming the opt-out flag and a
+#      non-zero exit; we NEVER block on ``stdin.readLine`` that can never be
+#      answered.
+#   4. On a TTY we ask once; ``y``/``yes`` confirms, anything else declines.
+#
+# ``confirmDestructive`` is the single chokepoint. TTY detection is injected
+# (``isTty``) so tests can drive the non-TTY refuse path deterministically
+# (``isatty(stdin)`` is false under ``execCmdEx``), and the refuse message is
+# parameterized so each command names its own flag.
+
+type
+  DestructiveDecision* = enum
+    ## Outcome of the shared RA-9 confirmation chokepoint.
+    ddConfirmed        ## opt-out flag set, or a TTY operator answered "yes".
+    ddRefusedNonTty    ## non-TTY without the opt-out flag → refuse cleanly.
+    ddDeclined         ## TTY operator answered "no".
+
+proc confirmDestructive*(prompt: string; autoYes: bool; isTty: bool;
+                         flagName: string; refuseMessage: string;
+                         declineMessage = ""): DestructiveDecision =
+  ## The single destructive-command confirmation gate shared by
+  ## ``remove`` (``--force``), ``checkout`` (``--yes``) and
+  ## ``sync --force-sync`` (``--yes``). The caller is responsible for
+  ## printing the per-repo preview BEFORE calling this. ``flagName`` is the
+  ## opt-out flag named in the non-TTY refusal so the operator knows exactly
+  ## how to proceed. Returns the decision; the caller maps it to an exit
+  ## code and acts (or not) accordingly. This proc NEVER reads stdin unless
+  ## ``isTty`` is true, so it can never hang in a non-interactive context.
+  if autoYes:
+    return ddConfirmed
+  if not isTty:
+    stderr.writeLine(refuseMessage & " (re-run with " & flagName &
+      " to confirm)")
+    return ddRefusedNonTty
+  stderr.write(prompt)
+  stderr.flushFile()
+  let answer = stdin.readLine().strip().toLowerAscii()
+  if answer == "y" or answer == "yes":
+    return ddConfirmed
+  if declineMessage.len > 0:
+    stderr.writeLine(declineMessage)
+  ddDeclined
+
 type
   ForceSyncGuardOutcome = enum
     ## Result of the RA-16 / RA-9 destructive-command safety gate for
@@ -17306,22 +17360,22 @@ proc forceSyncGuard(args: WorkspaceSyncArgs;
     stderr.writeLine("  " & t.path & " [" & syncCaseTag(t.syncCase) & "]" &
       (if t.observed.len > 0: " " & t.observed else: "") &
       " → " & t.expected)
-  if args.assumeYes:
-    return fsgConfirmed
-  # No explicit opt-out: a prompt is only answerable on a TTY.
-  if not isatty(stdin):
-    stderr.writeLine("refusing to --force-sync in a non-interactive context " &
-      "without --yes/--force (would discard local changes); re-run with " &
-      "--yes to confirm")
-    return fsgRefusedNonTty
-  stderr.write("Overwrite the checkout(s) above? This DISCARDS local " &
-    "changes. [y/N] ")
-  stderr.flushFile()
-  let answer = stdin.readLine().strip().toLowerAscii()
-  if answer == "y" or answer == "yes":
-    return fsgConfirmed
-  stderr.writeLine("force-sync declined; leaving divergent checkouts untouched")
-  fsgDeclined
+  # RA-9: defer the opt-out / TTY / non-TTY decision to the shared
+  # ``confirmDestructive`` chokepoint so ``--force-sync`` refuses in a
+  # non-interactive context identically to ``remove`` and ``checkout``.
+  case confirmDestructive(
+      prompt = "Overwrite the checkout(s) above? This DISCARDS local " &
+        "changes. [y/N] ",
+      autoYes = args.assumeYes,
+      isTty = isatty(stdin),
+      flagName = "--yes",
+      refuseMessage = "refusing to --force-sync in a non-interactive " &
+        "context without --yes/--force (would discard local changes)",
+      declineMessage =
+        "force-sync declined; leaving divergent checkouts untouched")
+  of ddConfirmed: fsgConfirmed
+  of ddRefusedNonTty: fsgRefusedNonTty
+  of ddDeclined: fsgDeclined
 
 proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
@@ -22850,6 +22904,7 @@ type
                           ## Branch absent locally AND on every remote.
     croProbeFailed        ## Pre-pass probe failed for this repo.
     croActionFailed       ## A scheduled action returned non-OK.
+    croConfirmRefused     ## RA-9 confirmation refused (non-TTY/declined).
 
   CheckoutRepoEntry* = object
     ## Per-repo line in the JSON report. ``previousBranch`` is the
@@ -22889,6 +22944,7 @@ proc checkoutOutcomeTag(outcome: CheckoutRepoOutcome): string =
   of croBranchMissingRefused: "branch_missing_refused"
   of croProbeFailed: "probe_failed"
   of croActionFailed: "action_failed"
+  of croConfirmRefused: "confirm_refused"
 
 proc toJsonNode*(report: CheckoutReport): JsonNode =
   result = newJObject()
@@ -22937,6 +22993,7 @@ type
     projectName: string
     branchName: string
     json: bool
+    assumeYes: bool      ## RA-9 ``--yes``: skip the per-repo confirmation.
     toolProvisioning: ToolProvisioningMode
 
 proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
@@ -22957,6 +23014,8 @@ proc parseCheckoutArgs*(args: openArray[string]): CheckoutArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "--json":
       result.json = true
+    elif arg == "--yes" or arg == "--force":
+      result.assumeYes = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro checkout` flag: " & arg)
@@ -23184,6 +23243,69 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       result.recordedBranch = recorded.get()
     return
 
+  # RA-9 destructive-command safety: ``checkout`` switches every
+  # participating repo's working tree, so PREVIEW the per-repo
+  # ``current -> target`` change and CONFIRM before mutating anything.
+  # ``--yes`` opts out; a non-interactive context without it REFUSES
+  # cleanly (non-zero, naming the flag) rather than hanging on a prompt.
+  # Only the repos that would actually switch (``rsReadyLocal`` /
+  # ``rsReadyFetchAndTrack``) are previewed — an all-``already_on_branch``
+  # checkout is a no-op and skips the gate entirely.
+  var switchPreview: seq[string]
+  for state in states:
+    if state.kind in {rsReadyLocal, rsReadyFetchAndTrack}:
+      let from0 =
+        if state.previousBranch.len > 0: state.previousBranch
+        else: "(detached)"
+      switchPreview.add("  " & state.repo.path & ": " & from0 &
+        " -> " & parsed.branchName &
+        (if state.kind == rsReadyFetchAndTrack: " (fetch+track)" else: ""))
+  if switchPreview.len > 0:
+    stderr.writeLine("repro checkout will switch " & $switchPreview.len &
+      " repo(s) to '" & parsed.branchName & "':")
+    for line in switchPreview:
+      stderr.writeLine(line)
+    let decision = confirmDestructive(
+      prompt = "Switch the repo(s) above to '" & parsed.branchName &
+        "'? [y/N] ",
+      autoYes = parsed.assumeYes,
+      isTty = isatty(stdin),
+      flagName = "--yes",
+      refuseMessage = "refusing to checkout in a non-interactive context " &
+        "without --yes (would switch the working tree of " &
+        $switchPreview.len & " repo(s))",
+      declineMessage = "checkout declined; no repo switched")
+    if decision != ddConfirmed:
+      # Refuse-and-report: mutate nothing, surface the per-repo
+      # classification just like the dirty/missing refuse path above.
+      for state in states:
+        var entry = CheckoutRepoEntry(
+          name: state.repo.name,
+          path: state.repo.path,
+          headSha: state.headSha,
+          previousBranch: state.previousBranch,
+          newBranch: state.previousBranch,
+          remoteHadBranch: state.remoteHadBranch,
+          localHadBranch: state.localHadBranch)
+        case state.kind
+        of rsAlreadyOnBranch:
+          entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
+          entry.newBranch = parsed.branchName
+        of rsReadyLocal, rsReadyFetchAndTrack:
+          entry.outcome = checkoutOutcomeTag(croConfirmRefused)
+          entry.diagnostic =
+            if decision == ddRefusedNonTty:
+              "refused: non-interactive context without --yes"
+            else: "declined by operator"
+        else:
+          entry.outcome = "internal_unexpected_state"
+        result.repos.add(entry)
+      result.exitCode = 2
+      let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+      if recorded.isSome:
+        result.recordedBranch = recorded.get()
+      return
+
   # Execute pass: schedule a ``gitFetchAction`` (for the
   # fetch-and-track group) chained to a ``gitSwitchAction``, and a
   # bare ``gitSwitchAction`` for the local-ready group. The
@@ -23359,6 +23481,280 @@ proc runCheckoutCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# --- RA-9: `repro remove <repo>` (workspace context) ----------------------
+#
+# Per CLI/remove.md (workspace/develop-mode responsibilities) + the RA-10
+# note: removing a repo from the active workspace drops its declaration AND
+# cleans its working tree (keyed by ``path``) and its object store (the
+# per-repo ``.git`` under that path; the shared bare is keyed by fetch URL
+# and SHARED across repos, so it is intentionally NOT deleted here). The
+# removal is DESTRUCTIVE — if the working tree has uncommitted changes it
+# would be discarded — so it is subject to the RA-9 confirmation contract:
+# preview the per-repo effect, ``--force`` to opt out, and REFUSE CLEANLY in
+# a non-interactive context without ``--force`` rather than hanging.
+#
+# Scope is deliberately minimal (RA-9 is about destructive-safety, not a
+# full dependency-graph cleanup): we mutate the single-project declaration by
+# dropping the matching ``repos/<repo>.toml`` include line from
+# ``projects/<project>.toml`` and remove the working tree. ``--dry-run``
+# prints the preview and exits without mutating.
+
+type
+  RemoveArgs = object
+    workspaceRoot: string
+    projectName: string
+    target: string       ## repo name (or path) to remove.
+    force: bool          ## ``--force``: opt out of the dirty-discard prompt.
+    dryRun: bool         ## ``--dry-run``: preview only, mutate nothing.
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+  RemoveRepoEntry* = object
+    name*: string
+    path*: string
+    effect*: string      ## ``would_remove`` / ``removed`` / ``refused`` / ``declined``.
+    dirty*: bool
+    diagnostic*: string
+
+  RemoveReport* = object
+    project*: string
+    workspaceRoot*: string
+    target*: string
+    repos*: seq[RemoveRepoEntry]
+    declarationChanged*: bool
+    exitCode*: int
+
+proc toJsonNode*(report: RemoveReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["target"] = %report.target
+  result["declarationChanged"] = %report.declarationChanged
+  result["exitCode"] = %report.exitCode
+  var repos = newJArray()
+  for entry in report.repos:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["effect"] = %entry.effect
+    obj["dirty"] = %entry.dirty
+    obj["diagnostic"] = %entry.diagnostic
+    repos.add(obj)
+  result["repos"] = repos
+
+proc parseRemoveArgs*(args: openArray[string]): RemoveArgs =
+  ## ``repro remove <repo> [--workspace-root=PATH] [--force] [--dry-run]
+  ## [--tool-provisioning=...] [--json]``.
+  result.workspaceRoot = ""
+  result.toolProvisioning = tpmPathOnly
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--force" or arg == "--yes":
+      result.force = true
+    elif arg == "--dry-run":
+      result.dryRun = true
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro remove` flag: " & arg)
+    elif result.target.len == 0:
+      result.target = arg
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro remove`: " & arg)
+    inc i
+  if result.target.len == 0:
+    raise newException(ValueError,
+      "`repro remove` requires a repo name positional argument")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
+  ## Same single-project / composer dispatch rule as ``checkout``: a
+  ## metadata-only ``workspace.toml`` (``[workspace].project``) or a
+  ## compositional one both resolve to a flat repo set we can scan.
+  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
+    let absToml = absolutePath(workspaceToml)
+    let workspaceLocal = readWorkspaceLocal(absToml)
+    return composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml)
+  var projectName = parsed.projectName
+  if projectName.len == 0 and fileExists(workspaceToml):
+    try:
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0:
+        projectName = recorded
+    except WorkspaceManifestParseError:
+      discard
+  if projectName.len == 0:
+    raise newException(ValueError,
+      "`repro remove <repo>` requires either `.repo/workspace.toml` or a " &
+        "project name recoverable from one; neither was present at " &
+        parsed.workspaceRoot)
+  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "no project or variant named '" & projectName & "' found under '" &
+      manifestsRoot & "'")
+
+proc dropFragmentInclude(projectFile, fragmentAbs: string): bool =
+  ## Remove the ``includes`` entry that resolves to ``fragmentAbs`` from
+  ## ``projectFile`` by rewriting the include list textually. Returns
+  ## true when a line was dropped. The match is on the resolved absolute
+  ## fragment path so a ``repos/<repo>.toml`` entry is identified even if
+  ## another repo shares a name prefix.
+  let content = readFile(projectFile)
+  var outLines: seq[string]
+  var dropped = false
+  for line in content.splitLines():
+    let trimmed = line.strip()
+    # An include line looks like ``"repos/<repo>.toml",`` (inside the
+    # ``includes = [ ... ]`` array). Extract the quoted path and compare
+    # its resolved form to the target fragment.
+    if trimmed.startsWith("\""):
+      let closeIdx = trimmed.find('"', 1)
+      if closeIdx > 1:
+        let raw = trimmed[1 ..< closeIdx]
+        let manifestRoot = parentDir(parentDir(absolutePath(projectFile)))
+        let resolvedInc = manifestRoot / raw.replace('/', DirSep)
+        if absolutePath(resolvedInc) == absolutePath(fragmentAbs):
+          dropped = true
+          continue
+    outLines.add(line)
+  if dropped:
+    writeFile(projectFile, outLines.join("\n"))
+  dropped
+
+proc executeRemove(parsed: RemoveArgs): RemoveReport =
+  result.workspaceRoot = parsed.workspaceRoot
+  result.target = parsed.target
+
+  let resolved = resolveRemoveProject(parsed)
+  result.project = resolved.projectName
+
+  # Locate the target repo by name, falling back to path.
+  var matchIdx = -1
+  for idx, repo in resolved.repos:
+    if repo.name == parsed.target or repo.path == parsed.target:
+      matchIdx = idx
+      break
+  if matchIdx < 0:
+    result.exitCode = 1
+    result.repos.add(RemoveRepoEntry(
+      name: parsed.target, effect: "not_found",
+      diagnostic: "no repo named '" & parsed.target &
+        "' is declared in project '" & resolved.projectName & "'"))
+    return
+
+  let repo = resolved.repos[matchIdx]
+  let repoPath = parsed.workspaceRoot / repo.path
+
+  # Dirty-detection: a working tree with uncommitted changes is what makes
+  # this destructive. A missing/clean tree is safe to remove without a
+  # discard.
+  var dirty = false
+  var dirtyDiag = ""
+  if dirExists(repoPath / ".git"):
+    let identity = ensureGitToolResolvable(
+      parsed.toolProvisioning, getEnv("PATH"))
+    let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
+    if cleanRes.status != gqsOk:
+      # A probe failure is treated conservatively as "possibly dirty" so we
+      # never silently discard on an unknown state.
+      dirty = true
+      dirtyDiag = "clean/dirty probe failed: " & cleanRes.diagnostic
+    elif not cleanRes.isClean:
+      dirty = true
+      dirtyDiag = "working tree has uncommitted changes"
+
+  # Preview the per-repo effect BEFORE mutating anything.
+  let effectVerb = if parsed.dryRun: "would remove" else: "remove"
+  stderr.writeLine("repro remove will " & effectVerb & " 1 repo from " &
+    "project '" & resolved.projectName & "':")
+  stderr.writeLine("  " & repo.path & " (name=" & repo.name & ")" &
+    (if dirty: " [DIRTY — uncommitted changes WILL BE DISCARDED]"
+     else: " [clean]"))
+
+  var entry = RemoveRepoEntry(name: repo.name, path: repo.path, dirty: dirty)
+
+  if parsed.dryRun:
+    entry.effect = "would_remove"
+    if dirty: entry.diagnostic = dirtyDiag
+    result.repos.add(entry)
+    result.exitCode = 0
+    return
+
+  # RA-9 confirmation: only DIRTY removals need the destructive prompt
+  # (discarding uncommitted work). A clean removal is allowed without a
+  # prompt — there is nothing to discard.
+  if dirty:
+    let decision = confirmDestructive(
+      prompt = "Remove '" & repo.path & "' and DISCARD its uncommitted " &
+        "changes? [y/N] ",
+      autoYes = parsed.force,
+      isTty = isatty(stdin),
+      flagName = "--force",
+      refuseMessage = "refusing to remove '" & repo.path &
+        "' in a non-interactive context without --force (would discard " &
+        "uncommitted changes)",
+      declineMessage = "remove declined; '" & repo.path & "' left intact")
+    if decision != ddConfirmed:
+      entry.effect =
+        if decision == ddRefusedNonTty: "refused" else: "declined"
+      entry.diagnostic = dirtyDiag
+      result.repos.add(entry)
+      result.exitCode = 2
+      result.declarationChanged = false
+      return
+
+  # Proceed: drop the declaration, then clean the working tree (path) and
+  # its object store (the per-repo ``.git``, removed with the tree).
+  let changed = dropFragmentInclude(resolved.projectFile, repo.fragmentPath)
+  result.declarationChanged = changed
+  if dirExists(repoPath):
+    removeDir(repoPath)
+  entry.effect = "removed"
+  result.repos.add(entry)
+  result.exitCode = 0
+
+proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
+  for entry in report.repos:
+    var line = "repro remove: " & entry.path & " " & entry.effect
+    if entry.diagnostic.len > 0:
+      line.add(" (" & entry.diagnostic & ")")
+    result.add(line)
+  if report.exitCode == 0 and report.declarationChanged:
+    result.add("repro remove: dropped '" & report.target &
+      "' from project '" & report.project & "'")
+
+proc runRemoveCommand*(args: openArray[string]): int =
+  ## ``repro remove <repo> [--force] [--dry-run] [--json]
+  ## [--workspace-root=PATH]``. RA-9 destructive-command safety: preview +
+  ## confirm + refuse-cleanly-in-non-TTY for a workspace repo removal.
+  let parsed = parseRemoveArgs(args)
+  let report = executeRemove(parsed)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderRemoveTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 # --- M16: `repro workspace start <branch>` --------------------------------
 #
 # Per ``reprobuild-specs/Workspace-Management.milestones.org`` §M16.
@@ -23515,10 +23911,15 @@ proc executeWorkspaceStart(parsed: WorkspaceStartArgs): WorkspaceStartReport =
   # (any-dirty refuses immediately), (b) branch present locally, (c)
   # branch present on origin. We reuse ``resolveCheckoutProject`` so
   # the dispatch rules stay aligned with M14/M15.
+  # RA-9: ``start`` performs its OWN dirty-refuse + branch-existence
+  # observation before delegating the switch, so the inner
+  # ``executeCheckout`` runs with the confirmation already satisfied
+  # (``assumeYes``) — ``start`` is not a separate non-TTY refuse surface.
   let parsedCheckout = CheckoutArgs(
     workspaceRoot: parsed.workspaceRoot,
     projectName: parsed.projectName,
     branchName: parsed.branchName,
+    assumeYes: true,
     toolProvisioning: parsed.toolProvisioning)
   let (resolved, _) = resolveCheckoutProject(parsedCheckout)
   result.project = resolved.projectName
@@ -26374,6 +26775,22 @@ proc runThinApp*(programName: string): int =
       return runCheckoutCommand(checkoutArgs)
     except CatchableError as err:
       stderr.writeLine("repro " & args[0] & ": error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "remove":
+    # RA-9 — `repro remove <repo>` (workspace context per CLI/remove.md +
+    # the RA-10 path/name note). Destructive-command safety: previews the
+    # per-repo effect, gates a dirty discard behind ``--force``, and
+    # refuses cleanly in a non-interactive context rather than hanging.
+    # Implementation in ``runRemoveCommand``.
+    try:
+      let removeArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runRemoveCommand(removeArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro remove: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:

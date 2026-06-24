@@ -6190,6 +6190,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim",
+    binary: "build/test-bin/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_init_bootstraps_manifest_cache_outside_workspace.nim",
     binary: "build/test-bin/t_workspace_init_bootstraps_manifest_cache_outside_workspace",
     defines: @[],

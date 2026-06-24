@@ -249,8 +249,13 @@ proc seedMetadataBranch(fx: M15Fixture; branch: string) =
     project = "lib-a", branch = branch)
 
 proc invokeCheckout(fx: M15Fixture; name: string): CmdResult =
+  # RA-9: ``checkout`` switches working trees, so it is a destructive
+  # multi-repo command and refuses in a non-interactive context (the
+  # natural state here) without ``--yes``. These cases exercise the
+  # post-confirmation switch outcomes, so they opt out with ``--yes``;
+  # the dedicated RA-9 suite covers the non-TTY refuse path.
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", name,
+    fx.reproBin, "checkout", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
