@@ -7,7 +7,7 @@ import repro_core
 import repro_depfile
 import repro_hash
 import repro_local_store
-import repro_monitor_depfile
+import io_mon
 import repro_runquota
 
 import repro_test_support

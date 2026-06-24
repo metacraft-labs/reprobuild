@@ -1845,9 +1845,11 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     ("STINT_SRC", anchored([
       "libs" / "stint" / "src",
     ]), "stint.nim"),
+    # Incremental-Test-Runner M7: the monitor shim moved to the io-mon
+    # sibling; ``nim-stackable-hooks`` is resolved only from the sibling
+    # checkout now (the deleted ``repro_monitor_shim/vendor`` fallback is gone).
     ("STACKABLE_HOOKS_SRC", anchored([
       ".." / "nim-stackable-hooks" / "src",
-      "libs" / "repro_monitor_shim" / "vendor" / "nim-stackable-hooks" / "src",
     ]), "stackable_hooks.nim"),
     ("VM_HARNESS_SRC", anchored([
       ".." / "vm-harness" / "src",

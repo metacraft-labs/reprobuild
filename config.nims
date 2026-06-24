@@ -28,10 +28,94 @@ let ctTestRunnerRoot = block:
     ".." / "reprobuild-ct-test-runner"
 for ctTestLib in [
   "ct_test_runner_adapter",
+  # Incremental-Test-Runner M0b-2: the watch-integration incremental-decision
+  # seam (``ct_incremental_adapter`` — ``watchTestEdgeDecision`` /
+  # ``WatchEdgeDecision``), backed by codetracer's canonical engine. Replaces
+  # reprobuild's former vendored ``repro_ct_incremental`` copy.
+  "ct_incremental_adapter",
 ]:
   let candidate = ctTestRunnerRoot / "libs" / ctTestLib / "src"
   if dirExists(candidate):
     switch("path", candidate)
+
+# Incremental-Test-Runner M0b-2: ``ct_incremental_adapter`` imports codetracer's
+# CANONICAL incremental engine (``codetracer/src/ct_test/incremental/engine.nim``)
+# directly as a workspace SIBLING — the whole point of M0b is that reprobuild
+# consumes the canonical engine with NO vendored copy and NO drift. The engine's
+# transitive imports stay within codetracer's ``ct_test/incremental`` modules
+# plus codetracer-trace-format-nim's seekable CTFS reader; it pulls in NO
+# reprobuild, runquota, or io-mon module. This wiring MIRRORS the adapter repo's
+# own ``config.nims`` (``wireCodetracerEngine``) and codetracer's
+# ``src/ct_test/config.nims`` + ``nim.cfg`` — the only build configuration that
+# makes the engine compile: the engine module path, the codetracer-trace-format-nim
+# sibling path, the ``results >= 0.5`` pin its seekable reader needs, and the
+# zstd dev include for the trace-format-nim CTFS reader's ``#include <zstd.h>``.
+# Every path is defended with ``dirExists``/``fileExists`` so a checkout missing
+# the codetracer sibling fails LOUDLY at compile time rather than mis-resolving.
+proc wireCodetracerEngine() =
+  # 1. The canonical engine module directory. Resolved from
+  #    ``CODETRACER_CT_TEST_SRC`` (the dev shell / CI sets it) or the sibling
+  #    checkout next to this repo for local development.
+  let ctTestSrc =
+    if getEnv("CODETRACER_CT_TEST_SRC").len > 0:
+      getEnv("CODETRACER_CT_TEST_SRC")
+    else:
+      ".." / "codetracer" / "src" / "ct_test"
+  let engineDir = ctTestSrc / "incremental"
+  if fileExists(engineDir / "engine.nim"):
+    switch("path", engineDir)
+
+  # 2. codetracer-trace-format-nim — the package the engine's seekable
+  #    executed-function reader (``ctfs_seekable.nim``) links.
+  let traceFormatSrc =
+    if getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC").len > 0:
+      getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")
+    else:
+      ".." / "codetracer-trace-format-nim" / "src"
+  if fileExists(traceFormatSrc / "codetracer_ct_print_lib.nim"):
+    switch("path", traceFormatSrc)
+
+  # 3. ``results >= 0.5`` pin (env var, then the newest ``results-0.5*`` under
+  #    ``~/.nimble/pkgs2``). codetracer-trace-format-nim needs the ``.v`` field
+  #    the ``?`` operator expands to; the older vendored ``results`` lacks it.
+  block pinResults:
+    let envSrc = getEnv("CODETRACER_RESULTS_SRC")
+    if envSrc.len > 0 and dirExists(envSrc):
+      switch("path", envSrc)
+      break pinResults
+    let pkgs2 = getHomeDir() / ".nimble" / "pkgs2"
+    if dirExists(pkgs2):
+      var best = ""
+      for kind, p in walkDir(pkgs2):
+        if kind == pcDir and p.lastPathPart.startsWith("results-0.5"):
+          if p.lastPathPart > best.lastPathPart:
+            best = p
+      if best.len > 0:
+        switch("path", best)
+
+  # 4. zstd dev include for the trace-format-nim CTFS reader's
+  #    ``#include <zstd.h>`` — re-surfaced out of the nix cc-wrapper's
+  #    ``NIX_CFLAGS_COMPILE`` exactly as codetracer's ``config.nims`` does.
+  let nixCflags = getEnv("NIX_CFLAGS_COMPILE")
+  if nixCflags.len > 0:
+    let toks = nixCflags.splitWhitespace()
+    var i = 0
+    while i < toks.len:
+      if toks[i] == "-isystem" and i + 1 < toks.len:
+        let dir = toks[i + 1]
+        if "zstd" in dir:
+          switch("passC", "-isystem " & dir)
+        i += 2
+      else:
+        i += 1
+
+# NOTE: ``wireCodetracerEngine()`` is CALLED at the very END of this config
+# (after the vendored ``results`` ``--path`` below), not here. In NimScript the
+# LAST ``--path`` added is searched FIRST, so codetracer's ``results >= 0.5``
+# pin (which the canonical engine + codetracer-trace-format-nim require — their
+# ``?`` operator expands to the ``.v`` field that version introduced) must be
+# added AFTER reprobuild's vendored ``libs/results`` to take precedence for the
+# engine modules. The proc is defined here; the call is deferred to the bottom.
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
 # ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
@@ -68,10 +152,7 @@ for libName in [
   "repro_hash",
   "cbor",
   "repro_domain_types",
-  "repro_monitor_depfile",
   "repro_depfile",
-  "repro_monitor_shim",
-  "repro_monitor_hooks",
   "repro_project_dsl",
   "repro_project_dsl_runtime_dll",
   "repro_dsl_stdlib",
@@ -127,13 +208,35 @@ for libName in [
   # types. M2b-M2e extend it with the ASP encoder; downstream libs
   # import it via ``import repro_solver`` once the encoder is alive.
   "repro_solver",
-  # Trace-Based-Incremental-Testing prototype (campaign in
-  # docs/Trace-Based-Incremental-Testing.milestones.org): M0 ships the
-  # CodeTracer JSON-trace reader; later milestones add the deep-hash
-  # invalidation engine and the ``repro watch --ct-incremental`` wiring.
-  "repro_ct_incremental",
+  # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
+  # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
+  # now flows through the engine-free ``ct_incremental_adapter`` (resolved from
+  # the ``reprobuild-ct-test-runner`` sibling above) onto codetracer's canonical
+  # engine. No reprobuild-side engine library remains.
 ]:
   switch("path", "libs" / libName / "src")
+
+# Incremental-Test-Runner M7: reprobuild's build engine consumes the shared
+# ``io-mon`` filesystem-monitoring library instead of its own former
+# ``repro_monitor_depfile`` / ``repro_monitor_shim`` / ``repro_monitor_hooks``
+# fs-snoop stack (now deleted). io-mon is a byte-identical wire-format + ABI
+# relocation of that stack onto ``nim-stackable-hooks``; the depfile API
+# (``MonitorDepFile`` / ``readMonitorDepFile`` / ``MonitorRecord`` / the
+# ``mr*`` / ``mo*`` / ``mc*`` enums / ``MonitorDepFileReaderError`` / the
+# ``fs_snoop`` driver + ``findShimLibrary``) is re-exported under the same
+# names from ``import io_mon`` (and the shim/hooks runtime under
+# ``io_mon/shim`` / ``io_mon/hooks``), so the consumers swapped their imports
+# only — no logic changed. The package's Nim name is ``io_mon`` with srcDir
+# ``src``; resolve the sibling checkout by path like every other workspace
+# Nim sibling. Prefer ``$IO_MON_SRC``, then the sibling checkout.
+let ioMonSrc = block:
+  let fromEnv = getEnv("IO_MON_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "io-mon" / "src"
+if fileExists(ioMonSrc / "io_mon.nim"):
+  switch("path", ioMonSrc)
 
 proc addPackagePath(envName: string; candidates: openArray[string];
                     marker: string) =
@@ -203,15 +306,27 @@ addPackagePath("STINT_SRC", [
   "libs" / "stint" / "src",
 ], "stint.nim")
 
-# The Windows monitor shim's hook chain is implemented on top of
+# Incremental-Test-Runner M0b-2: wire codetracer's canonical incremental engine
+# LAST, so its ``results >= 0.5`` pin is searched ahead of reprobuild's vendored
+# ``libs/results`` (NimScript: the last ``--path`` wins). The engine +
+# codetracer-trace-format-nim require the ``.v`` field the newer ``results``
+# introduces; the older vendored copy lacks it. Modules that only need the
+# vendored ``results`` still resolve it (it is still on the path) — only the
+# engine's seekable-reader chain needs the newer one, and it gets it by
+# precedence. See ``wireCodetracerEngine`` above.
+wireCodetracerEngine()
+
+# The monitor shim's hook chain is implemented on top of
 # ``metacraft-labs/nim-stackable-hooks`` (the framework portion that
 # the spec at MCR-OS-Interposition.status.org §M0 describes as the
-# Nim port of agent-harbor's stackable-hooks Rust library). Prefer
-# an explicit STACKABLE_HOOKS_SRC, then the sibling-repo checkout,
-# then a vendored copy under libs/repro_monitor_shim/vendor.
+# Nim port of agent-harbor's stackable-hooks Rust library). Since
+# Incremental-Test-Runner M7, the shim itself lives in the ``io-mon``
+# sibling (``io_mon/shim`` + ``io_mon/hooks``), but reprobuild's monitor
+# TESTS still compile io-mon's hooks runtime, which imports ``stackable_hooks``
+# — so the framework path is still resolved here. Prefer an explicit
+# STACKABLE_HOOKS_SRC, then the sibling-repo checkout.
 addPackagePath("STACKABLE_HOOKS_SRC", [
   ".." / "nim-stackable-hooks" / "src",
-  "libs" / "repro_monitor_shim" / "vendor" / "nim-stackable-hooks" / "src",
 ], "stackable_hooks.nim")
 
 # R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo

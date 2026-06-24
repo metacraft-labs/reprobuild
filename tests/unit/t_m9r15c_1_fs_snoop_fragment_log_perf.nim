@@ -2,7 +2,7 @@
 ##
 ## ## Context
 ##
-## ``libs/repro_monitor_depfile/src/repro_monitor_depfile/writer.nim``'s
+## io-mon ``io_mon/writer.nim``'s
 ## ``appendFragmentRecord`` originally opened, wrote, and closed the
 ## fragment file on every emitted ``MonitorRecord``. cmake's qt6-base
 ## configure issues tens of thousands of file probes; the doubled
@@ -46,8 +46,8 @@
 
 import std/[os, strutils, unittest]
 
-import repro_monitor_depfile/types
-import repro_monitor_depfile/writer
+import io_mon/types
+import io_mon/writer
 
 proc sampleRecord(seq: uint64; osPid, threadId: uint64;
                   path: string): MonitorRecord =

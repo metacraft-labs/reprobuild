@@ -1,6 +1,0 @@
-{
-  "program": "/fixtures/m6_backends/meta_override_native/bin/prog",
-  "args": [],
-  "recorder_backend": "rr",
-  "note": "Structure (a canonical trace.json) would say source/interpreted, but the explicit recorder_backend field 'rr' takes precedence -> tbNativeDwarf."
-}

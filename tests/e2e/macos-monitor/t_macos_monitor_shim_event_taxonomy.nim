@@ -1,6 +1,6 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
-import repro_monitor_depfile
+import io_mon
 from repro_test_support import requireBinary, monitorShimPath
 
 when defined(macosx):

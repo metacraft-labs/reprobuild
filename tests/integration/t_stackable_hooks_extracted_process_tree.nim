@@ -1,7 +1,7 @@
 import std/[algorithm, os, osproc, streams, strutils, tables, tempfiles, unittest]
 
-import repro_monitor_hooks
-import repro_monitor_depfile
+import io_mon/hooks
+import io_mon
 from repro_test_support import requireBinary, monitorShimPath
 
 when defined(macosx) or defined(linux):
@@ -189,7 +189,7 @@ int main(int argc, char **argv) {
     const StackableShimSource = r"""
 import std/[os, strutils]
 
-import repro_monitor_hooks/linux_preload_runtime
+import io_mon/hooks/linux_preload_runtime
 
 proc appendLine(line: string) {.raises: [].} =
   try:
@@ -252,9 +252,25 @@ int main(int argc, char **argv) {
 
   when defined(linux):
     proc compileStackableShim(root, sourcePath, outPath: string) =
+      # Incremental-Test-Runner M7: the hooks runtime
+      # (``io_mon/hooks/linux_preload_runtime``) and the stackable-hooks
+      # framework it builds on now live in the ``io-mon`` and
+      # ``nim-stackable-hooks`` siblings, not reprobuild's deleted
+      # ``repro_monitor_hooks`` library. Resolve both by the same sibling
+      # convention ``config.nims`` / ``scripts/build_apps.sh`` use
+      # (``$IO_MON_SRC`` / ``$STACKABLE_HOOKS_SRC`` then the sibling
+      # checkout, relative to the reprobuild repo root).
+      let ioMonSrc = block:
+        let fromEnv = getEnv("IO_MON_SRC")
+        if fromEnv.len > 0: fromEnv else: root.parentDir / "io-mon" / "src"
+      let stackableHooksSrc = block:
+        let fromEnv = getEnv("STACKABLE_HOOKS_SRC")
+        if fromEnv.len > 0: fromEnv
+        else: root.parentDir / "nim-stackable-hooks" / "src"
       let command =
         "nim c --app:lib --threads:on " &
-        "--path:" & quoteShell(root / "libs/repro_monitor_hooks/src") & " " &
+        "--path:" & quoteShell(ioMonSrc) & " " &
+        "--path:" & quoteShell(stackableHooksSrc) & " " &
         "--nimcache:" & quoteShell(root / "build/nimcache/integration-linux-stackable-runtime") & " " &
         "--out:" & quoteShell(outPath) & " " &
         quoteShell(sourcePath)

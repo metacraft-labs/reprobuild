@@ -4,7 +4,7 @@
 ## The Test-Fixtures-In-Build-Graph campaign (M1–M3) moved the test
 ## suite's *setup* compilation out of test-runtime code and into the
 ## reprobuild build graph: the ``repro`` CLI (``apps/repro/repro.nim``)
-## and the monitor shim (``libs/repro_monitor_shim/src/repro_monitor_shim/*``)
+## and the monitor shim (now the io-mon sibling: ``io_mon/shim/*``)
 ## are now graph edges, compiled once / content-addressed / cached, and
 ## test-runtime code only *asserts* their presence via
 ## ``repro_test_support.requireBinary`` instead of shelling out to a
@@ -99,17 +99,22 @@ const ForbiddenSetupSources = [
   # ``requireBinary(repoRoot/"build"/"bin"/"repro",
   # "reprobuild.apps.repro")``.
   "apps/repro/repro.nim",
-  # The monitor shim. M2 made ``repro_monitor_shim`` a single
+  # The monitor shim. M2 made it a single
   # ``reprobuild.test_fixtures.monitor_shim`` ``nim c --app:lib`` graph
   # edge; ``prepareMonitorTools`` now ``requireBinary``s
   # ``build/lib/librepro_monitor_shim.<ext>`` instead of compiling these
-  # interpose sources per test.
-  "repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim",
-  "repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim",
+  # interpose sources per test. Incremental-Test-Runner M7 relocated the
+  # shim source from reprobuild's deleted ``repro_monitor_shim`` library
+  # into the shared ``io-mon`` sibling (``io_mon/shim/*``); the build-graph
+  # edge now compiles those io-mon sources. Match the io-mon paths so a
+  # runtime recompile of the (relocated) shim is still caught as forbidden
+  # setup.
+  "io_mon/shim/macos_interpose.nim",
+  "io_mon/shim/windows_interpose.nim",
   # The Linux interpose source is ``linux_preload.nim`` (LD_PRELOAD), the
   # exact file the ``reprobuild.test_fixtures.monitor_shim`` edge compiles
   # on Linux (``repro.nim``) — match it so a runtime recompile is caught.
-  "repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim",
+  "io_mon/shim/linux_preload.nim",
 ]
 
 # ----------------------------------------------------------------------

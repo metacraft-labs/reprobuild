@@ -35,6 +35,9 @@
 ## those before invoking ``just build``; an interactive developer gets
 ## them out of the ``nix develop`` shell.
 
+import std/os  # Incremental-Test-Runner M7: getEnv + the `/` path operator
+              # for the io-mon / nim-stackable-hooks sibling resolution in the
+              # test-fixtures monitor-shim build edge below.
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/types
@@ -575,22 +578,38 @@ package reprobuild:
     # Test-Fixtures-In-Build-Graph M2: the monitor-shim ``test-fixtures``
     # collection.
     #
-    # The monitor shim (``repro_monitor_shim``, built ``nim c --app:lib``)
-    # was compiled per test by ``repro_test_support.prepareMonitorTools``
-    # (22 callers) and again, ad hoc, by three self-shim outlier tests.
-    # M2 lifts that compilation into a single graph edge that produces the
-    # shim at the SAME stable path ``scripts/build_apps.sh`` writes —
-    # ``build/lib/librepro_monitor_shim.<ext>`` — so the per-test code can
-    # ``requireBinary`` it instead of shelling out to a compiler.
+    # The monitor shim (built ``nim c --app:lib``) was compiled per test by
+    # ``repro_test_support.prepareMonitorTools`` (22 callers) and again, ad
+    # hoc, by three self-shim outlier tests. M2 lifted that compilation into a
+    # single graph edge that produces the shim at the SAME stable path
+    # ``scripts/build_apps.sh`` writes — ``build/lib/librepro_monitor_shim.<ext>``
+    # — so the per-test code can ``requireBinary`` it instead of shelling out
+    # to a compiler.
     #
-    # The platform arm (source file, output extension, and the extra
-    # ``--path:`` / ``--mm:`` / ``--cc:`` flags the Windows IAT patcher
-    # needs) mirrors ``scripts/build_apps.sh`` byte-for-byte and is gated
-    # on ``when defined(...)`` of the project-interface DLL's host OS, the
+    # Incremental-Test-Runner M7: the shim's SOURCE now lives in the shared
+    # ``io-mon`` sibling (``io_mon/shim/*`` + ``io_mon/hooks/*`` on
+    # nim-stackable-hooks) rather than reprobuild's deleted
+    # ``repro_monitor_shim`` library. The output filename, exported interpose
+    # ABI, and the per-platform flags are byte-identical (io-mon is a
+    # relocation), so the graph edge still produces the SAME artifact at the
+    # SAME path; only the ``source``/``--path:`` roots changed. The io-mon
+    # sibling is resolved at ``../io-mon/src`` (override with ``$IO_MON_SRC``)
+    # and nim-stackable-hooks at ``../nim-stackable-hooks/src`` (override with
+    # ``$STACKABLE_HOOKS_SRC``), the same siblings ``config.nims`` /
+    # ``scripts/build_apps.sh`` use.
+    #
+    # The platform arm is gated on ``when defined(...)`` of the host OS, the
     # same compile-time-host pattern the B4 ``hostIsMacos`` HCR gate uses
     # above. The shim is a host-native artifact (LD_PRELOAD / DYLD_INSERT
     # / IAT-patch DLL), so the host arm is the correct (and only) target.
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
+
+    let ioMonSrc = block:
+      let fromEnv = getEnv("IO_MON_SRC")
+      if fromEnv.len > 0: fromEnv else: ".." / "io-mon" / "src"
+    let stackableHooksSrc = block:
+      let fromEnv = getEnv("STACKABLE_HOOKS_SRC")
+      if fromEnv.len > 0: fromEnv else: ".." / "nim-stackable-hooks" / "src"
 
     when defined(macosx):
       const macosShimArchFlags =
@@ -599,39 +618,32 @@ package reprobuild:
         else:
           @[]
       reprobuildTestFixturesActions.add(nim.c(
-        source = "libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim",
+        source = ioMonSrc / "io_mon" / "shim" / "macos_interpose.nim",
         binary = "build/lib/librepro_monitor_shim.dylib",
         appLib = true,
         threadsOn = true,
+        paths = @[ioMonSrc, stackableHooksSrc],
         passC = macosShimArchFlags,
         passL = macosShimArchFlags,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
     elif defined(windows):
       # The Windows shim imports the stackable-hooks framework primitives;
       # the path list + ``--mm:orc`` / ``--cc:gcc`` mirror the Windows arm
-      # of ``scripts/build_apps.sh`` and ``prepareMonitorTools``. The
-      # stackable-hooks source is resolved by ``config.nims`` /
-      # ``STACKABLE_HOOKS_SRC`` the same way the script resolves it; the
-      # vendored fallback path is added unconditionally because a
-      # missing ``--path:`` directory is harmless to ``nim c``.
+      # of ``scripts/build_apps.sh`` and io-mon's ``build_shim.sh``.
       reprobuildTestFixturesActions.add(nim.c(
-        source = "libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim",
+        source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
         binary = "build/lib/librepro_monitor_shim.dll",
         appLib = true,
         threadsOn = true,
-        paths = @[
-          "libs/repro_monitor_depfile/src",
-          "libs/repro_core/src",
-          "libs/repro_monitor_shim/src",
-          "libs/repro_monitor_shim/vendor/nim-stackable-hooks/src",
-        ],
+        paths = @[ioMonSrc, stackableHooksSrc],
         actionId = "reprobuild.test_fixtures.monitor_shim"))
     else:
       reprobuildTestFixturesActions.add(nim.c(
-        source = "libs/repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim",
+        source = ioMonSrc / "io_mon" / "shim" / "linux_preload.nim",
         binary = "build/lib/librepro_monitor_shim.so",
         appLib = true,
         threadsOn = true,
+        paths = @[ioMonSrc, stackableHooksSrc],
         actionId = "reprobuild.test_fixtures.monitor_shim"))
 
     discard collect("test-fixtures", reprobuildTestFixturesActions)

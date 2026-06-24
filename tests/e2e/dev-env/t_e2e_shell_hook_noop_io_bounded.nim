@@ -33,7 +33,7 @@
 
 import std/[os, osproc, sequtils, streams, strtabs, strutils, unittest]
 
-import repro_monitor_depfile
+import io_mon
 import repro_test_support
 import shell_hook_helper
 

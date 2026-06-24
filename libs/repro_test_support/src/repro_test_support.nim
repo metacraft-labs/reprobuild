@@ -60,7 +60,7 @@ const
     ##
     ## Windows uses an IAT-patching DLL injected via
     ## ``CreateProcess(CREATE_SUSPENDED)`` + ``CreateRemoteThread``
-    ## (see ``libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim``).
+    ## (see ``io-mon: io_mon/shim/windows_interpose.nim``).
     ## The shim depends on ct_interpose's ``hook_registry`` —
     ## ``prepareMonitorTools`` below threads ``--path:<ct_interpose_src>``
     ## into the per-test ``compileNim`` invocation the same way
@@ -348,7 +348,8 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
   ## metacraft-labs/nim-stackable-hooks, but the resolver shape is
   ## unchanged. Honours ``STACKABLE_HOOKS_SRC`` (the same env knob
   ## ``scripts/build_apps.sh`` and ``env.ps1`` honour), then falls
-  ## back to the sibling checkout, then the in-tree vendor copy.
+  ## back to the sibling checkout (Incremental-Test-Runner M7 removed the
+  ## former in-tree ``repro_monitor_shim/vendor`` copy).
   ## Returns the empty string when nothing is found — the caller's
   ## compileNim call will then surface the missing
   ## ``stackable_hooks.nim`` path as a normal compile error rather
@@ -356,13 +357,12 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
   let explicit = getEnv("STACKABLE_HOOKS_SRC")
   if explicit.len > 0 and dirExists(explicit):
     return explicit
+  # Incremental-Test-Runner M7: the monitor shim moved to the io-mon sibling;
+  # nim-stackable-hooks is resolved from $STACKABLE_HOOKS_SRC then the sibling
+  # checkout (the deleted ``repro_monitor_shim/vendor`` fallback is gone).
   let sibling = repoRoot.parentDir / "nim-stackable-hooks" / "src"
   if dirExists(sibling):
     return sibling
-  let vendored = repoRoot / "libs" / "repro_monitor_shim" / "vendor" /
-    "nim-stackable-hooks" / "src"
-  if dirExists(vendored):
-    return vendored
   ""
 
 type MissingTestFixtureError* = object of CatchableError

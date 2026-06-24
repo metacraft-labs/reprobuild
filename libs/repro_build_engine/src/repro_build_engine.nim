@@ -8,7 +8,14 @@ import repro_core
 import repro_depfile
 import repro_hash
 import repro_local_store
-import repro_monitor_depfile
+# Incremental-Test-Runner M7: the build engine consumes the shared ``io-mon``
+# library (a byte-identical wire-format + ABI relocation of reprobuild's former
+# ``repro_monitor_depfile`` fs-snoop stack) for its monitor-evidence dependency
+# tracking. ``io_mon`` re-exports the depfile API under the SAME names
+# (``MonitorDepFile`` / ``readMonitorDepFile`` / ``MonitorRecord`` / the
+# ``mr*`` / ``mo*`` enums / ``mcComplete`` / ``MonitorDepFileReaderError`` /
+# ``findShimLibrary``), so the call sites below are unchanged.
+import io_mon
 import repro_platform
 import repro_runquota
 
@@ -1512,9 +1519,10 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   if action.monitorDepfile.len > 0:
     return
   # Windows: automatic monitor dependency gathering now works on Windows via
-  # the IAT-patching shim + CreateRemoteThread injection (see
-  # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim and
-  # libs/repro_monitor_depfile/src/repro_monitor_depfile/windows_injector.nim).
+  # the IAT-patching shim + CreateRemoteThread injection (see the shared
+  # io-mon sibling: io_mon/shim/windows_interpose.nim and
+  # io_mon/windows_injector.nim — Incremental-Test-Runner M7 relocated these
+  # from reprobuild's former repro_monitor_shim / repro_monitor_depfile libs).
   # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
   # injection mechanism differs.
   when not (defined(macosx) or defined(linux) or defined(windows)):

@@ -1978,11 +1978,11 @@
     "reprobuild-ct-test-runner-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1781901869,
-        "narHash": "sha256-H/yEanzDCr192n4KU0BVBdNB3oykdIlJvGkh9x1146c=",
+        "lastModified": 1782256249,
+        "narHash": "sha256-2FBvUE3a6rNXYPa2X+0GPFNTUiXfX4pwaBiadGpOyQY=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-ct-test-runner",
-        "rev": "1a2fceae68cf7ac4f3352c8eb9897b2646dbcf08",
+        "rev": "e9c9e37e9a89b92d644ea50f4da8db5495c8c4ad",
         "type": "github"
       },
       "original": {

@@ -2,7 +2,7 @@
 ##
 ## ## Context
 ##
-## ``libs/repro_monitor_depfile/src/repro_monitor_depfile/writer.nim``
+## io-mon ``io_mon/writer.nim``
 ## after M9.R.15c.1 issued one ``writeBuffer`` + one ``flushFile``
 ## syscall pair per emitted ``MonitorRecord``. cmake's qt6-base
 ## configure issues millions of file probes; the M9.R.15c
@@ -49,8 +49,8 @@
 
 import std/[monotimes, os, strutils, times, unittest]
 
-import repro_monitor_depfile/types
-import repro_monitor_depfile/writer
+import io_mon/types
+import io_mon/writer
 
 proc sampleRecord(seq: uint64; osPid, threadId: uint64;
                   path: string): MonitorRecord =

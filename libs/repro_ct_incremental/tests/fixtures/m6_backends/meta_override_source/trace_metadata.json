@@ -1,6 +1,0 @@
-{
-  "program": "/fixtures/m6_backends/meta_override_source/src/x.nim",
-  "args": [],
-  "recorder_backend": "interpreter",
-  "note": "Structure (rr/ subdir) would say native, but the explicit recorder_backend 'interpreter' wins -> tbSourceInterpreted."
-}

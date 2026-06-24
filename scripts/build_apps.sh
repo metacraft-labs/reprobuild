@@ -16,66 +16,28 @@ case "${REPROBUILD_BUILD_MODE:-debug}" in
     ;;
 esac
 
-if [ "$(uname -s)" = "Darwin" ]; then
-  macos_shim_arch_flags=()
-  if [ "$(uname -m)" = "arm64" ]; then
-    macos_shim_arch_flags+=(
-      "--passC:-arch arm64"
-      "--passC:-arch arm64e"
-      "--passL:-arch arm64"
-      "--passL:-arch arm64e"
-    )
-  fi
-  nim c \
-    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
-    ${macos_shim_arch_flags[@]+"${macos_shim_arch_flags[@]}"} \
-    --app:lib \
-    --threads:on \
-    --nimcache:build/nimcache/repro-monitor-shim-dylib \
-    --out:build/lib/librepro_monitor_shim.dylib \
-    libs/repro_monitor_shim/src/repro_monitor_shim/macos_interpose.nim
+# Incremental-Test-Runner M7: the interpose monitor shim
+# (``librepro_monitor_shim.{dylib,so,dll}``) is now produced by the shared
+# ``io-mon`` sibling rather than reprobuild's deleted ``repro_monitor_shim``
+# library. io-mon's ``scripts/build_shim.sh`` is the byte-identical relocation
+# of the shim build above — same shared-library name, same exported interpose
+# ABI (the ``repro_*`` / ``ct_linux_*`` symbols + the macOS
+# ``__DATA,__interpose`` section), same per-platform flags (macOS arm64/arm64e
+# fat build, Linux PRELOAD, Windows IAT DLL) — so the runtime contract every
+# consumer locates via ``findShimLibrary`` is unchanged. We point its output
+# at reprobuild's ``build/lib`` (``IO_MON_SHIM_OUT_DIR``) so the library lands
+# exactly where ``candidateShimLibraries`` expects (``<cwd>/build/lib`` and
+# ``<appDir>/../lib``). io-mon resolves nim-stackable-hooks at
+# ``../nim-stackable-hooks/src`` (override with ``$STACKABLE_HOOKS_SRC``),
+# the same sibling reprobuild's monitor tests use.
+io_mon_src="${IO_MON_SRC:-../io-mon}"
+if [ ! -x "${io_mon_src}/scripts/build_shim.sh" ]; then
+  echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
+  exit 2
 fi
-
-if [ "$(uname -s)" = "Linux" ]; then
-  nim c \
-    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
-    --app:lib \
-    --threads:on \
-    --nimcache:build/nimcache/repro-monitor-shim-so \
-    --out:build/lib/librepro_monitor_shim.so \
-    libs/repro_monitor_shim/src/repro_monitor_shim/linux_preload.nim
-fi
-
-# Windows: build the IAT-patching DLL counterpart of the macOS dylib.
-# Detect MSYS/Cygwin/Git Bash builds running under Windows by checking uname.
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
-    # The monitor shim imports the framework primitives (hook_registry,
-    # reentrancy, propagation, inline-detour C primitive) from
-    # `metacraft-labs/nim-stackable-hooks`. The sibling lives at
-    # $STACKABLE_HOOKS_SRC or, by default, at ../nim-stackable-hooks/src
-    # relative to the reprobuild repo root. CI clones the sibling.
-    stackable_hooks_src="${STACKABLE_HOOKS_SRC:-../nim-stackable-hooks/src}"
-    if [ ! -d "${stackable_hooks_src}" ]; then
-      stackable_hooks_src="libs/repro_monitor_shim/vendor/nim-stackable-hooks/src"
-    fi
-    nim c \
-      ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
-      --app:lib \
-      --threads:on \
-      --mm:orc \
-      --cc:gcc \
-      --hints:off \
-      --warnings:off \
-      --path:libs/repro_monitor_depfile/src \
-      --path:libs/repro_core/src \
-      --path:libs/repro_monitor_shim/src \
-      --path:"${stackable_hooks_src}" \
-      --nimcache:build/nimcache/repro-monitor-shim-dll \
-      --out:build/lib/librepro_monitor_shim.dll \
-      libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim
-    ;;
-esac
+IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
+IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
+  bash "${io_mon_src}/scripts/build_shim.sh"
 
 while read -r name path extra_flags; do
   case "${name}" in

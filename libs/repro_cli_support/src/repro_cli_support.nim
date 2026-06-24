@@ -8,7 +8,11 @@ import repro_depfile
 import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_interface_artifacts
-import repro_monitor_depfile/fs_snoop
+# Incremental-Test-Runner M7: the fs-snoop CLI driver (``runFsSnoopCli`` /
+# ``findShimLibrary``) now comes from the shared ``io-mon`` library, a
+# byte-identical relocation of reprobuild's former ``repro_monitor_depfile``
+# fs-snoop stack. The submodule path and public procs are preserved.
+import io_mon/fs_snoop
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider_protocol
@@ -65,11 +69,19 @@ import repro_home_resources/drivers/managed_block
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
 import repro_peer_cache
-# Trace-Based-Incremental-Testing M2: the pure skip/re-run seam
+# Incremental-Test-Runner M0b-2: the pure skip/re-run seam
 # (``watchTestEdgeDecision``) the ``--ct-incremental`` watch hook calls on each
-# filesystem-change cycle. The package re-exports the M1 engine
-# (``record``/``decide``/``loadCache``/``defaultCachePath``) too.
-import repro_ct_incremental
+# filesystem-change cycle is now provided by the engine-free
+# ``reprobuild-ct-test-runner`` ADAPTER (Nim module ``ct_incremental_adapter``),
+# which is backed by codetracer's CANONICAL incremental engine
+# (``codetracer/src/ct_test/incremental``) — NOT a vendored copy. The adapter
+# re-exports codetracer's engine (``record``/``decide``/``loadCache``/
+# ``saveCache``/``initCache``/``defaultCachePath``) alongside the
+# ``watchTestEdgeDecision`` / ``WatchEdgeDecision`` / ``weaSkip`` / ``weaRun``
+# value contract, so this call site's logic is unchanged from the former
+# vendored ``repro_ct_incremental`` import (M0b kept the types/signature
+# byte-faithful). The sibling/engine paths are wired in ``config.nims``.
+import ct_incremental_adapter
 # Spec-Implementation M2e — ``repro lock explain`` consumes the
 # explainer surface to render structured chosen / unsat justifications.
 import repro_solver

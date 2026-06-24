@@ -6,7 +6,8 @@ import repro_hash
 import repro_runquota
 
 when defined(macosx):
-  import repro_monitor_depfile
+  # Incremental-Test-Runner M7: monitor depfile API now comes from io-mon.
+  import io_mon
 
 type
   ThresholdDirection = enum

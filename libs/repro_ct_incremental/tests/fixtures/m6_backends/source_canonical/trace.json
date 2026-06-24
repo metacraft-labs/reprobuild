@@ -1,6 +1,0 @@
-[
-  {"Path": ""},
-  {"Path": "/fixtures/m6_backends/source_canonical/src/x.rb"},
-  {"Function": {"path_id": 1, "line": 1, "name": "main"}},
-  {"Call": {"function_id": 0, "args": []}}
-]

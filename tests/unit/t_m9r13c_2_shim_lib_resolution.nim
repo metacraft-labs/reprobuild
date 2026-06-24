@@ -65,7 +65,7 @@
 
 import std/[os, strutils, unittest]
 
-import repro_monitor_depfile
+import io_mon
 
 # ---------------------------------------------------------------------------
 # Helpers

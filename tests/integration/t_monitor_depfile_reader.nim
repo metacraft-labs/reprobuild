@@ -1,7 +1,7 @@
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_core/codec
-import repro_monitor_depfile
+import io_mon
 
 proc sampleRecord(path: string): MonitorRecord =
   MonitorRecord(

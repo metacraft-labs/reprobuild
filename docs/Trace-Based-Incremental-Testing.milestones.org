@@ -34,10 +34,16 @@
 
 ** Home & scope
 
-  - *Code home (prototype):* the **reprobuild** repo — core engine in
-    `libs/repro_ct_incremental/`, the watch integration in
-    `libs/repro_cli_support` (the `repro watch` command). Chosen for a clean
-    Nim build via the dev shell and because `repro watch` lives here.
+  - *Code home (prototype, NOW SUPERSEDED):* historically the **reprobuild**
+    repo — core engine in `libs/repro_ct_incremental/`, the watch integration in
+    `libs/repro_cli_support` (the `repro watch` command). As of the
+    Incremental-Test-Runner campaign (`codetracer-specs`, M0/M0b) the CANONICAL
+    engine moved to **codetracer** (`src/ct_test/incremental`); reprobuild's
+    vendored `libs/repro_ct_incremental` was DELETED and `repro watch
+    --ct-incremental` now consumes the engine through the engine-free
+    `reprobuild-ct-test-runner` adapter (`libs/ct_incremental_adapter`). Only the
+    watch integration in `libs/repro_cli_support` still lives here. See M21's
+    SUPERSEDED note below.
   - *Trace source:* CodeTracer traces. The prototype reads the **JSON trace
     form** (`trace.json` + `trace_paths.json` + `trace_metadata.json`) with
     `std/json` only — no CTFS binary parsing or `codetracer-trace-format-nim`
@@ -1734,7 +1740,21 @@
 # x86+PT host (owner-approved) and is NOT part of Phase 5.
 
 * M21 — Single source of truth for the incremental engine (de-duplicate the vendor)
-  :STATUS: complete
+  :STATUS: complete — but SUPERSEDED by the Incremental-Test-Runner campaign
+
+  SUPERSEDED (Incremental-Test-Runner M0/M0b, `codetracer-specs`): M21's
+  single-source-of-truth design picked reprobuild's `repro_ct_incremental` as the
+  CANONICAL copy and codetracer's tree as a GENERATED, drift-guarded copy. The
+  Incremental-Test-Runner campaign REVERSED that decision: codetracer's
+  `src/ct_test/incremental` is now the single CANONICAL engine, and reprobuild's
+  vendored `libs/repro_ct_incremental` (the engine copy, the
+  `tools/sync_ct_test_vendor` generator, and the `t_ct_test_vendor_sync` drift
+  test described below) has been DELETED. `repro watch --ct-incremental` now
+  reaches the canonical engine through the engine-free
+  `reprobuild-ct-test-runner` adapter (`libs/ct_incremental_adapter`), a one-way
+  dependency (reprobuild → codetracer, never the reverse). The text below is
+  retained as the historical record of the vendoring approach; it no longer
+  describes the live layout.
 
   Goal: M18 vendored the engine core from reprobuild's `repro_ct_incremental` into
   `codetracer/src/ct_test/incremental/` as a SECOND physical copy (faithful, with

@@ -1,6 +1,0 @@
-{
-  "program": "/fixtures/m9_nim_dual/src/calc.nim",
-  "args": [],
-  "workdir": "/fixtures/m9_nim_dual",
-  "recorder_backend": "interpreter"
-}
