@@ -6998,6 +6998,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r30_transitive_rpath_propagation.nim",
+    binary: "build/test-bin/t_m9r30_transitive_rpath_propagation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r3_library_api_block.nim",
     binary: "build/test-bin/t_m9r3_library_api_block",
     defines: @[],
