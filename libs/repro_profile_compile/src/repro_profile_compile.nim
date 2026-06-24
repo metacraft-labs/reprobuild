@@ -27,6 +27,7 @@ import ./repro_profile_compile/helper
 import ./repro_profile_compile/adapter_home
 import ./repro_profile_compile/adapter_system
 import ./repro_profile_compile/infra_apply_broker
+import ./repro_profile_compile/apply_build_actions
 
 # Source-discovery + digest + paths.
 export sources.CompiledRepoRoot
@@ -80,3 +81,13 @@ export infra_apply_broker.InfraApplyBrokerFailureExitCode
 export infra_apply_broker.elevatedExecRequestToPrivilegedOperation
 export infra_apply_broker.dispatchResultToElevatedExecResult
 export infra_apply_broker.mkInfraApplyBrokerSpawn
+
+# Windows-System-Resources Phase G integration seam: dispatcher
+# closure that ``runInfraApply`` injects to drive the action-edge
+# half of the apply through ``runBuild`` with the elevation broker
+# hook attached.
+export apply_build_actions.ApplyBuildActionsCacheDirName
+export apply_build_actions.profileBuildActionToBuildAction
+export apply_build_actions.buildActionsToBuildGraph
+export apply_build_actions.applyBuildActionsEngineConfig
+export apply_build_actions.mkBuildActionDispatcher

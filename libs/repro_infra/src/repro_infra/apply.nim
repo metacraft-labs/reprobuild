@@ -26,6 +26,7 @@
 import std/[os, strutils, times]
 
 import repro_elevation
+import repro_profile
 
 import ./audit_log
 import ./errors
@@ -40,6 +41,60 @@ type
     ## How the apply handles privileged operations.
     emBroker = "broker"               ## default: one broker, one prompt
     emNoElevate = "noElevate"         ## --no-elevate: skip privileged ops
+
+  BuildActionApplyOutcome* = object
+    ## Windows-System-Resources Phase G: per-edge result reported by
+    ## the build-action dispatcher closure injected into
+    ## ``ApplyOptions.buildActionDispatcher`` (see below).
+    ##
+    ## ``ok`` is the load-bearing success flag. Failure paths populate
+    ## ``diagnostic`` with the engine-side diagnostic (e.g. the broker
+    ## hook's error message); the apply driver folds the diagnostic
+    ## into ``ApplyResult.diagnostics`` so the operator sees the same
+    ## failure-reporting shape as a live-state driver failure.
+    id*: string
+    address*: string
+      ## Mirrors the build-graph action id; surfaces in the
+      ## ``ApplyResult.diagnostics`` line as the apply-log "address"
+      ## column so a failed edge is greppable by id.
+    ok*: bool
+      ## Per-edge success flag. ``true`` on a clean cache hit OR a
+      ## fresh successful execution; ``false`` on any failed action
+      ## (engine launch failure, broker dispatch failure, non-zero
+      ## exit code outside the accept set, ...).
+    requiresElevation*: bool
+    cacheHit*: bool
+      ## True when the engine's cache short-circuited the launch (the
+      ## edge produced the same outputs as a previous apply). Counted
+      ## in ``ApplyResult.noOpCount`` for the apply summary so a
+      ## repeat-apply prints "no-op" rather than "applied" for an
+      ## already-converged action edge.
+    diagnostic*: string
+
+  BuildActionDispatcher* = proc(actions: seq[ProfileBuildAction]):
+      seq[BuildActionApplyOutcome] {.gcsafe.}
+    ## Windows-System-Resources Phase G: caller-supplied closure that
+    ## drives the action-edge half of the apply. The dispatcher takes
+    ## the profile's ``buildActions`` seq, assembles a ``BuildGraph``,
+    ## attaches the elevation broker hook (constructed via
+    ## ``repro_profile_compile.mkInfraApplyBrokerSpawn(ctx)``), runs
+    ## ``runBuild`` against it, and projects each per-edge
+    ## ``ActionResult`` into a ``BuildActionApplyOutcome``.
+    ##
+    ## Living the dispatcher behind a typed closure (rather than
+    ## hard-coding ``runBuild`` here) keeps ``repro_infra`` from
+    ## depending on ``repro_build_engine``. The production seam wires
+    ## ``repro_profile_compile.mkBuildActionDispatcher(...)``; tests
+    ## inject a recording mock to assert the engine-edge translation
+    ## without spawning real processes.
+    ##
+    ## ``nil`` (the default) means "no action-edge dispatcher
+    ## attached". When ``nil`` AND the profile carries non-empty
+    ## ``buildActions``, the apply driver FAILS CLOSED with
+    ## ``EProtocol`` — silently skipping action edges would produce a
+    ## misleading "success" that the spec's fail-closed posture
+    ## explicitly forbids (see ``Windows-System-Resources.md`` § "What
+    ## NOT to do — silent fallbacks").
 
   ApplyOptions* = object
     stateDir*: string
@@ -63,6 +118,27 @@ type
       ## declares them. They are folded into the SAME apply as the
       ## target-profile convergence, so a rollback still raises at
       ## most one elevation prompt.
+    buildActions*: seq[ProfileBuildAction]
+      ## Windows-System-Resources Phase G: the action-edge intent
+      ## items the profile macro emitted from inside the
+      ## ``resources:`` block. Each entry lowers to a build-graph
+      ## ``BuildAction`` in the dispatcher closure and crosses the
+      ## elevation broker when ``requiresElevation = true``. The
+      ## live-state half of the apply (``resources`` ->
+      ## ``PlannedOperation`` -> ``dispatchOperation``) is unchanged
+      ## by Phase G — these two halves are dispatched independently
+      ## by ``runInfraApply``.
+      ##
+      ## Phase-G ordering: action edges run BEFORE the live-state
+      ## convergence. A profile-shaped example: extract the runner
+      ## zip (action edge) -> register the service (live state).
+      ## Interleaved dependency support (live-state depending on
+      ## action-edge outputs and vice versa) is a follow-up — for the
+      ## production windows-runner-001 profile the all-edges-first
+      ## ordering matches the natural dependency direction.
+    buildActionDispatcher*: BuildActionDispatcher
+      ## See ``BuildActionDispatcher``. ``nil`` is the default;
+      ## non-nil enables the action-edge half of the apply.
 
   ApplyResult* = object
     generationId*: string
@@ -77,6 +153,14 @@ type
     brokerLaunchCount*: int
     auditLogPath*: string
     diagnostics*: seq[string]
+    buildActionResults*: seq[BuildActionApplyOutcome]
+      ## Windows-System-Resources Phase G. Per-edge outcomes reported
+      ## by the build-action dispatcher closure, kept around for the
+      ## CLI's apply-summary print + the e2e test's assertion path.
+      ## Empty when the profile declared no action edges OR the
+      ## dispatcher was not wired (the latter case raises ``EProtocol``
+      ## at apply time so this seq stays empty only for genuine no-op
+      ## cases).
 
 # ---------------------------------------------------------------------------
 # A trivial per-host apply lock (file presence). Concurrent system
@@ -167,16 +251,76 @@ proc writeAuditRecords(logPath: string;
 # The apply.
 # ---------------------------------------------------------------------------
 
+proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
+  ## Windows-System-Resources Phase G: action-edge half of the apply.
+  ## Runs BEFORE the live-state dispatch so a profile that extracts an
+  ## archive then registers a service against the extracted directory
+  ## sees the directory in place when the live-state driver fires.
+  ##
+  ## Dispatcher contract:
+  ##   * empty ``buildActions`` -> no-op (dispatcher is not invoked,
+  ##     even if it's wired).
+  ##   * non-empty ``buildActions`` AND ``buildActionDispatcher == nil``
+  ##     -> raise ``EProtocol``. The fail-closed posture matches the
+  ##     spec's "no silent fallback" rule for any apply path that
+  ##     reaches an action-edge intent without a build engine attached.
+  ##   * non-empty ``buildActions`` AND non-nil dispatcher -> dispatch
+  ##     all, fold per-edge results into the apply tallies. A failed
+  ##     edge increments ``errorCount`` and surfaces its diagnostic
+  ##     via ``ApplyResult.diagnostics``; a cache-hit edge increments
+  ##     ``noOpCount``; everything else increments ``appliedCount``.
+  ##
+  ## The proc deliberately does NOT abort the apply on a failed
+  ## action edge — the live-state half still runs so the operator
+  ## sees the full picture (which lives-state resources also drifted)
+  ## in the audit log. A non-zero ``errorCount`` makes the CLI exit
+  ## non-zero so the failure is visible at the shell level.
+  if opts.buildActions.len == 0:
+    return
+  if opts.buildActionDispatcher == nil:
+    raise newException(EProtocol,
+      "repro infra apply: profile carries " & $opts.buildActions.len &
+      " build-action intent item(s) but no buildActionDispatcher was " &
+      "wired in ApplyOptions. The action-edge half of the apply " &
+      "cannot run without a dispatcher (no silent fallback). Construct " &
+      "one via repro_profile_compile.mkBuildActionDispatcher(...) " &
+      "before calling runInfraApply.")
+  let outcomes = opts.buildActionDispatcher(opts.buildActions)
+  result.buildActionResults = outcomes
+  for o in outcomes:
+    if not o.ok:
+      inc result.errorCount
+      result.diagnostics.add("build-action " & o.id & ": " & o.diagnostic)
+    elif o.cacheHit:
+      inc result.noOpCount
+    else:
+      inc result.appliedCount
+
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
   ## the `system.nim` text and resolved `opts`.
   ##
   ## Steps:
+  ##   0. Windows-System-Resources Phase G: dispatch any action-edge
+  ##      build intents (extract this zip, run this config script,
+  ##      ...) via the injected ``buildActionDispatcher`` closure. The
+  ##      closure wraps ``runBuild`` with the elevation broker hook;
+  ##      runs BEFORE the live-state half so a profile that extracts
+  ##      a runner zip then registers a service against the extracted
+  ##      directory sees the side effects in order.
   ##   1. resolve the plan — by id (with stale-detection) or fresh.
   ##   2. partition the effective operations.
   ##   3. apply: already-elevated fast path | one broker | skip.
   ##   4. write the RBSL audit log + commit the generation pointer.
   resetBrokerLaunchCount()
+
+  # --- 0. Action-edge half (Windows-System-Resources Phase G). ---
+  # Per spec § 2.3, action edges and live-state resources share one
+  # ``resources:`` block in the profile source but route through
+  # different engines at apply time. The action-edge dispatch runs
+  # FIRST so a downstream live-state resource (a service that points
+  # at an extracted binary) sees the extraction side effect.
+  dispatchBuildActions(opts, result)
 
   # --- 1. Resolve the plan. ---
   var env: PlanEnvelope
@@ -207,7 +351,11 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   for rec in env.operations:
     if rec.action == "no-op":
       noOps.add(rec)
-  result.noOpCount = noOps.len
+  # Windows-System-Resources Phase G: ADD the live-state no-op count
+  # rather than overwriting; ``dispatchBuildActions`` may have
+  # already incremented ``noOpCount`` for cache-hit action edges.
+  # The two halves of the apply contribute independently.
+  result.noOpCount += noOps.len
 
   # `--accept-passwd-destroy` gate: a `passwd.user` destroy in the
   # fold-in set REMOVES a real user account. Fail closed BEFORE any

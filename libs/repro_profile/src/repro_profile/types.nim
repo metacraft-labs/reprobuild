@@ -11,12 +11,77 @@
 import std/[options, strutils, tables]
 
 type
+  ProfileBuildAction* = object
+    ## Windows-System-Resources Phase G: action-edge intent item emitted
+    ## by the profile macro when it recognises a typed-tool ``build``
+    ## call (currently ``expandArchive.build(...)``) or a bare
+    ## ``inlineExecCall(...)`` inside the ``resources:`` block. Each
+    ## entry is a flattened mirror of the load-bearing
+    ## ``repro_project_dsl.BuildActionDef`` fields needed by the apply
+    ## driver to assemble a ``repro_build_engine.BuildAction`` and route
+    ## it through ``runBuild`` with the elevation broker hook attached.
+    ##
+    ## The flattening keeps ``repro_profile`` standalone — it does not
+    ## have to import ``repro_project_dsl`` just to carry the action-
+    ## edge payload across the macro/apply seam. The ``repro_profile_
+    ## compile`` adapter (which already depends on ``repro_project_dsl``)
+    ## populates these fields from a ``BuildActionDef`` returned by the
+    ## typed-tool's ``build`` proc.
+    ##
+    ## Field meanings (mirror of ``BuildActionDef``):
+    ##
+    ##   * ``id`` — stable per-edge identity (used as the apply log /
+    ##     audit address). ``BuildActionDef.id``.
+    ##   * ``argv`` — fully resolved argv (the engine's
+    ##     ``reprobuild.builtin.exec`` lowering forks ``argv[0]`` with
+    ##     ``argv[1..]`` as arguments). Decoded from the typed-tool's
+    ##     ``inlineExecCall(argv)`` ``PublicCliCall``.
+    ##   * ``cwd`` — working directory at fork time (empty ⇒ apply's
+    ##     cwd).
+    ##   * ``deps`` — build-graph deps (other action ids).
+    ##   * ``inputs`` — engine cache-fingerprint inputs.
+    ##   * ``outputs`` — engine cache-fingerprint outputs (also the
+    ##     "skip if exists" idempotency anchor).
+    ##   * ``commandStatsId`` — cache-stats discriminator (e.g.
+    ##     ``"expandArchive.eafZip"`` vs ``"expandArchive.eafTarXz"``).
+    ##   * ``toolIdentityRefs`` — bare tool names whose resolved bin
+    ##     dirs the engine should prepend to PATH at fork time.
+    ##   * ``requiresElevation`` — when true AND the engine config has a
+    ##     non-nil ``brokerSpawn`` hook, the engine packages the action
+    ##     into an ``ElevatedExecRequest`` and delegates spawning to the
+    ##     broker (the ``mkInfraApplyBrokerSpawn(ctx)`` closure for
+    ##     ``repro infra apply``). When the engine sees this flag and
+    ##     ``brokerSpawn`` is nil, the engine fails closed.
+    ##   * ``cacheable`` — engine cache opt-in (default true for Phase G
+    ##     since the action-edge story relies on the cache to skip
+    ##     re-extraction / re-config on repeat applies).
+    id*: string
+    argv*: seq[string]
+    cwd*: string
+    deps*: seq[string]
+    inputs*: seq[string]
+    outputs*: seq[string]
+    commandStatsId*: string
+    toolIdentityRefs*: seq[string]
+    requiresElevation*: bool
+    cacheable*: bool
+
   ProfileIntent* = object
     name*: string
     activities*: seq[ActivityIntent]
     configOverrides*: seq[ConfigOverride]
     hosts*: Table[string, seq[string]]
     resources*: seq[ResourceIntent]
+    buildActions*: seq[ProfileBuildAction]
+      ## Windows-System-Resources Phase G. Action-edge items emitted
+      ## from inside the profile's ``resources:`` block by typed-tool
+      ## ``build`` calls (``expandArchive.build(...)``) and bare
+      ## ``inlineExecCall(...)`` calls. Live-state items keep landing in
+      ## ``resources`` above; the macro routes each call to the matching
+      ## seq based on the call's syntactic shape (see
+      ## ``./macros.nim`` ``isProfileActionEdgeCall``). Empty seq is the
+      ## common case — profiles that don't declare action edges leave
+      ## the apply driver's build-graph path inactive.
     adapterPreference*: OrderedTable[string, seq[string]]
       ## M2.5: per-OS adapter preference parsed from the macro form
       ## `adapterPreference:` block. Keys are canonical OS tags

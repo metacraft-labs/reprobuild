@@ -366,6 +366,123 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     blk.add addCalls
     result.add blk
 
+## Windows-System-Resources Phase G: closed allow-list of typed-tool
+## names whose ``.build(...)`` call is treated as a profile-scope
+## action edge (instead of a live-state resource template). Each name
+## here must be a typed-tool that exists in ``repro_dsl_stdlib`` and
+## whose ``build`` proc returns a ``BuildActionDef`` whose ``call`` is
+## an ``inlineExecCall(argv)`` — that is the only shape
+## ``addProfileBuildAction`` accepts.
+##
+## Why a closed allow-list and not pattern-matching every ``<x>.build``
+## call? Many existing typed tools (``gcc.build``, ``meson.build``, ...)
+## return ``BuildActionDef`` from a SUBCOMMAND ``call`` shape (not
+## ``inlineExecCall``); their result is meant to land in a ``build:``
+## block consumed by the build-graph compiler, NOT inside a profile
+## ``resources:`` block. Accepting every ``<x>.build`` call would
+## silently swallow misplaced typed-tool calls and surface as a runtime
+## ``ValueError`` from ``addProfileBuildAction`` instead of a clear
+## compile-time diagnostic. The allow-list pins exactly the typed
+## tools the Windows-System-Resources spec § 2.3 enumerates; new
+## profile-scope typed tools (a hypothetical ``windowsInstallMsi``,
+## ``zypperInstall``, ...) extend this list.
+const ProfileActionEdgeTypedTools* = ["expandArchive"]
+
+const ProfileActionEdgeBareCalls* = ["inlineExecCall"]
+  ## Bare-ident action-edge calls (no typed-tool dot prefix). The
+  ## spec calls out ``inlineExecCall(...)`` as the escape hatch for
+  ## actions a typed tool doesn't yet cover (running a registration
+  ## script, invoking an installer's silent-mode binary, ...). The
+  ## macro recognises the bare ident and routes the call through
+  ## ``buildAction(... call = inlineExecCall(argv), ...)`` so the
+  ## resulting ``BuildActionDef`` lands in ``addProfileBuildAction``
+  ## with the same code path the typed-tool calls take.
+
+proc isProfileActionEdgeCall*(stmt: NimNode): bool =
+  ## True when ``stmt`` is a call shape the profile macro treats as an
+  ## action edge (build-graph item) rather than a live-state resource.
+  ## Pure / no AST mutation — the caller (``rewriteResourcesStmt``)
+  ## branches on this predicate.
+  ##
+  ## Recognised shapes (closed set):
+  ##   * ``<ident>.build(...)`` where ``<ident>`` is in
+  ##     ``ProfileActionEdgeTypedTools`` — a typed-tool action edge.
+  ##   * ``<ident>(...)`` where ``<ident>`` is in
+  ##     ``ProfileActionEdgeBareCalls`` — a bare ``inlineExecCall``
+  ##     call (or other Phase-G-approved bare action-edge call).
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return false
+  let head = stmt[0]
+  case head.kind
+  of nnkDotExpr:
+    if head.len < 2: return false
+    if head[0].kind notin {nnkIdent, nnkSym}: return false
+    if head[1].kind notin {nnkIdent, nnkSym}: return false
+    if $head[1] != "build": return false
+    let tool = $head[0]
+    for accepted in ProfileActionEdgeTypedTools:
+      if tool == accepted: return true
+    false
+  of nnkIdent, nnkSym:
+    let name = $head
+    for accepted in ProfileActionEdgeBareCalls:
+      if name == accepted: return true
+    false
+  else: false
+
+proc rewriteActionEdgeCall(stmt: NimNode; profileVar: NimNode): NimNode =
+  ## Rewrite an action-edge call (``expandArchive.build(...)`` /
+  ## ``inlineExecCall(...)``) so its ``BuildActionDef`` return value
+  ## lands in ``profileVar.buildActions`` via ``addProfileBuildAction``.
+  ##
+  ## For bare ``inlineExecCall(...)`` we also need to wrap it in
+  ## ``buildAction(...)`` because ``inlineExecCall`` itself returns a
+  ## ``PublicCliCall``, not a ``BuildActionDef`` (the
+  ## ``addProfileBuildAction`` helper signature). The wrapping moves
+  ## the caller-supplied ``id``/``inputs``/``outputs``/...
+  ## keyword arguments onto ``buildAction`` and uses the
+  ## ``inlineExecCall(...)`` value as the ``call =`` argument.
+  ##
+  ## The wrapping is done via a ``profileInlineExecActionEdge(...)``
+  ## helper (defined in ``./build_actions.nim``) so the macro doesn't
+  ## have to splice keyword arguments AST-by-AST: the helper accepts
+  ## the same parameter set the spec § 2.3 example shows and assembles
+  ## the ``BuildActionDef`` internally.
+  let head = stmt[0]
+  case head.kind
+  of nnkDotExpr:
+    # Typed-tool ``<x>.build(args)``: the result is already a
+    # BuildActionDef; just wrap with addProfileBuildAction.
+    var inner = newNimNode(nnkCall)
+    inner.add stmt[0]
+    for i in 1 ..< stmt.len:
+      inner.add stmt[i]
+    var pushCall = newNimNode(nnkCall)
+    pushCall.add newIdentNode("addProfileBuildAction")
+    var dotExpr = newNimNode(nnkDotExpr)
+    dotExpr.add profileVar
+    dotExpr.add newIdentNode("buildActions")
+    pushCall.add dotExpr
+    pushCall.add inner
+    return pushCall
+  of nnkIdent, nnkSym:
+    # Bare ``inlineExecCall(...)``: rewrite to
+    # ``profileInlineExecActionEdge(profileVar.buildActions, args)``
+    # so the helper can splice the keyword args onto a
+    # ``buildAction(...)`` call without the macro doing AST splicing.
+    var helperCall = newNimNode(nnkCall)
+    helperCall.add newIdentNode("profileInlineExecActionEdge")
+    var dotExpr = newNimNode(nnkDotExpr)
+    dotExpr.add profileVar
+    dotExpr.add newIdentNode("buildActions")
+    helperCall.add dotExpr
+    for i in 1 ..< stmt.len:
+      helperCall.add stmt[i]
+    return helperCall
+  else:
+    error("internal: rewriteActionEdgeCall called on unrecognized call shape",
+          stmt)
+
 proc rewriteResourceCall(stmt: NimNode; profileVar: NimNode): NimNode =
   ## Rewrite a `<callee>(args)` resource-constructor call into
   ## `<callee>(profileVar.resources, args)` — target seq splat as the
@@ -385,9 +502,21 @@ proc rewriteResourcesBody(body: NimNode; profileVar: NimNode): NimNode
 
 proc rewriteResourcesStmt(stmt: NimNode; profileVar: NimNode): NimNode =
   ## A single statement inside a `resources:` body.
+  ##
+  ## Windows-System-Resources Phase G: the body now accepts a MIX of
+  ## live-state resource constructor calls (``fsSystemFile(...)`` /
+  ## ``windowsService(...)``) and action-edge typed-tool calls
+  ## (``expandArchive.build(...)`` / ``inlineExecCall(...)``). The
+  ## macro detects the action-edge shape via
+  ## ``isProfileActionEdgeCall`` and rewrites it through a different
+  ## code path (the call's return value lands in
+  ## ``profileVar.buildActions`` instead of ``profileVar.resources``).
   case stmt.kind
   of nnkCall, nnkCommand:
-    result = rewriteResourceCall(stmt, profileVar)
+    if isProfileActionEdgeCall(stmt):
+      result = rewriteActionEdgeCall(stmt, profileVar)
+    else:
+      result = rewriteResourceCall(stmt, profileVar)
   of nnkWhenStmt:
     # Nim compile-time `when defined(...):` guard. The branches
     # contain resource-constructor calls; we recurse and rewrite each
