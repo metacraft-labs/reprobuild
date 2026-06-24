@@ -7262,6 +7262,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim",
+    binary: "build/test-bin/t_m9r34_recipe_edit_invalidates_local_cache",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r3_library_api_block.nim",
     binary: "build/test-bin/t_m9r3_library_api_block",
     defines: @[],

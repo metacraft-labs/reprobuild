@@ -1,0 +1,211 @@
+M9.R.34 — local action cache invalidates on recipe edits
+=========================================================
+
+Status: CODE FIX LANDED + REGRESSION TEST PASSING; live WSL Phase D
+smoke deferred to first eli-wsl build after sync.
+
+Bug + repro (Phase A — already characterised by M9.R.33)
+-------------------------------------------------------
+
+From the M9.R.33 close-out evidence at
+``recipes/reproos-iso/run-evidence/m9r33_complete.txt`` lines 268-272:
+
+  "The qcoro6 build did NOT actually pick up the M9.R.33.1.1
+   BUILD_SHARED_LIBS=ON addition on a re-run — the install-mirror
+   still held only the .a archives, not the shared objects despite
+   ``BUILD_SHARED_LIBS=ON`` in the recipe.  Verified: the M9.R.33.1.1
+   commit was incremental-cached past the BUILD_SHARED_LIBS recipe
+   edit; the cache key for the cmake-configure action did NOT pick
+   up the new ``-DBUILD_SHARED_LIBS=ON`` argv on the re-run.  Drive-
+   by follow-up: a manual ``rm -rf
+   recipes/packages/source/qcoro6/.repro`` would force the
+   cacheVars change."
+
+So the bug repros via:
+
+  1. Build qcoro6 once with cacheVars = @[]  (or any baseline).
+  2. Edit ``recipes/packages/source/qcoro6/repro.nim`` to add
+     ``"BUILD_SHARED_LIBS=ON"`` to cacheVars.
+  3. ``repro build qcoro6``.
+  4. Engine reports the cmake-configure / cmake-build / cmake-install
+     actions as cache HIT; the install-mirror still holds the old
+     static archive contents.  A manual ``rm -rf .repro/build`` is
+     the only workaround.
+
+Root cause (per M9.R.33 + this milestone's investigation)
+--------------------------------------------------------
+
+* ``libs/repro_build_engine/src/repro_build_engine.nim:813-816`` —
+  ``weakFingerprintFromText`` derives the local action-cache key from
+  the action ID text only.
+* ``libs/repro_cli_support/src/repro_cli_support.nim:1862-1870`` (and
+  the four sibling lowering paths) — ``lowerGraphAction`` composes
+  ``fingerprintText`` as ``[v1-tag, payload.id, packageName,
+  executableName, subcommand, node.payload,
+  digestHex(profileFingerprint)].join("\n")``.
+* ``libs/repro_build_engine/src/repro_build_engine.nim:1431-1460`` —
+  ``cacheInputPaths`` covers declared inputs + io-monitor reads/probes
+  + depfile inputs.  No path under
+  ``recipes/packages/source/<name>/repro.nim`` is ever in any of
+  these sets — cmake doesn't read it, the io-monitor doesn't see it,
+  and no depfile references it.
+* So the cmake-configure cache key depended on argv (which IS in
+  ``payload.call.arguments`` via the typed-tool wrapper) BUT ONLY
+  when the argv-affecting fields actually flow through the typed-tool
+  flag set.  Empirically (M9.R.33's BUILD_SHARED_LIBS=ON observation)
+  the propagation drops the change before the configure-action
+  payload — likely because the change is on the BUILD action's
+  ``inputs`` (which list the configure outputs, not the configure
+  argv) and the BUILD action's payload is what's keyed on.
+* The binary-cache path was always recipe-aware:
+  ``providerRevisionHex`` in
+  ``libs/repro_standard_provider/src/repro_standard_provider/conventions/from_source_identity.nim:73-88``
+  hashes the recipe file bytes for ``cacheEntryIdentity.providerRevision``.
+  The gap was strictly local.
+
+Fix shape (Phase B — Option 2, structured-payload field)
+-------------------------------------------------------
+
+Add a ``recipeRevisionFingerprint: string`` field to
+``BuildActionDef`` that ``buildAction()`` auto-populates from the
+recipe file under ``activeProviderProjectRoot()`` at action-emit
+time.  Carry the field through the v20 payload codec.  Because the
+engine's existing ``fingerprintText`` composition already includes
+``node.payload`` (the encoded BuildActionDef bytes), a different
+recipe digest -> different payload bytes -> different
+fingerprintText -> different ``weakFingerprint`` -> local action
+cache MISS -> action re-runs.
+
+Why Option 2 over Option 1 ("bake the digest into the action ID
+string"):
+
+* Action IDs are user-visible in build logs, target-resolution
+  diagnostics, and the engine's per-edge structured tracing.
+  Embedding a hex digest in every recipe-owned action ID would
+  make every log line ~32 characters longer for zero benefit.
+* The payload-field approach is locally orthogonal — no other
+  engine surface needs to change because the fingerprintText
+  already byte-mixes ``node.payload``.
+* The cache for ``computeRecipeRevisionFingerprint`` is keyed by
+  ``currentProviderProjectRoot``, so a typical recipe with 5-10
+  emitted actions reads + hashes the recipe file exactly once per
+  ``buildPackageFragment`` invocation.
+
+Files modified
+--------------
+
+1. ``libs/repro_project_dsl/src/repro_project_dsl/types.nim``
+   (+18 LOC):  new ``recipeRevisionFingerprint: string`` field on
+   ``BuildActionDef`` with a docstring describing the engine
+   contract.
+
+2. ``libs/repro_project_dsl/src/repro_project_dsl/runtime_core.nim``
+   (+109 LOC):
+   * ``resetRecipeRevisionFingerprintCache*()`` — public test
+     helper to invalidate the per-projectRoot cache.
+   * ``computeRecipeRevisionFingerprint*()`` — public proc that
+     reads + sha256-digests the recipe file (canonical
+     ``repro.nim`` first, legacy ``reprobuild.nim`` fallback), with
+     a single-slot cache keyed by ``projectRoot`` so the typical
+     recipe re-uses the digest across its 5-10 buildAction() calls.
+   * ``buildAction()`` auto-populates the new field via
+     ``computeRecipeRevisionFingerprint(activeProviderProjectRoot())``.
+   * Payload codec bumped from v19 to v20; encode appends the
+     length-prefixed digest string; decode reads it under
+     ``version >= 20`` with the explicit "v19-and-earlier decode
+     with empty string" backward-compat branch.
+   * Existing version-set check extended to accept v19 explicitly.
+
+3. ``libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim``
+   (+3 / -2 LOC + comment refresh):  forged-legacy-payload tests
+   updated to account for the new 4-byte length prefix the v20
+   codec appends.  ``trimBytes = 19 -> 23`` for the v11 test;
+   ``trimBytes = 5 -> 9`` for the v16 test; new
+   ``check decoded.recipeRevisionFingerprint == ""`` assertion on
+   the v16 path to pin the backward-compat default.
+
+4. ``tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim``
+   (NEW, 169 LOC) — see "Regression test" below.
+
+5. ``repro_tests.nim`` (+8 LOC) — registers the new test edge so
+   ``repro build test`` picks it up.  Generated by
+   ``nim r scripts/generate_test_edges.nim`` (the generator
+   discovered ~10 other unregistered tests too; those were
+   restored to keep this milestone's commit minimal — they're
+   separate scope).
+
+Phase C — regression test
+------------------------
+
+``tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim`` —
+8 sub-tests all passing on Windows host:
+
+  [OK] empty_project_root_yields_empty_digest
+  [OK] directory_without_recipe_file_yields_empty_digest
+  [OK] directory_with_repro_nim_returns_sha256_hex_digest
+  [OK] directory_with_reprobuild_nim_legacy_filename_also_resolves
+  [OK] recipe_edit_changes_the_returned_digest
+  [OK] payload_codec_round_trips_recipeRevisionFingerprint
+  [OK] different_recipeRevisionFingerprint_yields_different_payload_bytes
+  [OK] different_recipeRevisionFingerprint_yields_different_engine_fingerprintText
+
+The last test mirrors the engine's exact ``lowerGraphAction``
+fingerprintText composition shape and confirms two BuildActionDefs
+identical except for ``recipeRevisionFingerprint`` produce
+byte-different fingerprintTexts — closing the chain "recipe edit
+-> different recipe digest -> different payload bytes -> different
+fingerprintText -> (BLAKE3 collision resistance) different
+``weakFingerprint`` -> local action cache MISS".
+
+The test deliberately does NOT import ``repro_build_engine``
+because of an unrelated pre-existing Windows-host build break
+(commit 121b3629 introduced a call to ``pollNextGrantBounded`` on
+the sibling runquota repo's RunQuotaSession which was never added
+there).  The fingerprintText-byte-equality assertion + BLAKE3's
+contract makes the engine import unnecessary.
+
+Phase E — regression suites verified
+-----------------------------------
+
+  [OK] tests/integration/t_project_dsl_build_action_payload.nim
+       (7 tests — all payload-codec legacy backward-compat paths)
+  [OK] libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim
+       (3 tests — including the forged v11/v16 legacy payloads)
+  [OK] libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim
+       (7 tests — confirms the v19 requiresElevation field still
+        round-trips alongside the new v20 field)
+  [OK] tests/unit/t_m9r14f_2_rpath_patching.nim (10 tests)
+  [OK] tests/unit/t_m9r30_transitive_rpath_propagation.nim (10 tests)
+
+Zero regressions.
+
+Phase D smoke (deferred to first WSL build)
+------------------------------------------
+
+The end-to-end "edit qcoro6 cacheVar -> repro build qcoro6 ->
+verify cache MISS + rebuild fires + new binary reflects the
+change" smoke requires the full from-source toolchain (cmake +
+ninja + qt6-base + ...) which is a Linux-only realm in the current
+reprobuild surface, AND on Windows host the ``repro`` binary
+itself currently fails ``nim check`` because of the pre-existing
+``pollNextGrantBounded`` gap (commit 121b3629).  The fix lands
+fully verified at the unit-test layer; the WSL-side end-to-end
+verification will happen on the first ``repro build`` invocation
+in eli-wsl after the dev push lands.
+
+Pre-existing breakage NOT addressed here
+---------------------------------------
+
+* ``libs/repro_runquota/src/repro_runquota.nim:399`` calls
+  ``sessionPtr[].pollNextGrantBounded(boundedReadMs)`` which is
+  not defined anywhere in either the reprobuild repo or the
+  sibling ``D:/metacraft/runquota`` repo.  Commit 121b3629
+  ("Fail fast with a diagnostic when RunQuota stops responding
+  mid-wait") introduced the call but the corresponding runquota
+  client-side bounded poll never landed.  This breaks ``nim
+  check`` on every reprobuild module that transitively imports
+  ``repro_build_engine`` (including the test files
+  ``tests/unit/t_m9r14e_3_action_env_threading.nim`` /
+  ``tests/unit/t_m9r7_target_triple_cache_namespacing.nim`` /
+  ``tests/unit/t_runquota_grant_wait_*``).  Out of scope for
+  M9.R.34; flag for follow-up.
