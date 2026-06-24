@@ -16,6 +16,8 @@ EXECUTIVE SUMMARY
 
 Commits in M9.R.32 batch (newest first):
 
+  M9.R.32.1.2  plasma-workspace Qt6 platforms + GLESv2 hints  (129bc89f)
+  M9.R.32.6    evidence file + G5 driver scripts              (a029058f)
   M9.R.32.1.1  plasma-workspace test asserts startplasmaWayland (8d945cd0)
   M9.R.32.4    build-base-rootfs.sh per-entry apt audit       (5c15c19b)
   M9.R.32.2    gnome-shell honest mozjs/gjs blocker docs       (290017fa)
@@ -150,30 +152,52 @@ NB: this commit invalidates the base-rootfs cache (script-body hash
 participates in CACHE_KEY by design, M9.R.29.17).  The next ISO build
 will rebuild the trixie-slim tarball from upstream debian:trixie-slim.
 
-### G5 (M9.R.32.5) — ISO rebuild + Phase E DE smoke: PARTIAL
+### G5 (M9.R.32.5) — ISO rebuild + Phase E DE smoke: BLOCKED
 
-Status: deferred to a follow-up.  See "Build wedge incident" below.
+Discovered during the M9.R.32.1 verification run: a fresh plasma-
+workspace ``cmake configure`` (after ``rm -rf build/``) trips on
+multiple latent issues that the prior M9.R.31 build dodged by inheriting
+a stale-but-working CMakeCache.txt:
 
-The plasma-workspace rebuild (G1) is required before the ISO can pick
-up the new ``startplasma-wayland`` binary into the install-mirror that
-stage-de-rootfs.sh symlinks at line 312.  The Phase E install-and-boot
-smoke (--automated install → reboot → installed-system DE probes)
-similarly waits on plasma-workspace.
+  1. GLESv2 + PlatformGraphics — addressed by M9.R.32.1.2 by threading
+     the qt6-base-shipped Qt6 platforms cmake-module dir into
+     CMAKE_MODULE_PATH + baking the mesa GLESv2 hints.
+  2. QCoro6 — fresh configure fails with ``QCoro6 not found``.  qcoro6
+     is a Nix-channel stub (``packages/qcoro6.nim`` points at
+     ``nixpkgs#kdePackages.qcoro``), not a from-source recipe.  The
+     prior CMakeCache.txt had a Nix-store-baked ``QCoro6_DIR`` that
+     somehow resolved at the M9.R.30 build; that path is gone with the
+     wipe.  Surfacing QCoro6 cleanly under ``--tool-provisioning=
+     from-source`` is an unresolved architectural gap.
 
-The deferred work:
+Architectural conclusion: the plasma-workspace recipe inherited a
+"works only with cached CMakeCache.txt" state from M9.R.30's bulk
+rebuild.  A truly-from-scratch rebuild requires multiple additional
+fixes (from-source qcoro6 recipe OR auto-thread Nix-stubbed cmake-
+config dirs, plus the M9.R.15i.5 walker extension for
+CMAKE_MODULE_PATH).  All M9.R.33 work shape.
 
-  1. Wait for the plasma-workspace rebuild to complete (currently
-     running via ``_m9r32_pw_build.sh`` background driver, log at
-     ``/tmp/m9r32_1_pw_v5.log`` on eli-wsl).
-  2. Verify
-     ``recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/startplasma-wayland``
-     exists with clean ldd.
-  3. Rebuild the ISO via ``_m9r32_iso_build.sh``.
-  4. Run ``_m9r32_qemu_de_smoke.sh`` for the live-ISO probe transcript.
-  5. Phase E: ``qemu-img create -f qcow2 /tmp/installed_disk.qcow2 32G``
-     + UEFI install --automated + reboot + installed-system DE probes.
+The deferred-to-M9.R.33 work:
 
-The G6 evidence file (this file) will be updated with the transcripts.
+  1. Either author a qcoro6 from-source recipe (~half a day; QCoro is
+     a small Qt6 coroutines wrapper, no heavy deps beyond Qt6 itself),
+     OR extend the M9.R.15i.5 walker to fetch Nix-stub-provisioned
+     cmake-config dirs and thread them as
+     ``-D<Component>_DIR=<nix-store-path>``.
+  2. Extend cmake_package's M9.R.15o-family walker to thread
+     CMAKE_MODULE_PATH from every Qt6* dep's ``cmake/Qt6/platforms/``
+     dir AND surface GLESv2 from mesa's pkg-config.  M9.R.32.1.2's
+     recipe-local fallback can then be dropped.
+  3. With both landed, ``rm -rf build && repro build`` should succeed
+     end-to-end on plasma-workspace.
+  4. Then run ``_m9r32_iso_build.sh`` →
+     ``_m9r32_qemu_de_smoke.sh`` → installed-system Phase E.
+
+The live ISO from M9.R.31 (built 2026-06-24 12:20) WORKS for sway /
+kwin / mutter / plasmashell / sddm-greeter-qt6 as documented in
+``m9r31_complete.txt``; the M9.R.32 driver scripts in repo will
+generate the M9.R.32 transcripts once the plasma-workspace rebuild
+unblocks.
 
 ### G6 (M9.R.32.6) — close-out evidence: IN-PROGRESS
 
