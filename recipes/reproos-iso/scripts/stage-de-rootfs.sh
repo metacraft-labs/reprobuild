@@ -236,13 +236,12 @@ while :; do
     # gcc-libgcc output and plasmashell + kwin_wayland + sway
     # crashed at startup with 'cannot open shared object file:
     # libgcc_s.so.1'.
-    find "$staged_prefix" -type l 2>/dev/null | \
-      while IFS= read -r lnk; do
-        target=$(readlink "$lnk" 2>/dev/null || true)
-        case "$target" in
-          /nix/store/*) printf '%s\n' "$target" | sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p' ;;
-        esac
-      done
+    # M9.R.29.19b — use find's -lname predicate to match symlinks
+    # whose target is under /nix/store in ONE pass + -printf '%l'
+    # to emit the target string directly, avoiding a per-symlink
+    # shell fork (breeze-icons alone has 24k+ symlinks).
+    find "$staged_prefix" -type l -lname '/nix/store/*' -printf '%l\n' 2>/dev/null | \
+      sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
   done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
 
   # Filter out prefixes we already mirrored.
