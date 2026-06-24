@@ -154,15 +154,20 @@ PKG_LIST=(
   #                                          usr/share/zoneinfo;
   #                                          M9.R.33.3 stage loop
   #                                          shadows it)
-  #   passwd           FS:done    STAGE:yes (shadow-utils recipe)
-  #   login            FS:done    STAGE:yes (shadow-utils recipe)
+  #
+  # M9.R.33.11 dropped: ``passwd`` + ``login`` -- both ship via the
+  # FS:done from-source shadow-utils recipe (11 binaries in usr/bin
+  # incl. passwd + login + chsh + chage + 19 in usr/sbin incl.
+  # useradd + userdel + usermod + groupadd + groupdel + groupmod);
+  # the Phase 4b shadow-link loop covers them.
+  #
   #   procps           FS:partial STAGE:no  (recipe exists; install dir
   #                                          missing)
   #   less             FS:done    STAGE:no
   #   nano             FS:none    STAGE:no  (not in from-source corpus;
   #                                          editor convenience, no
   #                                          runtime dep)
-  udev tzdata passwd login procps less nano
+  udev tzdata procps less nano
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
