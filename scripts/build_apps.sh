@@ -31,6 +31,15 @@ esac
 # ``../nim-stackable-hooks/src`` (override with ``$STACKABLE_HOOKS_SRC``),
 # the same sibling reprobuild's monitor tests use.
 io_mon_src="${IO_MON_SRC:-../io-mon}"
+# M9.R.33 drive-by — env.ps1 + the cross-OS dev shell wire IO_MON_SRC to
+# the io-mon ``src/`` dir (consistent with the way reprobuild's
+# ``config.nims`` switch("path", ioMonSrc) lookup picks up
+# ``<root>/src/io_mon.nim``).  This script wants the io-mon repo ROOT
+# so ``scripts/build_shim.sh`` resolves.  Strip a trailing ``/src``
+# segment so the same env value works for both consumers.
+case "$io_mon_src" in
+  */src) io_mon_src="${io_mon_src%/src}" ;;
+esac
 if [ ! -x "${io_mon_src}/scripts/build_shim.sh" ]; then
   echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
   exit 2
