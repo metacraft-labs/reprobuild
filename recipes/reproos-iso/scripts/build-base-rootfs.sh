@@ -138,7 +138,10 @@ PKG_LIST=(
   # shadow-link loop emits /usr/{bin,sbin}/<name> symlinks at staging
   # time.
   #
-  #   kmod             FS:done    STAGE:yes (M9.R.33.3 stage loop)
+  # M9.R.33.6 dropped: ``kmod`` -- FS:done recipe ships 7 binaries
+  # in usr/bin (kmod, depmod, insmod, lsmod, modinfo, modprobe, rmmod);
+  # the Phase 4b shadow-link loop covers them.
+  #
   #   udev             FS:none    STAGE:no  (eudev recipe exists but
   #                                          install-mirror is empty)
   #   tzdata           FS:done    STAGE:yes (iana-tzdata recipe ships
@@ -153,7 +156,7 @@ PKG_LIST=(
   #   nano             FS:none    STAGE:no  (not in from-source corpus;
   #                                          editor convenience, no
   #                                          runtime dep)
-  kmod udev tzdata passwd login procps less nano
+  udev tzdata passwd login procps less nano
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
