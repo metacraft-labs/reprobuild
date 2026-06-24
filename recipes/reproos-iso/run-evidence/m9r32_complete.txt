@@ -60,6 +60,39 @@ Companion test update (M9.R.32.1.1): ``arts.len == 2`` → ``arts.len == 3``;
 third ``seenStartplasma`` flag joins the existing ``seenBin`` /
 ``seenLib`` assertions.
 
+VALIDATION TRANSCRIPT (M9.R.32.1.1 test on 2026-06-24):
+
+  [Suite] plasmaWorkspaceSource — from-source recipe smoke test
+    [OK] fetch spec carries the vendored URL verbatim
+    [OK] fetch spec hash is a 64-char sha256 hex string
+    [OK] fetch spec is the tarball variant with extractStrip = 1
+    [OK] cmakeFlags registers the exact production flag sequence
+    [OK] cmakeFlags does not leak into the meson channel
+    [OK] cmakeFlags does not leak into the configure channel
+    [OK] artifacts register an executable + a library with correct kinds
+    [OK] versions block records the upstream tag + URL + repository
+
+The 7th test exercises the registry round-trip on all 3 artifacts
+(plasmashell + libPlasmaWorkspace + startplasmaWayland) and confirms
+each has the correct ``dakExecutable`` / ``dakLibrary`` discriminant.
+The recipe is well-formed and ready to produce startplasma-wayland
+when the surrounding fresh-configure CMake gaps (G5 BLOCKED) are
+resolved per M9.R.33.
+
+VALIDATION TRANSCRIPT (gnome-shell test still passes despite the
+gjs/mozjs blocker — the recipe's REGISTRATION layer is sound; only
+the BUILD layer is blocked):
+
+  [Suite] gnomeShellSource — from-source recipe smoke test
+    [OK] fetch spec carries the vendored URL verbatim
+    [OK] fetch spec hash is a 64-char sha256 hex string
+    [OK] fetch spec is the tarball variant with extractStrip = 1
+    [OK] mesonOptions registers the exact production flag sequence
+    [OK] mesonOptions does not leak into the cmake channel
+    [OK] mesonOptions does not leak into the configure channel
+    [OK] artifacts register an executable + a library with correct kinds
+    [OK] versions block records the upstream tag + URL + repository
+
 ### G2 (M9.R.32.2) — gnome-shell mozjs blocker: DEFERRED (documented)
 
 gnome-shell's install mirror has never been populated.  The build
