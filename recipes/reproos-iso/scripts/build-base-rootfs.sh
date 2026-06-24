@@ -209,10 +209,15 @@ PKG_LIST=(
   # loop covers them.
   #
   #   dosfstools       FS:partial STAGE:no
-  #   btrfs-progs      FS:done    STAGE:yes (M9.R.33.3 stage loop)
+  #
+  # M9.R.33.10 dropped: ``btrfs-progs`` -- FS:done recipe ships 9
+  # binaries in usr/bin (btrfs, btrfs-convert, btrfs-find-root,
+  # btrfs-image, btrfs-map-logical, btrfs-select-super, btrfstune,
+  # fsck.btrfs, mkfs.btrfs); the Phase 4b shadow-link loop covers them.
+  #
   #   cryptsetup       FS:partial STAGE:no
   #   lvm2             FS:partial STAGE:no
-  gdisk parted dosfstools btrfs-progs cryptsetup lvm2
+  gdisk parted dosfstools cryptsetup lvm2
   # Bootloader tools the installer's Phase 5 (system apply) shells
   # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
   #   grub-efi-amd64-bin     FS:none STAGE:no
