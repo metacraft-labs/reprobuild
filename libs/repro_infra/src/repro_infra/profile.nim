@@ -38,6 +38,7 @@ type
     srkWindowsOptionalFeature = "windows.optionalFeature"
     srkWindowsCapability = "windows.capability"
     srkWindowsService = "windows.service"
+    srkWindowsScheduledTask = "windows.scheduledTask"
     srkWindowsVsInstaller = "windows.vsInstaller"
     srkWindowsFirewallRule = "windows.firewallRule"
     srkWindowsAcl = "windows.acl"
@@ -120,6 +121,26 @@ type
         ## Phase B: optional failure-count reset window. `0` (default)
         ## means "do not emit `reset= ` to `sc.exe failure`"; a
         ## positive value drives `sc.exe failure <name> reset= <secs>`.
+    of srkWindowsScheduledTask:
+      ## Windows-System-Resources Phase C: a Task Scheduler entry.
+      ## Identity is the fully-qualified `wstTaskName`; the schedule +
+      ## principal + executable + enabled flag are observable live
+      ## state. `wst*` field prefix avoids collisions with the
+      ## `serviceX` / `sd*` / `sda*` families already in this object.
+      wstTaskName*: string
+      wstExecutable*: string
+      wstArguments*: seq[string]
+      wstWorkingDirectory*: string
+      wstRunAsUser*: string
+      wstRunWithHighestPrivileges*: bool
+      wstSchedule*: ScheduledTaskScheduleSpec
+        ## Discriminated trigger union — the `repro_elevation`
+        ## `ScheduledTaskScheduleSpec` mirrors the front-end
+        ## `repro_profile.types.ScheduleSpec` byte-for-byte (closed
+        ## set of variants + lower-case wire tokens); the dep-inversion
+        ## stays clean because `repro_elevation` does NOT import
+        ## `repro_profile`.
+      wstEnabled*: bool
     of srkWindowsVsInstaller:
       vsEdition*: string
       vsChannel*: string
@@ -261,6 +282,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "capability:" & r.capabilityName
   of srkWindowsService:
     "service:" & r.serviceName
+  of srkWindowsScheduledTask:
+    "scheduledTask:" & r.wstTaskName
   of srkWindowsVsInstaller:
     "vsInstaller:" & r.vsEdition &
       (if r.vsInstallPath.len > 0: "@" & r.vsInstallPath else: "")
@@ -333,6 +356,7 @@ proc resourceName*(r: SystemResource): string =
   of srkWindowsOptionalFeature: r.featureName
   of srkWindowsCapability: r.capabilityName
   of srkWindowsService: r.serviceName
+  of srkWindowsScheduledTask: r.wstTaskName
   of srkWindowsVsInstaller: r.vsEdition
   of srkWindowsFirewallRule: r.fwName
   of srkWindowsAcl: r.aclPath
@@ -544,6 +568,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkWindowsOptionalFeature: srk = srkWindowsOptionalFeature
     of $srkWindowsCapability: srk = srkWindowsCapability
     of $srkWindowsService: srk = srkWindowsService
+    of $srkWindowsScheduledTask: srk = srkWindowsScheduledTask
     of $srkWindowsVsInstaller: srk = srkWindowsVsInstaller
     of $srkWindowsFirewallRule: srk = srkWindowsFirewallRule
     of $srkWindowsAcl: srk = srkWindowsAcl
@@ -716,6 +741,60 @@ proc parseSystemProfile*(text: string): SystemProfile =
         serviceBinPath: svcBinPath,
         serviceRecoveryActions: svcRecovery,
         serviceRecoveryResetSeconds: svcRecoveryReset)
+    of srkWindowsScheduledTask:
+      # Windows-System-Resources Phase C: every layer in the
+      # closed-set defence chain (template / text parser / adapter /
+      # broker validator) re-checks the same shape so a bypass through
+      # any one path still fails closed. The text parser is layer 2.
+      let wstTaskName = need("taskName")
+      if wstTaskName.len == 0:
+        raiseSystemProfileInvalid("windows.scheduledTask requires a " &
+          "non-empty taskName")
+      let wstExecutable = need("executable")
+      if wstExecutable.len == 0:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' requires a non-empty executable")
+      let wstArguments =
+        if "arguments" in rawFields: parseListLiteral(rawFields["arguments"])
+        else: @[]
+      let wstWorkingDirectory =
+        if "workingDirectory" in fields: fields["workingDirectory"] else: ""
+      let wstRunAsUser =
+        if "runAsUser" in fields: fields["runAsUser"] else: "SYSTEM"
+      let wstRunWithHighest =
+        if "runWithHighestPrivileges" in fields:
+          parseBoolField("runWithHighestPrivileges",
+            fields["runWithHighestPrivileges"])
+        else: wstRunAsUser == "SYSTEM"
+      let wstEnabled =
+        if "enabled" in fields: parseBoolField("enabled",
+          fields["enabled"]) else: true
+      # `schedule` arrives as a single-element list literal under the
+      # canonical wire-token convention (`<kind>:<payload>`). A missing
+      # field is a hard error — the spec requires the trigger.
+      if "schedule" notin rawFields:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' is missing required field 'schedule'")
+      let scheduleTokens = parseListLiteral(rawFields["schedule"])
+      if scheduleTokens.len != 1:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' schedule must be a single-element list (got " &
+          $scheduleTokens.len & " entries)")
+      var wstSchedule: ScheduledTaskScheduleSpec
+      try:
+        wstSchedule = decodeScheduledTaskScheduleToken(scheduleTokens[0])
+      except ValueError as e:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' schedule: " & e.msg)
+      res = SystemResource(kind: srkWindowsScheduledTask,
+        wstTaskName: wstTaskName,
+        wstExecutable: wstExecutable,
+        wstArguments: wstArguments,
+        wstWorkingDirectory: wstWorkingDirectory,
+        wstRunAsUser: wstRunAsUser,
+        wstRunWithHighestPrivileges: wstRunWithHighest,
+        wstSchedule: wstSchedule,
+        wstEnabled: wstEnabled)
     of srkWindowsVsInstaller:
       let workloads =
         if "workloads" in rawFields: parseListLiteral(rawFields["workloads"])
@@ -1254,6 +1333,17 @@ proc toPrivilegedOperation*(r: SystemResource;
       serviceBinPath: r.serviceBinPath,
       serviceRecoveryActions: r.serviceRecoveryActions,
       serviceRecoveryResetSeconds: r.serviceRecoveryResetSeconds)
+  of srkWindowsScheduledTask:
+    PrivilegedOperation(kind: pokWindowsScheduledTask, address: r.address,
+      wstTaskName: r.wstTaskName,
+      wstExecutable: r.wstExecutable,
+      wstArguments: r.wstArguments,
+      wstWorkingDirectory: r.wstWorkingDirectory,
+      wstRunAsUser: r.wstRunAsUser,
+      wstRunWithHighestPrivileges: r.wstRunWithHighestPrivileges,
+      wstSchedule: r.wstSchedule,
+      wstEnabled: r.wstEnabled,
+      wstDestroy: destroy)
   of srkWindowsVsInstaller:
     PrivilegedOperation(kind: pokWindowsVsInstaller, address: r.address,
       vsEdition: r.vsEdition,

@@ -92,6 +92,15 @@ proc systemDesiredDigestHex*(op: PrivilegedOperation): string =
       digestHexOfText(canonicalAclDesired(
         op.aclPath, op.aclOwner, op.aclEntries,
         op.aclInheritanceMode))
+  of pokWindowsScheduledTask:
+    if op.wstDestroy:
+      ZeroDigestHex
+    else:
+      digestHexOfText(canonicalScheduledTaskDesired(
+        op.wstTaskName, op.wstExecutable, op.wstArguments,
+        op.wstWorkingDirectory, op.wstRunAsUser,
+        op.wstRunWithHighestPrivileges, op.wstSchedule,
+        op.wstEnabled))
   of pokOsTimezone:
     digestHexOfText(canonicalTimezoneDesired(op.tzIana))
   of pokOsHostname:
@@ -1385,4 +1394,197 @@ proc applyWindowsOsHostname*(op: PrivilegedOperation):
       result.restartNeeded = true
   else:
     raiseNotImplementedPlatform("os.hostname apply (Windows path)")
+
+# ===========================================================================
+# windows.scheduledTask — `Get-ScheduledTask` / `Register-ScheduledTask` /
+# `Set-ScheduledTask` / `Unregister-ScheduledTask` via PowerShell.
+#
+# Windows-System-Resources Phase C. Like the service / firewall drivers,
+# the probe emits a deterministic `key=value` block so the pure parser
+# in `windows_system_parse.parseScheduledTaskQuery` stays Linux-runnable;
+# the assemblers in `operations.nim` build the cmdlet argv. The driver
+# branches:
+#
+#   * destroy   -> `Unregister-ScheduledTask -Confirm:$false`
+#   * absent    -> `Register-ScheduledTask` (XML body)
+#   * present + drift -> `Set-ScheduledTask` (when only schedule /
+#                        principal / enabled need updating) OR
+#                        unregister+re-register (when the action or
+#                        argument list changes — Set-ScheduledTask does
+#                        not safely converge the action's Execute /
+#                        Arguments fields)
+#
+# Post-apply re-probe is the integrity check.
+# ===========================================================================
+
+when defined(windows):
+  proc scheduledTaskProbeScript(name: string): string =
+    ## A deterministic `key=value` probe of a scheduled task. The probe
+    ## emits one `Schedule<X>=<val>` line per kind-specific field plus
+    ## `ScheduleKind=<lower-case-token>`; the pure parser
+    ## (`parseScheduledTaskQuery`) collapses absent lines to empty
+    ## strings.
+    "$t = Get-ScheduledTask -TaskName " & psQuote(name) &
+      " -ErrorAction SilentlyContinue; " &
+      "if ($null -eq $t) { 'Missing=1' } else { " &
+      "'TaskName=' + $t.TaskName; " &
+      "'Executable=' + $t.Actions[0].Execute; " &
+      "'Arguments=' + $t.Actions[0].Arguments; " &
+      "'WorkingDirectory=' + $t.Actions[0].WorkingDirectory; " &
+      "'RunAsUser=' + $t.Principal.UserId; " &
+      "'RunWithHighestPrivileges=' + ($t.Principal.RunLevel -eq 'Highest'); " &
+      "'Enabled=' + $t.Settings.Enabled; " &
+      "$tr = $t.Triggers[0]; " &
+      "if ($tr.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger') { " &
+      "  'ScheduleKind=onBoot'; " &
+      "  'ScheduleDelaySeconds=0' " &
+      "} elseif ($tr.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger') { " &
+      "  'ScheduleKind=onLogon'; " &
+      "  'ScheduleForUser=' + $tr.UserId " &
+      "} elseif ($tr.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger') { " &
+      "  if ($tr.Repetition -and $tr.Repetition.Interval) { " &
+      "    'ScheduleKind=interval'; " &
+      "    'ScheduleStartAt=' + $tr.StartBoundary " &
+      "  } else { " &
+      "    'ScheduleKind=once'; " &
+      "    'ScheduleRunAt=' + $tr.StartBoundary " &
+      "  } " &
+      "} elseif ($tr.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger') { " &
+      "  'ScheduleKind=daily'; " &
+      "  'ScheduleTimeOfDay=' + ($tr.StartBoundary.Substring(11,5)) " &
+      "} else { 'ScheduleKind=unknown' } }"
+
+proc observeWindowsScheduledTask*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Re-read the task via `Get-ScheduledTask -TaskName <name>`. The
+  ## probe collapses to `Missing=1` for an absent task; the parser
+  ## reconstructs the kind-specific schedule from the probe lines.
+  when defined(windows):
+    let (output, _) = runPowerShell(scheduledTaskProbeScript(op.wstTaskName))
+    let obs = parseScheduledTaskQuery(output)
+    result.present = obs.present
+    result.digestHex =
+      if not obs.present: ZeroDigestHex
+      else: digestHexOfText(canonicalScheduledTaskState(obs))
+  else:
+    raiseNotImplementedPlatform("windows.scheduledTask observe")
+
+proc applyWindowsScheduledTask*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Reconcile the scheduled task to the desired state. Creates a new
+  ## task via `Register-ScheduledTask` when absent; updates an existing
+  ## one via `Set-ScheduledTask` when present-but-differing; is a no-op
+  ## when present-and-matching. The destroy direction (`op.wstDestroy
+  ## == true`) calls `Unregister-ScheduledTask`.
+  ##
+  ## Post-apply re-probe contract: when this proc returns without
+  ## raising, the observed task matches the desired state (or, on
+  ## destroy, no task by that name exists). A genuine disagreement
+  ## raises `EProtocol`.
+  when defined(windows):
+    let (preOut, _) = runPowerShell(
+      scheduledTaskProbeScript(op.wstTaskName))
+    let before = parseScheduledTaskQuery(preOut)
+
+    if op.wstDestroy:
+      if before.present:
+        let (rmOut, rmCode) = runPowerShell(wrapCmdletTerminating(
+          "Unregister-ScheduledTask -TaskName " &
+          psQuote(op.wstTaskName) & " -Confirm:$false"))
+        if rmCode != 0:
+          raiseProtocol("windows.scheduledTask " &
+            "Unregister-ScheduledTask of '" & op.wstTaskName &
+            "' failed: " & rmOut.strip())
+      let (postOut, _) = runPowerShell(
+        scheduledTaskProbeScript(op.wstTaskName))
+      let after = parseScheduledTaskQuery(postOut)
+      if after.present:
+        raiseProtocol("windows.scheduledTask '" & op.wstTaskName &
+          "' post-apply observation reports the task is still present " &
+          "after Unregister-ScheduledTask returned exit 0 — the driver " &
+          "fails closed rather than reporting a spurious success.")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+
+    # Build the trigger XML + the action + principal cmdlet expressions.
+    let scheduleXml = renderScheduledTaskScheduleXml(op.wstSchedule)
+    var argList = ""
+    for i, a in op.wstArguments:
+      if i > 0:
+        argList.add(' ')
+      argList.add(a)
+    var actionExpr = "New-ScheduledTaskAction -Execute " &
+      psQuote(op.wstExecutable)
+    if op.wstArguments.len > 0:
+      actionExpr.add(" -Argument " & psQuote(argList))
+    if op.wstWorkingDirectory.len > 0:
+      actionExpr.add(" -WorkingDirectory " &
+        psQuote(op.wstWorkingDirectory))
+    var principalExpr = "New-ScheduledTaskPrincipal -UserId " &
+      psQuote(op.wstRunAsUser)
+    if op.wstRunWithHighestPrivileges:
+      principalExpr.add(" -RunLevel Highest")
+    let settingsExpr =
+      if op.wstEnabled: "New-ScheduledTaskSettingsSet"
+      else: "New-ScheduledTaskSettingsSet -Disable"
+
+    if not before.present:
+      let cmd = "Register-ScheduledTask -TaskName " &
+        psQuote(op.wstTaskName) &
+        " -Action (" & actionExpr & ")" &
+        " -Trigger ([xml]'<Triggers>" & scheduleXml & "</Triggers>')" &
+        " -Principal (" & principalExpr & ")" &
+        " -Settings (" & settingsExpr & ")"
+      let (cOut, cCode) = runPowerShell(wrapCmdletTerminating(cmd))
+      if cCode != 0:
+        raiseProtocol("windows.scheduledTask Register-ScheduledTask of '" &
+          op.wstTaskName & "' failed: " & cOut.strip())
+    else:
+      # `Set-ScheduledTask` does not safely converge the action's
+      # Execute / Arguments — the safest converge is unregister +
+      # re-register. The post-apply re-probe is the integrity check.
+      let (rmOut, rmCode) = runPowerShell(wrapCmdletTerminating(
+        "Unregister-ScheduledTask -TaskName " &
+        psQuote(op.wstTaskName) & " -Confirm:$false"))
+      if rmCode != 0:
+        raiseProtocol("windows.scheduledTask intermediate " &
+          "Unregister-ScheduledTask of '" & op.wstTaskName &
+          "' failed: " & rmOut.strip())
+      let cmd = "Register-ScheduledTask -TaskName " &
+        psQuote(op.wstTaskName) &
+        " -Action (" & actionExpr & ")" &
+        " -Trigger ([xml]'<Triggers>" & scheduleXml & "</Triggers>')" &
+        " -Principal (" & principalExpr & ")" &
+        " -Settings (" & settingsExpr & ")"
+      let (cOut, cCode) = runPowerShell(wrapCmdletTerminating(cmd))
+      if cCode != 0:
+        raiseProtocol("windows.scheduledTask re-register of '" &
+          op.wstTaskName & "' failed: " & cOut.strip())
+
+    # Post-apply re-probe.
+    let (postOut, _) = runPowerShell(
+      scheduledTaskProbeScript(op.wstTaskName))
+    let after = parseScheduledTaskQuery(postOut)
+    if not scheduledTaskMatchesDesired(after, op.wstTaskName,
+        op.wstExecutable, op.wstArguments, op.wstWorkingDirectory,
+        op.wstRunAsUser, op.wstRunWithHighestPrivileges,
+        op.wstSchedule, op.wstEnabled):
+      raiseProtocol("windows.scheduledTask '" & op.wstTaskName &
+        "' post-apply observation disagrees with desired state: " &
+        "observed " & canonicalScheduledTaskState(after) &
+        "; desired " & canonicalScheduledTaskDesired(op.wstTaskName,
+          op.wstExecutable, op.wstArguments, op.wstWorkingDirectory,
+          op.wstRunAsUser, op.wstRunWithHighestPrivileges,
+          op.wstSchedule, op.wstEnabled) &
+        ". The Register-ScheduledTask / Unregister-ScheduledTask " &
+        "cmdlets returned exit 0 but Task Scheduler does not reflect " &
+        "the change — the driver fails closed rather than reporting a " &
+        "spurious success.")
+    result.present = after.present
+    result.digestHex =
+      if not after.present: ZeroDigestHex
+      else: digestHexOfText(canonicalScheduledTaskState(after))
+  else:
+    raiseNotImplementedPlatform("windows.scheduledTask apply")
 

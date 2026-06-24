@@ -11,6 +11,8 @@
 
 import std/[algorithm, strutils]
 
+import ./operations
+
 # ===========================================================================
 # windows.optionalFeature — DISM `Get-WindowsOptionalFeature` parsing.
 # ===========================================================================
@@ -458,6 +460,221 @@ proc canonicalServiceState*(obs: ServiceObservation;
   if includeRecovery:
     result.add(renderRecoveryDigestPart(obs.recoveryActions,
       obs.recoveryResetSeconds))
+
+# ===========================================================================
+# windows.scheduledTask — `Get-ScheduledTask` parsing + drift comparator.
+#
+# Windows-System-Resources Phase C: the driver emits a deterministic
+# `key=value` block from a single `Get-ScheduledTask` probe so the pure
+# parser stays Linux-runnable. The same probe shape covers all five
+# trigger variants — kind-specific fields collapse to empty when absent.
+# ===========================================================================
+
+type
+  ScheduledTaskObservation* = object
+    ## What an observation of a Windows scheduled task reports.
+    ## `present` false means the task does not exist under that
+    ## `taskName`. Empty strings on present tasks mean the field was
+    ## not surfaced by the probe.
+    present*: bool
+    taskName*: string
+    executable*: string
+    arguments*: seq[string]
+    workingDirectory*: string
+    runAsUser*: string
+    runWithHighestPrivileges*: bool
+    enabled*: bool
+    schedule*: ScheduledTaskScheduleSpec
+      ## The trigger reconstructed from the probe lines. A probe that
+      ## could not name a recognisable schedule kind collapses to a
+      ## `wstskOnBoot` with `delaySeconds = 0` — the most conservative
+      ## "no special schedule" form; the drift comparator surfaces it
+      ## as a mismatch against any non-onBoot desired spec.
+
+proc parseScheduledTaskQuery*(rawOutput: string): ScheduledTaskObservation =
+  ## Parse a scheduled-task observation from a deterministic
+  ## `key=value` probe. `Missing=1` -> absent. The probe shape (emitted
+  ## by `scheduledTaskProbeScript` in the driver):
+  ##
+  ##   TaskName=\Reprobuild\Foo
+  ##   Executable=C:\bin\foo.exe
+  ##   Arguments=--flag
+  ##   WorkingDirectory=
+  ##   RunAsUser=SYSTEM
+  ##   RunWithHighestPrivileges=True
+  ##   Enabled=True
+  ##   ScheduleKind=daily
+  ##   ScheduleTimeOfDay=08:30
+  ##
+  ## Per kind, the schedule payload uses these field names:
+  ##   * onBoot   -> ScheduleDelaySeconds
+  ##   * onLogon  -> ScheduleForUser
+  ##   * once     -> ScheduleRunAt
+  ##   * daily    -> ScheduleTimeOfDay
+  ##   * interval -> ScheduleEveryMinutes + ScheduleStartAt
+  result.present = true
+  var sawAnyField = false
+  var scheduleKindTok = ""
+  var schDelay = 0
+  var schForUser = ""
+  var schRunAt = ""
+  var schTimeOfDay = ""
+  var schEveryMinutes = 0
+  var schStartAt = ""
+  for line in rawOutput.splitLines():
+    let t = line.strip()
+    if t.len == 0: continue
+    let idx = t.find('=')
+    if idx < 0: continue
+    let key = t[0 ..< idx].strip().toLowerAscii()
+    let val = t[idx + 1 .. ^1].strip()
+    case key
+    of "missing":
+      if val in ["1", "true", "yes"]:
+        result.present = false
+        return
+    of "taskname":
+      result.taskName = val
+      sawAnyField = true
+    of "executable":
+      result.executable = val
+      sawAnyField = true
+    of "arguments":
+      if val.len > 0:
+        for piece in val.split('\x1f'):       # split on US (\037)
+          result.arguments.add(piece)
+      sawAnyField = true
+    of "workingdirectory":
+      result.workingDirectory = val
+      sawAnyField = true
+    of "runasuser":
+      result.runAsUser = val
+      sawAnyField = true
+    of "runwithhighestprivileges":
+      result.runWithHighestPrivileges =
+        val.toLowerAscii() in ["true", "1", "yes", "highest"]
+      sawAnyField = true
+    of "enabled":
+      result.enabled = val.toLowerAscii() in ["true", "1", "yes", "ready"]
+      sawAnyField = true
+    of "schedulekind":
+      scheduleKindTok = val
+      sawAnyField = true
+    of "scheduledelayseconds":
+      try: schDelay = parseInt(val)
+      except ValueError: schDelay = 0
+    of "scheduleforuser":
+      schForUser = val
+    of "schedulerunat":
+      schRunAt = val
+    of "scheduletimeofday":
+      schTimeOfDay = val
+    of "scheduleeveryminutes":
+      try: schEveryMinutes = parseInt(val)
+      except ValueError: schEveryMinutes = 0
+    of "schedulestartat":
+      schStartAt = val
+    else: discard
+  if not sawAnyField:
+    result.present = false
+    return
+  # Reconstruct the schedule. An unrecognised tag collapses to the
+  # conservative onBoot:0 — the drift comparator treats it as a
+  # mismatch against any non-onBoot desired spec.
+  if isKnownScheduledTaskScheduleKindToken(scheduleKindTok):
+    let kind = scheduledTaskScheduleKindFromToken(scheduleKindTok)
+    case kind
+    of wstskOnBoot:
+      result.schedule = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: schDelay)
+    of wstskOnLogon:
+      result.schedule = ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: schForUser)
+    of wstskOnce:
+      result.schedule = ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: schRunAt)
+    of wstskDaily:
+      result.schedule = ScheduledTaskScheduleSpec(kind: wstskDaily,
+        timeOfDay: schTimeOfDay)
+    of wstskInterval:
+      result.schedule = ScheduledTaskScheduleSpec(kind: wstskInterval,
+        everyMinutes: schEveryMinutes, startAt: schStartAt)
+  else:
+    result.schedule = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 0)
+
+proc scheduledTaskMatchesDesired*(obs: ScheduledTaskObservation;
+                                  wantTaskName: string;
+                                  wantExecutable: string;
+                                  wantArguments: seq[string];
+                                  wantWorkingDirectory: string;
+                                  wantRunAsUser: string;
+                                  wantRunWithHighestPrivileges: bool;
+                                  wantSchedule: ScheduledTaskScheduleSpec;
+                                  wantEnabled: bool): bool =
+  ## Drift comparator. A task is at the desired state when every
+  ## load-bearing field matches. Empty desired strings + empty seqs
+  ## represent "leave at the driver default" — the observation's value
+  ## is not compared for those slots, mirroring the `windows.service`
+  ## "leave unmanaged" convention.
+  if not obs.present:
+    return false
+  if obs.taskName != wantTaskName:
+    return false
+  if obs.executable != wantExecutable:
+    return false
+  if obs.arguments != wantArguments:
+    return false
+  if wantWorkingDirectory.len > 0 and
+     obs.workingDirectory != wantWorkingDirectory:
+    return false
+  if obs.runAsUser != wantRunAsUser:
+    return false
+  if obs.runWithHighestPrivileges != wantRunWithHighestPrivileges:
+    return false
+  if obs.enabled != wantEnabled:
+    return false
+  if obs.schedule != wantSchedule:
+    return false
+  true
+
+proc canonicalScheduledTaskState*(obs: ScheduledTaskObservation): string =
+  ## Stable canonical rendering used for the broker's drift-digest. A
+  ## present task digests as `scheduledTask:<taskName>:<executable>:<schedule>:<runAsUser>:<enabled>`
+  ## with the schedule encoded as its canonical wire token.
+  if not obs.present:
+    return "scheduledTask:absent"
+  var argv = ""
+  for i, a in obs.arguments:
+    if i > 0:
+      argv.add(' ')
+    argv.add(a)
+  "scheduledTask:" & obs.taskName & ":" & obs.executable & ":" &
+    argv & ":" & obs.workingDirectory & ":" & obs.runAsUser & ":" &
+    (if obs.runWithHighestPrivileges: "highest" else: "limited") &
+    ":" & encodeScheduledTaskScheduleSpec(obs.schedule) & ":" &
+    (if obs.enabled: "enabled" else: "disabled")
+
+proc canonicalScheduledTaskDesired*(taskName, executable: string;
+                                    arguments: seq[string];
+                                    workingDirectory, runAsUser: string;
+                                    runWithHighestPrivileges: bool;
+                                    schedule: ScheduledTaskScheduleSpec;
+                                    enabled: bool): string =
+  ## Canonical desired-state digest input. Same shape as
+  ## `canonicalScheduledTaskState` so an observed-matches-desired
+  ## comparison reduces to a byte-equality check on the rendered
+  ## strings.
+  var argv = ""
+  for i, a in arguments:
+    if i > 0:
+      argv.add(' ')
+    argv.add(a)
+  "scheduledTask:" & taskName & ":" & executable & ":" & argv & ":" &
+    workingDirectory & ":" & runAsUser & ":" &
+    (if runWithHighestPrivileges: "highest" else: "limited") & ":" &
+    encodeScheduledTaskScheduleSpec(schedule) & ":" &
+    (if enabled: "enabled" else: "disabled")
 
 proc canonicalServiceDesired*(wantStartType: string;
                               wantRunning: bool;

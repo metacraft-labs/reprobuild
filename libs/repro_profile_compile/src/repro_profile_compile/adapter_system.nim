@@ -183,6 +183,50 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       serviceBinPath: svcBinPath,
       serviceRecoveryActions: svcRecovery,
       serviceRecoveryResetSeconds: svcRecoveryReset)
+  of "windows.scheduledTask":
+    # Windows-System-Resources Phase C: third defence-in-depth layer
+    # (after the template and the text parser). The adapter rejects the
+    # same malformed shape each surface rejects so a bypass through any
+    # one path still fails closed at the apply boundary.
+    let wstTaskName = fieldString(r, "taskName")
+    if wstTaskName.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask requires a non-empty taskName")
+    let wstExecutable = fieldString(r, "executable")
+    if wstExecutable.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & wstTaskName &
+        "' requires a non-empty executable")
+    let wstArguments = fieldList(r, "arguments")
+    let wstWorkingDirectory = fieldString(r, "workingDirectory")
+    let wstRunAsUser = fieldString(r, "runAsUser", "SYSTEM")
+    let wstRunWithHighest = fieldBool(r,
+      "runWithHighestPrivileges", wstRunAsUser == "SYSTEM")
+    let wstEnabled = fieldBool(r, "enabled", true)
+    # Schedule arrives as a single-element list of canonical wire
+    # tokens. A missing or multi-element list is a typed error.
+    let scheduleTokens = fieldList(r, "schedule")
+    if scheduleTokens.len != 1:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & wstTaskName &
+        "' schedule must be a single-element list (got " &
+        $scheduleTokens.len & " entries)")
+    var wstSchedule: ScheduledTaskScheduleSpec
+    try:
+      wstSchedule = decodeScheduledTaskScheduleToken(scheduleTokens[0])
+    except ValueError as e:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & wstTaskName &
+        "' schedule: " & e.msg)
+    result = SystemResource(kind: srkWindowsScheduledTask,
+      wstTaskName: wstTaskName,
+      wstExecutable: wstExecutable,
+      wstArguments: wstArguments,
+      wstWorkingDirectory: wstWorkingDirectory,
+      wstRunAsUser: wstRunAsUser,
+      wstRunWithHighestPrivileges: wstRunWithHighest,
+      wstSchedule: wstSchedule,
+      wstEnabled: wstEnabled)
   of "windows.vsInstaller":
     result = SystemResource(kind: srkWindowsVsInstaller,
       vsEdition: fieldString(r, "edition", fieldString(r, "version")),
@@ -616,7 +660,8 @@ proc isSystemScopeResource(kind: string): bool =
   case kind
   of "windows.registryValueHKLM",
      "windows.optionalFeature", "windows.capability",
-     "windows.service", "windows.vsInstaller",
+     "windows.service", "windows.scheduledTask",
+     "windows.vsInstaller",
      "windows.firewallRule", "windows.acl",
      "macos.systemDefault", "systemd.systemUnit",
      "launchd.systemDaemon", "fs.systemFile", "fs.systemDirectory",
@@ -759,6 +804,25 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       if r.serviceRecoveryResetSeconds > 0:
         pairs.add(("recoveryResetSeconds",
           $r.serviceRecoveryResetSeconds))
+    of srkWindowsScheduledTask:
+      # Windows-System-Resources Phase C: canonical text rendering.
+      # Mirrors the field-emission rule the template + the SystemResource
+      # parser agree on; back-compat-shaped optional fields stay
+      # byte-identical on omission.
+      pairs.add(("taskName", quoteSystemValue(r.wstTaskName)))
+      pairs.add(("executable", quoteSystemValue(r.wstExecutable)))
+      if r.wstArguments.len > 0:
+        pairs.add(("arguments", renderListLiteral(r.wstArguments)))
+      if r.wstWorkingDirectory.len > 0:
+        pairs.add(("workingDirectory",
+          quoteSystemValue(r.wstWorkingDirectory)))
+      pairs.add(("runAsUser", quoteSystemValue(r.wstRunAsUser)))
+      pairs.add(("runWithHighestPrivileges",
+        (if r.wstRunWithHighestPrivileges: "true" else: "false")))
+      pairs.add(("schedule",
+        renderListLiteral(@[encodeScheduledTaskScheduleSpec(r.wstSchedule)])))
+      pairs.add(("enabled",
+        (if r.wstEnabled: "true" else: "false")))
     of srkWindowsVsInstaller:
       pairs.add(("edition", quoteSystemValue(r.vsEdition)))
       pairs.add(("channel", quoteSystemValue(r.vsChannel)))

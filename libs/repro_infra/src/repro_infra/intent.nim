@@ -263,6 +263,35 @@ proc renderStanza*(r: SystemResource): seq[string] =
     if r.serviceRecoveryResetSeconds > 0:
       result.add("  recoveryResetSeconds = " &
         $r.serviceRecoveryResetSeconds)
+  of srkWindowsScheduledTask:
+    # Windows-System-Resources Phase C: render the canonical multi-line
+    # shape — required fields first (taskName, executable, schedule),
+    # optional fields only when non-default. The same shape
+    # `parseSystemProfile` reads; a round-trip is byte-stable for the
+    # core shape (operator-supplied optional fields stay byte-identical
+    # on omission, exactly like Phase B's recoveryActions).
+    result.add("  taskName = " & renderScalar(r.wstTaskName))
+    result.add("  executable = " & renderScalar(r.wstExecutable))
+    if r.wstArguments.len > 0:
+      result.add("  arguments = " & renderList(r.wstArguments))
+    if r.wstWorkingDirectory.len > 0:
+      result.add("  workingDirectory = " &
+        renderScalar(r.wstWorkingDirectory))
+    if r.wstRunAsUser.len > 0 and r.wstRunAsUser != "SYSTEM":
+      result.add("  runAsUser = " & renderScalar(r.wstRunAsUser))
+    # `runWithHighestPrivileges` default depends on principal (true
+    # for SYSTEM, false otherwise). Emit only when it deviates from
+    # the principal-default so a back-compat-shaped stanza stays
+    # byte-identical.
+    let highestDefault = r.wstRunAsUser == "SYSTEM" or
+      r.wstRunAsUser.len == 0
+    if r.wstRunWithHighestPrivileges != highestDefault:
+      result.add("  runWithHighestPrivileges = " &
+        (if r.wstRunWithHighestPrivileges: "true" else: "false"))
+    result.add("  schedule = " &
+      renderList(@[encodeScheduledTaskScheduleSpec(r.wstSchedule)]))
+    if not r.wstEnabled:
+      result.add("  enabled = false")
   of srkWindowsVsInstaller:
     result.add("  edition = " & renderScalar(r.vsEdition))
     result.add("  channel = " & renderScalar(r.vsChannel))

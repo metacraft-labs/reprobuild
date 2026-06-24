@@ -338,6 +338,120 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     expect ValueError:
       discard profileIntentToSystemProfile(intent)
 
+  test "windows.scheduledTask Phase C adapter -> text -> producePlan emits one op":
+    # Windows-System-Resources Phase C end-to-end: every load-bearing
+    # field flows from ProfileIntent through the adapter, the
+    # canonical-text renderer, the parser, and into a
+    # PrivilegedOperation that the broker would dispatch.
+    var intent = ProfileIntent(name: "phaseC-wst-full")
+    var f = initTable[string, FieldValue]()
+    f["taskName"] = strField("\\Reprobuild\\WindowsRunner-Env")
+    f["executable"] =
+      strField("C:\\actions-runner\\bin\\Runner.Listener.exe")
+    f["arguments"] = listField(@["--unattended", "--name=runner"])
+    f["workingDirectory"] = strField("C:\\actions-runner")
+    f["runAsUser"] = strField("SYSTEM")
+    f["runWithHighestPrivileges"] = boolField(true)
+    f["schedule"] = listField(@["onBoot:30"])
+    f["enabled"] = boolField(true)
+    intent.resources.add(ResourceIntent(kind: "windows.scheduledTask",
+      address: "runnerEnvTask", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkWindowsScheduledTask
+    check sp.resources[0].wstTaskName ==
+      "\\Reprobuild\\WindowsRunner-Env"
+    check sp.resources[0].wstExecutable ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check sp.resources[0].wstArguments.len == 2
+    check sp.resources[0].wstSchedule.kind == wstskOnBoot
+    check sp.resources[0].wstSchedule.delaySeconds == 30
+    let txt = renderSystemProfileToText(sp)
+    check "taskName" in txt
+    check "executable" in txt
+    check "schedule" in txt
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].wstTaskName ==
+      "\\Reprobuild\\WindowsRunner-Env"
+    check reparsed.resources[0].wstSchedule.kind == wstskOnBoot
+    let plan = producePlan(txt, "phaseC-wst-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag ==
+      "windows.scheduledTask"
+
+  test "windows.scheduledTask Phase C: every schedule kind round-trips":
+    # The integration test must cover EVERY ScheduleKind so a
+    # regression in any branch surfaces. Each iteration builds ONE
+    # ResourceIntent + checks the rendered-text round-trip preserves
+    # the schedule kind.
+    let schedules = @[
+      ("onBoot:0", wstskOnBoot),
+      ("onLogon:DOMAIN\\runner", wstskOnLogon),
+      ("once:2030-01-01T08:00:00Z", wstskOnce),
+      ("daily:08:30", wstskDaily),
+      ("interval:15:2030-01-01T00:00:00Z", wstskInterval)]
+    for (tok, kind) in schedules:
+      var intent = ProfileIntent(name: "phaseC-wst-" & $kind)
+      var f = initTable[string, FieldValue]()
+      f["taskName"] = strField("\\Reprobuild\\T-" & $kind)
+      f["executable"] = strField("C:\\bin\\app.exe")
+      f["schedule"] = listField(@[tok])
+      intent.resources.add(ResourceIntent(kind: "windows.scheduledTask",
+        address: "wstT-" & $kind, fields: f, dependsOn: @[]))
+      let sp = profileIntentToSystemProfile(intent)
+      check sp.resources[0].wstSchedule.kind == kind
+      let txt = renderSystemProfileToText(sp)
+      let reparsed = parseSystemProfile(txt)
+      check reparsed.resources[0].wstSchedule.kind == kind
+      let plan = producePlan(txt, "phaseC-wst-host")
+      check plan.envelope.operations.len == 1
+
+  test "windows.scheduledTask Phase C: adapter rejects malformed schedule":
+    # Defence-in-depth: the adapter is the third gate (after the
+    # template and the text parser). Each malformed schedule must
+    # raise ValueError.
+    for bad in ["bogus:0", "onBoot:abc", "daily:25:00",
+                "interval:0:", "once:not-iso"]:
+      var intent = ProfileIntent(name: "phaseC-wst-bad")
+      var f = initTable[string, FieldValue]()
+      f["taskName"] = strField("\\Foo")
+      f["executable"] = strField("C:\\bin\\foo.exe")
+      f["schedule"] = listField(@[bad])
+      intent.resources.add(ResourceIntent(kind: "windows.scheduledTask",
+        address: "wstBad", fields: f, dependsOn: @[]))
+      expect ValueError:
+        discard profileIntentToSystemProfile(intent)
+
+  test "windows.scheduledTask Phase C: adapter rejects missing fields":
+    block missingName:
+      var intent = ProfileIntent(name: "phaseC-wst-no-name")
+      var f = initTable[string, FieldValue]()
+      f["executable"] = strField("C:\\bin\\foo.exe")
+      f["schedule"] = listField(@["onBoot:0"])
+      intent.resources.add(ResourceIntent(kind: "windows.scheduledTask",
+        address: "x", fields: f, dependsOn: @[]))
+      expect ValueError:
+        discard profileIntentToSystemProfile(intent)
+    block missingExe:
+      var intent = ProfileIntent(name: "phaseC-wst-no-exe")
+      var f = initTable[string, FieldValue]()
+      f["taskName"] = strField("\\Foo")
+      f["schedule"] = listField(@["onBoot:0"])
+      intent.resources.add(ResourceIntent(kind: "windows.scheduledTask",
+        address: "x", fields: f, dependsOn: @[]))
+      expect ValueError:
+        discard profileIntentToSystemProfile(intent)
+    block multiSchedule:
+      var intent = ProfileIntent(name: "phaseC-wst-multi-sched")
+      var f = initTable[string, FieldValue]()
+      f["taskName"] = strField("\\Foo")
+      f["executable"] = strField("C:\\bin\\foo.exe")
+      f["schedule"] = listField(@["onBoot:0", "daily:08:30"])
+      intent.resources.add(ResourceIntent(kind: "windows.scheduledTask",
+        address: "x", fields: f, dependsOn: @[]))
+      expect ValueError:
+        discard profileIntentToSystemProfile(intent)
+
   test "multi-resource adapter -> text -> producePlan emits N operations":
     var intent = ProfileIntent(name: "phaseD-sys-smoke")
     block:

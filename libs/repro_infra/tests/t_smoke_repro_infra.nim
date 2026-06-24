@@ -308,6 +308,257 @@ fs.systemDirectory {
     check op.fsdAclPresent == false
     check op.fsdDestroy == false
 
+  # -----------------------------------------------------------------
+  # Windows-System-Resources Phase C: windows.scheduledTask parser +
+  # adapter + codec coverage.
+  # -----------------------------------------------------------------
+
+  test "windows.scheduledTask parses onBoot variant + defaults":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\WindowsRunner-Env"
+  executable = "C:\actions-runner\bin\Runner.Listener.exe"
+  schedule = ["onBoot:30"]
+}
+""")
+    check parsed.resources.len == 1
+    let r = parsed.resources[0]
+    check r.kind == srkWindowsScheduledTask
+    check r.wstTaskName == "\\Reprobuild\\WindowsRunner-Env"
+    check r.wstExecutable ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check r.wstArguments.len == 0
+    check r.wstWorkingDirectory == ""
+    check r.wstRunAsUser == "SYSTEM"
+    check r.wstRunWithHighestPrivileges == true
+    check r.wstEnabled == true
+    check r.wstSchedule.kind == wstskOnBoot
+    check r.wstSchedule.delaySeconds == 30
+    check r.address ==
+      "scheduledTask:\\Reprobuild\\WindowsRunner-Env"
+
+  test "windows.scheduledTask parses every schedule kind":
+    # Closed-set vocabulary: parse one stanza per ScheduleKind and
+    # assert each kind round-trips through the parser.
+    let cases = @[
+      ("onBoot:60", wstskOnBoot),
+      ("onLogon:", wstskOnLogon),
+      ("onLogon:DOMAIN\\u", wstskOnLogon),
+      ("once:2030-01-01T08:00:00Z", wstskOnce),
+      ("daily:08:30", wstskDaily),
+      ("interval:15:", wstskInterval),
+      ("interval:5:2030-01-01T00:00:00Z", wstskInterval)]
+    for (tok, kind) in cases:
+      let text = """
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["""" & tok & """"]
+}
+"""
+      let parsed = parseSystemProfile(text)
+      check parsed.resources.len == 1
+      check parsed.resources[0].wstSchedule.kind == kind
+
+  test "windows.scheduledTask parses optional arguments + workingDirectory":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  arguments = ["--flag", "--cfg", "C:\config.toml"]
+  workingDirectory = "C:\actions-runner"
+  schedule = ["daily:08:30"]
+}
+""")
+    let r = parsed.resources[0]
+    check r.wstArguments.len == 3
+    check r.wstArguments[0] == "--flag"
+    check r.wstArguments[2] == "C:\\config.toml"
+    check r.wstWorkingDirectory == "C:\\actions-runner"
+
+  test "windows.scheduledTask rejects missing required fields":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  executable = "C:\bin\foo.exe"
+  schedule = ["onBoot:0"]
+}
+""")
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  schedule = ["onBoot:0"]
+}
+""")
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+}
+""")
+
+  test "windows.scheduledTask rejects malformed schedule tokens":
+    # Defence-in-depth: the parser is the second layer (after the
+    # template). Each malformed token must raise.
+    for bad in ["", "onBoot", "unknown:30", "onBoot:abc",
+                "once:not-iso", "daily:25:00", "interval:0:",
+                "interval:5"]:
+      expect ESystemProfileInvalid:
+        discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["""" & bad & """"]
+}
+""")
+
+  test "windows.scheduledTask rejects multi-element schedule list":
+    # The schedule field carries EXACTLY ONE canonical wire token.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["onBoot:0", "daily:08:30"]
+}
+""")
+
+  test "windows.scheduledTask: realWorldIdentity + resourceName + kind tag":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\Hook"
+  executable = "C:\bin\hook.exe"
+  schedule = ["onBoot:0"]
+}
+""")
+    let r = parsed.resources[0]
+    check realWorldIdentity(r) == "scheduledTask:\\Reprobuild\\Hook"
+    check resourceName(r) == "\\Reprobuild\\Hook"
+    check resourceKindTag(r) == "windows.scheduledTask"
+
+  test "windows.scheduledTask roundtrips to PrivilegedOperation":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  arguments = ["--unattended"]
+  runAsUser = "LOCAL_SERVICE"
+  runWithHighestPrivileges = false
+  schedule = ["interval:15:"]
+  enabled = false
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.kind == pokWindowsScheduledTask
+    check op.wstTaskName == "\\Foo"
+    check op.wstExecutable == "C:\\bin\\foo.exe"
+    check op.wstArguments == @["--unattended"]
+    check op.wstRunAsUser == "LOCAL_SERVICE"
+    check op.wstRunWithHighestPrivileges == false
+    check op.wstSchedule.kind == wstskInterval
+    check op.wstSchedule.everyMinutes == 15
+    check op.wstEnabled == false
+    check op.wstDestroy == false
+
+  # -----------------------------------------------------------------
+  # Spec §1.3 schema: `runWithHighestPrivileges` default depends on
+  # principal (`true` for SYSTEM, `false` otherwise). The three tests
+  # below pin the end-to-end path — text profile → parser →
+  # SystemResource → `toPrivilegedOperation` — for the three corners
+  # of the two-axis rule that the template surface (whose parameter
+  # is `Option[bool]`) no longer pre-fills. The same three corners
+  # are pinned at the template surface in
+  # `t_smoke_repro_profile.nim`.
+  # -----------------------------------------------------------------
+
+  test "windows.scheduledTask: runAsUser=LOCAL_SERVICE without explicit runWithHighestPrivileges defaults to false end-to-end":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\LocalSvcTask"
+  executable = "C:\bin\svc.exe"
+  runAsUser = "LOCAL_SERVICE"
+  schedule = ["onBoot:0"]
+}
+""")
+    check parsed.resources.len == 1
+    let r = parsed.resources[0]
+    check r.wstRunAsUser == "LOCAL_SERVICE"
+    # Parser-side default: non-SYSTEM principal -> false.
+    check r.wstRunWithHighestPrivileges == false
+    # Adapter-side default (independent layer): same answer.
+    let op = toPrivilegedOperation(r)
+    check op.kind == pokWindowsScheduledTask
+    check op.wstRunAsUser == "LOCAL_SERVICE"
+    check op.wstRunWithHighestPrivileges == false
+
+  test "windows.scheduledTask: runAsUser=SYSTEM without explicit runWithHighestPrivileges defaults to true end-to-end":
+    # Back-compat sentinel — a bare SYSTEM stanza still ends up with
+    # `wstRunWithHighestPrivileges = true` at the apply layer.
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\SysTask"
+  executable = "C:\bin\sys.exe"
+  runAsUser = "SYSTEM"
+  schedule = ["onBoot:0"]
+}
+""")
+    check parsed.resources.len == 1
+    let r = parsed.resources[0]
+    check r.wstRunAsUser == "SYSTEM"
+    check r.wstRunWithHighestPrivileges == true
+    let op = toPrivilegedOperation(r)
+    check op.wstRunAsUser == "SYSTEM"
+    check op.wstRunWithHighestPrivileges == true
+
+  test "windows.scheduledTask: runAsUser=SYSTEM with explicit runWithHighestPrivileges=false round-trips through render+parse":
+    # Operator override on the SYSTEM principal MUST survive the
+    # canonical-text round-trip — the renderer in `intent.nim` already
+    # emits the field only when it deviates from the principal-default,
+    # which means the `false` override on SYSTEM is exactly the case
+    # the deviation rule covers. Round-trip via renderStanza +
+    # parseSystemProfile must preserve the `false` end-to-end.
+    let r0 = SystemResource(kind: srkWindowsScheduledTask,
+      address: "scheduledTask:\\Reprobuild\\SysOverrideTask",
+      wstTaskName: "\\Reprobuild\\SysOverrideTask",
+      wstExecutable: "C:\\bin\\sys.exe",
+      wstRunAsUser: "SYSTEM",
+      wstRunWithHighestPrivileges: false,
+      wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: 0),
+      wstEnabled: true)
+    let lines = renderStanza(r0)
+    # Sanity: the deviation triggers the renderer to emit the field.
+    var emittedFlag = false
+    for ln in lines:
+      if "runWithHighestPrivileges = false" in ln:
+        emittedFlag = true
+    check emittedFlag
+    let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+    check reparsed.resources.len == 1
+    let r1 = reparsed.resources[0]
+    check r1.wstRunAsUser == "SYSTEM"
+    check r1.wstRunWithHighestPrivileges == false
+    # And the adapter respects the round-tripped override (no silent
+    # flip back to true).
+    let op = toPrivilegedOperation(r1)
+    check op.wstRunAsUser == "SYSTEM"
+    check op.wstRunWithHighestPrivileges == false
+
+  test "windows.scheduledTask destroy direction sets wstDestroy=true":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["onBoot:0"]
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0],
+      destroy = true)
+    check op.kind == pokWindowsScheduledTask
+    check op.wstDestroy == true
+
   test "fs.systemFile parses with sourceUrl + sha256":
     # Windows-System-Resources Phase A: the URL-fetch content source.
     let parsed = parseSystemProfile("""

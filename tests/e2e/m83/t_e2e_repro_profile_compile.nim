@@ -224,6 +224,71 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check aces[1] == "BUILTIN\\Administrators:(F)"
     check aces[2] == "NetworkService:(RX)"
 
+  test "system_windowsscheduledtask.nim builds a windows.scheduledTask per ScheduleKind":
+    # Windows-System-Resources Phase C e2e: compile + run the fixture
+    # that declares one task per ScheduleKind variant. The e2e gate
+    # checks the ProfileIntent JSON — no Windows host, no Task
+    # Scheduler call, no apply.
+    let js = compileAndRun("system_windowsscheduledtask.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemWindowsScheduledTask"
+    check p.resources.len == 5
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    # onBoot variant.
+    check "onBootTask" in byAddr
+    check byAddr["onBootTask"].kind == "windows.scheduledTask"
+    check byAddr["onBootTask"].fields["taskName"].s ==
+      "\\Reprobuild\\OnBootTask"
+    check byAddr["onBootTask"].fields["executable"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check byAddr["onBootTask"].fields["arguments"].items.len == 1
+    check byAddr["onBootTask"].fields["arguments"].items[0] ==
+      "--unattended"
+    check byAddr["onBootTask"].fields["workingDirectory"].s ==
+      "C:\\actions-runner"
+    check byAddr["onBootTask"].fields["schedule"].items.len == 1
+    check byAddr["onBootTask"].fields["schedule"].items[0] ==
+      "onBoot:30"
+    check byAddr["onBootTask"].fields["runAsUser"].s == "SYSTEM"
+    # Spec §1.3: `runWithHighestPrivileges` is sentinel-aware at the
+    # template surface. The fixture does NOT set it explicitly so the
+    # field is absent from the intent map; the principal-dependent
+    # default (`true` for SYSTEM) applies downstream in the parser and
+    # the adapter — exercised in `t_smoke_repro_infra.nim`.
+    check "runWithHighestPrivileges" notin byAddr["onBootTask"].fields
+    check byAddr["onBootTask"].fields["enabled"].b == true
+
+    # onLogon variant + non-SYSTEM principal. The fixture omits
+    # `runWithHighestPrivileges` so the field is absent — the
+    # principal-dependent default (`false` for a non-SYSTEM
+    # principal) applies downstream.
+    check "onLogonTask" in byAddr
+    check byAddr["onLogonTask"].fields["schedule"].items[0] ==
+      "onLogon:DOMAIN\\runner"
+    check byAddr["onLogonTask"].fields["runAsUser"].s ==
+      "DOMAIN\\runner"
+    check "runWithHighestPrivileges" notin
+      byAddr["onLogonTask"].fields
+
+    # once variant.
+    check "onceTask" in byAddr
+    check byAddr["onceTask"].fields["schedule"].items[0] ==
+      "once:2030-01-01T08:00:00Z"
+
+    # daily variant.
+    check "dailyTask" in byAddr
+    check byAddr["dailyTask"].fields["schedule"].items[0] ==
+      "daily:08:30"
+
+    # interval variant + enabled=false.
+    check "intervalTask" in byAddr
+    check byAddr["intervalTask"].fields["schedule"].items[0] ==
+      "interval:15:2030-01-01T00:00:00Z"
+    check byAddr["intervalTask"].fields["enabled"].b == false
+
   test "home_with_config_and_hosts.nim assembles all four sections":
     let js = compileAndRun("home_with_config_and_hosts.nim")
     let p = parseProfileIntentJson(js)

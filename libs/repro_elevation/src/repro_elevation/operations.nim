@@ -42,6 +42,40 @@ type
     wsrakRunCommand = "runcommand"
     wsrakReboot = "reboot"
 
+  ScheduledTaskScheduleKind* = enum
+    ## Windows-System-Resources Phase C: apply-side counterpart of the
+    ## front-end `repro_profile.types.ScheduleKind`. Same lower-case wire
+    ## vocabulary so a profile-side `sskDaily` token flows through the
+    ## adapter as `"daily"` and lands here as `wstskDaily` without a
+    ## separate translation table. `repro_elevation` does NOT import
+    ## `repro_profile` (dep-inversion) — the two enums share a wire
+    ## vocabulary, not a Nim symbol.
+    wstskOnBoot = "onBoot"
+    wstskOnLogon = "onLogon"
+    wstskOnce = "once"
+    wstskDaily = "daily"
+    wstskInterval = "interval"
+
+  ScheduledTaskScheduleSpec* = object
+    ## Apply-side counterpart of the front-end `ScheduleSpec` (same
+    ## discriminated union, same wire vocabulary). The codec token form
+    ## is `<lower-case-kind>:<payload>` matching the front-end's
+    ## `encodeScheduleSpec` so a round-trip through ProfileIntent ->
+    ## SystemResource -> PrivilegedOperation -> RBEB frame stays
+    ## byte-stable.
+    case kind*: ScheduledTaskScheduleKind
+    of wstskOnBoot:
+      delaySeconds*: int
+    of wstskOnLogon:
+      forUser*: string
+    of wstskOnce:
+      runAt*: string
+    of wstskDaily:
+      timeOfDay*: string
+    of wstskInterval:
+      everyMinutes*: int
+      startAt*: string
+
   WindowsServiceRecoverySpec* = object
     ## One slot of `windows.service`'s `recoveryActions` field — an
     ## (action, delayMs) pair the SCM invokes on a failure. The
@@ -87,6 +121,14 @@ type
       ## The M69 `windows.service` operation: manage a Windows
       ## service's start-type and runtime state. Does NOT install or
       ## remove the service itself.
+    pokWindowsScheduledTask = "windows.scheduledTask"
+      ## The Windows-System-Resources Phase C `windows.scheduledTask`
+      ## operation: manage a Task Scheduler entry — schedule +
+      ## principal + executable + enabled flag are observable live
+      ## state. Apply registers the task via `Register-ScheduledTask`
+      ## (on create) or `Set-ScheduledTask` (on update); destroy uses
+      ## `Unregister-ScheduledTask`. Crosses the broker; per the spec
+      ## §1.3 destroy is gated by `--accept-destroy`.
     pokWindowsVsInstaller = "windows.vsInstaller"
       ## The M69 Phase-B `windows.vsInstaller` operation: install /
       ## modify / uninstall a Visual Studio product through the
@@ -366,6 +408,24 @@ type
       serviceRecoveryResetSeconds*: int
         ## Phase B: optional failure-count reset window. `0` means
         ## "do not emit `reset= ` to `sc.exe failure`".
+    of pokWindowsScheduledTask:
+      ## Windows-System-Resources Phase C: a Task Scheduler entry. The
+      ## `wst*` field prefix avoids collisions with the `serviceX` /
+      ## `vs*` / `fw*` families. `wstSchedule` is the discriminated
+      ## trigger union (the same shape as the front-end
+      ## `repro_profile.types.ScheduleSpec`); the codec serialises it
+      ## as ONE canonical-text token through the existing string-list
+      ## machinery. `wstDestroy` selects the rollback direction
+      ## (`Unregister-ScheduledTask`), gated by `--accept-destroy`.
+      wstTaskName*: string
+      wstExecutable*: string
+      wstArguments*: seq[string]
+      wstWorkingDirectory*: string
+      wstRunAsUser*: string
+      wstRunWithHighestPrivileges*: bool
+      wstSchedule*: ScheduledTaskScheduleSpec
+      wstEnabled*: bool
+      wstDestroy*: bool
     of pokWindowsVsInstaller:
       ## Converge a Visual Studio installation to the declared
       ## workload/component membership. `vsEdition` is the short
@@ -772,6 +832,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokWindowsOptionalFeature: true
   of pokWindowsCapability: true
   of pokWindowsService: true
+  of pokWindowsScheduledTask: true
   of pokWindowsVsInstaller: true
   of pokWindowsFirewallRule: true
   of pokWindowsAcl: true
@@ -812,6 +873,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokWindowsOptionalFeature: pokWindowsOptionalFeature
   of $pokWindowsCapability: pokWindowsCapability
   of $pokWindowsService: pokWindowsService
+  of $pokWindowsScheduledTask: pokWindowsScheduledTask
   of $pokWindowsVsInstaller: pokWindowsVsInstaller
   of $pokWindowsFirewallRule: pokWindowsFirewallRule
   of $pokWindowsAcl: pokWindowsAcl
@@ -1028,6 +1090,341 @@ proc renderScExeConfigDisplayNameCommand*(serviceName: string;
   ## Build the `sc.exe config <serviceName> DisplayName= "<displayName>"`
   ## argv.
   @["sc.exe", "config", serviceName, "DisplayName=", displayName]
+
+# ---------------------------------------------------------------------------
+# windows.scheduledTask — schedule token codec + argv assemblers.
+#
+# Windows-System-Resources Phase C: the `pokWindowsScheduledTask`
+# operation carries a `ScheduledTaskScheduleSpec`. The wire token is the
+# same `<kind>:<payload>` shape the front-end `repro_profile.types`
+# codec uses — sharing the vocabulary means the adapter does NOT have
+# to translate. The pure helpers below assemble:
+#
+#   * `Register-ScheduledTask` argv (creation path);
+#   * `Set-ScheduledTask` argv (update path);
+#   * `Unregister-ScheduledTask` argv (destroy path).
+#
+# Each is a `seq[string]` so the driver hands it directly to PowerShell
+# without a shell pass. The driver in `windows_system_driver.applyWindows
+# ScheduledTask` consumes these helpers verbatim.
+# ---------------------------------------------------------------------------
+
+proc scheduledTaskScheduleKindToken*(k: ScheduledTaskScheduleKind): string =
+  ## Lower-case wire token for a schedule kind. Centralised so the
+  ## codec, the validator and the canonical-text renderer all agree.
+  $k
+
+proc scheduledTaskScheduleKindFromToken*(
+    raw: string): ScheduledTaskScheduleKind =
+  ## Strict parse of a schedule-kind token. Raises `ValueError` on a
+  ## mismatch — mirrors the closed-set posture of every other typed
+  ## broker-side codec.
+  case raw
+  of "onBoot": wstskOnBoot
+  of "onLogon": wstskOnLogon
+  of "once": wstskOnce
+  of "daily": wstskDaily
+  of "interval": wstskInterval
+  else:
+    raise newException(ValueError,
+      "unknown windows.scheduledTask schedule kind token '" & raw &
+      "' (expected one of onBoot / onLogon / once / daily / interval)")
+
+proc isKnownScheduledTaskScheduleKindToken*(raw: string): bool =
+  ## Non-raising form for the closed-set validator.
+  raw in ["onBoot", "onLogon", "once", "daily", "interval"]
+
+proc isValidScheduledTaskTimeOfDay*(raw: string): bool =
+  ## True only for a 24-hour `HH:MM` string. Mirrors the front-end
+  ## `repro_profile.types.isValidScheduleTimeOfDay`; both surfaces need
+  ## the same closed-set check (defence-in-depth).
+  if raw.len != 5: return false
+  if raw[2] != ':': return false
+  for i in [0, 1, 3, 4]:
+    if raw[i] notin {'0'..'9'}:
+      return false
+  let h = parseInt(raw[0 ..< 2])
+  let m = parseInt(raw[3 ..< 5])
+  h in 0..23 and m in 0..59
+
+proc isValidScheduledTaskIso8601*(raw: string): bool =
+  ## True for a non-empty string in the conservative ISO-8601 charset
+  ## Task Scheduler accepts (digits + `-`, `:`, `T`, `Z`, `+`, `.`).
+  if raw.len == 0: return false
+  for ch in raw:
+    if ch notin {'0'..'9', '-', ':', 'T', 'Z', '+', '.'}:
+      return false
+  true
+
+proc encodeScheduledTaskScheduleSpec*(
+    s: ScheduledTaskScheduleSpec): string =
+  ## Encode a `ScheduledTaskScheduleSpec` to its canonical wire token.
+  ## REJECTS malformed shapes (negative delay, non-positive interval,
+  ## empty / malformed required-time fields) so a bypass through the
+  ## adapter still fails closed.
+  case s.kind
+  of wstskOnBoot:
+    if s.delaySeconds < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" &
+        $s.delaySeconds & "' is negative (must be >= 0)")
+    "onBoot:" & $s.delaySeconds
+  of wstskOnLogon:
+    "onLogon:" & s.forUser
+  of wstskOnce:
+    if not isValidScheduledTaskIso8601(s.runAt):
+      raise newException(ValueError,
+        "windows.scheduledTask once runAt '" & s.runAt &
+        "' is not a valid ISO-8601 timestamp")
+    "once:" & s.runAt
+  of wstskDaily:
+    if not isValidScheduledTaskTimeOfDay(s.timeOfDay):
+      raise newException(ValueError,
+        "windows.scheduledTask daily timeOfDay '" & s.timeOfDay &
+        "' is not a valid HH:MM 24-hour time")
+    "daily:" & s.timeOfDay
+  of wstskInterval:
+    if s.everyMinutes <= 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" &
+        $s.everyMinutes & "' must be > 0")
+    if s.startAt.len > 0 and not isValidScheduledTaskIso8601(s.startAt):
+      raise newException(ValueError,
+        "windows.scheduledTask interval startAt '" & s.startAt &
+        "' is not a valid ISO-8601 timestamp")
+    "interval:" & $s.everyMinutes & ":" & s.startAt
+
+proc decodeScheduledTaskScheduleToken*(
+    token: string): ScheduledTaskScheduleSpec =
+  ## Decode a canonical wire token into a `ScheduledTaskScheduleSpec`.
+  ## Rejects every malformed shape (unknown tag, missing required
+  ## field, non-integer numeric half, negative delay, non-positive
+  ## interval).
+  let sep = token.find(':')
+  if sep <= 0:
+    raise newException(ValueError,
+      "windows.scheduledTask schedule token '" & token &
+      "' is malformed (expected '<kind>:<payload>')")
+  let kindTok = token[0 ..< sep]
+  let payload = token[sep + 1 .. ^1]
+  if not isKnownScheduledTaskScheduleKindToken(kindTok):
+    raise newException(ValueError,
+      "windows.scheduledTask schedule token '" & token &
+      "' names an unknown kind '" & kindTok &
+      "' (expected one of onBoot / onLogon / once / daily / interval)")
+  let kind = scheduledTaskScheduleKindFromToken(kindTok)
+  case kind
+  of wstskOnBoot:
+    var delaySeconds: int
+    try:
+      delaySeconds = parseInt(payload)
+    except ValueError:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" & payload &
+        "' is not an integer")
+    if delaySeconds < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" & payload &
+        "' is negative (must be >= 0)")
+    ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: delaySeconds)
+  of wstskOnLogon:
+    ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: payload)
+  of wstskOnce:
+    if not isValidScheduledTaskIso8601(payload):
+      raise newException(ValueError,
+        "windows.scheduledTask once runAt '" & payload &
+        "' is not a valid ISO-8601 timestamp")
+    ScheduledTaskScheduleSpec(kind: wstskOnce, runAt: payload)
+  of wstskDaily:
+    if not isValidScheduledTaskTimeOfDay(payload):
+      raise newException(ValueError,
+        "windows.scheduledTask daily timeOfDay '" & payload &
+        "' is not a valid HH:MM 24-hour time")
+    ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: payload)
+  of wstskInterval:
+    let sep2 = payload.find(':')
+    if sep2 < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval payload '" & payload &
+        "' is malformed (expected '<everyMinutes>:<startAt>')")
+    let everyStr = payload[0 ..< sep2]
+    let startAt = payload[sep2 + 1 .. ^1]
+    var everyMinutes: int
+    try:
+      everyMinutes = parseInt(everyStr)
+    except ValueError:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" & everyStr &
+        "' is not an integer")
+    if everyMinutes <= 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" & everyStr &
+        "' must be > 0")
+    if startAt.len > 0 and not isValidScheduledTaskIso8601(startAt):
+      raise newException(ValueError,
+        "windows.scheduledTask interval startAt '" & startAt &
+        "' is not a valid ISO-8601 timestamp")
+    ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: everyMinutes, startAt: startAt)
+
+proc `==`*(a, b: ScheduledTaskScheduleSpec): bool =
+  ## Structural equality for `ScheduledTaskScheduleSpec`. Used by the
+  ## drift comparator + the codec round-trip tests.
+  if a.kind != b.kind:
+    return false
+  case a.kind
+  of wstskOnBoot: a.delaySeconds == b.delaySeconds
+  of wstskOnLogon: a.forUser == b.forUser
+  of wstskOnce: a.runAt == b.runAt
+  of wstskDaily: a.timeOfDay == b.timeOfDay
+  of wstskInterval:
+    a.everyMinutes == b.everyMinutes and a.startAt == b.startAt
+
+const
+  ScheduledTaskAllowedPrincipals* = ["SYSTEM", "LOCAL_SERVICE",
+                                     "NETWORK_SERVICE"]
+    ## The three special-principal forms the driver maps to the
+    ## corresponding `New-ScheduledTaskPrincipal -UserId` value. A
+    ## non-special principal (`DOMAIN\user` or a SID) is accepted by
+    ## the validator via the `isSafeScheduledTaskPrincipal` charset
+    ## check.
+
+proc isSafeScheduledTaskTaskName*(name: string): bool =
+  ## True only for a non-empty fully-qualified Task Scheduler path that
+  ## stays in the conservative charset (letters, digits, `\`, `/`, `.`,
+  ## `-`, `_`, ` `). A `..` segment is refused as a sandbox-escape
+  ## guard; the leading `\` is allowed (Task Scheduler's root prefix);
+  ## quote / shell metacharacter / control character are refused so the
+  ## name cannot smuggle a PowerShell pipeline past `psQuote` at the
+  ## driver edge.
+  let n = name.strip()
+  if n.len == 0:
+    return false
+  for ch in n:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9',
+                 '\\', '/', '.', '-', '_', ' '}:
+      return false
+  for seg in n.multiReplace(("\\", "/")).split('/'):
+    if seg == "..":
+      return false
+  true
+
+proc isSafeScheduledTaskExecutable*(path: string): bool =
+  ## True for a non-empty path with no NUL byte / quote / control
+  ## character. The driver `psQuote`s this as defence-in-depth layer 2;
+  ## the closed-set check here is layer 1.
+  if path.len == 0: return false
+  for ch in path:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch in {'"', '\n', '\r', '\x00'}:
+      return false
+  true
+
+proc isSafeScheduledTaskPrincipal*(p: string): bool =
+  ## True for one of the special principals OR a `DOMAIN\user` /
+  ## SID-form string in the conservative charset (letters, digits,
+  ## `\`, `.`, `-`, `_`, `@`).
+  if p in ScheduledTaskAllowedPrincipals:
+    return true
+  let s = p.strip()
+  if s.len == 0: return false
+  for ch in s:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9',
+                 '\\', '.', '-', '_', '@'}:
+      return false
+  true
+
+proc renderScheduledTaskScheduleXml*(
+    s: ScheduledTaskScheduleSpec): string =
+  ## Build the Task Scheduler `<Triggers>` XML fragment for a single
+  ## trigger. Pure — the driver substitutes this into the full task
+  ## XML before handing it to `Register-ScheduledTask`. Each branch
+  ## emits the canonical Task Scheduler element shape; missing optional
+  ## fields collapse to the empty form Task Scheduler treats as "use
+  ## defaults".
+  case s.kind
+  of wstskOnBoot:
+    var xml = "<BootTrigger>"
+    if s.delaySeconds > 0:
+      xml.add("<Delay>PT" & $s.delaySeconds & "S</Delay>")
+    xml.add("</BootTrigger>")
+    xml
+  of wstskOnLogon:
+    var xml = "<LogonTrigger>"
+    if s.forUser.len > 0:
+      xml.add("<UserId>" & s.forUser & "</UserId>")
+    xml.add("</LogonTrigger>")
+    xml
+  of wstskOnce:
+    "<TimeTrigger><StartBoundary>" & s.runAt &
+      "</StartBoundary></TimeTrigger>"
+  of wstskDaily:
+    # Task Scheduler daily triggers require a full ISO-8601
+    # StartBoundary; the driver substitutes `1970-01-01T<HH:MM>:00` so
+    # the trigger fires at `HH:MM` every day from epoch. The non-XML
+    # canonical text keeps the operator-facing `HH:MM` shape; the
+    # driver compares observation against this canonical form.
+    "<CalendarTrigger><StartBoundary>1970-01-01T" & s.timeOfDay &
+      ":00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval>" &
+      "</ScheduleByDay></CalendarTrigger>"
+  of wstskInterval:
+    var xml = "<TimeTrigger>"
+    if s.startAt.len > 0:
+      xml.add("<StartBoundary>" & s.startAt & "</StartBoundary>")
+    xml.add("<Repetition><Interval>PT" & $s.everyMinutes &
+      "M</Interval></Repetition></TimeTrigger>")
+    xml
+
+proc renderRegisterScheduledTaskCommand*(taskName, executable: string;
+                                         arguments: seq[string];
+                                         workingDirectory: string;
+                                         runAsUser: string;
+                                         runWithHighestPrivileges: bool;
+                                         scheduleXml: string;
+                                         enabled: bool): seq[string] =
+  ## Assemble the argv for the `Register-ScheduledTask` PowerShell
+  ## invocation as a sequence of tokens. The driver hands this to
+  ## PowerShell verbatim. The token list is the canonical argv shape
+  ## the pure assembler builds; the driver's `psQuote` pass at fork
+  ## time covers the actual shell-level quoting.
+  result = @["Register-ScheduledTask",
+             "-TaskName", taskName,
+             "-Action", "New-ScheduledTaskAction -Execute " & executable]
+  if arguments.len > 0:
+    result.add("-ArgumentList")
+    var args = ""
+    for i, a in arguments:
+      if i > 0:
+        args.add(' ')
+      args.add(a)
+    result.add(args)
+  if workingDirectory.len > 0:
+    result.add("-WorkingDirectory")
+    result.add(workingDirectory)
+  result.add("-Trigger")
+  result.add(scheduleXml)
+  let principalToken =
+    if runAsUser in ScheduledTaskAllowedPrincipals: runAsUser
+    else: runAsUser
+  result.add("-Principal")
+  result.add(principalToken)
+  if runWithHighestPrivileges:
+    result.add("-RunLevel")
+    result.add("Highest")
+  if not enabled:
+    result.add("-Settings")
+    result.add("Disabled")
+
+proc renderUnregisterScheduledTaskCommand*(taskName: string): seq[string] =
+  ## Assemble the argv for the `Unregister-ScheduledTask` destroy path.
+  ## `-Confirm:$false` so the cmdlet does not prompt.
+  @["Unregister-ScheduledTask",
+    "-TaskName", taskName,
+    "-Confirm:$false"]
 
 # ---------------------------------------------------------------------------
 # windows.firewallRule — protocol/direction/action allowlists and
@@ -1466,6 +1863,66 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       if slot.delayMs < 0:
         return "windows.service recoveryActions[" & $idx & "] for '" &
           op.serviceName & "' has a negative delayMs (must be >= 0)"
+  of pokWindowsScheduledTask:
+    # Windows-System-Resources Phase C: the broker validator is the
+    # final closed-set guard before the typed driver dispatches. Every
+    # field the operation carries is sanity-checked; a frame that
+    # arrived through the wire codec already had its schedule token
+    # decoded (codec rejects unknown kind), but the broker re-checks
+    # the empty-name / executable / principal cases here as
+    # defence-in-depth.
+    if op.wstTaskName.strip().len == 0:
+      return "windows.scheduledTask operation has an empty taskName"
+    if not isSafeScheduledTaskTaskName(op.wstTaskName):
+      return "windows.scheduledTask taskName '" & op.wstTaskName &
+        "' contains characters outside the safe Task Scheduler path " &
+        "charset (letters, digits, '\\', '/', '.', '-', '_', ' '; no " &
+        "'..' segment, no quote / shell metacharacter / control character)"
+    if op.wstExecutable.strip().len == 0:
+      return "windows.scheduledTask '" & op.wstTaskName &
+        "' has an empty executable"
+    if not isSafeScheduledTaskExecutable(op.wstExecutable):
+      return "windows.scheduledTask '" & op.wstTaskName &
+        "' executable '" & op.wstExecutable &
+        "' contains a NUL byte / quote / control character"
+    if op.wstRunAsUser.len > 0 and
+       not isSafeScheduledTaskPrincipal(op.wstRunAsUser):
+      return "windows.scheduledTask runAsUser '" & op.wstRunAsUser &
+        "' is not one of " &
+        ScheduledTaskAllowedPrincipals.join(" / ") &
+        " and is not a safe `DOMAIN\\user` / SID-form principal " &
+        "(allowed charset: letters, digits, '\\', '.', '-', '_', '@')"
+    # Schedule kind-specific guards. Mirrors the codec's
+    # `decodeScheduledTaskScheduleToken` checks but on the typed value
+    # — a frame that bypassed the codec (in-process construction)
+    # still fails closed here.
+    case op.wstSchedule.kind
+    of wstskOnBoot:
+      if op.wstSchedule.delaySeconds < 0:
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' onBoot delaySeconds is negative (must be >= 0)"
+    of wstskOnLogon:
+      discard          # forUser may legitimately be empty (any-user)
+    of wstskOnce:
+      if not isValidScheduledTaskIso8601(op.wstSchedule.runAt):
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' once runAt '" & op.wstSchedule.runAt &
+          "' is not a valid ISO-8601 timestamp"
+    of wstskDaily:
+      if not isValidScheduledTaskTimeOfDay(op.wstSchedule.timeOfDay):
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' daily timeOfDay '" & op.wstSchedule.timeOfDay &
+          "' is not a valid HH:MM 24-hour time"
+    of wstskInterval:
+      if op.wstSchedule.everyMinutes <= 0:
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' interval everyMinutes '" &
+          $op.wstSchedule.everyMinutes & "' must be > 0"
+      if op.wstSchedule.startAt.len > 0 and
+         not isValidScheduledTaskIso8601(op.wstSchedule.startAt):
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' interval startAt '" & op.wstSchedule.startAt &
+          "' is not a valid ISO-8601 timestamp"
   of pokWindowsVsInstaller:
     if op.vsEdition.len == 0:
       return "windows.vsInstaller operation has an empty edition"

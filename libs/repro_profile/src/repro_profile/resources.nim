@@ -21,9 +21,15 @@
 ## `dependsOn` is a `seq[string]` of `"kind:name"` references; each
 ## entry is parsed into a `ResourceAddress` at append time.
 
-import std/tables
+import std/[options, tables]
 
 import ./types
+
+# Profile authors invoke `windowsScheduledTask(...,
+# runWithHighestPrivileges = some(false), ...)` to override the
+# principal-dependent default. Re-export `std/options` so they don't
+# have to `import std/options` separately.
+export options
 
 # ---------------------------------------------------------------------
 # Internal helper: build a ResourceIntent + push it onto the target.
@@ -509,6 +515,137 @@ template windowsService*(targetResources: var seq[ResourceIntent];
                 else: autoAddress("windows.service", name)
     pushResource(targetResources, "windows.service", addr0, fields,
       dependsOn)
+
+template windowsScheduledTask*(targetResources: var seq[ResourceIntent];
+                               taskName: string;
+                               executable: string;
+                               schedule: ScheduleSpec;
+                               arguments: seq[string] = @[];
+                               workingDirectory: string = "";
+                               runAsUser: string = "SYSTEM";
+                               runWithHighestPrivileges: Option[bool] =
+                                 none(bool);
+                               enabled: bool = true;
+                               address: string = "";
+                               dependsOn: seq[string] = @[]) =
+  ## Manage a Windows Task Scheduler entry. Live state (per
+  ## Windows-System-Resources spec §1.3): the schedule, principal,
+  ## executable + arguments, and `enabled` flag are observable via
+  ## `Get-ScheduledTask`; the driver re-observes on every apply and
+  ## skips when the observed digest matches desired.
+  ##
+  ## `taskName` is the fully-qualified Task Scheduler path
+  ## (e.g. `\Reprobuild\WindowsRunner-Env`). Defence-in-depth: an empty
+  ## `taskName` is a compile-time error here and a validator reject
+  ## downstream (text parser + adapter).
+  ##
+  ## `executable` is the program the action invokes; `arguments` is the
+  ## argv (empty seq omits the field). `workingDirectory` is the CWD
+  ## for the action; empty means "let Task Scheduler default".
+  ##
+  ## `runAsUser` defaults to the special principal `SYSTEM`. Other
+  ## accepted values: `LOCAL_SERVICE`, `NETWORK_SERVICE`, a domain user
+  ## (`DOMAIN\user`), or a SID literal.
+  ##
+  ## `runWithHighestPrivileges` is an `Option[bool]` — leave it unset
+  ## (the parameter default `none(bool)`) to take the spec's principal-
+  ## dependent default. If unset, the text parser and the adapter both
+  ## apply that default (`true` for the SYSTEM principal, `false`
+  ## otherwise). Pass `some(true)` or `some(false)` to override the
+  ## principal default; the explicit value is captured verbatim in the
+  ## emitted `ResourceIntent`, round-trips through the codec, and
+  ## reaches the apply layer unchanged.
+  ##
+  ## `schedule` is the discriminated `ScheduleSpec` union — exactly one
+  ## of `onBoot`, `onLogon`, `once`, `daily`, `interval`. The encoder
+  ## REJECTS malformed values (negative delay, non-positive interval,
+  ## empty required-time fields, malformed `HH:MM` / ISO-8601 strings)
+  ## at compile time so a hand-authored profile fails closed at the
+  ## template surface AND at the validator + adapter downstream.
+  ##
+  ## `enabled` defaults to `true` (the most common case — a created
+  ## task is active).
+  ##
+  ## Address default: `windows.scheduledTask:<taskName>`.
+  block:
+    if taskName.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask requires a non-empty taskName")
+    if executable.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & taskName &
+        "' requires a non-empty executable")
+    var fields = initTable[string, FieldValue]()
+    fields["taskName"] = strField(taskName)
+    fields["executable"] = strField(executable)
+    if arguments.len > 0:
+      fields["arguments"] = listField(arguments)
+    if workingDirectory.len > 0:
+      fields["workingDirectory"] = strField(workingDirectory)
+    fields["runAsUser"] = strField(runAsUser)
+    # Spec rule: default highest-privileges is true for SYSTEM, false
+    # otherwise. The template parameter is `Option[bool]` so we can
+    # distinguish "operator left it at the parameter default" (none —
+    # apply the principal-dependent default downstream) from "operator
+    # explicitly set it" (some — capture the operator's choice
+    # verbatim). The text parser and the adapter independently re-apply
+    # the principal-dependent default when the field is absent.
+    if runWithHighestPrivileges.isSome:
+      fields["runWithHighestPrivileges"] = boolField(
+        runWithHighestPrivileges.get)
+    fields["schedule"] = listField(@[encodeScheduleSpec(schedule)])
+    fields["enabled"] = boolField(enabled)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("windows.scheduledTask", taskName)
+    pushResource(targetResources, "windows.scheduledTask", addr0,
+      fields, dependsOn)
+
+# ---------------------------------------------------------------------
+# ScheduleSpec constructors (Windows-System-Resources Phase C).
+#
+# Sugar so profile authors don't have to spell `ScheduleSpec(kind: ..)`
+# out by hand. Each variant maps 1:1 to a typed Nim helper and runs the
+# same canonical-text validation `encodeScheduleSpec` does — a
+# compile-time `static:` guard against malformed literals reaches the
+# operator at the template call site.
+# ---------------------------------------------------------------------
+
+proc scheduleOnBoot*(delaySeconds: int = 0): ScheduleSpec =
+  if delaySeconds < 0:
+    raise newException(ValueError,
+      "scheduleOnBoot delaySeconds '" & $delaySeconds &
+      "' is negative (must be >= 0)")
+  ScheduleSpec(kind: sskOnBoot, delaySeconds: delaySeconds)
+
+proc scheduleOnLogon*(forUser: string = ""): ScheduleSpec =
+  ScheduleSpec(kind: sskOnLogon, forUser: forUser)
+
+proc scheduleOnce*(runAt: string): ScheduleSpec =
+  if not isValidScheduleIso8601(runAt):
+    raise newException(ValueError,
+      "scheduleOnce runAt '" & runAt &
+      "' is not a valid ISO-8601 timestamp")
+  ScheduleSpec(kind: sskOnce, runAt: runAt)
+
+proc scheduleDaily*(timeOfDay: string): ScheduleSpec =
+  if not isValidScheduleTimeOfDay(timeOfDay):
+    raise newException(ValueError,
+      "scheduleDaily timeOfDay '" & timeOfDay &
+      "' is not a valid HH:MM 24-hour time")
+  ScheduleSpec(kind: sskDaily, timeOfDay: timeOfDay)
+
+proc scheduleInterval*(everyMinutes: int;
+                      startAt: string = ""): ScheduleSpec =
+  if everyMinutes <= 0:
+    raise newException(ValueError,
+      "scheduleInterval everyMinutes '" & $everyMinutes &
+      "' must be > 0")
+  if startAt.len > 0 and not isValidScheduleIso8601(startAt):
+    raise newException(ValueError,
+      "scheduleInterval startAt '" & startAt &
+      "' is not a valid ISO-8601 timestamp")
+  ScheduleSpec(kind: sskInterval, everyMinutes: everyMinutes,
+    startAt: startAt)
 
 template windowsRegistryValueHKLM*(targetResources: var seq[ResourceIntent];
                                    key: string;

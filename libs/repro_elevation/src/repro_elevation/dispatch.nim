@@ -97,6 +97,7 @@ proc desiredDigest(op: PrivilegedOperation): string =
     desiredDigestHex(op)
   of pokWindowsRegistryValue, pokWindowsOptionalFeature,
      pokWindowsCapability, pokWindowsService,
+     pokWindowsScheduledTask,
      pokWindowsFirewallRule, pokWindowsAcl:
     systemDesiredDigestHex(op)
   of pokWindowsVsInstaller:
@@ -148,6 +149,8 @@ proc reobserve*(ctx: FixtureContext;
     observeWindowsCapability(op)
   of pokWindowsService:
     observeWindowsService(op)
+  of pokWindowsScheduledTask:
+    observeWindowsScheduledTask(op)
   of pokWindowsVsInstaller:
     observeWindowsVsInstaller(op)
   of pokWindowsFirewallRule:
@@ -222,6 +225,8 @@ proc applyOne(ctx: FixtureContext;
     result.restartNeeded = r.restartNeeded
   of pokWindowsService:
     result = applyWindowsService(op)
+  of pokWindowsScheduledTask:
+    result = applyWindowsScheduledTask(op)
   of pokWindowsVsInstaller:
     let r = applyWindowsVsInstaller(op)
     result = r.state
@@ -323,6 +328,7 @@ proc dispatchOperation*(ctx: FixtureContext;
   #    an already-absent target is a no-op.
   let destroyOp =
     (op.kind == pokWindowsRegistryValue and op.hklmDestroy) or
+    (op.kind == pokWindowsScheduledTask and op.wstDestroy) or
     (op.kind == pokWindowsVsInstaller and op.vsDestroy) or
     (op.kind == pokWindowsFirewallRule and op.fwDestroy) or
     (op.kind == pokWindowsAcl and op.aclDestroy) or

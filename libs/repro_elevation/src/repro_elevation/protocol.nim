@@ -283,6 +283,24 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
       body.writeString(windowsServiceRecoveryActionToken(slot.action))
       body.writeU32Le(uint32(slot.delayMs))
     body.writeU32Le(uint32(op.serviceRecoveryResetSeconds))
+  of pokWindowsScheduledTask:
+    # Windows-System-Resources Phase C: encode the new kind. Schedule is
+    # serialized via its canonical wire token (`<kind>:<payload>`) so
+    # the same closed-set decoder that runs at the protocol boundary
+    # validates the shape. `encodeScheduledTaskScheduleSpec` rejects a
+    # malformed in-process construction here as defence-in-depth on top
+    # of the broker validator.
+    body.writeString(op.wstTaskName)
+    body.writeString(op.wstExecutable)
+    body.writeU32Le(uint32(op.wstArguments.len))
+    for a in op.wstArguments:
+      body.writeString(a)
+    body.writeString(op.wstWorkingDirectory)
+    body.writeString(op.wstRunAsUser)
+    body.writeBool(op.wstRunWithHighestPrivileges)
+    body.writeString(encodeScheduledTaskScheduleSpec(op.wstSchedule))
+    body.writeBool(op.wstEnabled)
+    body.writeBool(op.wstDestroy)
   of pokWindowsVsInstaller:
     body.writeString(op.vsEdition)
     body.writeString(op.vsChannel)
@@ -516,6 +534,29 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
           delayMs: delayMs))
     result.operation.serviceRecoveryResetSeconds =
       int(readU32Le(body, pos))
+  of pokWindowsScheduledTask:
+    result.operation = PrivilegedOperation(kind: pokWindowsScheduledTask,
+      address: address)
+    result.operation.wstTaskName = readString(body, pos)
+    result.operation.wstExecutable = readString(body, pos)
+    let argCount = int(readU32Le(body, pos))
+    if argCount < 0 or pos + argCount > body.len:
+      raiseProtocol("windows.scheduledTask frame: implausible arguments count")
+    for _ in 0 ..< argCount:
+      result.operation.wstArguments.add(readString(body, pos))
+    result.operation.wstWorkingDirectory = readString(body, pos)
+    result.operation.wstRunAsUser = readString(body, pos)
+    result.operation.wstRunWithHighestPrivileges =
+      readBool(body, pos, "wstRunWithHighestPrivileges")
+    let scheduleToken = readString(body, pos)
+    try:
+      result.operation.wstSchedule =
+        decodeScheduledTaskScheduleToken(scheduleToken)
+    except ValueError as e:
+      raiseProtocol("windows.scheduledTask frame schedule token rejected " &
+        "by closed-set codec: " & e.msg)
+    result.operation.wstEnabled = readBool(body, pos, "wstEnabled")
+    result.operation.wstDestroy = readBool(body, pos, "wstDestroy")
   of pokWindowsVsInstaller:
     result.operation = PrivilegedOperation(kind: pokWindowsVsInstaller,
       address: address)

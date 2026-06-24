@@ -3781,3 +3781,519 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
         delEnv(OsReleaseOverrideEnvVar)
         try: removeFile(fakePath) except OSError: discard
         try: removeDir(dir) except OSError: discard
+
+# ===========================================================================
+# Windows-System-Resources Phase C: windows.scheduledTask.
+#
+# Closed-set vocabulary tests + codec round-trip across every
+# ScheduleKind + drift comparator across every kind/field combination.
+# All tests platform-pure (the genuinely-Windows shell-outs gate behind
+# `when defined(windows)` in the driver; the assemblers below are
+# `seq[string]` pure-function returns).
+# ===========================================================================
+
+suite "repro_elevation: windows.scheduledTask Phase C":
+
+  test "pokWindowsScheduledTask is in the closed set + requires elevation":
+    check requiresElevation(pokWindowsScheduledTask)
+    check isKnownPrivilegedOperationKind($pokWindowsScheduledTask)
+    check $pokWindowsScheduledTask == "windows.scheduledTask"
+
+  test "schedule-kind token codec: all 5 variants round-trip":
+    for tok in ["onBoot", "onLogon", "once", "daily", "interval"]:
+      check isKnownScheduledTaskScheduleKindToken(tok)
+      let k = scheduledTaskScheduleKindFromToken(tok)
+      check scheduledTaskScheduleKindToken(k) == tok
+    check scheduledTaskScheduleKindToken(wstskOnBoot) == "onBoot"
+    check scheduledTaskScheduleKindToken(wstskOnLogon) == "onLogon"
+    check scheduledTaskScheduleKindToken(wstskOnce) == "once"
+    check scheduledTaskScheduleKindToken(wstskDaily) == "daily"
+    check scheduledTaskScheduleKindToken(wstskInterval) == "interval"
+
+  test "schedule-kind token codec: rejects unknown spellings":
+    for bad in ["", "ONBOOT", "onboot", "weekly", "monthly", "rest"]:
+      check not isKnownScheduledTaskScheduleKindToken(bad)
+      expect ValueError:
+        discard scheduledTaskScheduleKindFromToken(bad)
+
+  test "isValidScheduledTaskTimeOfDay: closed-set HH:MM":
+    for ok in ["00:00", "08:30", "23:59", "12:00"]:
+      check isValidScheduledTaskTimeOfDay(ok)
+    for bad in ["", "8:30", "24:00", "12:60", "1234", "12:00:00",
+                "ab:cd"]:
+      check not isValidScheduledTaskTimeOfDay(bad)
+
+  test "isValidScheduledTaskIso8601: charset closed":
+    for ok in ["2030-01-01T08:00:00Z",
+               "2030-01-01T08:00:00+02:00",
+               "2030-01-01T08:00:00.500Z"]:
+      check isValidScheduledTaskIso8601(ok)
+    for bad in ["", "not a date", "2030-01-01 08:00:00",
+                "2030/01/01T08:00:00Z"]:
+      check not isValidScheduledTaskIso8601(bad)
+
+  test "encodeScheduledTaskScheduleSpec: every variant round-trips":
+    let cases = @[
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 0),
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 60),
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: ""),
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: "DOMAIN\\runner"),
+      ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: "2030-01-01T08:00:00Z"),
+      ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "08:30"),
+      ScheduledTaskScheduleSpec(kind: wstskInterval, everyMinutes: 5,
+        startAt: ""),
+      ScheduledTaskScheduleSpec(kind: wstskInterval, everyMinutes: 60,
+        startAt: "2030-01-01T00:00:00Z")]
+    for s in cases:
+      let token = encodeScheduledTaskScheduleSpec(s)
+      let round = decodeScheduledTaskScheduleToken(token)
+      check round == s
+
+  test "encodeScheduledTaskScheduleSpec rejects malformed in-process construction":
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: -1))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskOnce, runAt: ""))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "8:30"))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskInterval,
+          everyMinutes: 0))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskInterval,
+          everyMinutes: 5, startAt: "bad-stamp"))
+
+  test "decodeScheduledTaskScheduleToken rejects every malformed shape":
+    for bad in ["", "onBoot", ":30", "unknown:30", "ONBOOT:30",
+                "onBoot:abc", "onBoot:-5",
+                "once:not-iso", "once:",
+                "daily:8:30", "daily:25:00", "daily:",
+                "interval:0:", "interval:abc:",
+                "interval:5", "interval:5:bad"]:
+      expect ValueError:
+        discard decodeScheduledTaskScheduleToken(bad)
+
+  test "isSafeScheduledTaskTaskName: closed-set charset + escape guard":
+    for ok in ["\\Reprobuild\\Foo",
+               "\\Microsoft\\Windows\\Updates\\Scheduled Start",
+               "MyTask"]:
+      check isSafeScheduledTaskTaskName(ok)
+    for bad in ["", "Foo'; rm", "Bar\nBaz",
+                "\\Reprobuild\\..\\..\\evil",
+                "Foo$evil", "Foo`evil"]:
+      check not isSafeScheduledTaskTaskName(bad)
+
+  test "isSafeScheduledTaskPrincipal: SYSTEM + DOMAIN\\user + SID":
+    for ok in ["SYSTEM", "LOCAL_SERVICE", "NETWORK_SERVICE",
+               "DOMAIN\\runner", "S-1-5-18", "user@example.com"]:
+      check isSafeScheduledTaskPrincipal(ok)
+    for bad in ["", "rm -rf /", "user; cmd", "user'or'1"]:
+      check not isSafeScheduledTaskPrincipal(bad)
+
+  test "windows.scheduledTask frames round-trip through wire codec — every kind":
+    # Codec round-trip across the full 5-variant cross-product is the
+    # broker integrity gate. A regression in either the encoder or
+    # decoder would break the round-trip equality check.
+    let schedules = @[
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 30),
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: "DOMAIN\\runner"),
+      ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: "2030-01-01T08:00:00Z"),
+      ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "08:30"),
+      ScheduledTaskScheduleSpec(kind: wstskInterval, everyMinutes: 15,
+        startAt: "2030-01-01T00:00:00Z")]
+    for s in schedules:
+      let op = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wst-" & $s.kind,
+        wstTaskName: "\\Reprobuild\\T-" & $s.kind,
+        wstExecutable: "C:\\bin\\app.exe",
+        wstArguments: @["--unattended", "--name=runner"],
+        wstWorkingDirectory: "C:\\actions-runner",
+        wstRunAsUser: "SYSTEM",
+        wstRunWithHighestPrivileges: true,
+        wstSchedule: s,
+        wstEnabled: true,
+        wstDestroy: false)
+      check operationValidationError(op) == ""
+      let frame = encodeOperation(WireOperation(operation: op,
+        baselineDigestHex: "abc"))
+      let dec = decodeOperation(decodeFrame(frame).body)
+      check dec.operation.kind == pokWindowsScheduledTask
+      check dec.operation.wstTaskName == op.wstTaskName
+      check dec.operation.wstExecutable == op.wstExecutable
+      check dec.operation.wstArguments == op.wstArguments
+      check dec.operation.wstWorkingDirectory ==
+        op.wstWorkingDirectory
+      check dec.operation.wstRunAsUser == op.wstRunAsUser
+      check dec.operation.wstRunWithHighestPrivileges ==
+        op.wstRunWithHighestPrivileges
+      check dec.operation.wstEnabled == op.wstEnabled
+      check dec.operation.wstDestroy == op.wstDestroy
+      check dec.operation.wstSchedule == op.wstSchedule
+
+  test "windows.scheduledTask: destroy direction codec round-trip":
+    let op = PrivilegedOperation(kind: pokWindowsScheduledTask,
+      address: "wstDestroy",
+      wstTaskName: "\\Foo",
+      wstExecutable: "C:\\bin\\foo.exe",
+      wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: 0),
+      wstRunAsUser: "SYSTEM",
+      wstRunWithHighestPrivileges: true,
+      wstEnabled: true,
+      wstDestroy: true)
+    check operationValidationError(op) == ""
+    let dec = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: op, baselineDigestHex: ""))).body)
+    check dec.operation.wstDestroy == true
+
+  test "windows.scheduledTask validator rejects empty fields + malformed":
+    # Closed-set defence-in-depth: the broker validator is the LAST
+    # gate before the typed driver dispatches.
+    block emptyName:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block emptyExe:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block escapeName:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Reprobuild\\..\\evil",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block badPrincipal:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "rm -rf /")
+      check operationValidationError(bad).len > 0
+    block badIso:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnce,
+          runAt: "not iso"),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block badInterval:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskInterval,
+          everyMinutes: 0),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block badDaily:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskDaily,
+          timeOfDay: "25:00"),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+
+  test "renderRegisterScheduledTaskCommand: pure argv assembler":
+    # The assembler is the apply-side argv builder the driver hands to
+    # PowerShell. Pure function — testable on Linux.
+    let argv = renderRegisterScheduledTaskCommand(
+      taskName = "\\Foo",
+      executable = "C:\\bin\\foo.exe",
+      arguments = @["--flag", "C:\\config.toml"],
+      workingDirectory = "C:\\actions-runner",
+      runAsUser = "SYSTEM",
+      runWithHighestPrivileges = true,
+      scheduleXml = "<BootTrigger/>",
+      enabled = true)
+    check argv[0] == "Register-ScheduledTask"
+    check "-TaskName" in argv
+    check "\\Foo" in argv
+    check "-ArgumentList" in argv
+    check "-WorkingDirectory" in argv
+    check "-Trigger" in argv
+    check "<BootTrigger/>" in argv
+    check "-Principal" in argv
+    check "SYSTEM" in argv
+    check "-RunLevel" in argv
+    check "Highest" in argv
+
+  test "renderRegisterScheduledTaskCommand: enabled=false adds Disabled settings":
+    let argv = renderRegisterScheduledTaskCommand(
+      taskName = "\\Foo",
+      executable = "C:\\bin\\foo.exe",
+      arguments = @[],
+      workingDirectory = "",
+      runAsUser = "DOMAIN\\runner",
+      runWithHighestPrivileges = false,
+      scheduleXml = "<BootTrigger/>",
+      enabled = false)
+    check "Disabled" in argv
+    check "-RunLevel" notin argv
+    check "-ArgumentList" notin argv
+    check "-WorkingDirectory" notin argv
+
+  test "renderUnregisterScheduledTaskCommand: destroy argv":
+    let argv = renderUnregisterScheduledTaskCommand("\\Foo")
+    check argv == @["Unregister-ScheduledTask", "-TaskName", "\\Foo",
+                    "-Confirm:$false"]
+
+  test "renderScheduledTaskScheduleXml: every variant emits a Task Scheduler element":
+    let onBoot = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 0))
+    check onBoot == "<BootTrigger></BootTrigger>"
+    let onBootDelay = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 30))
+    check onBootDelay.contains("<Delay>PT30S</Delay>")
+    let onLogon = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: "DOMAIN\\u"))
+    check onLogon.contains("<UserId>DOMAIN\\u</UserId>")
+    let onLogonAny = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: ""))
+    check onLogonAny == "<LogonTrigger></LogonTrigger>"
+    let once = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: "2030-01-01T08:00:00Z"))
+    check once.contains("<StartBoundary>2030-01-01T08:00:00Z" &
+      "</StartBoundary>")
+    let daily = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "08:30"))
+    check daily.contains("<CalendarTrigger>")
+    check daily.contains("<DaysInterval>1</DaysInterval>")
+    check daily.contains("1970-01-01T08:30:00")
+    let interval = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskInterval,
+        everyMinutes: 15, startAt: "2030-01-01T00:00:00Z"))
+    check interval.contains("<Repetition><Interval>PT15M</Interval>")
+
+  test "scheduledTaskMatchesDesired: matches when all fields agree":
+    let want = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 30)
+    let obs = ScheduledTaskObservation(present: true,
+      taskName: "\\Foo", executable: "C:\\bin\\foo.exe",
+      arguments: @[], workingDirectory: "", runAsUser: "SYSTEM",
+      runWithHighestPrivileges: true, enabled: true,
+      schedule: want)
+    check scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+
+  test "scheduledTaskMatchesDesired: drift on each load-bearing field":
+    let want = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 30)
+    let base = ScheduledTaskObservation(present: true,
+      taskName: "\\Foo", executable: "C:\\bin\\foo.exe",
+      arguments: @[], workingDirectory: "", runAsUser: "SYSTEM",
+      runWithHighestPrivileges: true, enabled: true,
+      schedule: want)
+    # Absent => mismatch.
+    check not scheduledTaskMatchesDesired(
+      ScheduledTaskObservation(present: false),
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # taskName drift.
+    var obs = base
+    obs.taskName = "\\OtherName"
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # executable drift.
+    obs = base
+    obs.executable = "C:\\bin\\other.exe"
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # arguments drift.
+    obs = base
+    obs.arguments = @["--flag"]
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # principal drift.
+    obs = base
+    obs.runAsUser = "LOCAL_SERVICE"
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # highestPrivileges drift.
+    obs = base
+    obs.runWithHighestPrivileges = false
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # enabled drift.
+    obs = base
+    obs.enabled = false
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # schedule drift (different kind).
+    obs = base
+    obs.schedule = ScheduledTaskScheduleSpec(kind: wstskDaily,
+      timeOfDay: "08:30")
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # schedule drift (same kind, different delay).
+    obs = base
+    obs.schedule = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 60)
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+
+  test "scheduledTaskMatchesDesired: drift across every ScheduleKind":
+    # Per-kind: a desired spec of each kind must match the equivalent
+    # observation AND mismatch a same-kind variation.
+    let kinds = @[
+      (ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 10),
+       ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+         delaySeconds: 20)),
+      (ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+         forUser: "DOMAIN\\u"),
+       ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: "")),
+      (ScheduledTaskScheduleSpec(kind: wstskOnce,
+         runAt: "2030-01-01T08:00:00Z"),
+       ScheduledTaskScheduleSpec(kind: wstskOnce,
+         runAt: "2031-01-01T08:00:00Z")),
+      (ScheduledTaskScheduleSpec(kind: wstskDaily,
+         timeOfDay: "08:30"),
+       ScheduledTaskScheduleSpec(kind: wstskDaily,
+         timeOfDay: "09:30")),
+      (ScheduledTaskScheduleSpec(kind: wstskInterval,
+         everyMinutes: 15, startAt: ""),
+       ScheduledTaskScheduleSpec(kind: wstskInterval,
+         everyMinutes: 30, startAt: ""))]
+    for (a, b) in kinds:
+      let obs = ScheduledTaskObservation(present: true,
+        taskName: "\\T", executable: "C:\\app.exe", arguments: @[],
+        workingDirectory: "", runAsUser: "SYSTEM",
+        runWithHighestPrivileges: true, enabled: true, schedule: a)
+      check scheduledTaskMatchesDesired(obs,
+        "\\T", "C:\\app.exe", @[], "", "SYSTEM", true, a, true)
+      check not scheduledTaskMatchesDesired(obs,
+        "\\T", "C:\\app.exe", @[], "", "SYSTEM", true, b, true)
+
+  test "parseScheduledTaskQuery: Missing=1 collapses to absent":
+    let obs = parseScheduledTaskQuery("Missing=1")
+    check obs.present == false
+
+  test "parseScheduledTaskQuery: onBoot probe parses cleanly":
+    let probe = """
+TaskName=\Reprobuild\Foo
+Executable=C:\bin\foo.exe
+Arguments=
+WorkingDirectory=
+RunAsUser=SYSTEM
+RunWithHighestPrivileges=True
+Enabled=True
+ScheduleKind=onBoot
+ScheduleDelaySeconds=30
+"""
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check obs.taskName == "\\Reprobuild\\Foo"
+    check obs.executable == "C:\\bin\\foo.exe"
+    check obs.runAsUser == "SYSTEM"
+    check obs.runWithHighestPrivileges == true
+    check obs.enabled == true
+    check obs.schedule.kind == wstskOnBoot
+    check obs.schedule.delaySeconds == 30
+
+  test "parseScheduledTaskQuery: daily probe":
+    let probe = """
+TaskName=\DailyJob
+Executable=C:\bin\daily.exe
+RunAsUser=SYSTEM
+RunWithHighestPrivileges=True
+Enabled=True
+ScheduleKind=daily
+ScheduleTimeOfDay=08:30
+"""
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check obs.schedule.kind == wstskDaily
+    check obs.schedule.timeOfDay == "08:30"
+
+  test "parseScheduledTaskQuery: interval probe":
+    let probe = """
+TaskName=\Heartbeat
+Executable=C:\bin\hb.exe
+RunAsUser=SYSTEM
+RunWithHighestPrivileges=True
+Enabled=True
+ScheduleKind=interval
+ScheduleEveryMinutes=15
+ScheduleStartAt=2030-01-01T00:00:00Z
+"""
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check obs.schedule.kind == wstskInterval
+    check obs.schedule.everyMinutes == 15
+    check obs.schedule.startAt == "2030-01-01T00:00:00Z"
+
+  test "canonicalScheduledTaskState == canonicalScheduledTaskDesired on convergence":
+    # Drift-digest equality property: the broker's digest computation
+    # of an observed task that matches the desired state produces the
+    # SAME canonical string as the desired-state digest.
+    let want = ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: 15, startAt: "")
+    let obs = ScheduledTaskObservation(present: true,
+      taskName: "\\T", executable: "C:\\app.exe",
+      arguments: @["--unattended"], workingDirectory: "",
+      runAsUser: "SYSTEM", runWithHighestPrivileges: true,
+      enabled: true, schedule: want)
+    check canonicalScheduledTaskState(obs) ==
+      canonicalScheduledTaskDesired("\\T", "C:\\app.exe",
+        @["--unattended"], "", "SYSTEM", true, want, true)
+
+  test "canonicalScheduledTaskState diverges on drift":
+    let want = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 0)
+    let obs = ScheduledTaskObservation(present: true,
+      taskName: "\\T", executable: "C:\\app.exe",
+      arguments: @[], workingDirectory: "",
+      runAsUser: "SYSTEM", runWithHighestPrivileges: true,
+      enabled: false, schedule: want)
+    check canonicalScheduledTaskState(obs) !=
+      canonicalScheduledTaskDesired("\\T", "C:\\app.exe",
+        @[], "", "SYSTEM", true, want, true)
+
+  test "windows.scheduledTask: validator rejects schedule-malformed in-memory":
+    # A defence-in-depth case: an operation that was built directly in
+    # Nim (skipping the codec) must STILL fail the validator if it
+    # carries a malformed schedule. The codec is the FIRST gate; the
+    # validator is the LAST gate before the typed driver runs.
+    let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+      address: "wstBad",
+      wstTaskName: "\\Foo",
+      wstExecutable: "C:\\bin\\foo.exe",
+      wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: -5),
+      wstRunAsUser: "SYSTEM")
+    check operationValidationError(bad).len > 0
