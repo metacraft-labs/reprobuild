@@ -41,6 +41,11 @@ package partedSource:
     "readline"
     ## libuuid (from util-linux) for partition UUIDs.
     "util-linux"
+    ## ncurses provides the terminfo/termcap library parted's
+    ## readline integration links against (parted's configure
+    ## hard-errors with "termcap could not be found which is required
+    ## for the --with-readline option" without it).
+    "ncurses"
 
   config:
     discard
