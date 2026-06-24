@@ -14,11 +14,11 @@ import repro_project_dsl
 # at module init time.
 import ./repro
 
+# M9.R.15q.5.13 bumped kdecoration to 6.2.5 to match kwin's
+# PROJECT_DEP_VERSION; the smoke test follows. Attic URL because
+# download.kde.org redirects ``stable/plasma/6.2.5/`` for the
+# kdecoration-6.2.5 tarball to the ``Attic/`` subtree.
 const ExpectedUrl =
-  ## M9.R.15q.5.13 bumped kdecoration to 6.2.5 to match kwin's
-  ## PROJECT_DEP_VERSION; the smoke test follows. Attic URL because
-  ## download.kde.org redirects ``stable/plasma/6.2.5/`` for the
-  ## kdecoration-6.2.5 tarball to the ``Attic/`` subtree.
   "https://download.kde.org/Attic/plasma/6.2.5/kdecoration-6.2.5.tar.xz"
 
 const ExpectedHash =
