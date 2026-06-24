@@ -314,6 +314,108 @@ link_entry plasma-workspace startplasma-x11
 link_entry gdm gdm-session-worker
 link_entry gdm gdm
 
+# ---------------------------------------------------------------------------
+# Phase 4b (M9.R.33.3): base-userspace from-source mirror loop.
+#
+# The per-recipe Phase 1 mirror already copies every from-source
+# install-mirror into the squashfs at the absolute path the build host
+# uses (e.g. /opt/repro/reprobuild/recipes/packages/source/systemd/
+# .repro/output/install/usr/bin/systemctl).  What's missing is the
+# /usr/{bin,sbin}/<name> shadow link so PID 1 / login shell / agetty
+# find these binaries via PATH; without it the Debian apt entries in
+# build-base-rootfs.sh's PKG_LIST shadow the from-source equivalents
+# for ever.
+#
+# This loop walks every recipe in BASE_USERSPACE_RECIPES and emits an
+# absolute /usr/bin or /usr/sbin symlink for every regular file under
+# the install-mirror's bin/ + sbin/ subtrees (matching the link_entry
+# helper above's pattern).  M9.R.33.4..12 then drop the corresponding
+# apt entries from build-base-rootfs.sh's PKG_LIST one commit at a
+# time, verified by rebuilding the base-rootfs + confirming the from-
+# source binary is the one resolved at PATH lookup time on the staged
+# ISO.
+#
+# The list mirrors the 9 FS:done entries documented in the M9.R.32.4
+# audit annotations of build-base-rootfs.sh PKG_LIST (systemd,
+# util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
+# iana-tzdata).  iana-tzdata ships /usr/share/zoneinfo + a small
+# /usr/bin tzdata helper; the rest ship pure executables.
+
+BASE_USERSPACE_RECIPES=(
+  systemd
+  util-linux
+  kmod
+  dbus
+  sudo
+  e2fsprogs
+  btrfs-progs
+  shadow-utils
+  iana-tzdata
+)
+
+link_base_recipe_binaries() {
+  local recipe="$1"
+  local install_usr="$ISO_SRC_MIRROR_ROOT/$recipe/.repro/output/install/usr"
+  if [ ! -d "$install_usr" ]; then
+    echo "[stage-de-rootfs] base-userspace mirror missing: $recipe (recipe not built; skipped)" >&2
+    return 0
+  fi
+  local sub
+  local linked=0
+  local skipped=0
+  for sub in bin sbin; do
+    local src_dir="$install_usr/$sub"
+    [ -d "$src_dir" ] || continue
+    mkdir -p "$STAGE_DIR/usr/$sub"
+    local file
+    # Walk regular files + symlinks (some recipes ship multi-call
+    # binaries as symlinks under bin/; we want the link target's path
+    # but the original name).
+    for file in "$src_dir"/*; do
+      [ -e "$file" ] || continue
+      local name
+      name="$(basename "$file")"
+      # M9.R.33.3 — strip the $STAGE_DIR prefix so the symlink target is
+      # absolute WITHIN the rootfs (resolves correctly after pivot_root).
+      local link_target="${file#$STAGE_DIR}"
+      local dst="$STAGE_DIR/usr/$sub/$name"
+      # If the apt-installed binary is already at this path and is NOT
+      # the from-source link, the apt entry shadows from-source.  We
+      # ALWAYS prefer from-source per the M9.R.33 task brief; force
+      # replace the apt-installed copy with the from-source symlink.
+      # (The M9.R.33.4..12 follow-up commits remove the matching apt
+      # PKG_LIST entries; until then the force-link gives from-source
+      # precedence.)
+      ln -sf "$link_target" "$dst"
+      linked=$((linked + 1))
+    done
+  done
+  # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
+  # install-mirror.  Other base-userspace recipes ship usr/share/
+  # files (man pages, locale, ...) that the apt-installed equivalents
+  # cover; we don't shadow those at v1 (the data-only files don't
+  # affect runtime correctness for the v1 DE smoke surface).  The
+  # /usr/share/zoneinfo case is special-cased because date(1) +
+  # systemd-timesyncd both probe it at process start.
+  if [ "$recipe" = "iana-tzdata" ]; then
+    local zoneinfo_src="$install_usr/share/zoneinfo"
+    if [ -d "$zoneinfo_src" ]; then
+      local zoneinfo_link_target="${zoneinfo_src#$STAGE_DIR}"
+      mkdir -p "$STAGE_DIR/usr/share"
+      # /usr/share/zoneinfo is a directory in apt-debian; we shadow it
+      # with a symlink to the from-source dir.  Replace if present.
+      rm -rf "$STAGE_DIR/usr/share/zoneinfo"
+      ln -sf "$zoneinfo_link_target" "$STAGE_DIR/usr/share/zoneinfo"
+    fi
+  fi
+  echo "[stage-de-rootfs] base-userspace: $recipe -> $linked /usr/{bin,sbin} shadow links"
+}
+
+echo "[stage-de-rootfs] staging base-userspace shadow links"
+for base_recipe in "${BASE_USERSPACE_RECIPES[@]}"; do
+  link_base_recipe_binaries "$base_recipe"
+done
+
 # Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 cat > "$STAGE_DIR/usr/share/wayland-sessions/sway.desktop" <<EOF
 [Desktop Entry]
