@@ -866,6 +866,157 @@ proc m9r15oCollectQt6TransitiveCmakeConfigDirs*(projectRoot, packageName: string
   for dep in extraDeps:
     m9r15iScanCmakeConfigDirs(siblingsRoot / dep, result)
 
+# ---------------------------------------------------------------------------
+# M9.R.33.2 — Auto-thread Qt6 FindXxx.cmake modules into CMAKE_MODULE_PATH
+# and GLESv2 hints into recipe cacheVars for fresh-configure correctness.
+# ---------------------------------------------------------------------------
+#
+# Without this fix a fresh ``rm -rf .repro/build && repro build
+# plasma-workspace`` (or any Qt6Gui consumer) fails at configure time
+# with:
+#
+#   By not providing "FindPlatformGraphics.cmake" in CMAKE_MODULE_PATH
+#   this project has asked CMake to find a package configuration file
+#   provided by "PlatformGraphics", but CMake did not find one.
+#
+# and:
+#
+#   Could NOT find GLESv2 (missing: GLESv2_LIBRARY GLESv2_INCLUDE_DIR
+#   HAVE_GLESv2)
+#
+# The Qt6 cmake-config layer ships ``FindGLESv2.cmake`` +
+# ``FindPlatformGraphics.cmake`` at
+# ``<qt6-base>/usr/lib/cmake/Qt6/`` and
+# ``<qt6-base>/usr/lib/cmake/Qt6/platforms/``.  Those dirs need to be on
+# ``CMAKE_MODULE_PATH`` for cmake's ``find_package`` /
+# ``find_dependency`` walks to discover them.  Qt6's own
+# ``Qt6GuiConfig.cmake`` adds them to ``CMAKE_MODULE_PATH`` once
+# Qt6Gui's config-package machinery loads, but downstream packages
+# whose ``find_package(Qt6 ...)`` umbrella runs BEFORE Qt6Gui's per-
+# module config loads (because the umbrella resolution order walks
+# ``COMPONENTS`` in source order) trip on ``find_dependency(GLESv2)``
+# inside ``Qt6Gui`` itself.
+#
+# Prior M9.R.31 builds dodged this trip by inheriting a stale-but-
+# working ``CMakeCache.txt`` from before the M9.R.15i.5 walker existed;
+# a fresh build dir loses those entries.  The M9.R.32.1.2 recipe-local
+# fallback in plasma-workspace/repro.nim threads the same dirs via a
+# recipe-author-visible ``CMAKE_MODULE_PATH=`` + ``GLESv2_*=`` cache
+# var block; M9.R.33.2 lifts that to the constructor layer so every
+# qt6-* consumer (plasma-workspace + every KF6 module + every Plasma
+# component + every future Qt6Gui consumer) gets the fix automatically.
+
+proc m9r33Collect2Qt6CmakeModulePathDirs*(projectRoot, packageName: string):
+    seq[string] =
+  ## DSL-port M9.R.33.2 — enumerate the Qt6-shipped FindXxx.cmake
+  ## module dirs from every declared ``qt6-*`` dep's install-mirror.
+  ## Returns an ordered list of absolute dirs (POSIX-style forward
+  ## slashes) suitable for splatting into ``CMAKE_MODULE_PATH`` via a
+  ## semicolon-joined cache var.
+  ##
+  ## Per-qt6-dep, the two interesting dirs are:
+  ##
+  ##   * ``<dep>/.repro/output/install/usr/lib/cmake/Qt6/`` —
+  ##     ships ``FindGLESv2.cmake``, ``FindEGL.cmake``, ``FindGLib2.cmake``,
+  ##     ``FindGSSAPI.cmake``, ``FindLibproxy.cmake``, ``FindXKB.cmake``,
+  ##     and ~30 other find-module shims.
+  ##   * ``<dep>/.repro/output/install/usr/lib/cmake/Qt6/platforms/`` —
+  ##     ships ``FindPlatformGraphics.cmake`` +
+  ##     ``FindIntegrityPlatformGraphics.cmake`` +
+  ##     ``FindVxWorksPlatformGraphics.cmake``.
+  ##
+  ## Inert in unit-test mode when ``projectRoot`` is empty; inert
+  ## when no qt6-* dep is declared.  Order: deterministic, matches the
+  ## ``(nativeBuildDeps, then buildDeps)`` declaration order; within
+  ## a dep, the root Qt6 dir precedes the platforms sub-dir.
+  if projectRoot.len == 0:
+    return
+  let recipeRoot = parentDir(projectRoot)
+  if recipeRoot.len == 0:
+    return
+  proc visit(raw: string; sink: var seq[string]) =
+    let dep = m9r14fStripDepConstraint(raw)
+    if not dep.startsWith("qt6-"):
+      return
+    let qt6CmakeRoot = recipeRoot / dep / ".repro" / "output" /
+      "install" / "usr" / "lib" / "cmake" / "Qt6"
+    if not dirExists(qt6CmakeRoot):
+      return
+    sink.add(qt6CmakeRoot.replace("\\", "/"))
+    let platformsDir = qt6CmakeRoot / "platforms"
+    if dirExists(platformsDir):
+      sink.add(platformsDir.replace("\\", "/"))
+  for raw in registeredNativeBuildDeps(packageName):
+    visit(raw, result)
+  for raw in registeredBuildDeps(packageName):
+    visit(raw, result)
+
+proc m9r33Emit2CmakeModulePathCacheVar*(modulePathDirs: seq[string]): string =
+  ## DSL-port M9.R.33.2 — format the ``CMAKE_MODULE_PATH=<dir1>;<dir2>``
+  ## cache var the constructor splices into ``cacheVars``.  Uses
+  ## cmake's standard semicolon-list separator; an empty input returns
+  ## the empty string so the caller can avoid double-flagging.
+  if modulePathDirs.len == 0:
+    return ""
+  var s = "CMAKE_MODULE_PATH="
+  for i, d in modulePathDirs:
+    if i > 0: s.add(";")
+    s.add(d)
+  return s
+
+proc m9r33Emit2MesaGlesv2CacheVars*(projectRoot, packageName: string):
+    seq[string] =
+  ## DSL-port M9.R.33.2 — emit ``GLESv2_INCLUDE_DIR=`` +
+  ## ``GLESv2_LIBRARY=`` cache var hints pointing at the mesa sibling's
+  ## install-mirror when:
+  ##
+  ##   1. Any ``qt6-*`` dep is declared on ``packageName`` (transitively
+  ##      a Qt6Gui consumer).
+  ##   2. The mesa sibling install-mirror exists at
+  ##      ``<recipesRoot>/mesa/.repro/output/install/usr/`` with the
+  ##      ``include/GLES2/`` headers + the ``lib64/libGLESv2.so``
+  ##      shared object.
+  ##
+  ## Qt6Gui's CMake config calls ``find_dependency(GLESv2)`` which loads
+  ## ``FindGLESv2.cmake`` which runs ``find_library(GLESv2_LIBRARY NAMES
+  ## GLESv2 OpenGLES)`` + ``find_path(GLESv2_INCLUDE_DIR NAMES
+  ## GLES2/gl2.h)``.  Those normally walk ``CMAKE_PREFIX_PATH``; the
+  ## M9.R.14e.* search-path channels DO populate CMAKE_PREFIX_PATH with
+  ## mesa's prefix when mesa is on the consumer's tool-identity-ref list
+  ## (via M9.R.15o.1's virtual injection).  Empirically the walk is
+  ## fragile across fresh-configure semantics — providing explicit hints
+  ## via cache vars takes a layer of timing/order sensitivity off the
+  ## table.
+  ##
+  ## Inert when no qt6-* dep is declared, when projectRoot is empty
+  ## (unit-test mode), or when the mesa install-mirror is absent.
+  if projectRoot.len == 0:
+    return
+  var hasQt6 = false
+  for raw in registeredNativeBuildDeps(packageName):
+    if m9r14fStripDepConstraint(raw).startsWith("qt6-"):
+      hasQt6 = true
+      break
+  if not hasQt6:
+    for raw in registeredBuildDeps(packageName):
+      if m9r14fStripDepConstraint(raw).startsWith("qt6-"):
+        hasQt6 = true
+        break
+  if not hasQt6:
+    return
+  let recipeRoot = parentDir(projectRoot)
+  if recipeRoot.len == 0:
+    return
+  let mesaInstall = recipeRoot / "mesa" / ".repro" / "output" /
+    "install" / "usr"
+  let glesHeader = mesaInstall / "include" / "GLES2" / "gl2.h"
+  let glesLib = mesaInstall / "lib64" / "libGLESv2.so"
+  if not fileExists(glesHeader) or not fileExists(glesLib):
+    return
+  result.add("GLESv2_INCLUDE_DIR=" &
+    (mesaInstall / "include").replace("\\", "/"))
+  result.add("GLESv2_LIBRARY=" & glesLib.replace("\\", "/"))
+
 proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  depMirrorLibDirs: seq[string];
                                  depManifestPaths: seq[string] = @[];

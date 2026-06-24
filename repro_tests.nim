@@ -7014,6 +7014,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/unit/t_m9r33_2_qt6_module_path_walker.nim",
+    binary: "build/test-bin/t_m9r33_2_qt6_module_path_walker",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/unit/t_m9r3_library_api_block.nim",
     binary: "build/test-bin/t_m9r3_library_api_block",
     defines: @[],
