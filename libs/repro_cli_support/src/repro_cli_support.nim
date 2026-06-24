@@ -7908,6 +7908,25 @@ proc moveFileReplacing(source, dest: string) =
   moveFile(extendedPath(source), extendedPath(dest))
 
 proc vcsDispatcherContent(hookName: string): string =
+  ## RA-4: the dispatcher coexists with the pre-commit framework's
+  ## ``hook-impl`` shim. Two safeguards (modelled on repo-workspaces
+  ## ``9ee9141``):
+  ##
+  ##   1. A preserved local hook may be pre-commit's ``hook-impl`` shim.
+  ##      pre-commit self-checks for migration mode via
+  ##      ``PRE_COMMIT_RUNNING_LEGACY`` and ABORTS with a "was installed in
+  ##      migration mode" error if it sees that variable set — which happens
+  ##      when pre-commit was installed over a previous Reprobuild
+  ##      dispatcher. The dispatcher clears that variable in the child env so
+  ##      the chained shim runs cleanly instead of re-entering itself.
+  ##   2. pre-commit's ``hook-impl`` shim chains into ``$HOOK_DIR/<hook>.legacy``.
+  ##      When pre-commit was installed on top of a previous Reprobuild
+  ##      dispatcher, that ``.legacy`` file *is* a Reprobuild dispatcher, so
+  ##      running the shim re-enters the dispatcher (and the shim) until it
+  ##      crashes. Such a file is always our own dispatcher, never a genuine
+  ##      user hook, so the dispatcher removes it defensively at runtime.
+  ##      (``ensure`` performs the same cleanup; this is the runtime safety
+  ##      net for a pre-commit reinstall after hooks were set up.)
   result = "#!/usr/bin/env sh\n"
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
@@ -7916,15 +7935,23 @@ proc vcsDispatcherContent(hookName: string): string =
   result.add("HOOK_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n")
   result.add("LOCAL_HOOK=\"$HOOK_DIR/" & hookName & ".repro-local\"\n")
   result.add("MANAGED_HOOK=\"$HOOK_DIR/" & hookName & ".repro-managed\"\n\n")
+  # (2) Drop a stale pre-commit `.legacy` that is actually our dispatcher,
+  # otherwise a chained pre-commit shim re-enters us in a loop.
+  result.add("PRECOMMIT_LEGACY=\"$HOOK_DIR/" & hookName & ".legacy\"\n")
+  result.add("if [ -f \"$PRECOMMIT_LEGACY\" ] && " &
+    "grep -q '" & VcsDispatcherMarker & "' \"$PRECOMMIT_LEGACY\" 2>/dev/null; then\n")
+  result.add("  rm -f \"$PRECOMMIT_LEGACY\"\n")
+  result.add("fi\n\n")
   if hookName == "pre-push":
     result.add("TMP_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push.XXXXXX\")\n")
     result.add("trap 'rm -f \"$TMP_FILE\"' EXIT HUP INT TERM\n")
     result.add("cat > \"$TMP_FILE\"\n")
-    result.add("if [ -x \"$LOCAL_HOOK\" ]; then \"$LOCAL_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?; fi\n")
-    result.add("if [ -x \"$MANAGED_HOOK\" ]; then \"$MANAGED_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?; fi\n")
+    # (1) Clear pre-commit's migration-mode guard for each chained hook.
+    result.add("if [ -x \"$LOCAL_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$LOCAL_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?; fi\n")
+    result.add("if [ -x \"$MANAGED_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$MANAGED_HOOK\" \"$@\" < \"$TMP_FILE\" || exit $?; fi\n")
   else:
-    result.add("if [ -x \"$LOCAL_HOOK\" ]; then \"$LOCAL_HOOK\" \"$@\" || exit $?; fi\n")
-    result.add("if [ -x \"$MANAGED_HOOK\" ]; then \"$MANAGED_HOOK\" \"$@\" || exit $?; fi\n")
+    result.add("if [ -x \"$LOCAL_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$LOCAL_HOOK\" \"$@\" || exit $?; fi\n")
+    result.add("if [ -x \"$MANAGED_HOOK\" ]; then PRE_COMMIT_RUNNING_LEGACY= \"$MANAGED_HOOK\" \"$@\" || exit $?; fi\n")
   result.add("exit 0\n")
 
 proc vcsManagedHookContent(hookName: string): string =
@@ -7976,6 +8003,21 @@ type
     vheoChainedUserHook     ## A pre-existing non-managed hook was preserved as ``<name>.repro-local``.
     vheoRefreshedDrifted    ## Sentinel present but body diverged; rewrote canonical content.
 
+proc sanitizePreCommitLegacyHook(hooksDir, hookName: string): bool =
+  ## RA-4: pre-commit's ``hook-impl`` shim chains into
+  ## ``<hook>.legacy``. When pre-commit is installed over an existing
+  ## Reprobuild dispatcher, it moves that dispatcher to ``<hook>.legacy``.
+  ## After ``ensure`` preserves the pre-commit shim as ``<hook>.repro-local``
+  ## and reinstalls its own dispatcher, that stale ``<hook>.legacy`` makes
+  ## pre-commit re-enter the dispatcher (and itself), tripping its
+  ## migration-mode self-check. Such a file is always a Reprobuild
+  ## dispatcher, never a genuine user hook, so it is safe to remove.
+  let legacy = hooksDir / (hookName & ".legacy")
+  if fileExists(extendedPath(legacy)) and
+      fileContains(legacy, VcsDispatcherMarker):
+    return removeFileIfExists(legacy)
+  false
+
 proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
   ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
   ## structured outcome so callers can surface per-repo per-hook status
@@ -7995,6 +8037,11 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
   # Stale sentinel-marked local file from an earlier `uninstall` run.
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
     anyChange = removeFileIfExists(local) or anyChange
+
+  # RA-4: drop a stale pre-commit `<hook>.legacy` that is actually our own
+  # dispatcher (left behind when pre-commit was installed over a previous
+  # dispatcher) so a chained pre-commit shim does not re-enter us.
+  anyChange = sanitizePreCommitLegacyHook(hooksDir, hookName) or anyChange
 
   # Pre-existing user-owned hook at the canonical path: chain it.
   if fileExists(extendedPath(standard)) and
@@ -8383,6 +8430,7 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # create / refresh the workspace lock).
 proc runCheckCommand*(args: openArray[string]): int
 proc runPostCommitLockCommand*(args: openArray[string]): int
+proc runCachePushCommand*(args: openArray[string]): int
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
 
@@ -8489,6 +8537,14 @@ proc runHooksCommand(args: openArray[string]): int =
       if args.len > 1: args[1 .. ^1]
       else: @[]
     return runHooksDispatchCommand(dispatchArgs)
+  if args.len > 0 and args[0] == "cache-push":
+    # RA-4: internal entry point invoked by the detached post-commit
+    # ``spawnAsyncCachePush`` child. Not part of the operator-facing
+    # surface; always exits 0 (best-effort cache-ref push).
+    let cacheArgs =
+      if args.len > 1: args[1 .. ^1]
+      else: @[]
+    return runCachePushCommand(cacheArgs)
   let parsed = parseHooksCommand(args)
   case parsed.action
   of hakEnsure:
@@ -17630,12 +17686,129 @@ proc parsePostCommitArgs(args: openArray[string]):
       except CatchableError: discard
     inc i
 
+# ---- RA-4: post-commit detached cache-ref push ---------------------------
+#
+# After the best-effort lock refresh, the post-commit hook fires a
+# detached, fire-and-forget push of the just-committed branch into the
+# shared bare cache under ``refs/cache/<workspace>/<branch>`` (the RA-5
+# ``pushCacheRef`` mechanism). The push MUST NOT block the commit: it
+# runs in a new session (``setsid ... &``) with stdio redirected to
+# /dev/null, so it survives the post-commit process exiting. On Windows
+# the eager push is skipped (parity with the pilot ``spawnAsyncCachePush``);
+# siblings rely on an explicit ``repro workspace shared-clones rewire``.
+
+proc resolveRepoFetchUrl(workspaceRoot, repoAbsPath: string): string =
+  ## Resolve the upstream fetch URL of the repo whose working tree is at
+  ## ``repoAbsPath`` by matching it against the resolved project repos.
+  ## Returns "" when no match (e.g. the repo is not part of the workspace
+  ## manifest) — the caller then skips the cache push.
+  let target = os.normalizedPath(absolutePath(repoAbsPath))
+  var repos: seq[ResolvedRepo]
+  try:
+    if isCompositionalWorkspaceToml(workspaceRoot):
+      let workspaceToml = absolutePath(
+        workspaceRoot / ".repo" / "workspace.toml")
+      repos = composeManifestLayersFromFile(workspaceToml).repos
+    else:
+      let projectName = detectWorkspaceProjectName(workspaceRoot)
+      if projectName.len == 0:
+        return ""
+      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+      let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+      if fileExists(projectFile):
+        repos = resolveProject(projectFile).repos
+      elif fileExists(variantFile):
+        repos = resolveVariant(variantFile).repos
+      else:
+        return ""
+  except CatchableError:
+    return ""
+  for repo in repos:
+    let repoAbs = os.normalizedPath(absolutePath(workspaceRoot / repo.path))
+    if repoAbs == target:
+      return repo.fetchUrl
+  ""
+
+proc runCachePushCommand*(args: openArray[string]): int =
+  ## Internal entry point for the detached post-commit cache push:
+  ## ``repro hooks cache-push --repo-root=PATH --workspace-name=NAME``.
+  ## Resolves the repo's upstream fetch URL, locates the shared bare for
+  ## that URL, and pushes the current branch to
+  ## ``refs/cache/<workspace>/<branch>`` via the RA-5 ``pushCacheRef``
+  ## mechanism. Best-effort: always exits 0, never raises. Designed to be
+  ## run from a detached background process (it is a no-op if the shared
+  ## bare is absent or the repo is detached).
+  var repoRoot = ""
+  var workspaceName = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--repo-root" or arg.startsWith("--repo-root="):
+      try: repoRoot = valueFromFlag(args, i, "--repo-root")
+      except CatchableError: discard
+    elif arg == "--workspace-name" or arg.startsWith("--workspace-name="):
+      try: workspaceName = valueFromFlag(args, i, "--workspace-name")
+      except CatchableError: discard
+    inc i
+  if repoRoot.len == 0 or workspaceName.len == 0:
+    return 0
+  try:
+    let repoAbs = absolutePath(repoRoot)
+    let workspaceRoot = resolvePostCommitWorkspaceRoot(repoAbs, "")
+    if workspaceRoot.len == 0:
+      return 0
+    let fetchUrl = resolveRepoFetchUrl(workspaceRoot, repoAbs)
+    if fetchUrl.len == 0:
+      return 0
+    let cacheRoot = defaultCacheRoot(workspaceRoot)
+    let bare = sharedBarePath(cacheRoot, fetchUrl)
+    # No shared bare on disk → nothing to push into. Common before the
+    # first ``init``/``shared-clones rewire`` wires the cache.
+    if not dirExists(bare / "objects"):
+      return 0
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      return 0
+    discard pushCacheRef(gitBin, repoAbs, bare, workspaceName)
+  except CatchableError:
+    discard
+  0
+
+proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
+  ## Fire a detached, fire-and-forget cache-ref push and return
+  ## immediately so the originating commit is never blocked. The child
+  ## re-invokes ``repro hooks cache-push`` in a new session (``setsid``)
+  ## with stdio detached from the parent. Best-effort: any failure to
+  ## even launch the child is swallowed.
+  when defined(windows):
+    # `start /b`-style detachment is deferred (RA-19). Skip the eager push
+    # on Windows; siblings rely on `repro workspace shared-clones rewire`.
+    discard
+  else:
+    if workspaceName.len == 0:
+      return
+    let myExe = getAppFilename()
+    if myExe.len == 0:
+      return
+    let childArgs = shellCommand(@[myExe, "hooks", "cache-push",
+      "--repo-root", repoRoot, "--workspace-name", workspaceName])
+    # `setsid ... &` detaches into a new session; redirecting all stdio to
+    # /dev/null lets the child outlive the post-commit process. The whole
+    # thing is best-effort — a failed launch never blocks the commit.
+    let cmd = "setsid " & childArgs & " </dev/null >/dev/null 2>&1 &"
+    try:
+      discard execShellCmd("sh -c " & q(cmd))
+    except CatchableError:
+      discard
+
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
   ## "best-effort": every failure is captured into the JSON report +
   ## the log file, and the process exits 0 so the originating commit
-  ## never sees a non-zero hook status.
+  ## never sees a non-zero hook status. RA-4 additionally fires a
+  ## detached, non-blocking cache-ref push (see ``spawnAsyncCachePush``).
   let parsed = parsePostCommitArgs(args)
   let timestamp = isoTimestampNow()
   let workspaceRoot = resolvePostCommitWorkspaceRoot(
@@ -17661,6 +17834,16 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
       appendPostCommitLog(workspaceRoot,
         timestamp & " " & report.outcome & " " & report.diagnostic)
     return 0
+
+  # RA-4: fire the detached cache-ref push independently of the lock
+  # refresh. It is best-effort and non-blocking — the originating commit
+  # has already landed and a failed/absent shared bare is a silent no-op.
+  # We use the post-commit repo (``--current-repo``) as the push source
+  # and the workspace directory's basename as the namespace.
+  if parsed.currentRepo.len > 0:
+    spawnAsyncCachePush(absolutePath(parsed.currentRepo),
+      extractFilename(workspaceRoot.strip(leading = false, trailing = true,
+        chars = {'/'})))
 
   # Build the strict M11 args from the dispatched argv and invoke the
   # M11 executor in-process. Any raise is downgraded to ``pcoFailed``.

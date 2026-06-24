@@ -5534,6 +5534,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim",
+    binary: "build/test-bin/t_hooks_ensure_coexists_with_pre_commit_shim",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_integration_build_engine_api_ready_queue.nim",
     binary: "build/test-bin/t_integration_build_engine_api_ready_queue",
     defines: @[],
@@ -5984,6 +5992,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim",
     binary: "build/test-bin/t_post_commit_cache_push_propagates_objects_to_sibling_workspace",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_post_commit_refreshes_lock_and_pushes_cache.nim",
+    binary: "build/test-bin/t_post_commit_refreshes_lock_and_pushes_cache",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
