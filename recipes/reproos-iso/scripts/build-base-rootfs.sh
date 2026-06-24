@@ -144,8 +144,13 @@ for g in audio video input plugdev netdev sudo; do
   groupadd -f \"\$g\" 2>/dev/null || true
 done
 useradd --create-home --shell /bin/bash --uid 1000 --groups audio,video,input,plugdev,netdev,sudo live
-LIVE_HASH='\$6\$reproos\$Rd5gmEZ6lzlf9HZUkY9SuD7Z65xVF7HhYIxQ4Q3Or8sM5wWdfaY0Hv38zXXdpVPsLZD6vN2GjdcS.HnXP/zaR0'
-ROOT_HASH='\$6\$reproos\$Rd5gmEZ6lzlf9HZUkY9SuD7Z65xVF7HhYIxQ4Q3Or8sM5wWdfaY0Hv38zXXdpVPsLZD6vN2GjdcS.HnXP/zaR0'
+## M9.R.29.16 — previous hash used a 7-char salt 'reproos' which is
+## invalid (modern crypt(3) requires 8-16 chars for SHA-512), and the
+## live-ISO 'login: ... Login incorrect' was a real auth failure, not
+## a missing-password issue. Regenerate with a valid 9-char salt
+## 'reproo123'; password is still 'reproos'.
+LIVE_HASH='\$6\$reproo123\$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/'
+ROOT_HASH='\$6\$reproo123\$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/'
 usermod -p \"\$LIVE_HASH\" live 2>/dev/null || true
 usermod -p \"\$ROOT_HASH\" root 2>/dev/null || true
 passwd -u live 2>/dev/null || true
