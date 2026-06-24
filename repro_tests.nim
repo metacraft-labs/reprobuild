@@ -6414,6 +6414,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim",
+    binary: "build/test-bin/t_repro_prompt_is_fast_and_silent_outside_workspace",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim",
     binary: "build/test-bin/t_workspace_lock_latest_resolves_via_git_history_per_repo",
     defines: @[],

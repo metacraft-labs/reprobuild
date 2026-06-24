@@ -220,7 +220,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
-      " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n\n" &
+      " show-conventions [--project=PATH] [--target=NAME] [--json] [PATH]\n       " &
+          programName &
+      " prompt [--format=plain|ansi|json|<template>] [--workspace-root=PATH]\n       " &
+          programName &
+      " prompt init bash|zsh|fish|starship|p10k|oh-my-zsh|prezto\n\n" &
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
@@ -28093,6 +28097,298 @@ proc runReproLockCommand*(args: openArray[string]): int =
     stderr.writeLine("repro lock: unknown verb '" & args[0] & "'")
     return 2
 
+# ---------------------------------------------------------------------------
+# RA-26 — `repro prompt` ambient workspace-state segment (+ `repro prompt
+# init <shell>`). Per CLI/prompt.md the prompt is recomputed on EVERY shell
+# render, so this path MUST be fast and side-effect-free: it reads only CHEAP
+# CACHED workspace state and never fans out a `git` subprocess per repo.
+#
+# Cached signals consulted (all plain filesystem reads — NO git):
+#   * ``.repo/workspace.toml``                   — the RA-10 workspace marker
+#     and the active workspace branch (``readWorkspaceBranch``). Absence of
+#     the marker is what makes the command silent + exit 0 outside a
+#     workspace.
+#   * ``.repro/workspace/sync-report.json``      — the cached per-repo state
+#     written by the last ``repro workspace sync`` (repo count + per-repo
+#     recorded branch); read for the repo count and a cheap drift signal.
+#   * ``develop-overrides.json``                 — the registered develop-mode
+#     (writable-checkout) dependencies; read for the ``dev:N`` count. This is
+#     also the on-disk side of the *physical signal* documented in
+#     CLI/prompt.md: develop deps are writable checkouts, pinned deps are
+#     read-only store paths.
+#
+# Editor/LSP integration and a daemon-pushed live-status stream are
+# explicitly OUT OF SCOPE for RA-26 (milestone scope_note).
+# ---------------------------------------------------------------------------
+
+type
+  PromptFormat = enum
+    pfPlain,    ## bare text, no escapes — safe everywhere
+    pfAnsi,     ## colorized with SGR escapes for terminals
+    pfJson,     ## structured, for custom prompt integrations
+    pfTemplate  ## user-supplied template string with ``{placeholders}``
+
+  PromptArgs = object
+    format: PromptFormat
+    templateStr: string   ## populated only when format == pfTemplate
+    workspaceRoot: string
+    explicitWorkspaceRoot: bool
+
+  PromptState = object
+    ## The cheap cached facts the segment renders. Computed once per
+    ## invocation from filesystem reads only — never a per-repo git call.
+    inWorkspace: bool
+    branch: string        ## active workspace branch ("" if unknown)
+    repoCount: int        ## participating repos per the cached sync report
+    driftRepos: int       ## repos whose cached branch != workspace branch
+    developCount: int     ## registered develop-mode (writable) dependencies
+
+proc ascendToWorkspaceRoot(startDir: string): string =
+  ## Walk up from ``startDir`` to the nearest directory carrying the RA-10
+  ## ``isInitializedWorkspace`` marker, so the prompt works from any
+  ## subdirectory of a workspace (like ``__git_ps1``). Returns "" when no
+  ## ancestor is an initialized workspace. Pure filesystem stat walk — no
+  ## git, bounded by the path depth.
+  var dir = absolutePath(startDir)
+  while true:
+    if isInitializedWorkspace(dir):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      return ""
+    dir = parent
+
+proc cachedSyncReportPath(workspaceRoot: string): string =
+  workspaceRoot / ".repro" / "workspace" / "sync-report.json"
+
+proc readPromptState(workspaceRoot: string): PromptState =
+  ## Populate the segment facts from cached state ONLY. Each read is
+  ## defensive: a missing or malformed cache degrades to a partial segment
+  ## rather than raising (the prompt must never break the user's shell).
+  result.inWorkspace = true
+  # Active branch — from ``.repo/workspace.toml`` (filesystem read, no git).
+  try:
+    let branchOpt = readWorkspaceBranch(workspaceRoot)
+    if branchOpt.isSome:
+      result.branch = branchOpt.get()
+  except CatchableError:
+    discard
+  # Repo count + drift — from the cached sync report, if one exists. We do
+  # NOT observe the live repos; we report what the last sync recorded.
+  let syncPath = cachedSyncReportPath(workspaceRoot)
+  if fileExists(extendedPath(syncPath)):
+    try:
+      let root = parseFile(extendedPath(syncPath))
+      if root.kind == JObject and root.hasKey("repos") and
+          root["repos"].kind == JArray:
+        for repo in root["repos"]:
+          if repo.kind != JObject:
+            continue
+          inc result.repoCount
+          let recordedBranch = repo{"branch"}.getStr()
+          if result.branch.len > 0 and recordedBranch.len > 0 and
+              recordedBranch != result.branch:
+            inc result.driftRepos
+    except CatchableError:
+      discard
+  # Develop-mode (writable-checkout) dependency count — from the registered
+  # overrides file. This is the cheap, cached side of the physical signal.
+  try:
+    let overridesPath = developOverridesMetadataPath(workspaceRoot)
+    result.developCount = readDevelopOverrides(overridesPath).len
+  except CatchableError:
+    discard
+
+proc segmentFields(state: PromptState): seq[(string, string)] =
+  ## The ordered (placeholder-key, rendered-value) pairs. Only non-empty
+  ## fields are emitted, matching the CLI/prompt.md example
+  ## ``[ws:feat-x ●3 dev:2]``.
+  if state.branch.len > 0:
+    result.add(("ws", "ws:" & state.branch))
+  if state.driftRepos > 0:
+    result.add(("drift", "●" & $state.driftRepos))
+  if state.developCount > 0:
+    result.add(("dev", "dev:" & $state.developCount))
+
+proc renderPromptPlain(state: PromptState): string =
+  let fields = segmentFields(state)
+  if fields.len == 0:
+    # An initialized workspace with no cached drift/develop facts still
+    # produces a stable, non-empty marker so the segment is visible.
+    return "[ws]"
+  var parts: seq[string]
+  for (_, value) in fields:
+    parts.add(value)
+  "[" & parts.join(" ") & "]"
+
+proc renderPromptAnsi(state: PromptState): string =
+  ## Same content as plain, wrapped in a dim-cyan SGR pair. We emit the
+  ## escapes unconditionally for ``--format ansi`` (the caller opts in);
+  ## ``--format plain`` stays escape-free for prompts that dislike them.
+  const sgrOn = "\e[36m"
+  const sgrOff = "\e[0m"
+  sgrOn & renderPromptPlain(state) & sgrOff
+
+proc renderPromptJson(state: PromptState): string =
+  let obj = %*{
+    "inWorkspace": state.inWorkspace,
+    "branch": state.branch,
+    "repoCount": state.repoCount,
+    "driftRepos": state.driftRepos,
+    "developCount": state.developCount,
+    "segment": renderPromptPlain(state),
+  }
+  $obj
+
+proc renderPromptTemplate(state: PromptState; tmpl: string): string =
+  ## Substitute documented ``{placeholder}`` tokens in a user format
+  ## string. Unknown tokens are left verbatim. Documented placeholders:
+  ##   {branch}  active workspace branch ("" if unknown)
+  ##   {repos}   participating repo count from the cached sync report
+  ##   {drift}   repos whose cached branch differs from the workspace branch
+  ##   {develop} registered develop-mode (writable) dependency count
+  ##   {segment} the default plain segment string
+  result = tmpl
+  result = result.replace("{branch}", state.branch)
+  result = result.replace("{repos}", $state.repoCount)
+  result = result.replace("{drift}", $state.driftRepos)
+  result = result.replace("{develop}", $state.developCount)
+  result = result.replace("{segment}", renderPromptPlain(state))
+
+proc renderPromptSegment(state: PromptState; args: PromptArgs): string =
+  case args.format
+  of pfPlain: renderPromptPlain(state)
+  of pfAnsi: renderPromptAnsi(state)
+  of pfJson: renderPromptJson(state)
+  of pfTemplate: renderPromptTemplate(state, args.templateStr)
+
+proc parsePromptArgs(args: openArray[string]): PromptArgs =
+  ## ``repro prompt [--format <plain|ansi|json|<template>>]
+  ## [--workspace-root=PATH]``. ``--format`` accepts the three named modes
+  ## or, for any other value, treats the value as a template string
+  ## (matching the spec's ``<template>`` form).
+  result.format = pfPlain
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--format" or arg.startsWith("--format="):
+      let value = valueFromFlag(args, i, "--format")
+      case value
+      of "plain": result.format = pfPlain
+      of "ansi": result.format = pfAnsi
+      of "json": result.format = pfJson
+      else:
+        result.format = pfTemplate
+        result.templateStr = value
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+      result.explicitWorkspaceRoot = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro prompt` flag: " & arg)
+    else:
+      raise newException(ValueError,
+        "unexpected positional argument to `repro prompt`: " & arg)
+    inc i
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc runPromptCommand*(args: openArray[string]): int =
+  ## ``repro prompt`` — print a compact ambient workspace-state segment for
+  ## a shell prompt / statusline. Reads ONLY cheap cached state (no
+  ## per-render git fan-out). Silent + exit 0 outside a workspace so it is
+  ## safe to drop into any prompt unconditionally. Read-only: no side
+  ## effects, never blocks on the network.
+  let parsed = parsePromptArgs(args)
+  let root =
+    if parsed.explicitWorkspaceRoot:
+      if isInitializedWorkspace(parsed.workspaceRoot):
+        parsed.workspaceRoot
+      else: ""
+    else:
+      ascendToWorkspaceRoot(parsed.workspaceRoot)
+  if root.len == 0:
+    # Outside a workspace: print NOTHING, exit 0 (CLI/prompt.md hard
+    # requirement — safe to call unconditionally with no shell guards).
+    return 0
+  let state = readPromptState(root)
+  stdout.writeLine(renderPromptSegment(state, parsed))
+  0
+
+proc renderPromptInitSnippet(shell: string; reproBin: string): string =
+  ## Emit the per-shell integration snippet (``repro prompt init <shell>``).
+  ## Like ``starship init zsh`` / ``direnv hook bash``: prints a snippet for
+  ## the user to add to their rc — it NEVER mutates the prompt itself. The
+  ## segment is appended (opt-in) so an existing prompt is preserved.
+  case shell
+  of "bash":
+    "# repro prompt — add to ~/.bashrc (opt-in; does not replace your prompt)\n" &
+    "__repro_prompt() { " & reproBin & " prompt 2>/dev/null; }\n" &
+    "PROMPT_COMMAND='PS1=\"$(__repro_prompt)$PS1_BASE\"; '\"$PROMPT_COMMAND\"\n" &
+    "# Or simpler, inline in PS1:\n" &
+    "#   PS1='$(" & reproBin & " prompt) '\"$PS1\"\n"
+  of "zsh":
+    "# repro prompt — add to ~/.zshrc (opt-in)\n" &
+    "__repro_prompt() { " & reproBin & " prompt 2>/dev/null; }\n" &
+    "setopt prompt_subst\n" &
+    "RPROMPT='$(__repro_prompt)'\"$RPROMPT\"\n"
+  of "fish":
+    "# repro prompt — add to ~/.config/fish/config.fish (opt-in)\n" &
+    "function __repro_prompt\n" &
+    "    " & reproBin & " prompt 2>/dev/null\n" &
+    "end\n" &
+    "# Append to your fish_prompt, e.g.:\n" &
+    "#   functions -c fish_prompt __fish_prompt_orig\n" &
+    "#   function fish_prompt; __fish_prompt_orig; __repro_prompt; end\n"
+  of "starship":
+    "# repro prompt — add to ~/.config/starship.toml (opt-in)\n" &
+    "[custom.repro]\n" &
+    "command = \"" & reproBin & " prompt\"\n" &
+    "when = true\n" &
+    "format = \"[$output]($style) \"\n" &
+    "shell = [\"sh\"]\n"
+  of "p10k", "powerlevel10k":
+    "# repro prompt — add to ~/.p10k.zsh (opt-in)\n" &
+    "function prompt_repro() {\n" &
+    "  local seg; seg=$(" & reproBin & " prompt 2>/dev/null)\n" &
+    "  [[ -n $seg ]] && p10k segment -f cyan -t \"$seg\"\n" &
+    "}\n" &
+    "# Then add `repro` to POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS.\n"
+  of "oh-my-zsh", "omz":
+    "# repro prompt — drop into ~/.oh-my-zsh/custom/ as repro.zsh (opt-in)\n" &
+    "__repro_prompt() { " & reproBin & " prompt 2>/dev/null; }\n" &
+    "setopt prompt_subst\n" &
+    "RPROMPT='$(__repro_prompt)'\"$RPROMPT\"\n"
+  of "prezto":
+    "# repro prompt — Prezto plugin snippet (opt-in)\n" &
+    "# Place in a module's init.zsh and append to your prompt:\n" &
+    "__repro_prompt() { " & reproBin & " prompt 2>/dev/null; }\n" &
+    "setopt prompt_subst\n" &
+    "RPROMPT='$(__repro_prompt)'\"$RPROMPT\"\n"
+  else:
+    ""
+
+proc renderPromptInitUsage(programName: string): string =
+  programName & " prompt init <bash|zsh|fish|starship|p10k|oh-my-zsh|prezto>"
+
+proc runPromptInitCommand*(programName: string; args: openArray[string];
+                           reproBin: string): int =
+  ## ``repro prompt init <shell>`` — print the integration snippet for the
+  ## named shell/prompt framework. Opt-in: it only PRINTS a snippet for the
+  ## user to add; it never edits any rc file or mutates the live prompt.
+  if args.len == 0 or args[0] in ["--help", "-h", "help"]:
+    echo renderPromptInitUsage(programName)
+    return (if args.len == 0: 2 else: 0)
+  let shell = args[0].toLowerAscii()
+  let snippet = renderPromptInitSnippet(shell, reproBin)
+  if snippet.len == 0:
+    stderr.writeLine("repro prompt init: unsupported shell '" & args[0] &
+      "'\n" & renderPromptInitUsage(programName))
+    return 2
+  stdout.write(snippet)
+  0
+
 const internalHelperAliases = {
   # Documented ``repro internal <name>`` spellings (Executable-Consolidation
   # M1) mapped to the historical ``__repro-<name>`` argument forms. The
@@ -29023,6 +29319,27 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runHardwareCommand(hardwareArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "prompt":
+    # RA-26 — `repro prompt` ambient workspace-state segment (+ `prompt
+    # init <shell>`) per CLI/prompt.md. Reads only cheap cached state (no
+    # per-render git fan-out); silent + exit 0 outside a workspace.
+    try:
+      let promptArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      if promptArgs.len > 0 and promptArgs[0] == "init":
+        let initArgs =
+          if promptArgs.len > 1:
+            promptArgs[1 .. ^1]
+          else:
+            @[]
+        return runPromptInitCommand(programName, initArgs, publicCliPath)
+      return runPromptCommand(promptArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro prompt: error: " & err.msg)
+      return 1
   if programName == "repro" and args.len > 0 and args[0] == "disk":
     # M9.R.22.4: `repro disk` subcommand surface (plan/apply/mount/...)
     # per `reprobuild-specs/ReproOS-Disko-Port.md` §4. The dispatcher
