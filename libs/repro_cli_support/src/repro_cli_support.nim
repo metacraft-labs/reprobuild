@@ -17336,6 +17336,59 @@ proc confirmDestructive*(prompt: string; autoYes: bool; isTty: bool;
   ddDeclined
 
 type
+  OfferDecision* = enum
+    ## Outcome of the shared "offer to run a SAFE remedy" prompt
+    ## (Interactive-UX-And-Progress.md Principle 2: "offer to run it
+    ## where safe"). Unlike ``confirmDestructive`` this gates a
+    ## NON-destructive fix, so the default in a non-TTY is to DESCRIBE the
+    ## remedy (print the copy-pasteable command) rather than run it — the
+    ## operator opts in to auto-run with ``--offer-fixes`` /
+    ## ``REPRO_OFFER_FIXES=1`` (the same opt-in shape as ``health --fix``).
+    odRun          ## opt-in flag/env set, or a TTY operator answered "yes".
+    odDescribed    ## non-TTY without opt-in → printed the remedy, did not run.
+    odDeclined     ## TTY operator answered "no".
+
+proc offerFixesOptIn*(): bool =
+  ## True when the operator has opted into auto-running safe remedies in a
+  ## non-interactive context. Honoured by every offer-to-run site so the
+  ## behavior is uniform (CI / agents set the env once).
+  let v = getEnv("REPRO_OFFER_FIXES").strip().toLowerAscii()
+  v == "1" or v == "true" or v == "yes" or v == "on"
+
+proc offerSafeRemedy*(description: string; remedyCommand: string;
+                      autoRun: bool; isTty: bool): OfferDecision =
+  ## The shared offer-to-run gate for a SAFE, non-destructive remedy
+  ## (Principle 2 "offer to run it where safe"). The caller prints any
+  ## context first, then calls this with a one-line ``description`` of what
+  ## the remedy does and the exact ``remedyCommand`` string (always shown,
+  ## so a refusal is never just "no"). Returns:
+  ##   - ``odRun``       when ``autoRun`` (``--offer-fixes`` /
+  ##                     ``REPRO_OFFER_FIXES``) OR a TTY operator answered
+  ##                     "yes" — the caller performs the remedy.
+  ##   - ``odDescribed`` in a non-TTY without opt-in — the remedy command is
+  ##                     printed; the caller does NOT run it (honest: we
+  ##                     never silently mutate state in a script).
+  ##   - ``odDeclined``  when a TTY operator answered "no".
+  ## This proc NEVER reads stdin unless ``isTty`` is true, so it can never
+  ## hang in a non-interactive context.
+  if autoRun:
+    stderr.writeLine("offering safe remedy (auto-run): " & description &
+      " — running `" & remedyCommand & "`")
+    return odRun
+  if not isTty:
+    stderr.writeLine("safe remedy available: " & description &
+      " — run `" & remedyCommand & "`" &
+      " (or set REPRO_OFFER_FIXES=1 to run it automatically)")
+    return odDescribed
+  stderr.write(description & " — run `" & remedyCommand & "` now? [y/N] ")
+  stderr.flushFile()
+  let answer = stdin.readLine().strip().toLowerAscii()
+  if answer == "y" or answer == "yes":
+    return odRun
+  stderr.writeLine("remedy not run; to fix manually: " & remedyCommand)
+  odDeclined
+
+type
   ForceSyncGuardOutcome = enum
     ## Result of the RA-16 / RA-9 destructive-command safety gate for
     ## ``--force-sync``.
@@ -17726,14 +17779,25 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         # do NOT abort the whole sync. Consistent with RA-11's no-rollback
         # partial-advance: readable repos still converge, the partial state
         # is reported, nothing is rolled back.
+        # Principle 2: name the offending repo AND a concrete remedy. The
+        # clone failed because the operator cannot read the repo (auth /
+        # private / wrong URL); the remedy is to gain access and re-run
+        # sync, or to drop the unreadable dependency from the workspace.
+        let offender = resolved.repos[repoIdx].path
+        let remedy = "ensure read access to '" &
+          resolved.repos[repoIdx].fetchUrl &
+          "' (auth / network) then 're-run 'repro sync', or " &
+          "'repro remove " & resolved.repos[repoIdx].name &
+          "' to drop the dependency"
         checkoutStatus[repoIdx] = ("skipped",
           "clone of newly-declared repo failed (reported, not fatal): " &
           "status=" & $outcome.status & " reason=" & outcome.reason &
-          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "") &
+          " — remedy: " & remedy)
         stderr.writeLine("workspace sync: skipped newly-declared repo '" &
-          resolved.repos[repoIdx].path & "' — clone failed (continuing): " &
+          offender & "' — clone failed (continuing): " &
           (if outcome.stderr.len > 0: outcome.stderr.strip()
-           else: outcome.reason))
+           else: outcome.reason) & " — remedy: " & remedy)
       else:
         checkoutStatus[repoIdx] = ("failed",
           "action " & a.id & " status=" & $outcome.status &
@@ -20275,7 +20339,10 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.failures.add(CheckFailure(
         repo: obs.path,
         property: "dirty",
-        remediation: "commit or stash changes in " & obs.path,
+        # Principle 2: name the offender AND a copy-pasteable command.
+        remediation: "commit or stash changes in " & obs.path &
+          " — run 'git -C " & obs.path & " commit -a' (or 'git -C " &
+          obs.path & " stash') then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
       return
@@ -20704,16 +20771,44 @@ proc runCheckCommand*(args: openArray[string]): int =
         # failed (commit / push / network error). A teammate must never pull
         # a commit whose lock never reached the manifest repo, so the push is
         # refused: record the failure and flip the gate to a non-zero exit.
-        let diag = "lock publication failed: " & pub.diagnostic
-        stderr.writeLine("repro check: " & diag)
-        report.failures.add(CheckFailure(
-          repo: "",
-          property: "lock-publish-failure",
-          remediation:
-            "publish the workspace lock to the manifest repo and re-push " &
-            "(fix the network / non-fast-forward / manifest-dirty cause above)",
-          evidence: pub.diagnostic))
-        report.exitCode = 2
+        var pub2 = pub
+        # RA-28 offer-to-run (Principle 2 "offer to run it where safe"). A
+        # PUBLISH FAILURE (``lpoFailed``: a transient commit/push/network
+        # error) has a genuinely SAFE remedy: re-running the publish only
+        # commits + pushes the ``locks/`` subtree — it never touches the
+        # operator's working trees. So we OFFER to re-run it (TTY prompt, or
+        # ``REPRO_OFFER_FIXES=1`` auto-run in non-TTY). A REFUSED-DIRTY
+        # outcome is NOT offered: clearing a manifest dirty outside
+        # ``locks/`` is the operator's decision, not a safe auto-fix — we
+        # describe the remedy and leave it to them (honest: no faked offer).
+        if pub.outcome == lpoFailed:
+          let dec = offerSafeRemedy(
+            description = "re-publish the workspace lock to the manifest repo",
+            remedyCommand = "repro push",
+            autoRun = offerFixesOptIn(),
+            isTty = isatty(stdin))
+          if dec == odRun:
+            pub2 = publishWorkspaceLock(identity, report.manifestLayerRoot)
+            if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
+              stderr.writeLine("repro check: lock re-publish succeeded: " &
+                pub2.diagnostic)
+        if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
+          # The offered remedy fixed it — the gate passes; do NOT record a
+          # failure or flip the exit code.
+          if pub2.outcome == lpoPublished:
+            stderr.writeLine("repro check: " & pub2.diagnostic)
+        else:
+          let diag = "lock publication failed: " & pub2.diagnostic
+          stderr.writeLine("repro check: " & diag)
+          report.failures.add(CheckFailure(
+            repo: "",
+            property: "lock-publish-failure",
+            remediation:
+              "run 'repro push' to publish the workspace lock to the manifest " &
+              "repo and re-push (fix the network / non-fast-forward / " &
+              "manifest-dirty cause above)",
+            evidence: pub2.diagnostic))
+          report.exitCode = 2
     writeCheckReport(report)
     if parsed.json:
       stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
@@ -23596,7 +23691,11 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       continue
     if not cleanRes.isClean:
       state.kind = rsDirty
-      state.reason = "working tree has uncommitted changes"
+      # Principle 2: name the offender (the path appears in the render line)
+      # AND a concrete remedy command the operator can copy-paste.
+      state.reason = "working tree has uncommitted changes — " &
+        "run 'git -C " & repo.path & " stash' (or 'git -C " & repo.path &
+        " commit -a') then 'repro checkout " & parsed.branchName & "'"
       states.add(state)
       continue
     # No-op short circuit: already on the requested branch.
@@ -23643,9 +23742,14 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       continue
     if lsRemote.output.strip().len == 0:
       state.kind = rsBranchMissing
+      # Principle 2: name the offending repo + missing branch AND a concrete
+      # remedy — create the branch across the workspace first, then checkout.
       state.reason = "branch '" & parsed.branchName &
         "' is absent locally and not present on remote '" &
-        remoteName & "'"
+        remoteName & "' in repo '" & repo.path &
+        "' — run 'repro branch " & parsed.branchName &
+        "' to create it across the workspace (or 'repro start " &
+        parsed.branchName & "')"
       states.add(state)
       continue
     state.remoteHadBranch = true

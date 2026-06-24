@@ -6070,6 +6070,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim",
+    binary: "build/test-bin/t_gate_refusals_name_offender_and_remedy_command",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_project_dsl_build_action_payload.nim",
     binary: "build/test-bin/t_project_dsl_build_action_payload",
     defines: @[],
