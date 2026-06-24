@@ -178,7 +178,9 @@ suite "RA-16 — resumable sync + --force-sync":
         for i in 0 ..< 3:
           let e = entryFor(report, "repo" & $i)
           check e["syncCase"].getStr() == "missing_checkout"
-          check e["executionStatus"].getStr() == "succeeded"
+          # RA-23 reports a newly-cloned (previously-absent) checkout distinctly
+          # as "cloned" rather than the "succeeded" used for an updated repo.
+          check e["executionStatus"].getStr() == "cloned"
 
       # Clone receipts from run 1 persist on disk (the resume mechanism).
       let receiptsDir = workspaceRoot / ".repro" / "workspace" / "receipts"
@@ -238,7 +240,8 @@ suite "RA-16 — resumable sync + --force-sync":
         let e1 = entryFor(report, "repo1")
         check e1["syncCase"].getStr() == "missing_checkout"
         check e1["action"].getStr() == "clone"
-        check e1["executionStatus"].getStr() == "succeeded"
+        # RA-23: a newly-cloned (previously-absent) checkout reports "cloned".
+        check e1["executionStatus"].getStr() == "cloned"
 
       # ===================================================================
       # (b) FORCE

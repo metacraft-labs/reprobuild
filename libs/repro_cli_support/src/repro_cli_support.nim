@@ -16654,6 +16654,20 @@ type
     executionStatus*: string
     executionDiagnostic*: string
 
+  WorkspaceSyncPlanEntry* = object
+    ## RA-27 — one announced-before-acting plan line per participating repo.
+    ## ``intendedAction`` is the action the sync expects to take based on
+    ## the cheap pre-execution observation (``clone`` when the working tree
+    ## is missing, else ``update`` for an existing checkout). It is a
+    ## PREVIEW, not the planner's final seven-case decision (which needs a
+    ## network fetch); the post-execution ``repos`` entries carry the real
+    ## outcome. Never hardcoded — derived from the resolved repo set + the
+    ## on-disk presence of each ``.git``.
+    name*: string
+    path*: string
+    fetchUrl*: string
+    intendedAction*: string
+
   WorkspaceSyncReport* = object
     ## Structured outcome of one ``repro workspace sync`` invocation.
     ## ``project`` carries the ``ResolvedProject.projectName``;
@@ -16663,6 +16677,14 @@ type
     ## seven-case classification per declared repo.
     project*: string
     workspaceRoot*: string
+    scopeProjects*: seq[string]
+      ## RA-27 — the ``<project>`` names this sync was scoped to (empty =
+      ## whole workspace). Surfaced so an agent/CI can confirm the scope.
+    dryRun*: bool
+      ## RA-27 — true when ``--dry-run`` was given: the plan was computed
+      ## and announced but NO mutation ran.
+    plan*: seq[WorkspaceSyncPlanEntry]
+      ## RA-27 — the announce-before-acting preview (one line per repo).
     manifestLayers*: seq[WorkspaceSyncManifestLayerEntry]
     repos*: seq[WorkspaceSyncRepoEntry]
     materialized*: seq[MaterializedFileEntry]
@@ -16673,10 +16695,67 @@ type
   WorkspaceSyncOutcome* = object
     report*: WorkspaceSyncReport
 
+type
+  WorkspaceSyncSummary* = object
+    ## RA-27 — the scannable per-repo digest at the end of a sync. Counts
+    ## are derived from the per-repo execution statuses + actions, so the
+    ## digest always reflects the real run (never hardcoded).
+    total*: int
+    succeeded*: int   ## existing checkout updated (ff / attach / merge).
+    cloned*: int      ## a newly-declared repo cloned.
+    forceReset*: int  ## ``--force-sync`` overwrote a divergent/dirty repo.
+    noop*: int        ## already at the locked revision / nothing to do.
+    skipped*: int     ## reported but not acted on (e.g. unreadable clone).
+    refused*: int     ## refuse-and-report (dirty / locally unpublished).
+    failed*: int      ## a mutating action failed.
+
+proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
+  result.total = report.repos.len
+  for entry in report.repos:
+    case entry.executionStatus
+    of "succeeded": inc result.succeeded
+    of "cloned": inc result.cloned
+    of "skipped": inc result.skipped
+    of "refused": inc result.refused
+    of "failed": inc result.failed
+    of "noop":
+      if entry.action == "force_reset": inc result.forceReset
+      else: inc result.noop
+    else:
+      # Force-reset surfaces as a non-"noop" status path; count it via the
+      # action tag so it is not silently dropped from the digest.
+      if entry.action == "force_reset": inc result.forceReset
+      else: inc result.noop
+
+proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
+  result = newJObject()
+  result["total"] = %summary.total
+  result["succeeded"] = %summary.succeeded
+  result["cloned"] = %summary.cloned
+  result["forceReset"] = %summary.forceReset
+  result["noop"] = %summary.noop
+  result["skipped"] = %summary.skipped
+  result["refused"] = %summary.refused
+  result["failed"] = %summary.failed
+
 proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
   result = newJObject()
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
+  var scope = newJArray()
+  for name in report.scopeProjects:
+    scope.add(%name)
+  result["scopeProjects"] = scope
+  result["dryRun"] = %report.dryRun
+  var plan = newJArray()
+  for entry in report.plan:
+    var obj = newJObject()
+    obj["name"] = %entry.name
+    obj["path"] = %entry.path
+    obj["fetchUrl"] = %entry.fetchUrl
+    obj["intendedAction"] = %entry.intendedAction
+    plan.add(obj)
+  result["plan"] = plan
   var layers = newJArray()
   for entry in report.manifestLayers:
     var obj = newJObject()
@@ -16716,9 +16795,48 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     materialized.add(obj)
   result["materialized"] = materialized
+  result["summary"] = report.summarize().toJsonNode()
   result["exitCode"] = %report.exitCode
 
-proc renderSyncTextLines*(report: WorkspaceSyncReport): seq[string] =
+proc renderSyncPlanLines*(report: WorkspaceSyncReport): seq[string] =
+  ## RA-27 Principle 1: ANNOUNCE the plan before acting. One scope header
+  ## line plus one line per participating repo naming the intended action.
+  ## Printed BEFORE any per-repo result so the user/agent sees what the
+  ## command is about to do (and, under ``--dry-run``, all it will do).
+  let scopeDesc =
+    if report.scopeProjects.len > 0:
+      "project(s) " & report.scopeProjects.join(", ")
+    else: "the whole workspace"
+  let prefix = if report.dryRun: "workspace sync (dry-run): "
+               else: "workspace sync plan: "
+  result.add(prefix & "will reconcile " & $report.plan.len &
+    " repo(s) across " & scopeDesc)
+  for entry in report.plan:
+    result.add(prefix & "  [" & entry.intendedAction & "] " & entry.path &
+      " (" & entry.name & ")" &
+      (if entry.fetchUrl.len > 0: " <- " & entry.fetchUrl else: ""))
+  if report.dryRun:
+    result.add(
+      "workspace sync (dry-run): no repos were modified " &
+      "(re-run without --dry-run to apply)")
+
+proc renderSyncSummaryLines*(report: WorkspaceSyncReport): seq[string] =
+  ## RA-27 Principle 1: end with a scannable per-repo digest the human can
+  ## scan and an agent can parse — counts, not a wall of raw git output.
+  let s = report.summarize()
+  result.add("workspace sync summary: " &
+    "updated " & $s.succeeded & ", cloned " & $s.cloned &
+    ", force-reset " & $s.forceReset & ", up-to-date " & $s.noop &
+    ", skipped " & $s.skipped & ", refused " & $s.refused &
+    ", failed " & $s.failed & " (" & $s.total & " repo(s))")
+
+proc renderSyncTextLines*(report: WorkspaceSyncReport;
+    verbose = false): seq[string] =
+  result.add(renderSyncPlanLines(report))
+  if report.dryRun:
+    # ``--dry-run`` announces the plan and stops; there are no per-repo
+    # results or summary to render (nothing was executed).
+    return
   for entry in report.manifestLayers:
     result.add("workspace sync: manifest-layer " & entry.provenance &
       " status=" & entry.status &
@@ -16727,6 +16845,8 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport): seq[string] =
         " " & entry.beforeSha & " → " & entry.afterSha
        else: ""))
   for entry in report.repos:
+    # RA-27 live-progress digest line per repo (the same per-repo motion the
+    # engine emits as actions complete; here it is the final, ordered form).
     var line = "workspace sync: " & entry.path & " case=" & entry.syncCase &
       " action=" & entry.action
     if entry.executionStatus.len > 0 and entry.executionStatus != "noop":
@@ -16736,11 +16856,25 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport): seq[string] =
     elif entry.message.len > 0:
       line.add(" — " & entry.message)
     result.add(line)
+    if verbose and entry.executionDiagnostic.len > 0:
+      # RA-27 ``--verbose``: surface the raw tool diagnostic behind the flag
+      # so the default output stays a legible digest.
+      result.add("    | " & entry.executionDiagnostic)
+  result.add(renderSyncSummaryLines(report))
 
 type
   WorkspaceSyncArgs = object
     workspaceRoot: string
     projectName: string
+    scopeProjects: seq[string]
+      ## RA-27 scoped sync. When non-empty, sync ONLY the union of these
+      ## named projects' repos (each resolved from
+      ## ``.repo/manifests/projects/<name>.toml`` / ``variants/<name>.toml``);
+      ## an unknown name is a clear error. Empty = whole-workspace sync
+      ## (the pre-RA-27 behavior). ``projectName`` retains the single-project
+      ## resolution dispatch for a workspace that lacks a composed
+      ## ``workspace.toml``; when ``scopeProjects`` is set the first entry
+      ## also seeds ``projectName`` for that dispatch.
     toolProvisioning: ToolProvisioningMode
     jobs: int            ## ``--jobs``/``-j``: default for both phases (0 = auto).
     jobsNetwork: int     ## ``--jobs-network``: vcs/fetch pool capacity (0 = auto).
@@ -16749,6 +16883,9 @@ type
     failFast: bool       ## ``--fail-fast``: stop on first fetch failure.
     forceSync: bool      ## ``--force-sync``: OVERWRITE divergent/dirty checkouts (RA-16).
     assumeYes: bool      ## ``--yes``/``--force``: skip the destructive-action confirmation.
+    dryRun: bool         ## RA-27 ``--dry-run``: print the plan and exit WITHOUT mutating.
+    json: bool           ## RA-27 ``--json``: machine surface (plan + per-repo results).
+    verbose: bool        ## RA-27 ``--verbose``/``-v``: include raw tool output diagnostics.
     includeGroups: seq[string]
       ## RA-18 ``--groups=a,b``: only repos in one of these groups (plus the
       ## implicit ``default`` rule) are synced. Empty = no group filter.
@@ -16840,14 +16977,24 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       result.forceSync = true
     elif arg == "--yes" or arg == "--force":
       result.assumeYes = true
+    elif arg == "--dry-run":
+      result.dryRun = true
+    elif arg == "--json":
+      result.json = true
+    elif arg == "--verbose" or arg == "-v":
+      result.verbose = true
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported `repro workspace sync` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
     else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace sync`: " & arg)
+      # RA-27: one or more positional ``<project>`` arguments SCOPE the sync
+      # to those projects' repos. The first one also seeds ``projectName``
+      # so the single-project resolution dispatch (workspaces with no
+      # composed ``workspace.toml``) keeps working; the full list drives the
+      # scoped-repo filter in ``resolveWorkspaceSyncProject``.
+      if result.projectName.len == 0:
+        result.projectName = arg
+      result.scopeProjects.add(arg)
     inc i
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
@@ -16899,6 +17046,38 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
     "no project or variant named '" & parsed.projectName &
       "' found under '" & manifestsRoot &
       "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+
+proc resolveNamedProjectOrVariant(workspaceRoot, name: string): ResolvedProject =
+  ## RA-27 scoped sync: resolve ONE named project (or variant) from the
+  ## manifest layer so its repo set can scope the participating set. An
+  ## unknown name is a clear, actionable error (Principle 2) naming where
+  ## we looked — the spec's "unknown project name → clear error".
+  let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+  let projectFile = manifestsRoot / "projects" / (name & ".toml")
+  let variantFile = manifestsRoot / "variants" / (name & ".toml")
+  if fileExists(projectFile):
+    return resolveProject(projectFile)
+  if fileExists(variantFile):
+    return resolveVariant(variantFile)
+  raise newException(ValueError,
+    "unknown project '" & name & "' passed to `repro workspace sync` " &
+      "(no `projects/" & name & ".toml` or `variants/" & name &
+      ".toml` under '" & manifestsRoot &
+      "'); run `repro workspace sync` with no project to sync the whole " &
+      "workspace, or pass a known project name")
+
+proc scopeRepoPathSet(workspaceRoot: string;
+    scopeProjects: openArray[string]): HashSet[string] =
+  ## The union of repo ``path`` values declared by the named projects.
+  ## ``executeWorkspaceSync`` filters the workspace's participating repo
+  ## set to this union — the resolver already knows project→repos, so a
+  ## scoped sync is exactly "keep only repos that belong to a named
+  ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``).
+  result = initHashSet[string]()
+  for name in scopeProjects:
+    let proj = resolveNamedProjectOrVariant(workspaceRoot, name)
+    for repo in proj.repos:
+      result.incl(repo.path)
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string] =
@@ -17449,21 +17628,64 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   var report: WorkspaceSyncReport
   report.workspaceRoot = args.workspaceRoot
 
-  # Step 1: manifest-layer refresh.
-  let refresh = refreshManifestLayers(args.workspaceRoot)
-  for entry in refresh.layers:
-    report.manifestLayers.add(WorkspaceSyncManifestLayerEntry(
-      index: entry.index,
-      provenance: entry.provenance,
-      layerPath: entry.layerPath,
-      status: manifestLayerStatusTag(entry.status),
-      beforeSha: entry.beforeSha,
-      afterSha: entry.afterSha,
-      diagnostic: entry.diagnostic))
+  # Step 1: manifest-layer refresh. RA-27 ``--dry-run`` must not mutate
+  # anything — the manifest-layer refresh fast-forwards the manifest repo's
+  # own checkout, which is a mutation — so a dry run skips it and resolves
+  # against the on-disk manifest as-is (stale manifest data is acceptable
+  # for a preview).
+  if not args.dryRun:
+    let refresh = refreshManifestLayers(args.workspaceRoot)
+    for entry in refresh.layers:
+      report.manifestLayers.add(WorkspaceSyncManifestLayerEntry(
+        index: entry.index,
+        provenance: entry.provenance,
+        layerPath: entry.layerPath,
+        status: manifestLayerStatusTag(entry.status),
+        beforeSha: entry.beforeSha,
+        afterSha: entry.afterSha,
+        diagnostic: entry.diagnostic))
 
   # Step 2: resolve (or compose) the project.
-  var resolved = resolveWorkspaceSyncProject(args)
+  #
+  # RA-27 scoped sync: ``repro workspace sync <projectA> <projectB>`` syncs
+  # ONLY the named projects' repos. When scope projects are given we resolve
+  # the FULL workspace set independent of the positionals — preferring a
+  # composer ``workspace.toml`` or a metadata-recorded project so that the
+  # positionals act purely as a SCOPE FILTER (not as the resolution target).
+  # That is what makes the filter load-bearing: the full set may span more
+  # repos than the named project, and the filter narrows it down. In a plain
+  # single-project workspace (no ``workspace.toml`` at all) there is nothing
+  # else to resolve, so the first scope project is the base — the union then
+  # equals that project's repos and the pre-RA-27 behavior is preserved.
+  var resolveArgs = args
+  if args.scopeProjects.len > 0:
+    let workspaceToml = args.workspaceRoot / ".repo" / "workspace.toml"
+    var haveBase = isCompositionalWorkspaceToml(args.workspaceRoot)
+    if not haveBase and fileExists(workspaceToml):
+      try:
+        haveBase =
+          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
+      except WorkspaceManifestParseError:
+        haveBase = false
+    if haveBase:
+      # Resolve the recorded/composed workspace, not the positional, so the
+      # scope filter below can narrow the full set.
+      resolveArgs.projectName = ""
+  var resolved = resolveWorkspaceSyncProject(resolveArgs)
   report.project = resolved.projectName
+  report.scopeProjects = args.scopeProjects
+  report.dryRun = args.dryRun
+
+  # Apply the scope filter: keep only repos that belong to one of the named
+  # projects (the resolver already knows project→repos). An unknown name
+  # raises a clear error inside ``scopeRepoPathSet`` (Principle 2).
+  if args.scopeProjects.len > 0:
+    let scopePaths = scopeRepoPathSet(args.workspaceRoot, args.scopeProjects)
+    var kept: seq[ResolvedRepo]
+    for repo in resolved.repos:
+      if repo.path in scopePaths:
+        kept.add(repo)
+    resolved.repos = kept
 
   # RA-18: subset selection by manifest group. ``--groups=a,b`` keeps only
   # repos in one of the requested groups; ``-<group>`` excludes. A repo with
@@ -17478,6 +17700,29 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       if repoSelectedByGroups(repo, args.includeGroups, args.excludeGroups):
         kept.add(repo)
     resolved.repos = kept
+
+  # RA-27 Principle 1: ANNOUNCE the plan before acting. Build a real
+  # preview from the now-final participating repo set + the cheap on-disk
+  # presence check (clone vs update). This is computed BEFORE any fetch /
+  # clone, so under ``--dry-run`` we can print it and return without ever
+  # touching the network or the working trees.
+  for repo in resolved.repos:
+    let repoPath = args.workspaceRoot / repo.path
+    let intended =
+      if dirExists(repoPath / ".git"): "update"
+      else: "clone"
+    report.plan.add(WorkspaceSyncPlanEntry(
+      name: repo.name, path: repo.path, fetchUrl: repo.fetchUrl,
+      intendedAction: intended))
+
+  # RA-27 ``--dry-run``: the plan is the deliverable; STOP before any
+  # mutating phase. No manifest-layer refresh has touched a working tree
+  # (it only fast-forwards the manifest repo's own checkout), and no
+  # per-repo fetch/clone/merge runs. Exit 0 — a dry run is informational.
+  if args.dryRun:
+    report.exitCode = 0
+    result.report = report
+    return
 
   # Step 3: resolve the git identity once.
   let identity = ensureGitToolResolvable(
@@ -17576,6 +17821,15 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     stderr.writeLine("workspace sync: optimized-fetch skipped " &
       $optimizedFetchSkips & " repo(s) already at the locked revision")
 
+  # RA-27 live progress: never a silent hang. Announce the network phase so
+  # the user/agent sees motion before the (potentially slow) parallel fetch
+  # begins. Suppressed under ``--json`` so the machine surface stays a single
+  # clean document on stdout (progress goes to stderr regardless).
+  let emitProgress = not args.json
+  if emitProgress and fetchActions.len > 0:
+    stderr.writeLine("workspace sync: fetching " & $fetchActions.len &
+      " repo(s) in parallel (jobs-network=" & $jobsNetwork & ") ...")
+
   if fetchActions.len > 0:
     var config = defaultBuildEngineConfig(engineCacheRoot)
     config.suppressTrace = true
@@ -17586,6 +17840,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     var fetchById = initTable[string, ActionResult]()
     for outcome in res.results:
       fetchById[outcome.id] = outcome
+    var fetchOk = 0
     for a in fetchActions:
       let outcome = fetchById.getOrDefault(a.id)
       if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
@@ -17595,6 +17850,11 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         stderr.writeLine("workspace sync: pre-classification fetch failed (" &
           a.id & "): status=" & $outcome.status &
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+      else:
+        inc fetchOk
+    if emitProgress:
+      stderr.writeLine("workspace sync: fetched " & $fetchOk & "/" &
+        $fetchActions.len & " repo(s)")
 
   # Step 3b: observe each repo (now with fresh remote-tracking refs).
   # Read the workspace metadata once and propagate it onto every
@@ -17751,6 +18011,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # independent of the engine's completion order.
   var checkoutStatus = initTable[int, (string, string)]()
   if checkoutActions.len > 0:
+    if emitProgress:
+      stderr.writeLine("workspace sync: updating " & $checkoutActions.len &
+        " repo(s) (clone/fast-forward/attach, jobs-checkout=" &
+        $jobsCheckout & ") ...")
     var config = defaultBuildEngineConfig(engineCacheRoot)
     config.suppressTrace = true
     config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
@@ -17773,6 +18037,11 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         # from an updated existing checkout (``succeeded``).
         checkoutStatus[repoIdx] =
           (if isClone: ("cloned", "") else: ("succeeded", ""))
+        # RA-27 per-repo live progress: emit motion as each repo finishes.
+        if emitProgress:
+          stderr.writeLine("workspace sync: [" &
+            (if isClone: "cloned" else: "updated") & "] " &
+            resolved.repos[repoIdx].path)
       elif isClone:
         # RA-23: cloning a newly-declared dependency failed (auth /
         # unreadable / private repo a teammate added). Report + SKIP it —
@@ -17875,10 +18144,24 @@ proc writeWorkspaceSyncReport(report: WorkspaceSyncReport) =
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
-  ## ``repro workspace sync [<project>] [--workspace-root=PATH]
+  ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
   ## [--jobs N|-j N] [--jobs-network N] [--jobs-checkout N]
-  ## [--no-interleaved] [--fail-fast] [--force-sync] [--yes|--force]``.
+  ## [--no-interleaved] [--fail-fast] [--force-sync] [--yes|--force]
+  ## [--dry-run] [--json] [--verbose|-v]``.
+  ##
+  ## RA-27 communicate-before-execute + live progress (Principle 1):
+  ##   - Positional ``<project>...`` SCOPES the sync to those projects'
+  ##     repos only (the participating set is filtered to the named
+  ##     projects' repos); an unknown name errors clearly. No positional =
+  ##     the whole workspace.
+  ##   - The plan (which repos / what action) is ANNOUNCED before acting;
+  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating.
+  ##   - Per-repo live progress is emitted to stderr (suppressed under
+  ##     ``--json``); the run ends with a scannable per-repo summary digest.
+  ##   - ``--json`` emits the machine surface (plan + per-repo results +
+  ##     summary) on stdout; ``--verbose``/``-v`` includes raw tool
+  ##     diagnostics behind the digest.
   ##
   ## RA-5c: ``--jobs-network`` bounds the ``vcs/fetch`` pool (parallel
   ## network fetch concurrency); ``--jobs-checkout`` bounds the checkout
@@ -17916,9 +18199,19 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##         so scripts can tell the two apart.
   let parsed = parseWorkspaceSyncArgs(args)
   let outcome = executeWorkspaceSync(parsed)
-  writeWorkspaceSyncReport(outcome.report)
-  for line in renderSyncTextLines(outcome.report):
-    stdout.writeLine(line)
+  # RA-27: a dry run does not run any mutating step, so it does not write a
+  # report artifact (there is nothing to persist about a run that did not
+  # happen). The plan is rendered to the chosen surface and we exit 0.
+  if not parsed.dryRun:
+    writeWorkspaceSyncReport(outcome.report)
+  if parsed.json:
+    # RA-27 machine surface: the plan + per-repo results + summary digest as
+    # one JSON document on stdout (the same shape persisted to
+    # ``sync-report.json``). Agents/CI consume this without scraping text.
+    stdout.writeLine(pretty(outcome.report.toJsonNode(), indent = 2))
+  else:
+    for line in renderSyncTextLines(outcome.report, parsed.verbose):
+      stdout.writeLine(line)
   outcome.report.exitCode
 
 # ---- RA-11: `repro workspace pull` ----------------------------------------

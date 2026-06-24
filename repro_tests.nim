@@ -6198,6 +6198,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim",
+    binary: "build/test-bin/t_long_operations_announce_plan_and_emit_live_progress",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim",
+    binary: "build/test-bin/t_sync_scoped_to_named_project_touches_only_that_project",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim",
     binary: "build/test-bin/t_sync_clones_newly_declared_dependency_after_pull",
     defines: @[],
