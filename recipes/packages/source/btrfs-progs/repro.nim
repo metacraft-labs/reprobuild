@@ -38,7 +38,12 @@ package btrfsProgsSource:
     "zstd"         # transparent compression dep
     "libgcrypt"    # checksumming (sha256, blake2)
     "zlib"         # zlib compression dep
-    "e2fsprogs"    # libext2fs (mkfs.btrfs --rootdir support)
+    # M9.R.29.12 — libext2fs (mkfs.btrfs --rootdir support) deferred;
+    # the sibling-recipe resolver doesn't currently bridge to the
+    # 'e2fsprogs' from-source recipe (different selector naming
+    # vs the project_dsl 'e2fsprogsSource' identifier), and we
+    # don't ship a nix-fallback stub either. The installer doesn't
+    # need --rootdir; configure with --disable-ext2 instead.
 
   config:
     discard
@@ -64,6 +69,8 @@ package btrfsProgsSource:
         "--disable-documentation",
         "--disable-python",
         "--disable-zoned",
+        "--disable-libudev",
+        "--disable-convert",
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("btrfs")
