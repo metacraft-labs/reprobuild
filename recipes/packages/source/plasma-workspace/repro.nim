@@ -335,6 +335,19 @@ package plasmaWorkspaceSource:
     ## convention's ninja-spawn + install-glue closes.
     discard
 
+  executable startplasmaWayland:
+    ## M9.R.32.1 — ``/usr/bin/startplasma-wayland`` is the Plasma
+    ## Wayland session entry-point.  SDDM's autologin chain ultimately
+    ## exec's this binary, which sets up the XDG environment, launches
+    ## kwin_wayland, then chain-exec's plasmashell.  The CMake target
+    ## lives in ``src/CMakeLists.txt``'s ``add_subdirectory(startkde)``
+    ## (restored below in ``srcPatches``) and emits the binary under
+    ## ``build/startkde/startplasma-wayland`` -> ``usr/bin/startplasma-
+    ## wayland`` in the install-mirror.  The DSL identifier
+    ## ``startplasmaWayland`` kebabs to ``startplasma-wayland`` via
+    ## the stage-copy probe.
+    discard
+
   library libPlasmaWorkspace:
     ## ``libPlasmaWorkspace.so`` — the Plasma workspace library
     ## third-party Plasma widgets + applets link against to register
@@ -550,13 +563,67 @@ package plasmaWorkspaceSource:
         # in HAVE_X11 (the field is gated on HAVE_X11 in the header but
         # the bare assignment in the .cpp isn't).
         "sed -i 's|^    m_previousWId = 0;$|#if HAVE_X11\\n    m_previousWId = 0;\\n#endif|' src/shell/shellcorona.cpp",
-        # M9.R.15q.13.14 — also drop startplasma since its startplasma.cpp
-        # includes lookandfeelmanager.h from the dropped lookandfeel
-        # KCM.  startplasma is the session launcher — the v1 path
-        # uses the upstream NDE-K1 startplasma-wayland script directly
-        # without rebuilding it from this source tree.  Drop the
-        # startkde subdir from src/CMakeLists.txt.
-        "sed -i 's|^add_subdirectory(startkde)$|# M9.R.15q.13.14: dropped — needs lookandfeel KCM headers|' src/CMakeLists.txt",
+        # M9.R.32.1 — restore ``add_subdirectory(startkde)`` so the
+        # startplasma-wayland binary is produced.  Without it, the
+        # Plasma Wayland session entry-point is missing and the live
+        # ISO falls through to a console.  Below patches strip the
+        # lookandfeelmanager dependency from startplasma.cpp +
+        # startkde/CMakeLists.txt so the build no longer needs the
+        # dropped lookandfeel KCM library (M9.R.15q.13.12 dropped
+        # the lookandfeel KCM itself; that decision stands — only the
+        # session-launcher's compile dependency on its header is
+        # surgically removed here).
+        #
+        # The LookAndFeelManager-using code in startplasma.cpp's
+        # ``setupPlasmaEnvironment()`` reapplies the user's
+        # look-and-feel package (color scheme, cursor theme,
+        # default Plasma layout) on session start when the active
+        # package changed since last login.  Stripping it makes
+        # session start use the kdedefaults already on disk + any
+        # KConfig overrides — a soft degradation users can recover
+        # from by re-applying the look-and-feel KCM in a fullbuild
+        # milestone that ships PolkitQt6-1 + krdb + libcrypt + ICU
+        # + qtx11extras.
+        "sed -i 's|^#include \"../kcms/lookandfeel/lookandfeelmanager.h\"$|// M9.R.32.1: dropped — lookandfeel KCM not built (see M9.R.15q.13.12)|' src/startkde/startplasma.cpp",
+        # Replace the LookAndFeelManager-using block inside
+        # setupPlasmaEnvironment() with a no-op marker, then re-close
+        # the function.  We use a sed range delete anchored on the
+        # ``const KConfig globals;`` line (start) and the final closing
+        # brace of setupPlasmaEnvironment (last ``    }`` line before
+        # ``cleanupPlasmaEnvironment``).  After the delete we re-add a
+        # bare ``}`` so the function terminates cleanly.
+        #
+        # The delete range:
+        #   FROM:  /^    const KConfig globals;$/
+        #   TO:    /^void cleanupPlasmaEnvironment/
+        # captures the entire tail (both lookandfeel blocks + the
+        # implicit setupPlasmaEnvironment close brace + the blank
+        # line) up to but NOT including the next function header.
+        # We then insert a single ``}\n\n`` before
+        # cleanupPlasmaEnvironment to restore the function close.
+        "sed -i '/^    const KConfig globals;$/,/^void cleanupPlasmaEnvironment/{ /^void cleanupPlasmaEnvironment/!d; }' src/startkde/startplasma.cpp",
+        "sed -i 's|^void cleanupPlasmaEnvironment|}\\n\\nvoid cleanupPlasmaEnvironment|' src/startkde/startplasma.cpp",
+        # Drop the ``lookandfeelmanager`` entry from the startplasma
+        # OBJECT lib's target_link_libraries.  The startkde
+        # CMakeLists block:
+        #
+        #     target_link_libraries(startplasma PUBLIC
+        #         Qt::Core
+        #         ...
+        #         lookandfeelmanager
+        #     )
+        #
+        # becomes the same block minus the final library name.
+        "sed -i '/^    lookandfeelmanager$/d' src/startkde/CMakeLists.txt",
+        # M9.R.32.1 — gate the startplasma-x11 target on WITH_X11.  The
+        # target links X11::X11 + kcheckrunning.cpp which both need the
+        # X11 client libraries we don't ship.  startplasma-wayland is
+        # the v1 path and stays unconditional.  Delete the four
+        # x11-target lines (add_executable, target_link_libraries
+        # block, install TARGETS).
+        "sed -i '/^add_executable(startplasma-x11/d' src/startkde/CMakeLists.txt",
+        "sed -i '/^target_link_libraries(startplasma-x11 PRIVATE$/,/^)$/d' src/startkde/CMakeLists.txt",
+        "sed -i '/^install(TARGETS startplasma-x11/d' src/startkde/CMakeLists.txt",
         # M9.R.15q.13.15 — drop kcm_autostart since its unit.cpp
         # #includes systemd/sd-journal.h which trips -Werror=undef on
         # __STDC_VERSION__ in C++ mode.  v1 plasmashell does not depend
@@ -578,6 +645,7 @@ package plasmaWorkspaceSource:
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
       discard pkg.executable("plasmashell")
+      discard pkg.executable("startplasmaWayland")
       discard pkg.library("libPlasmaWorkspace")
     finally:
       clearCurrentOwningPackageOverride()
