@@ -420,4 +420,6 @@ suite "M10 — repro workspace sync (seven sync corner cases)":
       let entry = onlyRepoEntry(readReport(fx))
       check entry["syncCase"].getStr() == "missing_checkout"
       check entry["action"].getStr() == "clone"
-      check entry["executionStatus"].getStr() == "succeeded"
+      # RA-23 reports a newly-cloned (previously-absent) checkout distinctly as
+      # "cloned" rather than the "succeeded" used for an updated existing repo.
+      check entry["executionStatus"].getStr() == "cloned"
