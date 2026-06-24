@@ -57,8 +57,10 @@ package lvm2Source:
     discard
   library libDevmapper:
     discard
-  library libLvm2cmd:
-    discard
+  ## M9.R.29.11 — ``liblvm2cmd.so`` is only built with ``--enable-applib``
+  ## which we're not enabling (the v1 installer drives the lvm CLI
+  ## directly, no embedded API). Drop the artifact registration so the
+  ## stage-copy doesn't look for a library we never produced.
 
   build:
     setCurrentOwningPackageOverride("lvm2Source")
@@ -79,7 +81,6 @@ package lvm2Source:
       discard pkg.executable("vgcreate")
       discard pkg.executable("pvcreate")
       discard pkg.library("libDevmapper")
-      discard pkg.library("libLvm2cmd")
     finally:
       clearCurrentOwningPackageOverride()
 
