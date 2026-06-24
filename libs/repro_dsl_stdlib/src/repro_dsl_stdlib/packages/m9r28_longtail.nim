@@ -82,3 +82,40 @@ package `libbsd`:
     nixPackage "nixpkgs#libbsd", executablePath = "lib/libbsd.so",
       nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
       nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+
+package `libmd`:
+  ## libmd ships ``libmd.so`` which libbsd's runtime depends on
+  ## (libbsd's DT_NEEDED includes libmd.so.0; the autoconf-style
+  ## ``-lbsd`` link probe in shadow-utils therefore needs the libmd
+  ## library on LIBRARY_PATH too, otherwise the linker fails with
+  ## ``cannot find -lmd``).
+  provisioning:
+    nixPackage "nixpkgs#libmd", executablePath = "lib/libmd.so",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+
+package `libcap`:
+  ## shadow-utils' helpers (``newuidmap``, ``newgidmap``) link against
+  ## libcap for fine-grained capability management.
+  provisioning:
+    nixPackage "nixpkgs#libcap", executablePath = "lib/libcap.so",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+
+package `libaio`:
+  ## Linux native AIO userspace library (libaio.so + libaio.h);
+  ## lvm2 reaches for it for bcache async I/O.
+  provisioning:
+    nixPackage "nixpkgs#libaio", executablePath = "lib/libaio.so",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="
+
+package `gettext`:
+  ## gettext provides ``msgfmt`` (compile .po → .mo locale catalogs)
+  ## referenced by shadow-utils, sudo, parted, e2fsprogs, util-linux
+  ## as a nativeBuildDep for translation files. The nix store ships
+  ## the runtime libintl.so + the msgfmt binary in the same package.
+  provisioning:
+    nixPackage "nixpkgs#gettext", executablePath = "bin/msgfmt",
+      nixpkgsRev = "addf7cf5f383a3101ecfba091b98d0a1263dc9b8",
+      nixpkgsNarHash = "sha256-hM20uyap1a0M9d344I692r+ik4gTMyj60cQWO+hAYP8="

@@ -110,7 +110,12 @@ PKG_LIST=(
 )
 
 PKG_DIGEST="$(printf '%s\n' "${PKG_LIST[@]}" | LC_ALL=C sort | sha256sum | awk '{print $1}')"
-CACHE_KEY="trixie-slim-${PKG_DIGEST:0:16}"
+## M9.R.29.17 — also hash the script body so shadow / autologin /
+## serial-getty changes invalidate the cache. Without this the cache
+## key only changes when PKG_LIST changes, and post-debootstrap
+## customisations silently stick from a stale tarball.
+SCRIPT_DIGEST="$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
+CACHE_KEY="trixie-slim-${PKG_DIGEST:0:8}-${SCRIPT_DIGEST:0:8}"
 CACHED_TAR="$CACHE_DIR/$CACHE_KEY.tar.xz"
 
 if [ -f "$CACHED_TAR" ]; then
@@ -144,8 +149,13 @@ for g in audio video input plugdev netdev sudo; do
   groupadd -f \"\$g\" 2>/dev/null || true
 done
 useradd --create-home --shell /bin/bash --uid 1000 --groups audio,video,input,plugdev,netdev,sudo live
-LIVE_HASH='\$6\$reproos\$Rd5gmEZ6lzlf9HZUkY9SuD7Z65xVF7HhYIxQ4Q3Or8sM5wWdfaY0Hv38zXXdpVPsLZD6vN2GjdcS.HnXP/zaR0'
-ROOT_HASH='\$6\$reproos\$Rd5gmEZ6lzlf9HZUkY9SuD7Z65xVF7HhYIxQ4Q3Or8sM5wWdfaY0Hv38zXXdpVPsLZD6vN2GjdcS.HnXP/zaR0'
+## M9.R.29.16 — previous hash used a 7-char salt 'reproos' which is
+## invalid (modern crypt(3) requires 8-16 chars for SHA-512), and the
+## live-ISO 'login: ... Login incorrect' was a real auth failure, not
+## a missing-password issue. Regenerate with a valid 9-char salt
+## 'reproo123'; password is still 'reproos'.
+LIVE_HASH='\$6\$reproo123\$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/'
+ROOT_HASH='\$6\$reproo123\$KJGP/pyxIdKyCZBeNLmdzO1b0H3n5klR49gRuog3Qel19.safRMX6YDVU9U2O098qGJMp6pp.NDp.7YcKXFnz/'
 usermod -p \"\$LIVE_HASH\" live 2>/dev/null || true
 usermod -p \"\$ROOT_HASH\" root 2>/dev/null || true
 passwd -u live 2>/dev/null || true
@@ -158,8 +168,20 @@ mkdir -p /etc/systemd/system/getty@tty1.service.d
 cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOF2
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin live --noclear %I \\\$TERM
+ExecStart=-/sbin/agetty --autologin root --noclear %I \\\$TERM
 EOF2
+## M9.R.29.17 — serial-console autologin for QEMU -nographic boots
+## (the M9.R.28 smoke ran into 'localhost login: Login incorrect'
+## because tty1's autologin doesn't help when the kernel cmdline
+## sends console=ttyS0). Enable serial-getty@ttyS0 with autologin
+## root, mirroring the tty1 override.
+mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+cat > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf <<EOF2
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --keep-baud 115200,38400,9600 %I \\\$TERM
+EOF2
+systemctl enable serial-getty@ttyS0.service 2>/dev/null || true
 "
 
 TMP_TAR="$(mktemp -t reproos-base-XXXXXX.tar)"

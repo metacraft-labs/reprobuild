@@ -60,6 +60,10 @@ package cryptsetupSource:
   build:
     setCurrentOwningPackageOverride("cryptsetupSource")
     try:
+      # M9.R.29.9b — disable the optional plugins that pull in libssh /
+      # libfido2 / libpwquality / libpasswdqc / udev. None are needed
+      # for the v1 live-ISO LUKS-via-passphrase installer flow; their
+      # absence keeps configure from hard-erroring at pkg-config.
       let opts = @[
         "--disable-static",
         "--enable-shared",
@@ -67,8 +71,15 @@ package cryptsetupSource:
         "--with-crypto_backend=gcrypt",
         "--disable-nls",
         "--disable-asciidoc",
+        "--disable-ssh-token",
+        "--disable-fido2-token",
+        "--disable-pwquality",
+        "--disable-passwdqc",
+        "--disable-udev",
+        "--enable-internal-argon2",
       ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
+      let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
+                                  patchHardcodedFile = true)
       discard pkg.executable("cryptsetup")
       discard pkg.executable("veritysetup")
       discard pkg.executable("integritysetup")

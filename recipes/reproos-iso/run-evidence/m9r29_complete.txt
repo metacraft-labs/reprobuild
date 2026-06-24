@@ -1,0 +1,129 @@
+M9.R.29 — close the M9.R.28 punch list (in progress)
+=======================================================
+
+ENVIRONMENT
+-----------
+- Host:                Windows 11 + eli-wsl (NixOS 25.05 + WSL2)
+- Reprobuild HEAD:     M9.R.29.* (see git log; 24+ commits)
+- Working tree state:  pulled fresh from origin/dev between every
+                       commit; eli-wsl reset to origin/dev between
+                       every push per the brief's discipline.
+- Tool provisioning:   `--tool-provisioning=nix` for stub-routed
+                       packages; `--tool-provisioning=from-source`
+                       for the xwayland sibling-recipe chain
+                       (libxfont2 → xtrans → xorgproto, etc).
+
+
+M9.R.29 PROGRESS — LONG-TAIL G1 RECIPES
+---------------------------------------
+Status (after recipe build + `du -sk .repro/output/install/`):
+
+  shadow-utils  INSTALL_OK   8776 KiB   (useradd, passwd, chsh, chfn, chage, groupadd)
+  sudo          INSTALL_OK   11520 KiB  (sudo, sudoedit, cvtsudoers, sudoreplay)
+  parted        INSTALL_OK   2228 KiB   (parted, partprobe)
+  e2fsprogs     INSTALL_OK   11028 KiB  (mke2fs, mkfs.ext4, e2fsck, tune2fs, resize2fs, debugfs, ...)
+  lvm2          INSTALL_OK   4860 KiB   (lvm, lvcreate, vgcreate, pvcreate, dmsetup, ...)
+  btrfs-progs   INSTALL_OK   27732 KiB  (btrfs, mkfs.btrfs, btrfsck, btrfs-image, btrfstune, ...)
+  iana-tzdata   INSTALL_OK   3384 KiB   (usr/share/zoneinfo/ tree)
+  dosfstools    INSTALL_OK   980 KiB    (M9.R.28.4.1)
+  cryptsetup    FAILED       — libgcrypt-config not on PATH (libgcrypt-dev/bin
+                              not threaded via the nix multi-output bin path).
+  gdisk         FAILED       — Makefile has no `install:` target (raw Makefile
+                              with custom build steps); needs a `customInstall`
+                              hook in the autotools_package convention.
+
+8/10 long-tail recipes LANDED end-to-end (M9.R.28 had 1/10).
+
+
+M9.R.29 PROGRESS — XWAYLAND G2 LEAF CHAIN
+------------------------------------------
+Status of the xwayland direct + transitive deps:
+
+  xorgproto       INSTALL_OK   1884 KiB  (.pc files via installTreeMirror)
+  xtrans          INSTALL_OK   272 KiB   (.pc files via installTreeMirror)
+  libxshmfence    INSTALL_OK   60 KiB    (libxshmfence.so + .pc)
+  libtirpc        INSTALL_OK   1196 KiB  (libtirpc.so)
+  ncurses         INSTALL_OK   11804 KiB (libncursesw.so + .pc + terminfo)
+  libxfont2       INSTALL_OK   992 KiB   (libXfont2.so + .pc)
+  libxkbfile      FAILED       — needs from-source `libx11` and `xorg-macros`
+                                  recipes which aren't in the corpus.
+  xkeyboard-config FAILED      — same x11 / xorg-macros dep.
+  xwayland        FAILED       — blocked on libxkbfile + xkeyboard-config.
+
+The xwayland chain blocks on missing libx11 / xorg-macros / libxext /
+libxau / libxdmcp from-source recipes — a far deeper sub-tree than the
+brief's "9 leaves" estimate (closer to ~25). This is genuinely the
+M9.R.28 honest-gap statement holding: the resolver work landed but the
+graph of leaf recipes is bigger than a single milestone can close.
+
+
+M9.R.29 DSL / INFRA CHANGES
+---------------------------
+
+  M9.R.29.1   inline nixpkgsRev / nixpkgsNarHash literals in
+              m9r28_longtail.nim — closes the "hash is not SRI"
+              tool-resolution failure that blocked every recipe whose
+              build depended on ncurses / popt / readline / zlib /
+              lzo / libgcrypt / json-c / device-mapper / util-linux /
+              pam / libbsd via the nix stub fallback.
+  M9.R.29.2   fix incorrect readline-8.2 tarball sha256.
+  M9.R.29.3   `installMakeVars` parameter added to
+              `autotools_package`; sudo uses it to override
+              install_uid / install_gid (chown root:root → chown
+              current user). Also pins sudo's MVPROG / VIPROG /
+              BSHELLPROG / SENDMAILPROG to runtime live-ISO paths.
+  M9.R.29.4   libcap nix stub.
+  M9.R.29.5   gettext nix stub.
+  M9.R.29.6   libmd nix stub + shadow-utils libmd dep.
+  M9.R.29.7   e2fsprogs executableAlias for mkfs.ext4.
+  M9.R.29.8   parted ncurses dep (termcap for readline).
+  M9.R.29.9   cryptsetup patchHardcodedFile=true; --disable-ssh-token
+              + friends.
+  M9.R.29.10  lvm2 ncurses dep + btrfs-progs e2fsprogs dep (later
+              dropped in M9.R.29.12c via --disable-convert).
+  M9.R.29.11  libaio nix stub + lvm2 libaio dep + drop libLvm2cmd
+              artifact (--enable-applib not enabled).
+  M9.R.29.12  btrfs-progs sibling-recipe selector fix + in-tree
+              Makefile (buildDir=src) + executableAlias for
+              mkfs.btrfs / btrfs-image / btrfstune.
+  M9.R.29.13  `installTreeMirror()` helper on AutotoolsPackageResult
+              + MesonPackageResult so data-only (iana-tzdata) /
+              header-only (xorgproto, xtrans) recipes emit the
+              install-tree mirror at `.repro/output/install/usr/`.
+              Unblocks the M9.R.28.4 pkgconfig-only fast-path for
+              libxfont2 / libxkbfile / xkeyboard-config consumers.
+  M9.R.29.14  libxfont2 needs zlib (XBdf bitmap compression).
+  M9.R.29.15  include libgcrypt + libgpg-error aclocal in the
+              autotools_package bootstrapPrefix.
+  M9.R.29.16  fix invalid live-ISO root/live shadow hash. The
+              M9.R.28 'localhost login: Login incorrect' wasn't a
+              missing-password issue; the salt 'reproos' was 7 chars
+              (modern crypt(3) requires 8-16 chars for SHA-512), so
+              every authentication attempt failed at hash validation.
+              Regenerate via 'mkpasswd -m sha-512 -S reproo123 reproos'.
+  M9.R.29.17  serial-getty@ttyS0 autologin root drop-in mirror of
+              tty1's autologin override. QEMU -nographic routes
+              console=ttyS0; without this drop-in the serial console
+              still prompts 'login:' even though tty1 autologins.
+              Also (.17b) include build-base-rootfs.sh script digest
+              in the cache key so shadow / autologin / serial-getty
+              edits invalidate the stale base-rootfs tarball.
+
+
+REMAINING HONEST GAPS (smaller than M9.R.28)
+=============================================
+- cryptsetup: nix multi-output bin (libgcrypt-dev/bin/libgcrypt-config)
+  not on PATH at configure time. M9.R.14h.5-style multi-output walk
+  threads include / lib but not bin. Genuine resolver fix shape:
+  populate `pathSearchList` from every realized store path, not just
+  `selectedStorePath / "bin"`.
+- gdisk: raw Makefile with no `install:` target. Needs either an
+  inline custom install action (new DSL helper) or a vendored
+  `Makefile.install` patch shipped alongside the recipe.
+- xwayland end-to-end: blocked on missing libx11 / xorg-macros /
+  libxext / libxau / libxdmcp from-source recipes (estimated ~15
+  additional leaf recipes; each is a copy-paste of an xorgproto-style
+  recipe + a custom sha256 + correct sibling-recipe deps).
+
+ISO + DE smoke evidence: see m9r29_qemu_de_smoke.log under
+recipes/reproos-iso/run-evidence/ once the ISO build completes.

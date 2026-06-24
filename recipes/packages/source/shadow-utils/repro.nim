@@ -88,6 +88,11 @@ package shadowUtilsSource:
     ## ``configure`` hard-errors with "readpassphrase() is missing,
     ## either from libc or libbsd" if neither has it.
     "libbsd"
+    ## libmd ships ``libmd.so`` which libbsd's runtime depends on
+    ## (libbsd's DT_NEEDED includes ``libmd.so.0``; the autoconf-style
+    ## ``-lbsd`` link probe in shadow-utils therefore needs libmd on
+    ## LIBRARY_PATH too).
+    "libmd"
 
   config:
     discard

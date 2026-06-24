@@ -251,6 +251,14 @@ proc files*(r: MesonPackageResult; name: string): BuildActionDef =
   discard componentPath(r.components, name) # placeholder until typed PathRef
   r.installEdge
 
+proc installTreeMirror*(r: MesonPackageResult) =
+  ## DSL-port M9.R.29.13 — emit ``emitInstallTreeMirror`` for a recipe
+  ## that produces NEITHER an executable NOR a library (data-only or
+  ## pure-header packages). See the AutotoolsPackageResult variant for
+  ## the rationale.
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage())
+
 # ---------------------------------------------------------------------------
 # Slicing methods — CmakePackageResult
 # ---------------------------------------------------------------------------
@@ -1657,3 +1665,14 @@ proc library*(r: AutotoolsPackageResult; name: string): Library =
 proc files*(r: AutotoolsPackageResult; name: string): BuildActionDef =
   discard componentPath(r.components, name)
   r.installEdge
+
+proc installTreeMirror*(r: AutotoolsPackageResult) =
+  ## DSL-port M9.R.29.13 — emit ``emitInstallTreeMirror`` for a recipe
+  ## that produces NEITHER an executable NOR a library (data-only
+  ## packages like ``iana-tzdata``, pure-header packages like
+  ## ``xorgproto`` / ``xtrans``). Without an explicit mirror call the
+  ## ``build/out/usr`` install tree never lands under
+  ## ``.repro/output/install/usr/`` and consumer recipes' M9.R.28.4
+  ## pkgconfig-only-package fast-path can't see the .pc / .h files.
+  emitInstallTreeMirror(r.installEdge, r.buildDir, r.destdir,
+    currentOwningPackage())

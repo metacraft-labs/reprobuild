@@ -78,7 +78,11 @@ package ianaTzdataSource:
       let pkg = autotools_package(srcDir = "./src",
                                   configureOptions = @["CC=gcc"],
                                   skipConfigure = true)
-      discard pkg
+      ## M9.R.29.13 — data-only zoneinfo package; emit the install
+      ## mirror explicitly so the live ISO's stage-de-rootfs walk
+      ## picks up ``usr/share/zoneinfo/`` under
+      ## ``.repro/output/install/usr/``.
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 
