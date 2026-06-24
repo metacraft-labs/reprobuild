@@ -456,6 +456,198 @@ fs.systemFile {
       check reparsed.resources[0].sfSha256 == r.sfSha256
       check reparsed.resources[0].sfSourceLocal == r.sfSourceLocal
 
+  test "windows.service Phase B: bare stanza parses with default Phase B fields":
+    # Sentinel test: a stanza that DOESN'T set the four new fields
+    # produces a SystemResource with all four at their "leave unmanaged"
+    # defaults — empty strings, empty seq, 0 — matching the back-compat
+    # invariant.
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+}
+""")
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkWindowsService
+    check profile.resources[0].serviceName == "sshd"
+    check profile.resources[0].serviceDisplayName == ""
+    check profile.resources[0].serviceBinPath == ""
+    check profile.resources[0].serviceRecoveryActions.len == 0
+    check profile.resources[0].serviceRecoveryResetSeconds == 0
+
+  test "windows.service Phase B: parses all four new fields":
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "actions.runner.metacraft-labs.windows-runner-001"
+  startType = Automatic
+  state = Running
+  displayName = "GitHub Actions Runner"
+  binPath = "C:\actions-runner\Runner.Listener.exe"
+  recoveryActions = ["restart:5000", "restart:10000", "reboot:60000"]
+  recoveryResetSeconds = 86400
+}
+""")
+    check profile.resources.len == 1
+    let r = profile.resources[0]
+    check r.kind == srkWindowsService
+    check r.serviceDisplayName == "GitHub Actions Runner"
+    check r.serviceBinPath == "C:\\actions-runner\\Runner.Listener.exe"
+    check r.serviceRecoveryActions.len == 3
+    check r.serviceRecoveryActions[0].action == wsrakRestart
+    check r.serviceRecoveryActions[0].delayMs == 5000
+    check r.serviceRecoveryActions[1].action == wsrakRestart
+    check r.serviceRecoveryActions[1].delayMs == 10000
+    check r.serviceRecoveryActions[2].action == wsrakReboot
+    check r.serviceRecoveryActions[2].delayMs == 60000
+    check r.serviceRecoveryResetSeconds == 86400
+
+  test "windows.service Phase B: rejects an unknown recovery action token":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["panic:5000"]
+}
+""")
+
+  test "windows.service Phase B: rejects malformed recoveryActions entry":
+    # Missing delay half.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart"]
+}
+""")
+    # Non-integer delay.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart:nope"]
+}
+""")
+    # Negative delay.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart:-5"]
+}
+""")
+
+  test "windows.service Phase B: rejects more than 3 recovery slots":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart:1000", "restart:2000", "restart:3000", "restart:4000"]
+}
+""")
+
+  test "windows.service Phase B: rejects a negative recoveryResetSeconds":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryResetSeconds = -1
+}
+""")
+
+  test "windows.service Phase B: rejects a non-integer recoveryResetSeconds":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryResetSeconds = bogus
+}
+""")
+
+  test "windows.service Phase B: toPrivilegedOperation carries new fields":
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  displayName = "OpenSSH SSH Server"
+  binPath = "C:\Windows\System32\OpenSSH\sshd.exe"
+  recoveryActions = ["restart:5000", "runcommand:30000"]
+  recoveryResetSeconds = 3600
+}
+""")
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokWindowsService
+    check op.serviceDisplayName == "OpenSSH SSH Server"
+    check op.serviceBinPath == "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
+    check op.serviceRecoveryActions.len == 2
+    check op.serviceRecoveryActions[0].action == wsrakRestart
+    check op.serviceRecoveryActions[0].delayMs == 5000
+    check op.serviceRecoveryActions[1].action == wsrakRunCommand
+    check op.serviceRecoveryActions[1].delayMs == 30000
+    check op.serviceRecoveryResetSeconds == 3600
+
+  test "windows.service Phase B: rendered stanza skips Phase B lines when default":
+    # Back-compat: a SystemResource without any Phase B fields renders
+    # identically to today's three-line stanza. The renderer MUST NOT
+    # emit `displayName = ""` or any other empty-default line.
+    let r = SystemResource(kind: srkWindowsService,
+      address: "windows.service:sshd",
+      serviceName: "sshd",
+      serviceStartType: "Automatic",
+      serviceRunning: true)
+    let lines = renderStanza(r)
+    let joined = lines.join("\n")
+    check "displayName" notin joined
+    check "binPath" notin joined
+    check "recoveryActions" notin joined
+    check "recoveryResetSeconds" notin joined
+    # And it still parses back into an equivalent SystemResource.
+    let reparsed = parseSystemProfile(joined & "\n")
+    check reparsed.resources.len == 1
+    check reparsed.resources[0].serviceName == "sshd"
+    check reparsed.resources[0].serviceDisplayName == ""
+
+  test "windows.service Phase B: rendered stanza round-trips Phase B fields":
+    let r = SystemResource(kind: srkWindowsService,
+      address: "actionsRunnerService",
+      serviceName: "actions.runner.001",
+      serviceStartType: "Automatic",
+      serviceRunning: true,
+      serviceDisplayName: "GitHub Actions Runner",
+      serviceBinPath: "C:\\actions-runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakRunCommand, delayMs: 30000)],
+      serviceRecoveryResetSeconds: 86400)
+    let lines = renderStanza(r)
+    let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+    check reparsed.resources.len == 1
+    check reparsed.resources[0].serviceDisplayName ==
+      "GitHub Actions Runner"
+    check reparsed.resources[0].serviceBinPath ==
+      "C:\\actions-runner\\Runner.Listener.exe"
+    check reparsed.resources[0].serviceRecoveryActions.len == 2
+    check reparsed.resources[0].serviceRecoveryActions[0].action ==
+      wsrakRestart
+    check reparsed.resources[0].serviceRecoveryActions[1].delayMs ==
+      30000
+    check reparsed.resources[0].serviceRecoveryResetSeconds == 86400
+
   test "an unclosed block is rejected":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("windows.capability {\n  name = \"X\"\n")

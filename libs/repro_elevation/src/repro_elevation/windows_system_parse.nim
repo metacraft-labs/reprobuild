@@ -133,6 +133,13 @@ proc capabilityStateMatchesDesired*(state: CapabilityState;
 # ===========================================================================
 
 type
+  ServiceRecoveryActionObservation* = object
+    ## One observed `sc qfailure` slot: the action token (lower-case,
+    ## matching the spec wire vocabulary `restart` / `runcommand` /
+    ## `reboot` / `none`) and the slot's delay in milliseconds.
+    action*: string
+    delayMs*: int
+
   ServiceObservation* = object
     ## What an observation of a Windows service reports. `present`
     ## false means the service is not installed (a `windows.service`
@@ -140,6 +147,13 @@ type
     present*: bool
     startType*: string              ## Automatic / Manual / Disabled / ""
     running*: bool
+    displayName*: string            ## Phase B: `DISPLAY_NAME` from sc qc.
+    binPath*: string                ## Phase B: `BINARY_PATH_NAME` from sc qc.
+    recoveryActions*: seq[ServiceRecoveryActionObservation]
+      ## Phase B: the 1st/2nd/subsequent-failure slots from sc qfailure.
+      ## `RESTART` / `RUN PROCESS` / `REBOOT` / blank map to the
+      ## lower-case canonical tokens.
+    recoveryResetSeconds*: int      ## Phase B: failure-count reset window.
 
 proc normalizeServiceStartType*(raw: string): string =
   ## Map the various spellings of a service start-type to the three
@@ -167,6 +181,12 @@ proc parseServiceQuery*(rawOutput: string): ServiceObservation =
   ## The driver emits exactly these two `key=value` lines from the
   ## `Get-Service` properties (or a sentinel `Missing=1` line when the
   ## service does not exist) so the parse is unambiguous and pure.
+  ##
+  ## Windows-System-Resources Phase B: an extended probe additionally
+  ## emits `DisplayName=` and `BinPath=` lines so the same parser shape
+  ## covers both the legacy two-field probe and the Phase B four-field
+  ## probe. Absent lines collapse to empty strings (the Phase B fields'
+  ## "leave unmanaged" sentinel).
   result.present = true
   result.startType = ""
   result.running = false
@@ -189,17 +209,188 @@ proc parseServiceQuery*(rawOutput: string): ServiceObservation =
     of "status":
       result.running = val.toLowerAscii() in ["running", "startpending"]
       sawAnyField = true
+    of "displayname":
+      result.displayName = val
+      sawAnyField = true
+    of "binpath", "binary_path_name", "binarypathname":
+      result.binPath = val
+      sawAnyField = true
     else: discard
   if not sawAnyField:
     result.present = false
 
+proc normalizeServiceRecoveryActionToken*(raw: string): string =
+  ## Map the various `sc qfailure` action-name spellings to the lower-
+  ## case wire vocabulary. `sc qfailure` prints `RESTART` / `RUN PROCESS`
+  ## / `REBOOT` / `NO_ACTION` (or blank); the wire tokens are `restart`
+  ## / `runcommand` / `reboot` / `none`. An unrecognized spelling
+  ## collapses to `none` so a malformed probe does NOT pose as a
+  ## meaningful policy.
+  let u = raw.strip().toUpperAscii()
+  if u.len == 0 or u == "NO_ACTION" or u == "NONE":
+    return "none"
+  if u == "RESTART":
+    return "restart"
+  if u.startsWith("RUN"):              # RUN PROCESS / RUN_COMMAND
+    return "runcommand"
+  if u == "REBOOT":
+    return "reboot"
+  return "none"
+
+proc parseSingleFailureActionLine*(text: string):
+    tuple[present: bool; action: string; delayMs: int] =
+  ## Parse a single `<ACTION> -- Delay = <ms> milliseconds.` line from
+  ## `sc qfailure` output. Returns `present=false` when the line does
+  ## not match (e.g. the `REBOOT_MESSAGE :` empty placeholder). The
+  ## action half is normalised to the lower-case wire token via
+  ## `normalizeServiceRecoveryActionToken`; the delay half is parsed
+  ## as an integer (the literal `milliseconds.` suffix is stripped
+  ## before the parse).
+  result.present = false
+  let t = text.strip()
+  if t.len == 0:
+    return
+  # The action token is the substring up to the FIRST "--" separator;
+  # the delay value is the substring after `Delay = ` to the next
+  # whitespace.
+  let sepIdx = t.find("--")
+  if sepIdx <= 0:
+    return
+  let actionRaw = t[0 ..< sepIdx].strip()
+  let actionTok = normalizeServiceRecoveryActionToken(actionRaw)
+  let after = t[sepIdx + 2 .. ^1]
+  let dEq = after.toUpperAscii().find("DELAY")
+  if dEq < 0:
+    return
+  let eqIdx = after.find('=', dEq)
+  if eqIdx < 0:
+    return
+  var delayStr = after[eqIdx + 1 .. ^1].strip()
+  # Strip trailing `milliseconds.` / `milliseconds` / `ms.` etc.
+  for stop in [" milliseconds.", " milliseconds", " ms.", " ms"]:
+    let pos = delayStr.toLowerAscii().find(stop)
+    if pos >= 0:
+      delayStr = delayStr[0 ..< pos].strip()
+      break
+  # Also drop a trailing `.` from the last token on the line.
+  if delayStr.endsWith("."):
+    delayStr = delayStr[0 ..< delayStr.len - 1].strip()
+  var delayMs: int
+  try:
+    delayMs = parseInt(delayStr)
+  except ValueError:
+    return
+  result.present = true
+  result.action = actionTok
+  result.delayMs = delayMs
+
+proc parseScQfailureOutput*(rawOutput: string):
+    tuple[resetSeconds: int;
+          actions: seq[ServiceRecoveryActionObservation]] =
+  ## Parse the `sc qfailure <name>` text output. `sc qfailure` prints a
+  ## block of the form:
+  ##
+  ##   [SC] QueryServiceConfig2 SUCCESS
+  ##
+  ##   SERVICE_NAME: foo
+  ##           RESET_PERIOD (in seconds)    : 86400
+  ##           REBOOT_MESSAGE               :
+  ##           COMMAND_LINE                 :
+  ##           FAILURE_ACTIONS              : RESTART -- Delay = 5000 milliseconds.
+  ##                                          RESTART -- Delay = 10000 milliseconds.
+  ##                                          REBOOT -- Delay = 60000 milliseconds.
+  ##
+  ## The pure parser extracts the `RESET_PERIOD` integer and walks the
+  ## `FAILURE_ACTIONS` continuation lines (indented after the colon)
+  ## for `<ACTION_TOKEN> -- Delay = <ms> milliseconds.` triples.
+  ## Missing / blank fields yield zero / empty seq (the Phase B
+  ## "no policy" sentinel).
+  result.resetSeconds = 0
+  result.actions = @[]
+  var inActions = false
+  for rawLine in rawOutput.splitLines():
+    let stripped = rawLine.strip()
+    if stripped.len == 0:
+      continue
+    let upper = stripped.toUpperAscii()
+    # RESET_PERIOD line.
+    if upper.startsWith("RESET_PERIOD") or
+       upper.startsWith("RESET PERIOD"):
+      let idx = stripped.find(':')
+      if idx >= 0:
+        let valStr = stripped[idx + 1 .. ^1].strip()
+        try:
+          result.resetSeconds = parseInt(valStr)
+        except ValueError:
+          result.resetSeconds = 0
+      inActions = false
+      continue
+    # FAILURE_ACTIONS marker — the first action token may share the
+    # line (after the `:`), subsequent actions continue on indented
+    # lines.
+    if upper.startsWith("FAILURE_ACTIONS") or
+       upper.startsWith("FAILURE ACTIONS"):
+      inActions = true
+      let idx = stripped.find(':')
+      if idx >= 0:
+        let tail = stripped[idx + 1 .. ^1].strip()
+        if tail.len > 0:
+          let act = parseSingleFailureActionLine(tail)
+          if act.present:
+            result.actions.add(ServiceRecoveryActionObservation(
+              action: act.action, delayMs: act.delayMs))
+      continue
+    # Skip other top-level fields.
+    if not inActions:
+      continue
+    # Continuation lines inside FAILURE_ACTIONS. The shape is
+    # `<TOKEN> -- Delay = <ms> milliseconds.` — `sc` may also print a
+    # secondary line for `REBOOT_MESSAGE` etc; those bail.
+    if upper.startsWith("REBOOT_MESSAGE") or
+       upper.startsWith("COMMAND_LINE"):
+      inActions = false
+      continue
+    let act = parseSingleFailureActionLine(stripped)
+    if act.present:
+      result.actions.add(ServiceRecoveryActionObservation(
+        action: act.action, delayMs: act.delayMs))
+
 proc serviceMatchesDesired*(obs: ServiceObservation;
                             wantStartType: string;
-                            wantRunning: bool): bool =
+                            wantRunning: bool;
+                            wantDisplayName = "";
+                            wantBinPath = "";
+                            wantRecoveryActions:
+                              seq[ServiceRecoveryActionObservation] = @[];
+                            wantRecoveryResetSeconds = 0): bool =
   ## A service is at the desired state when it exists, its start-type
-  ## matches, and its runtime state matches.
-  obs.present and obs.startType == wantStartType and
-    obs.running == wantRunning
+  ## matches, its runtime state matches, and — Windows-System-Resources
+  ## Phase B — each MANAGED Phase B field (non-empty desired) matches
+  ## the observation. An empty desired displayName / binPath / empty
+  ## recoveryActions / zero recoveryResetSeconds means "leave
+  ## unmanaged", and the observation's value is not compared.
+  if not obs.present:
+    return false
+  if obs.startType != wantStartType:
+    return false
+  if obs.running != wantRunning:
+    return false
+  if wantDisplayName.len > 0 and obs.displayName != wantDisplayName:
+    return false
+  if wantBinPath.len > 0 and obs.binPath != wantBinPath:
+    return false
+  if wantRecoveryActions.len > 0:
+    if obs.recoveryActions.len != wantRecoveryActions.len:
+      return false
+    for i, slot in wantRecoveryActions:
+      if obs.recoveryActions[i].action != slot.action:
+        return false
+      if obs.recoveryActions[i].delayMs != slot.delayMs:
+        return false
+  if wantRecoveryResetSeconds > 0 and
+     obs.recoveryResetSeconds != wantRecoveryResetSeconds:
+    return false
+  return true
 
 # ===========================================================================
 # Canonical-state digests. The broker's re-observe / drift gate
@@ -228,16 +419,64 @@ proc canonicalCapabilityState*(state: CapabilityState): string =
 proc canonicalCapabilityDesired*(wantInstalled: bool): string =
   if wantInstalled: "capability:installed" else: "capability:absent"
 
-proc canonicalServiceState*(obs: ServiceObservation): string =
+proc renderRecoveryDigestPart(actions: seq[ServiceRecoveryActionObservation];
+                              resetSeconds: int): string =
+  result = ":recovery="
+  for i, a in actions:
+    if i > 0:
+      result.add(',')
+    result.add(a.action)
+    result.add('/')
+    result.add($a.delayMs)
+  result.add(":reset=")
+  result.add($resetSeconds)
+
+proc canonicalServiceState*(obs: ServiceObservation;
+                            wantDisplayName = "";
+                            wantBinPath = "";
+                            includeRecovery = false): string =
+  ## Stable canonical rendering used for the broker's drift-digest.
+  ## The legacy two-argument call (`canonicalServiceState(obs)`) stays
+  ## backward-compatible by leaving the Phase B fields at their empty
+  ## defaults — the digest then matches the legacy three-field digest
+  ## byte-for-byte. When the Phase B fields are non-empty the digest
+  ## extends with their values so a drift on any of them triggers an
+  ## apply.
   if not obs.present:
     return "service:absent"
-  "service:" & obs.startType & ":" &
+  result = "service:" & obs.startType & ":" &
     (if obs.running: "running" else: "stopped")
+  # Only include displayName / binPath when the operation declared a
+  # non-empty desired value — a profile that doesn't manage these
+  # fields stays on the legacy digest.
+  if wantDisplayName.len > 0:
+    result.add(":displayName=")
+    result.add(obs.displayName)
+  if wantBinPath.len > 0:
+    result.add(":binPath=")
+    result.add(obs.binPath)
+  if includeRecovery:
+    result.add(renderRecoveryDigestPart(obs.recoveryActions,
+      obs.recoveryResetSeconds))
 
 proc canonicalServiceDesired*(wantStartType: string;
-                              wantRunning: bool): string =
-  "service:" & wantStartType & ":" &
+                              wantRunning: bool;
+                              wantDisplayName = "";
+                              wantBinPath = "";
+                              wantRecoveryActions:
+                                seq[ServiceRecoveryActionObservation] = @[];
+                              wantRecoveryResetSeconds = 0): string =
+  result = "service:" & wantStartType & ":" &
     (if wantRunning: "running" else: "stopped")
+  if wantDisplayName.len > 0:
+    result.add(":displayName=")
+    result.add(wantDisplayName)
+  if wantBinPath.len > 0:
+    result.add(":binPath=")
+    result.add(wantBinPath)
+  if wantRecoveryActions.len > 0 or wantRecoveryResetSeconds > 0:
+    result.add(renderRecoveryDigestPart(wantRecoveryActions,
+      wantRecoveryResetSeconds))
 
 # ===========================================================================
 # windows.firewallRule — `Get-NetFirewallRule` parsing.

@@ -101,6 +101,25 @@ type
       serviceName*: string
       serviceStartType*: string
       serviceRunning*: bool
+      serviceDisplayName*: string
+        ## Windows-System-Resources Phase B: optional service
+        ## `DISPLAY_NAME`. Empty (default) means "derived from `name`"
+        ## — the driver does NOT reconfigure the display name.
+      serviceBinPath*: string
+        ## Phase B: optional service `BINARY_PATH_NAME`. Empty
+        ## (default) means "reuse the SCM's current `sc qc` value" —
+        ## the driver does NOT reconfigure the binPath. A non-empty
+        ## value drives `sc.exe config <name> binPath= "<value>"`.
+      serviceRecoveryActions*: seq[WindowsServiceRecoverySpec]
+        ## Phase B: optional failure-recovery policy. Empty seq
+        ## (default) means "leave the SCM's failure policy untouched";
+        ## a non-empty seq drives `sc.exe failure <name> actions= ...`.
+        ## The driver consumes up to three (action, delayMs) slots in
+        ## declaration order.
+      serviceRecoveryResetSeconds*: int
+        ## Phase B: optional failure-count reset window. `0` (default)
+        ## means "do not emit `reset= ` to `sc.exe failure`"; a
+        ## positive value drives `sc.exe failure <name> reset= <secs>`.
     of srkWindowsVsInstaller:
       vsEdition*: string
       vsChannel*: string
@@ -634,10 +653,69 @@ proc parseSystemProfile*(text: string): SystemProfile =
       if stateStr notin ["running", "stopped"]:
         raiseSystemProfileInvalid("windows.service state '" & stateStr &
           "' is not one of Running / Stopped")
+      # Windows-System-Resources Phase B: the four new optional fields.
+      # Each is "default = leave unmanaged" — the parser accepts a
+      # stanza that omits them (the back-compat case) and the SystemResource
+      # carries the absent value as empty string / 0 / empty seq.
+      let svcName = need("name")
+      let svcDisplay =
+        if "displayName" in fields: fields["displayName"] else: ""
+      let svcBinPath =
+        if "binPath" in fields: fields["binPath"] else: ""
+      var svcRecovery: seq[WindowsServiceRecoverySpec] = @[]
+      if "recoveryActions" in rawFields:
+        let tokens = parseListLiteral(rawFields["recoveryActions"])
+        if tokens.len > 3:
+          raiseSystemProfileInvalid("windows.service '" & svcName &
+            "' recoveryActions has " & $tokens.len &
+            " entries — sc.exe failure consumes at most 3 slots")
+        for tok in tokens:
+          let sep = tok.find(':')
+          if sep <= 0 or sep == tok.len - 1:
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' is malformed (expected '<action>:<delayMs>')")
+          let actionTok = tok[0 ..< sep]
+          let delayStr = tok[sep + 1 .. ^1]
+          if not isKnownWindowsServiceRecoveryActionToken(actionTok):
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' names an unknown action '" & actionTok &
+              "' (expected restart / runcommand / reboot / none)")
+          var delayMs: int
+          try:
+            delayMs = parseInt(delayStr)
+          except ValueError:
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' has a non-integer delay '" & delayStr & "'")
+          if delayMs < 0:
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' has a negative delay (must be >= 0)")
+          svcRecovery.add(WindowsServiceRecoverySpec(
+            action: windowsServiceRecoveryActionFromToken(actionTok),
+            delayMs: delayMs))
+      var svcRecoveryReset = 0
+      if "recoveryResetSeconds" in fields:
+        let raw = fields["recoveryResetSeconds"].strip()
+        try:
+          svcRecoveryReset = parseInt(raw)
+        except ValueError:
+          raiseSystemProfileInvalid("windows.service '" & svcName &
+            "' recoveryResetSeconds '" & raw & "' is not an integer")
+        if svcRecoveryReset < 0:
+          raiseSystemProfileInvalid("windows.service '" & svcName &
+            "' recoveryResetSeconds '" & raw &
+            "' is negative (must be >= 0)")
       res = SystemResource(kind: srkWindowsService,
-        serviceName: need("name"),
+        serviceName: svcName,
         serviceStartType: st,
-        serviceRunning: stateStr == "running")
+        serviceRunning: stateStr == "running",
+        serviceDisplayName: svcDisplay,
+        serviceBinPath: svcBinPath,
+        serviceRecoveryActions: svcRecovery,
+        serviceRecoveryResetSeconds: svcRecoveryReset)
     of srkWindowsVsInstaller:
       let workloads =
         if "workloads" in rawFields: parseListLiteral(rawFields["workloads"])
@@ -1171,7 +1249,11 @@ proc toPrivilegedOperation*(r: SystemResource;
     PrivilegedOperation(kind: pokWindowsService, address: r.address,
       serviceName: r.serviceName,
       serviceStartType: r.serviceStartType,
-      serviceRunning: r.serviceRunning)
+      serviceRunning: r.serviceRunning,
+      serviceDisplayName: r.serviceDisplayName,
+      serviceBinPath: r.serviceBinPath,
+      serviceRecoveryActions: r.serviceRecoveryActions,
+      serviceRecoveryResetSeconds: r.serviceRecoveryResetSeconds)
   of srkWindowsVsInstaller:
     PrivilegedOperation(kind: pokWindowsVsInstaller, address: r.address,
       vsEdition: r.vsEdition,

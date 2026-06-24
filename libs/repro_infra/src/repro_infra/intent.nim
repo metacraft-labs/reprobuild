@@ -35,6 +35,8 @@
 import std/[os, strutils]
 from repro_core/paths import extendedPath
 
+import repro_elevation
+
 import ./errors
 import ./profile
 
@@ -245,6 +247,22 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  name = " & renderScalar(r.serviceName))
     result.add("  startType = " & r.serviceStartType)
     result.add("  state = " & (if r.serviceRunning: "Running" else: "Stopped"))
+    # Windows-System-Resources Phase B: emit the four new fields ONLY
+    # when set so a stanza that doesn't use them round-trips byte-
+    # identically with the legacy three-field rendering.
+    if r.serviceDisplayName.len > 0:
+      result.add("  displayName = " & renderScalar(r.serviceDisplayName))
+    if r.serviceBinPath.len > 0:
+      result.add("  binPath = " & renderScalar(r.serviceBinPath))
+    if r.serviceRecoveryActions.len > 0:
+      var tokens = newSeq[string]()
+      for slot in r.serviceRecoveryActions:
+        tokens.add(windowsServiceRecoveryActionToken(slot.action) &
+                   ":" & $slot.delayMs)
+      result.add("  recoveryActions = " & renderList(tokens))
+    if r.serviceRecoveryResetSeconds > 0:
+      result.add("  recoveryResetSeconds = " &
+        $r.serviceRecoveryResetSeconds)
   of srkWindowsVsInstaller:
     result.add("  edition = " & renderScalar(r.vsEdition))
     result.add("  channel = " & renderScalar(r.vsChannel))

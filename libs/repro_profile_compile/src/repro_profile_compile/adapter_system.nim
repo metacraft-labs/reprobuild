@@ -107,10 +107,82 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
   of "windows.service":
     let st = fieldString(r, "startType", "Automatic")
     let stateStr = fieldString(r, "state", "running").toLowerAscii()
+    # Windows-System-Resources Phase B: the four new optional fields.
+    # The adapter is the third surface (after the template and the text
+    # parser) the validator crosses; each layer rejects the same
+    # malformed shape so a bypass through any one path still fails
+    # closed.
+    let svcName = fieldString(r, "name")
+    let svcDisplay = fieldString(r, "displayName")
+    let svcBinPath = fieldString(r, "binPath")
+    var svcRecovery: seq[WindowsServiceRecoverySpec] = @[]
+    let recoveryTokens = fieldList(r, "recoveryActions")
+    if recoveryTokens.len > 3:
+      raise newException(ValueError,
+        "windows.service '" & svcName &
+        "' recoveryActions has " & $recoveryTokens.len &
+        " entries — sc.exe failure consumes at most 3 slots")
+    for tok in recoveryTokens:
+      let sep = tok.find(':')
+      if sep <= 0 or sep == tok.len - 1:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' is malformed (expected '<action>:<delayMs>')")
+      let actionTok = tok[0 ..< sep]
+      let delayStr = tok[sep + 1 .. ^1]
+      if not isKnownWindowsServiceRecoveryActionToken(actionTok):
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' names an unknown action '" & actionTok &
+          "' (expected restart / runcommand / reboot / none)")
+      var delayMs: int
+      try:
+        delayMs = parseInt(delayStr)
+      except ValueError:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' has a non-integer delay '" & delayStr & "'")
+      if delayMs < 0:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' has a negative delay (must be >= 0)")
+      svcRecovery.add(WindowsServiceRecoverySpec(
+        action: windowsServiceRecoveryActionFromToken(actionTok),
+        delayMs: delayMs))
+    var svcRecoveryReset = 0
+    if "recoveryResetSeconds" in r.fields:
+      let fv = r.fields["recoveryResetSeconds"]
+      case fv.kind
+      of fvkInt: svcRecoveryReset = fv.i
+      of fvkString:
+        if fv.s.strip().len > 0:
+          try:
+            svcRecoveryReset = parseInt(fv.s.strip())
+          except ValueError:
+            raise newException(ValueError,
+              "windows.service '" & svcName &
+              "' recoveryResetSeconds '" & fv.s &
+              "' is not an integer")
+      else:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryResetSeconds must be an integer field")
+    if svcRecoveryReset < 0:
+      raise newException(ValueError,
+        "windows.service '" & svcName &
+        "' recoveryResetSeconds is negative (must be >= 0)")
     result = SystemResource(kind: srkWindowsService,
-      serviceName: fieldString(r, "name"),
+      serviceName: svcName,
       serviceStartType: st,
-      serviceRunning: stateStr == "running")
+      serviceRunning: stateStr == "running",
+      serviceDisplayName: svcDisplay,
+      serviceBinPath: svcBinPath,
+      serviceRecoveryActions: svcRecovery,
+      serviceRecoveryResetSeconds: svcRecoveryReset)
   of "windows.vsInstaller":
     result = SystemResource(kind: srkWindowsVsInstaller,
       vsEdition: fieldString(r, "edition", fieldString(r, "version")),
@@ -669,6 +741,24 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("startType", quoteSystemValue(r.serviceStartType)))
       pairs.add(("state",
         quoteSystemValue(if r.serviceRunning: "running" else: "stopped")))
+      # Windows-System-Resources Phase B: emit the four new optional
+      # fields ONLY when set. A profile that omits them re-renders
+      # with NO `displayName` / `binPath` / `recoveryActions` /
+      # `recoveryResetSeconds` lines — backward-compat with the
+      # pre-Phase-B canonical text.
+      if r.serviceDisplayName.len > 0:
+        pairs.add(("displayName", quoteSystemValue(r.serviceDisplayName)))
+      if r.serviceBinPath.len > 0:
+        pairs.add(("binPath", quoteSystemValue(r.serviceBinPath)))
+      if r.serviceRecoveryActions.len > 0:
+        var tokens = newSeq[string]()
+        for slot in r.serviceRecoveryActions:
+          tokens.add(windowsServiceRecoveryActionToken(slot.action) &
+                     ":" & $slot.delayMs)
+        pairs.add(("recoveryActions", renderListLiteral(tokens)))
+      if r.serviceRecoveryResetSeconds > 0:
+        pairs.add(("recoveryResetSeconds",
+          $r.serviceRecoveryResetSeconds))
     of srkWindowsVsInstaller:
       pairs.add(("edition", quoteSystemValue(r.vsEdition)))
       pairs.add(("channel", quoteSystemValue(r.vsChannel)))

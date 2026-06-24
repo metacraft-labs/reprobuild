@@ -231,6 +231,138 @@ suite "Resource constructors":
     check target[0].fields["startType"].s == "Automatic"
     check target[0].fields["state"].s == "Running"
 
+  test "windowsService Phase B: bare call omits the four new fields":
+    # Sentinel test: a stanza that DOESN'T set the Phase B fields
+    # produces an intent IDENTICAL to today's. A regression that emits
+    # an empty `displayName = ""` (or any of the other three) would
+    # break the back-compat invariant.
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running)
+    check "displayName" notin target[0].fields
+    check "binPath" notin target[0].fields
+    check "recoveryActions" notin target[0].fields
+    check "recoveryResetSeconds" notin target[0].fields
+    # The exact three-field shape stays the same.
+    check target[0].fields.len == 3
+
+  test "windowsService Phase B: displayName carries through":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      displayName = "OpenSSH SSH Server")
+    check target[0].fields["displayName"].s == "OpenSSH SSH Server"
+    # Only the displayName field is emitted; the other three Phase B
+    # fields stay absent (default = "leave unmanaged").
+    check "binPath" notin target[0].fields
+    check "recoveryActions" notin target[0].fields
+    check "recoveryResetSeconds" notin target[0].fields
+
+  test "windowsService Phase B: binPath carries through":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      binPath = "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    check target[0].fields["binPath"].s ==
+      "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
+    check "displayName" notin target[0].fields
+    check "recoveryActions" notin target[0].fields
+    check "recoveryResetSeconds" notin target[0].fields
+
+  test "windowsService Phase B: recoveryActions encode as action:delay tokens":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      recoveryActions = @[
+        (action: wsraRestart, delayMs: 5000),
+        (action: wsraRestart, delayMs: 10000),
+        (action: wsraReboot, delayMs: 60000)],
+      recoveryResetSeconds = 86400)
+    let tokens = target[0].fields["recoveryActions"].items
+    check tokens.len == 3
+    check tokens[0] == "restart:5000"
+    check tokens[1] == "restart:10000"
+    check tokens[2] == "reboot:60000"
+    check target[0].fields["recoveryResetSeconds"].i == 86400
+
+  test "windowsService Phase B: all four recovery action variants round-trip":
+    # Closed-set vocabulary check: every WindowsServiceRecoveryAction
+    # enum variant must encode to a known lower-case token AND decode
+    # back to the same enum value. A regression here would silently
+    # collapse one variant to another's wire form.
+    for variant in [wsraNone, wsraRestart, wsraRunCommand, wsraReboot]:
+      let tok = recoveryActionToken(variant)
+      check isKnownRecoveryActionToken(tok)
+      check recoveryActionFromToken(tok) == variant
+    # The four canonical tokens are the closed set.
+    check recoveryActionToken(wsraNone) == "none"
+    check recoveryActionToken(wsraRestart) == "restart"
+    check recoveryActionToken(wsraRunCommand) == "runcommand"
+    check recoveryActionToken(wsraReboot) == "reboot"
+
+  test "windowsService Phase B: decodeWindowsServiceRecovery rejects malformed":
+    # Both the empty action half and the negative-delay half must
+    # raise — the decoder is the front-end's closed-set guard.
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("")
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart")           # no `:`
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart:")          # empty delay
+    expect ValueError:
+      discard decodeWindowsServiceRecovery(":5000")             # empty action
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("Restart:5000")      # case-sensitive
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("nope:5000")         # unknown action
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart:nope")      # non-int
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart:-1")        # negative
+    # Positive case (sanity check the same decoder accepts canonical).
+    let ok = decodeWindowsServiceRecovery("runcommand:7500")
+    check ok.action == wsraRunCommand
+    check ok.delayMs == 7500
+
+  test "windowsService Phase B: recoveryResetSeconds = 0 omitted":
+    # `0` is the "no reset" sentinel; the template MUST NOT emit the
+    # field when it stays at default, matching the back-compat
+    # invariant on a profile that doesn't manage the reset window.
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      recoveryResetSeconds = 0)
+    check "recoveryResetSeconds" notin target[0].fields
+
+  test "windowsService Phase B: empty recoveryActions seq omitted":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      recoveryActions = @[])
+    check "recoveryActions" notin target[0].fields
+
+  test "windowsService Phase B: all four fields together":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target,
+      name = "actions.runner.metacraft-labs.windows-runner-001",
+      startType = Automatic, state = Running,
+      displayName = "GitHub Actions Runner (windows-runner-001)",
+      binPath = "C:\\actions-runner\\bin\\Runner.Listener.exe",
+      recoveryActions = @[
+        (action: wsraRestart, delayMs: 5000),
+        (action: wsraRestart, delayMs: 10000),
+        (action: wsraRunCommand, delayMs: 30000)],
+      recoveryResetSeconds = 86400,
+      address = "actionsRunnerService")
+    check target[0].address == "actionsRunnerService"
+    check target[0].fields["displayName"].s ==
+      "GitHub Actions Runner (windows-runner-001)"
+    check target[0].fields["binPath"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check target[0].fields["recoveryActions"].items.len == 3
+    check target[0].fields["recoveryActions"].items[2] == "runcommand:30000"
+    check target[0].fields["recoveryResetSeconds"].i == 86400
+
   test "windowsFirewallRule records firewall rule fields":
     var target: seq[ResourceIntent] = @[]
     windowsFirewallRule(target,

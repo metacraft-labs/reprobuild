@@ -11,6 +11,7 @@
 
 import std/[os, strutils, tables, tempfiles, unittest]
 
+import repro_elevation
 import repro_infra
 import repro_profile
 import repro_profile_compile
@@ -245,6 +246,95 @@ suite "M83 Phase D: system apply round-trip via canonical text":
     f["sourceLocal"] = strField("/home/zah/profiles/myapp.toml")
     intent.resources.add(ResourceIntent(kind: "fs.systemFile",
       address: "bad", fields: f, dependsOn: @[]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "windows.service Phase B adapter -> text -> producePlan emits one op":
+    # Windows-System-Resources Phase B: end-to-end across the compile
+    # stack — the four new optional fields flow from ProfileIntent
+    # through the adapter, the canonical-text renderer, the parser,
+    # and into a PrivilegedOperation that the broker would dispatch.
+    var intent = ProfileIntent(name: "phaseB-svc-full")
+    var f = initTable[string, FieldValue]()
+    f["name"] = strField("actions.runner.windows-runner-001")
+    f["startType"] = strField("Automatic")
+    f["state"] = strField("Running")
+    f["displayName"] = strField("GitHub Actions Runner")
+    f["binPath"] = strField("C:\\actions-runner\\Runner.Listener.exe")
+    f["recoveryActions"] = listField(@[
+      "restart:5000", "restart:10000", "reboot:60000"])
+    f["recoveryResetSeconds"] = intField(86400)
+    intent.resources.add(ResourceIntent(kind: "windows.service",
+      address: "actionsRunnerService", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    check sp.resources.len == 1
+    check sp.resources[0].kind == srkWindowsService
+    check sp.resources[0].serviceDisplayName ==
+      "GitHub Actions Runner"
+    check sp.resources[0].serviceBinPath ==
+      "C:\\actions-runner\\Runner.Listener.exe"
+    check sp.resources[0].serviceRecoveryActions.len == 3
+    check sp.resources[0].serviceRecoveryActions[0].action ==
+      wsrakRestart
+    check sp.resources[0].serviceRecoveryActions[0].delayMs == 5000
+    check sp.resources[0].serviceRecoveryResetSeconds == 86400
+    let txt = renderSystemProfileToText(sp)
+    check "displayName" in txt
+    check "binPath" in txt
+    check "recoveryActions" in txt
+    check "recoveryResetSeconds" in txt
+    let reparsed = parseSystemProfile(txt)
+    check reparsed.resources[0].serviceDisplayName ==
+      "GitHub Actions Runner"
+    check reparsed.resources[0].serviceRecoveryActions.len == 3
+    let plan = producePlan(txt, "phaseB-svc-host")
+    check plan.envelope.operations.len == 1
+    check plan.envelope.operations[0].kindTag == "windows.service"
+
+  test "windows.service Phase B back-compat: bare stanza omits the four fields":
+    # A profile that doesn't set the Phase B fields renders text with
+    # NO Phase B lines — byte-compat with today's three-field
+    # rendering.
+    var intent = ProfileIntent(name: "phaseB-svc-bare")
+    var f = initTable[string, FieldValue]()
+    f["name"] = strField("sshd")
+    f["startType"] = strField("Automatic")
+    f["state"] = strField("Running")
+    intent.resources.add(ResourceIntent(kind: "windows.service",
+      address: "", fields: f, dependsOn: @[]))
+    let sp = profileIntentToSystemProfile(intent)
+    let txt = renderSystemProfileToText(sp)
+    check "displayName" notin txt
+    check "binPath" notin txt
+    check "recoveryActions" notin txt
+    check "recoveryResetSeconds" notin txt
+    check sp.resources[0].serviceDisplayName == ""
+    check sp.resources[0].serviceBinPath == ""
+    check sp.resources[0].serviceRecoveryActions.len == 0
+    check sp.resources[0].serviceRecoveryResetSeconds == 0
+
+  test "windows.service Phase B: adapter rejects malformed recoveryActions":
+    var intent = ProfileIntent(name: "phaseB-svc-bad")
+    var f = initTable[string, FieldValue]()
+    f["name"] = strField("sshd")
+    f["startType"] = strField("Automatic")
+    f["state"] = strField("Running")
+    f["recoveryActions"] = listField(@["panic:5000"])
+    intent.resources.add(ResourceIntent(kind: "windows.service",
+      address: "", fields: f, dependsOn: @[]))
+    expect ValueError:
+      discard profileIntentToSystemProfile(intent)
+
+  test "windows.service Phase B: adapter rejects more than 3 recovery slots":
+    var intent = ProfileIntent(name: "phaseB-svc-too-many")
+    var f = initTable[string, FieldValue]()
+    f["name"] = strField("sshd")
+    f["startType"] = strField("Automatic")
+    f["state"] = strField("Running")
+    f["recoveryActions"] = listField(@[
+      "restart:1000", "restart:2000", "restart:3000", "restart:4000"])
+    intent.resources.add(ResourceIntent(kind: "windows.service",
+      address: "", fields: f, dependsOn: @[]))
     expect ValueError:
       discard profileIntentToSystemProfile(intent)
 

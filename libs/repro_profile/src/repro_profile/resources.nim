@@ -457,13 +457,54 @@ template windowsService*(targetResources: var seq[ResourceIntent];
                          name: string;
                          startType: untyped;
                          state: untyped;
+                         displayName: string = "";
+                         binPath: string = "";
+                         recoveryActions: seq[WindowsServiceRecovery] = @[];
+                         recoveryResetSeconds: int = 0;
                          address: string = "";
                          dependsOn: seq[string] = @[]) =
+  ## Manage an existing Windows service's start-type, runtime state,
+  ## and (Windows-System-Resources Phase B) optional descriptor metadata
+  ## + recovery policy.
+  ##
+  ## `displayName`: empty (default) keeps the service's current
+  ## `DISPLAY_NAME` — no reconfigure issued. A non-empty value drives
+  ## `sc.exe config <name> DisplayName= "<value>"`.
+  ##
+  ## `binPath`: empty (default) leaves the SCM's current `BINARY_PATH_
+  ## NAME` untouched. A non-empty value drives `sc.exe config <name>
+  ## binPath= "<value>"`.
+  ##
+  ## `recoveryActions`: empty (default) leaves the SCM's failure policy
+  ## untouched. A non-empty seq drives `sc.exe failure <name> actions= `
+  ## with up to three `<action>/<delayMs>` slots; the action enum's
+  ## canonical lower-case token (`restart` / `runcommand` / `reboot` /
+  ## `none`) is the wire form.
+  ##
+  ## `recoveryResetSeconds`: `0` (default) means no `reset= ` value is
+  ## issued. A positive value drives `sc.exe failure <name> reset= `
+  ## (the failure-count reset window the SCM uses).
+  ##
+  ## Identity remains the service name; the four new fields are
+  ## independent and additive — a profile that doesn't set them
+  ## applies byte-identically to today.
   block:
     var fields = initTable[string, FieldValue]()
     fields["name"] = strField(name)
     fields["startType"] = strField(astToStr(startType))
     fields["state"] = strField(astToStr(state))
+    # Phase B: emit the four new fields ONLY when set so a profile that
+    # omits them round-trips byte-identically through the codec and the
+    # canonical-text renderer.
+    if displayName.len > 0:
+      fields["displayName"] = strField(displayName)
+    if binPath.len > 0:
+      fields["binPath"] = strField(binPath)
+    if recoveryActions.len > 0:
+      fields["recoveryActions"] =
+        listField(encodeWindowsServiceRecoveryList(recoveryActions))
+    if recoveryResetSeconds != 0:
+      fields["recoveryResetSeconds"] = intField(recoveryResetSeconds)
     let addr0 = if address.len > 0: address
                 else: autoAddress("windows.service", name)
     pushResource(targetResources, "windows.service", addr0, fields,

@@ -659,20 +659,54 @@ when defined(windows):
   proc serviceProbeScript(name: string): string =
     ## A deterministic two-line `key=value` probe of a service so the
     ## pure parser (`parseServiceQuery`) sees an unambiguous shape.
+    ##
+    ## Windows-System-Resources Phase B: the probe additionally surfaces
+    ## `DisplayName=` and `BinPath=` (the Win32 SCM's
+    ## `BINARY_PATH_NAME`) so the Phase B drift digest covers the four
+    ## new optional fields without a second `sc qc` shell-out for every
+    ## observation. The parser collapses absent lines to empty strings,
+    ## which is the "leave unmanaged" sentinel — backward-compatible
+    ## with the legacy two-field probe.
     "$s = Get-Service -Name " & psQuote(name) &
       " -ErrorAction SilentlyContinue; " &
       "if ($null -eq $s) { 'Missing=1' } else { " &
-      "'StartType=' + $s.StartType; 'Status=' + $s.Status }"
+      "'StartType=' + $s.StartType; 'Status=' + $s.Status; " &
+      "'DisplayName=' + $s.DisplayName; " &
+      "'BinPath=' + (Get-CimInstance Win32_Service " &
+      "-Filter (\"Name='\" + $s.Name + \"'\")).PathName }"
+
+  proc serviceQfailureProbeScript(name: string): string =
+    ## Windows-System-Resources Phase B: invoke `sc.exe qfailure
+    ## <name>` so the pure parser (`parseScQfailureOutput`) sees the
+    ## SCM's failure policy. PowerShell is just the convenient wrapper
+    ## the existing helpers already pipe through; the actual binary is
+    ## `sc.exe`.
+    "& sc.exe qfailure " & psQuote(name)
 
 proc observeWindowsService*(op: PrivilegedOperation):
     ObservedOperationState =
   when defined(windows):
     let (output, _) = runPowerShell(serviceProbeScript(op.serviceName))
-    let obs = parseServiceQuery(output)
+    var obs = parseServiceQuery(output)
+    # Windows-System-Resources Phase B: the failure policy is read by a
+    # second probe (sc.exe qfailure) ONLY when the operation declares
+    # a non-empty desired recovery policy — a profile that doesn't
+    # manage it stays on the single-probe legacy path.
+    let needRecovery = op.serviceRecoveryActions.len > 0 or
+                       op.serviceRecoveryResetSeconds > 0
+    if obs.present and needRecovery:
+      let (qfOut, _) = runPowerShell(
+        serviceQfailureProbeScript(op.serviceName))
+      let qf = parseScQfailureOutput(qfOut)
+      obs.recoveryActions = qf.actions
+      obs.recoveryResetSeconds = qf.resetSeconds
     result.present = obs.present
     result.digestHex =
       if not obs.present: ZeroDigestHex
-      else: digestHexOfText(canonicalServiceState(obs))
+      else: digestHexOfText(canonicalServiceState(obs,
+        wantDisplayName = op.serviceDisplayName,
+        wantBinPath = op.serviceBinPath,
+        includeRecovery = needRecovery))
   else:
     raiseNotImplementedPlatform("windows.service observe")
 
@@ -711,6 +745,43 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
     if stCode != 0:
       raiseProtocol("windows.service Set-Service(StartupType) of '" &
         op.serviceName & "' failed: " & stOut.strip())
+    # Windows-System-Resources Phase B: descriptor metadata. The
+    # `sc.exe config` calls are emitted ONLY when the operator declared
+    # a non-empty desired value — backwards-compat: a profile that
+    # doesn't manage them issues NO additional sc.exe call (and a
+    # re-apply is byte-identical to today).
+    if op.serviceDisplayName.len > 0:
+      let cmd = "& sc.exe config " & psQuote(op.serviceName) &
+        " DisplayName= " & psQuote(op.serviceDisplayName)
+      let (cOut, cCode) = runPowerShell(cmd)
+      if cCode != 0:
+        raiseProtocol("windows.service sc.exe config(DisplayName) of '" &
+          op.serviceName & "' failed: " & cOut.strip())
+    if op.serviceBinPath.len > 0:
+      let cmd = "& sc.exe config " & psQuote(op.serviceName) &
+        " binPath= " & psQuote(op.serviceBinPath)
+      let (cOut, cCode) = runPowerShell(cmd)
+      if cCode != 0:
+        raiseProtocol("windows.service sc.exe config(binPath) of '" &
+          op.serviceName & "' failed: " & cOut.strip())
+    # Phase B: failure-recovery policy. The `sc.exe failure` call is
+    # emitted ONLY when the operator declared a non-empty desired
+    # recovery policy.
+    let needRecovery = op.serviceRecoveryActions.len > 0 or
+                       op.serviceRecoveryResetSeconds > 0
+    if needRecovery:
+      var cmd = "& sc.exe failure " & psQuote(op.serviceName)
+      if op.serviceRecoveryResetSeconds > 0:
+        cmd.add(" reset= ")
+        cmd.add($op.serviceRecoveryResetSeconds)
+      if op.serviceRecoveryActions.len > 0:
+        cmd.add(" actions= ")
+        cmd.add(psQuote(renderScExeFailureActionsArg(
+          op.serviceRecoveryActions)))
+      let (fOut, fCode) = runPowerShell(cmd)
+      if fCode != 0:
+        raiseProtocol("windows.service sc.exe failure of '" &
+          op.serviceName & "' failed: " & fOut.strip())
     # Runtime state.
     if op.serviceRunning:
       let (rsOut, rsCode) = runPowerShell(
@@ -728,23 +799,46 @@ proc applyWindowsService*(op: PrivilegedOperation): ObservedOperationState =
     # same deterministic `key=value` shape `observeWindowsService`
     # parses, so a parser regression flags both paths.
     let (postOutput, _) = runPowerShell(serviceProbeScript(op.serviceName))
-    let after = parseServiceQuery(postOutput)
-    if not serviceMatchesDesired(after, op.serviceStartType, op.serviceRunning):
+    var after = parseServiceQuery(postOutput)
+    if needRecovery:
+      let (qfOut, _) = runPowerShell(
+        serviceQfailureProbeScript(op.serviceName))
+      let qf = parseScQfailureOutput(qfOut)
+      after.recoveryActions = qf.actions
+      after.recoveryResetSeconds = qf.resetSeconds
+    var wantSlots: seq[ServiceRecoveryActionObservation] = @[]
+    for slot in op.serviceRecoveryActions:
+      wantSlots.add(ServiceRecoveryActionObservation(
+        action: windowsServiceRecoveryActionToken(slot.action),
+        delayMs: slot.delayMs))
+    if not serviceMatchesDesired(after, op.serviceStartType,
+        op.serviceRunning,
+        wantDisplayName = op.serviceDisplayName,
+        wantBinPath = op.serviceBinPath,
+        wantRecoveryActions = wantSlots,
+        wantRecoveryResetSeconds = op.serviceRecoveryResetSeconds):
       raiseProtocol("windows.service '" & op.serviceName &
         "' post-apply observation disagrees with desired state: " &
         "observed StartType=" & after.startType &
         " Status=" & (if after.running: "Running" else: "Stopped") &
         " present=" & $after.present &
+        " displayName=" & after.displayName &
+        " binPath=" & after.binPath &
         "; desired StartType=" & op.serviceStartType &
         " Status=" & (if op.serviceRunning: "Running" else: "Stopped") &
-        ". The Set-Service / Start-Service / Stop-Service cmdlets all " &
-        "returned exit 0 but the SCM database does not reflect the " &
-        "change — the driver fails closed rather than reporting a " &
-        "spurious success.")
+        " displayName=" & op.serviceDisplayName &
+        " binPath=" & op.serviceBinPath &
+        ". The Set-Service / Start-Service / Stop-Service / sc.exe " &
+        "cmdlets all returned exit 0 but the SCM database does not " &
+        "reflect the change — the driver fails closed rather than " &
+        "reporting a spurious success.")
     result.present = after.present
     result.digestHex =
       if not after.present: ZeroDigestHex
-      else: digestHexOfText(canonicalServiceState(after))
+      else: digestHexOfText(canonicalServiceState(after,
+        wantDisplayName = op.serviceDisplayName,
+        wantBinPath = op.serviceBinPath,
+        includeRecovery = needRecovery))
   else:
     raiseNotImplementedPlatform("windows.service apply")
 

@@ -25,6 +25,33 @@ import ./posix_system_parse
 import ./system_value
 
 type
+  WindowsServiceRecoveryActionKind* = enum
+    ## Windows-System-Resources Phase B: the four `sc.exe failure`
+    ## actions a service can declare for its 1st/2nd/3rd-failure slots.
+    ## The string values are the LOWER-CASE wire form used in the
+    ## profile text, the codec frame, and the broker dispatch — `sc.exe
+    ## failure ... actions=` consumes the same tokens (with the empty
+    ## argument `""` for `wsrakNone`). The enum is the apply-side
+    ## counterpart of `repro_profile.types.WindowsServiceRecoveryAction`;
+    ## the two share a string vocabulary so a profile-side
+    ## `WindowsServiceRecoveryAction.Restart` flows through the
+    ## adapter as `"restart"` and lands here as `wsrakRestart` without
+    ## a separate translation table.
+    wsrakNone = "none"
+    wsrakRestart = "restart"
+    wsrakRunCommand = "runcommand"
+    wsrakReboot = "reboot"
+
+  WindowsServiceRecoverySpec* = object
+    ## One slot of `windows.service`'s `recoveryActions` field — an
+    ## (action, delayMs) pair the SCM invokes on a failure. The
+    ## sequence is positional inside the operation (1st-failure /
+    ## 2nd-failure / subsequent-failure slot); `sc.exe failure ...
+    ## actions=a1/d1/a2/d2/a3/d3` consumes up to three entries in
+    ## declaration order.
+    action*: WindowsServiceRecoveryActionKind
+    delayMs*: int
+
   PrivilegedOperationKind* = enum
     ## The variant tag for `PrivilegedOperation`. The string form is
     ## what the RBEB protocol serializes; an unknown tag on the wire
@@ -313,9 +340,32 @@ type
       ## `serviceName` is the service short name; `serviceStartType`
       ## is one of `Automatic` / `Manual` / `Disabled`;
       ## `serviceRunning` selects the desired runtime state.
+      ##
+      ## Windows-System-Resources Phase B: the four optional fields
+      ## below extend the operation with the service's descriptor
+      ## metadata + failure-recovery policy. Each is "default = leave
+      ## unmanaged"; the driver only emits the corresponding `sc.exe
+      ## config` / `sc.exe failure` call when the value is non-default.
+      ## A profile that doesn't set them applies byte-identically to
+      ## today.
       serviceName*: string
       serviceStartType*: string
       serviceRunning*: bool
+      serviceDisplayName*: string
+        ## Phase B: optional `DISPLAY_NAME` to converge. Empty means
+        ## "leave unmanaged" — the driver does NOT issue a
+        ## `sc.exe config <name> DisplayName= ...` call.
+      serviceBinPath*: string
+        ## Phase B: optional `BINARY_PATH_NAME` to converge. Empty
+        ## means "leave unmanaged" — the driver does NOT issue a
+        ## `sc.exe config <name> binPath= ...` call.
+      serviceRecoveryActions*: seq[WindowsServiceRecoverySpec]
+        ## Phase B: optional failure-recovery slots. Empty seq means
+        ## "leave the SCM's failure policy untouched". A non-empty
+        ## seq drives `sc.exe failure <name> actions= <a1>/<d1>/...`.
+      serviceRecoveryResetSeconds*: int
+        ## Phase B: optional failure-count reset window. `0` means
+        ## "do not emit `reset= ` to `sc.exe failure`".
     of pokWindowsVsInstaller:
       ## Converge a Visual Studio installation to the declared
       ## workload/component membership. `vsEdition` is the short
@@ -880,6 +930,106 @@ proc isSafeLaunchdLabel*(label: string): bool =
   return true
 
 # ---------------------------------------------------------------------------
+# windows.service — recovery-action token codec + sc.exe argv assembler.
+#
+# Windows-System-Resources Phase B extends the `windows.service`
+# operation with four optional fields (`displayName`, `binPath`,
+# `recoveryActions`, `recoveryResetSeconds`). The pure logic that
+# converts the typed `WindowsServiceRecoveryActionKind` enum to its
+# string token and assembles the `sc.exe failure / sc.exe config` argv
+# lives here so the cross-platform unit tests can exercise the formatter
+# without a Windows host. The driver in
+# `windows_system_driver.applyWindowsService` consumes these helpers
+# verbatim.
+# ---------------------------------------------------------------------------
+
+proc windowsServiceRecoveryActionToken*(
+    a: WindowsServiceRecoveryActionKind): string =
+  ## The lower-case wire token for a recovery action; also the form
+  ## `sc.exe failure ... actions=<a>/<d>/...` consumes. `wsrakNone`
+  ## renders as the literal `""` argument the SCM treats as "no
+  ## action".
+  $a
+
+proc windowsServiceRecoveryActionFromToken*(
+    raw: string): WindowsServiceRecoveryActionKind =
+  ## Strict parse of a recovery-action token. Accepts the canonical
+  ## lower-case forms only — mirrors the closed-set posture of every
+  ## other typed-field validator. Raises `ValueError` on a mismatch.
+  case raw
+  of "none": wsrakNone
+  of "restart": wsrakRestart
+  of "runcommand": wsrakRunCommand
+  of "reboot": wsrakReboot
+  else:
+    raise newException(ValueError,
+      "unknown windows.service recovery action token '" & raw &
+      "' (expected one of restart / runcommand / reboot / none)")
+
+proc isKnownWindowsServiceRecoveryActionToken*(raw: string): bool =
+  ## Non-raising form for the closed-set validator. Mirrors
+  ## `isKnownPrivilegedOperationKind` / `isSafeDefaultsTypeFlag`.
+  raw in ["none", "restart", "runcommand", "reboot"]
+
+proc scExeFailureActionToken*(
+    a: WindowsServiceRecoveryActionKind): string =
+  ## The `sc.exe failure ... actions=` token for a recovery action.
+  ## `wsrakNone` -> empty string (the SCM treats an empty slot as "no
+  ## action"); every other variant -> its lower-case token.
+  case a
+  of wsrakNone: ""
+  of wsrakRestart: "restart"
+  of wsrakRunCommand: "run"          # sc.exe's spelling of the cmdlet
+  of wsrakReboot: "reboot"
+
+proc renderScExeFailureActionsArg*(
+    actions: seq[WindowsServiceRecoverySpec]): string =
+  ## Build the `actions=` argument value `sc.exe failure` consumes:
+  ## `<a1>/<d1>/<a2>/<d2>/<a3>/<d3>`. Each `<a>` is the lower-case
+  ## token from `scExeFailureActionToken`; each `<d>` is the slot's
+  ## delay-in-milliseconds. An empty `actions` seq returns the empty
+  ## string — callers should test `actions.len > 0` and skip the
+  ## `sc.exe failure` invocation entirely in that case.
+  for i, e in actions:
+    if i > 0:
+      result.add('/')
+    result.add(scExeFailureActionToken(e.action))
+    result.add('/')
+    result.add($e.delayMs)
+
+proc renderScExeFailureCommand*(serviceName: string;
+                                 resetSeconds: int;
+                                 actions: seq[WindowsServiceRecoverySpec]):
+    seq[string] =
+  ## Build the argv `sc.exe failure <serviceName> reset= <secs>
+  ## actions= <a1>/<d1>/...` consumes. Returned as a `seq[string]` so
+  ## the driver can hand it directly to the spawning helper without a
+  ## shell pass. NOTE: `sc.exe` is finicky — the `=` MUST be at the END
+  ## of the option name and the value MUST be a separate argv entry, so
+  ## the assembly emits `reset=` / `<secs>` / `actions=` / `<value>`
+  ## as four separate argv tokens (NOT `"reset= <secs>"` jammed in one).
+  result = @["sc.exe", "failure", serviceName]
+  if resetSeconds > 0:
+    result.add("reset=")
+    result.add($resetSeconds)
+  if actions.len > 0:
+    result.add("actions=")
+    result.add(renderScExeFailureActionsArg(actions))
+
+proc renderScExeConfigBinPathCommand*(serviceName: string;
+                                       binPath: string): seq[string] =
+  ## Build the `sc.exe config <serviceName> binPath= "<binPath>"` argv.
+  ## Returned as separate tokens for the same finicky-sc.exe reason as
+  ## `renderScExeFailureCommand`.
+  @["sc.exe", "config", serviceName, "binPath=", binPath]
+
+proc renderScExeConfigDisplayNameCommand*(serviceName: string;
+                                           displayName: string): seq[string] =
+  ## Build the `sc.exe config <serviceName> DisplayName= "<displayName>"`
+  ## argv.
+  @["sc.exe", "config", serviceName, "DisplayName=", displayName]
+
+# ---------------------------------------------------------------------------
 # windows.firewallRule — protocol/direction/action allowlists and
 # identifier/port charset guards.
 #
@@ -1300,6 +1450,22 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if op.serviceStartType notin ["Automatic", "Manual", "Disabled"]:
       return "windows.service start-type '" & op.serviceStartType &
         "' is not one of Automatic / Manual / Disabled"
+    # Windows-System-Resources Phase B: validate the four new fields.
+    # The action enum's closed-set check rides the typed variant itself
+    # (a frame decoder catches a bad token before this proc sees it), so
+    # we only sanity-check the delay/reset numerics + cap the slot count
+    # at 3 (sc.exe failure consumes at most three positional slots).
+    if op.serviceRecoveryResetSeconds < 0:
+      return "windows.service recoveryResetSeconds for '" &
+        op.serviceName & "' is negative (must be >= 0)"
+    if op.serviceRecoveryActions.len > 3:
+      return "windows.service recoveryActions for '" & op.serviceName &
+        "' has " & $op.serviceRecoveryActions.len &
+        " entries — sc.exe failure consumes at most 3 slots"
+    for idx, slot in op.serviceRecoveryActions:
+      if slot.delayMs < 0:
+        return "windows.service recoveryActions[" & $idx & "] for '" &
+          op.serviceName & "' has a negative delayMs (must be >= 0)"
   of pokWindowsVsInstaller:
     if op.vsEdition.len == 0:
       return "windows.vsInstaller operation has an empty edition"

@@ -1410,6 +1410,336 @@ LocalPort=22
       pokWindowsFirewallRule
 
 # ===========================================================================
+# windows.service Phase B (Windows-System-Resources) — closed-set
+# recovery action vocabulary, sc.exe argv formatter, codec round-trip
+# across all four optional fields, and sc qfailure output parser. The
+# real driver runs only on Windows; what runs everywhere is the pure
+# logic verified below.
+# ===========================================================================
+
+suite "repro_elevation: windows.service Phase B pure surface":
+
+  test "all four recovery-action enum variants round-trip through their token":
+    for variant in [wsrakNone, wsrakRestart, wsrakRunCommand, wsrakReboot]:
+      let tok = windowsServiceRecoveryActionToken(variant)
+      check isKnownWindowsServiceRecoveryActionToken(tok)
+      check windowsServiceRecoveryActionFromToken(tok) == variant
+    # Canonical lower-case vocabulary.
+    check windowsServiceRecoveryActionToken(wsrakNone) == "none"
+    check windowsServiceRecoveryActionToken(wsrakRestart) == "restart"
+    check windowsServiceRecoveryActionToken(wsrakRunCommand) == "runcommand"
+    check windowsServiceRecoveryActionToken(wsrakReboot) == "reboot"
+
+  test "windowsServiceRecoveryActionFromToken rejects unknown / uppercase":
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("Restart")
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("RESTART")
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("")
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("nope")
+    check not isKnownWindowsServiceRecoveryActionToken("Restart")
+    check not isKnownWindowsServiceRecoveryActionToken("")
+
+  test "scExeFailureActionToken maps to the SCM's sc.exe vocabulary":
+    # `sc.exe failure ... actions=` consumes `restart` / `run` / `reboot`
+    # / empty (with the `runcommand` enum mapping to sc.exe's shorter
+    # `run` spelling — which is what the failure-action printer prints).
+    check scExeFailureActionToken(wsrakRestart) == "restart"
+    check scExeFailureActionToken(wsrakRunCommand) == "run"
+    check scExeFailureActionToken(wsrakReboot) == "reboot"
+    check scExeFailureActionToken(wsrakNone) == ""
+
+  test "renderScExeFailureActionsArg assembles slash-separated slots":
+    let actions = @[
+      WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+      WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 10000),
+      WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)]
+    check renderScExeFailureActionsArg(actions) ==
+      "restart/5000/restart/10000/reboot/60000"
+    # Empty seq -> empty string (caller decides to skip the sc.exe call).
+    check renderScExeFailureActionsArg(@[]) == ""
+    # Single slot.
+    check renderScExeFailureActionsArg(@[WindowsServiceRecoverySpec(
+      action: wsrakRunCommand, delayMs: 30000)]) == "run/30000"
+
+  test "renderScExeFailureCommand emits reset + actions in argv form":
+    let argv = renderScExeFailureCommand("sshd", 86400, @[
+      WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000)])
+    check argv == @[
+      "sc.exe", "failure", "sshd",
+      "reset=", "86400",
+      "actions=", "restart/5000"]
+    # Both halves absent -> still a valid no-op invocation (the driver
+    # tests `needRecovery` before calling, so this is just shape).
+    let bare = renderScExeFailureCommand("sshd", 0, @[])
+    check bare == @["sc.exe", "failure", "sshd"]
+
+  test "renderScExeFailureCommand handles reset-only / actions-only":
+    # reset only.
+    check renderScExeFailureCommand("sshd", 3600, @[]) ==
+      @["sc.exe", "failure", "sshd", "reset=", "3600"]
+    # actions only.
+    check renderScExeFailureCommand("sshd", 0, @[
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)]) ==
+      @["sc.exe", "failure", "sshd", "actions=", "reboot/60000"]
+
+  test "renderScExeConfig{BinPath,DisplayName}Command emit the right argv":
+    check renderScExeConfigBinPathCommand("sshd",
+      "C:\\Windows\\System32\\OpenSSH\\sshd.exe") == @[
+      "sc.exe", "config", "sshd", "binPath=",
+      "C:\\Windows\\System32\\OpenSSH\\sshd.exe"]
+    check renderScExeConfigDisplayNameCommand("sshd",
+      "OpenSSH SSH Server") == @[
+      "sc.exe", "config", "sshd", "DisplayName=", "OpenSSH SSH Server"]
+
+  test "operationValidationError accepts a Phase B windows.service":
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "actions-runner-svc",
+      serviceName: "actions.runner.windows-runner-001",
+      serviceStartType: "Automatic", serviceRunning: true,
+      serviceDisplayName: "GitHub Actions Runner",
+      serviceBinPath: "C:\\actions-runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 10000),
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)],
+      serviceRecoveryResetSeconds: 86400)
+    check operationValidationError(op) == ""
+
+  test "operationValidationError flags Phase B bad fields":
+    # >3 slots.
+    let tooMany = PrivilegedOperation(kind: pokWindowsService,
+      address: "x", serviceName: "sshd", serviceStartType: "Automatic",
+      serviceRunning: true,
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 1000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 2000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 3000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 4000)])
+    check operationValidationError(tooMany).len > 0
+    # negative delay.
+    let negDelay = PrivilegedOperation(kind: pokWindowsService,
+      address: "x", serviceName: "sshd", serviceStartType: "Automatic",
+      serviceRunning: true,
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: -1)])
+    check operationValidationError(negDelay).len > 0
+    # negative reset.
+    let negReset = PrivilegedOperation(kind: pokWindowsService,
+      address: "x", serviceName: "sshd", serviceStartType: "Automatic",
+      serviceRunning: true, serviceRecoveryResetSeconds: -1)
+    check operationValidationError(negReset).len > 0
+
+  test "RBEB Operation frame round-trips windows.service Phase B fields":
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "actions-runner-svc",
+      serviceName: "actions.runner.windows-runner-001",
+      serviceStartType: "Automatic", serviceRunning: true,
+      serviceDisplayName: "GitHub Actions Runner",
+      serviceBinPath: "C:\\actions-runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakRunCommand, delayMs: 30000),
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)],
+      serviceRecoveryResetSeconds: 86400)
+    let wire = WireOperation(operation: op, baselineDigestHex: "abcd")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "abcd"
+    check w2.operation.kind == pokWindowsService
+    check w2.operation.address == "actions-runner-svc"
+    check w2.operation.serviceName ==
+      "actions.runner.windows-runner-001"
+    check w2.operation.serviceStartType == "Automatic"
+    check w2.operation.serviceRunning
+    check w2.operation.serviceDisplayName == "GitHub Actions Runner"
+    check w2.operation.serviceBinPath ==
+      "C:\\actions-runner\\Runner.Listener.exe"
+    check w2.operation.serviceRecoveryActions.len == 3
+    check w2.operation.serviceRecoveryActions[0].action == wsrakRestart
+    check w2.operation.serviceRecoveryActions[0].delayMs == 5000
+    check w2.operation.serviceRecoveryActions[1].action == wsrakRunCommand
+    check w2.operation.serviceRecoveryActions[1].delayMs == 30000
+    check w2.operation.serviceRecoveryActions[2].action == wsrakReboot
+    check w2.operation.serviceRecoveryActions[2].delayMs == 60000
+    check w2.operation.serviceRecoveryResetSeconds == 86400
+
+  test "RBEB Operation frame stays backward-compat for legacy windows.service":
+    # A pre-Phase-B operation (no Phase B fields set) MUST round-trip
+    # byte-for-byte through the wire — the deserialized op has all
+    # four fields at their "leave unmanaged" defaults.
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "sshd-svc", serviceName: "sshd",
+      serviceStartType: "Automatic", serviceRunning: true)
+    let wire = WireOperation(operation: op, baselineDigestHex: "")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.serviceDisplayName == ""
+    check w2.operation.serviceBinPath == ""
+    check w2.operation.serviceRecoveryActions.len == 0
+    check w2.operation.serviceRecoveryResetSeconds == 0
+
+  test "parseScQfailureOutput parses the standard sc qfailure block":
+    let raw = """[SC] QueryServiceConfig2 SUCCESS
+
+SERVICE_NAME: sshd
+        RESET_PERIOD (in seconds)    : 86400
+        REBOOT_MESSAGE               :
+        COMMAND_LINE                 :
+        FAILURE_ACTIONS              : RESTART -- Delay = 5000 milliseconds.
+                                       RESTART -- Delay = 10000 milliseconds.
+                                       REBOOT -- Delay = 60000 milliseconds.
+"""
+    let parsed = parseScQfailureOutput(raw)
+    check parsed.resetSeconds == 86400
+    check parsed.actions.len == 3
+    check parsed.actions[0].action == "restart"
+    check parsed.actions[0].delayMs == 5000
+    check parsed.actions[1].action == "restart"
+    check parsed.actions[1].delayMs == 10000
+    check parsed.actions[2].action == "reboot"
+    check parsed.actions[2].delayMs == 60000
+
+  test "parseScQfailureOutput handles RUN PROCESS / NO_ACTION":
+    # `sc.exe` prints `RUN PROCESS` for the runcommand variant (which
+    # the normalizer collapses to the lower-case `runcommand` wire
+    # token); `NO_ACTION` collapses to `none`.
+    let raw = """SERVICE_NAME: foo
+        RESET_PERIOD (in seconds)    : 3600
+        FAILURE_ACTIONS              : RUN PROCESS -- Delay = 30000 milliseconds.
+                                       NO_ACTION -- Delay = 0 milliseconds.
+"""
+    let parsed = parseScQfailureOutput(raw)
+    check parsed.resetSeconds == 3600
+    check parsed.actions.len == 2
+    check parsed.actions[0].action == "runcommand"
+    check parsed.actions[0].delayMs == 30000
+    check parsed.actions[1].action == "none"
+    check parsed.actions[1].delayMs == 0
+
+  test "parseScQfailureOutput on empty / non-policy output yields defaults":
+    let parsed = parseScQfailureOutput("")
+    check parsed.resetSeconds == 0
+    check parsed.actions.len == 0
+
+  test "parseServiceQuery reads DisplayName and BinPath fields":
+    # Phase B-extended probe shape — the parser collapses absent lines
+    # to empty strings, so a legacy two-field probe still parses
+    # correctly (verified by the existing tests).
+    let raw = """StartType=Automatic
+Status=Running
+DisplayName=OpenSSH SSH Server
+BinPath=C:\Windows\System32\OpenSSH\sshd.exe
+"""
+    let obs = parseServiceQuery(raw)
+    check obs.present
+    check obs.startType == "Automatic"
+    check obs.running
+    check obs.displayName == "OpenSSH SSH Server"
+    check obs.binPath == "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
+
+  test "parseServiceQuery on legacy two-line probe leaves Phase B fields empty":
+    # Back-compat: the legacy two-line probe parses to the same
+    # observation it always did; the new fields default to empty.
+    let raw = "StartType=Automatic\nStatus=Running\n"
+    let obs = parseServiceQuery(raw)
+    check obs.present
+    check obs.startType == "Automatic"
+    check obs.displayName == ""
+    check obs.binPath == ""
+
+  test "serviceMatchesDesired ignores Phase B fields when desired is empty":
+    # "Leave unmanaged" semantics: a non-empty observation displayName
+    # should NOT trigger drift if the operator didn't declare one.
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      displayName: "OpenSSH SSH Server",
+      binPath: "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    # Bare desired: only the legacy three fields are compared; the
+    # observed displayName/binPath are ignored.
+    check serviceMatchesDesired(obs, "Automatic", true)
+
+  test "serviceMatchesDesired enforces Phase B fields when desired is set":
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true, displayName: "OpenSSH SSH Server",
+      binPath: "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    # A desired displayName that matches.
+    check serviceMatchesDesired(obs, "Automatic", true,
+      wantDisplayName = "OpenSSH SSH Server")
+    # A desired displayName that doesn't match -> drift.
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantDisplayName = "Different Label")
+    # A desired binPath that doesn't match -> drift.
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantBinPath = "C:\\elsewhere\\sshd.exe")
+
+  test "serviceMatchesDesired enforces recovery slots in declaration order":
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+        ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)],
+      recoveryResetSeconds: 3600)
+    let want = @[
+      ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+      ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)]
+    check serviceMatchesDesired(obs, "Automatic", true,
+      wantRecoveryActions = want, wantRecoveryResetSeconds = 3600)
+    # Wrong order -> drift.
+    let reordered = @[
+      ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000),
+      ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)]
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantRecoveryActions = reordered, wantRecoveryResetSeconds = 3600)
+    # Wrong reset window -> drift.
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantRecoveryActions = want, wantRecoveryResetSeconds = 86400)
+
+  test "canonicalServiceState legacy call stays byte-identical":
+    # Back-compat: a SystemResource with no Phase B fields produces
+    # the SAME canonical-state digest input as before the change.
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      displayName: "OpenSSH SSH Server",
+      binPath: "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    # The legacy single-arg call ignores observed displayName/binPath.
+    check canonicalServiceState(obs) == "service:Automatic:running"
+    # The desired-side legacy call matches.
+    check canonicalServiceDesired("Automatic", true) ==
+      "service:Automatic:running"
+
+  test "canonicalServiceState extends with Phase B fields when desired":
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true, displayName: "OpenSSH SSH Server",
+      binPath: "C:\\bin\\sshd.exe",
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)],
+      recoveryResetSeconds: 3600)
+    let digest = canonicalServiceState(obs,
+      wantDisplayName = "OpenSSH SSH Server",
+      wantBinPath = "C:\\bin\\sshd.exe",
+      includeRecovery = true)
+    check digest.contains("displayName=OpenSSH SSH Server")
+    check digest.contains("binPath=C:\\bin\\sshd.exe")
+    check digest.contains("restart/5000")
+    check digest.contains("reset=3600")
+    # Desired-side parallel: the digest matches when the observation
+    # matches.
+    let want = canonicalServiceDesired("Automatic", true,
+      wantDisplayName = "OpenSSH SSH Server",
+      wantBinPath = "C:\\bin\\sshd.exe",
+      wantRecoveryActions = @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)],
+      wantRecoveryResetSeconds = 3600)
+    check digest == want
+
+  test "windows.service still requires elevation":
+    # Sanity: the predicate is unchanged by the Phase B extension.
+    check requiresElevation(pokWindowsService)
+
+# ===========================================================================
 # os.timezone — pure parse + drift logic. The shell-out side of the
 # driver runs only on the resident host's platform; what runs everywhere
 # is the closed-set validator, the IANA -> Windows mapping table, the

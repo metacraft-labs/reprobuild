@@ -149,6 +149,52 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check "sourceUrl" notin byAddr["myappConfig"].fields
     check "sha256" notin byAddr["myappConfig"].fields
 
+  test "system_windowsservice_phaseb.nim builds windows.service with Phase B fields":
+    # Windows-System-Resources Phase B e2e: compile + run the fixture
+    # that declares one legacy three-field windows.service alongside
+    # one with all four Phase B optional fields. The e2e gate checks
+    # the ProfileIntent JSON — no real apply, no Windows host needed.
+    let js = compileAndRun("system_windowsservice_phaseb.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemWindowsServicePhaseB"
+    check p.resources.len == 2
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    # Legacy three-field shape: back-compat invariant — the four
+    # Phase B fields are ABSENT from the intent (the template skips
+    # them when they're at default), so a profile that doesn't use
+    # them emits byte-identical JSON to today.
+    check "legacyService" in byAddr
+    check byAddr["legacyService"].kind == "windows.service"
+    check byAddr["legacyService"].fields["name"].s == "sshd"
+    check byAddr["legacyService"].fields["startType"].s == "Automatic"
+    check byAddr["legacyService"].fields["state"].s == "Running"
+    check "displayName" notin byAddr["legacyService"].fields
+    check "binPath" notin byAddr["legacyService"].fields
+    check "recoveryActions" notin byAddr["legacyService"].fields
+    check "recoveryResetSeconds" notin byAddr["legacyService"].fields
+
+    # Phase B shape: all four optional fields carry through with the
+    # canonical encoding — recovery actions as `action:delayMs` strings
+    # in a list, reset as an int, displayName/binPath as strings.
+    check "actionsRunnerService" in byAddr
+    let svc = byAddr["actionsRunnerService"]
+    check svc.kind == "windows.service"
+    check svc.fields["name"].s ==
+      "actions.runner.metacraft-labs.windows-runner-001"
+    check svc.fields["displayName"].s ==
+      "GitHub Actions Runner (windows-runner-001)"
+    check svc.fields["binPath"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    let actions = svc.fields["recoveryActions"].items
+    check actions.len == 3
+    check actions[0] == "restart:5000"
+    check actions[1] == "restart:10000"
+    check actions[2] == "reboot:60000"
+    check svc.fields["recoveryResetSeconds"].i == 86400
+
   test "system_fssystemdirectory.nim builds an fs.systemDirectory + acl":
     let js = compileAndRun("system_fssystemdirectory.nim")
     let p = parseProfileIntentJson(js)

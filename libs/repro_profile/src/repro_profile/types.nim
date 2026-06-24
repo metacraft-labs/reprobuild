@@ -8,7 +8,7 @@
 ## with the RBPI binary envelope while keeping the same Nim-side
 ## record types.
 
-import std/[options, tables]
+import std/[options, strutils, tables]
 
 type
   ProfileIntent* = object
@@ -92,6 +92,30 @@ type
     of fvkBool: b*: bool
     of fvkList: items*: seq[string]
     of fvkExpr: expr*: string
+
+  WindowsServiceRecoveryAction* = enum
+    ## Windows-System-Resources Phase B: the four `sc.exe failure`
+    ## actions a service can declare for its 1st/2nd/3rd-failure slots.
+    ## The string values are the LOWER-CASE wire form used in the
+    ## profile text, JSON, and codec — `sc.exe failure ... actions= `
+    ## emits the same tokens (with `""` for `None`). The enum is
+    ## referenced by both the profile-side `windowsService` template
+    ## (operator-facing typed parameter) and the apply-side
+    ## `SystemResource` / `PrivilegedOperation` variants, so its
+    ## canonical string form has to survive every encoding boundary.
+    wsraNone = "none"
+    wsraRestart = "restart"
+    wsraRunCommand = "runcommand"
+    wsraReboot = "reboot"
+
+  WindowsServiceRecovery* = tuple[action: WindowsServiceRecoveryAction;
+                                   delayMs: int]
+    ## One entry of `windows.service`'s `recoveryActions` field: the
+    ## action to take on a failure plus the delay (in milliseconds)
+    ## the SCM waits before invoking it. The triple slot meaning
+    ## (1st-failure / 2nd-failure / subsequent-failure) is positional
+    ## inside the sequence — `sc.exe failure` consumes up to three
+    ## entries in order.
 
   ResourceAddress* = object
     kind*: string
@@ -336,6 +360,92 @@ proc listField*(items: seq[string]): FieldValue =
 
 proc exprField*(expr: string): FieldValue =
   FieldValue(kind: fvkExpr, expr: expr)
+
+# ---------------------------------------------------------------------
+# Windows-System-Resources Phase B: recovery-action token codec.
+#
+# `windows.service`'s `recoveryActions` field is a `seq[(action, delayMs)]`
+# tuple. The intermediate ProfileIntent shape stores each entry as one
+# `"action:delayMs"` string in a `fvkList` value so the existing JSON
+# emitter, codec round-trip, and text renderer can ride the established
+# string-list machinery without a new FieldValue variant. The strict
+# format is `<lower-case-action-token>:<non-negative-decimal>`; the
+# encoder rejects anything else.
+#
+# The matching apply-side codec lives in `repro_elevation/operations.nim`
+# (parallel `WindowsServiceRecoveryActionKind` enum + same lower-case
+# string vocabulary); the two namespaces share the wire form so a
+# round-trip through the adapter is loss-free.
+# ---------------------------------------------------------------------
+
+proc recoveryActionToken*(a: WindowsServiceRecoveryAction): string =
+  ## The lower-case wire token for a recovery action. Centralised so
+  ## the template, the JSON emitter, and the text renderer all agree.
+  $a
+
+proc recoveryActionFromToken*(raw: string): WindowsServiceRecoveryAction =
+  ## Strict parse of a recovery-action token. Accepts the canonical
+  ## lower-case forms only — mirrors the closed-set posture of every
+  ## other profile field. Raises `ValueError` on a mismatch.
+  case raw
+  of "none": wsraNone
+  of "restart": wsraRestart
+  of "runcommand": wsraRunCommand
+  of "reboot": wsraReboot
+  else:
+    raise newException(ValueError,
+      "unknown windows.service recovery action token '" & raw &
+      "' (expected one of restart / runcommand / reboot / none)")
+
+proc isKnownRecoveryActionToken*(raw: string): bool =
+  ## Non-raising form. Used by the front-end closed-set validators.
+  raw in ["none", "restart", "runcommand", "reboot"]
+
+proc encodeWindowsServiceRecovery*(r: WindowsServiceRecovery): string =
+  ## Encode a single `(action, delayMs)` pair as the canonical
+  ## `"action:delayMs"` token the FieldValue list carries.
+  recoveryActionToken(r.action) & ":" & $r.delayMs
+
+proc decodeWindowsServiceRecovery*(token: string): WindowsServiceRecovery =
+  ## Decode a single `"action:delayMs"` token. The action half must be
+  ## a known lower-case recovery-action token; the delay half must be a
+  ## non-negative decimal integer. Both halves are validated so a
+  ## malformed entry fails closed rather than collapsing to defaults.
+  let sep = token.find(':')
+  if sep <= 0 or sep == token.len - 1:
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' is malformed (expected '<action>:<delayMs>')")
+  let actionToken = token[0 ..< sep]
+  let delayStr = token[sep + 1 .. ^1]
+  if not isKnownRecoveryActionToken(actionToken):
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' names an unknown action '" & actionToken &
+      "' (expected restart / runcommand / reboot / none)")
+  var delayMs: int
+  try:
+    delayMs = parseInt(delayStr)
+  except ValueError:
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' has a non-integer delay '" & delayStr & "'")
+  if delayMs < 0:
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' has a negative delay (must be >= 0)")
+  (action: recoveryActionFromToken(actionToken),
+   delayMs: delayMs)
+
+proc encodeWindowsServiceRecoveryList*(
+    recovery: seq[WindowsServiceRecovery]): seq[string] =
+  for r in recovery:
+    result.add(encodeWindowsServiceRecovery(r))
+
+proc decodeWindowsServiceRecoveryList*(
+    tokens: seq[string]): seq[WindowsServiceRecovery] =
+  for t in tokens:
+    result.add(decodeWindowsServiceRecovery(t))
 
 proc parseResourceAddress*(s: string): ResourceAddress =
   ## Parse a `kind:name` string into a ResourceAddress. The address

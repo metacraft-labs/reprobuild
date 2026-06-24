@@ -272,6 +272,17 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.serviceName)
     body.writeString(op.serviceStartType)
     body.writeBool(op.serviceRunning)
+    # Windows-System-Resources Phase B: the four new fields. Empty
+    # strings / 0 / empty seq round-trip cleanly as their defaults so a
+    # pre-Phase-B frame (which doesn't set them) deserializes to a Phase
+    # B operation with all four at their "leave unmanaged" default.
+    body.writeString(op.serviceDisplayName)
+    body.writeString(op.serviceBinPath)
+    body.writeU32Le(uint32(op.serviceRecoveryActions.len))
+    for slot in op.serviceRecoveryActions:
+      body.writeString(windowsServiceRecoveryActionToken(slot.action))
+      body.writeU32Le(uint32(slot.delayMs))
+    body.writeU32Le(uint32(op.serviceRecoveryResetSeconds))
   of pokWindowsVsInstaller:
     body.writeString(op.vsEdition)
     body.writeString(op.vsChannel)
@@ -483,6 +494,28 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.serviceName = readString(body, pos)
     result.operation.serviceStartType = readString(body, pos)
     result.operation.serviceRunning = readBool(body, pos, "serviceRunning")
+    # Windows-System-Resources Phase B: read the four new fields. The
+    # action-token decoder enforces the closed-set vocabulary so a
+    # malformed frame fails closed at the codec boundary (mirrors the
+    # `windows.registryValue` kind tag check above).
+    result.operation.serviceDisplayName = readString(body, pos)
+    result.operation.serviceBinPath = readString(body, pos)
+    let recoveryCount = int(readU32Le(body, pos))
+    if recoveryCount < 0 or pos + recoveryCount > body.len:
+      raiseProtocol("windows.service frame: implausible recovery action count")
+    for _ in 0 ..< recoveryCount:
+      let actionToken = readString(body, pos)
+      if not isKnownWindowsServiceRecoveryActionToken(actionToken):
+        raiseProtocol("windows.service frame names an unrecognized " &
+          "recovery action '" & actionToken &
+          "'; the broker executes only the closed action set")
+      let delayMs = int(readU32Le(body, pos))
+      result.operation.serviceRecoveryActions.add(
+        WindowsServiceRecoverySpec(
+          action: windowsServiceRecoveryActionFromToken(actionToken),
+          delayMs: delayMs))
+    result.operation.serviceRecoveryResetSeconds =
+      int(readU32Le(body, pos))
   of pokWindowsVsInstaller:
     result.operation = PrivilegedOperation(kind: pokWindowsVsInstaller,
       address: address)
