@@ -1,0 +1,95 @@
+M9.R.29 — UEFI boot + DE smoke transcript
+=========================================
+
+ISO: build/reproos.iso (1,651,443,712 bytes — M9.R.29.19b symlink-walker
+closure; build initiated at 05:55, mksquashfs completed 06:04).
+
+QEMU invocation: bash /opt/repro/reprobuild/_m9r29_qemu_de_smoke.sh
+  (OVMF UEFI -nographic -serial mon:stdio, autologin root via
+   serial-getty@ttyS0.service.d/autologin.conf — M9.R.29.17).
+
+BOOT TRANSCRIPT (excerpt; full boot reached multi-user.target):
+
+  BdsDxe: loading Boot0001 "UEFI QEMU DVD-ROM"
+  BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM"
+  ...
+  [  OK  ] Started serial-getty@ttyS0.service - Serial Getty on ttyS0.
+  [  OK  ] Reached target getty.target - Login Prompts.
+  [  OK  ] Reached target multi-user.target - Multi-User System.
+
+  Debian GNU/Linux 13 localhost ttyS0
+  localhost login: root (automatic login)
+  ...
+  root@localhost:~#
+
+The M9.R.29.16/17 fixes (proper shadow hash + serial-getty autologin)
+made the live ISO auto-login as root over the serial console, vs
+M9.R.28 where the canonical UEFI smoke landed at `localhost login:`
+with no path through (invalid 7-char salt → Login incorrect).
+
+DE VERSION PROBE OUTPUT (root@localhost:~#):
+
+  === M9R29_DE_SMOKE_BEGIN ===
+  sway --version 2>&1 || echo SWAY_RC=$?
+  sway: error while loading shared libraries: libdrm.so.2: cannot
+  open shared object file: No such file or directory
+  SWAY_RC=127
+
+  kwin_wayland --version 2>&1 || echo KWIN_RC=$?
+  kwin_wayland: error while loading shared libraries: libz.so.1:
+  cannot open shared object file: No such file or directory
+  KWIN_RC=127
+
+  mutter --version 2>&1 || echo MUTTER_RC=$?
+  mutter: error while loading shared libraries: libGLESv2.so.2:
+  cannot open shared object file: No such file or directory
+  MUTTER_RC=127
+
+  plasmashell --version 2>&1 || echo PLASMA_RC=$?
+  plasmashell: error while loading shared libraries: libmount.so.1:
+  cannot open shared object file: No such file or directory
+  PLASMA_RC=127
+  === M9R29_DE_SMOKE_END ===
+
+ANALYSIS
+========
+
+PROGRESS vs M9.R.28:
+- M9.R.28's smoke never reached a logged-in shell; the malformed
+  shadow hash + tty1-only autologin meant `localhost login:` prompted
+  forever on serial console. M9.R.28 marked Gap 8 CLOSED prematurely.
+- M9.R.29 captures the FIRST verified live-ISO DE smoke transcript.
+  All four DE binaries land at /usr/bin/{sway,kwin_wayland,mutter,
+  plasmashell} as symlinks to the from-source install-mirrors.
+
+PROGRESS vs the prior M9.R.29 attempt (5/6, no symlink walker):
+- plasmashell: WAS libgcc_s.so.1 not found
+              IS  libmount.so.1 not found
+  M9.R.29.19's symlink walker correctly pulled gcc-14.3.0-libgcc into
+  the closure so libgcc_s.so.1 resolves; the new failure exposes the
+  next missing prefix.
+
+REMAINING M9.R.29 HONEST GAP (smaller than M9.R.28):
+- The DE binaries' baked RPATH lists from-source install dirs but
+  doesn't always include the transitive runtime libs (util-linux's
+  libmount, zlib's libz, libdrm, libglvnd's libGLESv2). These come
+  from M9.R.14f's LD_LIBRARY_PATH-reflected RPATH mechanism, but at
+  the bottom of the chain some pkg-config deps (e.g. plasma-workspace
+  doesn't pull in util-linux's libmount) silently leave their .so
+  off the RPATH chain.
+- Build-host `ldd` for each DE binary reports the same set of unmet
+  deps — this is a PRE-EXISTING recipe-architecture gap that lands
+  unchanged on the ISO; it's NOT caused by stage-de-rootfs.
+- The M9.R.29 closure walker fix correctly stages every nix-store
+  prefix the on-disk RPATHs reference. What's missing is the
+  recipe-side RPATH entries pointing at util-linux/zlib/libdrm/libglvnd.
+  A follow-up needs to either patchelf-extend the binaries with the
+  transitive paths OR enforce buildDep transitivity at link time.
+
+SUCCESSES CAPTURED
+==================
+- M9.R.29.16 (shadow hash): root login works at multi-user.
+- M9.R.29.17 (serial-getty autologin): tty1 + ttyS0 both autologin.
+- M9.R.29.19 (symlink closure walker): gcc-libgcc + companion
+  multi-output -lib/-libgcc nix paths land on the ISO; plasmashell
+  no longer crashes at libgcc_s.so.1.
