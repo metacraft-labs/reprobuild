@@ -21,9 +21,15 @@
 ## `dependsOn` is a `seq[string]` of `"kind:name"` references; each
 ## entry is parsed into a `ResourceAddress` at append time.
 
-import std/tables
+import std/[options, tables]
 
 import ./types
+
+# Profile authors invoke `windowsScheduledTask(...,
+# runWithHighestPrivileges = some(false), ...)` to override the
+# principal-dependent default. Re-export `std/options` so they don't
+# have to `import std/options` separately.
+export options
 
 # ---------------------------------------------------------------------
 # Internal helper: build a ResourceIntent + push it onto the target.
@@ -457,17 +463,189 @@ template windowsService*(targetResources: var seq[ResourceIntent];
                          name: string;
                          startType: untyped;
                          state: untyped;
+                         displayName: string = "";
+                         binPath: string = "";
+                         recoveryActions: seq[WindowsServiceRecovery] = @[];
+                         recoveryResetSeconds: int = 0;
                          address: string = "";
                          dependsOn: seq[string] = @[]) =
+  ## Manage an existing Windows service's start-type, runtime state,
+  ## and (Windows-System-Resources Phase B) optional descriptor metadata
+  ## + recovery policy.
+  ##
+  ## `displayName`: empty (default) keeps the service's current
+  ## `DISPLAY_NAME` — no reconfigure issued. A non-empty value drives
+  ## `sc.exe config <name> DisplayName= "<value>"`.
+  ##
+  ## `binPath`: empty (default) leaves the SCM's current `BINARY_PATH_
+  ## NAME` untouched. A non-empty value drives `sc.exe config <name>
+  ## binPath= "<value>"`.
+  ##
+  ## `recoveryActions`: empty (default) leaves the SCM's failure policy
+  ## untouched. A non-empty seq drives `sc.exe failure <name> actions= `
+  ## with up to three `<action>/<delayMs>` slots; the action enum's
+  ## canonical lower-case token (`restart` / `runcommand` / `reboot` /
+  ## `none`) is the wire form.
+  ##
+  ## `recoveryResetSeconds`: `0` (default) means no `reset= ` value is
+  ## issued. A positive value drives `sc.exe failure <name> reset= `
+  ## (the failure-count reset window the SCM uses).
+  ##
+  ## Identity remains the service name; the four new fields are
+  ## independent and additive — a profile that doesn't set them
+  ## applies byte-identically to today.
   block:
     var fields = initTable[string, FieldValue]()
     fields["name"] = strField(name)
     fields["startType"] = strField(astToStr(startType))
     fields["state"] = strField(astToStr(state))
+    # Phase B: emit the four new fields ONLY when set so a profile that
+    # omits them round-trips byte-identically through the codec and the
+    # canonical-text renderer.
+    if displayName.len > 0:
+      fields["displayName"] = strField(displayName)
+    if binPath.len > 0:
+      fields["binPath"] = strField(binPath)
+    if recoveryActions.len > 0:
+      fields["recoveryActions"] =
+        listField(encodeWindowsServiceRecoveryList(recoveryActions))
+    if recoveryResetSeconds != 0:
+      fields["recoveryResetSeconds"] = intField(recoveryResetSeconds)
     let addr0 = if address.len > 0: address
                 else: autoAddress("windows.service", name)
     pushResource(targetResources, "windows.service", addr0, fields,
       dependsOn)
+
+template windowsScheduledTask*(targetResources: var seq[ResourceIntent];
+                               taskName: string;
+                               executable: string;
+                               schedule: ScheduleSpec;
+                               arguments: seq[string] = @[];
+                               workingDirectory: string = "";
+                               runAsUser: string = "SYSTEM";
+                               runWithHighestPrivileges: Option[bool] =
+                                 none(bool);
+                               enabled: bool = true;
+                               address: string = "";
+                               dependsOn: seq[string] = @[]) =
+  ## Manage a Windows Task Scheduler entry. Live state (per
+  ## Windows-System-Resources spec §1.3): the schedule, principal,
+  ## executable + arguments, and `enabled` flag are observable via
+  ## `Get-ScheduledTask`; the driver re-observes on every apply and
+  ## skips when the observed digest matches desired.
+  ##
+  ## `taskName` is the fully-qualified Task Scheduler path
+  ## (e.g. `\Reprobuild\WindowsRunner-Env`). Defence-in-depth: an empty
+  ## `taskName` is a compile-time error here and a validator reject
+  ## downstream (text parser + adapter).
+  ##
+  ## `executable` is the program the action invokes; `arguments` is the
+  ## argv (empty seq omits the field). `workingDirectory` is the CWD
+  ## for the action; empty means "let Task Scheduler default".
+  ##
+  ## `runAsUser` defaults to the special principal `SYSTEM`. Other
+  ## accepted values: `LOCAL_SERVICE`, `NETWORK_SERVICE`, a domain user
+  ## (`DOMAIN\user`), or a SID literal.
+  ##
+  ## `runWithHighestPrivileges` is an `Option[bool]` — leave it unset
+  ## (the parameter default `none(bool)`) to take the spec's principal-
+  ## dependent default. If unset, the text parser and the adapter both
+  ## apply that default (`true` for the SYSTEM principal, `false`
+  ## otherwise). Pass `some(true)` or `some(false)` to override the
+  ## principal default; the explicit value is captured verbatim in the
+  ## emitted `ResourceIntent`, round-trips through the codec, and
+  ## reaches the apply layer unchanged.
+  ##
+  ## `schedule` is the discriminated `ScheduleSpec` union — exactly one
+  ## of `onBoot`, `onLogon`, `once`, `daily`, `interval`. The encoder
+  ## REJECTS malformed values (negative delay, non-positive interval,
+  ## empty required-time fields, malformed `HH:MM` / ISO-8601 strings)
+  ## at compile time so a hand-authored profile fails closed at the
+  ## template surface AND at the validator + adapter downstream.
+  ##
+  ## `enabled` defaults to `true` (the most common case — a created
+  ## task is active).
+  ##
+  ## Address default: `windows.scheduledTask:<taskName>`.
+  block:
+    if taskName.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask requires a non-empty taskName")
+    if executable.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & taskName &
+        "' requires a non-empty executable")
+    var fields = initTable[string, FieldValue]()
+    fields["taskName"] = strField(taskName)
+    fields["executable"] = strField(executable)
+    if arguments.len > 0:
+      fields["arguments"] = listField(arguments)
+    if workingDirectory.len > 0:
+      fields["workingDirectory"] = strField(workingDirectory)
+    fields["runAsUser"] = strField(runAsUser)
+    # Spec rule: default highest-privileges is true for SYSTEM, false
+    # otherwise. The template parameter is `Option[bool]` so we can
+    # distinguish "operator left it at the parameter default" (none —
+    # apply the principal-dependent default downstream) from "operator
+    # explicitly set it" (some — capture the operator's choice
+    # verbatim). The text parser and the adapter independently re-apply
+    # the principal-dependent default when the field is absent.
+    if runWithHighestPrivileges.isSome:
+      fields["runWithHighestPrivileges"] = boolField(
+        runWithHighestPrivileges.get)
+    fields["schedule"] = listField(@[encodeScheduleSpec(schedule)])
+    fields["enabled"] = boolField(enabled)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("windows.scheduledTask", taskName)
+    pushResource(targetResources, "windows.scheduledTask", addr0,
+      fields, dependsOn)
+
+# ---------------------------------------------------------------------
+# ScheduleSpec constructors (Windows-System-Resources Phase C).
+#
+# Sugar so profile authors don't have to spell `ScheduleSpec(kind: ..)`
+# out by hand. Each variant maps 1:1 to a typed Nim helper and runs the
+# same canonical-text validation `encodeScheduleSpec` does — a
+# compile-time `static:` guard against malformed literals reaches the
+# operator at the template call site.
+# ---------------------------------------------------------------------
+
+proc scheduleOnBoot*(delaySeconds: int = 0): ScheduleSpec =
+  if delaySeconds < 0:
+    raise newException(ValueError,
+      "scheduleOnBoot delaySeconds '" & $delaySeconds &
+      "' is negative (must be >= 0)")
+  ScheduleSpec(kind: sskOnBoot, delaySeconds: delaySeconds)
+
+proc scheduleOnLogon*(forUser: string = ""): ScheduleSpec =
+  ScheduleSpec(kind: sskOnLogon, forUser: forUser)
+
+proc scheduleOnce*(runAt: string): ScheduleSpec =
+  if not isValidScheduleIso8601(runAt):
+    raise newException(ValueError,
+      "scheduleOnce runAt '" & runAt &
+      "' is not a valid ISO-8601 timestamp")
+  ScheduleSpec(kind: sskOnce, runAt: runAt)
+
+proc scheduleDaily*(timeOfDay: string): ScheduleSpec =
+  if not isValidScheduleTimeOfDay(timeOfDay):
+    raise newException(ValueError,
+      "scheduleDaily timeOfDay '" & timeOfDay &
+      "' is not a valid HH:MM 24-hour time")
+  ScheduleSpec(kind: sskDaily, timeOfDay: timeOfDay)
+
+proc scheduleInterval*(everyMinutes: int;
+                      startAt: string = ""): ScheduleSpec =
+  if everyMinutes <= 0:
+    raise newException(ValueError,
+      "scheduleInterval everyMinutes '" & $everyMinutes &
+      "' must be > 0")
+  if startAt.len > 0 and not isValidScheduleIso8601(startAt):
+    raise newException(ValueError,
+      "scheduleInterval startAt '" & startAt &
+      "' is not a valid ISO-8601 timestamp")
+  ScheduleSpec(kind: sskInterval, everyMinutes: everyMinutes,
+    startAt: startAt)
 
 template windowsRegistryValueHKLM*(targetResources: var seq[ResourceIntent];
                                    key: string;
@@ -617,15 +795,69 @@ template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
 
 template fsSystemFile*(targetResources: var seq[ResourceIntent];
                        path: string;
-                       content: string;
+                       content: string = "";
+                       sourceUrl: string = "";
+                       sha256: string = "";
+                       sourceLocal: string = "";
                        mode: string = "0644";
                        address: string = "";
                        dependsOn: seq[string] = @[]) =
+  ## A managed system-scope file. The file's content is supplied by
+  ## EXACTLY ONE of three mutually-exclusive sources:
+  ##
+  ##   * `content`     — inline string baked into the plan (the
+  ##                     existing behaviour; the historical default).
+  ##   * `sourceUrl`   — URL fetched at apply time; the controller
+  ##                     downloads the bytes, verifies them against
+  ##                     `sha256` (lowercase 64-char hex BLAKE3
+  ##                     digest), and only then asks the broker to
+  ##                     write. `sha256` MUST also be set.
+  ##   * `sourceLocal` — path on the controller side; re-read on every
+  ##                     apply so a between-step edit lands. The file
+  ##                     is opened by the unprivileged controller
+  ##                     before the broker dispatch — the broker
+  ##                     receives the bytes, not the path.
+  ##
+  ## A profile that supplies two or more of these (e.g. both `content`
+  ## and `sourceUrl`) is a compile-time error here AND a validator
+  ## reject downstream (defence in depth). All three absent means the
+  ## resource declares an empty file — equivalent to `content = ""`.
   block:
+    # Defence in depth #1: at-most-one-source mutual exclusion. The
+    # downstream validator (`profile.parseSystemProfile` and the
+    # adapter) re-checks; both layers raise so a bypass at either
+    # surface still fails closed.
+    let nonEmptySources = (if content.len > 0: 1 else: 0) +
+                          (if sourceUrl.len > 0: 1 else: 0) +
+                          (if sourceLocal.len > 0: 1 else: 0)
+    if nonEmptySources > 1:
+      raise newException(ValueError,
+        "fs.systemFile '" & path &
+        "' declares more than one content source — at most one of " &
+        "`content`, `sourceUrl`, `sourceLocal` may be non-empty")
+    # Defence in depth #2: `sourceUrl` requires `sha256` (and vice
+    # versa — a profile that pins a digest without a URL has no
+    # bytes to verify against).
+    if sourceUrl.len > 0 and sha256.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & path &
+        "' sets `sourceUrl` but no `sha256` — the URL fetch requires " &
+        "a lowercase 64-char BLAKE3 hex digest to verify against")
+    if sha256.len > 0 and sourceUrl.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & path &
+        "' sets `sha256` but no `sourceUrl` — the digest is only " &
+        "meaningful when paired with a URL fetch")
     var fields = initTable[string, FieldValue]()
     fields["path"] = strField(path)
     fields["content"] = strField(content)
     fields["mode"] = strField(mode)
+    if sourceUrl.len > 0:
+      fields["sourceUrl"] = strField(sourceUrl)
+    if sha256.len > 0:
+      fields["sha256"] = strField(sha256)
+    if sourceLocal.len > 0:
+      fields["sourceLocal"] = strField(sourceLocal)
     let addr0 = if address.len > 0: address
                 else: autoAddress("fs.systemFile", path)
     pushResource(targetResources, "fs.systemFile", addr0, fields,

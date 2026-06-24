@@ -107,10 +107,126 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
   of "windows.service":
     let st = fieldString(r, "startType", "Automatic")
     let stateStr = fieldString(r, "state", "running").toLowerAscii()
+    # Windows-System-Resources Phase B: the four new optional fields.
+    # The adapter is the third surface (after the template and the text
+    # parser) the validator crosses; each layer rejects the same
+    # malformed shape so a bypass through any one path still fails
+    # closed.
+    let svcName = fieldString(r, "name")
+    let svcDisplay = fieldString(r, "displayName")
+    let svcBinPath = fieldString(r, "binPath")
+    var svcRecovery: seq[WindowsServiceRecoverySpec] = @[]
+    let recoveryTokens = fieldList(r, "recoveryActions")
+    if recoveryTokens.len > 3:
+      raise newException(ValueError,
+        "windows.service '" & svcName &
+        "' recoveryActions has " & $recoveryTokens.len &
+        " entries — sc.exe failure consumes at most 3 slots")
+    for tok in recoveryTokens:
+      let sep = tok.find(':')
+      if sep <= 0 or sep == tok.len - 1:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' is malformed (expected '<action>:<delayMs>')")
+      let actionTok = tok[0 ..< sep]
+      let delayStr = tok[sep + 1 .. ^1]
+      if not isKnownWindowsServiceRecoveryActionToken(actionTok):
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' names an unknown action '" & actionTok &
+          "' (expected restart / runcommand / reboot / none)")
+      var delayMs: int
+      try:
+        delayMs = parseInt(delayStr)
+      except ValueError:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' has a non-integer delay '" & delayStr & "'")
+      if delayMs < 0:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryActions entry '" & tok &
+          "' has a negative delay (must be >= 0)")
+      svcRecovery.add(WindowsServiceRecoverySpec(
+        action: windowsServiceRecoveryActionFromToken(actionTok),
+        delayMs: delayMs))
+    var svcRecoveryReset = 0
+    if "recoveryResetSeconds" in r.fields:
+      let fv = r.fields["recoveryResetSeconds"]
+      case fv.kind
+      of fvkInt: svcRecoveryReset = fv.i
+      of fvkString:
+        if fv.s.strip().len > 0:
+          try:
+            svcRecoveryReset = parseInt(fv.s.strip())
+          except ValueError:
+            raise newException(ValueError,
+              "windows.service '" & svcName &
+              "' recoveryResetSeconds '" & fv.s &
+              "' is not an integer")
+      else:
+        raise newException(ValueError,
+          "windows.service '" & svcName &
+          "' recoveryResetSeconds must be an integer field")
+    if svcRecoveryReset < 0:
+      raise newException(ValueError,
+        "windows.service '" & svcName &
+        "' recoveryResetSeconds is negative (must be >= 0)")
     result = SystemResource(kind: srkWindowsService,
-      serviceName: fieldString(r, "name"),
+      serviceName: svcName,
       serviceStartType: st,
-      serviceRunning: stateStr == "running")
+      serviceRunning: stateStr == "running",
+      serviceDisplayName: svcDisplay,
+      serviceBinPath: svcBinPath,
+      serviceRecoveryActions: svcRecovery,
+      serviceRecoveryResetSeconds: svcRecoveryReset)
+  of "windows.scheduledTask":
+    # Windows-System-Resources Phase C: third defence-in-depth layer
+    # (after the template and the text parser). The adapter rejects the
+    # same malformed shape each surface rejects so a bypass through any
+    # one path still fails closed at the apply boundary.
+    let wstTaskName = fieldString(r, "taskName")
+    if wstTaskName.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask requires a non-empty taskName")
+    let wstExecutable = fieldString(r, "executable")
+    if wstExecutable.len == 0:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & wstTaskName &
+        "' requires a non-empty executable")
+    let wstArguments = fieldList(r, "arguments")
+    let wstWorkingDirectory = fieldString(r, "workingDirectory")
+    let wstRunAsUser = fieldString(r, "runAsUser", "SYSTEM")
+    let wstRunWithHighest = fieldBool(r,
+      "runWithHighestPrivileges", wstRunAsUser == "SYSTEM")
+    let wstEnabled = fieldBool(r, "enabled", true)
+    # Schedule arrives as a single-element list of canonical wire
+    # tokens. A missing or multi-element list is a typed error.
+    let scheduleTokens = fieldList(r, "schedule")
+    if scheduleTokens.len != 1:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & wstTaskName &
+        "' schedule must be a single-element list (got " &
+        $scheduleTokens.len & " entries)")
+    var wstSchedule: ScheduledTaskScheduleSpec
+    try:
+      wstSchedule = decodeScheduledTaskScheduleToken(scheduleTokens[0])
+    except ValueError as e:
+      raise newException(ValueError,
+        "windows.scheduledTask '" & wstTaskName &
+        "' schedule: " & e.msg)
+    result = SystemResource(kind: srkWindowsScheduledTask,
+      wstTaskName: wstTaskName,
+      wstExecutable: wstExecutable,
+      wstArguments: wstArguments,
+      wstWorkingDirectory: wstWorkingDirectory,
+      wstRunAsUser: wstRunAsUser,
+      wstRunWithHighestPrivileges: wstRunWithHighest,
+      wstSchedule: wstSchedule,
+      wstEnabled: wstEnabled)
   of "windows.vsInstaller":
     result = SystemResource(kind: srkWindowsVsInstaller,
       vsEdition: fieldString(r, "edition", fieldString(r, "version")),
@@ -193,9 +309,40 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       sdaProgramArgs: fieldList(r, "programArgs"),
       sdaRunAtLoad: fieldBool(r, "runAtLoad", true))
   of "fs.systemFile":
+    let sfPath = fieldString(r, "path")
+    let sfContent = fieldString(r, "content")
+    let sfSourceUrl = fieldString(r, "sourceUrl")
+    let sfSha256 = fieldString(r, "sha256")
+    let sfSourceLocal = fieldString(r, "sourceLocal")
+    # Mutual-exclusion + sha256-pairing — same shape the template
+    # raises at compile time and `parseSystemProfile` raises in the
+    # text parser. The adapter is the third surface; all three layers
+    # reject the same malformed intent so a bypass through any one
+    # path still fails closed.
+    let nonEmptySources = (if sfContent.len > 0: 1 else: 0) +
+                          (if sfSourceUrl.len > 0: 1 else: 0) +
+                          (if sfSourceLocal.len > 0: 1 else: 0)
+    if nonEmptySources > 1:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath &
+        "' declares more than one content source — at most one of " &
+        "`content`, `sourceUrl`, `sourceLocal` may be non-empty")
+    if sfSourceUrl.len > 0 and sfSha256.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath &
+        "' sets `sourceUrl` but no `sha256` — the URL fetch requires " &
+        "a lowercase 64-char BLAKE3 hex digest to verify against")
+    if sfSha256.len > 0 and sfSourceUrl.len == 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath &
+        "' sets `sha256` but no `sourceUrl` — the digest is only " &
+        "meaningful when paired with a URL fetch")
     result = SystemResource(kind: srkFsSystemFile,
-      sfPath: fieldString(r, "path"),
-      sfContent: fieldString(r, "content"))
+      sfPath: sfPath,
+      sfContent: sfContent,
+      sfSourceUrl: sfSourceUrl,
+      sfSha256: sfSha256,
+      sfSourceLocal: sfSourceLocal)
   of "fs.systemDirectory":
     let dirPath = fieldString(r, "path")
     # ACL is optional. The fsSystemDirectory template emits the three
@@ -513,7 +660,8 @@ proc isSystemScopeResource(kind: string): bool =
   case kind
   of "windows.registryValueHKLM",
      "windows.optionalFeature", "windows.capability",
-     "windows.service", "windows.vsInstaller",
+     "windows.service", "windows.scheduledTask",
+     "windows.vsInstaller",
      "windows.firewallRule", "windows.acl",
      "macos.systemDefault", "systemd.systemUnit",
      "launchd.systemDaemon", "fs.systemFile", "fs.systemDirectory",
@@ -638,6 +786,43 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("startType", quoteSystemValue(r.serviceStartType)))
       pairs.add(("state",
         quoteSystemValue(if r.serviceRunning: "running" else: "stopped")))
+      # Windows-System-Resources Phase B: emit the four new optional
+      # fields ONLY when set. A profile that omits them re-renders
+      # with NO `displayName` / `binPath` / `recoveryActions` /
+      # `recoveryResetSeconds` lines — backward-compat with the
+      # pre-Phase-B canonical text.
+      if r.serviceDisplayName.len > 0:
+        pairs.add(("displayName", quoteSystemValue(r.serviceDisplayName)))
+      if r.serviceBinPath.len > 0:
+        pairs.add(("binPath", quoteSystemValue(r.serviceBinPath)))
+      if r.serviceRecoveryActions.len > 0:
+        var tokens = newSeq[string]()
+        for slot in r.serviceRecoveryActions:
+          tokens.add(windowsServiceRecoveryActionToken(slot.action) &
+                     ":" & $slot.delayMs)
+        pairs.add(("recoveryActions", renderListLiteral(tokens)))
+      if r.serviceRecoveryResetSeconds > 0:
+        pairs.add(("recoveryResetSeconds",
+          $r.serviceRecoveryResetSeconds))
+    of srkWindowsScheduledTask:
+      # Windows-System-Resources Phase C: canonical text rendering.
+      # Mirrors the field-emission rule the template + the SystemResource
+      # parser agree on; back-compat-shaped optional fields stay
+      # byte-identical on omission.
+      pairs.add(("taskName", quoteSystemValue(r.wstTaskName)))
+      pairs.add(("executable", quoteSystemValue(r.wstExecutable)))
+      if r.wstArguments.len > 0:
+        pairs.add(("arguments", renderListLiteral(r.wstArguments)))
+      if r.wstWorkingDirectory.len > 0:
+        pairs.add(("workingDirectory",
+          quoteSystemValue(r.wstWorkingDirectory)))
+      pairs.add(("runAsUser", quoteSystemValue(r.wstRunAsUser)))
+      pairs.add(("runWithHighestPrivileges",
+        (if r.wstRunWithHighestPrivileges: "true" else: "false")))
+      pairs.add(("schedule",
+        renderListLiteral(@[encodeScheduledTaskScheduleSpec(r.wstSchedule)])))
+      pairs.add(("enabled",
+        (if r.wstEnabled: "true" else: "false")))
     of srkWindowsVsInstaller:
       pairs.add(("edition", quoteSystemValue(r.vsEdition)))
       pairs.add(("channel", quoteSystemValue(r.vsChannel)))
@@ -684,6 +869,17 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkFsSystemFile:
       pairs.add(("path", quoteSystemValue(r.sfPath)))
       pairs.add(("content", quoteSystemValue(r.sfContent)))
+      # External-source fields (Windows-System-Resources Phase A): emit
+      # only when present, mirroring the template + ACL-fields pattern.
+      # A profile that uses inline content alone re-renders with NO
+      # `sourceUrl` / `sha256` / `sourceLocal` lines — backward-compat
+      # with the pre-Phase-A canonical text.
+      if r.sfSourceUrl.len > 0:
+        pairs.add(("sourceUrl", quoteSystemValue(r.sfSourceUrl)))
+      if r.sfSha256.len > 0:
+        pairs.add(("sha256", quoteSystemValue(r.sfSha256)))
+      if r.sfSourceLocal.len > 0:
+        pairs.add(("sourceLocal", quoteSystemValue(r.sfSourceLocal)))
     of srkFsSystemDirectory:
       pairs.add(("path", quoteSystemValue(r.dirPath)))
       if r.dirAclPresent:

@@ -8,7 +8,7 @@
 ## with the RBPI binary envelope while keeping the same Nim-side
 ## record types.
 
-import std/[options, tables]
+import std/[options, strutils, tables]
 
 type
   ProfileIntent* = object
@@ -92,6 +92,74 @@ type
     of fvkBool: b*: bool
     of fvkList: items*: seq[string]
     of fvkExpr: expr*: string
+
+  WindowsServiceRecoveryAction* = enum
+    ## Windows-System-Resources Phase B: the four `sc.exe failure`
+    ## actions a service can declare for its 1st/2nd/3rd-failure slots.
+    ## The string values are the LOWER-CASE wire form used in the
+    ## profile text, JSON, and codec — `sc.exe failure ... actions= `
+    ## emits the same tokens (with `""` for `None`). The enum is
+    ## referenced by both the profile-side `windowsService` template
+    ## (operator-facing typed parameter) and the apply-side
+    ## `SystemResource` / `PrivilegedOperation` variants, so its
+    ## canonical string form has to survive every encoding boundary.
+    wsraNone = "none"
+    wsraRestart = "restart"
+    wsraRunCommand = "runcommand"
+    wsraReboot = "reboot"
+
+  WindowsServiceRecovery* = tuple[action: WindowsServiceRecoveryAction;
+                                   delayMs: int]
+    ## One entry of `windows.service`'s `recoveryActions` field: the
+    ## action to take on a failure plus the delay (in milliseconds)
+    ## the SCM waits before invoking it. The triple slot meaning
+    ## (1st-failure / 2nd-failure / subsequent-failure) is positional
+    ## inside the sequence — `sc.exe failure` consumes up to three
+    ## entries in order.
+
+  ScheduleKind* = enum
+    ## Windows-System-Resources Phase C: the closed set of trigger
+    ## shapes a `windows.scheduledTask` resource accepts. The string
+    ## values are the LOWER-CASE wire form used in the profile text,
+    ## the ProfileIntent field list, the codec frame, and the broker
+    ## dispatch — every encoding boundary agrees on the same vocabulary
+    ## so a round-trip is loss-free. A profile carrying a token outside
+    ## this set is rejected at the codec / validator boundary.
+    sskOnBoot = "onBoot"
+    sskOnLogon = "onLogon"
+    sskOnce = "once"
+    sskDaily = "daily"
+    sskInterval = "interval"
+
+  ScheduleSpec* = object
+    ## Windows-System-Resources Phase C: discriminated union describing
+    ## ONE Task Scheduler trigger. The driver encodes this to the XML
+    ## `Register-ScheduledTask` consumes and decodes
+    ## `Get-ScheduledTask`'s observation back into the same shape.
+    ##
+    ## The intermediate ProfileIntent representation stores each spec
+    ## as ONE canonical-text string in a `fvkList` value (the codec
+    ## token form below) so the existing string-list machinery covers
+    ## the JSON, RBEB and canonical-text surfaces without a new
+    ## `FieldValue` variant. Per-kind fields:
+    ##
+    ##   * `sskOnBoot`    — `delaySeconds`         (default 0)
+    ##   * `sskOnLogon`   — `forUser`              ("" => any user)
+    ##   * `sskOnce`      — `runAt` ISO-8601 stamp
+    ##   * `sskDaily`     — `timeOfDay` `HH:MM`
+    ##   * `sskInterval`  — `everyMinutes` (>0), `startAt` ISO-8601 ("" allowed)
+    case kind*: ScheduleKind
+    of sskOnBoot:
+      delaySeconds*: int
+    of sskOnLogon:
+      forUser*: string
+    of sskOnce:
+      runAt*: string
+    of sskDaily:
+      timeOfDay*: string
+    of sskInterval:
+      everyMinutes*: int
+      startAt*: string
 
   ResourceAddress* = object
     kind*: string
@@ -336,6 +404,293 @@ proc listField*(items: seq[string]): FieldValue =
 
 proc exprField*(expr: string): FieldValue =
   FieldValue(kind: fvkExpr, expr: expr)
+
+# ---------------------------------------------------------------------
+# Windows-System-Resources Phase B: recovery-action token codec.
+#
+# `windows.service`'s `recoveryActions` field is a `seq[(action, delayMs)]`
+# tuple. The intermediate ProfileIntent shape stores each entry as one
+# `"action:delayMs"` string in a `fvkList` value so the existing JSON
+# emitter, codec round-trip, and text renderer can ride the established
+# string-list machinery without a new FieldValue variant. The strict
+# format is `<lower-case-action-token>:<non-negative-decimal>`; the
+# encoder rejects anything else.
+#
+# The matching apply-side codec lives in `repro_elevation/operations.nim`
+# (parallel `WindowsServiceRecoveryActionKind` enum + same lower-case
+# string vocabulary); the two namespaces share the wire form so a
+# round-trip through the adapter is loss-free.
+# ---------------------------------------------------------------------
+
+proc recoveryActionToken*(a: WindowsServiceRecoveryAction): string =
+  ## The lower-case wire token for a recovery action. Centralised so
+  ## the template, the JSON emitter, and the text renderer all agree.
+  $a
+
+proc recoveryActionFromToken*(raw: string): WindowsServiceRecoveryAction =
+  ## Strict parse of a recovery-action token. Accepts the canonical
+  ## lower-case forms only — mirrors the closed-set posture of every
+  ## other profile field. Raises `ValueError` on a mismatch.
+  case raw
+  of "none": wsraNone
+  of "restart": wsraRestart
+  of "runcommand": wsraRunCommand
+  of "reboot": wsraReboot
+  else:
+    raise newException(ValueError,
+      "unknown windows.service recovery action token '" & raw &
+      "' (expected one of restart / runcommand / reboot / none)")
+
+proc isKnownRecoveryActionToken*(raw: string): bool =
+  ## Non-raising form. Used by the front-end closed-set validators.
+  raw in ["none", "restart", "runcommand", "reboot"]
+
+proc encodeWindowsServiceRecovery*(r: WindowsServiceRecovery): string =
+  ## Encode a single `(action, delayMs)` pair as the canonical
+  ## `"action:delayMs"` token the FieldValue list carries.
+  recoveryActionToken(r.action) & ":" & $r.delayMs
+
+proc decodeWindowsServiceRecovery*(token: string): WindowsServiceRecovery =
+  ## Decode a single `"action:delayMs"` token. The action half must be
+  ## a known lower-case recovery-action token; the delay half must be a
+  ## non-negative decimal integer. Both halves are validated so a
+  ## malformed entry fails closed rather than collapsing to defaults.
+  let sep = token.find(':')
+  if sep <= 0 or sep == token.len - 1:
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' is malformed (expected '<action>:<delayMs>')")
+  let actionToken = token[0 ..< sep]
+  let delayStr = token[sep + 1 .. ^1]
+  if not isKnownRecoveryActionToken(actionToken):
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' names an unknown action '" & actionToken &
+      "' (expected restart / runcommand / reboot / none)")
+  var delayMs: int
+  try:
+    delayMs = parseInt(delayStr)
+  except ValueError:
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' has a non-integer delay '" & delayStr & "'")
+  if delayMs < 0:
+    raise newException(ValueError,
+      "windows.service recovery entry '" & token &
+      "' has a negative delay (must be >= 0)")
+  (action: recoveryActionFromToken(actionToken),
+   delayMs: delayMs)
+
+proc encodeWindowsServiceRecoveryList*(
+    recovery: seq[WindowsServiceRecovery]): seq[string] =
+  for r in recovery:
+    result.add(encodeWindowsServiceRecovery(r))
+
+proc decodeWindowsServiceRecoveryList*(
+    tokens: seq[string]): seq[WindowsServiceRecovery] =
+  for t in tokens:
+    result.add(decodeWindowsServiceRecovery(t))
+
+# ---------------------------------------------------------------------
+# Windows-System-Resources Phase C: ScheduleSpec token codec.
+#
+# `windows.scheduledTask`'s `schedule` field is a discriminated union.
+# The intermediate ProfileIntent shape stores it as a SINGLE-ELEMENT
+# string seq under a `fvkList` value so the existing JSON emitter,
+# canonical-text renderer and codec machinery flow without a new
+# FieldValue variant. The canonical token form mirrors the
+# `WindowsServiceRecovery` pattern (Phase B):
+#
+#   * `onBoot:<delaySeconds>`
+#   * `onLogon:<forUser>`               (forUser may be empty)
+#   * `once:<runAt>`                    (ISO-8601 timestamp)
+#   * `daily:<timeOfDay>`               (`HH:MM`)
+#   * `interval:<everyMinutes>:<startAt>`  (startAt may be empty)
+#
+# The codec is closed-set: an unrecognised tag, an empty required
+# field, a non-positive `everyMinutes`, or a malformed `HH:MM` is
+# rejected at every encoding boundary (template, parser, adapter,
+# RBEB decoder) — defence-in-depth identical to Phase B.
+# ---------------------------------------------------------------------
+
+proc scheduleKindToken*(k: ScheduleKind): string =
+  ## Lower-case wire token for a schedule kind. Centralised so every
+  ## boundary agrees on the same spelling.
+  $k
+
+proc scheduleKindFromToken*(raw: string): ScheduleKind =
+  ## Strict parse of a schedule-kind token. An unknown spelling raises
+  ## `ValueError`. Used by the front-end + adapter validators.
+  case raw
+  of "onBoot": sskOnBoot
+  of "onLogon": sskOnLogon
+  of "once": sskOnce
+  of "daily": sskDaily
+  of "interval": sskInterval
+  else:
+    raise newException(ValueError,
+      "unknown windows.scheduledTask schedule kind token '" & raw &
+      "' (expected one of onBoot / onLogon / once / daily / interval)")
+
+proc isKnownScheduleKindToken*(raw: string): bool =
+  ## Non-raising form, used by closed-set validators.
+  raw in ["onBoot", "onLogon", "once", "daily", "interval"]
+
+proc isValidScheduleTimeOfDay*(raw: string): bool =
+  ## True only for an `HH:MM` string with a valid 24-hour time. The
+  ## driver interpolates this verbatim into the Task Scheduler XML, so
+  ## a closed-set validator on the front-end side is necessary as
+  ## defence-in-depth on top of the broker's psQuote.
+  if raw.len != 5: return false
+  if raw[2] != ':': return false
+  for i in [0, 1, 3, 4]:
+    if raw[i] notin {'0'..'9'}:
+      return false
+  let h = parseInt(raw[0 ..< 2])
+  let m = parseInt(raw[3 ..< 5])
+  h in 0..23 and m in 0..59
+
+proc isValidScheduleIso8601*(raw: string): bool =
+  ## Lightweight ISO-8601 shape check. We do NOT parse the full
+  ## grammar; we just confirm the string is non-empty and uses only the
+  ## conservative charset (digits + `-`, `:`, `T`, `Z`, `+`, `.`) that
+  ## Task Scheduler accepts in `StartBoundary`. A malformed value here
+  ## fails closed at codec time rather than at apply time.
+  if raw.len == 0: return false
+  for ch in raw:
+    if ch notin {'0'..'9', '-', ':', 'T', 'Z', '+', '.'}:
+      return false
+  true
+
+proc encodeScheduleSpec*(s: ScheduleSpec): string =
+  ## Encode a `ScheduleSpec` to its canonical wire token. The encoder
+  ## REJECTS malformed inputs (negative `delaySeconds`, non-positive
+  ## `everyMinutes`, empty required-time fields, malformed `HH:MM` /
+  ## ISO-8601 shapes) so a bypass through the template surface still
+  ## fails closed.
+  case s.kind
+  of sskOnBoot:
+    if s.delaySeconds < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" &
+        $s.delaySeconds & "' is negative (must be >= 0)")
+    "onBoot:" & $s.delaySeconds
+  of sskOnLogon:
+    "onLogon:" & s.forUser
+  of sskOnce:
+    if not isValidScheduleIso8601(s.runAt):
+      raise newException(ValueError,
+        "windows.scheduledTask once runAt '" & s.runAt &
+        "' is not a valid ISO-8601 timestamp")
+    "once:" & s.runAt
+  of sskDaily:
+    if not isValidScheduleTimeOfDay(s.timeOfDay):
+      raise newException(ValueError,
+        "windows.scheduledTask daily timeOfDay '" & s.timeOfDay &
+        "' is not a valid HH:MM 24-hour time")
+    "daily:" & s.timeOfDay
+  of sskInterval:
+    if s.everyMinutes <= 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" &
+        $s.everyMinutes & "' must be > 0")
+    if s.startAt.len > 0 and not isValidScheduleIso8601(s.startAt):
+      raise newException(ValueError,
+        "windows.scheduledTask interval startAt '" & s.startAt &
+        "' is not a valid ISO-8601 timestamp")
+    "interval:" & $s.everyMinutes & ":" & s.startAt
+
+proc decodeScheduleSpec*(token: string): ScheduleSpec =
+  ## Decode a canonical wire token into a `ScheduleSpec`. Rejects every
+  ## malformed shape (unknown tag, missing required field, non-integer
+  ## numeric half, negative delay, non-positive interval). Raises
+  ## `ValueError` on every refusal — the caller turns the message into
+  ## the kind-specific diagnostic.
+  let sep = token.find(':')
+  if sep <= 0:
+    raise newException(ValueError,
+      "windows.scheduledTask schedule token '" & token &
+      "' is malformed (expected '<kind>:<payload>')")
+  let kindTok = token[0 ..< sep]
+  let payload = token[sep + 1 .. ^1]
+  if not isKnownScheduleKindToken(kindTok):
+    raise newException(ValueError,
+      "windows.scheduledTask schedule token '" & token &
+      "' names an unknown kind '" & kindTok &
+      "' (expected one of onBoot / onLogon / once / daily / interval)")
+  let kind = scheduleKindFromToken(kindTok)
+  case kind
+  of sskOnBoot:
+    var delaySeconds: int
+    try:
+      delaySeconds = parseInt(payload)
+    except ValueError:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" & payload &
+        "' is not an integer")
+    if delaySeconds < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" & payload &
+        "' is negative (must be >= 0)")
+    ScheduleSpec(kind: sskOnBoot, delaySeconds: delaySeconds)
+  of sskOnLogon:
+    # `payload` may legitimately be empty (any-user logon trigger).
+    ScheduleSpec(kind: sskOnLogon, forUser: payload)
+  of sskOnce:
+    if not isValidScheduleIso8601(payload):
+      raise newException(ValueError,
+        "windows.scheduledTask once runAt '" & payload &
+        "' is not a valid ISO-8601 timestamp")
+    ScheduleSpec(kind: sskOnce, runAt: payload)
+  of sskDaily:
+    if not isValidScheduleTimeOfDay(payload):
+      raise newException(ValueError,
+        "windows.scheduledTask daily timeOfDay '" & payload &
+        "' is not a valid HH:MM 24-hour time")
+    ScheduleSpec(kind: sskDaily, timeOfDay: payload)
+  of sskInterval:
+    let sep2 = payload.find(':')
+    if sep2 < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval payload '" & payload &
+        "' is malformed (expected '<everyMinutes>:<startAt>')")
+    let everyStr = payload[0 ..< sep2]
+    let startAt = payload[sep2 + 1 .. ^1]
+    var everyMinutes: int
+    try:
+      everyMinutes = parseInt(everyStr)
+    except ValueError:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" & everyStr &
+        "' is not an integer")
+    if everyMinutes <= 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" & everyStr &
+        "' must be > 0")
+    if startAt.len > 0 and not isValidScheduleIso8601(startAt):
+      raise newException(ValueError,
+        "windows.scheduledTask interval startAt '" & startAt &
+        "' is not a valid ISO-8601 timestamp")
+    ScheduleSpec(kind: sskInterval, everyMinutes: everyMinutes,
+      startAt: startAt)
+
+proc `==`*(a, b: ScheduleSpec): bool =
+  ## Structural equality for `ScheduleSpec`. Used by adapter / driver
+  ## drift checks. Two specs of different `kind` are NEVER equal; same-
+  ## kind specs compare on the variant's fields.
+  if a.kind != b.kind:
+    return false
+  case a.kind
+  of sskOnBoot:
+    a.delaySeconds == b.delaySeconds
+  of sskOnLogon:
+    a.forUser == b.forUser
+  of sskOnce:
+    a.runAt == b.runAt
+  of sskDaily:
+    a.timeOfDay == b.timeOfDay
+  of sskInterval:
+    a.everyMinutes == b.everyMinutes and a.startAt == b.startAt
 
 proc parseResourceAddress*(s: string): ResourceAddress =
   ## Parse a `kind:name` string into a ResourceAddress. The address

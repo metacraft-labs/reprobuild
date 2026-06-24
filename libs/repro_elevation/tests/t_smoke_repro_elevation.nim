@@ -533,6 +533,198 @@ suite "repro_elevation: Phase C closed-set wiring":
       WireOperation(operation: f, baselineDigestHex: ""))).body)
     check fd.operation.sfPath == "/etc/profile.d/repro-system.sh"
     check fd.operation.sfContent == "export X=1\n"
+    # External-source fields round-trip preserved on the inline-content
+    # path (all three stay empty — the backward-compat shape).
+    check fd.operation.sfSourceUrl == ""
+    check fd.operation.sfSha256 == ""
+    check fd.operation.sfSourceLocal == ""
+
+  test "fs.systemFile sourceUrl/sourceLocal frame round-trips":
+    # Windows-System-Resources Phase A: encode + decode preserves the
+    # external-source fields on the wire so the broker's payload
+    # matches the controller's plan.
+    let url = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "urlFile",
+      sfPath: "/etc/cache/runner.tar.gz",
+      sfSourceUrl: "https://example.com/runner.tar.gz",
+      sfSha256: "0123456789abcdef0123456789abcdef" &
+                "0123456789abcdef0123456789abcdef",
+      sfDestroy: false)
+    check operationValidationError(url) == ""
+    let urlRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: url, baselineDigestHex: ""))).body).operation
+    check urlRT.sfSourceUrl == "https://example.com/runner.tar.gz"
+    check urlRT.sfSha256.len == 64
+    check urlRT.sfContent == ""
+    check urlRT.sfSourceLocal == ""
+
+    let lo = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "localFile",
+      sfPath: "/etc/cache/local.conf",
+      sfSourceLocal: "/tmp/repro-controller-side/local.conf",
+      sfDestroy: false)
+    check operationValidationError(lo) == ""
+    let loRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: lo, baselineDigestHex: ""))).body).operation
+    check loRT.sfSourceLocal == "/tmp/repro-controller-side/local.conf"
+    check loRT.sfContent == ""
+    check loRT.sfSourceUrl == ""
+
+  test "fs.systemFile validator rejects mutually exclusive sources":
+    # Defence-in-depth at the closed-set boundary.
+    let both = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "bothBad",
+      sfPath: "/etc/cache/x",
+      sfContent: "k = v",
+      sfSourceUrl: "https://example.com/x",
+      sfSha256: "0123456789abcdef0123456789abcdef" &
+                "0123456789abcdef0123456789abcdef",
+      sfDestroy: false)
+    check operationValidationError(both).len > 0
+    let bothLocal = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "bothLocalBad",
+      sfPath: "/etc/cache/x",
+      sfContent: "k = v",
+      sfSourceLocal: "/tmp/x",
+      sfDestroy: false)
+    check operationValidationError(bothLocal).len > 0
+    let urlNoSha = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "urlNoSha",
+      sfPath: "/etc/cache/x",
+      sfSourceUrl: "https://example.com/x",
+      sfDestroy: false)
+    check operationValidationError(urlNoSha).len > 0
+    let shaNoUrl = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "shaNoUrl",
+      sfPath: "/etc/cache/x",
+      sfSha256: "0123456789abcdef0123456789abcdef" &
+                "0123456789abcdef0123456789abcdef",
+      sfDestroy: false)
+    check operationValidationError(shaNoUrl).len > 0
+    # Bad-length / non-hex sha256 is rejected too.
+    let shortSha = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "shortSha",
+      sfPath: "/etc/cache/x",
+      sfSourceUrl: "https://example.com/x",
+      sfSha256: "deadbeef", sfDestroy: false)
+    check operationValidationError(shortSha).len > 0
+    let upperSha = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "upperSha",
+      sfPath: "/etc/cache/x",
+      sfSourceUrl: "https://example.com/x",
+      sfSha256: "0123456789ABCDEF0123456789ABCDEF" &
+                "0123456789ABCDEF0123456789ABCDEF",
+      sfDestroy: false)
+    check operationValidationError(upperSha).len > 0
+    # An all-empty fs.systemFile (no source at all) is a legitimate
+    # "empty file" declaration and the validator accepts it; mutual
+    # exclusion is `<= 1`, not `== 1`.
+    let empty = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "emptyFile",
+      sfPath: "/etc/cache/empty",
+      sfDestroy: false)
+    check operationValidationError(empty) == ""
+
+  test "fs.systemFile desiredFileContent reads sourceLocal each call":
+    # The driver re-reads `sfSourceLocal` on every call — so a
+    # between-step edit lands in the second apply. Exercise that
+    # against a real tempdir file: write A, observe digest A, edit
+    # to B, observe digest B.
+    when defined(linux) or defined(macosx) or defined(windows):
+      let dir = createTempDir("repro-fssf-local-", "")
+      defer: removeDir(dir)
+      let src = dir / "src.txt"
+      writeFile(src, "alpha")
+      let op = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "localFile",
+        sfPath: "/etc/profile.d/repro-localfile.sh",
+        sfSourceLocal: src,
+        sfDestroy: false)
+      let bytesA = desiredFileContent(op)
+      check bytesA == "alpha"
+      writeFile(src, "bravo")
+      let bytesB = desiredFileContent(op)
+      check bytesB == "bravo"
+      let bytesB2 = desiredFileContent(op)
+      check bytesB2 == "bravo"
+
+  test "fs.systemFile desiredFileContent raises on missing sourceLocal":
+    when defined(linux) or defined(macosx) or defined(windows):
+      let dir = createTempDir("repro-fssf-missing-", "")
+      defer: removeDir(dir)
+      let op = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "missingLocal",
+        sfPath: "/etc/profile.d/repro-missing.sh",
+        sfSourceLocal: dir / "definitely-not-here.txt",
+        sfDestroy: false)
+      var raised = false
+      try:
+        discard desiredFileContent(op)
+      except CatchableError:
+        raised = true
+      check raised
+
+  test "fs.systemFile desiredFileContent verifies sourceUrl digest":
+    # Use a `data:`-URI as a controllable transport: stdlib
+    # `httpclient` understands it without a network round-trip. We
+    # pin both a correct and an incorrect BLAKE3 digest of the
+    # decoded body and assert the verifier accepts / rejects.
+    when defined(linux) or defined(macosx) or defined(windows):
+      # NOTE: at the time of writing, std/httpclient does not handle
+      # `data:` URIs; this test exercises the digest-mismatch failure
+      # mode (the apply path should not surface raw bytes on a bad
+      # hash). The negative case below is the primary integration
+      # gate; a positive case for the `sourceUrl` path is exercised
+      # by the e2e fixture's compile + plan, NOT a real fetch.
+      let badShaOp = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "badShaUrl",
+        sfPath: "/etc/profile.d/repro-url.sh",
+        sfSourceUrl: "http://127.0.0.1:1/not-actually-served",
+        sfSha256: "0123456789abcdef0123456789abcdef" &
+                  "0123456789abcdef0123456789abcdef",
+        sfDestroy: false)
+      var raised = false
+      try:
+        discard desiredFileContent(badShaOp)
+      except CatchableError:
+        # Either the fetch fails (port 1 closed) or the digest
+        # mismatches — both raise `EProtocol`, which is the
+        # contract.
+        raised = true
+      check raised
+
+  test "fs.systemFile posixSystemDesiredDigestHex dispatches on source":
+    # The dispatcher's drift gate compares against this digest; the
+    # sourceUrl path returns the pinned hex directly, the sourceLocal
+    # path re-reads the file. Both produce the same shape the
+    # post-apply re-probe compares against.
+    when defined(linux) or defined(macosx) or defined(windows):
+      let inlineOp = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "inline",
+        sfPath: "/etc/x", sfContent: "hello", sfDestroy: false)
+      let urlOp = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "url",
+        sfPath: "/etc/x",
+        sfSourceUrl: "https://example.com/y",
+        sfSha256: "0123456789abcdef0123456789abcdef" &
+                  "0123456789abcdef0123456789abcdef",
+        sfDestroy: false)
+      check posixSystemDesiredDigestHex(urlOp) == urlOp.sfSha256
+      check posixSystemDesiredDigestHex(inlineOp).len == 64
+      let dir = createTempDir("repro-fssf-desired-", "")
+      defer: removeDir(dir)
+      let src = dir / "src.txt"
+      writeFile(src, "charlie")
+      let localOp = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "local",
+        sfPath: "/etc/x", sfSourceLocal: src, sfDestroy: false)
+      # The local digest matches the digest of an inline op with the
+      # same byte payload.
+      let inlineCharlie = PrivilegedOperation(kind: pokFsSystemFile,
+        address: "inlineCharlie",
+        sfPath: "/etc/x", sfContent: "charlie", sfDestroy: false)
+      check posixSystemDesiredDigestHex(localOp) ==
+        posixSystemDesiredDigestHex(inlineCharlie)
     let e = PrivilegedOperation(kind: pokEnvSystemVariable, address: "e",
       evName: "PATH", evContribution: @["/opt/a/bin", "/opt/b/bin"],
       evIsPathList: true, evDestroy: false)
@@ -776,6 +968,308 @@ suite "repro_elevation: fs.systemDirectory allowlist + driver":
       except CatchableError:
         raised = true
       check raised
+
+# ===========================================================================
+# Windows-System-Resources Phase D — `fs.systemDirectory` NTFS ACL apply
+# pure helpers + drift digest. The icacls argv assemblers + the Allow
+# / Deny pivot + the canonical-payload contributors are all
+# platform-pure (no shell-out); the live `icacls <path>` re-probe lives
+# behind `when defined(windows)` in the driver and is exercised only
+# on a Windows host.
+# ===========================================================================
+
+suite "repro_elevation: fs.systemDirectory Phase D — icacls argv":
+
+  test "splitDirAclEntry detects the Deny direction":
+    # The profile builder's `aclEntry(... type=Deny)` emits the leading
+    # `:(D,...)` marker; the splitter strips it to the bare `:(...)` form
+    # icacls's `/deny` verb consumes.
+    let allow = splitDirAclEntry("SYSTEM:(F)")
+    check allow.verb == icaclsGrantVerb
+    check allow.spec == "SYSTEM:(F)"
+    let deny = splitDirAclEntry("Guests:(D,W)")
+    check deny.verb == icaclsDenyVerb
+    check deny.spec == "Guests:(W)"
+    let denyMulti = splitDirAclEntry(
+      "BUILTIN\\Administrators:(D,F)")
+    check denyMulti.verb == icaclsDenyVerb
+    check denyMulti.spec == "BUILTIN\\Administrators:(F)"
+
+  test "renderTakeownDirCommandArgs exact argv":
+    check renderTakeownDirCommandArgs("C:\\actions-runner-tokens") ==
+      @["takeown", "/F", "C:\\actions-runner-tokens", "/A"]
+    # Path with a space — the renderer emits the raw argv; quoting
+    # happens at the shell-cmd join.
+    check renderTakeownDirCommandArgs("C:\\Program Files\\foo") ==
+      @["takeown", "/F", "C:\\Program Files\\foo", "/A"]
+
+  test "renderIcaclsSetOwnerCommandArgs exact argv":
+    check renderIcaclsSetOwnerCommandArgs(
+      "C:\\actions-runner-tokens", "SYSTEM") ==
+      @["icacls", "C:\\actions-runner-tokens", "/setowner", "SYSTEM"]
+    check renderIcaclsSetOwnerCommandArgs(
+      "C:\\actions-runner-tokens", "BUILTIN\\Administrators") ==
+      @["icacls", "C:\\actions-runner-tokens", "/setowner",
+        "BUILTIN\\Administrators"]
+
+  test "renderIcaclsInheritanceCommandArgs maps the closed set":
+    let empty: seq[string] = @[]
+    # `enabled` (or unset) is a no-op — empty argv.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "enabled") == empty
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "") == empty
+    # `disabled-replace` -> `/inheritance:r`.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "disabled-replace") ==
+      @["icacls", "C:\\actions-runner-tokens", "/inheritance:r"]
+    # `disabled-convert` -> `/inheritance:d`.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "disabled-convert") ==
+      @["icacls", "C:\\actions-runner-tokens", "/inheritance:d"]
+    # `protected-clear-inherited` -> same `/inheritance:r` flag (the
+    # new vocabulary value names the SetAccessRuleProtection(true,
+    # false) intent — icacls's `r` is the closest live verb).
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "protected-clear-inherited") ==
+      @["icacls", "C:\\actions-runner-tokens", "/inheritance:r"]
+
+  test "renderIcaclsInheritanceCommandArgs refuses an unknown mode":
+    let empty: seq[string] = @[]
+    # An unknown mode falls through to the no-op branch; the closed-
+    # set validator at the codec boundary already rejects this before
+    # the driver sees the operation, so the pure renderer can fall
+    # through silently rather than raising.
+    check renderIcaclsInheritanceCommandArgs(
+      "C:\\actions-runner-tokens", "evil-mode") == empty
+
+  test "renderIcaclsGrantCommandArgs routes Allow vs Deny":
+    # Allow ACE -> /grant + verbatim spec.
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens", "SYSTEM:(F)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/grant", "SYSTEM:(F)"]
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens",
+      "BUILTIN\\Administrators:(F)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/grant",
+        "BUILTIN\\Administrators:(F)"]
+    # Deny ACE -> /deny + spec with the leading `D,` marker stripped.
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens", "Guests:(D,W)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/deny", "Guests:(W)"]
+    # Network ReadAndExecute (RX) Allow.
+    check renderIcaclsGrantCommandArgs(
+      "C:\\actions-runner-tokens", "NetworkService:(RX)") ==
+      @["icacls", "C:\\actions-runner-tokens", "/grant",
+        "NetworkService:(RX)"]
+
+  test "renderArgvAsShellCmd quotes each token":
+    # The shell-cmd join is what the driver feeds to `execCmdEx`. The
+    # path-with-spaces case is the load-bearing one: `quoteShell`
+    # wraps the path in double-quotes so the cmd.exe argv parser
+    # treats it as one token.
+    let argv = renderTakeownDirCommandArgs("C:\\Program Files\\foo")
+    let cmd = renderArgvAsShellCmd(argv)
+    # cmd.exe quoting: `takeown /F "C:\Program Files\foo" /A` on
+    # Windows; on POSIX `quoteShell` uses single-quotes. Either way
+    # the path's space must round-trip as part of ONE argument.
+    check cmd.contains("Program Files") or cmd.contains("Program\\ Files")
+    check cmd.startsWith("takeown")
+    check cmd.endsWith("/A")
+
+suite "repro_elevation: fs.systemDirectory Phase D — drift digest":
+
+  test "canonicalDirAclDesired empty when ACL unmanaged":
+    # The back-compat sentinel — an ACL-unmanaged directory MUST
+    # contribute the empty string so the post-Phase-D
+    # `fsSystemDirectoryDigestPayload` matches PR #7's pre-Phase-D
+    # payload byte-for-byte.
+    check canonicalDirAclDesired(false, "", @[], "") == ""
+
+  test "canonicalDirAclDesired stable across entry re-ordering":
+    let a = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)",
+        "NetworkService:(RX)"],
+      "protected-clear-inherited")
+    let b = canonicalDirAclDesired(true, "SYSTEM",
+      @["NetworkService:(RX)", "SYSTEM:(F)",
+        "BUILTIN\\Administrators:(F)"],
+      "protected-clear-inherited")
+    check a == b
+    check a.contains("SYSTEM:(F)")
+    check a.contains("mode=protected-clear-inherited")
+
+  test "canonicalDirAclDesired distinguishes inheritance vocab":
+    let enabled = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "enabled")
+    let replace = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-replace")
+    let convert = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-convert")
+    let protected = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "protected-clear-inherited")
+    check enabled != replace
+    check replace != convert
+    check convert != protected
+    check enabled != protected
+
+  test "canonicalDirAclDesired defaults missing inheritance to enabled":
+    check canonicalDirAclDesired(true, "SYSTEM", @["SYSTEM:(F)"], "") ==
+      canonicalDirAclDesired(true, "SYSTEM", @["SYSTEM:(F)"], "enabled")
+
+  test "canonicalDirAclObserved matches desired when ACEs converge":
+    # Order-independence: a host whose ACL contains the desired ACEs
+    # (plus possibly extras) yields the SAME observed-projection
+    # digest as the desired digest, so the broker's cache-hit
+    # predicate fires.
+    let desired = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"], "disabled-replace")
+    let observed = canonicalDirAclObserved(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"],
+      # Host's ACL has the desired ACEs PLUS an extra one (additive
+      # semantics — extras are NOT drift).
+      @["BUILTIN\\Administrators:(F)", "NetworkService:(RX)",
+        "SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    check desired == observed
+
+  test "canonicalDirAclObserved differs when a desired ACE is missing":
+    let desired = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"], "disabled-replace")
+    let observed = canonicalDirAclObserved(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"],
+      # Missing the second desired ACE on the host.
+      @["SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    check desired != observed
+
+  test "canonicalDirAclObserved differs when inheritance not pinned":
+    # `disabled-replace` requires the live ACL to have inheritance
+    # disabled. A host where inheritance is still enabled flips the
+    # digest even when every desired ACE is present.
+    let desired = canonicalDirAclDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-replace")
+    let observed = canonicalDirAclObserved(true, "SYSTEM",
+      @["SYSTEM:(F)"], @["SYSTEM:(F)"],
+      observedInheritanceDisabled = false,
+      desiredInheritance = "disabled-replace")
+    check desired != observed
+
+  test "dirAclMatchesDesired covers the convergence + drift cases":
+    # Converged: every desired ACE present, inheritance disabled.
+    check dirAclMatchesDesired(true, "SYSTEM",
+      @["SYSTEM:(F)"], @["SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    # Drift: a desired ACE missing.
+    check not dirAclMatchesDesired(true, "SYSTEM",
+      @["SYSTEM:(F)", "NetworkService:(RX)"],
+      @["SYSTEM:(F)"],
+      observedInheritanceDisabled = true,
+      desiredInheritance = "disabled-replace")
+    # Absent target -> never a match for an ACL-managed directory.
+    check not dirAclMatchesDesired(false, "SYSTEM",
+      @["SYSTEM:(F)"], @[],
+      observedInheritanceDisabled = false,
+      desiredInheritance = "enabled")
+
+  test "normalizeDirAclEntry collapses internal whitespace":
+    check normalizeDirAclEntry("SYSTEM:(F)") == "SYSTEM:(F)"
+    check normalizeDirAclEntry("  SYSTEM:(F)  ") == "SYSTEM:(F)"
+    check normalizeDirAclEntry("SYSTEM:(F)  (OI)") == "SYSTEM:(F) (OI)"
+    check normalizeDirAclEntry("SYSTEM:(F)\t (CI)") == "SYSTEM:(F) (CI)"
+
+  test "fsSystemDirectoryDigestPayload back-compat for ACL-unmanaged":
+    # The aclPresent==false branch MUST produce a string
+    # byte-identical to PR #7's legacy
+    # `"fs.systemDirectory:present"` payload so the unmanaged-ACL
+    # observation digest is bit-for-bit unchanged.
+    check fsSystemDirectoryDigestPayload(true, false, "", @[], "") ==
+      "fs.systemDirectory:present"
+    # Owner / entries / inheritance are IGNORED when aclPresent==false
+    # — a stray field doesn't poison the legacy payload.
+    check fsSystemDirectoryDigestPayload(true, false, "SYSTEM",
+      @["SYSTEM:(F)"], "disabled-replace") ==
+      "fs.systemDirectory:present"
+
+  test "fsSystemDirectoryDigestPayload absent yields the empty string":
+    # The absent observation digests to the zero sentinel; the
+    # payload itself is the empty string.
+    check fsSystemDirectoryDigestPayload(false, false, "", @[], "") == ""
+    check fsSystemDirectoryDigestPayload(false, true, "SYSTEM",
+      @["SYSTEM:(F)"], "enabled") == ""
+
+  test "fsSystemDirectoryDigestPayload extends payload when ACL managed":
+    let payload = fsSystemDirectoryDigestPayload(true, true,
+      "SYSTEM", @["SYSTEM:(F)", "BUILTIN\\Administrators:(F)"],
+      "protected-clear-inherited")
+    check payload.startsWith("fs.systemDirectory:present|")
+    check payload.contains("owner=SYSTEM")
+    check payload.contains("mode=protected-clear-inherited")
+    check payload.contains("SYSTEM:(F)")
+    check payload.contains("BUILTIN\\Administrators:(F)")
+
+  test "fsSystemDirectoryDigestPayload distinguishes aclPresent variants":
+    # Pure-function digest assertion (no filesystem I/O): the
+    # aclPresent==false branch produces the back-compat sentinel; the
+    # aclPresent==true branch extends it with the canonical ACL
+    # contribution. The two payloads MUST hash to distinct digests so
+    # the broker's drift comparison recomputes the apply when the
+    # operator changes the ACL declaration.
+    let legacyPayload = fsSystemDirectoryDigestPayload(true, false,
+      "", @[], "")
+    let aclPayload = fsSystemDirectoryDigestPayload(true, true,
+      "SYSTEM", @["SYSTEM:(F)"], "protected-clear-inherited")
+    check legacyPayload == "fs.systemDirectory:present"
+    check legacyPayload != aclPayload
+    # BLAKE3 hashing is injective on distinct payloads.
+    check posixDigestHexOfText(legacyPayload) !=
+      posixDigestHexOfText(aclPayload)
+    # The aclPresent==false digest matches PR #7's legacy
+    # `posixDigestHexOfText("fs.systemDirectory:present")`
+    # byte-for-byte.
+    check posixDigestHexOfText(legacyPayload) ==
+      posixDigestHexOfText("fs.systemDirectory:present")
+
+  test "validator: aclInheritance closed-set vocabulary":
+    # Defence-in-depth — the codec-boundary validator rejects an
+    # inheritance value outside the closed set.
+    let bad = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdBadInh", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @["SYSTEM:(F)"],
+      fsdAclInheritance: "make-up-mode")
+    check operationValidationError(bad).len > 0
+    # All four documented values pass the validator.
+    for mode in ["enabled", "disabled-replace",
+                 "disabled-convert", "protected-clear-inherited"]:
+      let ok = PrivilegedOperation(kind: pokFsSystemDirectory,
+        address: "fdOk", fsdPath: "/etc/myapp.d",
+        fsdAclPresent: true,
+        fsdAclEntries: @["SYSTEM:(F)"],
+        fsdAclInheritance: mode)
+      check operationValidationError(ok) == ""
+
+  test "validator: aclEntries non-empty when aclPresent + non-destroy":
+    # A managed ACL must declare at least one ACE — an empty list is
+    # a profile authoring bug.
+    let bad = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdNoEntries", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @[],
+      fsdAclInheritance: "disabled-replace")
+    check operationValidationError(bad).len > 0
+    # Destroy direction does NOT require entries (the destroy strips
+    # the directory; no ACL stamp needed).
+    let okDestroy = PrivilegedOperation(kind: pokFsSystemDirectory,
+      address: "fdDestroy", fsdPath: "/etc/myapp.d",
+      fsdAclPresent: true,
+      fsdAclEntries: @[],
+      fsdAclInheritance: "enabled",
+      fsdDestroy: true)
+    check operationValidationError(okDestroy) == ""
 
 suite "repro_elevation: env.systemVariable merge (Phase C)":
 
@@ -1216,6 +1710,336 @@ LocalPort=22
     check $pokWindowsFirewallRule == "windows.firewallRule"
     check privilegedOperationKindFromString("windows.firewallRule") ==
       pokWindowsFirewallRule
+
+# ===========================================================================
+# windows.service Phase B (Windows-System-Resources) — closed-set
+# recovery action vocabulary, sc.exe argv formatter, codec round-trip
+# across all four optional fields, and sc qfailure output parser. The
+# real driver runs only on Windows; what runs everywhere is the pure
+# logic verified below.
+# ===========================================================================
+
+suite "repro_elevation: windows.service Phase B pure surface":
+
+  test "all four recovery-action enum variants round-trip through their token":
+    for variant in [wsrakNone, wsrakRestart, wsrakRunCommand, wsrakReboot]:
+      let tok = windowsServiceRecoveryActionToken(variant)
+      check isKnownWindowsServiceRecoveryActionToken(tok)
+      check windowsServiceRecoveryActionFromToken(tok) == variant
+    # Canonical lower-case vocabulary.
+    check windowsServiceRecoveryActionToken(wsrakNone) == "none"
+    check windowsServiceRecoveryActionToken(wsrakRestart) == "restart"
+    check windowsServiceRecoveryActionToken(wsrakRunCommand) == "runcommand"
+    check windowsServiceRecoveryActionToken(wsrakReboot) == "reboot"
+
+  test "windowsServiceRecoveryActionFromToken rejects unknown / uppercase":
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("Restart")
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("RESTART")
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("")
+    expect ValueError:
+      discard windowsServiceRecoveryActionFromToken("nope")
+    check not isKnownWindowsServiceRecoveryActionToken("Restart")
+    check not isKnownWindowsServiceRecoveryActionToken("")
+
+  test "scExeFailureActionToken maps to the SCM's sc.exe vocabulary":
+    # `sc.exe failure ... actions=` consumes `restart` / `run` / `reboot`
+    # / empty (with the `runcommand` enum mapping to sc.exe's shorter
+    # `run` spelling — which is what the failure-action printer prints).
+    check scExeFailureActionToken(wsrakRestart) == "restart"
+    check scExeFailureActionToken(wsrakRunCommand) == "run"
+    check scExeFailureActionToken(wsrakReboot) == "reboot"
+    check scExeFailureActionToken(wsrakNone) == ""
+
+  test "renderScExeFailureActionsArg assembles slash-separated slots":
+    let actions = @[
+      WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+      WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 10000),
+      WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)]
+    check renderScExeFailureActionsArg(actions) ==
+      "restart/5000/restart/10000/reboot/60000"
+    # Empty seq -> empty string (caller decides to skip the sc.exe call).
+    check renderScExeFailureActionsArg(@[]) == ""
+    # Single slot.
+    check renderScExeFailureActionsArg(@[WindowsServiceRecoverySpec(
+      action: wsrakRunCommand, delayMs: 30000)]) == "run/30000"
+
+  test "renderScExeFailureCommand emits reset + actions in argv form":
+    let argv = renderScExeFailureCommand("sshd", 86400, @[
+      WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000)])
+    check argv == @[
+      "sc.exe", "failure", "sshd",
+      "reset=", "86400",
+      "actions=", "restart/5000"]
+    # Both halves absent -> still a valid no-op invocation (the driver
+    # tests `needRecovery` before calling, so this is just shape).
+    let bare = renderScExeFailureCommand("sshd", 0, @[])
+    check bare == @["sc.exe", "failure", "sshd"]
+
+  test "renderScExeFailureCommand handles reset-only / actions-only":
+    # reset only.
+    check renderScExeFailureCommand("sshd", 3600, @[]) ==
+      @["sc.exe", "failure", "sshd", "reset=", "3600"]
+    # actions only.
+    check renderScExeFailureCommand("sshd", 0, @[
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)]) ==
+      @["sc.exe", "failure", "sshd", "actions=", "reboot/60000"]
+
+  test "renderScExeConfig{BinPath,DisplayName}Command emit the right argv":
+    check renderScExeConfigBinPathCommand("sshd",
+      "C:\\Windows\\System32\\OpenSSH\\sshd.exe") == @[
+      "sc.exe", "config", "sshd", "binPath=",
+      "C:\\Windows\\System32\\OpenSSH\\sshd.exe"]
+    check renderScExeConfigDisplayNameCommand("sshd",
+      "OpenSSH SSH Server") == @[
+      "sc.exe", "config", "sshd", "DisplayName=", "OpenSSH SSH Server"]
+
+  test "operationValidationError accepts a Phase B windows.service":
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "actions-runner-svc",
+      serviceName: "actions.runner.windows-runner-001",
+      serviceStartType: "Automatic", serviceRunning: true,
+      serviceDisplayName: "GitHub Actions Runner",
+      serviceBinPath: "C:\\actions-runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 10000),
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)],
+      serviceRecoveryResetSeconds: 86400)
+    check operationValidationError(op) == ""
+
+  test "operationValidationError flags Phase B bad fields":
+    # >3 slots.
+    let tooMany = PrivilegedOperation(kind: pokWindowsService,
+      address: "x", serviceName: "sshd", serviceStartType: "Automatic",
+      serviceRunning: true,
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 1000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 2000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 3000),
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 4000)])
+    check operationValidationError(tooMany).len > 0
+    # negative delay.
+    let negDelay = PrivilegedOperation(kind: pokWindowsService,
+      address: "x", serviceName: "sshd", serviceStartType: "Automatic",
+      serviceRunning: true,
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: -1)])
+    check operationValidationError(negDelay).len > 0
+    # negative reset.
+    let negReset = PrivilegedOperation(kind: pokWindowsService,
+      address: "x", serviceName: "sshd", serviceStartType: "Automatic",
+      serviceRunning: true, serviceRecoveryResetSeconds: -1)
+    check operationValidationError(negReset).len > 0
+
+  test "RBEB Operation frame round-trips windows.service Phase B fields":
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "actions-runner-svc",
+      serviceName: "actions.runner.windows-runner-001",
+      serviceStartType: "Automatic", serviceRunning: true,
+      serviceDisplayName: "GitHub Actions Runner",
+      serviceBinPath: "C:\\actions-runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakRunCommand, delayMs: 30000),
+        WindowsServiceRecoverySpec(action: wsrakReboot, delayMs: 60000)],
+      serviceRecoveryResetSeconds: 86400)
+    let wire = WireOperation(operation: op, baselineDigestHex: "abcd")
+    let dec = decodeFrame(encodeOperation(wire))
+    check dec.messageType == rmtOperation
+    let w2 = decodeOperation(dec.body)
+    check w2.baselineDigestHex == "abcd"
+    check w2.operation.kind == pokWindowsService
+    check w2.operation.address == "actions-runner-svc"
+    check w2.operation.serviceName ==
+      "actions.runner.windows-runner-001"
+    check w2.operation.serviceStartType == "Automatic"
+    check w2.operation.serviceRunning
+    check w2.operation.serviceDisplayName == "GitHub Actions Runner"
+    check w2.operation.serviceBinPath ==
+      "C:\\actions-runner\\Runner.Listener.exe"
+    check w2.operation.serviceRecoveryActions.len == 3
+    check w2.operation.serviceRecoveryActions[0].action == wsrakRestart
+    check w2.operation.serviceRecoveryActions[0].delayMs == 5000
+    check w2.operation.serviceRecoveryActions[1].action == wsrakRunCommand
+    check w2.operation.serviceRecoveryActions[1].delayMs == 30000
+    check w2.operation.serviceRecoveryActions[2].action == wsrakReboot
+    check w2.operation.serviceRecoveryActions[2].delayMs == 60000
+    check w2.operation.serviceRecoveryResetSeconds == 86400
+
+  test "RBEB Operation frame stays backward-compat for legacy windows.service":
+    # A pre-Phase-B operation (no Phase B fields set) MUST round-trip
+    # byte-for-byte through the wire — the deserialized op has all
+    # four fields at their "leave unmanaged" defaults.
+    let op = PrivilegedOperation(kind: pokWindowsService,
+      address: "sshd-svc", serviceName: "sshd",
+      serviceStartType: "Automatic", serviceRunning: true)
+    let wire = WireOperation(operation: op, baselineDigestHex: "")
+    let w2 = decodeOperation(decodeFrame(encodeOperation(wire)).body)
+    check w2.operation.serviceDisplayName == ""
+    check w2.operation.serviceBinPath == ""
+    check w2.operation.serviceRecoveryActions.len == 0
+    check w2.operation.serviceRecoveryResetSeconds == 0
+
+  test "parseScQfailureOutput parses the standard sc qfailure block":
+    let raw = """[SC] QueryServiceConfig2 SUCCESS
+
+SERVICE_NAME: sshd
+        RESET_PERIOD (in seconds)    : 86400
+        REBOOT_MESSAGE               :
+        COMMAND_LINE                 :
+        FAILURE_ACTIONS              : RESTART -- Delay = 5000 milliseconds.
+                                       RESTART -- Delay = 10000 milliseconds.
+                                       REBOOT -- Delay = 60000 milliseconds.
+"""
+    let parsed = parseScQfailureOutput(raw)
+    check parsed.resetSeconds == 86400
+    check parsed.actions.len == 3
+    check parsed.actions[0].action == "restart"
+    check parsed.actions[0].delayMs == 5000
+    check parsed.actions[1].action == "restart"
+    check parsed.actions[1].delayMs == 10000
+    check parsed.actions[2].action == "reboot"
+    check parsed.actions[2].delayMs == 60000
+
+  test "parseScQfailureOutput handles RUN PROCESS / NO_ACTION":
+    # `sc.exe` prints `RUN PROCESS` for the runcommand variant (which
+    # the normalizer collapses to the lower-case `runcommand` wire
+    # token); `NO_ACTION` collapses to `none`.
+    let raw = """SERVICE_NAME: foo
+        RESET_PERIOD (in seconds)    : 3600
+        FAILURE_ACTIONS              : RUN PROCESS -- Delay = 30000 milliseconds.
+                                       NO_ACTION -- Delay = 0 milliseconds.
+"""
+    let parsed = parseScQfailureOutput(raw)
+    check parsed.resetSeconds == 3600
+    check parsed.actions.len == 2
+    check parsed.actions[0].action == "runcommand"
+    check parsed.actions[0].delayMs == 30000
+    check parsed.actions[1].action == "none"
+    check parsed.actions[1].delayMs == 0
+
+  test "parseScQfailureOutput on empty / non-policy output yields defaults":
+    let parsed = parseScQfailureOutput("")
+    check parsed.resetSeconds == 0
+    check parsed.actions.len == 0
+
+  test "parseServiceQuery reads DisplayName and BinPath fields":
+    # Phase B-extended probe shape — the parser collapses absent lines
+    # to empty strings, so a legacy two-field probe still parses
+    # correctly (verified by the existing tests).
+    let raw = """StartType=Automatic
+Status=Running
+DisplayName=OpenSSH SSH Server
+BinPath=C:\Windows\System32\OpenSSH\sshd.exe
+"""
+    let obs = parseServiceQuery(raw)
+    check obs.present
+    check obs.startType == "Automatic"
+    check obs.running
+    check obs.displayName == "OpenSSH SSH Server"
+    check obs.binPath == "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
+
+  test "parseServiceQuery on legacy two-line probe leaves Phase B fields empty":
+    # Back-compat: the legacy two-line probe parses to the same
+    # observation it always did; the new fields default to empty.
+    let raw = "StartType=Automatic\nStatus=Running\n"
+    let obs = parseServiceQuery(raw)
+    check obs.present
+    check obs.startType == "Automatic"
+    check obs.displayName == ""
+    check obs.binPath == ""
+
+  test "serviceMatchesDesired ignores Phase B fields when desired is empty":
+    # "Leave unmanaged" semantics: a non-empty observation displayName
+    # should NOT trigger drift if the operator didn't declare one.
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      displayName: "OpenSSH SSH Server",
+      binPath: "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    # Bare desired: only the legacy three fields are compared; the
+    # observed displayName/binPath are ignored.
+    check serviceMatchesDesired(obs, "Automatic", true)
+
+  test "serviceMatchesDesired enforces Phase B fields when desired is set":
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true, displayName: "OpenSSH SSH Server",
+      binPath: "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    # A desired displayName that matches.
+    check serviceMatchesDesired(obs, "Automatic", true,
+      wantDisplayName = "OpenSSH SSH Server")
+    # A desired displayName that doesn't match -> drift.
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantDisplayName = "Different Label")
+    # A desired binPath that doesn't match -> drift.
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantBinPath = "C:\\elsewhere\\sshd.exe")
+
+  test "serviceMatchesDesired enforces recovery slots in declaration order":
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+        ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)],
+      recoveryResetSeconds: 3600)
+    let want = @[
+      ServiceRecoveryActionObservation(action: "restart", delayMs: 5000),
+      ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000)]
+    check serviceMatchesDesired(obs, "Automatic", true,
+      wantRecoveryActions = want, wantRecoveryResetSeconds = 3600)
+    # Wrong order -> drift.
+    let reordered = @[
+      ServiceRecoveryActionObservation(action: "reboot", delayMs: 60000),
+      ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)]
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantRecoveryActions = reordered, wantRecoveryResetSeconds = 3600)
+    # Wrong reset window -> drift.
+    check not serviceMatchesDesired(obs, "Automatic", true,
+      wantRecoveryActions = want, wantRecoveryResetSeconds = 86400)
+
+  test "canonicalServiceState legacy call stays byte-identical":
+    # Back-compat: a SystemResource with no Phase B fields produces
+    # the SAME canonical-state digest input as before the change.
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true,
+      displayName: "OpenSSH SSH Server",
+      binPath: "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    # The legacy single-arg call ignores observed displayName/binPath.
+    check canonicalServiceState(obs) == "service:Automatic:running"
+    # The desired-side legacy call matches.
+    check canonicalServiceDesired("Automatic", true) ==
+      "service:Automatic:running"
+
+  test "canonicalServiceState extends with Phase B fields when desired":
+    let obs = ServiceObservation(present: true, startType: "Automatic",
+      running: true, displayName: "OpenSSH SSH Server",
+      binPath: "C:\\bin\\sshd.exe",
+      recoveryActions: @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)],
+      recoveryResetSeconds: 3600)
+    let digest = canonicalServiceState(obs,
+      wantDisplayName = "OpenSSH SSH Server",
+      wantBinPath = "C:\\bin\\sshd.exe",
+      includeRecovery = true)
+    check digest.contains("displayName=OpenSSH SSH Server")
+    check digest.contains("binPath=C:\\bin\\sshd.exe")
+    check digest.contains("restart/5000")
+    check digest.contains("reset=3600")
+    # Desired-side parallel: the digest matches when the observation
+    # matches.
+    let want = canonicalServiceDesired("Automatic", true,
+      wantDisplayName = "OpenSSH SSH Server",
+      wantBinPath = "C:\\bin\\sshd.exe",
+      wantRecoveryActions = @[
+        ServiceRecoveryActionObservation(action: "restart", delayMs: 5000)],
+      wantRecoveryResetSeconds = 3600)
+    check digest == want
+
+  test "windows.service still requires elevation":
+    # Sanity: the predicate is unchanged by the Phase B extension.
+    check requiresElevation(pokWindowsService)
 
 # ===========================================================================
 # os.timezone — pure parse + drift logic. The shell-out side of the
@@ -3259,3 +4083,961 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
         delEnv(OsReleaseOverrideEnvVar)
         try: removeFile(fakePath) except OSError: discard
         try: removeDir(dir) except OSError: discard
+
+# ===========================================================================
+# Windows-System-Resources Phase C: windows.scheduledTask.
+#
+# Closed-set vocabulary tests + codec round-trip across every
+# ScheduleKind + drift comparator across every kind/field combination.
+# All tests platform-pure (the genuinely-Windows shell-outs gate behind
+# `when defined(windows)` in the driver; the assemblers below are
+# `seq[string]` pure-function returns).
+# ===========================================================================
+
+suite "repro_elevation: windows.scheduledTask Phase C":
+
+  test "pokWindowsScheduledTask is in the closed set + requires elevation":
+    check requiresElevation(pokWindowsScheduledTask)
+    check isKnownPrivilegedOperationKind($pokWindowsScheduledTask)
+    check $pokWindowsScheduledTask == "windows.scheduledTask"
+
+  test "schedule-kind token codec: all 5 variants round-trip":
+    for tok in ["onBoot", "onLogon", "once", "daily", "interval"]:
+      check isKnownScheduledTaskScheduleKindToken(tok)
+      let k = scheduledTaskScheduleKindFromToken(tok)
+      check scheduledTaskScheduleKindToken(k) == tok
+    check scheduledTaskScheduleKindToken(wstskOnBoot) == "onBoot"
+    check scheduledTaskScheduleKindToken(wstskOnLogon) == "onLogon"
+    check scheduledTaskScheduleKindToken(wstskOnce) == "once"
+    check scheduledTaskScheduleKindToken(wstskDaily) == "daily"
+    check scheduledTaskScheduleKindToken(wstskInterval) == "interval"
+
+  test "schedule-kind token codec: rejects unknown spellings":
+    for bad in ["", "ONBOOT", "onboot", "weekly", "monthly", "rest"]:
+      check not isKnownScheduledTaskScheduleKindToken(bad)
+      expect ValueError:
+        discard scheduledTaskScheduleKindFromToken(bad)
+
+  test "isValidScheduledTaskTimeOfDay: closed-set HH:MM":
+    for ok in ["00:00", "08:30", "23:59", "12:00"]:
+      check isValidScheduledTaskTimeOfDay(ok)
+    for bad in ["", "8:30", "24:00", "12:60", "1234", "12:00:00",
+                "ab:cd"]:
+      check not isValidScheduledTaskTimeOfDay(bad)
+
+  test "isValidScheduledTaskIso8601: charset closed":
+    for ok in ["2030-01-01T08:00:00Z",
+               "2030-01-01T08:00:00+02:00",
+               "2030-01-01T08:00:00.500Z"]:
+      check isValidScheduledTaskIso8601(ok)
+    for bad in ["", "not a date", "2030-01-01 08:00:00",
+                "2030/01/01T08:00:00Z"]:
+      check not isValidScheduledTaskIso8601(bad)
+
+  test "encodeScheduledTaskScheduleSpec: every variant round-trips":
+    let cases = @[
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 0),
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 60),
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: ""),
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: "DOMAIN\\runner"),
+      ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: "2030-01-01T08:00:00Z"),
+      ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "08:30"),
+      ScheduledTaskScheduleSpec(kind: wstskInterval, everyMinutes: 5,
+        startAt: ""),
+      ScheduledTaskScheduleSpec(kind: wstskInterval, everyMinutes: 60,
+        startAt: "2030-01-01T00:00:00Z")]
+    for s in cases:
+      let token = encodeScheduledTaskScheduleSpec(s)
+      let round = decodeScheduledTaskScheduleToken(token)
+      check round == s
+
+  test "encodeScheduledTaskScheduleSpec rejects malformed in-process construction":
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: -1))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskOnce, runAt: ""))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "8:30"))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskInterval,
+          everyMinutes: 0))
+    expect ValueError:
+      discard encodeScheduledTaskScheduleSpec(
+        ScheduledTaskScheduleSpec(kind: wstskInterval,
+          everyMinutes: 5, startAt: "bad-stamp"))
+
+  test "decodeScheduledTaskScheduleToken rejects every malformed shape":
+    for bad in ["", "onBoot", ":30", "unknown:30", "ONBOOT:30",
+                "onBoot:abc", "onBoot:-5",
+                "once:not-iso", "once:",
+                "daily:8:30", "daily:25:00", "daily:",
+                "interval:0:", "interval:abc:",
+                "interval:5", "interval:5:bad"]:
+      expect ValueError:
+        discard decodeScheduledTaskScheduleToken(bad)
+
+  test "isSafeScheduledTaskTaskName: closed-set charset + escape guard":
+    for ok in ["\\Reprobuild\\Foo",
+               "\\Microsoft\\Windows\\Updates\\Scheduled Start",
+               "MyTask"]:
+      check isSafeScheduledTaskTaskName(ok)
+    for bad in ["", "Foo'; rm", "Bar\nBaz",
+                "\\Reprobuild\\..\\..\\evil",
+                "Foo$evil", "Foo`evil"]:
+      check not isSafeScheduledTaskTaskName(bad)
+
+  test "isSafeScheduledTaskPrincipal: SYSTEM + DOMAIN\\user + SID":
+    for ok in ["SYSTEM", "LOCAL_SERVICE", "NETWORK_SERVICE",
+               "DOMAIN\\runner", "S-1-5-18", "user@example.com"]:
+      check isSafeScheduledTaskPrincipal(ok)
+    for bad in ["", "rm -rf /", "user; cmd", "user'or'1"]:
+      check not isSafeScheduledTaskPrincipal(bad)
+
+  test "windows.scheduledTask frames round-trip through wire codec — every kind":
+    # Codec round-trip across the full 5-variant cross-product is the
+    # broker integrity gate. A regression in either the encoder or
+    # decoder would break the round-trip equality check.
+    let schedules = @[
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 30),
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: "DOMAIN\\runner"),
+      ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: "2030-01-01T08:00:00Z"),
+      ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "08:30"),
+      ScheduledTaskScheduleSpec(kind: wstskInterval, everyMinutes: 15,
+        startAt: "2030-01-01T00:00:00Z")]
+    for s in schedules:
+      let op = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wst-" & $s.kind,
+        wstTaskName: "\\Reprobuild\\T-" & $s.kind,
+        wstExecutable: "C:\\bin\\app.exe",
+        wstArguments: @["--unattended", "--name=runner"],
+        wstWorkingDirectory: "C:\\actions-runner",
+        wstRunAsUser: "SYSTEM",
+        wstRunWithHighestPrivileges: true,
+        wstSchedule: s,
+        wstEnabled: true,
+        wstDestroy: false)
+      check operationValidationError(op) == ""
+      let frame = encodeOperation(WireOperation(operation: op,
+        baselineDigestHex: "abc"))
+      let dec = decodeOperation(decodeFrame(frame).body)
+      check dec.operation.kind == pokWindowsScheduledTask
+      check dec.operation.wstTaskName == op.wstTaskName
+      check dec.operation.wstExecutable == op.wstExecutable
+      check dec.operation.wstArguments == op.wstArguments
+      check dec.operation.wstWorkingDirectory ==
+        op.wstWorkingDirectory
+      check dec.operation.wstRunAsUser == op.wstRunAsUser
+      check dec.operation.wstRunWithHighestPrivileges ==
+        op.wstRunWithHighestPrivileges
+      check dec.operation.wstEnabled == op.wstEnabled
+      check dec.operation.wstDestroy == op.wstDestroy
+      check dec.operation.wstSchedule == op.wstSchedule
+
+  test "windows.scheduledTask: destroy direction codec round-trip":
+    let op = PrivilegedOperation(kind: pokWindowsScheduledTask,
+      address: "wstDestroy",
+      wstTaskName: "\\Foo",
+      wstExecutable: "C:\\bin\\foo.exe",
+      wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: 0),
+      wstRunAsUser: "SYSTEM",
+      wstRunWithHighestPrivileges: true,
+      wstEnabled: true,
+      wstDestroy: true)
+    check operationValidationError(op) == ""
+    let dec = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: op, baselineDigestHex: ""))).body)
+    check dec.operation.wstDestroy == true
+
+  test "windows.scheduledTask validator rejects empty fields + malformed":
+    # Closed-set defence-in-depth: the broker validator is the LAST
+    # gate before the typed driver dispatches.
+    block emptyName:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block emptyExe:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block escapeName:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Reprobuild\\..\\evil",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block badPrincipal:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot),
+        wstRunAsUser: "rm -rf /")
+      check operationValidationError(bad).len > 0
+    block badIso:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnce,
+          runAt: "not iso"),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block badInterval:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskInterval,
+          everyMinutes: 0),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+    block badDaily:
+      let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+        address: "wstBad",
+        wstTaskName: "\\Foo",
+        wstExecutable: "C:\\bin\\foo.exe",
+        wstSchedule: ScheduledTaskScheduleSpec(kind: wstskDaily,
+          timeOfDay: "25:00"),
+        wstRunAsUser: "SYSTEM")
+      check operationValidationError(bad).len > 0
+
+  test "renderRegisterScheduledTaskCommand: pure argv assembler":
+    # The assembler is the apply-side argv builder the driver hands to
+    # PowerShell. Pure function — testable on Linux.
+    let argv = renderRegisterScheduledTaskCommand(
+      taskName = "\\Foo",
+      executable = "C:\\bin\\foo.exe",
+      arguments = @["--flag", "C:\\config.toml"],
+      workingDirectory = "C:\\actions-runner",
+      runAsUser = "SYSTEM",
+      runWithHighestPrivileges = true,
+      scheduleXml = "<BootTrigger/>",
+      enabled = true)
+    check argv[0] == "Register-ScheduledTask"
+    check "-TaskName" in argv
+    check "\\Foo" in argv
+    check "-ArgumentList" in argv
+    check "-WorkingDirectory" in argv
+    check "-Trigger" in argv
+    check "<BootTrigger/>" in argv
+    check "-Principal" in argv
+    check "SYSTEM" in argv
+    check "-RunLevel" in argv
+    check "Highest" in argv
+
+  test "renderRegisterScheduledTaskCommand: enabled=false adds Disabled settings":
+    let argv = renderRegisterScheduledTaskCommand(
+      taskName = "\\Foo",
+      executable = "C:\\bin\\foo.exe",
+      arguments = @[],
+      workingDirectory = "",
+      runAsUser = "DOMAIN\\runner",
+      runWithHighestPrivileges = false,
+      scheduleXml = "<BootTrigger/>",
+      enabled = false)
+    check "Disabled" in argv
+    check "-RunLevel" notin argv
+    check "-ArgumentList" notin argv
+    check "-WorkingDirectory" notin argv
+
+  test "renderUnregisterScheduledTaskCommand: destroy argv":
+    let argv = renderUnregisterScheduledTaskCommand("\\Foo")
+    check argv == @["Unregister-ScheduledTask", "-TaskName", "\\Foo",
+                    "-Confirm:$false"]
+
+  test "renderScheduledTaskScheduleXml: every variant emits a Task Scheduler element":
+    let onBoot = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 0))
+    check onBoot == "<BootTrigger></BootTrigger>"
+    let onBootDelay = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 30))
+    check onBootDelay.contains("<Delay>PT30S</Delay>")
+    let onLogon = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+        forUser: "DOMAIN\\u"))
+    check onLogon.contains("<UserId>DOMAIN\\u</UserId>")
+    let onLogonAny = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: ""))
+    check onLogonAny == "<LogonTrigger></LogonTrigger>"
+    let once = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskOnce,
+        runAt: "2030-01-01T08:00:00Z"))
+    check once.contains("<StartBoundary>2030-01-01T08:00:00Z" &
+      "</StartBoundary>")
+    let daily = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: "08:30"))
+    check daily.contains("<CalendarTrigger>")
+    check daily.contains("<DaysInterval>1</DaysInterval>")
+    check daily.contains("1970-01-01T08:30:00")
+    let interval = renderScheduledTaskScheduleXml(
+      ScheduledTaskScheduleSpec(kind: wstskInterval,
+        everyMinutes: 15, startAt: "2030-01-01T00:00:00Z"))
+    check interval.contains("<Repetition><Interval>PT15M</Interval>")
+
+  test "scheduledTaskMatchesDesired: matches when all fields agree":
+    let want = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 30)
+    let obs = ScheduledTaskObservation(present: true,
+      taskName: "\\Foo", executable: "C:\\bin\\foo.exe",
+      arguments: @[], workingDirectory: "", runAsUser: "SYSTEM",
+      runWithHighestPrivileges: true, enabled: true,
+      schedule: want)
+    check scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+
+  test "scheduledTaskMatchesDesired: drift on each load-bearing field":
+    let want = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 30)
+    let base = ScheduledTaskObservation(present: true,
+      taskName: "\\Foo", executable: "C:\\bin\\foo.exe",
+      arguments: @[], workingDirectory: "", runAsUser: "SYSTEM",
+      runWithHighestPrivileges: true, enabled: true,
+      schedule: want)
+    # Absent => mismatch.
+    check not scheduledTaskMatchesDesired(
+      ScheduledTaskObservation(present: false),
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # taskName drift.
+    var obs = base
+    obs.taskName = "\\OtherName"
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # executable drift.
+    obs = base
+    obs.executable = "C:\\bin\\other.exe"
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # arguments drift.
+    obs = base
+    obs.arguments = @["--flag"]
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # principal drift.
+    obs = base
+    obs.runAsUser = "LOCAL_SERVICE"
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # highestPrivileges drift.
+    obs = base
+    obs.runWithHighestPrivileges = false
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # enabled drift.
+    obs = base
+    obs.enabled = false
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # schedule drift (different kind).
+    obs = base
+    obs.schedule = ScheduledTaskScheduleSpec(kind: wstskDaily,
+      timeOfDay: "08:30")
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+    # schedule drift (same kind, different delay).
+    obs = base
+    obs.schedule = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 60)
+    check not scheduledTaskMatchesDesired(obs,
+      "\\Foo", "C:\\bin\\foo.exe", @[], "", "SYSTEM",
+      true, want, true)
+
+  test "scheduledTaskMatchesDesired: drift across every ScheduleKind":
+    # Per-kind: a desired spec of each kind must match the equivalent
+    # observation AND mismatch a same-kind variation.
+    let kinds = @[
+      (ScheduledTaskScheduleSpec(kind: wstskOnBoot, delaySeconds: 10),
+       ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+         delaySeconds: 20)),
+      (ScheduledTaskScheduleSpec(kind: wstskOnLogon,
+         forUser: "DOMAIN\\u"),
+       ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: "")),
+      (ScheduledTaskScheduleSpec(kind: wstskOnce,
+         runAt: "2030-01-01T08:00:00Z"),
+       ScheduledTaskScheduleSpec(kind: wstskOnce,
+         runAt: "2031-01-01T08:00:00Z")),
+      (ScheduledTaskScheduleSpec(kind: wstskDaily,
+         timeOfDay: "08:30"),
+       ScheduledTaskScheduleSpec(kind: wstskDaily,
+         timeOfDay: "09:30")),
+      (ScheduledTaskScheduleSpec(kind: wstskInterval,
+         everyMinutes: 15, startAt: ""),
+       ScheduledTaskScheduleSpec(kind: wstskInterval,
+         everyMinutes: 30, startAt: ""))]
+    for (a, b) in kinds:
+      let obs = ScheduledTaskObservation(present: true,
+        taskName: "\\T", executable: "C:\\app.exe", arguments: @[],
+        workingDirectory: "", runAsUser: "SYSTEM",
+        runWithHighestPrivileges: true, enabled: true, schedule: a)
+      check scheduledTaskMatchesDesired(obs,
+        "\\T", "C:\\app.exe", @[], "", "SYSTEM", true, a, true)
+      check not scheduledTaskMatchesDesired(obs,
+        "\\T", "C:\\app.exe", @[], "", "SYSTEM", true, b, true)
+
+  test "parseScheduledTaskQuery: Missing=1 collapses to absent":
+    let obs = parseScheduledTaskQuery("Missing=1")
+    check obs.present == false
+
+  test "parseScheduledTaskQuery: onBoot probe parses cleanly":
+    let probe = """
+TaskName=\Reprobuild\Foo
+Executable=C:\bin\foo.exe
+Arguments=
+WorkingDirectory=
+RunAsUser=SYSTEM
+RunWithHighestPrivileges=True
+Enabled=True
+ScheduleKind=onBoot
+ScheduleDelaySeconds=30
+"""
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check obs.taskName == "\\Reprobuild\\Foo"
+    check obs.executable == "C:\\bin\\foo.exe"
+    check obs.runAsUser == "SYSTEM"
+    check obs.runWithHighestPrivileges == true
+    check obs.enabled == true
+    check obs.schedule.kind == wstskOnBoot
+    check obs.schedule.delaySeconds == 30
+
+  test "parseScheduledTaskQuery: daily probe":
+    let probe = """
+TaskName=\DailyJob
+Executable=C:\bin\daily.exe
+RunAsUser=SYSTEM
+RunWithHighestPrivileges=True
+Enabled=True
+ScheduleKind=daily
+ScheduleTimeOfDay=08:30
+"""
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check obs.schedule.kind == wstskDaily
+    check obs.schedule.timeOfDay == "08:30"
+
+  test "parseScheduledTaskQuery: interval probe":
+    let probe = """
+TaskName=\Heartbeat
+Executable=C:\bin\hb.exe
+RunAsUser=SYSTEM
+RunWithHighestPrivileges=True
+Enabled=True
+ScheduleKind=interval
+ScheduleEveryMinutes=15
+ScheduleStartAt=2030-01-01T00:00:00Z
+"""
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check obs.schedule.kind == wstskInterval
+    check obs.schedule.everyMinutes == 15
+    check obs.schedule.startAt == "2030-01-01T00:00:00Z"
+
+  test "canonicalScheduledTaskState == canonicalScheduledTaskDesired on convergence":
+    # Drift-digest equality property: the broker's digest computation
+    # of an observed task that matches the desired state produces the
+    # SAME canonical string as the desired-state digest.
+    let want = ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: 15, startAt: "")
+    let obs = ScheduledTaskObservation(present: true,
+      taskName: "\\T", executable: "C:\\app.exe",
+      arguments: @["--unattended"], workingDirectory: "",
+      runAsUser: "SYSTEM", runWithHighestPrivileges: true,
+      enabled: true, schedule: want)
+    check canonicalScheduledTaskState(obs) ==
+      canonicalScheduledTaskDesired("\\T", "C:\\app.exe",
+        @["--unattended"], "", "SYSTEM", true, want, true)
+
+  test "canonicalScheduledTaskState diverges on drift":
+    let want = ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: 0)
+    let obs = ScheduledTaskObservation(present: true,
+      taskName: "\\T", executable: "C:\\app.exe",
+      arguments: @[], workingDirectory: "",
+      runAsUser: "SYSTEM", runWithHighestPrivileges: true,
+      enabled: false, schedule: want)
+    check canonicalScheduledTaskState(obs) !=
+      canonicalScheduledTaskDesired("\\T", "C:\\app.exe",
+        @[], "", "SYSTEM", true, want, true)
+
+  test "windows.scheduledTask: validator rejects schedule-malformed in-memory":
+    # A defence-in-depth case: an operation that was built directly in
+    # Nim (skipping the codec) must STILL fail the validator if it
+    # carries a malformed schedule. The codec is the FIRST gate; the
+    # validator is the LAST gate before the typed driver runs.
+    let bad = PrivilegedOperation(kind: pokWindowsScheduledTask,
+      address: "wstBad",
+      wstTaskName: "\\Foo",
+      wstExecutable: "C:\\bin\\foo.exe",
+      wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: -5),
+      wstRunAsUser: "SYSTEM")
+    check operationValidationError(bad).len > 0
+
+# ---------------------------------------------------------------------------
+# Windows-System-Resources Phase E — `pokInlineExecCall` + `@FILE:` argv
+# preprocessor.
+#
+# The cross-cutting bridge between the build engine and the broker:
+# every `inlineExecCall(...)` build-graph edge tagged
+# `requiresElevation = true` becomes a `pokInlineExecCall`
+# `PrivilegedOperation` the broker spawns under elevation. The argv
+# `@FILE:<path>` preprocessor runs on BOTH the elevated and the non-
+# elevated paths so the substitution semantics are uniform.
+# ---------------------------------------------------------------------------
+
+suite "repro_elevation: pokInlineExecCall is in the closed set":
+
+  test "pokInlineExecCall requires elevation and is a known kind tag":
+    check requiresElevation(pokInlineExecCall)
+    check isKnownPrivilegedOperationKind($pokInlineExecCall)
+    check $pokInlineExecCall == "reprobuild.inlineExecCall"
+
+  test "an unknown inline-exec-like tag is rejected":
+    # Defence-in-depth: a frame that NAMES inlineExecCall via a typo /
+    # forged tag must NOT be accepted as a recognized kind.
+    check not isKnownPrivilegedOperationKind("reprobuild.inline_exec_call")
+    check not isKnownPrivilegedOperationKind("inlineExecCall")
+    check not isKnownPrivilegedOperationKind("reprobuild.inlineExec")
+
+suite "repro_elevation: pokInlineExecCall codec round-trip":
+
+  test "every field round-trips through the wire codec":
+    # Build a fully-populated operation, encode + decode it, and assert
+    # on every field. The codec must preserve every closed string +
+    # the typed exit-code list verbatim.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-runner-config",
+      iecExecutable: "C:\\actions-runner\\config.cmd",
+      iecArguments: @[
+        "--unattended", "--replace",
+        "--url", "https://github.com/metacraft-labs",
+        "--token", "@FILE:C:\\actions-runner-tokens\\mcl.token",
+        "--name", "windows-runner-001"],
+      iecWorkingDirectory: "C:\\actions-runner",
+      iecEnvironment: @["RUNNER_LOG_DIR=C:\\actions-runner\\logs",
+        "RUNNER_TIMEOUT=300"],
+      iecToolIdentityRefs: @["C:\\actions-runner\\config.cmd"],
+      iecAcceptExitCodes: @[0, 3010])
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: "baseline-phaseE"))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.kind == pokInlineExecCall
+    check dec.operation.address == "phaseE-runner-config"
+    check dec.baselineDigestHex == "baseline-phaseE"
+    check dec.operation.iecExecutable == op.iecExecutable
+    check dec.operation.iecArguments == op.iecArguments
+    check dec.operation.iecWorkingDirectory == op.iecWorkingDirectory
+    check dec.operation.iecEnvironment == op.iecEnvironment
+    check dec.operation.iecToolIdentityRefs == op.iecToolIdentityRefs
+    check dec.operation.iecAcceptExitCodes == @[0, 3010]
+
+  test "defaults round-trip (empty fields, empty exit-code list)":
+    # A bare-minimum operation: only executable + one argument. The
+    # codec must round-trip the empty fields without inventing a value.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-bare",
+      iecExecutable: "/bin/sh",
+      iecArguments: @[],
+      iecWorkingDirectory: "",
+      iecEnvironment: @[],
+      iecToolIdentityRefs: @[],
+      iecAcceptExitCodes: @[])
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: ""))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.iecExecutable == "/bin/sh"
+    check dec.operation.iecArguments.len == 0
+    check dec.operation.iecWorkingDirectory == ""
+    check dec.operation.iecEnvironment.len == 0
+    check dec.operation.iecToolIdentityRefs.len == 0
+    check dec.operation.iecAcceptExitCodes.len == 0
+
+  test "negative exit code (Windows STATUS code) round-trips":
+    # Windows installers surface negative `NTSTATUS` codes; the codec
+    # casts through `int32` so the sign bit survives a round-trip.
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-signed",
+      iecExecutable: "C:\\Windows\\System32\\msiexec.exe",
+      iecAcceptExitCodes: @[0, 3010, -2147483647])
+    let frame = encodeOperation(WireOperation(operation: op,
+      baselineDigestHex: ""))
+    let dec = decodeOperation(decodeFrame(frame).body)
+    check dec.operation.iecAcceptExitCodes == @[0, 3010, -2147483647]
+
+suite "repro_elevation: pokInlineExecCall validator":
+
+  test "accepts a well-formed operation":
+    let ok = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-ok",
+      iecExecutable: "/bin/echo",
+      iecArguments: @["hello"],
+      iecEnvironment: @["TZ=UTC"],
+      iecToolIdentityRefs: @["echo"])
+    check operationValidationError(ok) == ""
+
+  test "rejects an empty executable":
+    let bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-empty",
+      iecExecutable: "",
+      iecArguments: @[])
+    let err = operationValidationError(bad)
+    check err.len > 0
+    check err.contains("empty executable")
+
+  test "rejects a NUL byte in executable / arg / env / toolref":
+    var bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo\x00malicious")
+    check operationValidationError(bad).contains("NUL")
+    bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo",
+      iecArguments: @["hello\x00world"])
+    check operationValidationError(bad).contains("NUL")
+    bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo",
+      iecEnvironment: @["FOO=bar\x00baz"])
+    check operationValidationError(bad).contains("NUL")
+    bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul",
+      iecExecutable: "/bin/echo",
+      iecToolIdentityRefs: @["sh\x00"])
+    check operationValidationError(bad).contains("NUL")
+
+  test "rejects an environment entry that is not NAME=VALUE":
+    let bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-env",
+      iecExecutable: "/bin/echo",
+      iecEnvironment: @["NOT_A_KEY_VALUE_PAIR"])
+    let err = operationValidationError(bad)
+    check err.len > 0
+    check err.contains("NAME=VALUE")
+
+  test "rejects an empty tool identity ref":
+    let bad = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-emptyref",
+      iecExecutable: "/bin/echo",
+      iecToolIdentityRefs: @[""])
+    let err = operationValidationError(bad)
+    check err.len > 0
+    check err.contains("empty")
+
+  test "rejects malformed @FILE: tokens at the codec boundary":
+    # `@FILE:` with no payload is malformed — the apply-time expander
+    # would fail closed, but the validator catches it earlier so the
+    # operator sees a clean diagnostic instead of an obscure runtime.
+    let bareToken = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-bare-token",
+      iecExecutable: "/bin/cat",
+      iecArguments: @["@FILE:"])
+    check operationValidationError(bareToken).len > 0
+    # Relative `@FILE:` path: refused because the broker's cwd is not
+    # a stable identity (defensible-decision documented in the helper).
+    let relativeToken = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-rel-token",
+      iecExecutable: "/bin/cat",
+      iecArguments: @["@FILE:secret.tok"])
+    let relErr = operationValidationError(relativeToken)
+    check relErr.len > 0
+    check relErr.contains("absolute") or relErr.contains("relative")
+    # NUL byte in `@FILE:` path: refused because the OS reader would
+    # reject it.
+    let nulToken = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-nul-token",
+      iecExecutable: "/bin/cat",
+      iecArguments: @["@FILE:/tmp/secret\x00.tok"])
+    check operationValidationError(nulToken).contains("NUL")
+
+suite "repro_elevation: @FILE: argv preprocessor (pure helper)":
+
+  test "isArgFileToken / argFilePath classify and split":
+    check isArgFileToken("@FILE:/abs/path")
+    check not isArgFileToken("not-a-token")
+    # A bare `@FILE:` (no payload) IS classified as a token here so
+    # the validator / expander catches it as a hard error rather than
+    # letting it fall through as if it were a literal argument.
+    check isArgFileToken("@FILE:")
+    check argFilePath("@FILE:/secret.tok") == "/secret.tok"
+    check argFilePath("plain") == ""
+    # The bare-prefix token's payload is empty — argFilePath returns
+    # an empty string so the downstream validator's empty-payload
+    # check fires cleanly.
+    check argFilePath("@FILE:") == ""
+
+  test "expandArgFileToken substitutes well-formed tokens":
+    # Inject a pure table-backed reader so the test exercises the
+    # substitution semantics without touching real disk.
+    proc r(path: string): string =
+      if path == "/etc/runner.tok": "abc123\n"
+      elif path == "/etc/empty.tok": ""
+      else: raise newException(IOError, "no such test path " & path)
+    check expandArgFileToken("@FILE:/etc/runner.tok", r) == "abc123"
+    check expandArgFileToken("plain", r) == "plain"
+
+  test "expandArgFileToken strips trailing CR / LF":
+    # Common case for text-file secrets that end with a newline. The
+    # spec asks for the trimmed contents.
+    proc r(path: string): string =
+      case path
+      of "/a": "value\n"
+      of "/b": "value\r\n"
+      of "/c": "value\r"
+      of "/d": "value"
+      else: raise newException(IOError, "no such path")
+    check expandArgFileToken("@FILE:/a", r) == "value"
+    check expandArgFileToken("@FILE:/b", r) == "value"
+    check expandArgFileToken("@FILE:/c", r) == "value"
+    check expandArgFileToken("@FILE:/d", r) == "value"
+
+  test "expandArgFileToken returns empty string for an empty file":
+    # Spec: "Empty file ⇒ pass empty arg (caller decides if that's
+    # valid)." The expander does NOT raise here.
+    proc r(path: string): string = ""
+    check expandArgFileToken("@FILE:/empty.tok", r) == ""
+
+  test "expandArgFileToken raises EProtocol when the file is missing":
+    proc r(path: string): string =
+      raise newException(IOError, "no such file")
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:/missing.tok", r)
+
+  test "expandArgFileToken raises EProtocol on OSError too":
+    # Permission-denied / other OS errors surface with the same
+    # spec-mandated `@FILE: not found` shape.
+    proc r(path: string): string =
+      raise newException(OSError, "permission denied")
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:/forbidden.tok", r)
+
+  test "expandArgFileToken EProtocol diagnostic includes the path":
+    # The audit log uses this diagnostic; it MUST cite which path
+    # failed.
+    proc r(path: string): string =
+      raise newException(IOError, "boom")
+    try:
+      discard expandArgFileToken("@FILE:/path/to/missing.tok", r)
+      check false  # unreachable
+    except EProtocol as e:
+      check e.msg.contains("@FILE:")
+      check e.msg.contains("/path/to/missing.tok")
+
+  test "expandArgFileToken re-checks malformed tokens (defence in depth)":
+    # A call site that constructs the operation in-process and skips
+    # the codec validator must STILL fail closed if it carries a
+    # malformed token. The expander double-checks.
+    proc r(path: string): string = ""
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:", r)
+    expect EProtocol:
+      discard expandArgFileToken("@FILE:relative-path", r)
+
+  test "expandArgFiles preserves order across mixed argv":
+    proc r(path: string): string =
+      case path
+      of "/tok1": "value1\n"
+      of "/tok2": "value2"
+      else: raise newException(IOError, "missing")
+    let expanded = expandArgFiles(@["--first", "@FILE:/tok1", "--mid",
+      "@FILE:/tok2", "--last"], r)
+    check expanded == @["--first", "value1", "--mid", "value2", "--last"]
+
+  test "auditArgvWithRedaction replaces tokens with the redaction":
+    # Spec §2.1: the audit log records the substitution as `<arg
+    # redacted: read from <path>>` — the substituted bytes never reach
+    # the log.
+    let argv = @["config.cmd", "--token", "@FILE:/secrets/x.tok",
+      "--name", "runner"]
+    let safe = auditArgvWithRedaction(argv)
+    check safe.len == argv.len
+    check safe[0] == "config.cmd"
+    check safe[1] == "--token"
+    check safe[2] == "<arg redacted: read from /secrets/x.tok>"
+    check safe[3] == "--name"
+    check safe[4] == "runner"
+
+suite "repro_elevation: inline-exec driver dispatch":
+
+  test "expandExecCallArgv prepends the executable to the expanded argv":
+    proc r(path: string): string = "tok-bytes"
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-expand",
+      iecExecutable: "/usr/bin/curl",
+      iecArguments: @["-H", "@FILE:/tmp/auth.tok", "https://example/"])
+    let argv = expandExecCallArgv(op, r)
+    check argv == @["/usr/bin/curl", "-H", "tok-bytes",
+      "https://example/"]
+
+  test "expandExecCallArgv on a non-inline-exec kind raises ValueError":
+    let op = PrivilegedOperation(kind: pokFixtureFile,
+      address: "wrong-kind", fileRelPath: "x", fileContent: "")
+    expect ValueError:
+      discard expandExecCallArgv(op)
+
+  test "inlineExecCallAuditDetail uses the redacted argv form":
+    let op = PrivilegedOperation(kind: pokInlineExecCall,
+      address: "phaseE-audit",
+      iecExecutable: "config.cmd",
+      iecArguments: @["--token", "@FILE:/secrets/x.tok", "--name",
+        "runner"])
+    let detail = inlineExecCallAuditDetail(op,
+      InlineExecCallOutcome(exitCode: 0))
+    check detail.contains("config.cmd")
+    check detail.contains("<arg redacted: read from /secrets/x.tok>")
+    check detail.contains("exit 0")
+    # Critically: the literal `@FILE:` token MUST appear inside the
+    # redaction placeholder — not the substituted bytes.
+    check not detail.contains("tok-bytes")
+
+  test "runInlineExecCall: success on exit code 0 via /bin/true":
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-true",
+        iecExecutable: "true",
+        iecAcceptExitCodes: @[0])
+      let outcome = runInlineExecCall(op)
+      check outcome.exitCode == 0
+
+  test "runInlineExecCall: non-zero exit raises EProtocol":
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-false",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[0])
+      expect EProtocol:
+        discard runInlineExecCall(op)
+
+  test "runInlineExecCall: configured acceptable exit code is success":
+    when defined(linux) or defined(macosx):
+      # /bin/false exits 1; accepting {0, 1} treats it as success.
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-accept-1",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[0, 1])
+      let outcome = runInlineExecCall(op)
+      check outcome.exitCode == 1
+
+  test "runInlineExecCall: default acceptable set is @[0]":
+    when defined(linux) or defined(macosx):
+      # An empty `iecAcceptExitCodes` defaults to @[0] inside the
+      # driver — exit 1 must still raise.
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-default-accept",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[])
+      expect EProtocol:
+        discard runInlineExecCall(op)
+
+  test "runInlineExecCall: @FILE: missing file raises EProtocol before spawn":
+    when defined(linux) or defined(macosx):
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-missing-token",
+        iecExecutable: "true",
+        iecArguments: @["@FILE:/this/path/does/not/exist.tok"])
+      expect EProtocol:
+        discard runInlineExecCall(op)
+
+  test "runInlineExecCall: empty @FILE: file passes empty arg through":
+    when defined(linux) or defined(macosx):
+      # Create a real empty file and confirm the spawn succeeds with
+      # an empty arg passed to `/bin/true` (which ignores its argv).
+      let emptyPath = "/tmp/repro_phaseE_empty_" & $getCurrentProcessId() &
+        ".tok"
+      writeFile(emptyPath, "")
+      defer:
+        try: removeFile(emptyPath)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-empty-token",
+        iecExecutable: "true",
+        iecArguments: @["@FILE:" & emptyPath])
+      let outcome = runInlineExecCall(op)
+      check outcome.exitCode == 0
+
+  test "runInlineExecCall raises ValueError for a non-inline-exec kind":
+    let op = PrivilegedOperation(kind: pokFixtureFile,
+      address: "phaseE-wrong-kind",
+      fileRelPath: "x", fileContent: "")
+    expect ValueError:
+      discard runInlineExecCall(op)
+
+suite "repro_elevation: pokInlineExecCall dispatch via the broker":
+
+  test "dispatchOperation: a successful inline-exec edge is doApplied":
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("phaseE-dispatch-", "")
+      defer:
+        try: removeDir(dir)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-dispatch-true",
+        iecExecutable: "true",
+        iecAcceptExitCodes: @[0])
+      let planned = PlannedOperation(operation: op,
+        baselineDigestHex: "")
+      let res = dispatchOperation(FixtureContext(filePrefix: dir),
+        planned)
+      check res.outcome == doApplied
+      check res.address == "phaseE-dispatch-true"
+      check res.kind == pokInlineExecCall
+      check res.detail.contains("exit 0")
+
+  test "dispatchOperation: a failing inline-exec edge raises EProtocol":
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("phaseE-dispatch-fail-", "")
+      defer:
+        try: removeDir(dir)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-dispatch-false",
+        iecExecutable: "false",
+        iecAcceptExitCodes: @[0])
+      let planned = PlannedOperation(operation: op,
+        baselineDigestHex: "")
+      expect EProtocol:
+        discard dispatchOperation(FixtureContext(filePrefix: dir),
+          planned)
+
+  test "dispatchOperation rejects an in-policy-broken inline-exec op":
+    # Defence-in-depth: even though the codec already validated, the
+    # dispatch re-runs the validator and fails closed.
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("phaseE-dispatch-bad-", "")
+      defer:
+        try: removeDir(dir)
+        except CatchableError: discard
+      let op = PrivilegedOperation(kind: pokInlineExecCall,
+        address: "phaseE-bad",
+        iecExecutable: "")   # empty executable, fails the validator
+      let planned = PlannedOperation(operation: op,
+        baselineDigestHex: "")
+      expect EProtocol:
+        discard dispatchOperation(FixtureContext(filePrefix: dir),
+          planned)

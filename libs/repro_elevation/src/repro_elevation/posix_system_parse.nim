@@ -1063,3 +1063,286 @@ proc usesSystemdFromOsRelease*(rawContent: string): bool =
   ## list before the carve-out is relaxed.
   let id = parseOsReleaseId(rawContent)
   id != "alpine" and id != "void" and id != "gentoo"
+
+# ===========================================================================
+# Windows-System-Resources Phase D — `fs.systemDirectory` NTFS ACL apply
+# pure helpers (argv assembly + drift digest + ACE direction split).
+#
+# The `fs.systemDirectory` driver's `acl.present == true` branch needs
+# to stamp an NTFS DACL via `icacls` after the cross-platform
+# `createDir` materializes the directory. The shell-out lives in
+# `posix_system_driver.nim`'s Windows-gated branch (the same module
+# that already calls `createDir`); the argv ASSEMBLY + the drift
+# digest contribution + the Deny-vs-Allow ACE-direction split live
+# HERE so they are unit-testable cross-platform without a Windows
+# host.
+#
+# Reuse note: a parallel set of helpers exists in
+# `windows_system_parse.nim` for the standalone `windows.acl` driver
+# (`canonicalAclDesired` / `canonicalAclState` / `aclMatchesDesired`).
+# Those are NOT imported here because:
+#
+#   1. `windows_system_parse.nim` is `when defined(windows)`-only at
+#      its import sites (the broker only references it on Windows
+#      hosts), and `fs.systemDirectory` runs on EVERY platform — the
+#      directory create path is cross-platform.
+#   2. The `fs.systemDirectory` ACL contract has its OWN closed-set
+#      inheritance vocabulary (`DirectoryAclInheritanceModes`,
+#      including the new `protected-clear-inherited` value) that the
+#      `windows.acl` driver doesn't accept; sharing helpers would
+#      force the broader vocabulary upstream.
+#
+# The drift digest is intentionally stable + platform-independent: a
+# profile that declares `acl(present=true, owner=..., entries=...,
+# inheritance=...)` digests to the same value whether the host is
+# Linux (where the icacls call is skipped) or Windows (where it
+# executes). That lets the broker compare a baseline digest computed
+# on a build host against the apply-side digest computed on the
+# Windows runner without a platform-specific normalization step.
+# ===========================================================================
+
+type
+  IcaclsAceVerb* = enum
+    ## icacls's two ACE-direction verbs. The driver routes an Allow
+    ## entry through `/grant` and a Deny entry through `/deny`. The
+    ## profile-side `aclEntry(... type=Deny)` builder emits a leading
+    ## `:(D,...)` marker that the driver pivots on; the pure splitter
+    ## below detects that marker.
+    icaclsGrantVerb
+    icaclsDenyVerb
+
+  DirAclEntrySplit* = object
+    ## A parsed `fs.systemDirectory` ACE: the icacls verb (Grant or
+    ## Deny) plus the bare `<principal>:(<spec>)` form icacls accepts
+    ## after the verb is chosen. The driver passes `spec` straight to
+    ## `icacls /grant <spec>` / `icacls /deny <spec>`.
+    verb*: IcaclsAceVerb
+    spec*: string
+
+proc splitDirAclEntry*(entry: string): DirAclEntrySplit =
+  ## Detect whether `entry` is an Allow ACE (`<principal>:(<perms>)`)
+  ## or a Deny ACE (`<principal>:(D,<perms>)`) and return the icacls
+  ## verb + the bare form. The Deny marker `:(D,` is the profile
+  ## builder's emission; stripping it yields the `<principal>:(<perms>)`
+  ## form icacls's `/deny` verb consumes (icacls's deny verb does NOT
+  ## want the leading `D,` — that marker is internal-only).
+  ##
+  ## A degenerate entry (no `:(D,` marker) is treated as Grant + the
+  ## verbatim entry. The validator already gates on `isSafeAclEntry`
+  ## so a malformed ACE never reaches this splitter.
+  let denyMarker = ":(D,"
+  let denyIdx = entry.find(denyMarker)
+  if denyIdx > 0:
+    result.verb = icaclsDenyVerb
+    result.spec = entry[0 ..< denyIdx] & ":(" &
+      entry[denyIdx + denyMarker.len .. ^1]
+  else:
+    result.verb = icaclsGrantVerb
+    result.spec = entry
+
+proc renderTakeownDirCommandArgs*(path: string): seq[string] =
+  ## Pure argv for `takeown /F <path> /A` — the directory-ownership-
+  ## seize call the driver issues before `icacls /setowner` to ensure
+  ## the current Administrator can stamp the new owner. `/A` pins the
+  ## seized ownership to the Administrators group regardless of the
+  ## invoking session.
+  @["takeown", "/F", path, "/A"]
+
+proc renderIcaclsSetOwnerCommandArgs*(path, owner: string): seq[string] =
+  ## Pure argv for `icacls <path> /setowner <owner>`. The driver calls
+  ## this AFTER `takeown` so the new owner is the operator's declared
+  ## principal, not the Administrators group `takeown /A` seized to.
+  ##
+  ## An empty `owner` is a programming error — the driver's caller
+  ## already gates on `op.fsdAclOwner.len > 0` so this assembler
+  ## never sees the empty form.
+  @["icacls", path, "/setowner", owner]
+
+proc renderIcaclsInheritanceCommandArgs*(path, mode: string): seq[string] =
+  ## Pure argv for the inheritance-mode mutation. The closed-set
+  ## vocabulary (`DirectoryAclInheritanceModes` from
+  ## `operations.nim`) maps:
+  ##
+  ##   `enabled`                    -> @[]   (no-op; the OS default)
+  ##   `disabled-replace`           -> `/inheritance:r` (disable + drop
+  ##                                  inherited ACEs)
+  ##   `disabled-convert`           -> `/inheritance:d` (disable +
+  ##                                  promote inherited ACEs to
+  ##                                  explicit)
+  ##   `protected-clear-inherited`  -> `/inheritance:r` (same icacls
+  ##                                  flag as `disabled-replace`, but
+  ##                                  the spec's intent is the
+  ##                                  SetAccessRuleProtection(true,
+  ##                                  false) pinned-explicit form — the
+  ##                                  driver leaves protection ON for
+  ##                                  the lifetime of the directory)
+  ##
+  ## An empty `mode` is treated the same as `enabled` (the operator
+  ## didn't declare an inheritance mode -> leave the default).
+  let flag =
+    case mode
+    of "disabled-replace", "protected-clear-inherited": "r"
+    of "disabled-convert": "d"
+    else: ""
+  if flag.len == 0:
+    return @[]
+  @["icacls", path, "/inheritance:" & flag]
+
+proc renderIcaclsGrantCommandArgs*(path, entry: string): seq[string] =
+  ## Pure argv for the per-ACE icacls call. Allow entries route to
+  ## `/grant <spec>`; Deny entries route to `/deny <spec>` (the leading
+  ## `(D,...)` marker the profile builder emits is stripped by
+  ## `splitDirAclEntry` before icacls sees the ACE — icacls's `/deny`
+  ## verb wants the bare `<principal>:(<perms>)` form, not the
+  ## marker-prefixed form). icacls's grant verb is idempotent: a
+  ## re-issue with the same ACE replaces any existing entry for the
+  ## same principal at the same inheritance level.
+  let split = splitDirAclEntry(entry)
+  case split.verb
+  of icaclsGrantVerb:
+    @["icacls", path, "/grant", split.spec]
+  of icaclsDenyVerb:
+    @["icacls", path, "/deny", split.spec]
+
+proc normalizeDirAclEntry*(ace: string): string =
+  ## Stable rendering of an ACE for digest purposes: trim outer
+  ## whitespace and collapse all internal whitespace runs to single
+  ## spaces. icacls permits extra whitespace inside the perm groups;
+  ## the canonical form collapses these so two visually-equivalent
+  ## ACE strings hash to the same digest. Mirrors the
+  ## `normalizeAclEntry` shape in `windows_system_parse.nim` so the
+  ## two ACL kinds digest equivalent entries identically.
+  var collapsed = ""
+  var prevWasSpace = false
+  for ch in ace.strip():
+    if ch in {' ', '\t'}:
+      if not prevWasSpace:
+        collapsed.add(' ')
+        prevWasSpace = true
+    else:
+      collapsed.add(ch)
+      prevWasSpace = false
+  collapsed
+
+proc canonicalDirAclDesired*(present: bool; owner: string;
+                             entries: seq[string];
+                             inheritance: string): string =
+  ## Stable canonical rendering used as the DRIFT-DIGEST contribution
+  ## for an `fs.systemDirectory`'s ACL. When `present == false` the
+  ## return value is the empty string — the digest of an
+  ## ACL-unmanaged directory is BYTE-IDENTICAL to the legacy
+  ## directory-present sentinel (`"fs.systemDirectory:present"`),
+  ## preserving back-compat with PR #7's pre-Phase-D digest. When
+  ## `present == true` the contribution is a stable
+  ## `present=true:owner=...:mode=...:entries=...` shape with the ACE
+  ## list NORMALIZED + SORTED so a re-ordering of the operator's
+  ## declaration does NOT trigger a drift apply.
+  if not present:
+    return ""
+  var normalized: seq[string] = @[]
+  for e in entries:
+    normalized.add(normalizeDirAclEntry(e))
+  normalized.sort()
+  let mode = if inheritance.len > 0: inheritance else: "enabled"
+  result = "dirAcl:present=true:owner=" & owner & ":mode=" & mode &
+    ":entries="
+  for i, e in normalized:
+    if i > 0:
+      result.add(',')
+    result.add(e)
+
+proc canonicalDirAclObserved*(present: bool; owner: string;
+                              desiredEntries: seq[string];
+                              observedEntries: seq[string];
+                              observedInheritanceDisabled: bool;
+                              desiredInheritance: string): string =
+  ## Canonical rendering of the OBSERVED ACL state, projected onto the
+  ## desired-entries set. Additive-only semantics: only entries the
+  ## operator declared are compared; extra ACEs already on disk are
+  ## NOT considered drift (the operator may have local additions).
+  ## The projection emits the desired ACE iff that ACE is present in
+  ## the observed list, or the empty string otherwise — that
+  ## asymmetric digest collapses to the desired digest iff every
+  ## desired ACE was actually observed.
+  ##
+  ## `observedInheritanceDisabled` is the heuristic flag the icacls
+  ## parser sets (no entry carries the `(I)` inherited-marker). For a
+  ## `disabled-*` / `protected-clear-inherited` desired mode the
+  ## observed state must report `inheritanceDisabled == true` for the
+  ## projection to converge to the desired digest.
+  if not present:
+    return ""
+  var normalizedDesired: seq[string] = @[]
+  for e in desiredEntries:
+    normalizedDesired.add(normalizeDirAclEntry(e))
+  normalizedDesired.sort()
+  var normalizedObserved: seq[string] = @[]
+  for e in observedEntries:
+    normalizedObserved.add(normalizeDirAclEntry(e))
+  var matched: seq[string] = @[]
+  for d in normalizedDesired:
+    var found = ""
+    for o in normalizedObserved:
+      if o == d:
+        found = d
+        break
+    matched.add(found)
+  let mode = if desiredInheritance.len > 0: desiredInheritance else: "enabled"
+  # If the desired mode is `disabled-*` / `protected-*` but the
+  # observed state shows inheritance still enabled (no `(I)` flag
+  # absent from any entry), emit a sentinel that intentionally
+  # disagrees with the desired digest.
+  let modeSatisfied = mode == "enabled" or observedInheritanceDisabled
+  result = "dirAcl:present=true:owner=" & owner & ":mode=" & mode &
+    ":entries="
+  for i, e in matched:
+    if i > 0:
+      result.add(',')
+    result.add(e)
+  if not modeSatisfied:
+    result.add(":inheritance-not-pinned")
+
+proc dirAclMatchesDesired*(present: bool; owner: string;
+                           desiredEntries: seq[string];
+                           observedEntries: seq[string];
+                           observedInheritanceDisabled: bool;
+                           desiredInheritance: string): bool =
+  ## True when every desired ACE is present in the observed ACL AND
+  ## the inheritance-mode constraint is satisfied. Additive-only on
+  ## the entries — extra observed ACEs are ignored. An absent target
+  ## (`present == false`) is NEVER a match for an ACL-managed
+  ## directory.
+  if not present:
+    return false
+  let observedDigest = canonicalDirAclObserved(present, owner,
+    desiredEntries, observedEntries, observedInheritanceDisabled,
+    desiredInheritance)
+  let desiredDigest = canonicalDirAclDesired(true, owner,
+    desiredEntries, desiredInheritance)
+  observedDigest == desiredDigest
+
+proc fsSystemDirectoryDigestPayload*(present: bool;
+                                     aclPresent: bool;
+                                     aclOwner: string;
+                                     aclEntries: seq[string];
+                                     aclInheritance: string): string =
+  ## The text the `fs.systemDirectory` driver's BLAKE3 digest is taken
+  ## over. When the directory is absent the payload is the empty
+  ## string and the caller emits `ZeroDigestHex`. When the directory
+  ## is present:
+  ##
+  ##   * `aclPresent == false` -> the legacy back-compat payload
+  ##     `"fs.systemDirectory:present"` (BYTE-IDENTICAL to PR #7).
+  ##   * `aclPresent == true`  -> the legacy payload PLUS a stable
+  ##     `|` separator and the canonical ACL contribution.
+  ##
+  ## The separator + the contribution shape make the digest a strict
+  ## extension of the legacy form: the unmanaged-ACL case stays
+  ## bit-identical, while the managed-ACL case includes the ACL in
+  ## the drift comparison so a drifted ACL re-triggers the apply.
+  if not present:
+    return ""
+  if not aclPresent:
+    return "fs.systemDirectory:present"
+  "fs.systemDirectory:present|" &
+    canonicalDirAclDesired(true, aclOwner, aclEntries, aclInheritance)

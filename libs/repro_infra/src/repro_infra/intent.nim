@@ -35,6 +35,8 @@
 import std/[os, strutils]
 from repro_core/paths import extendedPath
 
+import repro_elevation
+
 import ./errors
 import ./profile
 
@@ -245,6 +247,51 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  name = " & renderScalar(r.serviceName))
     result.add("  startType = " & r.serviceStartType)
     result.add("  state = " & (if r.serviceRunning: "Running" else: "Stopped"))
+    # Windows-System-Resources Phase B: emit the four new fields ONLY
+    # when set so a stanza that doesn't use them round-trips byte-
+    # identically with the legacy three-field rendering.
+    if r.serviceDisplayName.len > 0:
+      result.add("  displayName = " & renderScalar(r.serviceDisplayName))
+    if r.serviceBinPath.len > 0:
+      result.add("  binPath = " & renderScalar(r.serviceBinPath))
+    if r.serviceRecoveryActions.len > 0:
+      var tokens = newSeq[string]()
+      for slot in r.serviceRecoveryActions:
+        tokens.add(windowsServiceRecoveryActionToken(slot.action) &
+                   ":" & $slot.delayMs)
+      result.add("  recoveryActions = " & renderList(tokens))
+    if r.serviceRecoveryResetSeconds > 0:
+      result.add("  recoveryResetSeconds = " &
+        $r.serviceRecoveryResetSeconds)
+  of srkWindowsScheduledTask:
+    # Windows-System-Resources Phase C: render the canonical multi-line
+    # shape — required fields first (taskName, executable, schedule),
+    # optional fields only when non-default. The same shape
+    # `parseSystemProfile` reads; a round-trip is byte-stable for the
+    # core shape (operator-supplied optional fields stay byte-identical
+    # on omission, exactly like Phase B's recoveryActions).
+    result.add("  taskName = " & renderScalar(r.wstTaskName))
+    result.add("  executable = " & renderScalar(r.wstExecutable))
+    if r.wstArguments.len > 0:
+      result.add("  arguments = " & renderList(r.wstArguments))
+    if r.wstWorkingDirectory.len > 0:
+      result.add("  workingDirectory = " &
+        renderScalar(r.wstWorkingDirectory))
+    if r.wstRunAsUser.len > 0 and r.wstRunAsUser != "SYSTEM":
+      result.add("  runAsUser = " & renderScalar(r.wstRunAsUser))
+    # `runWithHighestPrivileges` default depends on principal (true
+    # for SYSTEM, false otherwise). Emit only when it deviates from
+    # the principal-default so a back-compat-shaped stanza stays
+    # byte-identical.
+    let highestDefault = r.wstRunAsUser == "SYSTEM" or
+      r.wstRunAsUser.len == 0
+    if r.wstRunWithHighestPrivileges != highestDefault:
+      result.add("  runWithHighestPrivileges = " &
+        (if r.wstRunWithHighestPrivileges: "true" else: "false"))
+    result.add("  schedule = " &
+      renderList(@[encodeScheduledTaskScheduleSpec(r.wstSchedule)]))
+    if not r.wstEnabled:
+      result.add("  enabled = false")
   of srkWindowsVsInstaller:
     result.add("  edition = " & renderScalar(r.vsEdition))
     result.add("  channel = " & renderScalar(r.vsChannel))
@@ -298,6 +345,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  path = " & renderScalar(r.sfPath))
     if r.sfContent.len > 0:
       result.add("  content = " & renderScalar(r.sfContent))
+    # External-source fields: emit only when present, so a profile
+    # using `content` round-trips byte-identically with the legacy
+    # rendering (the renderer never injects an empty key).
+    if r.sfSourceUrl.len > 0:
+      result.add("  sourceUrl = " & renderScalar(r.sfSourceUrl))
+    if r.sfSha256.len > 0:
+      result.add("  sha256 = " & renderScalar(r.sfSha256))
+    if r.sfSourceLocal.len > 0:
+      result.add("  sourceLocal = " & renderScalar(r.sfSourceLocal))
   of srkFsSystemDirectory:
     result.add("  path = " & renderScalar(r.dirPath))
     if r.dirAclPresent:

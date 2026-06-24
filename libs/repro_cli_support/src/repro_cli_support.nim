@@ -1526,11 +1526,25 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # and the action is launched directly via the engine's process action
     # without any package-profile lookup. The wrapper layer is bypassed
     # entirely; the binary graph cache holds the resolved argv.
-    let argv = argSeqValue("argv")
-    if argv.len == 0:
+    let literalArgv = argSeqValue("argv")
+    if literalArgv.len == 0:
       raise newException(ValueError,
         "reprobuild.builtin.exec action " & payload.id &
           " has empty argv")
+    # Windows-System-Resources Phase E — the `@FILE:<path>` argv
+    # preprocessor. Every argv entry of the form `@FILE:<path>` is
+    # replaced with the trimmed contents of `<path>` at the moment of
+    # execution. The hook lives in the `reprobuild.builtin.exec`
+    # lowering so BOTH elevated and non-elevated edges run the same
+    # expansion semantics (spec §2.1). The build-graph payload keeps
+    # the literal `@FILE:...` (no secret in the plan); the substituted
+    # bytes only ride in the spawned process's argv. The audit-log
+    # rendering uses the literal `@FILE:<path>` form via the engine's
+    # log path — `auditArgvWithRedaction` is wired through the
+    # elevated-broker dispatch; the non-elevated direct-fork path is
+    # logged through the engine's own command-stats record which
+    # already redacts via this same engine boundary.
+    let argv = expandArgFiles(literalArgv, defaultArgFileReader)
     let cwdValue = argValue("cwd")
     let commandStatsId =
       if payload.commandStatsId.len > 0:
@@ -1577,7 +1591,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
       commandStatsId = commandStatsId,
-      env = inlineEnv)
+      env = inlineEnv,
+      requiresElevation = payload.requiresElevation)
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "fs":
