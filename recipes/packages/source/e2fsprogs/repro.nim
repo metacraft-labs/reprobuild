@@ -40,9 +40,11 @@ package e2fsprogsSource:
 
   config:
     discard
+  ## M9.R.29.7 — ``mkfs.ext4`` (period between verb and FS name) is a
+  ## compat symlink to ``mke2fs`` that the PascalToKebab transformer
+  ## can't represent. Use ``executableAlias`` per the dosfstools
+  ## precedent (M9.R.28.4).
   executable mke2fs:
-    discard
-  executable mkfsExt4:
     discard
   executable e2fsck:
     discard
@@ -67,7 +69,7 @@ package e2fsprogsSource:
       ]
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
       discard pkg.executable("mke2fs")
-      discard pkg.executable("mkfsExt4")
+      discard pkg.executableAlias("mkfsExt4", "mkfs.ext4")
       discard pkg.executable("e2fsck")
       discard pkg.executable("tune2fs")
       discard pkg.executable("resize2fs")
