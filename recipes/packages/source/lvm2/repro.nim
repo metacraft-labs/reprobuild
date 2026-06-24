@@ -40,6 +40,8 @@ package lvm2Source:
     "readline"
     ## util-linux for libblkid + libuuid.
     "util-linux"
+    ## ncurses for the termcap library that readline links against.
+    "ncurses"
 
   config:
     discard

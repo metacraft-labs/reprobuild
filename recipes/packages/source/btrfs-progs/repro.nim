@@ -38,6 +38,7 @@ package btrfsProgsSource:
     "zstd"         # transparent compression dep
     "libgcrypt"    # checksumming (sha256, blake2)
     "zlib"         # zlib compression dep
+    "e2fsprogs"    # libext2fs (mkfs.btrfs --rootdir support)
 
   config:
     discard
