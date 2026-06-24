@@ -419,11 +419,7 @@ EOF
 mkdir -p "$STAGE_DIR/etc/profile.d"
 cat > "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh" <<'EOF'
 # ReproOS live-ISO console-mode installer autostart.
-case "$(tty)" in
-  /dev/tty1|/dev/ttyS0|/dev/ttyAMA0) installer_tty=1;;
-  *) installer_tty=0;;
-esac
-if [ "$installer_tty" = "1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
+if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
   export REPRO_INSTALLER_RAN=1
   AUTO_CFG=""
   for cand in /etc/reproos/auto-config.toml /run/reproos/auto-config.toml; do
