@@ -96,16 +96,18 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # to 11 and re-encode the payload length so the framing self-
     # consistency check stays valid.
     # Magic is bytes 0..3; version is bytes 4..5; length is bytes 6..9.
-    # Truncate 19 trailing bytes: 4 for the empty typedOutputs count
+    # Truncate 23 trailing bytes: 4 for the empty typedOutputs count
     # (the v12 addition) + 4 for the empty outputTag string length
     # (the v13 addition) + 4 for the empty env count (the v14
     # addition) + 1 for the publishToBinaryCache sentinel byte + 1
     # for the hasIdentity sentinel byte (the v16 addition; both
     # default-zero when the optional fields are inert) + 4 for the
     # empty toolIdentityRefs count (the v17 addition) + 1 for the
-    # requiresElevation sentinel byte (the v19 addition). All seven
+    # requiresElevation sentinel byte (the v19 addition) + 4 for the
+    # empty recipeRevisionFingerprint string length (the v20 addition;
+    # zero-length string round-trips as four zero bytes). All eight
     # fields are absent at v11.
-    let trimBytes = 19
+    let trimBytes = 23
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
@@ -130,12 +132,14 @@ suite "t_engine_typed_output_payload_codec_round_trip":
   test "older v16 payload decodes with empty toolIdentityRefs (M9.N Batch B)":
     # Forge a v16 payload by encoding the current-version action with
     # no toolIdentityRefs and no requiresElevation, then patching the
-    # version field down to 16 and trimming the trailing 5 bytes (4 for
-    # the v17 toolIdentityRefs length-prefix + 1 for the v19 Windows-
-    # System-Resources Phase E requiresElevation sentinel byte).
-    # v16-and-earlier payloads MUST decode with both fields at their
-    # inert defaults (empty ``toolIdentityRefs`` + ``requiresElevation
-    # = false``) so legacy artefacts keep working.
+    # version field down to 16 and trimming the trailing 9 bytes (4
+    # for the v17 toolIdentityRefs length-prefix + 1 for the v19
+    # Windows-System-Resources Phase E requiresElevation sentinel byte
+    # + 4 for the M9.R.34 v20 empty recipeRevisionFingerprint string
+    # length). v16-and-earlier payloads MUST decode with all three
+    # fields at their inert defaults (empty ``toolIdentityRefs`` +
+    # ``requiresElevation = false`` + empty
+    # ``recipeRevisionFingerprint``) so legacy artefacts keep working.
     let action = BuildActionDef(
       id: "v16-legacy",
       call: publicCliCall("pkg", "exe", "build",
@@ -146,7 +150,7 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       actionCachePolicy: defaultActionCachePolicy())
 
     var payload = encodeBuildActionPayload(action)
-    let trimBytes = 5
+    let trimBytes = 9
     let oldLen = int(uint32(payload[6]) or
       (uint32(payload[7]) shl 8) or
       (uint32(payload[8]) shl 16) or
@@ -169,3 +173,8 @@ suite "t_engine_typed_output_payload_codec_round_trip":
     # decode with ``requiresElevation = false`` so the engine's
     # exec lowering keeps every legacy edge on the direct-fork path.
     check decoded.requiresElevation == false
+    # M9.R.34: v19-and-earlier payloads predate per-recipe
+    # invalidation; legacy artefacts decode with an empty
+    # ``recipeRevisionFingerprint`` so the engine reverts to the
+    # pre-M9.R.34 fingerprint composition for them.
+    check decoded.recipeRevisionFingerprint == ""

@@ -170,7 +170,19 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 19'u16
+  BuildActionPayloadVersion = 20'u16
+    ## v20: M9.R.34 — appends a length-prefixed string holding the
+    ## recipe-file content digest (sha256 hex; empty string when no
+    ## recipe file resolves under the active provider's project
+    ## root). The engine-side lowering in
+    ## ``repro_cli_support.lowerGraphAction`` includes the encoded
+    ## ``node.payload`` bytes in every ``fingerprintText`` it
+    ## composes, so a change to the recipe file automatically buses
+    ## the action's local ``weakFingerprint``. v19-and-earlier
+    ## payloads decode with the field empty so the engine still
+    ## fingerprints them, but recipe-edit invalidation isn't active
+    ## for actions emitted before the upgrade.
+    ##
     ## v19: Windows-System-Resources Phase E — appends a single
     ## ``requiresElevation`` sentinel byte (0/1) carrying the new edge
     ## attribute that routes elevated edges through the privileged
@@ -383,6 +395,93 @@ proc activeProviderProjectRoot*(): string {.dynOrStatic.} =
     currentProviderProjectRoot
   else:
     ""
+
+# M9.R.34: recipe-revision fingerprint cache.
+#
+# Each ``buildAction()`` registered while a ``buildProc`` is running
+# stamps the recipe file's content digest onto the action's
+# ``recipeRevisionFingerprint`` field. Without a cache that would
+# re-read + re-hash the recipe file once per registered action (5..10x
+# per recipe for the typical cmake_package / autotools_package /
+# meson_package shape, plus the per-recipe install + stage-copy edges).
+# The cache key is ``currentProviderProjectRoot``: once a ``buildProc``
+# starts evaluating a given recipe, every action it emits sees the same
+# digest. ``buildPackageFragment`` clears ``currentProviderProjectRoot``
+# at its ``finally:`` boundary; we keyed the cache by the path so a
+# subsequent ``buildProc`` for the same recipe re-uses the digest while
+# a switch to a different recipe re-computes.
+var recipeRevisionCacheRoot = ""
+var recipeRevisionCacheValue = ""
+
+proc dslSha256Hex(data: string): string =
+  ## Hex-encode the sha256 digest of ``data``. 64 lower-case hex chars.
+  ## Mirrors ``dsl_port_runtime.dslPortSha256Hex`` (kept module-local
+  ## so the recipe-revision computation here doesn't reach into the
+  ## sidecar runtime's private helper).
+  var ctx: ncSha2.sha256
+  ctx.init()
+  if data.len > 0:
+    ctx.update(cast[ptr UncheckedArray[byte]](
+      data[0].unsafeAddr).toOpenArray(0, data.len - 1))
+  let digest = ctx.finish()
+  result = newStringOfCap(64)
+  const Hex = "0123456789abcdef"
+  for i in 0 ..< 32:
+    let b = digest.data[i].uint8
+    result.add(Hex[int(b shr 4)])
+    result.add(Hex[int(b and 0x0f)])
+
+proc resetRecipeRevisionFingerprintCache*() {.dynOrStatic.} =
+  ## Drop the cached recipe-revision digest so the next
+  ## ``computeRecipeRevisionFingerprint`` call rereads the recipe
+  ## file. The ``buildPackageFragment`` per-recipe boundary already
+  ## triggers a recompute via the projectRoot-keyed cache, so the
+  ## main build flow doesn't need this; the helper exists so
+  ## hermetic unit tests can force a fresh read after they mutate
+  ## the on-disk recipe file inside a single test invocation.
+  recipeRevisionCacheRoot = ""
+  recipeRevisionCacheValue = ""
+
+proc computeRecipeRevisionFingerprint*(projectRoot: string): string {.dynOrStatic.} =
+  ## Read the recipe file (``repro.nim`` / ``reprobuild.nim``) under
+  ## ``projectRoot`` and return its sha256 hex digest, or the empty
+  ## string when the file can't be read. Cached per-projectRoot so
+  ## repeated calls within a single ``buildProc`` evaluation don't
+  ## redo the read + hash.
+  ##
+  ## Why sha256 (not blake3 like ``providerRevisionHex``): the DSL
+  ## runtime already imports ``nimcrypto/sha2`` for the M9.A
+  ## ``configFile`` cache-key path; reusing that import keeps the
+  ## umbrella's transitive dependency set unchanged. The hash here
+  ## feeds only the local action-cache fingerprint (no on-wire
+  ## binary-cache key), so byte-equality with ``providerRevisionHex``
+  ## is not required.
+  if projectRoot.len == 0:
+    return ""
+  if projectRoot == recipeRevisionCacheRoot:
+    return recipeRevisionCacheValue
+  const Canonical = "repro.nim"
+  const Legacy = "reprobuild.nim"
+  let canonicalPath = projectRoot / Canonical
+  let legacyPath = projectRoot / Legacy
+  var recipePath = ""
+  if fileExists(canonicalPath):
+    recipePath = canonicalPath
+  elif fileExists(legacyPath):
+    recipePath = legacyPath
+  if recipePath.len == 0:
+    recipeRevisionCacheRoot = projectRoot
+    recipeRevisionCacheValue = ""
+    return ""
+  var body = ""
+  try:
+    body = readFile(recipePath)
+  except CatchableError:
+    body = ""
+  let digest = dslSha256Hex(body)
+  recipeRevisionCacheRoot = projectRoot
+  recipeRevisionCacheValue = digest
+  digest
 
 proc defaultBuildAction*(id: string) {.dynOrStatic.} =
   defaultBuildActionRegistry = id
@@ -831,6 +930,15 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## ``pokInlineExecCall`` ``PrivilegedOperation`` instead of forking
   ## directly. ``false`` (the default) preserves the existing direct-
   ## fork path so every legacy edge is byte-identical to today.
+  # M9.R.34: stamp the recipe-revision fingerprint at registration
+  # time so edits to ``repro.nim`` / ``reprobuild.nim`` bus the local
+  # action-cache key. ``computeRecipeRevisionFingerprint`` returns the
+  # empty string outside provider mode (unit tests, hand-rolled
+  # ``buildAction`` callers) and for recipes whose file can't be read,
+  # so unit-test fingerprints stay byte-identical to the pre-M9.R.34
+  # encoding aside from the new sentinel byte the v20 codec adds.
+  let recipeRevisionFingerprint = computeRecipeRevisionFingerprint(
+    activeProviderProjectRoot())
   result = BuildActionDef(
     id: id,
     call: call,
@@ -850,7 +958,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     publishToBinaryCache: publishToBinaryCache,
     cacheEntryIdentity: cacheEntryIdentity,
     toolIdentityRefs: @toolIdentityRefs,
-    requiresElevation: requiresElevation)
+    requiresElevation: requiresElevation,
+    recipeRevisionFingerprint: recipeRevisionFingerprint)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -1912,6 +2021,13 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   # payloads decode with ``false`` so the engine's exec lowering
   # continues to fork every legacy edge directly.
   payload.writeByte(if action.requiresElevation: 1'u8 else: 0'u8)
+  # v20: M9.R.34 — length-prefixed recipe-file digest. Empty for
+  # actions registered outside provider mode (unit tests, hand-rolled
+  # ``buildAction`` callers, recipes whose file can't be read); the
+  # engine's lowering treats an empty payload as "no per-recipe
+  # invalidation" so legacy artefacts still fingerprint the same way
+  # they did under v19.
+  payload.writeString(action.recipeRevisionFingerprint)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -1928,7 +2044,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, BuildActionPayloadVersion}:
+      17'u16, 18'u16, 19'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2032,6 +2148,19 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # the engine's exec lowering keeps every legacy edge on the
     # direct-fork path.
     result.requiresElevation = false
+  if version >= 20'u16:
+    # M9.R.34 v20: recipe-file content digest the engine mixes into
+    # the action's local cache fingerprint via ``node.payload``.
+    # Empty when the action was emitted outside provider mode or
+    # when no recipe file resolved under the active project root —
+    # in either case the engine's fingerprintText behaviour is
+    # equivalent to the pre-M9.R.34 state for that action.
+    result.recipeRevisionFingerprint = readString(bytes, pos)
+  else:
+    # v19-and-earlier payloads predate per-recipe invalidation;
+    # legacy artefacts decode with the field empty so the engine's
+    # fingerprint reverts to the pre-M9.R.34 composition for them.
+    result.recipeRevisionFingerprint = ""
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
