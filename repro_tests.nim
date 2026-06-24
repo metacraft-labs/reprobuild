@@ -6262,6 +6262,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim",
+    binary: "build/test-bin/t_repro_push_publishes_dependency_closure_in_topological_order",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim",
+    binary: "build/test-bin/t_repro_push_sync_integrates_upstream_then_publishes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_init_bootstraps_manifest_cache_outside_workspace.nim",
     binary: "build/test-bin/t_workspace_init_bootstraps_manifest_cache_outside_workspace",
     defines: @[],

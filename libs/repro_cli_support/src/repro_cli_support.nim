@@ -182,6 +182,8 @@ proc renderUsage*(programName: string): string =
           programName &
       " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
           programName &
+      " push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
+          programName &
       " branch [<name>] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
           programName &
       " checkout <branch> [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json]\n       " &
@@ -21110,6 +21112,652 @@ proc runCheckCommand*(args: openArray[string]): int =
         stdout.writeLine(line)
     return report.exitCode
 
+# ---- RA-25: `repro push` (closure-ordered push + lock publish + certify) ---
+#
+# The inverse of the RA-21 publication gate. Where the gate REFUSES a push
+# when the pushed repo's develop-mode dependency siblings are dirty,
+# unpublished, or out of lock, `repro push` SATISFIES the gate: it pushes the
+# pushed repo's develop-mode dependency closure in dependency-first
+# (topological) order, then writes + publishes the workspace lock for the
+# resulting state (loud on failure). See CLI/push.md and
+# Workspace-And-Develop-Mode.md §"Lock publication is loud on failure".
+#
+# Reuse map (the spec is explicit that most substrate already exists):
+#   - closure: ``developSetClosure`` (RA-21) over ``ResolvedRepo.depends``.
+#   - topological order: Kahn over the same ``depends`` edges (a dependent is
+#     never published before its dependency).
+#   - per-repo cleanliness / publication probes: the SAME ``isCleanQuery`` /
+#     ``isPublishedQuery`` / ``headShaQuery`` the gate (``executeCheckPrePush``)
+#     uses.
+#   - lock write: ``executeWorkspaceLock`` (M11), scoped to the closure via
+#     ``dirtyScopeNames`` exactly like the gate.
+#   - lock publish: ``publishWorkspaceLock`` (RA-7), loud on failure.
+#   - ``--sync`` reconcile: a focused fetch + ``--merge``/``--rebase`` pass
+#     over the closure (the gate-facing inverse of RA-27 sync's fast-forward;
+#     RA-27's executor only fast-forwards, so the genuine upstream-integration
+#     step is push-owned per CLI/push.md §"--sync flavor").
+
+type
+  PushSyncMode = enum
+    psmNone        ## no ``--sync`` — reconcile nothing, just push the closure.
+    psmMerge       ## ``--sync --merge`` — integrate upstream via merge.
+    psmRebase      ## ``--sync --rebase`` — replay local commits onto upstream.
+
+  PushArgs = object
+    workspaceRoot: string
+    projectName: string
+      ## ``repro push <project>`` scopes to a named project's closure; empty
+      ## means "the repo at the current directory" (CLI/push.md §Scope).
+    currentRepo: string
+      ## Absolute path of the repo the push is for. Defaults to the cwd;
+      ## resolved to a declared repo NAME to seed the closure.
+    syncMode: PushSyncMode
+    certify: bool
+      ## ``--certify`` (default true): obtain/attach the test certificate.
+      ## The actual obtain+attach is the TC (test-certificate) campaign's
+      ## job and is NOT wired yet, so this is an honest documented no-op
+      ## (see ``runPushCertifyStub``). ``--no-certify`` skips it entirely.
+    toolProvisioning: ToolProvisioningMode
+    json: bool
+
+  PushRepoOutcome = enum
+    proPushed              ## had unpublished commits → ``git push`` succeeded.
+    proAlreadyPublished    ## HEAD already on a remote-tracking branch.
+    proSkippedDirty        ## dirty/divergent → STOP (never silently discarded).
+    proFailed              ## the ``git push`` itself failed.
+
+  PushRepoResult = object
+    name: string
+    path: string
+    branch: string
+    headSha: string
+    outcome: PushRepoOutcome
+    diagnostic: string
+    remediation: string
+
+  PushSyncResult = object
+    ## One closure member's ``--sync`` reconcile outcome. ``integrated`` is
+    ## true when upstream movement was merged/rebased in; ``stopped`` is true
+    ## on a conflict/divergence that needs human judgment (CLI/push.md: stop
+    ## and report, do not guess).
+    name: string
+    path: string
+    action: string     ## "noop" / "fast-forward" / "merge" / "rebase".
+    integrated: bool
+    stopped: bool
+    diagnostic: string
+    remediation: string
+
+  PushReport = object
+    project: string
+    workspaceRoot: string
+    closure: seq[string]        ## the dependency-closure repo NAMES.
+    order: seq[string]          ## the TOPOLOGICAL (dependency-first) push order.
+    syncMode: string
+    syncResults: seq[PushSyncResult]
+    repos: seq[PushRepoResult]
+    certifyDeferred: bool       ## ``--certify`` requested but TC path not wired.
+    lockPublished: bool
+    lockDiagnostic: string
+    exitCode: int
+
+proc parsePushArgs(args: openArray[string]): PushArgs =
+  ## ``repro push [<project>] [--sync] [--merge|--rebase]
+  ## [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH]
+  ## [--tool-provisioning=...] [--json]``.
+  result.toolProvisioning = tpmPathOnly
+  result.certify = true        ## CLI/push.md: certify by default; --no-certify opts out.
+  var wantSync = false
+  var explicitFlavor = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
+      result.currentRepo = valueFromFlag(args, i, "--current-repo")
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg == "--sync":
+      wantSync = true
+    elif arg == "--merge":
+      result.syncMode = psmMerge
+      explicitFlavor = true
+    elif arg == "--rebase":
+      result.syncMode = psmRebase
+      explicitFlavor = true
+    elif arg == "--certify":
+      result.certify = true
+    elif arg == "--no-certify":
+      result.certify = false
+    elif arg == "--json":
+      result.json = true
+    elif arg.startsWith("-"):
+      raise newException(ValueError,
+        "unsupported `repro push` flag: " & arg)
+    else:
+      if result.projectName.len > 0:
+        raise newException(ValueError,
+          "`repro push` takes at most one <project> argument; got an " &
+          "extra positional: " & arg)
+      result.projectName = arg
+    inc i
+  # ``--merge``/``--rebase`` imply ``--sync`` (you cannot pick a reconcile
+  # flavor without reconciling). A bare ``--sync`` defaults to merge — the
+  # same conservative, preserve-developer-intent default repo tooling uses
+  # when the flavor is unspecified.
+  if wantSync and not explicitFlavor:
+    result.syncMode = psmMerge
+  elif not wantSync and not explicitFlavor:
+    result.syncMode = psmNone
+  if result.workspaceRoot.len == 0:
+    if result.currentRepo.len > 0:
+      var probe = absolutePath(result.currentRepo)
+      while probe.len > 1:
+        if dirExists(probe / ".repo"):
+          result.workspaceRoot = probe
+          break
+        let parent = parentDir(probe)
+        if parent == probe: break
+        probe = parent
+    if result.workspaceRoot.len == 0:
+      result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  if result.currentRepo.len == 0:
+    result.currentRepo = getCurrentDir()
+  result.currentRepo = absolutePath(result.currentRepo)
+
+proc topoSortClosure(repos: seq[ResolvedRepo];
+                     closure: HashSet[string]): seq[string] =
+  ## Kahn topological sort of the closure over the per-repo ``depends``
+  ## edges, DEPENDENCY-FIRST: a repo is emitted only after every dependency
+  ## it names (that is also in the closure) has been emitted. This is the
+  ## load-bearing guarantee of ``repro push`` — a dependent is NEVER pushed
+  ## before its dependency (CLI/push.md High-Level Rules).
+  ##
+  ## Edges are restricted to the closure (an out-of-closure ``depends``
+  ## target cannot gate a member). Ties are broken by declaration order so
+  ## the push order is deterministic. A dependency cycle (which the manifest
+  ## should never contain) is surfaced by appending the unresolved remainder
+  ## in declaration order rather than silently dropping repos — the push
+  ## still runs, and the lock publish + gate remain the correctness backstop.
+  var byName = initTable[string, ResolvedRepo]()
+  var declOrder: seq[string]
+  for repo in repos:
+    if repo.name in closure and repo.name notin byName:
+      byName[repo.name] = repo
+      declOrder.add(repo.name)
+  # In-degree = number of (in-closure) dependencies each node still waits on.
+  var indeg = initTable[string, int]()
+  var dependents = initTable[string, seq[string]]()  # dep -> nodes that need it
+  for name in declOrder:
+    indeg[name] = 0
+  for name in declOrder:
+    for dep in byName[name].depends:
+      if dep.len > 0 and dep in byName:
+        inc indeg[name]
+        dependents.mgetOrPut(dep, @[]).add(name)
+  # Seed the ready set with zero-dependency nodes, preserving declaration
+  # order for determinism.
+  var ready: seq[string]
+  for name in declOrder:
+    if indeg[name] == 0:
+      ready.add(name)
+  var emitted = initHashSet[string]()
+  while ready.len > 0:
+    let name = ready[0]
+    ready.delete(0)
+    if name in emitted:
+      continue
+    result.add(name)
+    emitted.incl(name)
+    if name in dependents:
+      for dependent in dependents[name]:
+        dec indeg[dependent]
+        if indeg[dependent] == 0:
+          ready.add(dependent)
+  # Cycle / unresolved remainder safety net (never expected in practice).
+  if emitted.len < declOrder.len:
+    for name in declOrder:
+      if name notin emitted:
+        result.add(name)
+        emitted.incl(name)
+
+proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
+                            repo: ResolvedRepo;
+                            mode: PushSyncMode): PushSyncResult =
+  ## RA-25 ``--sync`` reconcile for one closure member: fetch the upstream,
+  ## then integrate any upstream movement on the repo's CURRENT branch via
+  ## ``--merge`` or ``--rebase`` BEFORE the closure push runs (CLI/push.md
+  ## §"--sync flavor"). The conservative rules mirror ``repro sync``:
+  ##
+  ##   - no upstream / not on a branch → noop (nothing to reconcile).
+  ##   - upstream unchanged from HEAD → noop.
+  ##   - HEAD already contains the upstream tip (we're ahead only) → noop;
+  ##     the local commits get published by the push step.
+  ##   - HEAD strictly behind a fast-forwardable upstream → fast-forward.
+  ##   - divergent (local + upstream both moved) → merge or rebase per mode.
+  ##
+  ## A conflict (merge/rebase fails) STOPS with a remedy naming the repo and
+  ## leaves the tree in git's conflicted state for the operator — it never
+  ## guesses (CLI/push.md: "stops and reports it with the remedy").
+  result.name = repo.name
+  result.path = repo.path
+  result.action = "noop"
+  let repoAbs = workspaceRoot / repo.path
+  if not dirExists(repoAbs / ".git"):
+    return
+  let branchRes = gitRunPlain(identity,
+    ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+  if branchRes.code != 0 or branchRes.output.strip().len == 0:
+    # Detached HEAD — nothing branch-scoped to reconcile.
+    return
+  let branch = branchRes.output.strip()
+  # Fetch the upstream so the remote-tracking ref reflects teammate movement.
+  let fetchRes = gitRunPlain(identity, ["-C", repoAbs, "fetch", "--quiet",
+    "origin"])
+  if fetchRes.code != 0:
+    result.stopped = true
+    result.diagnostic = "git fetch origin failed in " & repo.path & ": " &
+      fetchRes.output.strip()
+    result.remediation = "check connectivity / credentials for " & repo.path &
+      " then re-run 'repro push --sync'"
+    return
+  let head = revParse(identity, repoAbs, "HEAD")
+  let upstream = revParse(identity, repoAbs, "refs/remotes/origin/" & branch)
+  if upstream.len == 0 or head.len == 0 or head == upstream:
+    return
+  # Is upstream already contained in HEAD? (we're strictly ahead — pure
+  # local work). Nothing to integrate; the push step publishes it.
+  let upstreamInHead = gitRunPlain(identity,
+    ["-C", repoAbs, "merge-base", "--is-ancestor", upstream, head])
+  if upstreamInHead.code == 0:
+    return
+  # Is HEAD an ancestor of upstream? (pure fast-forward — we're behind).
+  let headInUpstream = gitRunPlain(identity,
+    ["-C", repoAbs, "merge-base", "--is-ancestor", head, upstream])
+  if headInUpstream.code == 0:
+    let ff = gitRunPlain(identity,
+      ["-C", repoAbs, "merge", "--ff-only", "origin/" & branch])
+    if ff.code != 0:
+      result.stopped = true
+      result.diagnostic = "fast-forward of " & repo.path & " failed: " &
+        ff.output.strip()
+      result.remediation = "resolve manually in " & repo.path &
+        " then re-run 'repro push'"
+      return
+    result.action = "fast-forward"
+    result.integrated = true
+    return
+  # Genuine divergence: both HEAD and upstream advanced. Integrate per mode.
+  case mode
+  of psmNone:
+    # ``--sync`` was not requested but we somehow diverged — report-and-stop
+    # rather than guess. (Unreachable from the dispatcher, which only calls
+    # this when a sync mode is set; kept for completeness.)
+    result.stopped = true
+    result.diagnostic = repo.path & " has diverged from origin/" & branch
+    result.remediation = "run 'repro push --sync --rebase' (or --merge) to " &
+      "integrate origin/" & branch & " in " & repo.path
+  of psmMerge:
+    let m = gitRunPlain(identity,
+      ["-C", repoAbs, "merge", "--no-edit", "origin/" & branch])
+    if m.code != 0:
+      # Abort the half-applied merge so the tree is not left mid-conflict
+      # for the operator to puzzle over an unexpected state.
+      discard gitRunPlain(identity, ["-C", repoAbs, "merge", "--abort"])
+      result.stopped = true
+      result.diagnostic = "merge of origin/" & branch & " into " & repo.path &
+        " hit a conflict: " & m.output.strip()
+      result.remediation = "resolve the conflict in " & repo.path &
+        " (git -C " & repo.path & " merge origin/" & branch &
+        "), commit, then re-run 'repro push'"
+      return
+    result.action = "merge"
+    result.integrated = true
+  of psmRebase:
+    let r = gitRunPlain(identity,
+      ["-C", repoAbs, "rebase", "origin/" & branch])
+    if r.code != 0:
+      discard gitRunPlain(identity, ["-C", repoAbs, "rebase", "--abort"])
+      result.stopped = true
+      result.diagnostic = "rebase onto origin/" & branch & " in " & repo.path &
+        " hit a conflict: " & r.output.strip()
+      result.remediation = "resolve the conflict in " & repo.path &
+        " (git -C " & repo.path & " rebase origin/" & branch &
+        "), then re-run 'repro push'"
+      return
+    result.action = "rebase"
+    result.integrated = true
+
+proc runPushCertifyStub(report: var PushReport; certify: bool) =
+  ## RA-25 certify FLAG + pipeline slot. The certificate obtain+attach is the
+  ## TC (test-certificate) campaign's deliverable and is NOT wired here yet:
+  ## this is the HONEST place in the pipeline where certification would run.
+  ## ``--certify`` (default) records that the step is deferred (the push
+  ## relies on whatever certificates are already attached); ``--no-certify``
+  ## skips even that. We NEVER fake running tests or attaching a certificate.
+  if certify:
+    report.certifyDeferred = true
+    stderr.writeLine("repro push: certification is not wired yet " &
+      "(deferred to the test-certificate campaign); this push relies on " &
+      "whatever certificates are already attached. Use --no-certify to " &
+      "silence this notice.")
+  else:
+    report.certifyDeferred = false
+
+proc executePush(args: PushArgs): PushReport =
+  result.workspaceRoot = args.workspaceRoot
+  result.syncMode =
+    case args.syncMode
+    of psmNone: "none"
+    of psmMerge: "merge"
+    of psmRebase: "rebase"
+
+  # Resolve the workspace project / compose layers via the SAME dispatch the
+  # gate uses, so push and the gate agree on the participating repo set.
+  let (resolved, _) = resolveCheckProject(CheckArgs(
+    mode: cmPrePush,
+    workspaceRoot: args.workspaceRoot,
+    currentRepo: args.currentRepo,
+    toolProvisioning: args.toolProvisioning))
+  result.project = resolved.projectName
+
+  let identity = ensureGitToolResolvable(
+    args.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+
+  # Determine the pushed repo NAME that seeds the closure.
+  #   - ``repro push <project>``: the named project's TRUNK repo (the repo
+  #     whose name matches the project), else every repo (whole-project
+  #     closure) when no single repo carries the project name.
+  #   - ``repro push`` (no arg): the repo at ``--current-repo``/cwd.
+  var pushedRepoName = ""
+  if args.projectName.len > 0:
+    for repo in resolved.repos:
+      if repo.name == args.projectName:
+        pushedRepoName = repo.name
+        break
+  else:
+    let abs = absolutePath(args.currentRepo)
+    for repo in resolved.repos:
+      if absolutePath(args.workspaceRoot / repo.path) == abs:
+        pushedRepoName = repo.name
+        break
+
+  var closure: HashSet[string]
+  if pushedRepoName.len > 0:
+    closure = developSetClosure(resolved.repos, pushedRepoName)
+  else:
+    # No single trunk repo resolves (a ``repro push <project>`` whose project
+    # name is not also a repo name, or a cwd outside any declared repo): the
+    # closure is the whole resolved set, so the push is the project's full
+    # publication. This mirrors the gate's whole-workspace fallback.
+    for repo in resolved.repos:
+      closure.incl(repo.name)
+  for repo in resolved.repos:
+    if repo.name in closure:
+      result.closure.add(repo.name)
+
+  # Topological (dependency-first) push order over ``depends``.
+  result.order = topoSortClosure(resolved.repos, closure)
+
+  var byName = initTable[string, ResolvedRepo]()
+  for repo in resolved.repos:
+    byName[repo.name] = repo
+
+  # ---- 1. ``--sync`` reconcile (BEFORE any push) -------------------------
+  # CLI/push.md: reconcile upstream movement FIRST, then publish the closure
+  # on top. If a member needs human judgment (conflict/divergence), STOP and
+  # report with the remedy — publish nothing misleading.
+  if args.syncMode != psmNone:
+    for name in result.order:
+      let sr = reconcileMemberForPush(
+        identity, args.workspaceRoot, byName[name], args.syncMode)
+      result.syncResults.add(sr)
+      if sr.stopped:
+        result.exitCode = 2
+        return
+
+  # ---- 2. closure push in topological order ------------------------------
+  # Walk dependency-first. A dirty/divergent member STOPS the push with an
+  # actionable {offender, remedy} diagnostic (never silently discarded). A
+  # member with unpublished commits is pushed; an already-published member
+  # is a benign noop.
+  for name in result.order:
+    let repo = byName[name]
+    let repoAbs = args.workspaceRoot / repo.path
+    var entry = PushRepoResult(name: repo.name, path: repo.path)
+    if not dirExists(repoAbs / ".git"):
+      # Not a checkout we can publish from. Treat as already-published (no
+      # local work to lose); the lock still records what it can observe.
+      entry.outcome = proAlreadyPublished
+      entry.diagnostic = "no git checkout at " & repo.path & "; nothing to push"
+      result.repos.add(entry)
+      continue
+    let branchRes = gitRunPlain(identity,
+      ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      entry.branch = branchRes.output.strip()
+    let headRes = queryGitState(headShaQuery(repoAbs), identity)
+    if headRes.status == gqsOk:
+      entry.headSha = headRes.headSha
+    # Cleanliness FIRST — a dirty member stops the push (reuses the gate probe).
+    let cleanRes = queryGitState(isCleanQuery(repoAbs), identity)
+    let isClean =
+      if cleanRes.status == gqsOk: cleanRes.isClean
+      else: false
+    if not isClean:
+      entry.outcome = proSkippedDirty
+      entry.diagnostic =
+        if cleanRes.status != gqsOk: "clean-probe-failed: " & cleanRes.diagnostic
+        else: "working tree has uncommitted changes"
+      entry.remediation = "commit or stash changes in " & repo.path &
+        " — run 'git -C " & repo.path & " commit -a' (or 'git -C " &
+        repo.path & " stash') then 're-run repro push"
+      result.repos.add(entry)
+      result.exitCode = 2
+      return
+    # Published? (reuses the gate's publication probe.) Already-published is a
+    # benign noop; unpublished commits get pushed.
+    let pubRes = queryGitState(isPublishedQuery(repoAbs, "origin"), identity)
+    let isPublished =
+      if pubRes.status == gqsOk: pubRes.isPublished
+      else: false
+    if isPublished:
+      entry.outcome = proAlreadyPublished
+      result.repos.add(entry)
+      continue
+    if entry.branch.len == 0:
+      # Unpublished work on a detached HEAD: we have no branch to push. STOP
+      # with a remedy rather than guessing a refspec.
+      entry.outcome = proSkippedDirty
+      entry.diagnostic = "HEAD " & entry.headSha &
+        " is unpublished but the checkout is on a detached HEAD"
+      entry.remediation = "attach " & repo.path &
+        " to a branch (git -C " & repo.path &
+        " switch -c <branch>) then re-run 'repro push'"
+      result.repos.add(entry)
+      result.exitCode = 2
+      return
+    let pushRes = gitRunPlain(identity,
+      ["-C", repoAbs, "push", "origin", "HEAD:" & entry.branch])
+    if pushRes.code != 0:
+      entry.outcome = proFailed
+      entry.diagnostic = "git push origin HEAD:" & entry.branch &
+        " failed in " & repo.path & ": " & pushRes.output.strip()
+      entry.remediation = "resolve the push failure in " & repo.path &
+        " (fetch + reconcile, then re-run 'repro push --sync')"
+      result.repos.add(entry)
+      result.exitCode = 1
+      return
+    entry.outcome = proPushed
+    result.repos.add(entry)
+
+  # ---- 3. certificate slot (FLAG only; obtain+attach deferred to TC) -----
+  runPushCertifyStub(result, args.certify)
+
+  # ---- 4. lock write + publish (loud on failure) -------------------------
+  # Write/refresh the lock for the now-published state (reusing the M11
+  # writer scoped to the closure, exactly like the gate), then PUBLISH it
+  # (RA-7). A publish FAILURE is loud: the push exit flips non-zero so a
+  # teammate never pulls a commit whose lock never reached the manifest repo.
+  var lockArgs = WorkspaceLockArgs(
+    workspaceRoot: args.workspaceRoot,
+    toolProvisioning: args.toolProvisioning,
+    dirtyScopeNames: closure)
+  var lockOutcome: WorkspaceLockOutcome
+  try:
+    lockOutcome = executeWorkspaceLock(lockArgs)
+  except CatchableError as err:
+    result.lockDiagnostic = "lock write failed: " & err.msg
+    result.exitCode = 1
+    return
+  if lockOutcome.report.exitCode != 0:
+    result.lockDiagnostic = "lock writer exited with code " &
+      $lockOutcome.report.exitCode
+    result.exitCode = 1
+    return
+  let manifestLayerRoot = lockOutcome.report.manifestLayerRoot
+  let pub = publishWorkspaceLock(identity, manifestLayerRoot)
+  case pub.outcome
+  of lpoPublished:
+    result.lockPublished = true
+    result.lockDiagnostic = pub.diagnostic
+  of lpoNothingToPublish:
+    # The lock was already current and committed earlier — benign.
+    result.lockPublished = true
+    result.lockDiagnostic = "lock already current: " & pub.diagnostic
+  of lpoNotPublishable:
+    # The workspace is not configured to publish (no manifest git checkout /
+    # no upstream). There is no publication boundary to honour — benign skip.
+    result.lockPublished = false
+    result.lockDiagnostic = "lock publish skipped: " & pub.diagnostic
+  of lpoRefusedDirty, lpoFailed:
+    # Loud-on-failure (RA-7/RA-21): the reproducible state could be published
+    # but the attempt failed/was refused. Refuse with a clear diagnostic
+    # rather than leaving a published commit whose lock never landed.
+    result.lockPublished = false
+    result.lockDiagnostic = "lock publication failed: " & pub.diagnostic
+    result.exitCode = 2
+
+proc renderPushTextLines(report: PushReport): seq[string] =
+  ## Per-repo outcomes + topological order + lock/cert summary, in the
+  ## communicate-before-execute style (Interactive-UX-And-Progress.md).
+  result.add("repro push: closure " & report.closure.join(", ") &
+    " (push order: " & report.order.join(" → ") & ")")
+  if report.syncMode != "none":
+    for sr in report.syncResults:
+      var line = "repro push: sync " & sr.path & " action=" & sr.action
+      if sr.stopped:
+        line.add(" → STOPPED (" & sr.diagnostic & ")")
+      elif sr.integrated:
+        line.add(" → integrated upstream")
+      result.add(line)
+      if sr.stopped and sr.remediation.len > 0:
+        result.add("    remedy: " & sr.remediation)
+  for entry in report.repos:
+    let tag =
+      case entry.outcome
+      of proPushed: "pushed"
+      of proAlreadyPublished: "already-published"
+      of proSkippedDirty: "skipped-dirty"
+      of proFailed: "failed"
+    var line = "repro push: " & entry.path & " (" & entry.name & ") → " & tag
+    if entry.diagnostic.len > 0:
+      line.add(" — " & entry.diagnostic)
+    result.add(line)
+    if entry.remediation.len > 0:
+      result.add("    remedy: " & entry.remediation)
+  if report.certifyDeferred:
+    result.add("repro push: certification deferred to the " &
+      "test-certificate campaign (not wired yet)")
+  if report.lockDiagnostic.len > 0:
+    result.add("repro push: " & report.lockDiagnostic)
+
+proc toJsonNode(report: PushReport): JsonNode =
+  result = newJObject()
+  result["project"] = %report.project
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["closure"] = %report.closure
+  result["order"] = %report.order
+  result["syncMode"] = %report.syncMode
+  var syncs = newJArray()
+  for sr in report.syncResults:
+    var o = newJObject()
+    o["name"] = %sr.name
+    o["path"] = %sr.path
+    o["action"] = %sr.action
+    o["integrated"] = %sr.integrated
+    o["stopped"] = %sr.stopped
+    o["diagnostic"] = %sr.diagnostic
+    o["remediation"] = %sr.remediation
+    syncs.add(o)
+  result["syncResults"] = syncs
+  var repos = newJArray()
+  for entry in report.repos:
+    var o = newJObject()
+    o["name"] = %entry.name
+    o["path"] = %entry.path
+    o["branch"] = %entry.branch
+    o["headSha"] = %entry.headSha
+    o["outcome"] = %(
+      case entry.outcome
+      of proPushed: "pushed"
+      of proAlreadyPublished: "already-published"
+      of proSkippedDirty: "skipped-dirty"
+      of proFailed: "failed")
+    o["diagnostic"] = %entry.diagnostic
+    o["remediation"] = %entry.remediation
+    repos.add(o)
+  result["repos"] = repos
+  result["certifyDeferred"] = %report.certifyDeferred
+  result["lockPublished"] = %report.lockPublished
+  result["lockDiagnostic"] = %report.lockDiagnostic
+  result["exitCode"] = %report.exitCode
+
+proc writePushReport(report: PushReport) =
+  let dir = report.workspaceRoot / ".repro" / "workspace"
+  createDir(dir)
+  writeFile(dir / "push-report.json", pretty(report.toJsonNode(), indent = 2))
+
+proc runPushCommand*(args: openArray[string]): int =
+  ## ``repro push [<project>] [--sync] [--merge|--rebase]
+  ## [--certify|--no-certify]`` per CLI/push.md.
+  ##
+  ## Exit codes:
+  ##   - 0 — the closure was published (in dependency order) and the lock
+  ##         was published (or there was no publication boundary).
+  ##   - 2 — a closure member is dirty/divergent, a ``--sync`` reconcile
+  ##         needs human judgment, or the lock publication failed (loud).
+  ##   - 1 — a ``git push`` of a closure member failed, or the lock writer
+  ##         errored.
+  let parsed =
+    try:
+      parsePushArgs(args)
+    except ValueError as err:
+      stderr.writeLine("repro push: " & err.msg)
+      return 1
+  if not isInitializedWorkspace(parsed.workspaceRoot):
+    stderr.writeLine("repro push: not a workspace (no resolved manifest " &
+      "checkout at " & parsed.workspaceRoot & ")")
+    return 1
+  var report: PushReport
+  try:
+    report = executePush(parsed)
+  except CatchableError as err:
+    stderr.writeLine("repro push: error: " & err.msg)
+    return 1
+  writePushReport(report)
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderPushTextLines(report):
+      stdout.writeLine(line)
+  report.exitCode
+
 # ---- M12: `repro workspace status / list / manifests` ---------------------
 #
 # Three read-only introspection commands per
@@ -28239,6 +28887,23 @@ proc runThinApp*(programName: string): int =
       return runRemoveCommand(removeArgs)
     except CatchableError as err:
       stderr.writeLine("repro remove: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "push":
+    # RA-25 — `repro push [<project>]` (closure-ordered push + lock publish +
+    # certify) per CLI/push.md. The inverse of the RA-21 publication gate:
+    # pushes the pushed repo's develop-mode dependency closure in dependency-
+    # first order, then publishes the workspace lock (loud on failure).
+    # ``--sync`` (+``--merge``/``--rebase``) reconciles upstream first.
+    # Implementation in ``runPushCommand``.
+    try:
+      let pushArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runPushCommand(pushArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro push: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
