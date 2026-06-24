@@ -42,7 +42,11 @@ package xtransSource:
     setCurrentOwningPackageOverride("xtransSource")
     try:
       let pkg = autotools_package(srcDir = "./src", configureOptions = @[])
-      discard pkg
+      ## M9.R.29.13 — header-only autotools package; emit the install
+      ## mirror explicitly so the consumer's pkgconfig-only fast-path
+      ## sees ``xtrans.pc`` under ``.repro/output/install/usr/share/
+      ## pkgconfig/``.
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 

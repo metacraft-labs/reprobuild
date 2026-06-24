@@ -42,7 +42,11 @@ package xorgprotoSource:
     setCurrentOwningPackageOverride("xorgprotoSource")
     try:
       let pkg = meson_package(srcDir = "./src", configureOptions = @[])
-      discard pkg
+      ## M9.R.29.13 — pure-header X11 protocol package; emit the
+      ## install mirror explicitly so consumers' pkgconfig-only
+      ## fast-path sees the .pc files under
+      ## ``.repro/output/install/usr/share/pkgconfig/``.
+      pkg.installTreeMirror()
     finally:
       clearCurrentOwningPackageOverride()
 
