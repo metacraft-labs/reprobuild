@@ -42,6 +42,8 @@ package lvm2Source:
     "util-linux"
     ## ncurses for the termcap library that readline links against.
     "ncurses"
+    ## libaio for the bcache async-I/O fast path.
+    "libaio"
 
   config:
     discard
