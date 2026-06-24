@@ -49,13 +49,7 @@ package btrfsProgsSource:
     discard
   executable btrfs:
     discard
-  executable mkfsBtrfs:
-    discard
   executable btrfsck:
-    discard
-  executable btrfsImage:
-    discard
-  executable btrfsTune:
     discard
   library libBtrfs:
     discard
@@ -81,10 +75,10 @@ package btrfsProgsSource:
       let pkg = autotools_package(srcDir = "./src", buildDir = "src",
                                   configureOptions = opts)
       discard pkg.executable("btrfs")
-      discard pkg.executable("mkfsBtrfs")
+      discard pkg.executableAlias("mkfsBtrfs", "mkfs.btrfs")
       discard pkg.executable("btrfsck")
-      discard pkg.executable("btrfsImage")
-      discard pkg.executable("btrfsTune")
+      discard pkg.executableAlias("btrfsImage", "btrfs-image")
+      discard pkg.executableAlias("btrfsTune", "btrfstune")
       discard pkg.library("libBtrfs")
     finally:
       clearCurrentOwningPackageOverride()
