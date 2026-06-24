@@ -83,6 +83,22 @@ const
 type
   # --- repos/<repo>.toml -----------------------------------------------------
 
+  CopyLinkFileEntry* = object
+    ## RA-18 — one copyfile / linkfile directive (the `repo`
+    ## `<copyfile>` / `<linkfile>` equivalent). `src` is interpreted
+    ## relative to the repo's own working tree; `dest` is interpreted
+    ## relative to the workspace root. Both required.
+    ##
+    ## Authored as an inline-table-array element under `[repo]`:
+    ##   copyfile = [{ src = "build/config.default.toml", dest = "config.toml" }]
+    ##   linkfile = [{ src = "scripts/dev.sh", dest = "dev.sh" }]
+    ## The pinned `nim-toml-serialization` (v0.2.18) does not support a
+    ## *nested* array-of-tables (`[[repo.copyfile]]`), so the inline-table
+    ## array is the supported surface syntax (Workspace-Manifests.md
+    ## §"copyfile / linkfile" "Syntax note").
+    src*: string
+    dest*: string
+
   RepoBody* = object
     name*: string
     path*: string
@@ -97,6 +113,15 @@ type
     clone_filter*: Option[string]  ## partial clone: "blob:none" / "tree:0"
     depth*: Option[int]            ## shallow clone depth (deepened on demand)
     single_branch*: Option[bool]   ## fetch only the pinned revision's branch
+    # RA-18 — post-sync file materialization + group membership
+    # (Workspace-Manifests.md §§"copyfile / linkfile", "Manifest Groups").
+    # A missing/empty `groups` means the repo belongs to the implicit
+    # `default` group only. `copyfile`/`linkfile` are applied after a
+    # successful checkout and re-applied on every sync (idempotent), so the
+    # materialized files track the checked-out revision.
+    copyfile*: seq[CopyLinkFileEntry]
+    linkfile*: seq[CopyLinkFileEntry]
+    groups*: seq[string]
 
   RepoFragment* = object
     schema*: string

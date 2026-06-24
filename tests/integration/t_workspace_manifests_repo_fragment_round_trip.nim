@@ -73,6 +73,18 @@ path = "y"
 future_key = "forward-compat"
 """
 
+# RA-18 — copyfile/linkfile (inline-table arrays) + groups.
+const ra18Toml = """
+schema = "reprobuild.workspace.repo.v1"
+
+[repo]
+name = "lib"
+path = "lib"
+groups = ["default", "tools"]
+copyfile = [{ src = "build/config.default.toml", dest = "config.toml" }]
+linkfile = [{ src = "scripts/dev.sh", dest = "dev.sh" }]
+"""
+
 proc writeFixture(dir, name, content: string): string =
   result = dir / name
   writeFile(result, content)
@@ -137,3 +149,21 @@ suite "M5 — RepoFragment round-trip":
     let r = readRepoFragment(path)
     check r.repo.name == "x"
     check r.extensions.isPresent
+
+  test "RA-18 copyfile/linkfile/groups round-trip":
+    let path = writeFixture(dir, "repo-ra18.toml", ra18Toml)
+    let r = readRepoFragment(path)
+    check r.repo.groups == @["default", "tools"]
+    check r.repo.copyfile.len == 1
+    check r.repo.copyfile[0].src == "build/config.default.toml"
+    check r.repo.copyfile[0].dest == "config.toml"
+    check r.repo.linkfile.len == 1
+    check r.repo.linkfile[0].src == "scripts/dev.sh"
+    check r.repo.linkfile[0].dest == "dev.sh"
+
+  test "a fragment WITHOUT RA-18 fields leaves them empty (no regression)":
+    let path = writeFixture(dir, "repo-happy2.toml", happyToml)
+    let r = readRepoFragment(path)
+    check r.repo.copyfile.len == 0
+    check r.repo.linkfile.len == 0
+    check r.repo.groups.len == 0

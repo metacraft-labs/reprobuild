@@ -108,6 +108,12 @@ type
     cloneFilter*: string
     depth*: int
     singleBranch*: bool
+    # RA-18 — post-sync file materialization + group membership, carried
+    # verbatim from the fragment. An empty `groups` means the repo belongs
+    # to the implicit `default` group only (see `repoInGroups`).
+    copyfile*: seq[CopyLinkFileEntry]
+    linkfile*: seq[CopyLinkFileEntry]
+    groups*: seq[string]
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -121,6 +127,39 @@ type
 const
   defaultRepoVcs* = "git"
   defaultRepoStability* = "tracked"
+  defaultManifestGroup* = "default"
+    ## RA-18 — a repo with no declared `groups` belongs to this implicit
+    ## group (the `repo`-tool convention). A repo's effective group set is
+    ## therefore `groups` when non-empty, else `["default"]`.
+
+# ---- RA-18 group membership -----------------------------------------------
+
+proc effectiveGroups*(repo: ResolvedRepo): seq[string] =
+  ## The repo's effective group membership: its declared `groups` when it
+  ## has any, otherwise the implicit `["default"]`. A repo that explicitly
+  ## lists groups WITHOUT naming `default` is NOT in `default` (mirroring
+  ## `repo`, where listing a group opts out of the implicit membership).
+  if repo.groups.len > 0: repo.groups
+  else: @[defaultManifestGroup]
+
+proc repoSelectedByGroups*(repo: ResolvedRepo;
+                           includeGroups, excludeGroups: seq[string]): bool =
+  ## RA-18 subset selection. `includeGroups` is the requested `--groups`
+  ## set (empty means "no `--groups` filter": every repo is selected unless
+  ## excluded). `excludeGroups` is the `-<group>` set. A repo is selected
+  ## when (a) `includeGroups` is empty OR the repo is in at least one
+  ## included group, AND (b) the repo is in NONE of the excluded groups.
+  ## Exclusion wins over inclusion, matching `repo`'s `groups=foo,-bar`.
+  let groups = effectiveGroups(repo)
+  for g in excludeGroups:
+    if g in groups:
+      return false
+  if includeGroups.len == 0:
+    return true
+  for g in includeGroups:
+    if g in groups:
+      return true
+  false
 
 # ---- helpers --------------------------------------------------------------
 
@@ -279,6 +318,13 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       resolved.depth = fragment.repo.depth.get()
     if fragment.repo.single_branch.isSome:
       resolved.singleBranch = fragment.repo.single_branch.get()
+
+    # RA-18 — carry the copyfile/linkfile directives and group membership
+    # through verbatim. These are workspace-layout facts, not download
+    # knobs; the materialization step runs post-checkout in the CLI driver.
+    resolved.copyfile = fragment.repo.copyfile
+    resolved.linkfile = fragment.repo.linkfile
+    resolved.groups = fragment.repo.groups
 
     # Duplicate check on the `(name, path, remoteName)` triple. We use
     # a tab-joined key because none of the three components legally
@@ -511,6 +557,12 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       resolved.depth = fragment.repo.depth.get()
     if fragment.repo.single_branch.isSome:
       resolved.singleBranch = fragment.repo.single_branch.get()
+
+    # RA-18 — carry the copyfile/linkfile directives and group membership
+    # through verbatim (same as the project path above).
+    resolved.copyfile = fragment.repo.copyfile
+    resolved.linkfile = fragment.repo.linkfile
+    resolved.groups = fragment.repo.groups
 
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
     if triple in seen:

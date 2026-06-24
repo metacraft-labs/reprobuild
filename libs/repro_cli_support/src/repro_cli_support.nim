@@ -15762,6 +15762,17 @@ proc installUserDaemonWatchExecutor() =
 # (or, once M10 lands, ``repro workspace sync``).
 
 type
+  MaterializedFileEntry* = object
+    ## RA-18 — one copyfile/linkfile dest materialized at the workspace
+    ## root after a repo's checkout succeeds. Emitted by both
+    ## ``executeWorkspaceInit`` and ``executeWorkspaceSync``.
+    repo*: string        ## repo ``path`` that declared the directive
+    kind*: string        ## "copyfile" | "linkfile"
+    src*: string         ## repo-relative source
+    dest*: string        ## workspace-root-relative destination
+    status*: string      ## "materialized" | "failed"
+    diagnostic*: string  ## empty on success
+
   WorkspaceInitClonedEntry* = object
     name*: string
     path*: string
@@ -15812,6 +15823,8 @@ type
     upToDate*: seq[WorkspaceInitUpToDateEntry]
     divergences*: seq[WorkspaceInitDivergenceEntry]
     skippedLayers*: seq[WorkspaceInitSkippedLayerEntry]
+    materialized*: seq[MaterializedFileEntry]
+      ## RA-18 — copyfile/linkfile dest paths materialized post-checkout.
 
   WorkspaceInitOutcome* = object
     ## Internal aggregate the dispatcher consumes to compute the exit
@@ -15859,6 +15872,17 @@ proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     skipped.add(obj)
   result["skippedLayers"] = skipped
+  var materialized = newJArray()
+  for entry in report.materialized:
+    var obj = newJObject()
+    obj["repo"] = %entry.repo
+    obj["kind"] = %entry.kind
+    obj["src"] = %entry.src
+    obj["dest"] = %entry.dest
+    obj["status"] = %entry.status
+    obj["diagnostic"] = %entry.diagnostic
+    materialized.add(obj)
+  result["materialized"] = materialized
 
 proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
   for entry in report.skippedLayers:
@@ -16279,6 +16303,74 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
       except OSError, IOError:
         copyDir(privCached.sharedBarePath, privateDir)
 
+proc normalizeMaterializeRel(raw: string): string =
+  ## A copyfile/linkfile path is authored with forward slashes (the
+  ## Workspace-Manifests "Common Conventions" rule) and must stay inside
+  ## its anchor (repo for `src`, workspace root for `dest`). Reject
+  ## absolute paths and any `..` segment; return the host-separator form.
+  ## Empty string signals an invalid path the caller must report.
+  if raw.len == 0 or isAbsolute(raw) or '\\' in raw:
+    return ""
+  for component in raw.split('/'):
+    if component == ".." or component == "":
+      return ""
+  raw.replace('/', DirSep)
+
+proc materializeRepoFiles(workspaceRoot: string;
+                          repo: ResolvedRepo): seq[MaterializedFileEntry] =
+  ## Apply `repo`'s copyfile (copy) and linkfile (symlink) directives.
+  ## Idempotent: an existing `dest` (regular file or symlink) is removed
+  ## and rewritten so the materialized file/symlink tracks the current
+  ## checkout. Every directive is best-effort and independently reported;
+  ## a failure on one never aborts the others or the surrounding sync.
+  let repoAbs = workspaceRoot / repo.path
+
+  proc apply(kind: string; entry: CopyLinkFileEntry): MaterializedFileEntry =
+    result = MaterializedFileEntry(
+      repo: repo.path, kind: kind, src: entry.src, dest: entry.dest)
+    let srcRel = normalizeMaterializeRel(entry.src)
+    let destRel = normalizeMaterializeRel(entry.dest)
+    if srcRel.len == 0:
+      result.status = "failed"
+      result.diagnostic = "invalid src path '" & entry.src &
+        "' (must be repo-relative, forward-slashed, no `..`)"
+      return
+    if destRel.len == 0:
+      result.status = "failed"
+      result.diagnostic = "invalid dest path '" & entry.dest &
+        "' (must be workspace-root-relative, forward-slashed, no `..`)"
+      return
+    let srcAbs = repoAbs / srcRel
+    let destAbs = workspaceRoot / destRel
+    if not fileExists(srcAbs) and not dirExists(srcAbs):
+      result.status = "failed"
+      result.diagnostic = "source '" & srcRel & "' does not exist in repo '" &
+        repo.path & "'"
+      return
+    try:
+      createDir(destAbs.parentDir)
+      # Idempotent overwrite: clear any prior materialized file/symlink so
+      # a re-run replaces stale content (the checked-out src may have
+      # changed) and a copyfile→linkfile switch is honored.
+      if symlinkExists(destAbs) or fileExists(destAbs):
+        removeFile(destAbs)
+      if kind == "linkfile":
+        createSymlink(srcAbs, destAbs)
+      else:
+        copyFile(srcAbs, destAbs)
+      result.status = "materialized"
+    except OSError as e:
+      result.status = "failed"
+      result.diagnostic = e.msg
+    except IOError as e:
+      result.status = "failed"
+      result.diagnostic = e.msg
+
+  for entry in repo.copyfile:
+    result.add(apply("copyfile", entry))
+  for entry in repo.linkfile:
+    result.add(apply("linkfile", entry))
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -16409,6 +16501,22 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       else:
         report.cloned.add(cloneEntries[i])
 
+  # RA-18: materialize copyfile/linkfile directives post-checkout. Applied
+  # for every repo whose working tree now exists (freshly cloned OR already
+  # present), so the workspace-root files track the checked-out revision.
+  # Idempotent and best-effort: a failure on one directive is reported but
+  # never fails init.
+  for repo in resolved.repos:
+    if repo.copyfile.len == 0 and repo.linkfile.len == 0:
+      continue
+    if not dirExists(args.workspaceRoot / repo.path):
+      continue
+    for m in materializeRepoFiles(args.workspaceRoot, repo):
+      report.materialized.add(m)
+      if m.status == "failed":
+        stderr.writeLine("workspace init: " & m.kind & " '" & m.dest &
+          "' <- '" & repo.path & "/" & m.src & "' failed: " & m.diagnostic)
+
   result.report = report
   result.cloneFailures = cloneFailures
 
@@ -16528,6 +16636,9 @@ type
     workspaceRoot*: string
     manifestLayers*: seq[WorkspaceSyncManifestLayerEntry]
     repos*: seq[WorkspaceSyncRepoEntry]
+    materialized*: seq[MaterializedFileEntry]
+      ## RA-18 — copyfile/linkfile dests materialized after the checkout
+      ## phase (idempotent; re-applied on every sync).
     exitCode*: int
 
   WorkspaceSyncOutcome* = object
@@ -16565,6 +16676,17 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["executionDiagnostic"] = %entry.executionDiagnostic
     repos.add(obj)
   result["repos"] = repos
+  var materialized = newJArray()
+  for entry in report.materialized:
+    var obj = newJObject()
+    obj["repo"] = %entry.repo
+    obj["kind"] = %entry.kind
+    obj["src"] = %entry.src
+    obj["dest"] = %entry.dest
+    obj["status"] = %entry.status
+    obj["diagnostic"] = %entry.diagnostic
+    materialized.add(obj)
+  result["materialized"] = materialized
   result["exitCode"] = %report.exitCode
 
 proc renderSyncTextLines*(report: WorkspaceSyncReport): seq[string] =
@@ -16598,6 +16720,12 @@ type
     failFast: bool       ## ``--fail-fast``: stop on first fetch failure.
     forceSync: bool      ## ``--force-sync``: OVERWRITE divergent/dirty checkouts (RA-16).
     assumeYes: bool      ## ``--yes``/``--force``: skip the destructive-action confirmation.
+    includeGroups: seq[string]
+      ## RA-18 ``--groups=a,b``: only repos in one of these groups (plus the
+      ## implicit ``default`` rule) are synced. Empty = no group filter.
+    excludeGroups: seq[string]
+      ## RA-18 ``--groups=-a`` / ``-a`` entries: repos in any of these groups
+      ## are excluded (exclusion wins over inclusion).
 
 const
   SyncDefaultJobsNetwork = 8
@@ -16661,6 +16789,20 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     elif arg == "--jobs-checkout" or arg.startsWith("--jobs-checkout="):
       result.jobsCheckout = parseSyncJobsValue(
         valueFromFlag(args, i, "--jobs-checkout"), "--jobs-checkout")
+    elif arg == "--groups" or arg.startsWith("--groups="):
+      # RA-18 subset selection. A comma-separated list; an entry prefixed
+      # with ``-`` (e.g. ``--groups=default,-heavy``) is an EXCLUDE term,
+      # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax.
+      for raw in valueFromFlag(args, i, "--groups").split(','):
+        let term = raw.strip()
+        if term.len == 0:
+          continue
+        if term.startsWith("-"):
+          let g = term[1 .. ^1]
+          if g.len > 0:
+            result.excludeGroups.add(g)
+        else:
+          result.includeGroups.add(term)
     elif arg == "--no-interleaved":
       result.noInterleaved = true
     elif arg == "--fail-fast":
@@ -17174,8 +17316,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       diagnostic: entry.diagnostic))
 
   # Step 2: resolve (or compose) the project.
-  let resolved = resolveWorkspaceSyncProject(args)
+  var resolved = resolveWorkspaceSyncProject(args)
   report.project = resolved.projectName
+
+  # RA-18: subset selection by manifest group. ``--groups=a,b`` keeps only
+  # repos in one of the requested groups; ``-<group>`` excludes. A repo with
+  # no declared ``groups`` belongs to the implicit ``default`` group, so a
+  # plain ``--groups=default`` (or no filter at all) keeps every un-grouped
+  # repo. When no group flags are given the filter is a no-op and the repo
+  # set is exactly the resolved set (no regression for fragments without
+  # ``groups``).
+  if args.includeGroups.len > 0 or args.excludeGroups.len > 0:
+    var kept: seq[ResolvedRepo]
+    for repo in resolved.repos:
+      if repoSelectedByGroups(repo, args.includeGroups, args.excludeGroups):
+        kept.add(repo)
+    resolved.repos = kept
 
   # Step 3: resolve the git identity once.
   let identity = ensureGitToolResolvable(
@@ -17472,6 +17628,23 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       refusalReason: (if wasForceReset: "" else: decision.refusalReason),
       executionStatus: status,
       executionDiagnostic: diagnostic))
+
+  # RA-18: materialize copyfile/linkfile directives AFTER the checkout
+  # phase, for every selected repo whose working tree exists. Re-applied on
+  # every sync (idempotent overwrite), so the materialized files always
+  # track the just-checked-out revision. Best-effort: a directive failure is
+  # reported but does not change the sync exit code (the checkout itself
+  # succeeded; the materialization is a post-step convenience).
+  for repo in resolved.repos:
+    if repo.copyfile.len == 0 and repo.linkfile.len == 0:
+      continue
+    if not dirExists(args.workspaceRoot / repo.path):
+      continue
+    for m in materializeRepoFiles(args.workspaceRoot, repo):
+      report.materialized.add(m)
+      if m.status == "failed":
+        stderr.writeLine("workspace sync: " & m.kind & " '" & m.dest &
+          "' <- '" & repo.path & "/" & m.src & "' failed: " & m.diagnostic)
 
   # Step 6: exit code.
   if anyFailure:

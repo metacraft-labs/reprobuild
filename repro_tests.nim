@@ -5974,6 +5974,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim",
+    binary: "build/test-bin/t_manifest_copyfile_linkfile_materialized_after_sync",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_manifest_groups_select_repo_subset.nim",
+    binary: "build/test-bin/t_manifest_groups_select_repo_subset",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_m9r21_4_hardware_e2e.nim",
     binary: "build/test-bin/t_m9r21_4_hardware_e2e",
     defines: @[],
