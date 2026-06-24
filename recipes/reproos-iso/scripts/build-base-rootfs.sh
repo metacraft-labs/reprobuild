@@ -130,23 +130,30 @@ PKG_LIST=(
   #                                           shipped by from-source)
   libpam-systemd dbus dbus-user-session
   # Essential userspace.
-  #   util-linux       FS:done    STAGE:no  (63 binaries in usr/bin)
-  #   mount            FS:none    STAGE:no  (part of util-linux pkg)
-  #   kmod             FS:done    STAGE:no  (7 binaries in usr/bin)
+  #
+  # M9.R.33.5 dropped: ``util-linux`` -- FS:done recipe ships 63
+  # binaries in usr/bin + 9 in usr/sbin (mount/umount/fdisk/blkid/
+  # lsblk/findmnt/...).  ``mount`` apt entry is also dropped since
+  # mount(8) ships from the same util-linux source.  The Phase 4b
+  # shadow-link loop emits /usr/{bin,sbin}/<name> symlinks at staging
+  # time.
+  #
+  #   kmod             FS:done    STAGE:yes (M9.R.33.3 stage loop)
   #   udev             FS:none    STAGE:no  (eudev recipe exists but
   #                                          install-mirror is empty)
-  #   tzdata           FS:done    STAGE:no  (iana-tzdata recipe ships
+  #   tzdata           FS:done    STAGE:yes (iana-tzdata recipe ships
   #                                          usr/share/zoneinfo;
-  #                                          STAGE:no blocks dropping)
-  #   passwd           FS:done    STAGE:no  (shadow-utils recipe)
-  #   login            FS:done    STAGE:no  (shadow-utils recipe)
+  #                                          M9.R.33.3 stage loop
+  #                                          shadows it)
+  #   passwd           FS:done    STAGE:yes (shadow-utils recipe)
+  #   login            FS:done    STAGE:yes (shadow-utils recipe)
   #   procps           FS:partial STAGE:no  (recipe exists; install dir
   #                                          missing)
   #   less             FS:done    STAGE:no
   #   nano             FS:none    STAGE:no  (not in from-source corpus;
   #                                          editor convenience, no
   #                                          runtime dep)
-  util-linux mount kmod udev tzdata passwd login procps less nano
+  kmod udev tzdata passwd login procps less nano
   # Locale data (no build cost; pure data).
   #   locales          FS:none    STAGE:no  (glibc recipe exists but
   #                                          locale-gen is a runtime
