@@ -2037,6 +2037,63 @@ proc bypassActionLogDir(cacheRoot: string): string =
   ## transient state.
   cacheRoot / "actions"
 
+when defined(macosx):
+  # Portable-Macos-Sandbox-Tools B1: the bypass launch path must NOT route a
+  # MONITORED action through the System-Integrity-Protection-protected
+  # ``/bin/sh``. On macOS / Apple Silicon, SIP strips ``DYLD_INSERT_LIBRARIES``
+  # when a SIP-protected binary is exec'd, so wrapping the io-mon monitor
+  # invocation in an outer ``/bin/sh -c`` places a SIP boundary at the very top
+  # of the action's process tree — the monitor's shim injection then degrades
+  # (the io-mon banner reports ``failed`` hooks / ``spawn_tramp=skip``) and the
+  # monitored subtree goes partially blind. The fix, grounded in
+  # ``Sandbox-And-Monitoring.md`` (~line 575, "SIP path rewriting from
+  # propagation.nim") and ``MacOS-Interpose-Limitations-Under-Chained-Fixups.md``
+  # (the drop-in / ``CT_SANDBOX_TOOLS_DIR`` mechanism), is to wrap the action in
+  # a NON-SIP shell instead: the ``<CT_SANDBOX_TOOLS_DIR>/bin/sh`` drop-in when
+  # present, else any non-SIP ``sh`` resolvable on PATH (the dev shell's
+  # Nix/Homebrew bash). The shim then loads in the wrapper shell and propagates
+  # into the whole tree.
+  #
+  # The SIP-prefix predicate is reused from the shared
+  # ``stackable_hooks/propagation`` module that io-mon itself uses
+  # (``isSipProtected`` / ``sipProtectedPrefixes``) so the engine and the
+  # monitor agree byte-for-byte on what counts as SIP-protected — DRY per the
+  # spec's "reuse io-mon's existing population rather than re-implementing it".
+  import stackable_hooks/propagation as sip_propagation
+
+  proc resolveNonSipShell*(): string =
+    ## Resolve a non-SIP POSIX shell suitable for wrapping a monitored
+    ## action's redirection (`sh -c "<argv> > out 2> err"`). Resolution order:
+    ##
+    ## 1. ``<CT_SANDBOX_TOOLS_DIR>/bin/sh`` — the drop-in the io-mon monitor
+    ##    populates (``populateReproSandboxTools``). This is the canonical
+    ##    SIP-rewrite target (``rewriteSipPath("/bin/sh", dir)``), so reusing it
+    ##    keeps the engine's wrapper shell identical to the one the monitor's
+    ##    own exec-redirect would pick.
+    ## 2. The first non-SIP ``sh`` on ``PATH`` (e.g. the Nix dev shell's bash).
+    ##    ``isSipProtected`` rejects ``/bin``, ``/sbin``, ``/usr/bin``,
+    ##    ``/usr/sbin`` candidates so a SIP shell is never selected here.
+    ##
+    ## Returns ``""`` when only SIP-protected shells are available — the caller
+    ## then enforces the Monitor-Hook-Shim.md:501 fail-safe for monitored
+    ## actions (injection failure MUST fail the action / make it non-cacheable).
+    let sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
+    if sandboxDir.len > 0:
+      let dropInSh = sip_propagation.rewriteSipPath("/bin/sh", sandboxDir)
+      if fileExists(dropInSh) or symlinkExists(dropInSh):
+        return dropInSh
+    let pathEnv = getEnv("PATH")
+    for entry in pathEnv.split(PathSep):
+      if entry.len == 0:
+        continue
+      let candidate = entry / "sh"
+      if not fileExists(candidate):
+        continue
+      if sip_propagation.isSipProtected(candidate):
+        continue
+      return candidate
+    ""
+
 proc bypassActionStdoutLogPath(cacheRoot, actionId: string): string =
   bypassActionLogDir(cacheRoot) / (actionId & ".stdout.log")
 
@@ -2055,6 +2112,28 @@ proc readBypassActionLog(path: string): string =
     readFile(extendedPath(path))
   except CatchableError:
     ""
+
+proc stripMonitorBanner*(captured: string): string =
+  ## Portable-Macos-Sandbox-Tools B2: the io-mon shim writes a per-process
+  ## diagnostic banner to stderr on every monitored (grand)child
+  ## (``io-mon: macOS body-patch installed=… failed=… spawn_tramp=…``). For a
+  ## deep autotools process tree this banner is emitted dozens of times and
+  ## floods the captured ``<id>.stderr.log``, burying the failing command's
+  ## REAL error. ``Monitor-Hook-Shim.md`` (Acceptance Criteria, "child
+  ## stdout/stderr pass through without corrupting monitor event streams") and
+  ## §"conservative failure diagnostics" require the monitor's own noise to be
+  ## separable from the action's output so a failing action shows its actual
+  ## error. This strips the monitor banner lines from the surfaced stderr; the
+  ## raw on-disk log is left untouched for deep inspection.
+  if captured.len == 0:
+    return captured
+  var kept: seq[string] = @[]
+  for line in captured.splitLines:
+    if line.startsWith("io-mon: macOS body-patch ") or
+        line.startsWith("io-mon: macOS backend="):
+      continue
+    kept.add(line)
+  kept.join("\n")
 
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig): Process =
@@ -2152,7 +2231,32 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       workingDir = cwd,
       options = {poUsePath})
   else:
-    result = startProcess("/bin/sh",
+    # POSIX wrapper shell. On Linux ``/bin/sh`` is not SIP-protected so it is
+    # used directly. On macOS a MONITORED action (one the engine wrapped with
+    # the io-mon monitor — ``action.monitorDepfile.len > 0``) MUST NOT be routed
+    # through the SIP-protected ``/bin/sh`` (B1): that strips
+    # ``DYLD_INSERT_LIBRARIES`` at the top of the tree and degrades injection.
+    var wrapperShell = "/bin/sh"
+    when defined(macosx):
+      if action.monitorDepfile.len > 0:
+        wrapperShell = resolveNonSipShell()
+        if wrapperShell.len == 0:
+          # Monitor-Hook-Shim.md:501 fail-safe: monitoring is required for this
+          # action but no injectable (non-SIP) wrapper shell is available, so we
+          # cannot launch it without losing shim injection on macOS. Running it
+          # under the SIP ``/bin/sh`` anyway would silently produce incomplete
+          # dependency evidence and let it be cached as if its deps were fully
+          # captured — exactly the "successful child exit MUST NOT hide monitor
+          # failure" hazard the spec forbids. Fail the launch conservatively
+          # instead; ``runBuild`` surfaces this as an action failure (and the
+          # action is therefore never published to the cache).
+          raiseEngine(
+            "monitored action " & action.id & " cannot be launched SIP-safely " &
+            "on macOS: no non-SIP shell found (set CT_SANDBOX_TOOLS_DIR to a " &
+            "drop-in bundle or provide a non-SIP sh on PATH). Refusing to run " &
+            "under SIP /bin/sh, which would strip DYLD_INSERT_LIBRARIES and " &
+            "produce incomplete, non-cacheable monitor evidence.")
+    result = startProcess(wrapperShell,
       args = @["-c", wrapped],
       env = env,
       workingDir = cwd,
@@ -2257,8 +2361,12 @@ proc finishBypassRunQuotaProcess(id: string; process: Process;
   let exitCode = process.waitForExit()
   let stdoutPayload = readBypassActionLog(
     bypassActionStdoutLogPath(cacheRoot, id))
-  let stderrPayload = readBypassActionLog(
-    bypassActionStderrLogPath(cacheRoot, id))
+  # B2: strip the io-mon shim's per-process banner from the surfaced stderr so
+  # a failing monitored action shows its REAL error instead of dozens of
+  # ``io-mon: macOS body-patch …`` noise lines (Monitor-Hook-Shim.md). The raw
+  # ``<id>.stderr.log`` on disk keeps the banner for deep diagnosis.
+  let stderrPayload = stripMonitorBanner(readBypassActionLog(
+    bypassActionStderrLogPath(cacheRoot, id)))
   writeBypassResultJson(resultPath, exitCode, stdoutPayload, stderrPayload)
 
 proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;

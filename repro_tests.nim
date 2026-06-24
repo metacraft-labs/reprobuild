@@ -294,6 +294,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
+    binary: "build/test-bin/t_engine_macos_sip_safe_launch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_execution_edge.nim",
     binary: "build/test-bin/t_engine_method_call_on_typed_field_emits_execution_edge",
     defines: @["reproProviderMode"],
