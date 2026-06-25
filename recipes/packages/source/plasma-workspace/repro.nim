@@ -629,6 +629,30 @@ package plasmaWorkspaceSource:
         # __STDC_VERSION__ in C++ mode.  v1 plasmashell does not depend
         # on the autostart KCM at runtime.
         "sed -i 's|^add_subdirectory(autostart)$|# M9.R.15q.13.15: dropped — systemd sd-id128.h -Werror=undef|' src/kcms/CMakeLists.txt",
+        # M9.R.35.2 — plasma_session links ``KF6::KIOCore`` but
+        # ``startup.cpp`` ``#include <KIO/ApplicationLauncherJob>`` which
+        # is a KIOGui header (lives at
+        # ``${KF6_INSTALL}/include/KF6/KIOGui/KIO/ApplicationLauncherJob``;
+        # the camelCased forwarding header is correctly installed but
+        # CMake's interface-include resolution only walks the link
+        # closure).  Without ``KF6::KIOGui`` on the link line, the
+        # KIOGui include dir is never added to the compiler's ``-I``
+        # set, and ``startup.cpp`` fails with
+        # ``KIO/ApplicationLauncherJob: No such file or directory``.
+        # The fix is an upstream-style addition of ``KF6::KIOGui`` to
+        # plasma-session's ``target_link_libraries`` (KIOGui depends
+        # on KIOCore at link time, so the existing KIOCore entry is
+        # transitively re-supplied — this addition only forces the
+        # include-path threading).
+        #
+        # Reported upstream as a latent bug in plasma-workspace 6.2.5:
+        # the build only happens to work in distros where ``KF6KIO``
+        # ships the umbrella library that re-exports KIOGui headers
+        # under KIOCore's include dir; our from-source kio recipe
+        # splits them per upstream KF6 6.10.0's CMake config (the kio
+        # tarball already separates ``KF6KIOCore.so`` / ``KF6KIOGui.so``
+        # / ``KF6KIOWidgets.so`` / ``KF6KIOFileWidgets.so`` since 6.0).
+        "sed -i 's|^    KF6::KIOCore$|    KF6::KIOCore\\n    KF6::KIOGui|' src/startkde/plasma-session/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
