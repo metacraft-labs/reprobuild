@@ -2260,7 +2260,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   for i, a in action.argv:
     if i > 0: quotedArgv.add(" ")
     quotedArgv.add(quoteShell(a))
-  let wrapped =
+  let redirectedArgv =
     quotedArgv & " > " & quoteShell(stdoutLog) &
       " 2> " & quoteShell(stderrLog)
   when defined(windows):
@@ -2270,11 +2270,31 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     # for the real tool is delegated to ``cmd`` rather than ``startProcess``
     # because the wrapped command line itself contains the tool name.
     result = startProcess("cmd.exe",
-      args = @["/D", "/C", wrapped],
+      args = @["/D", "/C", redirectedArgv],
       env = env,
       workingDir = cwd,
       options = {poUsePath})
   else:
+    # M9.R.35.1 — pin the action's umask to a deterministic 022 so every
+    # spawned tool creates files with the canonical ``rw-r--r--``
+    # (0644) / ``rwxr-xr-x`` (0755) permissions. Without this pin, the
+    # umask is inherited from whatever shell launched ``repro build``
+    # — and on WSL the inherited value can drift between invocations
+    # (observed: Qt6 ``qmlcachegen`` emitting ``qmlcache_loader.cpp``
+    # at modes ``0300`` / ``0254`` / ``0044`` / ``0204``, which then
+    # trips a downstream ``cc1plus: fatal error: <file>: Permission
+    # denied``).  qmlcachegen calls ``QSaveFile::open`` which delegates
+    # to ``QTemporaryFileEngine::initialize(0666)``, then commits via
+    # rename(); the kernel applies the calling process's umask at
+    # ``mkstemp`` time, so any process-state umask drift in the
+    # CMake → ninja → qmlcachegen fork chain bleeds into the final
+    # file's mode bits.  Pinning umask at the shell-wrap level closes
+    # the drift channel for every build action, not just qmlcachegen
+    # — the same protection benefits any tool that relies on the
+    # process umask for file-creation modes (mostly: every tool that
+    # uses libc's ``fopen`` / ``mkstemp`` / ``open(O_CREAT)`` without
+    # an explicit ``mode`` argument).
+    let wrapped = "umask 022 && " & redirectedArgv
     result = startProcess("/bin/sh",
       args = @["-c", wrapped],
       env = env,
