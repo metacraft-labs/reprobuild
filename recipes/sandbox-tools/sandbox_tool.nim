@@ -60,6 +60,23 @@ const
   ## ``lib/termcap/tparam.c`` calls ``write`` without a prototype, etc.).
   SandboxCFlags* = "CFLAGS=-Wno-implicit-function-declaration"
 
+  ## PORTABILITY (libSystem-only invariant). The Nix clang cc-wrapper on Darwin
+  ## injects ``-L<nix libiconv> -liconv`` (and similar) into EVERY link via
+  ## ``NIX_LDFLAGS``. When the package's gnulib config compiles out the iconv
+  ## calls (``am_cv_func_iconv=no``), nothing references those symbols — yet the
+  ## linker still records a dead ``LC_LOAD_DYLIB`` for the nix ``libiconv.2.dylib``
+  ## (Apple ld keeps ``-l`` libs as load commands even when unused). That stray
+  ## /nix/store load command breaks relocatability (e.g. GNU grep linked nix
+  ## libiconv while bash did not, purely by link-order luck).
+  ##
+  ## ``-Wl,-dead_strip_dylibs`` tells the linker to DROP any dylib load command
+  ## whose symbols are never bound, so an injected-but-unreferenced nix dylib is
+  ## removed and the binary stays libSystem-only. It is a safe no-op when every
+  ## linked dylib is actually used (macOS provides iconv via libSystem, so no
+  ## functionality is lost). Verified to turn grep's ``otool -L`` from
+  ## "nix libiconv + libSystem" into "libSystem only".
+  SandboxLdFlags* = "LDFLAGS=-Wl,-dead_strip_dylibs"
+
   ## Configure knobs shared by every sandbox tool, chosen for a MINIMAL,
   ## PORTABLE link surface (libSystem-only):
   ##   * ``--disable-dependency-tracking`` — drop automake's ``.deps/*.Po``
@@ -94,10 +111,12 @@ proc sandboxAutotoolsPackage*(owningPackage: string;
     var opts: seq[string] = @[]
     for o in SandboxCommonConfigure: opts.add(o)
     for o in extraConfigure: opts.add(o)
-    # ``CFLAGS=...`` is honoured by GNU ``configure`` as a positional
-    # variable-assignment argument; placing it last keeps it from being
-    # shadowed by an earlier ``--enable-*`` value.
+    # ``CFLAGS=...`` / ``LDFLAGS=...`` are honoured by GNU ``configure`` as
+    # positional variable-assignment arguments; placing them last keeps them
+    # from being shadowed by an earlier ``--enable-*`` value. ``LDFLAGS`` carries
+    # the ``-dead_strip_dylibs`` portability fix (see ``SandboxLdFlags``).
     opts.add(SandboxCFlags)
+    opts.add(SandboxLdFlags)
     result = autotools_package(srcDir = srcDir, configureOptions = opts)
     for exe in executables:
       discard result.executable(exe)

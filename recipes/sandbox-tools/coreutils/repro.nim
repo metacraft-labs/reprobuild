@@ -104,25 +104,26 @@ package sandboxCoreutils:
       ],
       extraConfigure = @[
         "--enable-no-install-program=kill,uptime,arch",
-        # NOTE on portability of the digest/locale utilities: coreutils'
-        # gnulib ``digest`` module compiles ``md5-stream.o`` against OpenSSL
-        # when the nix dev shell's ``<openssl/md5.h>`` is on the include path,
-        # so md5sum / sha*sum / cksum (and, via libintl, sort / printf) record
-        # a /nix/store/.../libcrypto.3.dylib (or libiconv.2.dylib) dependency.
-        # Passing ``--with-openssl=no`` makes a CLEAN tree build them
-        # libSystem-only, but under the parallel Mode B ``make`` a stale
-        # ``md5-stream.o`` (compiled against the openssl-enabled config.h on the
-        # first pass) survives and the final link then fails with undefined
-        # OpenSSL symbols. Rather than fight that race, we leave the digest
-        # utilities as-built and let the bundle assembler EXCLUDE any binary
-        # that is not libSystem-only. This is sound for the sandbox use case:
-        # md5sum / sha*sum / cksum / sort / printf are NOT SIP drop-in targets
-        # the io-mon monitor redirects to. The ESSENTIAL drop-ins — cat / ls /
-        # cp / mv / rm / mkdir / head / tail / wc / cut / tr / basename /
-        # dirname / touch / env / tee / true / false / sleep / pwd / echo /
-        # ... — are libSystem-only and land in the bundle. Making the digest
-        # utilities portable is a tracked follow-up (force a from-scratch make,
-        # or build with the openssl headers off the include path).
+        # PORTABILITY of the digest/locale utilities. coreutils' gnulib
+        # ``digest`` module compiles ``md5-stream.o`` / ``sha*-stream.o`` against
+        # OpenSSL when the nix dev shell's ``<openssl/md5.h>`` is on the include
+        # path, so md5sum / sha*sum / cksum / sort would record a /nix/store
+        # ``libcrypto.3.dylib`` dependency. ``--without-openssl`` makes gnulib use
+        # its OWN bundled digest implementations, so those binaries link
+        # libSystem-only. (An earlier revision feared a stale-``md5-stream.o``
+        # race under the parallel Mode B make, but the recipe now always builds
+        # from a CLEAN ``build/`` tree, so configure's ``HAVE_OPENSSL`` value is
+        # applied uniformly and there is no stale object to mislink.)
+        "--without-openssl",
+        # ``printf`` (and a few locale utilities) reference ``iconv`` for charset
+        # handling; on this Nix clang toolchain ``_iconv`` is provided only by the
+        # Nix libiconv (the macOS SDK libSystem stub does not export it), which
+        # would record a /nix/store ``libiconv.2.dylib`` dependency. Force the
+        # gnulib iconv probe OFF (as in the bash/grep/tar recipes) so coreutils
+        # uses libSystem byte handling and stays libSystem-only.
+        "--without-libiconv-prefix",
+        "am_cv_func_iconv=no",
+        "am_cv_lib_iconv=no",
       ])
 
   runtimeDeps:
