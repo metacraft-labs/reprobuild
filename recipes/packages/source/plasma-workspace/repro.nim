@@ -21,13 +21,14 @@
 ## of gnome-shell for the Plasma story. The standalone ``plasmashell``
 ## binary is the user-session leader: it owns the task bar, system
 ## tray, application launcher, activities, lock screen, and global
-## notifications. ``libPlasmaWorkspace.so`` is the Plasma workspace
-## library third-party Plasma widgets + applets link against to
-## register UI contributions. NDE-K1's
+## notifications. ``libkworkspace6.so`` (M9.R.36.2 — was speculatively
+## named ``libPlasmaWorkspace.so`` in the recipe pre-M9.R.36) is the
+## Plasma workspace library third-party Plasma widgets + applets link
+## against to register UI contributions. NDE-K1's
 ## ``startplasma-wayland`` chain-execs into ``plasmashell`` after kwin
 ## hands off the Wayland compositor. The from-source recipe lifts the
 ## NDE-K1 apt-jammy plasma-workspace .deb pin to a real
-## ``plasmashell`` binary + ``libPlasmaWorkspace.so`` library artifact
+## ``plasmashell`` binary + ``libkworkspace6.so`` library artifact
 ## for the v2 Plasma story.
 ##
 ## ## sha256 strategy
@@ -80,10 +81,17 @@
 ## standalone binary (among many others — we only register the v1
 ## artifacts the NDE-K1 desktop entry depends on):
 ##
-##   * ``libPlasmaWorkspace.so`` — the Plasma workspace library third-
-##                                  party Plasma widgets + applets link
-##                                  against to register UI
-##                                  contributions.
+##   * ``libkworkspace6.so`` — the Plasma workspace library third-
+##                              party Plasma widgets + applets link
+##                              against to register UI contributions.
+##                              Upstream CMake target name is
+##                              ``KWorkspace`` with explicit
+##                              ``OUTPUT_NAME kworkspace6`` (so the
+##                              ``6`` is the KF6 major-version ABI
+##                              suffix, NOT the package name).
+##                              M9.R.36.2 fixed the recipe's
+##                              previously-speculative
+##                              ``libPlasmaWorkspace`` declaration.
 ##   * ``plasmashell`` — the standalone shell binary that drives the
 ##                       Plasma user-session UI (task bar, system
 ##                       tray, application launcher, activities, lock
@@ -93,10 +101,10 @@
 ##                       compositor.
 ##
 ## We register the library under the package-level identifier
-## ``libPlasmaWorkspace`` (camelCased from the upstream hyphenated
-## package name ``plasma-workspace`` per the gdk-pixbuf precedent of
-## kebab-to-PascalCase + preserved ``lib`` prefix), and the executable
-## under ``plasmashell`` (kept verbatim — the upstream binary name is
+## ``libkworkspace6`` (the upstream CMake ``OUTPUT_NAME`` for the
+## ``KWorkspace`` target — kebab-passes-through verbatim, single
+## lowercase word + KF6 ABI suffix), and the executable under
+## ``plasmashell`` (kept verbatim — the upstream binary name is
 ## already a single lowercase word, no kebab segments to camelCase).
 ##
 ## ## Configurables
@@ -348,13 +356,34 @@ package plasmaWorkspaceSource:
     ## the stage-copy probe.
     discard
 
-  library libPlasmaWorkspace:
-    ## ``libPlasmaWorkspace.so`` — the Plasma workspace library
-    ## third-party Plasma widgets + applets link against to register
-    ## UI contributions. The kebab-cased upstream package name
-    ## ``plasma-workspace`` is camelCased to ``libPlasmaWorkspace``
-    ## per the gdk-pixbuf precedent + preserved ``lib`` prefix.
-    ## v1 records the artifact only.
+  library libkworkspace6:
+    ## ``libkworkspace6.so`` — the Plasma workspace library third-party
+    ## Plasma widgets + applets link against to register UI contributions.
+    ##
+    ## M9.R.36.2 — the original recipe declared ``libPlasmaWorkspace.so``
+    ## as the artifact name (speculative, derived by kebab-camelCasing
+    ## the upstream package name + the gdk-pixbuf ``lib`` prefix
+    ## precedent).  M9.R.35.G3 verified that plasma-workspace 6.2.5's
+    ## ``src/libkworkspace/CMakeLists.txt`` actually emits
+    ## ``libkworkspace6.so`` (the ``6`` suffix is the KF6 major-version
+    ## ABI marker, set explicitly via ``set_target_properties(...
+    ## OUTPUT_NAME kworkspace6 ...)`` in the CMake build — NOT a name
+    ## the convention layer could have inferred from the package name).
+    ## ``libPlasmaWorkspace.so`` does NOT exist in the install-mirror,
+    ## which caused the ``stage-library`` post-install probe to fail
+    ## with the M9.R.35 RC=1 even though every other artifact built
+    ## cleanly.
+    ##
+    ## Verification (captured 2026-06-25 via M9.R.35.G3):
+    ##
+    ##   $ ls .repro/output/install/usr/lib/lib*workspace*.so*
+    ##   libkworkspace6.so
+    ##   libkworkspace6.so.6
+    ##   libkworkspace6.so.6.2.5
+    ##
+    ## The artifact identifier ``libkworkspace6`` kebab-passes-through
+    ## the stage-copy probe verbatim (single lowercase word, no kebab
+    ## segments to re-camel) — same convention as ``plasmashell``.
     discard
 
   build:
@@ -441,7 +470,7 @@ package plasmaWorkspaceSource:
         # from-source siblings (they're part of the legacy X11
         # session-management protocol, not load-bearing for a pure-
         # Wayland Plasma session). Skip the subdir entirely; the
-        # plasmashell + libPlasmaWorkspace artifacts the recipe
+        # plasmashell + libkworkspace6 artifacts the recipe
         # registers don't depend on ksmserver targets.
         "sed -i 's|^add_subdirectory(ksmserver)$|if(WITH_X11)\\n    add_subdirectory(ksmserver)\\nendif()|' src/CMakeLists.txt",
         # M9.R.15q.12.11 — wrap ``ecm_optional_add_subdirectory(xembed-
@@ -497,7 +526,7 @@ package plasmaWorkspaceSource:
         # call sites in each TU is more invasive than the v1 surface
         # justifies. Both are Plasma applets (per-applet QML packages
         # that plasmashell loads at runtime). plasmashell itself +
-        # libPlasmaWorkspace.so (the two artifacts this recipe ships)
+        # libkworkspace6.so (the two artifacts this recipe ships)
         # build + ship without them; users get a Plasma session with
         # fewer panel applets out of the box. A future plasma-
         # fullbuild milestone can add ICU + restore both applets.
@@ -742,7 +771,10 @@ package plasmaWorkspaceSource:
                               extraEnv = env, srcPatches = patches)
       discard pkg.executable("plasmashell")
       discard pkg.executable("startplasmaWayland")
-      discard pkg.library("libPlasmaWorkspace")
+      # M9.R.36.2 — renamed from speculative ``libPlasmaWorkspace`` to
+      # the real shipped artifact ``libkworkspace6`` (see the library
+      # declaration above for the rationale).
+      discard pkg.library("libkworkspace6")
     finally:
       clearCurrentOwningPackageOverride()
 
