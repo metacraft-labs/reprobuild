@@ -236,8 +236,8 @@ package qt6DeclarativeSource:
         #
         # The ``QT_BUILD_INTERNALS_CHECK_PROJECT_INFO`` flag also
         # silences the cmake warning at configure time.
-        "CMAKE_CXX_FLAGS=-isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include",
-        "CMAKE_C_FLAGS=-isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include",
+        "CMAKE_CXX_FLAGS=-isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include -isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include/QtCore",
+        "CMAKE_C_FLAGS=-isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include -isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include/QtCore",
       ]
       # M9.R.35.4 — qmlcachegen, qmltyperegistrar, and qmlc compiler
       # all emit files via Qt's ``QSaveFile`` which on WSL ext4 under
