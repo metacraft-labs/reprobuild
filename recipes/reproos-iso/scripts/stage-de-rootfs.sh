@@ -730,8 +730,8 @@ else
   _repro_ldpath="$_repro_nix_libs"
 fi
 
-# M9.R.37.1 — diagnostic mode.  When ``REPRO_INSTALLER_DIAG=1`` is
-# set, the launcher:
+# M9.R.37.1 / M9.R.39.1 — diagnostic mode.  When ``REPRO_INSTALLER_DIAG=1``
+# is set, the launcher:
 #   (a) wraps the installer process in ``strace -f -ttt -o
 #       /tmp/installer.strace`` so we capture every syscall on every
 #       thread with microsecond timestamps;
@@ -743,22 +743,35 @@ fi
 #       ``/proc/<pid>/status``, ``/proc/<pid>/stack``,
 #       ``/proc/<pid>/wchan`` + every TID under
 #       ``/proc/<pid>/task/`` every 5 seconds into
-#       ``/tmp/installer.kernelstacks``; lets us see WHICH thread is
-#       blocked on WHICH kernel function (futex / read / connect /
-#       wait4 / poll / ...) without needing a corefile.
+#       ``/tmp/installer.kernelstacks``;
+#   (d) M9.R.39.1 — exports ``LD_DEBUG=libs`` so glibc's loader dumps
+#       every shared-lib resolution decision (DT_NEEDED -> path, RPATH
+#       walk, ld.so.cache fall-through, version-mismatch warnings) to
+#       a file we can read post-crash.  This is the canonical channel
+#       for identifying ABI / version mismatches between the installer
+#       binary's expected libs and what the live ISO presents.
+#   (e) M9.R.39.1 — on installer exit (success OR SIGABRT), persists
+#       /tmp/installer.{strace,kernelstacks,log,lddebug} onto the
+#       second virtio disk (/dev/vdb) which the driver attaches.
+#       Without this, the M9.R.37/38 tmpfs logs vanish on poweroff.
+#       We format /dev/vdb as ext4 if it's blank, mount it at /mnt/diag,
+#       cp the logs in, sync, then return the installer's exit code.
+#       The driver post-mortem extracts the logs from the qcow2.
 #
 # This diagnostic apparatus is the M9.R.37 wedge characterisation
-# infrastructure the M9.R.36 closeout flagged as a follow-up.
+# infrastructure the M9.R.36 closeout flagged as a follow-up, plus
+# the M9.R.39 LD_DEBUG + log-persistence extension the M9.R.38
+# closeout flagged as the next investigation step.
 _repro_diag="${REPRO_INSTALLER_DIAG:-0}"
 if [ "$_repro_diag" = "1" ]; then
+  rm -f /tmp/installer.strace /tmp/installer.kernelstacks \
+        /tmp/installer.lddebug /tmp/installer.log /tmp/installer.diag.pid
   # Launch the kernel-stack snapshotter as a background sub-shell.
   # The installer's PID becomes its parent shell's $$ once exec
   # replaces this script, so we sample $$ from the child's POV via
   # a marker file: write our own PID to /tmp/installer.diag.pid AFTER
-  # we exec strace, then the snapshotter reads it.
+  # we fork the installer.
   (
-    # Wait for the marker to appear (max 10s) — if the strace failed
-    # to start we just exit cleanly.
     n=0
     while [ ! -f /tmp/installer.diag.pid ] && [ $n -lt 20 ]; do
       sleep 0.5
@@ -792,26 +805,92 @@ if [ "$_repro_diag" = "1" ]; then
       sleep 5
     done
   ) &
-  rm -f /tmp/installer.strace /tmp/installer.kernelstacks /tmp/installer.diag.pid
-  # ``strace -ff`` writes per-process logs to <prefix>.<pid>; we use
-  # plain ``-f`` so all children land in one file with the leading pid
-  # column.  ``-ttt`` for absolute microsecond timestamps; ``-y`` to
-  # decode fd numbers as paths; ``-s 256`` to capture longer strings.
-  # ``-e signal=!SIGCHLD`` to silence the spammy SIGCHLD entries.
-  # Write our own pid post-exec so the snapshotter can find us.
-  # ``stdbuf -oL -eL`` line-buffers the installer's stdio so
-  # ``appendLog`` writes reach the pipe immediately.
-  echo $$ > /tmp/installer.diag.pid
-  exec env \
-    LD_LIBRARY_PATH="$_repro_ldpath" \
-    QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
-    QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
-    QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
-    QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
-    strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
-      -o /tmp/installer.strace \
-      stdbuf -oL -eL \
-      /usr/bin/reproos-installer "$@"
+  # M9.R.39.1 — capture a snapshot of the installer binary's
+  # DT_NEEDED + RPATH + INTERP so the post-mortem can correlate against
+  # the LD_DEBUG=libs trace.
+  {
+    echo "=== installer binary inventory ==="
+    /usr/bin/stat /usr/bin/reproos-installer 2>&1 || true
+    /usr/bin/sha256sum /usr/bin/reproos-installer 2>&1 || true
+    if command -v patchelf >/dev/null 2>&1; then
+      echo "--- patchelf --print-interpreter ---"
+      patchelf --print-interpreter /usr/bin/reproos-installer 2>&1
+      echo "--- patchelf --print-rpath ---"
+      patchelf --print-rpath /usr/bin/reproos-installer 2>&1
+      echo "--- patchelf --print-needed ---"
+      patchelf --print-needed /usr/bin/reproos-installer 2>&1
+    elif command -v readelf >/dev/null 2>&1; then
+      echo "--- readelf -d (dynamic section) ---"
+      readelf -d /usr/bin/reproos-installer 2>&1 | \
+        grep -E 'NEEDED|RUNPATH|RPATH|INTERP' || true
+    else
+      echo "patchelf + readelf both unavailable"
+    fi
+    echo "--- ldd (resolution view) ---"
+    ldd /usr/bin/reproos-installer 2>&1 | head -60 || true
+    echo "=== launcher env ==="
+    echo "LD_LIBRARY_PATH=$_repro_ldpath"
+    echo "QT_PLUGIN_PATH=$_repro_qt_plugins"
+    echo "QML2_IMPORT_PATH=$_repro_qml_imports"
+    echo "QT_QPA_PLATFORM_PLUGIN_PATH=$_repro_qpa_plugins"
+    echo "=== /etc/ld.so.cache (head) ==="
+    if command -v ldconfig >/dev/null 2>&1; then
+      ldconfig -p 2>&1 | grep -E 'libstdc\+\+|libgcc_s|libc\.so|libQt6Core|libQt6Gui|libQt6Qml' | head -40
+    fi
+    echo ""
+  } > /tmp/installer.binfo 2>&1
+  # Run the installer SYNCHRONOUSLY (not via exec) so we can persist
+  # the diagnostic logs to the scratch disk BEFORE poweroff regardless
+  # of whether the binary exits cleanly, aborts, or wedges (in which
+  # case the driver's timeout kills us and we still drop logs first).
+  # ``LD_DEBUG=libs`` makes glibc's loader dump every library lookup
+  # decision to stderr; we redirect that to /tmp/installer.lddebug
+  # via ``LD_DEBUG_OUTPUT`` so it doesn't interleave with the
+  # installer's QTextStream(stderr) writes.
+  (
+    env \
+      LD_LIBRARY_PATH="$_repro_ldpath" \
+      LD_DEBUG=libs \
+      LD_DEBUG_OUTPUT=/tmp/installer.lddebug \
+      QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
+      QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
+      QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
+      QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
+      strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
+        -o /tmp/installer.strace \
+        stdbuf -oL -eL \
+        /usr/bin/reproos-installer "$@" \
+          > /tmp/installer.log 2>&1
+    echo $? > /tmp/installer.rc
+  ) &
+  _instpid=$!
+  echo $_instpid > /tmp/installer.diag.pid
+  wait $_instpid
+  _rc="$(cat /tmp/installer.rc 2>/dev/null || echo 255)"
+  # M9.R.39.1 — persist diag logs to /dev/vdb (the driver attaches a
+  # scratch virtio disk for this purpose).  Raw layout for the host
+  # extractor (host has gzip + tail, the live ISO has tar + dd):
+  #   sector 0 (512 bytes): ASCII header 'M9R39DIAGv1 SIZE=<bytes>\n'
+  #                          padded to 512 with spaces; nul-terminated
+  #   sector 1+ (4096+):     gzipped tar of /tmp/installer.* files
+  if [ -b /dev/vdb ]; then
+    _diagtar=/tmp/installer.diag.tar.gz
+    tar -czf "$_diagtar" -C /tmp \
+      installer.strace installer.kernelstacks installer.lddebug \
+      installer.log installer.binfo installer.rc installer.diag.pid \
+      2>/dev/null || true
+    _diagsz="$(stat -c %s "$_diagtar" 2>/dev/null || echo 0)"
+    # ASCII-only header for portability.  The host extractor parses
+    # SIZE=<decimal> + skips one 512-byte sector + reads SIZE bytes.
+    printf 'M9R39DIAGv1 SIZE=%d\n' "$_diagsz" \
+      | dd of=/tmp/installer.diag.header bs=512 count=1 conv=sync 2>/dev/null
+    dd if=/tmp/installer.diag.header of=/dev/vdb bs=512 count=1 \
+      conv=notrunc 2>/dev/null || true
+    dd if="$_diagtar" of=/dev/vdb bs=512 seek=1 conv=notrunc 2>/dev/null || true
+    sync
+    sync
+  fi
+  exit "$_rc"
 fi
 
 exec env \
