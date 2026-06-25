@@ -275,7 +275,22 @@ package qt6DeclarativeSource:
         "sed -i 's@^    if (!f.commit()) {@    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);\\n    if (!f.commit()) {@' src/src/qmlcompiler/qqmljsloadergenerator.cpp",
         "sed -i 's@^    if (!f.commit()) {@    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);\\n    if (!f.commit()) {@' src/src/qmlcompiler/qqmljscompiler.cpp",
       ]
+      # M9.R.35.7 — switch generator from the default ``Unix Makefiles``
+      # to ``Ninja``.  The Unix-Makefiles generator on WSL2 hits a
+      # known ``cmake -E cmake_autogen`` wedge where the autogen
+      # runner forks moc children that exit quickly but the parent
+      # blocks forever on ``read(7)`` from the moc-stdout pipe
+      # (M9.R.15q.13.6 / M9.R.35.5).  Even
+      # ``CMAKE_AUTOGEN_PARALLEL=1`` only reduces the wedge frequency
+      # — per-target autogen still hangs intermittently in WSL.
+      # Ninja schedules autogen + compile jobs through a different
+      # pipe/poll mechanism that doesn't trigger the wedge.
+      #
+      # Both generators produce byte-identical artifacts (cmake's
+      # cross-generator contract) so the install-mirror is stable
+      # across the switch.
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              generator = "Ninja",
                               srcPatches = patches)
       discard pkg.library("libQt6Qml")
       discard pkg.library("libQt6Quick")
