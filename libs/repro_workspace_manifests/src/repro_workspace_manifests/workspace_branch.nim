@@ -106,6 +106,23 @@ proc serializeWorkspaceLocalToToml*(local: WorkspaceLocal): string =
   result.add("\"\n\n")
   result.add("[workspace]\n")
   emitKv(result, "project", local.workspace.project)
+  # RA-6: emit the active project SET as a TOML array when it carries more
+  # than the single primary project. The array is omitted in the
+  # single-project steady state (empty or a one-element set equal to the
+  # primary) so existing fixtures stay byte-identical.
+  block emitProjects:
+    let ps = local.workspace.projects
+    if ps.len == 0:
+      break emitProjects
+    if ps.len == 1 and ps[0] == local.workspace.project:
+      break emitProjects
+    result.add("projects = [")
+    for i, p in ps:
+      if i > 0: result.add(", ")
+      result.add("\"")
+      result.add(tomlEscape(p))
+      result.add("\"")
+    result.add("]\n")
   if local.workspace.branch.isSome and local.workspace.branch.get().len > 0:
     emitKv(result, "branch", local.workspace.branch.get())
   # M16: emit ``feature_started = true`` only when the flag is
@@ -225,6 +242,58 @@ proc readWorkspaceBranch*(workspaceRoot: string): Option[string] =
   if local.workspace.branch.isSome and local.workspace.branch.get().len > 0:
     return some(local.workspace.branch.get())
   none(string)
+
+proc readWorkspaceProjects*(workspaceRoot: string): seq[string] =
+  ## RA-6 — return the active PROJECT SET recorded in
+  ## ``.repo/workspace.toml``. The set is the ``[workspace] projects``
+  ## array when present; otherwise it degrades to the single
+  ## ``[workspace] project`` scalar (the single-project steady state).
+  ## Returns an empty seq when the file is missing. A malformed
+  ## workspace.toml propagates the M5 reader's structured diagnostic.
+  let path = workspaceTomlPath(workspaceRoot)
+  if not fileExists(path):
+    return @[]
+  let local = readWorkspaceLocal(path)
+  if local.workspace.projects.len > 0:
+    return local.workspace.projects
+  if local.workspace.project.len > 0:
+    return @[local.workspace.project]
+  @[]
+
+proc writeWorkspaceProjects*(workspaceRoot: string; projects: seq[string]) =
+  ## RA-6 — record the active PROJECT SET in ``.repo/workspace.toml``.
+  ##
+  ## The FIRST entry of ``projects`` becomes the primary
+  ## ``[workspace] project`` (kept non-empty for the M6/M8 resolver and
+  ## every existing reader); the full ordered set is stored in the
+  ## ``[workspace] projects`` array. Duplicates are folded out preserving
+  ## first-seen order so re-adding an already-active project is a no-op.
+  ##
+  ## When ``.repo/workspace.toml`` already exists the writer reads it
+  ## through the strict reader and preserves the branch / manifest layers
+  ## / feature-started fields verbatim, replacing only the project set.
+  ## Idempotent: re-running with the same set yields a byte-identical file.
+  var deduped: seq[string]
+  for p in projects:
+    if p.len > 0 and p notin deduped:
+      deduped.add(p)
+  if deduped.len == 0:
+    raiseManifestError(workspaceTomlPath(workspaceRoot),
+      "workspace.projects", schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      "writeWorkspaceProjects refuses to record an empty project set")
+
+  let path = workspaceTomlPath(workspaceRoot)
+  createDir(parentDir(path))
+
+  var local: WorkspaceLocal
+  if fileExists(path):
+    local = readWorkspaceLocal(path)
+  else:
+    local.schema = schemaWorkspaceLocalV1
+
+  local.workspace.project = deduped[0]
+  local.workspace.projects = deduped
+  writeFile(path, serializeWorkspaceLocalToToml(local))
 
 # ---- writer ---------------------------------------------------------------
 

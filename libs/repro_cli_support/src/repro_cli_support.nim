@@ -224,7 +224,13 @@ proc renderUsage*(programName: string): string =
           programName &
       " prompt [--format=plain|ansi|json|<template>] [--workspace-root=PATH]\n       " &
           programName &
-      " prompt init bash|zsh|fish|starship|p10k|oh-my-zsh|prezto\n\n" &
+      " prompt init bash|zsh|fish|starship|p10k|oh-my-zsh|prezto\n       " &
+          programName &
+      " completion bash|zsh|fish\n       " &
+          programName &
+      " workspace {bootstrap [<dir>] | projects [list|add [--default]] | " &
+      "project new <name> [-m DESC] | project repo add <project> <repo> " &
+      "--remote=URL} [--workspace-root=PATH]\n\n" &
       "build progress: default=bar-line; aliases: " &
       "quiet=silent|none|off, line=ninja|single-line, " &
       "bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, " &
@@ -29246,6 +29252,490 @@ proc normalizeInternalArgs(args: seq[string]): seq[string] =
   else:
     result = args
 
+# ---- RA-6: host-ergonomics verbs -------------------------------------------
+#
+# RA-6 adopts the host-ergonomics surface the repo-workspaces pilot grew that
+# reprobuild lacked:
+#
+#   * ``repro workspace bootstrap`` — scaffold an empty host with the
+#     direnv/agent/project-index files a workspace checkout expects
+#     (``.envrc`` / ``AGENTS.md`` / ``workspace-projects.md``). Idempotent:
+#     a re-run never clobbers an existing file; it reports each as written
+#     or skipped.
+#   * ``repro workspace projects [list|add]`` — inspect / grow the active
+#     PROJECT SET. ``add --default`` auto-layers the set from
+#     ``REPRO_DEFAULT_PROJECTS`` (then the RA-8 ``[projects] default``) when
+#     the user has not chosen an explicit set.
+#   * ``repro completion <shell>`` — emit a shell completion script
+#     (RA-26 ``prompt init`` style: print a snippet, mutate nothing).
+#   * ``repro project new`` / ``repro project repo add`` — manifest-authoring
+#     verbs that write + commit + push to the manifest repo.
+
+const
+  bootstrapEnvrcContent = """# shellcheck shell=bash
+# reprobuild workspace .envrc — scaffolded by `repro workspace bootstrap`.
+# Core direnv behavior for this checkout. Workspace-specific facts belong in
+# optional generated files such as `.envrc.workspace`, sourced if present.
+
+source_env_if_exists .envrc.workspace
+
+# Bring the reprobuild dev environment onto PATH for this directory tree.
+# `repro shell hook` emits the activation; `direnv allow` opts in once.
+if has repro; then
+  eval "$(repro shell hook bash 2>/dev/null)"
+fi
+"""
+
+  bootstrapAgentsContent = """# Workspace
+
+This is a multi-repo reprobuild workspace. Sibling repos are cloned
+side-by-side and coordinated through the workspace manifest. Read
+@workspace-projects.md for the active project set and per-repo descriptions.
+
+When you add a project or a repo to this workspace, use
+`repro workspace project new` / `repro workspace project repo add`; the
+manifest is the workspace bill of materials. `workspace-projects.md` is
+generated from the manifest — do not edit it by hand.
+"""
+
+  bootstrapProjectsDocContent = """# Workspace Projects
+
+This file is generated from the workspace manifest. It lists the projects
+layered into this workspace and the repos each project contributes.
+
+Run `repro workspace projects list` to see the active project set, and
+`repro workspace projects add <project>` to layer another project in.
+"""
+
+type
+  BootstrapFilePlan = object
+    name: string
+    content: string
+
+  BootstrapFileResult = object
+    name: string
+    written: bool       ## true when the file was created by this run
+    skipped: bool       ## true when the file already existed (left untouched)
+
+proc bootstrapHostFiles(): seq[BootstrapFilePlan] =
+  @[
+    BootstrapFilePlan(name: ".envrc", content: bootstrapEnvrcContent),
+    BootstrapFilePlan(name: "AGENTS.md", content: bootstrapAgentsContent),
+    BootstrapFilePlan(name: "workspace-projects.md",
+      content: bootstrapProjectsDocContent),
+  ]
+
+proc parseBootstrapTargetDir(args: openArray[string]): string =
+  ## ``repro workspace bootstrap [<dir>] [--workspace-root=PATH]``. The target
+  ## host directory defaults to the cwd. An explicit positional or
+  ## ``--workspace-root`` overrides it.
+  result = getCurrentDir()
+  for arg in args:
+    if arg.startsWith("--workspace-root="):
+      result = arg["--workspace-root=".len .. ^1]
+    elif not arg.startsWith("-"):
+      result = arg
+
+proc runWorkspaceBootstrapCommand*(args: openArray[string]): int =
+  ## ``repro workspace bootstrap [<dir>]`` — scaffold the host ergonomics
+  ## files (``.envrc`` / ``AGENTS.md`` / ``workspace-projects.md``) into an
+  ## empty host directory. IDEMPOTENT: an existing file is never clobbered —
+  ## it is reported as ``skipped`` and left byte-for-byte untouched. Reports
+  ## what was written vs skipped on stdout; exit 0 always (a re-run is a safe
+  ## no-op, not an error).
+  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
+    echo "repro workspace bootstrap [<dir>] [--workspace-root=PATH]"
+    return 0
+  let targetDir = parseBootstrapTargetDir(args)
+  createDir(targetDir)
+  var results: seq[BootstrapFileResult]
+  for plan in bootstrapHostFiles():
+    let path = targetDir / plan.name
+    if fileExists(path):
+      results.add(BootstrapFileResult(
+        name: plan.name, written: false, skipped: true))
+    else:
+      writeFile(path, plan.content)
+      results.add(BootstrapFileResult(
+        name: plan.name, written: true, skipped: false))
+  for r in results:
+    if r.written:
+      stdout.writeLine("repro workspace bootstrap: wrote " & r.name)
+    else:
+      stdout.writeLine("repro workspace bootstrap: skipped " & r.name &
+        " (already exists)")
+  let wrote = results.filterIt(it.written).len
+  let skipped = results.filterIt(it.skipped).len
+  stdout.writeLine("repro workspace bootstrap: " & $wrote & " written, " &
+    $skipped & " skipped in " & targetDir)
+  0
+
+# ---- RA-6: `repro workspace projects [list|add]` ---------------------------
+
+proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
+  result = getCurrentDir()
+  var explicit = ""
+  for arg in args:
+    if arg.startsWith("--workspace-root="):
+      explicit = arg["--workspace-root=".len .. ^1]
+  if explicit.len > 0:
+    return absolutePath(explicit)
+  let ascended = ascendToWorkspaceRoot(result)
+  if ascended.len > 0:
+    return ascended
+  result = absolutePath(result)
+
+proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
+  ## RA-8 fallback source for ``projects add --default``: the host bootstrap
+  ## config's ``[projects] default`` set. Best-effort — a missing/malformed
+  ## config yields an empty set (the env var is the primary source).
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0:
+    return @[]
+  try:
+    let cfg = readWorkspaceBootstrap(configPath)
+    return cfg.projects.default
+  except CatchableError:
+    return @[]
+
+proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
+  ## ``repro workspace projects [list|add ...]`` — inspect or grow the active
+  ## PROJECT SET recorded in ``.repo/workspace.toml``.
+  ##
+  ##   * ``list`` (default) — print the active set, one per line.
+  ##   * ``add <project>...`` — layer the named projects into the set.
+  ##   * ``add --default`` — auto-layer the set from ``REPRO_DEFAULT_PROJECTS``
+  ##     (a path-separator / comma / whitespace-delimited list), falling back
+  ##     to the RA-8 host config ``[projects] default``. Does NOTHING when
+  ##     neither source provides any project (no env var → no auto-layer).
+  let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
+  let rest = if args.len > 0 and not args[0].startsWith("-"): args[1 .. ^1]
+             else: @(args)
+  let workspaceRoot = parseProjectsWorkspaceRoot(args)
+
+  case sub
+  of "list":
+    let active = readWorkspaceProjects(workspaceRoot)
+    for p in active:
+      stdout.writeLine(p)
+    return 0
+  of "add":
+    var explicit: seq[string]
+    var useDefault = false
+    for arg in rest:
+      if arg == "--default":
+        useDefault = true
+      elif arg.startsWith("--workspace-root="):
+        discard
+      elif not arg.startsWith("-"):
+        explicit.add(arg)
+
+    var toAdd: seq[string]
+    if useDefault:
+      # RA-6 auto-layer: source the default set from REPRO_DEFAULT_PROJECTS
+      # (primary), then the RA-8 host config. With NEITHER set, no auto-layer
+      # happens — the active set is left unchanged.
+      let envRaw = getEnv("REPRO_DEFAULT_PROJECTS")
+      if envRaw.len > 0:
+        for tok in envRaw.split({':', ';', ',', ' ', '\t', '\n'}):
+          let t = tok.strip()
+          if t.len > 0:
+            toAdd.add(t)
+      if toAdd.len == 0:
+        toAdd = readDefaultProjectsFromHostConfig(workspaceRoot)
+    for p in explicit:
+      if p notin toAdd:
+        toAdd.add(p)
+
+    if toAdd.len == 0:
+      if useDefault:
+        # No env var, no host-config default: a deliberate no-op (exit 0).
+        # The active set is untouched — there is no default to layer.
+        stdout.writeLine(
+          "repro workspace projects: no default project set " &
+          "(REPRO_DEFAULT_PROJECTS unset and no host config [projects] " &
+          "default); nothing added")
+        return 0
+      stderr.writeLine("repro workspace projects add: no project named " &
+        "(pass one or more <project> names, or --default)")
+      return 2
+
+    let existing = readWorkspaceProjects(workspaceRoot)
+    var merged = existing
+    for p in toAdd:
+      if p notin merged:
+        merged.add(p)
+    writeWorkspaceProjects(workspaceRoot, merged)
+    for p in readWorkspaceProjects(workspaceRoot):
+      stdout.writeLine(p)
+    return 0
+  else:
+    stderr.writeLine("repro workspace projects: unknown subcommand '" & sub &
+      "' (expected: list, add)")
+    return 2
+
+# ---- RA-6: `repro completion <shell>` --------------------------------------
+
+const reproTopLevelCommands = [
+  "build", "watch", "develop", "add", "remove", "push", "sync", "branch",
+  "checkout", "hooks", "check", "workspace", "prompt", "completion", "store",
+  "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
+  "hardware", "disk", "launch-plan",
+]
+
+const reproWorkspaceSubcommands = [
+  "init", "sync", "pull", "lock", "status", "list", "start", "manifests",
+  "shared-clones", "forall", "bootstrap", "projects", "project",
+]
+
+proc renderCompletionSnippet(shell, reproBin: string): string =
+  ## Emit a static shell-completion script for the named shell. Like
+  ## ``repro prompt init``: prints a snippet for the user to source; it
+  ## NEVER edits an rc file or mutates shell state. The completion is a
+  ## first-level command list (+ the ``workspace`` subcommand list) — enough
+  ## to make the common verbs tab-completable without a per-keystroke
+  ## ``repro`` subprocess.
+  let topCmds = reproTopLevelCommands.join(" ")
+  let wsSubs = reproWorkspaceSubcommands.join(" ")
+  case shell
+  of "bash":
+    "# repro bash completion — add to ~/.bashrc:  source <(repro completion bash)\n" &
+    "_repro_complete() {\n" &
+    "  local cur prev\n" &
+    "  cur=\"${COMP_WORDS[COMP_CWORD]}\"\n" &
+    "  prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n" &
+    "  if [[ $COMP_CWORD -eq 1 ]]; then\n" &
+    "    COMPREPLY=( $(compgen -W \"" & topCmds & "\" -- \"$cur\") )\n" &
+    "    return\n" &
+    "  fi\n" &
+    "  if [[ ${COMP_WORDS[1]} == workspace && $COMP_CWORD -eq 2 ]]; then\n" &
+    "    COMPREPLY=( $(compgen -W \"" & wsSubs & "\" -- \"$cur\") )\n" &
+    "    return\n" &
+    "  fi\n" &
+    "}\n" &
+    "complete -F _repro_complete repro\n"
+  of "zsh":
+    "# repro zsh completion — add to ~/.zshrc:  source <(repro completion zsh)\n" &
+    "_repro() {\n" &
+    "  local -a cmds wscmds\n" &
+    "  cmds=(" & topCmds & ")\n" &
+    "  wscmds=(" & wsSubs & ")\n" &
+    "  if (( CURRENT == 2 )); then\n" &
+    "    compadd -- $cmds\n" &
+    "  elif [[ ${words[2]} == workspace && CURRENT == 3 ]]; then\n" &
+    "    compadd -- $wscmds\n" &
+    "  fi\n" &
+    "}\n" &
+    "compdef _repro repro\n"
+  of "fish":
+    "# repro fish completion — add to ~/.config/fish/config.fish:\n" &
+    "#   repro completion fish | source\n" &
+    "complete -c repro -f\n" &
+    "complete -c repro -n \"__fish_use_subcommand\" -a \"" & topCmds & "\"\n" &
+    "complete -c repro -n \"__fish_seen_subcommand_from workspace\" -a \"" &
+      wsSubs & "\"\n"
+  else:
+    ""
+
+proc renderCompletionUsage(programName: string): string =
+  programName & " completion <bash|zsh|fish>"
+
+proc runCompletionCommand*(programName: string; args: openArray[string];
+                           reproBin: string): int =
+  ## ``repro completion <shell>`` — print a tab-completion script for the
+  ## named shell. Opt-in and side-effect-free: it only prints a snippet for
+  ## the user to ``source``.
+  if args.len == 0 or args[0] in ["--help", "-h", "help"]:
+    echo renderCompletionUsage(programName)
+    return (if args.len == 0: 2 else: 0)
+  let shell = args[0].toLowerAscii()
+  let snippet = renderCompletionSnippet(shell, reproBin)
+  if snippet.len == 0:
+    stderr.writeLine("repro completion: unsupported shell '" & args[0] &
+      "'\n" & renderCompletionUsage(programName))
+    return 2
+  stdout.write(snippet)
+  0
+
+# ---- RA-6: `repro workspace project new` / `project repo add` ---------------
+
+proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
+    code: int; output: string] =
+  var argv = @[gitBin, "-C", repoRoot]
+  for a in sub: argv.add(a)
+  let res = execCmdEx(quoteShellCommand(argv))
+  (code: res.exitCode, output: res.output)
+
+proc manifestRepoRootFor(workspaceRoot: string): string =
+  ## The manifest repo carrying ``projects/*.toml`` — ``.repo/manifests``
+  ## under the workspace root.
+  workspaceRoot / ".repo" / "manifests"
+
+proc projectManifestStub(project: string): string =
+  "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+  "[project]\n" &
+  "name = \"" & project & "\"\n" &
+  "default_revision = \"main\"\n" &
+  "trunk = \"main\"\n\n" &
+  "includes = [\n]\n"
+
+proc commitAndPushManifest(gitBin, manifestRoot, message: string;
+                           paths: openArray[string]): tuple[
+    code: int; diagnostic: string] =
+  ## Stage ``paths``, commit with ``message``, and push ``HEAD`` to the
+  ## manifest repo's upstream when one is configured. Best-effort push: the
+  ## commit always lands locally; a missing upstream is reported, not fatal.
+  for p in paths:
+    let st = gitOutput(gitBin, manifestRoot, ["add", "--", p])
+    if st.code != 0:
+      return (code: st.code, diagnostic: "git add failed: " & st.output)
+  let ci = gitOutput(gitBin, manifestRoot, ["commit", "-m", message])
+  if ci.code != 0:
+    return (code: ci.code, diagnostic: "git commit failed: " & ci.output)
+  # Resolve the upstream from @{u}; push only when configured.
+  let up = gitOutput(gitBin, manifestRoot,
+    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+  if up.code != 0:
+    return (code: 0, diagnostic: "committed locally; no upstream configured " &
+      "for the manifest repo (skipped push)")
+  let upstream = up.output.strip()
+  let slash = upstream.find('/')
+  if slash <= 0:
+    return (code: 0, diagnostic: "committed locally; upstream '" & upstream &
+      "' is not a remote/branch pair (skipped push)")
+  let remote = upstream[0 ..< slash]
+  let branch = upstream[slash + 1 .. ^1]
+  let push = gitOutput(gitBin, manifestRoot,
+    ["push", remote, "HEAD:" & branch])
+  if push.code != 0:
+    return (code: push.code, diagnostic: "git push failed: " & push.output)
+  (code: 0, diagnostic: "committed and pushed to " & upstream)
+
+proc runWorkspaceProjectCommand*(args: openArray[string]): int =
+  ## ``repro workspace project new <name> [-m DESC]`` and
+  ## ``repro workspace project repo add <project> <repo> --remote=URL``.
+  ## Manifest-authoring verbs: write the manifest TOML, commit, and push to
+  ## the manifest repo's upstream (best-effort push — the commit always lands).
+  if args.len == 0 or args[0] in ["--help", "-h", "help"]:
+    echo "repro workspace project new <name> [-m DESC] [--workspace-root=PATH]"
+    echo "repro workspace project repo add <project> <repo> --remote=URL " &
+      "[--revision=REV] [--workspace-root=PATH]"
+    return (if args.len == 0: 2 else: 0)
+
+  let workspaceRoot = parseProjectsWorkspaceRoot(args)
+  let manifestRoot = manifestRepoRootFor(workspaceRoot)
+  if not dirExists(manifestRoot):
+    stderr.writeLine("repro workspace project: no manifest repo at " &
+      manifestRoot & " (run `repro workspace init` first)")
+    return 1
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  let gitBin = identity.binaryPath
+
+  let sub = args[0]
+  case sub
+  of "new":
+    var name = ""
+    var desc = ""
+    var i = 1
+    while i < args.len:
+      let a = args[i]
+      if a == "-m" or a == "--message":
+        if i + 1 < args.len:
+          desc = args[i + 1]; inc i
+      elif a.startsWith("--message="):
+        desc = a["--message=".len .. ^1]
+      elif a.startsWith("--workspace-root="):
+        discard
+      elif not a.startsWith("-"):
+        name = a
+      inc i
+    if name.len == 0:
+      stderr.writeLine("repro workspace project new: missing <name>")
+      return 2
+    createDir(manifestRoot / "projects")
+    let projectFileRel = "projects/" & name & ".toml"
+    let projectFileAbs = manifestRoot / "projects" / (name & ".toml")
+    if fileExists(projectFileAbs):
+      stderr.writeLine("repro workspace project new: project '" & name &
+        "' already exists at " & projectFileAbs)
+      return 1
+    writeFile(projectFileAbs, projectManifestStub(name))
+    var paths = @[projectFileRel]
+    # Optionally record the description as a sibling Markdown stub, matching
+    # the pilot's `projects/<name>.md` convention.
+    if desc.len > 0:
+      let docRel = "projects/" & name & ".md"
+      writeFile(manifestRoot / "projects" / (name & ".md"),
+        "# " & name & "\n\n" & desc & "\n")
+      paths.add(docRel)
+    let msg = "Add project " & name &
+      (if desc.len > 0: " (" & desc & ")" else: "")
+    let res = commitAndPushManifest(gitBin, manifestRoot, msg, paths)
+    stdout.writeLine("repro workspace project new: " & name & " — " &
+      res.diagnostic)
+    return res.code
+  of "repo":
+    if args.len < 2 or args[1] != "add":
+      stderr.writeLine("repro workspace project repo: expected `add`")
+      return 2
+    var project = ""
+    var repo = ""
+    var remote = ""
+    var revision = "main"
+    var i = 2
+    var positional: seq[string]
+    while i < args.len:
+      let a = args[i]
+      if a.startsWith("--remote="):
+        remote = a["--remote=".len .. ^1]
+      elif a.startsWith("--revision="):
+        revision = a["--revision=".len .. ^1]
+      elif a.startsWith("--workspace-root="):
+        discard
+      elif not a.startsWith("-"):
+        positional.add(a)
+      inc i
+    if positional.len >= 2:
+      project = positional[0]
+      repo = positional[1]
+    if project.len == 0 or repo.len == 0:
+      stderr.writeLine("repro workspace project repo add: usage: " &
+        "<project> <repo> --remote=URL")
+      return 2
+    if remote.len == 0:
+      stderr.writeLine("repro workspace project repo add: --remote=URL is " &
+        "required")
+      return 2
+    let projectFileAbs = manifestRoot / "projects" / (project & ".toml")
+    if not fileExists(projectFileAbs):
+      stderr.writeLine("repro workspace project repo add: project '" &
+        project & "' does not exist (" & projectFileAbs & ")")
+      return 1
+    createDir(manifestRoot / "repos")
+    let remoteName = repo & "-origin"
+    let fragmentRel = "repos/" & repo & ".toml"
+    let fragmentAbs = manifestRoot / "repos" / (repo & ".toml")
+    if not fileExists(fragmentAbs):
+      writeFile(fragmentAbs,
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\n" &
+        "name = \"" & repo & "\"\n" &
+        "path = \"" & repo & "\"\n" &
+        "remote = \"" & remoteName & "\"\n" &
+        "revision = \"" & revision & "\"\n")
+    ensureRemoteEntry(projectFileAbs, remoteName, remote)
+    discard appendFragmentInclude(projectFileAbs, fragmentRel)
+    let msg = "Add repo " & repo & " to project " & project
+    let res = commitAndPushManifest(gitBin, manifestRoot, msg,
+      ["projects/" & project & ".toml", fragmentRel])
+    stdout.writeLine("repro workspace project repo add: " & repo & " -> " &
+      project & " — " & res.diagnostic)
+    return res.code
+  else:
+    stderr.writeLine("repro workspace project: unknown subcommand '" & sub &
+      "' (expected: new, repo)")
+    return 2
+
 proc runThinApp*(programName: string): int =
   # M9.R.13a — seed the provider-nimcache session token before any
   # subcommand routing, so every nested subprocess spawned downstream
@@ -29966,6 +30456,56 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceForallCommand(forallArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace forall: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "bootstrap":
+    # RA-6 — `repro workspace bootstrap [<dir>]`. Scaffold the host
+    # ergonomics files (`.envrc` / `AGENTS.md` / `workspace-projects.md`)
+    # into an empty host directory; idempotent on re-run.
+    try:
+      let bsArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceBootstrapCommand(bsArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace bootstrap: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "projects":
+    # RA-6 — `repro workspace projects [list|add]`. Inspect / grow the
+    # active PROJECT SET; `add --default` auto-layers from
+    # REPRO_DEFAULT_PROJECTS (then the RA-8 host config).
+    try:
+      let pArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceProjectsCommand(pArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace projects: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "project":
+    # RA-6 — `repro workspace project new` / `project repo add`.
+    # Manifest-authoring: write the project/repo manifest TOML, commit, and
+    # push to the manifest repo's upstream (best-effort push).
+    try:
+      let pArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceProjectCommand(pArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace project: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "completion":
+    # RA-6 — `repro completion <shell>`. Emit a shell completion script
+    # (RA-26 `prompt init` style: print a snippet, mutate nothing).
+    try:
+      let cArgs =
+        if args.len > 1: args[1 .. ^1]
+        else: @[]
+      return runCompletionCommand(programName, cArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro completion: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "branch":
     # M14 — `repro branch [<name>]`. Top-level subcommand per

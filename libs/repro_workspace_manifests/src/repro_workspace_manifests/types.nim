@@ -249,6 +249,14 @@ type
 
   WorkspaceBody* = object
     project*: string
+    projects*: seq[string]
+      ## RA-6 — the active PROJECT SET layered into this workspace. The
+      ## pilot's ``repro workspace projects add`` tracks a SET of project
+      ## names (not a single project); this array records that set. The
+      ## scalar ``project`` field remains the PRIMARY project (the first
+      ## entry of the set, kept non-empty for the M6/M8 single-project
+      ## resolver and every existing reader). An empty array means
+      ## "single-project workspace" — only ``project`` is meaningful.
     branch*: Option[string]
     feature_started*: Option[bool]
       ## M16 — when ``true``, the current ``branch`` value names a
