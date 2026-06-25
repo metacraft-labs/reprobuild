@@ -6334,6 +6334,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_certificate_signature_verifies_against_registered_key.nim",
+    binary: "build/test-bin/t_certificate_signature_verifies_against_registered_key",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim",
+    binary: "build/test-bin/t_unsigned_or_wrong_key_certificate_is_rejected",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim",
     binary: "build/test-bin/t_cert_gate_defaults_off_and_advisory_does_not_block",
     defines: @[],

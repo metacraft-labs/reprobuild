@@ -1,5 +1,5 @@
-import std/[algorithm, hashes, json, options, os, osproc, sequtils,
-    sets, streams, strutils, tables, terminal, times]
+import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
+    sets, streams, strutils, tables, tempfiles, terminal, times]
 import repro_core
 import repro_build_engine
 import repro_cmake_trycompile
@@ -21492,6 +21492,345 @@ proc verifyCoverage*(certs: openArray[TestCertificate];
   result.covered = result.missingTargets.len == 0
 
 # ============================================================================
+# TC-5 — Daemon signing + key registration.
+#
+# TC-1 shipped the cert schema with the ``[certificate.signature]`` block left
+# explicitly EMPTY (unsigned) and a COVERAGE verifier. TC-5 fills that block on
+# issuance with a REAL ed25519 signature and makes a verifier accept a
+# certificate only when its ``key_id`` resolves to a REGISTERED, UNREVOKED
+# public key AND the signature over ``canonicalCertificatePayload`` checks out.
+#
+# Crypto primitive (REAL, no hand-rolled crypto): OpenSSH ``ssh-keygen -Y
+# sign`` / ``ssh-keygen -Y verify`` over an ed25519 SSH key. This is the same
+# ed25519/SSH-signature machinery RA-17 uses for manifest provenance (``git
+# verify-commit`` with ``gpg.ssh.allowedSignersFile``), so the toolchain
+# already ships it. ``ssh-keygen -Y sign`` produces a detached SSH signature
+# (``-----BEGIN SSH SIGNATURE-----``) over arbitrary payload bytes under a
+# namespace; ``ssh-keygen -Y verify`` checks it against an allowed-signers
+# file. We sign the EXACT bytes of ``canonicalCertificatePayload(cert)``.
+#
+# Key-protection posture (HONEST — see Test-Certificates.md §"Trust model" and
+# §"Signing and key management"): the IDEAL is that the privileged daemon
+# (``reprostored``, running as root / a dedicated service account that the
+# unprivileged agent cannot read) owns the signing key, so forging a cert
+# requires deliberate key exfiltration past the same boundary that protects the
+# store. THIS implementation locates the signing key via the daemon-owned key
+# path (``reproSigningKeyPath``), but does NOT yet stand up a separate
+# privileged signing service: the key is a file readable by whoever runs the
+# observed ``repro test`` issuance. That residual risk is stated plainly, not
+# hidden — if the key lives where the issuing user can read it, signing resists
+# CASUAL/accidental forgery (an agent that skips the tests cannot mint a cert
+# without finding+using the key) but NOT a determined local attacker who steals
+# the key. The full privileged-daemon/OS-keystore/remote-signer split is the
+# documented deferral (DEFER-TC5-PRIV-DAEMON below). The SIGNING ENTRY POINT is
+# already shaped correctly: ``signCertificateOnIssuance`` is reachable ONLY as
+# a side effect of an observed real run (the ``repro test`` issuance path) —
+# there is NO ``repro sign <blob>`` command/API anywhere, so an agent cannot
+# obtain a signature over an arbitrary record even with the current key
+# placement.
+# ============================================================================
+
+const
+  certificateSignatureNamespace* = "reprobuild-test-certificate-v1"
+    ## The ``ssh-keygen -Y sign -n <namespace>`` namespace. Both sign and
+    ## verify MUST use the same namespace; a mismatch fails verification (a
+    ## cheap domain-separation guard so a cert signature can never be confused
+    ## with, e.g., an RA-17 manifest signature).
+  certificateSignatureAlgorithm* = "ed25519"
+    ## The ``[certificate.signature] algorithm`` value TC-5 writes.
+
+type
+  CertificateSigningError* = object of CatchableError
+    ## Raised when the daemon cannot produce a signature (no key, no
+    ## ssh-keygen, signing tool failure). Issuance treats this as "no
+    ## certificate" — we NEVER emit an unsigned/faked cert in its place.
+
+  RegisteredKeyStatus* = enum
+    ## A registered key is either ``active`` (a current allowed signer) or
+    ## ``revoked`` (compromised / rotated out — a cert signed by it is
+    ## REJECTED even though the signature itself is cryptographically valid).
+    rksActive = "active"
+    rksRevoked = "revoked"
+
+  RegisteredKey* = object
+    ## One entry in the allowed-signers store: a ``key_id`` → ed25519 public
+    ## key + status. ``publicKey`` is the OpenSSH public-key line
+    ## (``ssh-ed25519 AAAA... [comment]``) as emitted by ``ssh-keygen``.
+    keyId*: string
+    publicKey*: string
+    status*: RegisteredKeyStatus
+
+  RegisteredKeyStore* = object
+    ## The set of allowed signers CI / the server registers (the "registered
+    ## public keys" of Test-Certificates.md §"Signing and key management").
+    ## ROTATION is ``registerKey`` (append a new active key, e.g. a new
+    ## quarter's key); REVOCATION is ``revokeKey`` (flip a key to ``revoked``
+    ## without removing it, so the audit trail and any "why rejected" diagnostic
+    ## survive). A ``key_id`` is unique; registering an existing id replaces it.
+    keys*: seq[RegisteredKey]
+
+const
+  registeredKeysSchemaV1* = "reprobuild.registered-keys.v1"
+    ## ``schema`` value the registered-keys store file carries.
+
+proc resolveSigner*(store: RegisteredKeyStore;
+                    keyId: string): tuple[found: bool; publicKey: string;
+                                          revoked: bool] =
+  ## The reader/resolver: ``key_id`` → (public key, revoked?). ``found`` is
+  ## false for an UNREGISTERED id (a cert claiming such an id is rejected by
+  ## the verifier). ``revoked`` is true for a registered-but-revoked key (also
+  ## rejected). Only a ``found`` + not-``revoked`` result is a trusted signer.
+  for k in store.keys:
+    if k.keyId == keyId:
+      return (found: true, publicKey: k.publicKey,
+              revoked: k.status == rksRevoked)
+  (found: false, publicKey: "", revoked: false)
+
+proc registerKey*(store: var RegisteredKeyStore; keyId, publicKey: string) =
+  ## ROTATION primitive: register (or replace) ``keyId`` as an ACTIVE allowed
+  ## signer. Adding a new key id alongside the old ones is how a key rotates in;
+  ## the old key stays trusted until explicitly revoked, so certs signed before
+  ## the rotation keep verifying.
+  for k in store.keys.mitems:
+    if k.keyId == keyId:
+      k.publicKey = publicKey
+      k.status = rksActive
+      return
+  store.keys.add(RegisteredKey(keyId: keyId, publicKey: publicKey,
+    status: rksActive))
+
+proc revokeKey*(store: var RegisteredKeyStore; keyId: string): bool =
+  ## REVOCATION primitive: flip ``keyId`` to ``revoked``. Returns false if the
+  ## id is not registered. A revoked key's certs are REJECTED by the verifier
+  ## even though their signatures are still cryptographically valid — this is
+  ## the "revocation list invalidates compromised keys" of the spec.
+  for k in store.keys.mitems:
+    if k.keyId == keyId:
+      k.status = rksRevoked
+      return true
+  false
+
+proc serializeRegisteredKeyStore*(store: RegisteredKeyStore): string =
+  ## Render the store to a deterministic TOML form (one ``[[key]]`` table per
+  ## entry). Stored under the workspace so issuance and the gate share one
+  ## allowed-signers set.
+  result = "schema = \"" & registeredKeysSchemaV1 & "\"\n"
+  for k in store.keys:
+    result.add("\n[[key]]\n")
+    result.add("key_id = \"" & tomlEscapeCert(k.keyId) & "\"\n")
+    result.add("public_key = \"" & tomlEscapeCert(k.publicKey) & "\"\n")
+    result.add("status = \"" & $k.status & "\"\n")
+
+proc parseRegisteredKeyStore*(content: string): RegisteredKeyStore =
+  ## Reader for ``serializeRegisteredKeyStore``. Tolerant of unknown keys; a
+  ## missing/empty file parses to an EMPTY store (no allowed signers → every
+  ## cert is rejected, fail-closed).
+  var cur: RegisteredKey
+  var inKey = false
+  template flush() =
+    if inKey and cur.keyId.len > 0:
+      result.keys.add(cur)
+    cur = RegisteredKey()
+    inKey = false
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"): continue
+    if line == "[[key]]":
+      flush()
+      inKey = true
+      cur = RegisteredKey(status: rksActive)
+      continue
+    if line.startsWith("["): continue
+    let eq = line.find('=')
+    if eq <= 0: continue
+    let key = line[0 ..< eq].strip()
+    let rhs = line[eq + 1 .. ^1]
+    if not inKey:
+      continue
+    case key
+    of "key_id": cur.keyId = parseTomlBasicValue(rhs)
+    of "public_key": cur.publicKey = parseTomlBasicValue(rhs)
+    of "status":
+      cur.status =
+        if parseTomlBasicValue(rhs) == $rksRevoked: rksRevoked else: rksActive
+    else: discard
+  flush()
+
+proc registeredKeyStorePath*(workspaceRoot: string): string =
+  ## Where the allowed-signers store lives for a workspace. CI / the server
+  ## owns this set (Test-Certificates.md: "CI/server registers trusted public
+  ## keys"); we colocate it with the workspace's daemon-owned ``.repo`` tree so
+  ## both the issuance path and the pre-push gate read the SAME registry.
+  workspaceRoot / ".repo" / "workspace" / "certificates" / "registered-keys.toml"
+
+proc readRegisteredKeyStore*(path: string): RegisteredKeyStore =
+  ## Read the store from ``path``; a missing file is an EMPTY store
+  ## (fail-closed: no registered signers → nothing verifies).
+  if path.len == 0 or not fileExists(path):
+    return RegisteredKeyStore()
+  parseRegisteredKeyStore(readFile(path))
+
+proc writeRegisteredKeyStore*(store: RegisteredKeyStore; path: string) =
+  ## Persist the store, creating parent dirs.
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, serializeRegisteredKeyStore(store))
+
+# ---- daemon signing (reachable ONLY via observed-run issuance) -------------
+
+proc reproSigningKeyPath*(workspaceRoot: string): string =
+  ## The daemon's ed25519 signing-key path. PRIVILEGED-DAEMON posture (honest):
+  ##   1. ``REPRO_DAEMON_SIGNING_KEY`` — the daemon injects the path to the key
+  ##      it owns when it observes the run. This is the seam where a real
+  ##      privileged ``reprostored`` (or a remote signer) would hand the signing
+  ##      capability to the issuance step WITHOUT the key ever being readable by
+  ##      the unprivileged agent. Tests set it to a hermetic key.
+  ##   2. Otherwise a workspace-local daemon key under ``.repo/workspace/
+  ##      certificates/signing-key`` (the colocated daemon-state default).
+  ## DEFER-TC5-PRIV-DAEMON: in this implementation the key at either location
+  ## is a plain file readable by whoever runs issuance; standing up the actual
+  ## privileged signing service (root/service-account-owned key, or a remote
+  ## signer) is deferred. The entry point is already correct — see
+  ## ``signCertificateOnIssuance`` (no "sign this blob" API exists).
+  let injected = getEnv("REPRO_DAEMON_SIGNING_KEY")
+  if injected.len > 0:
+    return injected
+  workspaceRoot / ".repo" / "workspace" / "certificates" / "signing-key"
+
+proc reproSigningKeyId*(): string =
+  ## The ``key_id`` the daemon's signing key is registered under (the
+  ## ``[certificate] key_id`` field). Daemon-injected via ``REPRO_DAEMON_KEY_ID``
+  ## when it observes the run; otherwise a stable default. The verifier resolves
+  ## this id against the registered-keys store, so the SAME id must be the one
+  ## CI/the server registered the daemon's public half under.
+  let injected = getEnv("REPRO_DAEMON_KEY_ID")
+  if injected.len > 0: injected else: "repro-daemon-key"
+
+proc sshKeygenBinary(): string =
+  ## Resolve ``ssh-keygen`` (the real ed25519 signer/verifier). Empty when
+  ## absent — callers fail closed (no signature, no certificate; verify fails).
+  findExe("ssh-keygen")
+
+proc signCertificateOnIssuance*(cert: var TestCertificate;
+                                keyId, signingKeyPath: string) =
+  ## DAEMON-SIDE signing, reachable ONLY from the ``repro test`` issuance path
+  ## (see the call in ``runTestCommand``'s issuance arm). There is deliberately
+  ## NO general "sign this blob" wrapper: this proc takes a fully-built
+  ## ``TestCertificate`` for a state the daemon just OBSERVED passing, signs the
+  ## EXACT ``canonicalCertificatePayload(cert)`` bytes with the daemon's
+  ## ed25519 key, and fills ``cert.keyId`` + ``cert.signature``. An agent cannot
+  ## reach this with an arbitrary payload — it only ever runs as a side effect
+  ## of an actually-executed clean+passing run.
+  ##
+  ## Raises ``CertificateSigningError`` on any failure (no key, no ssh-keygen,
+  ## signer error). The issuance caller treats that as "no certificate" rather
+  ## than emitting an unsigned/faked one.
+  let sshKeygen = sshKeygenBinary()
+  if sshKeygen.len == 0:
+    raise newException(CertificateSigningError,
+      "ssh-keygen not found on PATH; cannot sign the certificate")
+  if signingKeyPath.len == 0 or not fileExists(signingKeyPath):
+    raise newException(CertificateSigningError,
+      "daemon signing key not found at '" & signingKeyPath & "'")
+  # ``key_id`` is part of the ``[certificate]`` body, so it MUST be set BEFORE
+  # we compute the canonical payload — the verifier reconstructs the payload
+  # from the cert it reads (which carries the key_id), and the signed bytes
+  # must match those exactly. Setting it after signing would sign a DIFFERENT
+  # byte sequence than the one verified, and every signature would fail.
+  cert.keyId = keyId
+  let payload = canonicalCertificatePayload(cert)
+  # ssh-keygen -Y sign signs a FILE in place (writes ``<file>.sig``); use a
+  # private scratch file so the exact payload bytes are what gets signed.
+  let scratch = createTempDir("repro-cert-sign-", "")
+  defer: removeDir(scratch)
+  let payloadFile = scratch / "payload"
+  writeFile(payloadFile, payload)
+  let res = execCmdEx(shellCommand(@[sshKeygen, "-Y", "sign",
+    "-n", certificateSignatureNamespace, "-f", signingKeyPath, payloadFile]))
+  if res.exitCode != 0:
+    raise newException(CertificateSigningError,
+      "ssh-keygen -Y sign failed: " & res.output.strip())
+  let sigPath = payloadFile & ".sig"
+  if not fileExists(sigPath):
+    raise newException(CertificateSigningError,
+      "ssh-keygen produced no signature file")
+  cert.signature = TestCertificateSignature(
+    algorithm: certificateSignatureAlgorithm,
+    value: encode(readFile(sigPath)))   # base64 of the SSH signature blob
+
+# ---- signature verification (registered + unrevoked + valid sig) -----------
+
+type
+  SignatureVerdict* = enum
+    ## Outcome of verifying a certificate's signature against the registry.
+    svValid              ## signed + key registered + unrevoked + sig checks.
+    svUnsigned           ## no ``[certificate.signature]`` (TC-1-shape cert).
+    svUnregisteredKey    ## ``key_id`` not in the registry.
+    svRevokedKey         ## ``key_id`` registered but REVOKED.
+    svBadSignature       ## signed by a registered key but sig does NOT check
+                         ## (tampered payload / wrong key for that key_id).
+    svToolingUnavailable ## ssh-keygen missing — cannot verify (fail closed).
+
+proc allowedSignerIdentity*(keyId: string): string =
+  ## The ``-I`` principal we sign-as / verify-as. The registry's ``key_id`` is
+  ## a stable principal so the allowed-signers line ties a key to its id.
+  "repro-cert/" & keyId
+
+proc verifyCertificateSignature*(cert: TestCertificate;
+                                 store: RegisteredKeyStore): SignatureVerdict =
+  ## The TC-5 SIGNATURE verifier (additive to the TC-1 COVERAGE verifier). A
+  ## certificate's signature is VALID iff:
+  ##   (a) it is signed (``isSigned``), AND
+  ##   (b) its ``key_id`` resolves to a REGISTERED key in ``store``, AND
+  ##   (c) that key is NOT revoked, AND
+  ##   (d) the ed25519 signature over ``canonicalCertificatePayload(cert)``
+  ##       checks against that registered public key (via ``ssh-keygen -Y
+  ##       verify``).
+  ## Any miss → a specific non-``svValid`` verdict the gate/CI renders.
+  if not cert.isSigned:
+    return svUnsigned
+  let signer = resolveSigner(store, cert.keyId)
+  if not signer.found:
+    return svUnregisteredKey
+  if signer.revoked:
+    return svRevokedKey
+  let sshKeygen = sshKeygenBinary()
+  if sshKeygen.len == 0:
+    return svToolingUnavailable
+  let payload = canonicalCertificatePayload(cert)
+  var sigBytes: string
+  try:
+    sigBytes = decode(cert.signature.value)
+  except CatchableError:
+    return svBadSignature
+  let scratch = createTempDir("repro-cert-verify-", "")
+  defer: removeDir(scratch)
+  let payloadFile = scratch / "payload"
+  let sigFile = scratch / "payload.sig"
+  let allowedSigners = scratch / "allowed_signers"
+  writeFile(payloadFile, payload)
+  writeFile(sigFile, sigBytes)
+  # The allowed-signers file ties THIS key_id's registered public key to the
+  # principal we verify as, so a signature made by a DIFFERENT key (even a
+  # registered one under another id) does not verify for this key_id.
+  writeFile(allowedSigners,
+    allowedSignerIdentity(cert.keyId) & " " & signer.publicKey & "\n")
+  # ``ssh-keygen -Y verify`` reads the signed payload on stdin.
+  let cmd = shellCommand(@[sshKeygen, "-Y", "verify",
+    "-f", allowedSigners, "-I", allowedSignerIdentity(cert.keyId),
+    "-n", certificateSignatureNamespace, "-s", sigFile]) &
+    " < " & quoteShell(payloadFile)
+  let res = execCmdEx(cmd)
+  if res.exitCode == 0: svValid else: svBadSignature
+
+proc certificateIsTrusted*(cert: TestCertificate;
+                           store: RegisteredKeyStore): bool =
+  ## Convenience predicate the gate composes with coverage: a certificate is
+  ## TRUSTED iff its signature verdict is ``svValid``.
+  verifyCertificateSignature(cert, store) == svValid
+
+# ============================================================================
 # TC-2: certificate TRANSPORT — attach/read certificates bound to a commit and
 # carry them on the push.
 # ============================================================================
@@ -21640,7 +21979,7 @@ proc pushCertificateNotes*(gitBin, repoPath, remote: string):
 
 proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
                      pushedCommit, certRepoPath, gitBin,
-                     currentRepoName: string) =
+                     currentRepoName, registeredKeysPath: string) =
   ## TC-3 / RA-32 — the certificate-coverage stage of the RA-21 pre-push gate.
   ## Called ONLY after every other gate stage has passed (clean + published +
   ## at the locked revisions, lock current), from each exit point of stage 5.
@@ -21692,6 +22031,30 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
   # (multi-cert union: a linux cert + a macos cert together satisfy a
   # {linux, macos} requirement).
   let attached = readAttachedCertificates(gitBin, certRepoPath, pushedCommit)
+  # TC-5: coverage now requires a VALID REGISTERED SIGNATURE. A certificate
+  # counts toward coverage ONLY when its ``key_id`` resolves to a registered,
+  # unrevoked key and the ed25519 signature over the canonical payload checks.
+  # Unsigned / wrong-key / unregistered / revoked / tampered certs are dropped
+  # BEFORE coverage, so the ``required`` gate enforces BOTH coverage AND a
+  # trusted signature. We record WHY a present-but-untrusted cert was dropped so
+  # the diagnostic distinguishes "no cert" from "cert present but not trusted".
+  let keyStore = readRegisteredKeyStore(registeredKeysPath)
+  var trusted: seq[TestCertificate] = @[]
+  var signatureNotes: seq[string] = @[]
+  for cert in attached:
+    let verdict = verifyCertificateSignature(cert, keyStore)
+    if verdict == svValid:
+      trusted.add(cert)
+    else:
+      let why =
+        case verdict
+        of svUnsigned: "unsigned"
+        of svUnregisteredKey: "key_id '" & cert.keyId & "' not registered"
+        of svRevokedKey: "key_id '" & cert.keyId & "' revoked"
+        of svBadSignature: "signature does not verify"
+        of svToolingUnavailable: "ssh-keygen unavailable (cannot verify)"
+        of svValid: ""
+      signatureNotes.add(cert.platform & ": " & why)
   var perPlatformMissing: seq[string] = @[]
   for platform in policy.requiredPlatforms:
     let req = CoverageRequirement(
@@ -21699,7 +22062,7 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       lock: lockDigest,
       platform: platform,
       requiredTargets: policy.requiredTargets)
-    let cov = verifyCoverage(attached, req)
+    let cov = verifyCoverage(trusted, req)
     if not cov.covered:
       perPlatformMissing.add(platform & " (missing: " &
         (if cov.missingTargets.len > 0: cov.missingTargets.join(", ")
@@ -21713,7 +22076,11 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
     # In required mode a clean pass adds no failure — the gate keeps whatever
     # exit code stage 5 set (0 on success).
     return
-  let detail = perPlatformMissing.join("; ")
+  let sigDetail =
+    if signatureNotes.len > 0:
+      " (untrusted certs ignored: " & signatureNotes.join("; ") & ")"
+    else: ""
+  let detail = perPlatformMissing.join("; ") & sigDetail
   if policy.gateMode == cgmAdvisory:
     report.notices.add("certificate advisory: coverage INCOMPLETE — " &
       detail & " (run 'repro certify' on the missing platform(s); advisory " &
@@ -21935,7 +22302,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   template applyCertificateGate() =
     if not parsed.skipCertificateGate:
       certificateGate(result, resolved.certificatePolicy, certPushedCommit,
-        certRepoPath, identity.binaryPath, currentRepoName)
+        certRepoPath, identity.binaryPath, currentRepoName,
+        registeredKeyStorePath(parsed.workspaceRoot))
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -29593,13 +29961,27 @@ proc runReproTestCommand*(args: openArray[string];
       stderr.writeLine("repro test: no certificate — the run did not pass " &
         "(result is not 'passed'); fix the failing targets and re-run")
     else:
-      let cert = issueCertificate(pre, outcome.passedTargets,
+      var cert = issueCertificate(pre, outcome.passedTargets,
         "repro-test@" & issuerHostTag())
+      # TC-5: the daemon signs the canonical certificate payload (ed25519) as a
+      # side effect of THIS observed clean+passing run. Signing is reachable
+      # ONLY here (the issuance path) — there is no "sign this blob" command.
+      # Fail closed: if the daemon cannot sign (no key / no ssh-keygen), no
+      # certificate is written — we never emit an unsigned/faked one.
+      let keyId = reproSigningKeyId()
+      let keyPath = reproSigningKeyPath(opts.certWorkspaceRoot)
+      try:
+        signCertificateOnIssuance(cert, keyId, keyPath)
+      except CertificateSigningError as err:
+        stderr.writeLine("repro test: no certificate — the daemon could not " &
+          "sign it (" & err.msg & "); the attestation is withheld")
+        return code
       writeCertificateFile(cert, certOut)
       stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
         " covering [" & outcome.passedTargets.join(", ") & "] for " &
         cert.platform & " at " & cert.commit & " → " & certOut &
-        " (unsigned; signing lands in TC-5)")
+        " (signed " & certificateSignatureAlgorithm & ", key_id=" &
+        cert.keyId & ")")
     return code
   return runWorkspaceModeShard(opts, peer, publicCliPath)
 

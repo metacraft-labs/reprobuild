@@ -34,6 +34,14 @@ import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
 
+# TC-5 reconciliation: the gate now requires a VALID REGISTERED SIGNATURE, not
+# just coverage. The covering cert must be daemon-signed (ed25519) by a key
+# whose public half is REGISTERED in the workspace allowed-signers store. These
+# helpers generate that key, point issuance at it, and register it.
+include tc5_cert_signing_helpers
+
+const tc3KeyId = "tc3-daemon-key"
+
 proc q(value: string): string = quoteShell(value)
 
 proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
@@ -109,6 +117,7 @@ type
     libAOrigin: string
     libAPath: string
     libASha: string
+    daemonKey: string   ## ed25519 private key the daemon signs issuance with
 
 proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
   let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
@@ -133,6 +142,12 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   writeProjectManifest(result, certificatesTable)
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  # TC-5: generate the daemon signing key and register its public half so the
+  # cert the TC-1 path issues is daemon-signed AND trusted by the gate.
+  let key = genEd25519Key(result.scratch / "daemon-keys", "tc3-key", tc3KeyId)
+  result.daemonKey = key.priv
+  writeRegistry(workspaceRoot,
+    @[RegisteredKey(keyId: tc3KeyId, publicKey: key.pub, status: rksActive)])
 
 proc seedLock(fx: Fixture) =
   let res = runShell(shellCommand(@[
@@ -174,7 +189,8 @@ proc issueRealCert(fx: Fixture; fixtureJson: string): CmdResult =
     "--shard=1/1",
     "--certify",
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath]), fx.workspaceRoot)
+    "--current-repo=" & fx.libAPath],
+    daemonKeyEnv(fx.daemonKey, tc3KeyId)), fx.workspaceRoot)
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
@@ -293,9 +309,17 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       # Attach a SECOND cert for the other platform (same commit + lock, a
       # different platform + the required target). Now the UNION of the two
       # certs covers BOTH required platforms.
+      #
+      # TC-5: the second cert must be GENUINELY daemon-signed for its OWN
+      # canonical payload (a different platform changes the signed bytes), so we
+      # re-sign with the same daemon key — modelling "run `repro certify` on a
+      # worker for the other platform". A naive copy of cert 1's signature would
+      # NOT verify (different payload) and the gate would correctly drop it.
       var cert2 = cert
       cert2.platform = otherPlatform
       cert2.targets = @["t-unit"]
+      cert2.signature = TestCertificateSignature()  # clear cert 1's signature
+      signCertificateOnIssuance(cert2, tc3KeyId, fx.daemonKey)
       let att2 = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert2)
       check att2.ok
 

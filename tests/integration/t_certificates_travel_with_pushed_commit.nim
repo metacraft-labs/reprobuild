@@ -22,13 +22,21 @@
 ##   - no mismatch filter → the wrong-commit cert is returned → assert 3 fails.
 ##
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no network.
-## Skip rule: ``git`` missing on PATH.
+## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
+##
+## TC-5: issuance now signs the certificate, so the TC-1 issuance helper here
+## provides a daemon signing key. The transport assertions are unchanged — a
+## signed cert travels exactly like an unsigned one did.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+
+include tc5_cert_signing_helpers
+
+const tc2KeyId = "tc2-daemon-key"
 
 proc q(value: string): string = quoteShell(value)
 
@@ -104,6 +112,7 @@ type
     libAOrigin: string
     libAPath: string
     libASha: string
+    daemonKey: string
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc2-" & slug & "-", "")
@@ -124,6 +133,12 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.libAPath = workspaceRoot / "lib-a"
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  # TC-5: issuance signs the cert — provide + register a daemon key.
+  if findExe("ssh-keygen").len > 0:
+    let key = genEd25519Key(result.scratch / "daemon-keys", "tc2-key", tc2KeyId)
+    result.daemonKey = key.priv
+    writeRegistry(workspaceRoot,
+      @[RegisteredKey(keyId: tc2KeyId, publicKey: key.pub, status: rksActive)])
 
 proc seedLock(fx: Fixture) =
   let res = runShell(shellCommand(@[
@@ -165,7 +180,8 @@ proc issueRealCert(fx: Fixture; fixtureJson: string): CmdResult =
     "--shard=1/1",
     "--certify",
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath]), fx.workspaceRoot)
+    "--current-repo=" & fx.libAPath],
+    daemonKeyEnv(fx.daemonKey, tc2KeyId)), fx.workspaceRoot)
 
 proc invokePush(fx: Fixture): CmdResult =
   ## ``--no-certify`` so the push's own certify slot stays a no-op; the
@@ -195,7 +211,7 @@ suite "TC-2 — certificates travel with the pushed commit":
 
   test "t_certificates_travel_with_pushed_commit":
     let gitBin = findExe("git")
-    if gitBin.len == 0:
+    if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip()
     else:
       let fx = setupFixture(gitBin, "travel")

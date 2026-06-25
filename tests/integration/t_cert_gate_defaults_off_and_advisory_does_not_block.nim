@@ -30,6 +30,12 @@ import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
 
+# TC-5: issuance signs the cert; the advisory "coverage OK" case (c) needs the
+# issued cert to be signed by a registered key. These helpers provide it.
+include tc5_cert_signing_helpers
+
+const ra32KeyId = "ra32-daemon-key"
+
 proc q(value: string): string = quoteShell(value)
 
 proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
@@ -105,6 +111,7 @@ type
     libAOrigin: string
     libAPath: string
     libASha: string
+    daemonKey: string
 
 proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
   let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
@@ -129,6 +136,15 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   writeProjectManifest(result, certificatesTable)
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  # TC-5: provide + register a daemon signing key so issued certs are signed
+  # and trusted (the advisory "coverage OK" case needs a trusted cert).
+  if findExe("ssh-keygen").len > 0:
+    let key = genEd25519Key(result.scratch / "daemon-keys", "ra32-key",
+      ra32KeyId)
+    result.daemonKey = key.priv
+    writeRegistry(workspaceRoot,
+      @[RegisteredKey(keyId: ra32KeyId, publicKey: key.pub,
+        status: rksActive)])
 
 proc seedLock(fx: Fixture) =
   let res = runShell(shellCommand(@[
@@ -168,7 +184,8 @@ proc issueRealCert(fx: Fixture; fixtureJson: string): CmdResult =
     "--shard=1/1",
     "--certify",
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath]), fx.workspaceRoot)
+    "--current-repo=" & fx.libAPath],
+    daemonKeyEnv(fx.daemonKey, ra32KeyId)), fx.workspaceRoot)
 
 proc invokeCheckPrePush(fx: Fixture; refsFile: string): CmdResult =
   runShell(shellCommand(@[
@@ -213,7 +230,7 @@ suite "RA-32 — certificate gate defaults off; advisory never blocks":
 
   test "t_cert_gate_defaults_off_and_advisory_does_not_block":
     let gitBin = findExe("git")
-    if gitBin.len == 0:
+    if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip()
     else:
       # ---- (a) DEFAULT: NO `[certificates]` policy at all → no cert check -

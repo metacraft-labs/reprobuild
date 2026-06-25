@@ -7,20 +7,31 @@
 ##
 ## Sub-cases (all hermetic, real local bare repos, no network):
 ##   1. clean + passing target → a certificate is written, covers the target,
-##      binds to HEAD, and is unsigned (TC-5 deferral).
+##      binds to HEAD, and (TC-5) is daemon-SIGNED (ed25519) by the registered
+##      key.
 ##   2. ``--no-certify`` → no certificate file is written (tests still run).
 ##   3. a FAILING target → no certificate (result is not 'passed').
+##
+## TC-5 reconciliation: issuance now signs the certificate, so the clean-issue
+## case provides a daemon signing key (via ``REPRO_DAEMON_SIGNING_KEY``) and the
+## former "unsigned" assertion becomes a "signed + verifies against the
+## registered key" assertion. The issuance still happens — only the signature is
+## now populated.
 ##
 ## Falsifiability: forcing issuance for a failing run, or breaking the verifier
 ## coverage union, makes a check below fail. See the milestone note.
 ##
-## Skip rule: ``git`` missing on PATH.
+## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+
+include tc5_cert_signing_helpers
+
+const tc1KeyId = "tc1-daemon-key"
 
 proc q(value: string): string = quoteShell(value)
 
@@ -96,6 +107,7 @@ type
     libAOrigin: string
     libASeed: string
     libASha: string
+    daemonKey: string   ## ed25519 private key the daemon signs issuance with
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1-" & slug & "-", "")
@@ -115,6 +127,13 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
   cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
+  # TC-5: the daemon signs issuance — provide a key and register its public
+  # half so the issued cert is signed AND verifies against the registry.
+  if findExe("ssh-keygen").len > 0:
+    let key = genEd25519Key(result.scratch / "daemon-keys", "tc1-key", tc1KeyId)
+    result.daemonKey = key.priv
+    writeRegistry(workspaceRoot,
+      @[RegisteredKey(keyId: tc1KeyId, publicKey: key.pub, status: rksActive)])
 
 proc seedLock(fx: Fixture) =
   let res = runShell(shellCommand(@[
@@ -160,7 +179,8 @@ proc runReproTest(fx: Fixture; fixtureJson: string;
   for a in extra: args.add(a)
   # Run from the workspace root (not an in-scope git repo) so the shard
   # runner's ``test-logs/`` artifacts never dirty ``lib-a`` and skew the gate.
-  runShell(shellCommand(args), fx.workspaceRoot)
+  runShell(shellCommand(args, daemonKeyEnv(fx.daemonKey, tc1KeyId)),
+    fx.workspaceRoot)
 
 proc certPath(fx: Fixture): string =
   defaultCertificatePath(fx.workspaceRoot, fx.libASha, currentPlatformTag())
@@ -169,7 +189,7 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
 
   test "t_repro_test_issues_certificate_by_default_in_clean_state":
     let gitBin = findExe("git")
-    if gitBin.len == 0:
+    if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip()
     else:
       let fx = setupFixture(gitBin, "clean")
@@ -194,10 +214,15 @@ suite "TC-1 — repro test issues a certificate by default in a clean state":
       check cert.result == tcrPassed
       check "t-unit" in cert.targets
       check cert.lock.len > 0 and cert.lock.startsWith("blake3:")
-      # TC-5 deferral: the certificate is explicitly UNSIGNED at TC-1.
-      check (not cert.isSigned)
-      check cert.signature.algorithm.len == 0
-      check cert.signature.value.len == 0
+      # TC-5: the certificate is now daemon-SIGNED (ed25519) by the registered
+      # key, and the signature verifies against the workspace registry.
+      check cert.isSigned
+      check cert.signature.algorithm == certificateSignatureAlgorithm
+      check cert.signature.value.len > 0
+      check cert.keyId == tc1KeyId
+      let regStore = readRegisteredKeyStore(
+        registeredKeyStorePath(fx.workspaceRoot))
+      check verifyCertificateSignature(cert, regStore) == svValid
 
       # Verifier: the cert covers (commit, lock, platform, [t-unit]).
       let req = CoverageRequirement(
