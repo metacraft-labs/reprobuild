@@ -2790,6 +2790,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    # macOS sandbox-tools recipes — fixture-level registry + Mode B recognition.
+    # ``reproProviderMode`` is required because the test imports the
+    # c_cpp_autotools convention (for ``detectModeBTrigger``), which only
+    # compiles its package-fragment surface under that define.
+    source: "recipes/sandbox-tools/test_sandbox_tools.nim",
+    binary: "build/test-bin/test_sandbox_tools",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "recipes/packages/source/cryptsetup/test_cryptsetup_source.nim",
     binary: "build/test-bin/test_cryptsetup_source",
     defines: @[],

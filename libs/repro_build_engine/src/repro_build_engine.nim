@@ -2017,6 +2017,29 @@ proc launchChildEnv(action: BuildAction;
   let shimLib = findShimLibrary()
   if shimLib.len > 0:
     result.add("REPRO_MONITOR_SHIM_LIB=" & shimLib)
+  when defined(macosx):
+    # Portable-Macos-Sandbox-Tools: select the io-mon macOS monitoring backend
+    # for every monitored action's process tree. The io-mon shim reads
+    # ``IO_MON_MACOS_BACKEND`` in its dyld constructor (default ``both`` =
+    # interpose + body-patch). On this Apple-Silicon (arm64e) host the
+    # body-patch backend is known to crash gnulib/clang subprocesses (it
+    # corrupts the monitored compiler's ``open``/``read`` of its own
+    # nimcache ``.nim.c`` files — observed as ``Permission denied`` / SIGTRAP
+    # exit 133), which aborts the engine's own ``__repro_provider_compile``
+    # and any autotools ``configure``/``make`` action before its dep set can
+    # be captured. The interpose-only backend does NOT body-patch, so it does
+    # not trip that crash while still capturing the direct-spawn read/write
+    # dep set. We therefore default monitored actions to ``interpose`` on
+    # macOS. This is a constant seed (like ``REPRO_MONITOR_SHIM_LIB`` above),
+    # so it does not perturb the action-cache fingerprint.
+    #
+    # An explicit parent-process ``IO_MON_MACOS_BACKEND`` (e.g. a test that
+    # wants the ``both`` body-patch coverage) wins: the seed is only added
+    # when the parent did not already set the variable, and ``action.env``
+    # overrides still win because they are appended after this seed. The
+    # full body-patch arm64e fix is a tracked io-mon follow-up.
+    if not existsEnv("IO_MON_MACOS_BACKEND"):
+      result.add("IO_MON_MACOS_BACKEND=interpose")
   for entry in action.env:
     result.add(entry)
   # M9.N Batch B: the resolved-tool ``PATH`` prepend happens in
@@ -2805,6 +2828,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # ``completed < buildGraph.actions.len`` so a freshly inserted action keeps
   # the loop alive.
   var buildGraph = inferDeclaredActionDeps(g)
+  when defined(macosx):
+    # Portable-Macos-Sandbox-Tools fallback: on macOS / Apple Silicon the
+    # io-mon monitor (both the body-patch AND, for some heavy build trees, the
+    # interpose-only backend) intermittently SIGTRAPs the tool subprocesses an
+    # autotools ``configure``/``make`` spawns (e.g. the ``sed`` that writes
+    # ``lib/configmake.h``; observed ``Trace/BPT trap: 5`` → exit 133), which
+    # aborts the build before its dependency set can be captured. When
+    # ``REPRO_MACOS_DISABLE_ACTION_MONITOR=1`` is set, the engine downgrades every
+    # monitored action to a declared-only (unmonitored) policy so the action
+    # RUNS and PRODUCES its outputs. The action's static inputs/outputs +
+    # cache fingerprint still gate rebuilds; what is lost is runtime read-set
+    # discovery — an explicit, opt-in trade documented as a tracked io-mon
+    # arm64e follow-up (Portable-Macos-Sandbox-Tools.milestones.org). Off by
+    # default, so no existing suite changes behaviour. The knob is honoured
+    # here, once, before any monitor-evidence / wrap logic reads the policy.
+    if getEnv("REPRO_MACOS_DISABLE_ACTION_MONITOR") == "1":
+      for action in buildGraph.actions.mitems:
+        if action.dependencyPolicy.kind in MonitorPolicyKinds:
+          action.dependencyPolicy = DependencyGatheringPolicy(
+            kind: dgNoRuntimeDependencies,
+            completeness: decComplete,
+            ignoredInputPrefixes: action.dependencyPolicy.ignoredInputPrefixes)
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace

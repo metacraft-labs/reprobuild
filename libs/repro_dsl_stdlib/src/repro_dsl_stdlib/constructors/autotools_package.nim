@@ -177,20 +177,42 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
   # letter) as ``host:`` -- without it, ``tar -xf D:/.../foo.tar``
   # fails with ``tar: Cannot connect to D: resolve failed`` on Windows
   # tar implementations (MSYS2 / Git-for-Windows) that default to
-  # rsh-style host parsing. Linux/macOS GNU tar accepts the same flag
-  # silently so the script stays portable. See:
+  # rsh-style host parsing. See:
   # https://www.gnu.org/software/tar/manual/html_node/local.html
-  script.add("tar --force-local -xf \"" & escapedTarball & "\" -C \"" &
+  #
+  # Portable-Macos-Sandbox-Tools: the flag is GNU-tar-only. macOS ships
+  # Apple's BSD ``tar`` (``/usr/bin/tar`` is libarchive ``bsdtar``), which
+  # REJECTS ``--force-local`` with ``Option --force-local is not supported``
+  # and aborts the extract. BSD tar also never does rsh-style host parsing on
+  # a leading drive letter, so the flag is unnecessary off Windows. Emit it
+  # only on Windows, where the MSYS2/Git GNU tar needs it. Linux GNU tar would
+  # accept it but does not need it either, so gating on Windows keeps the
+  # emitted script minimal and portable across all three host tar flavours.
+  let tarForceLocal = when defined(windows): "--force-local " else: ""
+  script.add("tar " & tarForceLocal & "-xf \"" & escapedTarball & "\" -C \"" &
     escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
+  # Portable-Macos-Sandbox-Tools: the fetch action's dependency evidence is the
+  # declared URL + content hash (already folded into the action fingerprint and
+  # the emitted stamp), NOT a set of read files we need the io-mon monitor to
+  # discover. Monitoring it would force the download/verify/extract helpers
+  # (``curl`` / ``sha256sum`` / ``tar``) — all SIP-protected system binaries on
+  # macOS — through the io-mon SIP drop-in redirect, which has no drop-in for
+  # ``curl`` / ``sha256sum`` and so fails the fetch (exit 127) when bootstrapping
+  # the very sandbox-tools bundle that would supply those drop-ins (a
+  # chicken-and-egg). A declared-only (unmonitored) policy is both correct
+  # (download+verify+extract produces no monitorable file-dependency evidence)
+  # and avoids that bootstrap deadlock. See
+  # reprobuild-specs/Language-Conventions/C-Cpp-Autotools.md (the fetch step is a
+  # source-acquisition action, not a compile/link with implicit inputs).
   let act = buildAction(
     id = autotoolsFetchActionId(packageName),
     call = inlineExecCall(argv),
     inputs = @[],
     outputs = @[stamp],
     pool = "fetch",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = declaredOnlyDependencyPolicy(),
     commandStatsId = "autotools_package.fetch." & hashAlgTag,
     toolIdentityRefs = @["sh"])
   some(act)
