@@ -644,6 +644,29 @@ for d in /nix/store/*/lib; do
   case "$d" in
     /nix/store/*-glibc-*/lib) continue ;;
   esac
+  # M9.R.38.3 — skip ANY nix-store Qt6 prefix.  The installer is
+  # compiled + RPATH'd against ``/opt/repro/.../qt6-base/.repro/
+  # output/install/usr/lib/libQt6Core.so.6.8.1``, but the de-rootfs
+  # mirror also ships an UNRELATED ``zp6r9bxds...-qtbase-6.10.1/lib/``
+  # tree pulled in as a transitive of layer-shell-qt-6.5.3 (which is
+  # in the DE closure).  Without this skip the launcher's qt-6/plugins
+  # / qt-6/qml walk below picks up the 6.10.1 plugin tree as well, and
+  # the Qt 6.8.1 binary loading a 6.10.1 ``libqoffscreen.so`` /
+  # ``QtQuick.Controls`` plugin trips C++ ABI mismatch -> heap
+  # corruption -> ``munmap_chunk(): invalid pointer`` on init, SIGABRT
+  # before Phase 1.  The qt6-base + qt6-declarative + qt6-quickcontrols2
+  # the installer needs live at /opt/repro/... paths the RPATH already
+  # covers; no nix-store Qt6 mirror is required.
+  case "$d" in
+    /nix/store/*-qtbase-*/lib | \
+    /nix/store/*-qtdeclarative-*/lib | \
+    /nix/store/*-qt5compat-*/lib | \
+    /nix/store/*-layer-shell-qt-*/lib | \
+    /nix/store/*-kquickcharts-*/lib | \
+    /nix/store/*-qtquickcontrols*/lib | \
+    /nix/store/*-qttools-*/lib | \
+    /nix/store/*-qtwayland-*/lib) continue ;;
+  esac
   # M9.R.37.5: include ONLY dirs that ship a library the ``repro``
   # binary's Nim {.dynlib: "..."} pragma resolves by bare leaf name:
   #   * libclingo.so      (libs/repro_solver/.../clingo_bindings.nim)
@@ -680,6 +703,24 @@ for d in /nix/store/*/lib; do
     else
       _repro_qml_imports="$_repro_qml_imports:$d/qt-6/qml"
     fi
+  fi
+done
+# M9.R.38.3 — the installer's RPATH points to /opt/repro/.../qt6-base
+# /.repro/output/install/usr/lib/qt-6/plugins/ + qt6-declarative's
+# qt-6/qml/.  Wire those EXPLICITLY since the loop above only walks
+# /nix/store; without this Qt finds no plugins + falls back to system
+# Debian Qt6 (which doesn't exist in the live DE rootfs) + crashes on
+# QtQuick init.
+for repro_qt_pkg in qt6-base qt6-declarative qt6-quickcontrols2 qt6-tools; do
+  qtpkg_dir="/opt/repro/reprobuild/recipes/packages/source/${repro_qt_pkg}/.repro/output/install/usr/lib"
+  if [ -d "${qtpkg_dir}/qt-6/plugins" ]; then
+    _repro_qt_plugins="${qtpkg_dir}/qt-6/plugins${_repro_qt_plugins:+:$_repro_qt_plugins}"
+    if [ -d "${qtpkg_dir}/qt-6/plugins/platforms" ]; then
+      _repro_qpa_plugins="${qtpkg_dir}/qt-6/plugins/platforms${_repro_qpa_plugins:+:$_repro_qpa_plugins}"
+    fi
+  fi
+  if [ -d "${qtpkg_dir}/qt-6/qml" ]; then
+    _repro_qml_imports="${qtpkg_dir}/qt-6/qml${_repro_qml_imports:+:$_repro_qml_imports}"
   fi
 done
 # Append caller-supplied paths last so any operator override wins.
