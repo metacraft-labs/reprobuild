@@ -602,7 +602,24 @@ package plasmaWorkspaceSource:
         # We then insert a single ``}\n\n`` before
         # cleanupPlasmaEnvironment to restore the function close.
         "sed -i '/^    const KConfig globals;$/,/^void cleanupPlasmaEnvironment/{ /^void cleanupPlasmaEnvironment/!d; }' src/startkde/startplasma.cpp",
-        "sed -i 's|^void cleanupPlasmaEnvironment|}\\n\\nvoid cleanupPlasmaEnvironment|' src/startkde/startplasma.cpp",
+        # M9.R.35.10 — the brace-insert below was non-idempotent under
+        # the M9.R.34 recipe-revision cache-invalidation regime.
+        # The original ``sed s|^void cleanup|}\\n\\nvoid cleanup|``
+        # inserted a closing ``}`` every time the patches ran; pre-M9.R.34
+        # the patch-action cache was hit on no-source-edit so the sed
+        # ran exactly once.  Post-M9.R.34, every edit to ``repro.nim``
+        # buses the patch-action's weakFingerprint and the sed re-runs,
+        # producing TWO (then THREE, ...) closing braces and a compile
+        # error ``startplasma.cpp:379:1: expected declaration before '}'
+        # token``.  Idempotent shape: only insert ``}`` if the line
+        # immediately before ``void cleanupPlasmaEnvironment`` is not
+        # already ``}``.
+        # Use perl's negative lookbehind ``(?<!\\}\\n\\n)`` to ensure
+        # the insertion only fires when ``}\\n\\n`` doesn't already
+        # immediately precede ``void cleanupPlasmaEnvironment``.
+        # Truly idempotent: a second invocation finds the pattern
+        # already there and is a no-op.
+        "perl -0777 -i -pe 's/(?<!\\}\\n\\n)void cleanupPlasmaEnvironment/}\\n\\nvoid cleanupPlasmaEnvironment/m;' src/startkde/startplasma.cpp",
         # Drop the ``lookandfeelmanager`` entry from the startplasma
         # OBJECT lib's target_link_libraries.  The startkde
         # CMakeLists block:
