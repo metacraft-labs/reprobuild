@@ -1090,6 +1090,22 @@
         "type": "github"
       }
     },
+    "io-mon-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782266820,
+        "narHash": "sha256-xtT1pqRkbq2c7BeHPZDdvnzc0oZz7I0xlrLayTsiciQ=",
+        "owner": "metacraft-labs",
+        "repo": "io-mon",
+        "rev": "fb106b6fb560b98d0d907ecf5662ad4199ae1076",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "io-mon",
+        "type": "github"
+      }
+    },
     "llm-agents": {
       "inputs": {
         "blueprint": "blueprint",
@@ -2019,6 +2035,7 @@
           "nixos-modules",
           "git-hooks-nix"
         ],
+        "io-mon-src": "io-mon-src",
         "nimcrypto-src": "nimcrypto-src",
         "nixos-modules": "nixos-modules",
         "nixpkgs": [
@@ -2034,16 +2051,16 @@
     "runquota-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1780706093,
-        "narHash": "sha256-Du8M6rmqKvP0nVzMDeXjGZEj0DWE6iDFw++UCEkn384=",
+        "lastModified": 1782279680,
+        "narHash": "sha256-xFJ30wKib5O1KLgiGchzCF3G4rPsEEsx8DdQoJxzEzM=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "87524764128109d433d0c3356d9b1edb5a60cbc6",
+        "rev": "aa3a30182ec11be9bc703f8b5b6fcf5a2ab625c4",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
-        "ref": "main",
+        "ref": "dev",
         "repo": "runquota",
         "type": "github"
       }

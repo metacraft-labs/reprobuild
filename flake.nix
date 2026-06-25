@@ -7,7 +7,22 @@
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
     runquota-src = {
-      url = "github:metacraft-labs/runquota/main";
+      # runquota's mainline is ``dev``; ``main`` is stale and lacks the
+      # bounded grant-stream API (``pollNextGrantBounded`` / ``GrantPollResult``)
+      # that repro_runquota now compiles against. The ``test`` CI job already
+      # overrides this to the ``dev`` sibling clone; pin the default here so the
+      # override-free ``lint`` and ``nix-build`` jobs resolve the same source.
+      url = "github:metacraft-labs/runquota/dev";
+      flake = false;
+    };
+    io-mon-src = {
+      # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
+      # + ABI relocation of the former repro_monitor_depfile / shim / hooks
+      # stack). The build engine, CLI fs-snoop driver and monitor tests import
+      # it; config.nims reads IO_MON_SRC (then falls back to a ``../io-mon``
+      # sibling). Like the other source inputs, the sandboxed package build and
+      # the override-free CI jobs have no sibling, so seed it from this input.
+      url = "github:metacraft-labs/io-mon";
       flake = false;
     };
     nimcrypto-src = {
@@ -76,6 +91,7 @@
       reprobuild-test-adapters-src,
       codetracer-native-recorder,
       runquota-src,
+      io-mon-src,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -166,6 +182,7 @@
                 export NIMCRYPTO_SRC=${nimcrypto-src}
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
+                export IO_MON_SRC=${io-mon-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
@@ -217,6 +234,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            IO_MON_SRC = "${io-mon-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
@@ -288,6 +306,7 @@
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
+            IO_MON_SRC = "${io-mon-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
