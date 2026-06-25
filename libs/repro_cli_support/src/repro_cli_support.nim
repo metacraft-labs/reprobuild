@@ -70,18 +70,17 @@ import repro_home_resources/drivers/managed_block
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
 import repro_peer_cache
-# Incremental-Test-Runner M0b-2: the pure skip/re-run seam
-# (``watchTestEdgeDecision``) the ``--ct-incremental`` watch hook calls on each
-# filesystem-change cycle is now provided by the engine-free
-# ``reprobuild-ct-test-runner`` ADAPTER (Nim module ``ct_incremental_adapter``),
-# which is backed by codetracer's CANONICAL incremental engine
-# (``codetracer/src/ct_test/incremental``) — NOT a vendored copy. The adapter
-# re-exports codetracer's engine (``record``/``decide``/``loadCache``/
-# ``saveCache``/``initCache``/``defaultCachePath``) alongside the
-# ``watchTestEdgeDecision`` / ``WatchEdgeDecision`` / ``weaSkip`` / ``weaRun``
-# value contract, so this call site's logic is unchanged from the former
-# vendored ``repro_ct_incremental`` import (M0b kept the types/signature
-# byte-faithful). The sibling/engine paths are wired in ``config.nims``.
+# Incremental-Test-Runner: the skip/re-run seam (``watchTestEdgeDecision``) the
+# ``--ct-incremental`` watch hook calls on each filesystem-change cycle, and the
+# post-run cache refresh (``recordWatchTestEdge``), are provided by the engine-
+# free ``reprobuild-ct-test-runner`` ADAPTER (Nim module ``ct_incremental_adapter``).
+# The adapter reaches codetracer's CANONICAL incremental engine
+# (``codetracer/src/ct_test/incremental``) by EXECUTING the ``ct`` binary as a
+# subprocess (``ct test --incremental --watch-decide`` / ``--watch-record``) —
+# so reprobuild compiles ONLY the thin adapter (std-only), never codetracer's
+# engine. The adapter exposes the ``WatchEdgeDecision`` / ``weaSkip`` / ``weaRun``
+# value contract plus ``defaultCachePath`` / ``recordWatchTestEdge``; the ``ct``
+# binary is resolved at runtime from ``$CT_BIN`` or ``PATH``.
 import ct_incremental_adapter
 # Spec-Implementation M2e — ``repro lock explain`` consumes the
 # explainer surface to render structured chosen / unsat justifications.
@@ -14198,26 +14197,18 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         return outcome.exitCode
       # Trace-Based-Incremental-Testing M2: the test edge actually ran this
       # cycle (fresh/changed/initial), so refresh the incremental cache from
-      # the freshly-produced trace. ``record`` recomputes the executed-function
-      # dependency set + deep hash; a missing/unreadable trace is reported but
-      # not fatal — the next decision then falls back to a re-run (fail-safe).
+      # the freshly-produced trace. ``recordWatchTestEdge`` execs codetracer's
+      # ``ct test --incremental --watch-record`` (record + persist in one step);
+      # a missing/unreadable trace or a failed ``ct`` is reported but not fatal —
+      # the next decision then falls back to a re-run (fail-safe).
       if ctFlags.enabled:
-        var ctCache = block:
-          let loaded = loadCache(ctCachePath)
-          if loaded.isOk: loaded.value else: initCache(ctCachePath)
-        let rec = record(ctCache, ctTestId, ctTraceDir, ctProjectRoot)
-        if rec.isErr:
+        let rec = recordWatchTestEdge(ctTestId, ctTraceDir, ctProjectRoot,
+          ctCachePath)
+        if not rec.ok:
           emitWatchLine("repro watch: ct-incremental record skipped (" &
               rec.error & ")",
             payloadJson = "{\"watchEvent\":\"ct-incremental\",\"decision\":" &
               "\"record-error\"}")
-        else:
-          let saved = saveCache(ctCache)
-          if saved.isErr:
-            emitWatchLine("repro watch: ct-incremental cache save failed (" &
-                saved.error & ")",
-              payloadJson = "{\"watchEvent\":\"ct-incremental\",\"decision\":" &
-                "\"save-error\"}")
       # Named-Targets M4: per-target HCR session lifecycle. Each enabled
       # session runs its own baseline (cycle 1) or patch delivery (cycle
       # N>1). A failure on any single session is isolated: the session

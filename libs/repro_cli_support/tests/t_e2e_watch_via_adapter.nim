@@ -1,88 +1,140 @@
-## t_e2e_watch_via_adapter — Incremental-Test-Runner M0b-2/M0b-3 verification:
+## t_e2e_watch_via_adapter — Incremental-Test-Runner verification:
 ## ``repro watch --ct-incremental`` decides skip/re-run THROUGH the engine-free
-## ``reprobuild-ct-test-runner`` adapter, with reprobuild's former vendored
-## engine copy (``libs/repro_ct_incremental``) DELETED.
+## ``reprobuild-ct-test-runner`` adapter, which reaches codetracer's CANONICAL
+## engine by EXECUTING the ``ct`` binary (``ct test --incremental
+## --watch-decide`` / ``--watch-record``) — reprobuild's former vendored engine
+## copy (``libs/repro_ct_incremental``) is DELETED and reprobuild no longer
+## compiles codetracer's engine at all.
 ##
 ## What this test exercises (the cutover call path)
 ## ------------------------------------------------
-## ``repro_cli_support``'s ``repro watch --ct-incremental`` loop calls the pure
-## ``watchTestEdgeDecision(testId, traceDir, sourceRoot, cachePath)`` seam on each
-## rebuild cycle and acts on the returned ``WatchEdgeDecision`` (``weaSkip`` ⇒
-## report "skipped (unchanged)" and keep watching; otherwise re-run + ``record``).
-## Before M0b-2 that seam came from reprobuild's vendored ``repro_ct_incremental``;
-## after the cutover it comes from the ADAPTER (Nim module
-## ``ct_incremental_adapter``), backed by codetracer's CANONICAL engine
-## (``codetracer/src/ct_test/incremental``).
+## ``repro_cli_support``'s ``repro watch --ct-incremental`` loop calls
+## ``watchTestEdgeDecision(testId, traceDir, sourceRoot, cachePath)`` each cycle
+## and acts on the returned ``WatchEdgeDecision`` (``weaSkip`` ⇒ "skipped
+## (unchanged)"; otherwise re-run + ``recordWatchTestEdge``). This test imports
+## the seam EXACTLY as ``repro_cli_support`` does (``import ct_incremental_adapter``)
+## — so it goes through reprobuild's OWN ``config.nims`` wiring — and verifies
+## the seam in two complementary layers:
 ##
-## This test imports the seam EXACTLY as ``repro_cli_support`` does (``import
-## ct_incremental_adapter``) — so it goes through reprobuild's OWN ``config.nims``
-## wiring (the adapter sibling path + ``wireCodetracerEngine``). It then drives
-## the seam over codetracer's committed ``m0_three_funcs`` fixture, reproducing
-## the watch hook's cycle-1 ``record`` + cycle>1 ``watchTestEdgeDecision`` flow:
-##
-##   * an UNCHANGED source ⇒ ``weaSkip`` (the watch loop skips the rebuild);
-##   * editing an EXECUTED function (``used_a``) ⇒ ``weaRun`` naming it (re-run);
-##   * editing a NON-executed function (``unused_c``) ⇒ ``weaSkip``;
-##   * a malformed cache ⇒ ``weaRun`` fail-safe (``error:``), never a silent skip;
-##   * the engine's own ``decide`` is cross-checked so the verdict is PROVEN to be
-##     codetracer's engine deciding (not a constant), and ``record``/``saveCache``/
-##     ``loadCache`` (re-exported through the adapter) round-trip the cache.
-##
-## This is the strongest level runnable here: it drives the full decision call
-## path the watch loop uses, with the vendored lib gone, against a real recorded
-## cache. The full LIVE ``repro watch`` loop (filesystem watcher + a live
-## recorder re-tracing the edge each cycle) needs a host with a recorder and is
-## gated the same way the campaign gates live recorder runs; this test asserts
-## everything BELOW that live boundary — the decision, the cache round-trip, and
-## that the adapter (not a vendored copy) is what reprobuild resolves.
-##
-## NOT FAKED: the decisions come from codetracer's engine over a real on-disk
-## cache materialized by the engine's own ``record``. If the cutover wiring were
-## wrong (adapter unresolved, engine unresolved, vendored copy still shadowing),
-## this file would not compile.
+##   1. ALWAYS (standalone, no codetracer): drive the seam against a FAKE ``ct``
+##      (a tiny script via ``$CT_BIN``) emitting each engine outcome, asserting
+##      the adapter execs ct, parses its JSON, and maps it to the
+##      ``WatchEdgeDecision`` contract — including the fail-safe that any ct
+##      failure is a re-run, NEVER a silent skip. This is reprobuild's own
+##      responsibility (the seam wiring); the decision logic itself is owned and
+##      tested by codetracer.
+##   2. WHEN ``$CT_BIN`` points at a REAL ``ct`` (CI builds it in the codetracer
+##      sibling): a genuine end-to-end over codetracer's committed
+##      ``m0_three_funcs`` fixture — ``recordWatchTestEdge`` builds the cache via
+##      ``ct --watch-record``, then ``watchTestEdgeDecision`` decides via
+##      ``ct --watch-decide`` — asserting an unchanged source skips, editing an
+##      executed function re-runs naming it, and editing a non-executed function
+##      skips. This proves the real engine decides through the subprocess seam.
 
 import std/[unittest, os, strutils, times]
 
-# Imported EXACTLY as ``repro_cli_support`` imports it after the M0b-2 cutover.
-# The adapter exposes ``watchTestEdgeDecision`` + ``WatchEdgeDecision`` /
-# ``weaSkip`` / ``weaRun`` and re-exports codetracer's canonical engine
-# (``initCache`` / ``record`` / ``saveCache`` / ``loadCache`` / ``decide`` / the
-# ``IncrementalDecision*`` kinds).
+# Imported EXACTLY as ``repro_cli_support`` imports it. The adapter exposes
+# ``watchTestEdgeDecision`` / ``recordWatchTestEdge`` / ``defaultCachePath`` +
+# the ``WatchEdgeDecision`` / ``weaSkip`` / ``weaRun`` value contract, and
+# compiles against std only (no codetracer engine source).
 import ct_incremental_adapter
 
 # ---------------------------------------------------------------------------
-# Locate codetracer's committed m0_three_funcs fixture. Resolution mirrors
-# reprobuild's config.nims: CODETRACER_CT_TEST_SRC env, else the sibling
-# checkout next to the reprobuild repo root.
+# Layer 1 — fake ct: scripts each engine outcome so the adapter's exec+parse+map
+# is asserted standalone (no codetracer, no real engine).
 # ---------------------------------------------------------------------------
+
+let fakeCt = getTempDir() / "repro_watch_fake_ct.sh"
+
+proc installFakeCt() =
+  writeFile(fakeCt,
+    "#!/bin/sh\nprintf '%s\\n' \"$CT_FAKE_OUT\"\nexit ${CT_FAKE_CODE:-0}\n")
+  inclFilePermissions(fakeCt, {fpUserExec, fpGroupExec, fpOthersExec})
+  putEnv("CT_BIN", fakeCt)
+
+proc fakeDecide(output: string; code = 0): WatchEdgeDecision =
+  putEnv("CT_FAKE_OUT", output); putEnv("CT_FAKE_CODE", $code)
+  watchTestEdgeDecision("t::id", "/trace", "/root", "/cache.json")
+
+suite "repro watch seam — adapter exec/parse/map (fake ct)":
+
+  setup:
+    installFakeCt()
+  teardown:
+    delEnv("CT_BIN"); delEnv("CT_FAKE_OUT"); delEnv("CT_FAKE_CODE")
+
+  test "unchanged_source_skips":
+    let d = fakeDecide("""{"status":"skip","reason":"unchanged","changedFuncs":[]}""")
+    check d.action == weaSkip
+    check d.reason == "unchanged"
+    check d.testId == "t::id"
+
+  test "changed_executed_function_reruns_naming_it":
+    let d = fakeDecide(
+      """{"status":"run","reason":"changed: used_a","changedFuncs":["used_a"]}""")
+    check d.action == weaRun
+    check "used_a" in d.changedFuncs
+    check d.reason.startsWith("changed:")
+
+  test "no_cache_entry_runs_fresh":
+    let d = fakeDecide("""{"status":"run","reason":"fresh","changedFuncs":[]}""")
+    check d.action == weaRun
+    check d.reason == "fresh"
+
+  test "ct_failure_is_failsafe_run (never a silent skip)":
+    let d = fakeDecide("""{"status":"skip"}""", code = 1)
+    check d.action == weaRun
+    check d.reason.startsWith("error:")
+
+  test "recordWatchTestEdge maps ok and error":
+    putEnv("CT_FAKE_OUT", """{"ok":true,"error":""}"""); putEnv("CT_FAKE_CODE", "0")
+    check recordWatchTestEdge("t::id", "/trace", "/root", "/cache.json").ok
+    putEnv("CT_FAKE_OUT", """{"ok":false,"error":"trace missing"}""")
+    let r = recordWatchTestEdge("t::id", "/trace", "/root", "/cache.json")
+    check not r.ok
+    check r.error == "trace missing"
+
+suite "no reprobuild engine copy remains":
+
+  test "vendored repro_ct_incremental library is deleted":
+    # The former vendored engine copy must be GONE — the watch decision now
+    # flows through the adapter -> codetracer's `ct` binary.
+    let reproRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+    check not dirExists(reproRoot / "libs" / "repro_ct_incremental")
+
+  test "adapter compiles without codetracer's engine in reprobuild's build":
+    # Reaching this line proves reprobuild built `import ct_incremental_adapter`
+    # with NO engine source/trace-format-nim/results/zstd on the path — the whole
+    # point of the subprocess cutover. defaultCachePath is the pure helper.
+    check defaultCachePath("/proj") == "/proj" / ".ct-incremental" / "cache.json"
+
+# ---------------------------------------------------------------------------
+# Layer 2 — real ct end-to-end over codetracer's m0_three_funcs fixture, gated
+# on a built `ct` ($CT_BIN). Resolution mirrors reprobuild's config.nims:
+# CODETRACER_CT_TEST_SRC env, else the codetracer sibling next to the repo.
+# ---------------------------------------------------------------------------
+
+proc realCt(): string =
+  let b = getEnv("CT_BIN")
+  if b.len > 0 and fileExists(b): b else: ""
+
 proc ctTestSrcDir(): string =
   let env = getEnv("CODETRACER_CT_TEST_SRC")
-  if env.len > 0:
-    return env
-  # tests/<this file> -> repro_cli_support -> libs -> reprobuild root -> ws root
+  if env.len > 0: return env
   let reproRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
   reproRoot.parentDir / "codetracer" / "src" / "ct_test"
 
 let
-  fixturesDir = ctTestSrcDir() / "incremental" / "fixtures"
-  threeFuncsFixture = fixturesDir / "m0_three_funcs"
+  threeFuncsFixture = ctTestSrcDir() / "incremental" / "fixtures" / "m0_three_funcs"
   threeFuncsTrace = threeFuncsFixture / "trace"
   relSourcePath = "fixtures/m0_three_funcs/src/three_funcs.rb"
-  testId = "fixture::three_funcs"
-
-# Fail loudly (never skip) if the codetracer sibling/fixture is absent. The
-# build would already have failed to import the engine, but this pinpoints a
-# missing fixture distinctly.
-doAssert dirExists(threeFuncsTrace),
-  "codetracer m0_three_funcs trace fixture not found at " & threeFuncsTrace &
-  " (set CODETRACER_CT_TEST_SRC or check out the codetracer sibling)"
+  realTestId = "fixture::three_funcs"
 
 var counter = 0
-
 proc makeSourceRoot(): string =
   inc counter
   let stamp = (epochTime() * 1_000_000.0).int64
-  let root = getTempDir() / ("repro_watch_adapter_" & $stamp & "_" & $counter)
+  let root = getTempDir() / ("repro_watch_realct_" & $stamp & "_" & $counter)
   let dst = root / relSourcePath
   createDir(dst.parentDir)
   copyFile(threeFuncsFixture / "src" / "three_funcs.rb", dst)
@@ -99,81 +151,35 @@ proc editFunctionBody(root, funcName, newBody: string) =
       return
   doAssert false, "function not found: " & funcName
 
-proc recordBaseline(root: string): string =
-  ## Mimic the watch loop's cycle-1 record(): build + persist a cache on disk
-  ## over the fixture trace + temp source via the engine re-exported through the
-  ## adapter, returning the cache path the seam reads on later cycles.
-  let cachePath = root / "cache.json"
-  var cache = initCache(cachePath)
-  doAssert record(cache, testId, threeFuncsTrace, root).isOk
-  doAssert saveCache(cache).isOk
-  cachePath
+suite "repro watch seam — real ct end-to-end (gated on $CT_BIN)":
 
-suite "M0b — repro watch --ct-incremental decides via the adapter (vendored lib deleted)":
-
-  test "unchanged_source_skips (watch hook skips the rebuild)":
-    let root = makeSourceRoot()
-    let cachePath = recordBaseline(root)
-    let d = watchTestEdgeDecision(testId, threeFuncsTrace, root, cachePath)
-    check d.action == weaSkip
-    check d.reason == "unchanged"
-    check d.testId == testId
-    # Proven to be codetracer's engine deciding, not a constant.
-    check decide(testId, threeFuncsTrace, root, loadCache(cachePath).value).kind ==
-      idSkipUnchanged
-
-  test "changed_executed_function_reruns_naming_it (watch hook re-runs)":
-    let root = makeSourceRoot()
-    let cachePath = recordBaseline(root)
-    editFunctionBody(root, "used_a", "42 + 99")
-    let d = watchTestEdgeDecision(testId, threeFuncsTrace, root, cachePath)
-    check d.action == weaRun
-    check "used_a" in d.changedFuncs
-    check d.reason.startsWith("changed:")
-    check "used_a" in d.reason
-    let ed = decide(testId, threeFuncsTrace, root, loadCache(cachePath).value)
-    check ed.kind == idRerunChanged
-    check d.changedFuncs == ed.changedFuncs
-
-  test "changed_unexecuted_function_skips (function-level precision through the seam)":
-    let root = makeSourceRoot()
-    let cachePath = recordBaseline(root)
-    editFunctionBody(root, "unused_c", "777 + 777")
-    let d = watchTestEdgeDecision(testId, threeFuncsTrace, root, cachePath)
-    check d.action == weaSkip
-    check d.reason == "unchanged"
-
-  test "no_cache_entry_runs_fresh (never skip without a baseline)":
-    let root = makeSourceRoot()
-    let cachePath = root / "cache.json"  # never written
-    let d = watchTestEdgeDecision(testId, threeFuncsTrace, root, cachePath)
-    check d.action == weaRun
-    check d.reason == "fresh"
-
-  test "malformed_cache_is_failsafe_run (never a silent skip)":
-    let root = makeSourceRoot()
-    let cachePath = root / "cache.json"
-    writeFile(cachePath, "{ this is not valid json")
-    let d = watchTestEdgeDecision(testId, threeFuncsTrace, root, cachePath)
-    check d.action == weaRun
-    check d.reason.startsWith("error:")
-
-suite "M0b-3 — no reprobuild engine copy remains":
-
-  test "vendored repro_ct_incremental library is deleted":
-    # Static check: the former vendored engine copy must be GONE. The watch
-    # decision now flows through the adapter -> codetracer's canonical engine.
-    let reproRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
-    let vendored = reproRoot / "libs" / "repro_ct_incremental"
-    check not dirExists(vendored)
-
-  test "the canonical engine is the one in scope (codetracer, via the adapter)":
-    # ``initCache`` / ``record`` / ``decide`` are reachable ONLY because the
-    # adapter re-exports codetracer's engine; a vendored-copy import is gone.
-    # A round-trip through the on-disk cache exercises the real engine path.
-    let root = makeSourceRoot()
-    let cachePath = recordBaseline(root)
-    let loaded = loadCache(cachePath)
-    check loaded.isOk
-    check decide(testId, threeFuncsTrace, root, loaded.value).kind ==
-      idSkipUnchanged
+  test "unchanged skips / changed-executed re-runs / changed-unexecuted skips":
+    if realCt().len == 0:
+      # No built ct on this host: the genuine end-to-end can't run. The fake-ct
+      # suite above already asserts the seam's exec/parse/map + fail-safe; CI sets
+      # CT_BIN to the ct built in the codetracer sibling, where this runs for real.
+      skip()
+    elif not dirExists(threeFuncsTrace):
+      checkpoint("CT_BIN set but m0_three_funcs fixture missing at " & threeFuncsTrace)
+      fail()
+    else:
+      let root = makeSourceRoot()
+      let cachePath = defaultCachePath(root)
+      # cycle 1: record the baseline via `ct --watch-record`.
+      check recordWatchTestEdge(realTestId, threeFuncsTrace, root, cachePath).ok
+      # unchanged ⇒ skip
+      let d0 = watchTestEdgeDecision(realTestId, threeFuncsTrace, root, cachePath)
+      check d0.action == weaSkip
+      check d0.reason == "unchanged"
+      # edit an EXECUTED function ⇒ re-run naming it
+      editFunctionBody(root, "used_a", "42 + 99")
+      let d1 = watchTestEdgeDecision(realTestId, threeFuncsTrace, root, cachePath)
+      check d1.action == weaRun
+      check "used_a" in d1.changedFuncs
+      # a fresh root with a NON-executed function edited ⇒ skip
+      let root2 = makeSourceRoot()
+      let cache2 = defaultCachePath(root2)
+      check recordWatchTestEdge(realTestId, threeFuncsTrace, root2, cache2).ok
+      editFunctionBody(root2, "unused_c", "777 + 777")
+      let d2 = watchTestEdgeDecision(realTestId, threeFuncsTrace, root2, cache2)
+      check d2.action == weaSkip
