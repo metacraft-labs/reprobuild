@@ -19529,6 +19529,53 @@ proc pathIsUnderLocks(path: string): bool =
   let normalized = path.replace('\\', '/')
   normalized == "locks" or normalized.startsWith("locks/")
 
+proc pushOutputIsNonFastForward(output: string): bool =
+  ## A push rejected because the remote tip advanced (another publisher
+  ## raced us). Git prints ``! [rejected] ... (fetch first)`` /
+  ## ``(non-fast-forward)`` to stderr; we fold stderr into stdout
+  ## (``poStdErrToStdOut``), so match those markers case-insensitively.
+  let low = output.toLowerAscii()
+  ("[rejected]" in low) and
+    (("non-fast-forward" in low) or ("fetch first" in low) or
+     ("behind" in low))
+
+const lockPublishNonFfRetryBudget = 8
+  ## RA-29: bounded re-apply attempts for a non-fast-forward (concurrent
+  ## publisher) push. Because lock files are commit-addressed —
+  ## ``locks/<project>/<repo>/<sha>.toml`` — concurrent publishers write
+  ## DISJOINT paths, so re-applying our lock commit onto the freshly fetched
+  ## tip NEVER conflicts; the budget only guards against pathological churn
+  ## or a genuinely wedged remote (after which we stay loud, RA-21).
+
+proc reapplyLockCommitOntoFetchedTip(identity: GitToolIdentity;
+    manifestRepoRoot, remote, remoteBranch: string):
+    tuple[ok: bool; diagnostic: string] =
+  ## RA-29 non-ff re-apply. Our HEAD already carries the lock commit. Fetch
+  ## the remote tip and REBASE our single lock commit on top of it. Because
+  ## the lock path is commit-addressed (disjoint from every other
+  ## publisher's lock), the rebase replays cleanly with no conflict — it is
+  ## an append of a new file, never an edit of a shared one. We deliberately
+  ## do NOT force-push: the rebase preserves the other publisher's lock
+  ## commit (it becomes our new base), so re-pushing is an ordinary
+  ## fast-forward that ADDS our lock without clobbering theirs.
+  let fetchRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "fetch", remote, remoteBranch])
+  if fetchRes.code != 0:
+    return (ok: false, diagnostic: "git fetch " & remote & " " &
+      remoteBranch & " failed: " & fetchRes.output.strip())
+  # Rebase our lock commit onto the just-fetched remote tip. Disjoint paths
+  # ⇒ no conflict; if a rebase somehow stops (it should not for an
+  # append-only lock), abort so we never leave a half-rebased tree.
+  let rebaseRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "rebase", remote & "/" & remoteBranch])
+  if rebaseRes.code != 0:
+    discard gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "rebase", "--abort"])
+    return (ok: false, diagnostic: "git rebase onto " & remote & "/" &
+      remoteBranch & " failed (lock paths should be disjoint): " &
+      rebaseRes.output.strip())
+  (ok: true, diagnostic: "")
+
 proc publishWorkspaceLock*(identity: GitToolIdentity;
                            manifestRepoRoot: string): LockPublishResult =
   ## RA-7. Commit the staged-under-``locks/`` subtree and push it to the
@@ -19638,18 +19685,56 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     result.diagnostic = "git commit failed: " & commitRes.output.strip()
     return
 
-  let pushRes = gitRunPlain(identity,
-    ["-C", manifestRepoRoot, "push", remote, "HEAD:" & remoteBranch])
-  if pushRes.code != 0:
-    result.outcome = lpoFailed
-    result.diagnostic =
-      "git push " & remote & " HEAD:" & remoteBranch & " failed: " &
-        pushRes.output.strip()
-    return
+  # RA-29: push with a bounded non-fast-forward retry. The first push may be
+  # rejected because a CONCURRENT publisher advanced the manifest tip between
+  # our fetch-state and our push. Locks are commit-addressed
+  # (``locks/<project>/<repo>/<sha>.toml``), so the concurrent writes touch
+  # DISJOINT paths — re-applying our lock commit onto the freshly fetched tip
+  # is conflict-free. We loop: fetch + rebase our lock commit onto the new
+  # tip + re-push (an ordinary fast-forward that ADDS our lock without
+  # clobbering theirs — NEVER a force-push). A non-ff race is therefore
+  # invisible to the user. Any OTHER push failure, or exhausting the retry
+  # budget, stays LOUD (``lpoFailed``) per RA-21.
+  var attempt = 0
+  var lastPushOutput = ""
+  while true:
+    let pushRes = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "push", remote, "HEAD:" & remoteBranch])
+    if pushRes.code == 0:
+      break
+    lastPushOutput = pushRes.output.strip()
+    # Only a non-fast-forward (concurrent publisher) is retryable. Any other
+    # push error (auth, unwritable upstream, missing remote) is a genuine
+    # failure: stay loud immediately.
+    if not pushOutputIsNonFastForward(pushRes.output):
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "git push " & remote & " HEAD:" & remoteBranch & " failed: " &
+          lastPushOutput
+      return
+    inc attempt
+    if attempt > lockPublishNonFfRetryBudget:
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "git push " & remote & " HEAD:" & remoteBranch &
+        " kept getting non-fast-forward after " &
+        $lockPublishNonFfRetryBudget & " re-apply attempts: " & lastPushOutput
+      return
+    # Re-apply our disjoint lock commit onto the advanced tip and retry.
+    let reapply = reapplyLockCommitOntoFetchedTip(
+      identity, manifestRepoRoot, remote, remoteBranch)
+    if not reapply.ok:
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "non-fast-forward re-apply failed: " & reapply.diagnostic
+      return
 
   result.outcome = lpoPublished
   result.diagnostic =
-    "published " & $stagedLocks.len & " lock " & plural & " to " & upstream
+    "published " & $stagedLocks.len & " lock " & plural & " to " & upstream &
+    (if attempt > 0: " (after " & $attempt &
+      " non-fast-forward re-apply attempt" &
+      (if attempt == 1: "" else: "s") & ")" else: "")
 
 proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
@@ -24709,6 +24794,87 @@ proc runBranchCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
+# --- RA-29: per-repo stash-on-leave / restore-on-return -------------------
+#
+# CLI/checkout.md's V1 surface "requires a clean workspace — commit, stash,
+# or discard changes first". RA-29 makes the *stash* path automatic and
+# COHERENT across the workspace: when ``repro checkout`` leaves a branch
+# with uncommitted work in some repos, each dirty repo's WIP is stashed
+# (per-repo, independently) keyed by the branch being LEFT; when a later
+# ``repro checkout`` RETURNS to that branch, the matching stash is restored
+# in each repo. WIP is never lost on a task-switch
+# (Workspace-And-Develop-Mode.md — switching tasks is the steady-state loop).
+#
+# Keying. The stash message is ``repro-checkout:<branch-left>`` so the
+# restore on return finds exactly the stash that belongs to that branch and
+# never pops an unrelated user stash. Each repo carries its own stash entry
+# (git's per-repo stash stack), so the operation is genuinely per-repo:
+# repo A's WIP and repo B's WIP round-trip independently.
+
+const reproCheckoutStashPrefix = "repro-checkout:"
+
+proc reproCheckoutStashMessage(branch: string): string =
+  reproCheckoutStashPrefix & branch
+
+proc stashRepoWipOnLeave(identity: GitToolIdentity;
+                         repoPath, branchLeft: string):
+    tuple[ok: bool; diagnostic: string] =
+  ## Stash the repo's WIP (tracked + untracked) under a branch-keyed
+  ## message so a later return to ``branchLeft`` can restore it. Returns
+  ## ``ok=false`` with a diagnostic if the stash push fails (the caller
+  ## then refuses, never silently dropping the change).
+  let msg = reproCheckoutStashMessage(branchLeft)
+  let res = gitRunPlain(identity,
+    ["-C", repoPath, "stash", "push", "--include-untracked", "-m", msg])
+  if res.code != 0:
+    return (ok: false, diagnostic: "git stash push failed: " &
+      res.output.strip())
+  (ok: true, diagnostic: "")
+
+proc findReproCheckoutStashRef(identity: GitToolIdentity;
+                               repoPath, branchReturned: string): string =
+  ## Return the ``stash@{N}`` ref whose message is the branch-keyed
+  ## ``repro-checkout:<branchReturned>`` marker, or "" if none. We match
+  ## the most recent such entry (the stash list is newest-first), so a
+  ## leave/return pair round-trips even if other stashes were pushed in
+  ## between.
+  let wanted = reproCheckoutStashMessage(branchReturned)
+  let res = gitRunPlain(identity,
+    ["-C", repoPath, "stash", "list", "--format=%gd%x01%gs"])
+  if res.code != 0:
+    return ""
+  for raw in res.output.splitLines():
+    let sep = raw.find('\x01')
+    if sep < 0:
+      continue
+    let refName = raw[0 ..< sep]
+    var subject = raw[(sep + 1) .. ^1]
+    # ``%gs`` renders the reflog subject as ``On <branch>: <message>``;
+    # match on the trailing message exactly so we never pop an unrelated
+    # stash.
+    let colon = subject.find(": ")
+    if colon >= 0:
+      subject = subject[(colon + 2) .. ^1]
+    if subject.strip() == wanted:
+      return refName.strip()
+  ""
+
+proc restoreRepoWipOnReturn(identity: GitToolIdentity;
+                            repoPath, branchReturned: string):
+    tuple[restored: bool; diagnostic: string] =
+  ## Pop the branch-keyed stash for ``branchReturned`` if one exists.
+  ## ``restored=false`` with empty diagnostic means there was nothing to
+  ## restore (the common case); a non-empty diagnostic means a stash WAS
+  ## found but the pop failed (surfaced, never silently lost).
+  let stashRef = findReproCheckoutStashRef(identity, repoPath, branchReturned)
+  if stashRef.len == 0:
+    return (restored: false, diagnostic: "")
+  let res = gitRunPlain(identity, ["-C", repoPath, "stash", "pop", stashRef])
+  if res.code != 0:
+    return (restored: false, diagnostic: "git stash pop " & stashRef &
+      " failed: " & res.output.strip())
+  (restored: true, diagnostic: "")
+
 # --- M15: `repro checkout <branch>` ---------------------------------------
 #
 # Top-level subcommand per ``reprobuild-specs/CLI/checkout.md``. Same
@@ -24776,6 +24942,7 @@ type
     croProbeFailed        ## Pre-pass probe failed for this repo.
     croActionFailed       ## A scheduled action returned non-OK.
     croConfirmRefused     ## RA-9 confirmation refused (non-TTY/declined).
+    croStashFailed        ## RA-29 leave-stash failed; nothing scheduled.
 
   CheckoutRepoEntry* = object
     ## Per-repo line in the JSON report. ``previousBranch`` is the
@@ -24793,6 +24960,8 @@ type
     localHadBranch*: bool
     dirtyReason*: string
     diagnostic*: string
+    stashedOnLeave*: bool   ## RA-29: WIP was stashed leaving the old branch.
+    restoredOnReturn*: bool ## RA-29: a prior stash was restored on return.
 
   CheckoutReport* = object
     ## Structured outcome of one ``repro checkout`` invocation.
@@ -24816,6 +24985,7 @@ proc checkoutOutcomeTag(outcome: CheckoutRepoOutcome): string =
   of croProbeFailed: "probe_failed"
   of croActionFailed: "action_failed"
   of croConfirmRefused: "confirm_refused"
+  of croStashFailed: "stash_failed"
 
 proc toJsonNode*(report: CheckoutReport): JsonNode =
   result = newJObject()
@@ -24836,6 +25006,8 @@ proc toJsonNode*(report: CheckoutReport): JsonNode =
     obj["localHadBranch"] = %entry.localHadBranch
     obj["dirtyReason"] = %entry.dirtyReason
     obj["diagnostic"] = %entry.diagnostic
+    obj["stashedOnLeave"] = %entry.stashedOnLeave
+    obj["restoredOnReturn"] = %entry.restoredOnReturn
     repos.add(obj)
   result["repos"] = repos
   result["exitCode"] = %report.exitCode
@@ -24848,6 +25020,10 @@ proc renderCheckoutTextLines*(report: CheckoutReport): seq[string] =
       line.add(" " & entry.previousBranch & " -> " & entry.newBranch)
     elif entry.newBranch.len > 0:
       line.add(" branch=" & entry.newBranch)
+    if entry.stashedOnLeave:
+      line.add(" [stashed WIP]")
+    if entry.restoredOnReturn:
+      line.add(" [restored WIP]")
     if entry.dirtyReason.len > 0:
       line.add(" (" & entry.dirtyReason & ")")
     elif entry.diagnostic.len > 0:
@@ -24968,6 +25144,7 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       previousBranch: string
       localHadBranch: bool
       remoteHadBranch: bool
+      needsStash: bool      ## RA-29: dirty on leave → stash before switch.
       reason: string
 
   var states: seq[RepoState]
@@ -25002,14 +25179,13 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       states.add(state)
       continue
     if not cleanRes.isClean:
-      state.kind = rsDirty
-      # Principle 2: name the offender (the path appears in the render line)
-      # AND a concrete remedy command the operator can copy-paste.
-      state.reason = "working tree has uncommitted changes — " &
-        "run 'git -C " & repo.path & " stash' (or 'git -C " & repo.path &
-        " commit -a') then 'repro checkout " & parsed.branchName & "'"
-      states.add(state)
-      continue
+      # RA-29: a dirty repo no longer REFUSES the checkout. We mark it for
+      # a per-repo stash-on-leave (keyed by the branch being left) so the
+      # WIP is preserved and restored when the operator returns to this
+      # branch. The stash only happens if the repo will actually SWITCH
+      # (i.e. not the already-on-branch no-op below), so we just record
+      # the intent here and let the branch-availability probes proceed.
+      state.needsStash = true
     # No-op short circuit: already on the requested branch.
     if state.previousBranch == parsed.branchName:
       state.kind = rsAlreadyOnBranch
@@ -25068,7 +25244,10 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
     state.kind = rsReadyFetchAndTrack
     states.add(state)
 
-  # Decision pass.
+  # Decision pass. RA-29: a dirty repo NO LONGER refuses the checkout — its
+  # WIP is stashed on leave (and restored on return), so the only refuse
+  # conditions are a missing branch or a probe failure. (``rsDirty`` is no
+  # longer produced; the branch is kept in the case-matches for safety.)
   var dirtyCount = 0
   var missingCount = 0
   var probeFailures = 0
@@ -25139,7 +25318,8 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
         else: "(detached)"
       switchPreview.add("  " & state.repo.path & ": " & from0 &
         " -> " & parsed.branchName &
-        (if state.kind == rsReadyFetchAndTrack: " (fetch+track)" else: ""))
+        (if state.kind == rsReadyFetchAndTrack: " (fetch+track)" else: "") &
+        (if state.needsStash: " (stash WIP)" else: ""))
   if switchPreview.len > 0:
     stderr.writeLine("repro checkout will switch " & $switchPreview.len &
       " repo(s) to '" & parsed.branchName & "':")
@@ -25192,11 +25372,34 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
   # ``rsAlreadyOnBranch`` repos schedule no action — the executor
   # would refuse to no-op a ``switch`` to the current branch with
   # any noisier diagnostic than necessary, so we just skip it.
+  # RA-29 stash-on-leave: a dirty repo that is about to SWITCH gets its WIP
+  # stashed FIRST (keyed by the branch being left) so the tree is clean for
+  # the switch and the change is recoverable on return. If the stash itself
+  # fails we record ``croStashFailed`` and do NOT schedule that repo's
+  # switch — WIP is never dropped on the floor. Repos that are already on
+  # the branch (no leave) or clean are untouched.
+  var stashFailure = initTable[int, string]()
+  var stashedOnLeave = initTable[int, bool]()
+  for idx, state in states:
+    if state.needsStash and state.kind in {rsReadyLocal, rsReadyFetchAndTrack}:
+      let leftBranch =
+        if state.previousBranch.len > 0: state.previousBranch
+        else: state.headSha   # detached HEAD: key by the commit we leave.
+      let st = stashRepoWipOnLeave(identity, state.repoPath, leftBranch)
+      if not st.ok:
+        stashFailure[idx] = st.diagnostic
+      else:
+        stashedOnLeave[idx] = true
+
   var actions: seq[BuildAction]
   var switchActionByIdx = initTable[int, string]()
   let receiptDir = parsed.workspaceRoot / ".repro" / "workspace" / "receipts"
   createDir(receiptDir)
   for idx, state in states:
+    if stashFailure.hasKey(idx):
+      # Stash failed for this repo — skip scheduling its switch; the
+      # outcome loop below reports ``croStashFailed`` and fails the run.
+      continue
     case state.kind
     of rsReadyLocal:
       let receiptRel = ".repro" / "workspace" / "receipts" /
@@ -25270,6 +25473,29 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
           else: croSwitched
         perRepoOutcome[idx] = (outcome: tag, diagnostic: "")
 
+  # RA-29 restore-on-return: a repo that successfully switched TO the
+  # requested branch may have a prior ``repro-checkout:<branch>`` stash
+  # (left the last time this branch was checked out away from). Pop it so
+  # the WIP reappears. Done after the switch (clean tree at switch time),
+  # per-repo (each repo finds its own keyed stash).
+  var restoredOnReturn = initTable[int, bool]()
+  for idx, state in states:
+    if state.kind notin {rsReadyLocal, rsReadyFetchAndTrack}:
+      continue
+    if not perRepoOutcome.hasKey(idx):
+      continue   # stash-on-leave failed → no switch happened, no restore.
+    let r = perRepoOutcome[idx]
+    if r.outcome in {croSwitched, croFetchedAndSwitched}:
+      let rest = restoreRepoWipOnReturn(identity, state.repoPath,
+        parsed.branchName)
+      if rest.restored:
+        restoredOnReturn[idx] = true
+      elif rest.diagnostic.len > 0:
+        # A stash WAS found but the pop failed (e.g. a conflict). Surface
+        # it as a failure rather than silently leaving the stash stuck.
+        perRepoOutcome[idx] = (outcome: croActionFailed,
+          diagnostic: "restore-on-return: " & rest.diagnostic)
+
   var actionFailures = 0
   for idx, state in states:
     var entry = CheckoutRepoEntry(
@@ -25278,22 +25504,35 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
       headSha: state.headSha,
       previousBranch: state.previousBranch,
       remoteHadBranch: state.remoteHadBranch,
-      localHadBranch: state.localHadBranch)
+      localHadBranch: state.localHadBranch,
+      stashedOnLeave: stashedOnLeave.getOrDefault(idx, false),
+      restoredOnReturn: restoredOnReturn.getOrDefault(idx, false))
     case state.kind
     of rsAlreadyOnBranch:
       entry.outcome = checkoutOutcomeTag(croAlreadyOnBranch)
       entry.newBranch = parsed.branchName
     of rsReadyLocal, rsReadyFetchAndTrack:
-      let r = perRepoOutcome.getOrDefault(idx,
-        (outcome: croActionFailed,
-         diagnostic: "internal: missing action outcome"))
-      entry.outcome = checkoutOutcomeTag(r.outcome)
-      entry.diagnostic = r.diagnostic
-      entry.newBranch =
-        if r.outcome == croActionFailed: state.previousBranch
-        else: parsed.branchName
-      if r.outcome == croActionFailed:
+      if stashFailure.hasKey(idx):
+        # RA-29: the leave-stash failed; this repo did not switch. WIP is
+        # still in place (we never touched the tree), but the operator must
+        # resolve it. Refuse this repo with a non-zero exit.
+        entry.outcome = checkoutOutcomeTag(croStashFailed)
+        entry.dirtyReason =
+          "could not stash WIP before leaving '" & state.previousBranch &
+          "': " & stashFailure[idx]
+        entry.newBranch = state.previousBranch
         inc actionFailures
+      else:
+        let r = perRepoOutcome.getOrDefault(idx,
+          (outcome: croActionFailed,
+           diagnostic: "internal: missing action outcome"))
+        entry.outcome = checkoutOutcomeTag(r.outcome)
+        entry.diagnostic = r.diagnostic
+        entry.newBranch =
+          if r.outcome == croActionFailed: state.previousBranch
+          else: parsed.branchName
+        if r.outcome == croActionFailed:
+          inc actionFailures
     else:
       # Unreachable: refuse / probe-failed paths returned early above.
       entry.outcome = "internal_unexpected_state"

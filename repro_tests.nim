@@ -6366,6 +6366,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_checkout_stashes_and_restores_per_repo_wip.nim",
+    binary: "build/test-bin/t_checkout_stashes_and_restores_per_repo_wip",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim",
+    binary: "build/test-bin/t_concurrent_lock_publishes_retry_without_user_visible_failure",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_develop_clones_and_registers_override.nim",
     binary: "build/test-bin/t_workspace_develop_clones_and_registers_override",
     defines: @[],
