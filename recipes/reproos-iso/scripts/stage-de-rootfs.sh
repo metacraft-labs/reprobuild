@@ -622,6 +622,21 @@ _repro_qpa_plugins=""
 # after Qt init").  Use a subshell's exit code instead: if the first
 # entry of the expansion exists, the subshell succeeds; otherwise it
 # fails.  $@ is untouched.
+#
+# M9.R.37.5 — be SURGICAL about which dirs go on LD_LIBRARY_PATH.  The
+# previous wholesale ``/nix/store/*/lib`` walk added ~600 dirs to
+# LD_LIBRARY_PATH; every dlopen() inside the installer's QProcess
+# children then had to iterate all 600 before falling through to
+# ld.so.cache.  The DT_NEEDED libs the ``repro`` binary uses at
+# runtime (libclingo / libsqlite3) are well-known leaf names hit via
+# Nim's ``{.dynlib: const-string.}`` pragma, so we only need their
+# specific dirs on LD_LIBRARY_PATH.  Every OTHER library the binaries
+# need is already resolvable via either embedded RPATH or ld.so.cache
+# (M9.R.37.3 + M9.R.37.4 made the cache reachable from every PT_INTERP).
+#
+# This dramatically narrows LD_LIBRARY_PATH from ~600 entries to
+# a handful, slashing each dlopen()'s syscall cost from ~600 ENOENT
+# probes to ~5.
 for d in /nix/store/*/lib; do
   [ -d "$d" ] || continue
   # Skip glibc dirs — Debian system glibc must remain canonical so
@@ -629,7 +644,14 @@ for d in /nix/store/*/lib; do
   case "$d" in
     /nix/store/*-glibc-*/lib) continue ;;
   esac
-  if ( set -- "$d"/*.so*; [ -e "$1" ] ); then
+  # M9.R.37.5: include ONLY dirs that ship a library the ``repro``
+  # binary's Nim {.dynlib: "..."} pragma resolves by bare leaf name:
+  #   * libclingo.so      (libs/repro_solver/.../clingo_bindings.nim)
+  #   * libsqlite3.so(.0) (libs/repro_local_store/.../sqlite3_binding.nim)
+  # plus any sqlite3 successor name (the bindings tries _64 / _32
+  # variants on Windows only; libsqlite3.so covers POSIX).
+  if [ -e "$d/libclingo.so" ] || [ -e "$d/libsqlite3.so" ] || \
+     [ -e "$d/libsqlite3.so.0" ]; then
     if [ -z "$_repro_nix_libs" ]; then
       _repro_nix_libs="$d"
     else
@@ -921,6 +943,37 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
   echo "/usr/lib"
   echo "/usr/lib64"
 } > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf"
+
+# M9.R.37.4 — symlink every nix-store glibc's hard-coded
+# ``etc/ld.so.cache`` path to ``/etc/ld.so.cache`` so the
+# from-source-built binaries' nix-store PT_INTERPs find the cache the
+# Debian system loader writes.  Without this, every binary with PT_INTERP
+# ``/nix/store/<hash>-glibc-X.Y/lib/ld-linux-x86-64.so.2`` reads
+# ``/nix/store/<hash>-glibc-X.Y/etc/ld.so.cache`` (the path is baked into
+# ld-linux at compile time -- ``strings`` it to confirm) which doesn't
+# exist on our stage, and the dlopen() fall-through to ld.so.cache
+# fails.  Concretely: ``mkfs.ext4`` failed at exec-time with
+# ``libext2fs.so.2: cannot open shared object file`` because its PT_INTERP
+# pointed at the ``xx7cm72...-glibc-2.40-66`` ld-linux which reads
+# ``/nix/store/xx7cm72.../etc/ld.so.cache`` (ENOENT), bypassing the
+# Debian system cache at ``/etc/ld.so.cache``.
+#
+# Fix: for each nix-store glibc dir on the stage, ``chmod u+w`` its
+# ``etc/`` subdir then drop a relative symlink at
+# ``etc/ld.so.cache -> /etc/ld.so.cache``.  Now every loader -- nix
+# or Debian -- reads the SAME cache the system ldconfig wrote.
+for glibc_etc in "$STAGE_DIR"/nix/store/*-glibc-*/etc; do
+  [ -d "$glibc_etc" ] || continue
+  glibc_dir="$(dirname "$glibc_etc")"
+  chmod u+w "$glibc_etc" 2>/dev/null || true
+  if [ -e "$glibc_etc/ld.so.cache" ] && [ ! -L "$glibc_etc/ld.so.cache" ]; then
+    rm -f "$glibc_etc/ld.so.cache"
+  fi
+  if [ ! -L "$glibc_etc/ld.so.cache" ]; then
+    ln -s /etc/ld.so.cache "$glibc_etc/ld.so.cache"
+  fi
+  echo "[stage-de-rootfs] linked $glibc_etc/ld.so.cache -> /etc/ld.so.cache"
+done
 
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
 if [ -x "$chroot_ldconfig" ]; then
