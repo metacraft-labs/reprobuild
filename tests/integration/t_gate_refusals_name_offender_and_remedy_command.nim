@@ -17,7 +17,12 @@
 ##   - sync-unreadable       ``repro sync`` skipping a newly-declared repo whose
 ##                           clone fails (unreadable origin).
 ##   - remove-dirty          ``repro remove`` refusing a dirty repo in non-TTY.
-##   - checkout-dirty        ``repro checkout`` refusing a dirty repo.
+##   - checkout-dirty        ``repro checkout`` of a dirty repo refused by the
+##                           RA-9 destructive-switch gate (non-TTY, no
+##                           ``--yes``). RA-29 stashes a dirty repo's WIP rather
+##                           than refusing it, so the offending act is the
+##                           working-tree switch the gate guards; the remedy is
+##                           ``repro checkout <branch> --yes``.
 ##   - checkout-missing      ``repro checkout`` of an absent branch.
 ##
 ## For EACH case: the offender (the real repo / branch name) must appear in
@@ -394,7 +399,14 @@ suite "RA-28 — refusals name the offender and a remedy command":
     else:
       let fx = baseFixture(gitBin, "checkout-dirty")
       defer: removeDir(fx.scratch)
-      # Create a target branch on origin so the ONLY blocker is dirtiness.
+      # Create a target branch on origin so the branch exists everywhere and a
+      # dirty working tree is the only thing that makes this checkout
+      # destructive. RA-29 no longer REFUSES a dirty repo (it stashes WIP on
+      # leave) — instead the RA-9 destructive-command gate refuses the
+      # working-tree switch when run non-interactively without ``--yes``. The
+      # ``invokeCheckout`` helper passes no ``--yes`` and runs under
+      # ``startProcess`` (non-TTY), so the gate fires: the repo is reported
+      # ``confirm_refused`` and the run exits 2 having mutated nothing.
       discard requireGit(q(gitBin) & " -C " & q(fx.libASeed) & " branch feat")
       discard requireGit(q(gitBin) & " -C " & q(fx.libASeed) &
         " push origin feat")
@@ -407,8 +419,16 @@ suite "RA-28 — refusals name the offender and a remedy command":
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
       check entry != nil
-      check entry["outcome"].getStr() == "dirty_refused"
-      assertNamesOffenderAndRemedy(entry["dirtyReason"].getStr(), "lib-a")
+      check entry["outcome"].getStr() == "confirm_refused"
+      # RA-28: the per-repo refusal diagnostic must NAME the offender (lib-a,
+      # whose dirty working tree would be switched and whose WIP would be
+      # stashed) AND a copy-pasteable remedy command (``repro checkout … --yes``).
+      let diag = entry["diagnostic"].getStr()
+      assertNamesOffenderAndRemedy(diag, "lib-a")
+      check diag.contains("--yes")
+      check diag.contains("stash")
+      # The dirty file is untouched — the refusal mutated nothing.
+      check fileExists(fx.workspaceRoot / "lib-a" / "dirty.txt")
 
   test "checkout_missing_branch_names_offender_and_remedy":
     let gitBin = findExe("git")

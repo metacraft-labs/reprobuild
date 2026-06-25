@@ -26260,10 +26260,28 @@ proc executeCheckout(parsed: CheckoutArgs): CheckoutReport =
           entry.newBranch = parsed.branchName
         of rsReadyLocal, rsReadyFetchAndTrack:
           entry.outcome = checkoutOutcomeTag(croConfirmRefused)
-          entry.diagnostic =
+          # RA-28 Principle 2: the per-repo diagnostic must NAME the offender
+          # (this repo + the working-tree switch that requires confirmation,
+          # plus the WIP-stash it would trigger when dirty) AND a concrete,
+          # copy-pasteable remedy command. The switch of a working tree is the
+          # destructive act being gated, so the offender is this repo's path.
+          let from0 =
+            if state.previousBranch.len > 0: state.previousBranch
+            else: "(detached)"
+          let stashNote =
+            if state.needsStash:
+              " (its uncommitted WIP would be stashed on leave)"
+            else: ""
+          let cause =
             if decision == ddRefusedNonTty:
-              "refused: non-interactive context without --yes"
-            else: "declined by operator"
+              "non-interactive context without --yes"
+            else: "operator declined"
+          entry.diagnostic =
+            "refused: switching repo '" & state.repo.path & "' from '" &
+            from0 & "' to '" & parsed.branchName & "'" & stashNote &
+            " requires confirmation (" & cause &
+            ") — re-run 'repro checkout " & parsed.branchName &
+            " --yes' to confirm"
         else:
           entry.outcome = "internal_unexpected_state"
         result.repos.add(entry)
