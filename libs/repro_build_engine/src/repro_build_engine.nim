@@ -2179,6 +2179,41 @@ proc readBypassActionLog(path: string): string =
   except CatchableError:
     ""
 
+proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
+  ## M9.R.36.3 — wrap an action's argv in a POSIX ``/bin/sh -c "umask 022
+  ## && <argv>"`` invocation so every spawned tool inherits the canonical
+  ## ``rw-r--r--`` (0644) / ``rwxr-xr-x`` (0755) file-creation mask.
+  ##
+  ## M9.R.35.1 lifted this pin into ``startBypassRunQuotaProcess`` (the
+  ## ``bypassRunQuota`` path used by direct ``--daemon=off`` invocations).
+  ## M9.R.36.3 extends the same pin to the runquota helper-spawn path AND
+  ## the inline-runquota batch path, both of which forward an action's
+  ## argv unchanged to ``launchProcess`` inside the runquotad helper —
+  ## meaning a daemon-mode build would otherwise still hit the umask
+  ## drift channel documented in ``startBypassRunQuotaProcess``.
+  ##
+  ## On Windows the umask concept does not apply and the wrapper would
+  ## introduce a ``/bin/sh`` dependency that the Windows build doesn't
+  ## have; on non-POSIX platforms this is the identity transform.
+  ##
+  ## Behaviour for an empty argv is the identity transform — callers can
+  ## blindly delegate without a pre-check, and downstream "empty argv"
+  ## guards keep their own error surface unchanged.
+  result = newSeqOfCap[string](argv.len)
+  when defined(posix):
+    if argv.len == 0:
+      for entry in argv: result.add(entry)
+      return result
+    var quoted = ""
+    for i, a in argv:
+      if i > 0: quoted.add(" ")
+      quoted.add(quoteShell(a))
+    result.add("/bin/sh")
+    result.add("-c")
+    result.add("umask 022 && " & quoted)
+  else:
+    for entry in argv: result.add(entry)
+
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig): Process =
   ## Path-mode escape hatch: spawn the action's argv directly via osproc,
@@ -2323,8 +2358,14 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  # M9.R.36.3 — same umask-022 pin we apply on the bypass path. The
+  # runquota helper forwards ``command.argv`` straight through to its
+  # ``launchProcess`` call site, so without this wrap the daemon-mode
+  # build inherits whatever umask the runquotad daemon's parent shell
+  # had — recreating the qmlcachegen mode-corruption channel that
+  # M9.R.35.1 closed on the ``bypassRunQuota`` path.
   let command = ReproCommandSpec(
-    argv: action.argv,
+    argv: umaskWrappedArgv(action.argv),
     cwd: action.cwd,
     env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
@@ -2353,8 +2394,13 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  # M9.R.36.3 — apply the same umask-022 wrap the helper-spawn and
+  # bypass paths use. The inline-runquota path likewise forwards
+  # ``command.argv`` to ``launchProcess`` inside the helper / inline
+  # batch, so an unwrapped argv would resurrect the qmlcachegen mode
+  # drift.
   ReproCommandSpec(
-    argv: action.argv,
+    argv: umaskWrappedArgv(action.argv),
     cwd: action.cwd,
     env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
