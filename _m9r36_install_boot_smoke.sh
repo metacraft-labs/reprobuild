@@ -69,7 +69,10 @@ mkfifo "$INSTALL_FIFO"
   # Debian binary).
   echo "echo === M9R36_INSTALLER_LAUNCH ==="
   sleep 1
-  echo "QT_QPA_PLATFORM=offscreen /usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml 2>&1 | tail -200; echo INSTALLER_RC=\$?"
+  # ``tee /tmp/installer.log`` so we see live progress (the previous
+  # ``| tail -200`` buffered every line until installer exit, which
+  # hid the actual phase progression + masked any internal hang).
+  echo "QT_QPA_PLATFORM=offscreen /usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml 2>&1 | tee /tmp/installer.log; echo INSTALLER_RC=\$?"
   # Installer can take 2-6 minutes depending on disko-zap + nix-pop
   # closure copy speed.  Wait generously.
   sleep 360
