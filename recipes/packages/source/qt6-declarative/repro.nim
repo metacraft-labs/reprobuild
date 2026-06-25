@@ -214,6 +214,30 @@ package qt6DeclarativeSource:
         # The compile parallelism stays at ``cmake --build --parallel``
         # so wall-time impact is bounded.
         "CMAKE_AUTOGEN_PARALLEL=1",
+        # M9.R.35.6 — qt_internal_add_resource emits a ``resources_<N>``
+        # OBJECT library that compiles the rcc-emitted
+        # ``qrc_<name>_init.cpp`` template (which hardcodes
+        # ``#include <QtCore/qtsymbolmacros.h>``).  The Qt6CoreMacros
+        # ``target_include_directories ... PRIVATE
+        # "$<TARGET_PROPERTY:Qt6::Core,INTERFACE_INCLUDE_DIRECTORIES>"``
+        # call is SUPPOSED to thread the public ``usr/include`` /
+        # ``usr/include/QtCore`` dirs into the resource target, but on
+        # Qt 6.8.1 cross-installed (qt6-base sibling install-mirror)
+        # the genex evaluation skips the public dirs and only carries
+        # ``Qt6::CorePrivate``'s ``${prefix}/include/QtCore/6.8.1[/QtCore]``
+        # paths — leaving ``QtCore/qtsymbolmacros.h`` unresolvable.
+        #
+        # Workaround: thread the qt6-base install's ``usr/include``
+        # directly via ``CMAKE_CXX_FLAGS_INIT`` / ``CMAKE_C_FLAGS_INIT``
+        # as an ``-isystem`` flag.  Every compile invocation in the
+        # qt6-declarative build picks up the missing include search
+        # path AND inherits ``-isystem`` precedence (so the project's
+        # own builddir headers still take precedence on conflict).
+        #
+        # The ``QT_BUILD_INTERNALS_CHECK_PROJECT_INFO`` flag also
+        # silences the cmake warning at configure time.
+        "CMAKE_CXX_FLAGS=-isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include",
+        "CMAKE_C_FLAGS=-isystem /opt/repro/reprobuild/recipes/packages/source/qt6-base/.repro/output/install/usr/include",
       ]
       # M9.R.35.4 — qmlcachegen, qmltyperegistrar, and qmlc compiler
       # all emit files via Qt's ``QSaveFile`` which on WSL ext4 under
