@@ -255,6 +255,14 @@ type
     # preserves the legacy ``<monitorCliPath> --depfile …`` shape used by tests
     # and any caller that still points at a dedicated fs-snoop binary.
     monitorCliArgs*: seq[string]
+    # RA-13: the engine's parallelism knob is an ADVERTISED-FRONTIER bound, NOT
+    # an independent CPU-slot quota. It caps how many candidate actions the
+    # engine offers to / keeps in flight with RunQuota at once (it cannot offer
+    # an unbounded ready frontier); RunQuota then selects the fitting subset
+    # against the real host budget. When this value and RunQuota's grant
+    # disagree, RunQuota's grant is authoritative — this knob never throttles
+    # below what RunQuota grants, it only bounds the candidate set above it. See
+    # Build-Engine-And-Scheduler.md § "One executor, one resource authority".
     maxParallelism*: uint32
     stdoutLimit*: int
     stderrLimit*: int
@@ -405,6 +413,15 @@ type
     trace*: seq[SchedulerTraceEvent]
     stats*: BuildStats
     traceEnabled: bool
+    runQuotaBypassed*: bool
+      ## RA-13: true when at least one action in this build launched without a
+      ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA``
+      ## bypass, or the unreachable-daemon fallback). In that state RunQuota is
+      ## NOT the resource authority for this run: host limits, cross-session
+      ## fairness, and named-pool capacity are enforced only by the engine's
+      ## LOCAL pool gate, which cannot make concurrent cross-invocation runs
+      ## safe. Surfaced in the build header + run report so the unsafe state is
+      ## never entered silently. Stays false when RunQuota gated every launch.
 
   BuildProgressEvent* = object
     kind*: BuildProgressKind
@@ -3177,6 +3194,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finally:
       finishStat("repro runquota session open", sessionStart)
 
+  proc willBypassRunQuota(): bool =
+    ## RA-13: build-stable predicate mirroring the per-launch bypass decision
+    ## taken just before a process action is spawned (the ``inlineRunQuota`` /
+    ## ``launchBypassesRunQuota`` branch below). It is consulted by the ready
+    ## scan to decide whether the LOCAL named-pool gate must enforce capacity:
+    ##
+    ## - When RunQuota IS the authority (no bypass), the engine declares each
+    ##   action's pool membership + units in the lease request and lets
+    ##   RunQuota's grant gate the pool cross-session; the engine MUST NOT also
+    ##   gate locally (that would double-count the same pool — see
+    ##   Build-Engine-And-Scheduler.md § "One executor, one resource authority").
+    ## - On the bypass path there is NO lease and NO RunQuota to enforce a pool,
+    ##   so the local pool gate is the ONLY enforcement that keeps a declared
+    ##   pool (e.g. ``host/linker``) from running unbounded. There the gate is
+    ##   kept as the fallback.
+    ##
+    ## The decision is the same value the launch site computes for
+    ## ``bypassRunQuota``, so removing the double-gate cannot diverge from the
+    ## path that actually spawns the child. The probe / session-open it triggers
+    ## is cached and idempotent (same round trip the first launch would pay).
+    if config.inlineRunQuota and not effectiveBypassRunQuota:
+      not tryEnsureInlineRunQuotaSession()
+    else:
+      launchBypassesRunQuota()
+
   proc terminalCount(): int =
     for action in buildGraph.actions:
       if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
@@ -3490,7 +3532,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let cap = poolCapacity.getOrDefault(poolName, maxParallel)
         let used = poolRunning.getOrDefault(poolName, 0'u32)
         let units = if action.poolUnits == 0'u32: 1'u32 else: action.poolUnits
-        if used + units > cap:
+        # RA-13: the local pool gate is authoritative ONLY for the default
+        # frontier pool ("") and for NAMED pools on the bypass path. When
+        # RunQuota is the authority for this launch, a NAMED pool's capacity is
+        # enforced by RunQuota's grant against the units declared in the lease
+        # request (``namedPool`` / ``namedPoolUnits``) — gating it again here
+        # would double-count the same cross-session pool down to this single
+        # invocation (Build-Engine-And-Scheduler.md § "One executor, one
+        # resource authority"). The default pool is the frontier/parallelism
+        # bound and stays local. ``poolRunning`` is still tracked for every
+        # pool, but for a RunQuota-gated named pool it is only a
+        # non-authoritative ordering hint, never a second gate.
+        let localPoolGateActive = poolName.len == 0 or willBypassRunQuota()
+        if localPoolGateActive and used + units > cap:
           inc i
           continue
 
@@ -3913,6 +3967,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           bypassRunQuota = not inlineRunQuota
         else:
           bypassRunQuota = launchBypassesRunQuota()
+        # RA-13: record that this run launched at least one action with no
+        # RunQuota lease so the build header + run report can surface the
+        # unsafe-for-concurrent state (it never makes concurrent cross-
+        # invocation runs safe). On the bypass path the local pool gate above
+        # was the sole capacity enforcement.
+        if bypassRunQuota:
+          runResult.runQuotaBypassed = true
         if inlineRunQuota:
           # Pipelined path: defer the actual offer round-trip and stage
           # this launch. After the launch wave we'll dispatch every

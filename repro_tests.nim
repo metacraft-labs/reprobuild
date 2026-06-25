@@ -5558,6 +5558,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim",
+    binary: "build/test-bin/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
+    binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_integration_build_report_target_resolution_kind.nim",
     binary: "build/test-bin/t_integration_build_report_target_resolution_kind",
     defines: @[],

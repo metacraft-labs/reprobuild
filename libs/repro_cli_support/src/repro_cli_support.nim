@@ -3105,6 +3105,35 @@ proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
   of trkUnknown:
     result["suggestions"] = jsonStringSeq(record.suggestions)
 
+proc runQuotaReportJson*(bypassed: bool): JsonNode =
+  ## RA-13: machine-readable resource-authority status for the run report.
+  ## ``bypassed`` is true when this build launched at least one action with no
+  ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA`` or
+  ## the unreachable-daemon fallback). In that state ``authority`` is the
+  ## engine's local pool gate only — host limits and cross-session fairness do
+  ## NOT apply and concurrent cross-invocation runs cannot be made safe. When
+  ## RunQuota gated every launch, ``bypassed`` is false and ``authority`` is
+  ## "runquota". Shared by ``writeBuildReport`` and the RA-13 regression test so
+  ## the asserted shape is the production shape.
+  %*{
+    "bypassed": bypassed,
+    "authority":
+      if bypassed: "local-engine-pool-gate-only" else: "runquota",
+    "concurrentInvocationsSafe": not bypassed
+  }
+
+proc runQuotaAuthorityHeaderLine*(bypassed: bool): string =
+  ## RA-13: the human build-header line stating the resource-authority status.
+  ## On bypass it states plainly that limits are locally-enforced-only and that
+  ## concurrent cross-invocation runs are NOT made safe. Shared by
+  ## ``logRunQuotaAuthority`` and the RA-13 regression test.
+  if bypassed:
+    "runQuota: bypassed (no lease) — resource limits are " &
+      "locally-enforced-only; concurrent cross-invocation runs are NOT " &
+      "made safe"
+  else:
+    "runQuota: active (lease authority)"
+
 proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
                       refresh: ProviderRefreshReport;
                       cmakeRegenerationResult,
@@ -3159,6 +3188,9 @@ proc writeBuildReport(path: string; provider: ProviderCompileArtifact;
     "trace": trace,
     "workspaceVcs": workspaceVcsEvidence.toJson(workspaceVcs),
     "targetResolution": targetResolutionArr,
+    # RA-13: machine-readable resource-authority status (see
+    # ``runQuotaReportJson``).
+    "runQuota": runQuotaReportJson(buildResult.runQuotaBypassed),
     "stats": statsJson(buildResult.stats)
   }
   createDir(extendedPath(parentDir(path)))
@@ -4906,6 +4938,18 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if item.launched and item.runQuotaBackend == "runquota-bypass":
         return true
 
+  var loggedRunQuotaAuthority = false
+  proc logRunQuotaAuthority(runResult: BuildRunResult) =
+    # RA-13: surface the resource-authority status in the build header. When
+    # this build launched at least one action with no RunQuota lease (explicit
+    # --runquota=off / REPROBUILD_NO_RUNQUOTA, or the unreachable-daemon
+    # fallback), say so plainly: limits are locally-enforced-only and cannot
+    # make concurrent cross-invocation runs safe. Emit once per build command.
+    if loggedRunQuotaAuthority:
+      return
+    loggedRunQuotaAuthority = true
+    logSummary(runQuotaAuthorityHeaderLine(runResult.runQuotaBypassed))
+
   proc warnRunQuotaBypassIfUsed(runResult: BuildRunResult) =
     if warnedRunQuotaBypass or not fallbackToRunQuotaBypass:
       return
@@ -5032,6 +5076,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if item.launched:
         inc benchmarkExecutedActions
     warnRunQuotaBypassIfUsed(buildResult)
+    logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
     let actionLogStart = statStart(statsEnabled)
@@ -5890,6 +5935,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if item.launched:
         inc benchmarkExecutedActions
     warnRunQuotaBypassIfUsed(buildResult)
+    logRunQuotaAuthority(buildResult)
     finishStat(buildStats, statsEnabled, "repro build total", buildTotalStart)
     buildResult.stats = buildStats
     let reportPath = outDir / "build-report.json"
