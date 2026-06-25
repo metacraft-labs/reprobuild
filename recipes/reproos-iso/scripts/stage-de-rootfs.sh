@@ -531,8 +531,65 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 EOF
 
-# Profile hook to auto-launch the installer on root login (tty1 only).
+# M9.R.36.1 — profile.d entry that exports LD_LIBRARY_PATH with every
+# /nix/store/*/lib dir present in the live ISO root. The ``repro``
+# binary (and several from-source recipes) ``dlopen()`` libraries
+# like ``libclingo.so`` by bare leaf name from Nim's
+# ``{.dynlib: const-string.}`` pragma; without LD_LIBRARY_PATH the
+# dlopen runs through ld.so's default search list (``/lib``,
+# ``/usr/lib`` + the ld.so.cache built from ``/etc/ld.so.conf`` at
+# image-stage time) and misses the nix-store hash dirs the ISO
+# bundles for closures.
+#
+# M9.R.33's stage script mirrors the full nix-store closure verbatim
+# at ``/nix/store/<hash>-<pkg>/lib`` to preserve RPATH resolution
+# for from-source ELFs, but the runtime ``dlopen("libclingo.so")``
+# call site doesn't get RPATH context — it relies on LD_LIBRARY_PATH
+# or the ld.so cache. We force-resolve via LD_LIBRARY_PATH at every
+# shell login so a manual ``/usr/bin/reproos-installer`` invocation
+# (or a manual ``repro hardware probe`` from a root shell) finds the
+# bundled libs without any further wrapper.
+#
+# The shell loop builds the path string lazily at login time by
+# globbing ``/nix/store/*/lib`` directories that contain at least one
+# ``*.so*`` file. Cheaper than mirroring every closure dir into a
+# pre-computed text file at stage time, and stays correct as the
+# closure grows in future M9.R.* iterations without a script edit.
 mkdir -p "$STAGE_DIR/etc/profile.d"
+cat > "$STAGE_DIR/etc/profile.d/zz-reproos-nixstore-ldpath.sh" <<'EOF'
+# Append every /nix/store/*/lib dir (containing .so libraries) to
+# LD_LIBRARY_PATH so dlopen() of bundled libs by leaf name works.
+# M9.R.36.1 — closes the libclingo.so dlopen gap that blocked
+# /usr/bin/reproos-installer's repro hardware probe phase.
+if [ -d /nix/store ] && [ -z "${REPRO_NIXSTORE_LDPATH_DONE:-}" ]; then
+  export REPRO_NIXSTORE_LDPATH_DONE=1
+  _repro_nix_dirs=""
+  for d in /nix/store/*/lib; do
+    [ -d "$d" ] || continue
+    # Cheap "contains at least one .so" check — restrict to lib dirs
+    # that actually ship shared objects (skip header-only / pkgconfig
+    # subdirs that have no dlopen-relevant content).
+    set -- "$d"/*.so*
+    [ -e "$1" ] || continue
+    if [ -z "$_repro_nix_dirs" ]; then
+      _repro_nix_dirs="$d"
+    else
+      _repro_nix_dirs="$_repro_nix_dirs:$d"
+    fi
+  done
+  if [ -n "$_repro_nix_dirs" ]; then
+    if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+      export LD_LIBRARY_PATH="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+    else
+      export LD_LIBRARY_PATH="$_repro_nix_dirs"
+    fi
+  fi
+  unset _repro_nix_dirs
+fi
+EOF
+chmod 0644 "$STAGE_DIR/etc/profile.d/zz-reproos-nixstore-ldpath.sh"
+
+# Profile hook to auto-launch the installer on root login (tty1 only).
 cat > "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh" <<'EOF'
 # ReproOS live-ISO console-mode installer autostart.
 if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
