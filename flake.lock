@@ -2023,6 +2023,23 @@
         "type": "github"
       }
     },
+    "results-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1733582743,
+        "narHash": "sha256-KbNqt0FMuzDF4X+XM6JEaZJBypLDnvVPpnBpE7Sq6sA=",
+        "owner": "arnetheduck",
+        "repo": "nim-results",
+        "rev": "df8113dda4c2d74d460a8fa98252b0b771bf1f27",
+        "type": "github"
+      },
+      "original": {
+        "owner": "arnetheduck",
+        "ref": "v0.5.1",
+        "repo": "nim-results",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "bearssl-src": "bearssl-src",
@@ -2044,6 +2061,7 @@
         ],
         "reprobuild-ct-test-runner-src": "reprobuild-ct-test-runner-src",
         "reprobuild-test-adapters-src": "reprobuild-test-adapters-src",
+        "results-src": "results-src",
         "runquota-src": "runquota-src",
         "stackable-hooks-src": "stackable-hooks-src"
       }

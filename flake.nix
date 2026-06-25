@@ -25,6 +25,17 @@
       url = "github:metacraft-labs/io-mon";
       flake = false;
     };
+    results-src = {
+      # ``results >= 0.5`` — codetracer-trace-format-nim's seekable CTFS reader
+      # (which the canonical incremental engine pulls in via ct_incremental_adapter)
+      # needs the ``.v`` field the ``?`` operator expands to, which the older
+      # vendored ``results`` lacks. config.nims's wireCodetracerEngine reads
+      # CODETRACER_RESULTS_SRC, then the newest ``results-0.5*`` under
+      # ~/.nimble/pkgs2. CI's clean dev shell has no nimble cache, so seed the
+      # env var from this input (a transitive dep, like nimcrypto/bearssl).
+      url = "github:arnetheduck/nim-results/v0.5.1";
+      flake = false;
+    };
     nimcrypto-src = {
       url = "github:cheatfate/nimcrypto/69eec0375dd146aede41f920c702c531bfe89c6b";
       flake = false;
@@ -92,6 +103,7 @@
       codetracer-native-recorder,
       runquota-src,
       io-mon-src,
+      results-src,
       ...
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -186,6 +198,13 @@
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
+                # codetracer's canonical incremental engine (reached through
+                # ct_incremental_adapter) compiles codetracer-trace-format-nim's
+                # CTFS reader, which needs results>=0.5 and <zstd.h>. The engine
+                # + trace-format-nim sources resolve from workspace siblings
+                # (config.nims), but results and the zstd include must be seeded.
+                export CODETRACER_RESULTS_SRC=${results-src}
+                export NIX_CFLAGS_COMPILE="-isystem ${pkgs.zstd.dev}/include ''${NIX_CFLAGS_COMPILE:-}"
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -310,6 +329,14 @@
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
+            # codetracer's canonical incremental engine (reached via
+            # ct_incremental_adapter) compiles codetracer-trace-format-nim's CTFS
+            # reader, which needs results>=0.5. The engine + trace-format-nim
+            # sources resolve from workspace siblings (config.nims's sibling
+            # detection); results is a transitive dep, seeded here. zstd (for the
+            # reader's <zstd.h>) is supplied via the cc-wrapper by adding it to
+            # the package set below.
+            CODETRACER_RESULTS_SRC = results-src;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             SQLITE_PREFIX = pkgs.sqlite.out;
@@ -327,6 +354,7 @@
               pkgs.p7zip
               pkgs.sqlite
               pkgs.xxHash
+              pkgs.zstd
               pkgs.zip
               pkgs.zlib
               pkgs.nixfmt-rfc-style

@@ -1,0 +1,14 @@
+# Cross-repo siblings the dev-shell CI jobs (lint, test) clone adjacent to this
+# checkout so config.nims's sibling detection can resolve them. The shared
+# `clone-siblings` action (run by setup-dev-env) reads this file.
+#
+# `name=ref` clones the ref directly; plain `name` resolves the revision from
+# the per-commit workspace lock in metacraft-manifests. reprobuild is not yet
+# integrated into the lock contract, so pin the mainline branch explicitly.
+#
+# These carry codetracer's canonical incremental test engine
+# (src/ct_test/incremental) and the trace-format-nim CTFS reader it imports,
+# reached through ct_incremental_adapter (the engine-free seam). One-way
+# dependency: reprobuild -> codetracer.
+codetracer=dev
+codetracer-trace-format-nim=dev
