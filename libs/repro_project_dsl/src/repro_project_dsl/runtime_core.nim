@@ -683,12 +683,15 @@ proc automaticMonitorPolicy*(
     kind: bdpAutomaticMonitor,
     ignoredInputPrefixes: @ignoredInputPrefixes)
 
-proc declaredOnlyDependencyPolicy*(
-    ignoredInputPrefixes: openArray[string] = []):
-    BuildActionDependencyPolicy {.dynOrStatic.} =
-  BuildActionDependencyPolicy(
-    kind: bdpDeclaredOnly,
-    ignoredInputPrefixes: @ignoredInputPrefixes)
+# NOTE: a ``declaredOnlyDependencyPolicy`` constructor used to live here. It
+# produced a "track only the statically declared inputs, no runtime
+# monitoring, mark the action complete/cacheable anyway" policy — an
+# unapproved soundness hole that silently let depended-on files change
+# without triggering a rebuild. It has been REMOVED and MUST NOT be
+# re-added: opaque tools use ``automaticMonitorPolicy`` (the spec baseline,
+# Reprobuild-Development.milestones.org M17); actions that genuinely have no
+# monitorable evidence (e.g. a pure network fetch) are made NON-CACHEABLE per
+# Monitor-Hook-Shim.md:501, never marked complete-on-declared-inputs.
 
 proc makeDepfilePolicy*(depfile = "";
                         depfiles: openArray[string] = [];
@@ -1762,7 +1765,11 @@ proc writeDependencyPolicy(outp: var seq[byte];
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
   let kind = readByte(bytes, pos)
-  if kind > byte(ord(bdpDeclaredOnly)):
+  # ``bdpMakeDepfile`` is the highest valid ordinal now that the removed
+  # ``bdpDeclaredOnly`` case is gone (Reprobuild-Development M17). The
+  # removal only dropped the last enum case, so no other ordinal shifts and
+  # the on-wire encoding of the surviving kinds is unchanged.
+  if kind > byte(ord(bdpMakeDepfile)):
     raisePayload("invalid dependency policy kind in build action payload")
   result.kind = BuildActionDependencyPolicyKind(kind)
   if version >= 15'u16:

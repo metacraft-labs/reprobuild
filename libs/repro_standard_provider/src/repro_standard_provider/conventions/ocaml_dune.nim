@@ -58,11 +58,11 @@
 ##      (excluding ``_build/`` / ``.repro/`` / ``.git/``). Outputs: one
 ##      ``_build/default/<entry-dir>/<name>.exe`` per declared executable
 ##      and ``_build/default/<entry-dir>/<name>.cmxa`` per declared
-##      library. Uses ``declaredOnlyDependencyPolicy`` — ``dune build``
-##      spawns ``ocamlopt`` / ``ocamldep`` worker processes whose FS
-##      reads aren't reliably observed via Windows DLL-interpose (same
-##      constraint M38 / M39 / M40 / M41 / M42 / M43 face for their
-##      configure / package / build actions).
+##      library. Uses ``automaticMonitorPolicy`` (automatic monitoring is
+##      the spec baseline for opaque tools, Reprobuild-Development M17):
+##      ``dune build`` spawns ``ocamlopt`` / ``ocamldep`` worker
+##      processes and the engine monitors their real read-set instead of
+##      trusting only statically declared inputs.
 ##
 ## **Output paths**:
 ##   * Executable: ``<projectRoot>/_build/default/<entry-dir>/<name>.exe``.

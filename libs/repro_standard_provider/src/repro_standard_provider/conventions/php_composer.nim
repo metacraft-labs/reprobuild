@@ -66,11 +66,11 @@
 ##      worth predicting at emit time; the sentinel gives the engine
 ##      a stable output path to fingerprint mirroring the M56
 ##      ruby-bundler convention's ``vendor/bundle/.repro-bundle-stamp``).
-##      Uses ``declaredOnlyDependencyPolicy`` — ``composer install``
-##      spawns worker subprocesses (PHP scripts) whose FS reads aren't
-##      reliably observed via Windows DLL-interpose (same constraint
-##      M40 / M41 / M42 / M43 / M46 / M55 / M56 face for their
-##      package / install actions).
+##      Uses ``automaticMonitorPolicy`` (automatic monitoring is the
+##      spec baseline for opaque tools, Reprobuild-Development M17):
+##      ``composer install`` spawns worker subprocesses (PHP scripts)
+##      and the engine monitors their real read-set instead of trusting
+##      only statically declared inputs.
 ##
 ##   2. ``php-composer-wrapper-<name>`` — one ``fs.writeText`` action
 ##      per declared executable. Outputs:

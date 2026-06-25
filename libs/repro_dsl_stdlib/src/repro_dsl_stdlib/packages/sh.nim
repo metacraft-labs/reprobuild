@@ -44,20 +44,20 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
             commandStatsId = "";
             dependencyPolicy = automaticMonitorPolicy()): BuildActionDef
     {.discardable.} =
-  ## MR12: ``dependencyPolicy`` lets recipes opt OUT of the default
-  ## automatic-monitor IAT-patching shim that the engine injects into
-  ## every child process of a shell action. Pass
-  ## ``dependencyPolicy = declaredOnlyDependencyPolicy()`` for shell
-  ## wrappers around toolchains that have their own incremental cache
-  ## (e.g. ``bash -c '... cargo build ...'`` indirections — cargo's
-  ## fingerprint DB already decides invalidation, and rustc + LLVM on
-  ## Windows interact badly with the inline-hook propagation, producing
-  ## STATUS_ACCESS_VIOLATION crashes in rustc's proc-macro / codegen
-  ## paths). The cargo typed-tool edges declare ``declaredOnly`` for
-  ## the same reason (see ``cargo.nim``'s ``dependencyPolicy
-  ## declaredOnly`` comment); this parameter brings the same opt-out
-  ## to the bash-wrapped indirections that recipes still use while
-  ## features like workspace-PATH-injection are being designed.
+  ## ``dependencyPolicy`` selects how the engine gathers this shell
+  ## action's dependency evidence. It defaults to
+  ## ``automaticMonitorPolicy()`` — automatic monitoring is the spec
+  ## baseline for opaque tools (Reprobuild-Development.milestones.org
+  ## M17). Recipes wrapping a toolchain that emits its own recognized
+  ## dependency reports (e.g. a ``bash -c '... cargo build ...'``
+  ## indirection where cargo writes ``.d`` depfiles) should pass an
+  ## explicit ``makeDepfilePolicy(...)`` / recognized-report policy so
+  ## the engine still collects real evidence. There is intentionally NO
+  ## declared-only opt-out: a "track only declared inputs, mark complete
+  ## anyway" policy is a soundness hole and was removed (M17). An action
+  ## that genuinely cannot be monitored and has no other evidence must be
+  ## made non-cacheable (``cacheable = false``) per
+  ## Monitor-Hook-Shim.md:501, never marked complete-on-declared-inputs.
   ##
   ## ``ignoredInputPrefixes`` is merged into the supplied policy so
   ## callers can keep using the convenience parameter without having

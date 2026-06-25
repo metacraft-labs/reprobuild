@@ -63,11 +63,11 @@
 ##      shape (``vendor/bundle/ruby/<ABI>/gems/...``), and the
 ##      convention can't predict the host's exact ABI version. The
 ##      sentinel works around the prediction problem cleanly).
-##      Uses ``declaredOnlyDependencyPolicy`` — ``bundle install``
-##      spawns worker subprocesses whose FS reads aren't reliably
-##      observed via Windows DLL-interpose (same constraint M40 /
-##      M41 / M42 / M43 / M46 / M55 face for their package /
-##      configure / build actions).
+##      Uses ``automaticMonitorPolicy`` (automatic monitoring is the
+##      spec baseline for opaque tools, Reprobuild-Development M17):
+##      ``bundle install`` spawns worker subprocesses and the engine
+##      monitors their real read-set instead of trusting only
+##      statically declared inputs.
 ##
 ##   2. ``ruby-bundler-wrapper-<name>`` — one ``fs.writeText`` action
 ##      per declared executable. Outputs:

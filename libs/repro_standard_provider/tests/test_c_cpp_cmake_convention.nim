@@ -311,11 +311,15 @@ suite "c-cpp-cmake convention M38":
         check "ninja" in action.toolIdentityRefs
         check "gcc" in action.toolIdentityRefs
         check "sh" in action.toolIdentityRefs
+        # Opaque tools use automatic monitoring — the removed declared-only
+        # policy is prohibited (Reprobuild-Development M17).
+        check action.dependencyPolicy.kind == bdpAutomaticMonitor
         sawConfigureRefs = true
       elif action.id.startsWith("ccpp-cmake-build-"):
         check "cmake" in action.toolIdentityRefs
         check "ninja" in action.toolIdentityRefs
         check "gcc" in action.toolIdentityRefs
+        check action.dependencyPolicy.kind == bdpAutomaticMonitor
         sawBuildRefs = true
     check sawConfigureRefs
     check sawBuildRefs

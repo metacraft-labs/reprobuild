@@ -42,11 +42,11 @@
 ##      under ``src/``/``include/``. Outputs include the build dir's
 ##      ``CMakeCache.txt`` plus a custom stamp so the action's success is
 ##      recorded independently of CMake's internal touch behaviour. Uses
-##      ``declaredOnlyDependencyPolicy`` — the configure step spawns a
-##      fan-out of generator subprocesses whose FS reads are tracked
-##      poorly by the Windows DLL-interpose path (same reason
-##      ``c-cpp-autotools`` declines automatic-monitor for its configure
-##      action).
+##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
+##      baseline for opaque tools, Reprobuild-Development M17): the
+##      configure step spawns a fan-out of generator subprocesses and the
+##      engine monitors their real read-set instead of trusting only
+##      statically declared inputs.
 ##   2. ``ccpp-cmake-build-<member>`` — one per declared member:
 ##      ``cmake --build <scratch> --target <member>``. Deps:
 ##      ``ccpp-cmake-configure``. Outputs: the produced binary or static

@@ -57,11 +57,11 @@
 ##      ``Sources/`` (excluding ``.build/`` / ``.repro/`` / ``.git/``).
 ##      Outputs: one ``.build/release/<target>[.exe]`` per declared
 ##      executable, ``.build/release/lib<target>.a`` per declared
-##      library. Uses ``declaredOnlyDependencyPolicy`` — ``swift build``
-##      spawns ``swiftc`` worker processes whose FS reads aren't reliably
-##      observed via Windows DLL-interpose (same constraint M38 / M39 /
-##      M40 / M41 / M42 face for their configure / package / build
-##      actions).
+##      library. Uses ``automaticMonitorPolicy`` (automatic monitoring is
+##      the spec baseline for opaque tools, Reprobuild-Development M17):
+##      ``swift build`` spawns ``swiftc`` worker processes and the engine
+##      monitors their real read-set instead of trusting only statically
+##      declared inputs.
 ##
 ## **Output paths**:
 ##   * Executable: ``<projectRoot>/.build/release/<targetName>`` (on

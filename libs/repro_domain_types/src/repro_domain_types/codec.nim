@@ -148,7 +148,7 @@ proc writeDependencyPolicy(outp: var seq[byte]; policy: DependencyGatheringPolic
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int): DependencyGatheringPolicy =
   let kind = readByte(bytes, pos)
   let completeness = readByte(bytes, pos)
-  if kind > byte(ord(dgNoRuntimeDependencies)):
+  if kind > byte(ord(dgPostBuildConverterValidatedByMonitor)):
     raiseEnvelopeError(eeMalformed, "invalid dependency gathering kind")
   if completeness > byte(ord(decDiagnosticOnly)):
     raiseEnvelopeError(eeMalformed, "invalid evidence completeness")

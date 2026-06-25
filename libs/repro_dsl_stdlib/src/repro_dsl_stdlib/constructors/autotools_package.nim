@@ -193,26 +193,27 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     escapedExtracted & "\" --strip-components=" & $spec.extractStrip & "; ")
   script.add("touch \"" & escapedStamp & "\"")
   let argv = @["sh", "-c", script]
-  # Portable-Macos-Sandbox-Tools: the fetch action's dependency evidence is the
-  # declared URL + content hash (already folded into the action fingerprint and
-  # the emitted stamp), NOT a set of read files we need the io-mon monitor to
-  # discover. Monitoring it would force the download/verify/extract helpers
-  # (``curl`` / ``sha256sum`` / ``tar``) — all SIP-protected system binaries on
-  # macOS — through the io-mon SIP drop-in redirect, which has no drop-in for
-  # ``curl`` / ``sha256sum`` and so fails the fetch (exit 127) when bootstrapping
-  # the very sandbox-tools bundle that would supply those drop-ins (a
-  # chicken-and-egg). A declared-only (unmonitored) policy is both correct
-  # (download+verify+extract produces no monitorable file-dependency evidence)
-  # and avoids that bootstrap deadlock. See
-  # reprobuild-specs/Language-Conventions/C-Cpp-Autotools.md (the fetch step is a
-  # source-acquisition action, not a compile/link with implicit inputs).
+  # The fetch action is a pure source-acquisition step
+  # (download → verify → extract): it has NO monitorable file-dependency
+  # evidence — its only "inputs" are the declared URL + content hash, which
+  # are already folded into the action fingerprint and the emitted stamp.
+  # Per Monitor-Hook-Shim.md:501 an action with no monitorable evidence must
+  # be FAILED or made NON-CACHEABLE; it must NEVER be marked
+  # complete-on-declared-inputs (the removed declared-only policy — see
+  # Reprobuild-Development.milestones.org M17). So the action is marked
+  # NON-CACHEABLE (always re-run): the network fetch is cheap relative to the
+  # build it feeds, and re-running is the safe behaviour for a step whose
+  # read-set the engine cannot verify. It still uses ``automaticMonitorPolicy``
+  # so that, when the action IS monitored, any incidental file reads are
+  # captured rather than silently ignored.
   let act = buildAction(
     id = autotoolsFetchActionId(packageName),
     call = inlineExecCall(argv),
     inputs = @[],
     outputs = @[stamp],
     pool = "fetch",
-    dependencyPolicy = declaredOnlyDependencyPolicy(),
+    cacheable = false,
+    dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.fetch." & hashAlgTag,
     toolIdentityRefs = @["sh"])
   some(act)

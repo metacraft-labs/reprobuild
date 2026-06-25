@@ -74,10 +74,11 @@
 ##      ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>`` per
 ##      declared member, where ``<ext>`` is ``.exe`` when the csproj
 ##      ``<OutputType>`` is ``Exe`` and ``.dll`` otherwise. Uses
-##      ``declaredOnlyDependencyPolicy`` — ``dotnet`` spawns MSBuild
-##      worker processes whose FS reads aren't reliably observed via
-##      Windows DLL-interpose (same constraint M38 / M39 / M40 / M41
-##      face for their configure / package / build actions).
+##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
+##      baseline for opaque tools, Reprobuild-Development M17): ``dotnet``
+##      spawns MSBuild worker processes and the engine monitors their
+##      real read-set instead of trusting only statically declared
+##      inputs.
 ##
 ## **Output paths** (parsed from ``.csproj``):
 ##   * ``<TargetFramework>`` (e.g. ``net8.0``). When the csproj uses

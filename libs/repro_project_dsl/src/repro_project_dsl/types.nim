@@ -321,7 +321,14 @@ type
     bdpDefault
     bdpAutomaticMonitor
     bdpMakeDepfile
-    bdpDeclaredOnly
+    # NOTE: there is intentionally NO ``bdpDeclaredOnly``. A recipe-facing
+    # "declared-only" policy (track only statically declared inputs, no
+    # runtime monitoring, mark the action complete/cacheable anyway) is an
+    # unapproved soundness hole that lets depended-on files change without a
+    # rebuild. It was re-introduced more than once by agents and is REMOVED;
+    # opaque tools use ``bdpAutomaticMonitor``, and actions with no
+    # monitorable evidence are made non-cacheable per Monitor-Hook-Shim.md:501.
+    # See Reprobuild-Development.milestones.org M17.
 
   BuildActionDependencyPolicy* = object
     kind*: BuildActionDependencyPolicyKind

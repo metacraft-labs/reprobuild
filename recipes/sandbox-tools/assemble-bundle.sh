@@ -67,7 +67,7 @@ for recipe in "${recipe_dirs[@]}"; do
   if [ ! -d "$install_bin" ]; then
     echo "WARNING: $recipe not built — missing $install_bin" >&2
     echo "  run: repro build $recipe --tool-provisioning=path --no-runquota \\" >&2
-    echo "         --daemon=off  (with REPRO_MACOS_DISABLE_ACTION_MONITOR=1)" >&2
+    echo "         --daemon=off" >&2
     continue
   fi
   for src in "$install_bin"/*; do

@@ -92,10 +92,11 @@
 ##      ``.exs`` source file recursively walked under the project root
 ##      (excluding ``_build/`` / ``.repro/`` / ``.git/`` / ``deps/``).
 ##      Outputs: ``<projectRoot>/<name>`` (the escript). Uses
-##      ``declaredOnlyDependencyPolicy`` — ``mix`` spawns ``erl`` /
-##      ``escript`` worker processes whose FS reads aren't reliably
-##      observed via the Windows DLL-interpose path (same constraint
-##      M40/M41/M42/M43/M46/M55/M56/M57/M60/M61 face).
+##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
+##      baseline for opaque tools, Reprobuild-Development M17): ``mix``
+##      spawns ``erl`` / ``escript`` worker processes and the engine
+##      monitors their real read-set instead of trusting only statically
+##      declared inputs.
 ##
 ##   2. ``elixir-mix-wrapper-<name>`` — one ``fs.writeText`` action
 ##      per declared executable. Outputs:

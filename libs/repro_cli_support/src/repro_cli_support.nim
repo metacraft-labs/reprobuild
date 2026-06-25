@@ -1455,9 +1455,6 @@ proc lowerDependencyPolicy(actionId, depfile: string;
       raise newException(ValueError,
         "action " & actionId & " uses makeDepfilePolicy without a depfile path")
     result = depfilePolicyMulti(merged)
-  of bdpDeclaredOnly:
-    result = DependencyGatheringPolicy(kind: dgNoRuntimeDependencies,
-      completeness: decComplete)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
 
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
@@ -2755,7 +2752,7 @@ proc readCompleteness(bytes: openArray[byte]; pos: var int):
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
     DependencyGatheringPolicy =
   let kind = readByteValue(bytes, pos)
-  if kind > byte(ord(dgNoRuntimeDependencies)):
+  if kind > byte(ord(dgPostBuildConverterValidatedByMonitor)):
     raiseEnvelopeError(eeMalformed, "invalid dependency gathering kind")
   result.kind = DependencyGatheringKind(kind)
   result.completeness = readCompleteness(bytes, pos)
@@ -3166,27 +3163,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   if scratchDir.len > 0:
     command.add("--scratch-dir")
     command.add(scratchDir)
-  # Portable-Macos-Sandbox-Tools: the provider-compile edge runs reprobuild's
-  # OWN ``nim c`` of the recipe's provider binary (its inputs are reprobuild's
-  # pinned libs + the Nim stdlib, NOT the package's source tree). On macOS /
-  # Apple Silicon the io-mon monitor destabilises this particular compile: even
-  # the interpose-only backend intermittently SIGTRAPs the clang subprocess
-  # that compiles the large ``system.nim.c`` translation unit (observed exit
-  # 133), and the body-patch backend additionally corrupts the compiler's
-  # ``open``/``read`` of its own nimcache files. Because this is reprobuild's
-  # internal machinery — its full dependency set is already pinned by
-  # ``weakFingerprint`` (the recipe + toolchain + library closure fingerprint),
-  # not by monitor evidence — we run it UNMONITORED on macOS rather than wedge
-  # every from-source recipe behind an io-mon arm64e defect. Linux and Windows
-  # keep the monitored policy. The remaining io-mon arm64e crash is a tracked
-  # follow-up (it does not block producing the portable sandbox tools, whose
-  # OWN configure/make actions are monitored under interpose below).
-  let providerCompilePolicy =
-    when defined(macosx):
-      DependencyGatheringPolicy(kind: dgNoRuntimeDependencies,
-                                completeness: decComplete)
-    else:
-      automaticMonitorGatheringPolicy()
+  # The provider-compile edge runs reprobuild's OWN ``nim c`` of the recipe's
+  # provider binary (its inputs are reprobuild's pinned libs + the Nim stdlib,
+  # NOT the package's source tree). It uses automatic monitoring like every
+  # other opaque tool: automatic monitoring is the spec baseline for opaque
+  # tools (Reprobuild-Development.milestones.org M17). An earlier macOS-only
+  # ``dgNoRuntimeDependencies`` (declared-only) downgrade here was an
+  # unapproved soundness hole and has been removed; monitored builds work on
+  # arm64e after the io-mon fix.
   action("__repro_provider_compile", command,
     cwd = workDir,
     inputs = inputs,
@@ -3194,7 +3178,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = true,
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    dependencyPolicy = providerCompilePolicy)
+    dependencyPolicy = automaticMonitorGatheringPolicy())
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =

@@ -75,11 +75,11 @@
 ##      Outputs: one
 ##      ``dist-newstyle/build/<platform-tuple>/ghc-<ghc-ver>/<pkg>-<pkg-ver>/
 ##      x/<exe>/build/<exe>/<exe>[.exe]`` per declared executable. Uses
-##      ``declaredOnlyDependencyPolicy`` — ``cabal v2-build`` spawns
-##      ``ghc`` worker processes whose FS reads aren't reliably observed
-##      via Windows DLL-interpose (same constraint M38 / M39 / M40 / M41
-##      / M42 / M43 / M46 face for their configure / package / build
-##      actions).
+##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
+##      baseline for opaque tools, Reprobuild-Development M17): ``cabal
+##      v2-build`` spawns ``ghc`` worker processes and the engine monitors
+##      their real read-set instead of trusting only statically declared
+##      inputs.
 ##
 ## **Output paths**:
 ##   * Executable: ``<projectRoot>/dist-newstyle/build/<platform-tuple>/

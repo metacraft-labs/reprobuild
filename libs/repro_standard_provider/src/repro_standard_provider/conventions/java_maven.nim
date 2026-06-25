@@ -43,10 +43,11 @@
 ##      nothing by limiting to ``.java``). Outputs: one
 ##      ``target/<artifactId>-<version>.jar`` per declared member (M40
 ##      assumes the project produces a single jar — ``<artifactId>`` is
-##      parsed from ``pom.xml``). Uses ``declaredOnlyDependencyPolicy`` —
-##      ``mvn`` spawns a fan-out of plugin processes whose FS reads
-##      aren't reliably observed via Windows DLL-interpose (same
-##      constraint M38 / M39 face for their configure actions).
+##      parsed from ``pom.xml``). Uses ``automaticMonitorPolicy``
+##      (automatic monitoring is the spec baseline for opaque tools,
+##      Reprobuild-Development M17): ``mvn`` spawns a fan-out of plugin
+##      processes and the engine monitors their real read-set instead of
+##      trusting only statically declared inputs.
 ##
 ## **Output paths**:
 ##   * Executable / library: ``target/<artifactId>-<version>.jar``.

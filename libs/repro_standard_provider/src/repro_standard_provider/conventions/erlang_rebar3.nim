@@ -85,10 +85,11 @@
 ##      ``.repro/`` / ``.git/``). Outputs:
 ##      ``<projectRoot>/_build/default/bin/<name>`` (the escript) plus,
 ##      on Windows, the sibling ``<name>.cmd`` launcher. Uses
-##      ``declaredOnlyDependencyPolicy`` — ``rebar3`` spawns ``erl``
-##      worker processes whose FS reads aren't reliably observed via
-##      the Windows DLL-interpose path (same constraint
-##      M40/M41/M42/M43/M46/M55/M56/M57/M60 face).
+##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
+##      baseline for opaque tools, Reprobuild-Development M17): ``rebar3``
+##      spawns ``erl`` worker processes and the engine monitors their
+##      real read-set instead of trusting only statically declared
+##      inputs.
 ##
 ##   2. ``erlang-rebar3-wrapper-<name>`` — one ``fs.writeText`` action
 ##      per declared executable. Outputs:

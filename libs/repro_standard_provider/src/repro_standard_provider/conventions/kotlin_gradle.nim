@@ -79,10 +79,11 @@
 ##      (M41 assumes the project produces a single jar — the convention
 ##      parses ``rootProject.name`` from ``settings.gradle[.kts]`` and
 ##      ``version = "..."`` from ``build.gradle[.kts]`` to predict the
-##      path). Uses ``declaredOnlyDependencyPolicy`` — ``gradle`` spawns
-##      a fan-out of plugin processes whose FS reads aren't reliably
-##      observed via Windows DLL-interpose (same constraint M38 / M39 /
-##      M40 face for their configure / package actions).
+##      path). Uses ``automaticMonitorPolicy`` (automatic monitoring is
+##      the spec baseline for opaque tools, Reprobuild-Development M17):
+##      ``gradle`` spawns a fan-out of plugin processes and the engine
+##      monitors their real read-set instead of trusting only statically
+##      declared inputs.
 ##
 ## **Output paths**:
 ##   * Executable / library: ``build/libs/<projectName>-<version>.jar``.

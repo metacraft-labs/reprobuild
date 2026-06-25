@@ -51,11 +51,11 @@
 ##      ``include/``. Outputs include the build dir's
 ##      ``build.ninja`` + a custom stamp so the action's success is
 ##      recorded independently of Meson's internal touch behaviour.
-##      Uses ``declaredOnlyDependencyPolicy`` — like the cmake
-##      convention, the configure step spawns a fan-out of subprocesses
-##      whose FS reads aren't reliably observed via the Windows DLL-
-##      interpose path (same constraint ``c-cpp-autotools`` and
-##      ``c-cpp-cmake`` face).
+##      Uses ``automaticMonitorPolicy`` (automatic monitoring is the spec
+##      baseline for opaque tools, Reprobuild-Development M17): like the
+##      cmake convention, the configure step spawns a fan-out of
+##      subprocesses and the engine monitors their real read-set instead
+##      of trusting only statically declared inputs.
 ##   2. ``ccpp-meson-build-<member>`` — one per declared member:
 ##      ``meson compile -C <scratch> <member>``. Deps:
 ##      ``ccpp-meson-configure``. Outputs: the produced binary or

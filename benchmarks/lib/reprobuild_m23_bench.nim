@@ -196,10 +196,13 @@ proc requireAll(run: BuildRunResult; statuses: set[ActionStatus]) =
         item.id & " status=" & $item.status & " exit=" & $item.exitCode &
         " stderr=" & item.stderr)
 
-proc noRuntimeDependencyPolicy(): DependencyGatheringPolicy =
-  DependencyGatheringPolicy(
-    kind: dgNoRuntimeDependencies,
-    completeness: decComplete)
+proc benchActionPolicy(): DependencyGatheringPolicy =
+  # Automatic monitoring is the spec baseline for opaque tools
+  # (Reprobuild-Development M17). The removed declared-only /
+  # no-runtime-dependencies kind must not be used. These synthetic
+  # fixture-actions read no files, so monitoring adds negligible overhead
+  # to the throughput measurement.
+  automaticMonitorGatheringPolicy()
 
 proc benchmarkEngineConfig(cacheRoot, app: string;
                            rebuildMissingOutputsOnCacheHit = false):
@@ -222,7 +225,7 @@ proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
       outputs = ["wide/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-wide-" & $i,
-      dependencyPolicy = noRuntimeDependencyPolicy())
+      dependencyPolicy = benchActionPolicy())
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
@@ -238,7 +241,7 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
       outputs = ["noop/" & $i & ".txt"], cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-noop-" & $i,
-      dependencyPolicy = noRuntimeDependencyPolicy())
+      dependencyPolicy = benchActionPolicy())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
@@ -261,7 +264,7 @@ proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
       cpuMilli = 100'u32,
       memoryBytes = 4'u64 * 1024'u64 * 1024'u64,
       commandStatsId = "m23-cache-" & $i,
-      dependencyPolicy = noRuntimeDependencyPolicy())
+      dependencyPolicy = benchActionPolicy())
   discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   for i in 0 ..< count:
     let outputPath = workRoot / "cache" / ($i & ".txt")

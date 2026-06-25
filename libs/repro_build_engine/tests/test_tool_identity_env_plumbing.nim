@@ -27,6 +27,7 @@ import repro_build_engine
 import repro_core
 import repro_hash
 import repro_local_store
+import io_mon/writer
 
 const TmpDir = "build/test-tmp/test_tool_identity_env_plumbing"
 
@@ -123,11 +124,64 @@ proc oneAction(actionId: string;
     actionCachePolicy: ffpTimestamp,
     cpuMilli: 1000,
     memoryBytes: 0,
+    # Automatic monitoring is the spec baseline for opaque tools
+    # (Reprobuild-Development M17). This test exercises env plumbing, not
+    # the dependency-gathering kind, and the action is already marked
+    # ``cacheable: false`` above, so the policy choice doesn't affect what
+    # it asserts.
     dependencyPolicy: DependencyGatheringPolicy(
-      kind: dgNoRuntimeDependencies,
+      kind: dgAutomaticMonitor,
       completeness: decComplete),
     toolIdentityRefs: refs)
   graph(@[act], newSeq[BuildPool]())
+
+proc passthroughMonitorCli(cacheRoot: string): string =
+  ## The actions in this suite use ``dgAutomaticMonitor`` — automatic
+  ## monitoring is the spec baseline for opaque tools
+  ## (Reprobuild-Development M17), and an automatic-monitor action with
+  ## no monitor CLI wired now FAILS by design (Monitor-Hook-Shim.md:501:
+  ## "injection failure MUST fail the monitored action or make it
+  ## non-cacheable"). This test is about env plumbing, not monitor
+  ## evidence, so it wires a passthrough fake-monitor: parse ``--depfile``,
+  ## copy a pre-built empty-but-valid RMDF there (the engine's evidence
+  ## read then succeeds with a complete, zero-record dependency set), then
+  ## ``exec`` the real action argv unchanged (preserving the inherited
+  ## environment the test asserts on). The RMDF template is produced via
+  ## io-mon's own ``encodeCanonical(@[])`` so the wrapper stays decoupled
+  ## from the RMDF wire format.
+  let dir = cacheRoot / "monitor-cli"
+  createDir(dir)
+  let rmdfTemplate = dir / "empty.rmdf"
+  writeFile(rmdfTemplate, cast[string](encodeCanonical(@[])))
+  when defined(windows):
+    result = dir / "passthrough-monitor.cmd"
+    # ``%1 %2`` are ``--depfile`` and the depfile path; ``%3`` is ``--``;
+    # ``%4`` onward is the real argv. Create the depfile's directory, copy
+    # the RMDF template there, then invoke the real argv.
+    writeFile(result,
+      "@echo off\r\n" &
+      "for %%I in (\"%~2\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\r\n" &
+      "copy /Y \"" & rmdfTemplate & "\" %~2 >nul\r\n" &
+      "%4 %5 %6 %7 %8 %9\r\n")
+  else:
+    result = dir / "passthrough-monitor.sh"
+    writeFile(result,
+      "#!/bin/sh\n" &
+      "depfile=\"\"\n" &
+      "while [ \"$#\" -gt 0 ]; do\n" &
+      "  case \"$1\" in\n" &
+      "    --depfile) depfile=\"$2\"; shift 2;;\n" &
+      "    --) shift; break;;\n" &
+      "    *) shift;;\n" &
+      "  esac\n" &
+      "done\n" &
+      "if [ -n \"$depfile\" ]; then\n" &
+      "  mkdir -p \"$(dirname \"$depfile\")\"\n" &
+      "  cp \"" & rmdfTemplate & "\" \"$depfile\"\n" &
+      "fi\n" &
+      "exec \"$@\"\n")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc runnerCfg(cacheRoot: string;
                resolver: ToolIdentityResolver = nil): BuildEngineConfig =
@@ -140,6 +194,11 @@ proc runnerCfg(cacheRoot: string;
   # ``mergeActionEnvWithMsvc`` -> ``envTableFromArgvStyle``), so the
   # assertion surface is identical.
   result.bypassRunQuota = true
+  # Wire the passthrough monitor so the ``dgAutomaticMonitor`` actions run
+  # (see ``passthroughMonitorCli``); without a monitor CLI they would fail
+  # the fail-safe, which is the correct behaviour but not what this suite
+  # exercises.
+  result.monitorCliPath = passthroughMonitorCli(cacheRoot)
   result.toolIdentityResolver = resolver
 
 # ---------------------------------------------------------------------------

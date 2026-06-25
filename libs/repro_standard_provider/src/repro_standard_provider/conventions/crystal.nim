@@ -555,9 +555,10 @@ proc emitBuildAction(projectRoot, crystalExe: string;
     outputs = @[outputPath],
     pool = "compile",
     # Crystal's whole-program analysis spawns its own compile pipeline
-    # internally; the FS reads aren't reliably observed via Windows
-    # DLL-interpose. ``declaredOnly`` policy + explicit ``inputs``
-    # walk is the same pattern other Tier 2b conventions use.
+    # internally. Uses ``automaticMonitorPolicy`` (automatic monitoring is
+    # the spec baseline for opaque tools, Reprobuild-Development M17): the
+    # engine monitors the real read-set instead of trusting only the
+    # statically declared inputs.
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = statsId)
 

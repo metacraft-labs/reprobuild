@@ -2828,28 +2828,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # ``completed < buildGraph.actions.len`` so a freshly inserted action keeps
   # the loop alive.
   var buildGraph = inferDeclaredActionDeps(g)
-  when defined(macosx):
-    # Portable-Macos-Sandbox-Tools fallback: on macOS / Apple Silicon the
-    # io-mon monitor (both the body-patch AND, for some heavy build trees, the
-    # interpose-only backend) intermittently SIGTRAPs the tool subprocesses an
-    # autotools ``configure``/``make`` spawns (e.g. the ``sed`` that writes
-    # ``lib/configmake.h``; observed ``Trace/BPT trap: 5`` → exit 133), which
-    # aborts the build before its dependency set can be captured. When
-    # ``REPRO_MACOS_DISABLE_ACTION_MONITOR=1`` is set, the engine downgrades every
-    # monitored action to a declared-only (unmonitored) policy so the action
-    # RUNS and PRODUCES its outputs. The action's static inputs/outputs +
-    # cache fingerprint still gate rebuilds; what is lost is runtime read-set
-    # discovery — an explicit, opt-in trade documented as a tracked io-mon
-    # arm64e follow-up (Portable-Macos-Sandbox-Tools.milestones.org). Off by
-    # default, so no existing suite changes behaviour. The knob is honoured
-    # here, once, before any monitor-evidence / wrap logic reads the policy.
-    if getEnv("REPRO_MACOS_DISABLE_ACTION_MONITOR") == "1":
-      for action in buildGraph.actions.mitems:
-        if action.dependencyPolicy.kind in MonitorPolicyKinds:
-          action.dependencyPolicy = DependencyGatheringPolicy(
-            kind: dgNoRuntimeDependencies,
-            completeness: decComplete,
-            ignoredInputPrefixes: action.dependencyPolicy.ignoredInputPrefixes)
+  # NOTE: an earlier ``REPRO_MACOS_DISABLE_ACTION_MONITOR`` opt-in lived here and
+  # downgraded every monitored action to a declared-only (unmonitored) policy
+  # on macOS. That was an unapproved soundness hole — it marked actions
+  # complete/cacheable on declared inputs alone while silently dropping runtime
+  # read-set discovery. It has been REMOVED and MUST NOT be re-added: automatic
+  # monitoring is the spec baseline for opaque tools
+  # (Reprobuild-Development.milestones.org M17), monitored builds work on arm64e
+  # after the io-mon fix, and an action that genuinely cannot be monitored must
+  # FAIL or be NON-CACHEABLE per Monitor-Hook-Shim.md:501 — never marked
+  # complete-on-declared-inputs.
   finishStat("repro graph infer deps", inferStart)
   var runResult: BuildRunResult
   runResult.traceEnabled = not config.suppressTrace
