@@ -6214,6 +6214,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim",
+    binary: "build/test-bin/t_top_level_sync_pull_shortcuts_match_workspace_forms",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim",
     binary: "build/test-bin/t_long_operations_announce_plan_and_emit_live_progress",
     defines: @[],

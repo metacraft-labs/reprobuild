@@ -31920,7 +31920,8 @@ proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
 # ---- RA-6: `repro completion <shell>` --------------------------------------
 
 const reproTopLevelCommands = [
-  "build", "watch", "develop", "add", "remove", "push", "sync", "branch",
+  "build", "watch", "develop", "add", "remove", "push", "sync", "pull",
+  "branch",
   "checkout", "hooks", "check", "workspace", "prompt", "completion", "store",
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "hardware", "disk", "launch-plan",
@@ -33093,6 +33094,38 @@ proc runThinApp*(programName: string): int =
       return runPushCommand(pushArgs)
     except CatchableError as err:
       stderr.writeLine("repro push: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "sync":
+    # Top-level `repro sync [<project>]` shortcut per CLI/sync.md. Mirrors
+    # the `repro checkout`/`push` top-level arms above: routes to the same
+    # handler `repro workspace sync` uses (``runWorkspaceSyncCommand``),
+    # forwarding the remaining args unchanged so every flag (scoped
+    # ``<project>``, ``--jobs*``, ``--groups``, ``--force-sync``,
+    # ``--dry-run``, ``--json``, ``--verbose``) behaves identically.
+    try:
+      let syncArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runWorkspaceSyncCommand(syncArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro sync: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "pull":
+    # Top-level `repro pull [<project>]` shortcut per CLI/sync.md. Mirrors
+    # the `repro sync` shortcut just above: routes to the same handler
+    # `repro workspace pull` uses (``runWorkspacePullCommand``), forwarding
+    # the remaining args unchanged.
+    try:
+      let pullArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runWorkspacePullCommand(pullArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro pull: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
