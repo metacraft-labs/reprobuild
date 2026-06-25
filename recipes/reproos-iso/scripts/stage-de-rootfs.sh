@@ -468,6 +468,32 @@ if [ ! -x "$INSTALLER_BIN" ]; then
   exec /usr/bin/startplasma-wayland
 fi
 
+# M9.R.36.1 — build a TARGETED LD_LIBRARY_PATH for the installer's
+# QProcess children (libclingo / libsqlite3 dlopen via Nim
+# {.dynlib: const-string.}).  Skip glibc dirs to avoid shadowing the
+# Debian-installed libc.so.6 with a foreign nix-store glibc (which
+# would break every Debian binary in the chain).
+_repro_nix_dirs=""
+for d in /nix/store/*/lib; do
+  [ -d "$d" ] || continue
+  case "$d" in
+    /nix/store/*-glibc-*/lib) continue ;;
+  esac
+  set -- "$d"/*.so*
+  [ -e "$1" ] || continue
+  if [ -z "$_repro_nix_dirs" ]; then
+    _repro_nix_dirs="$d"
+  else
+    _repro_nix_dirs="$_repro_nix_dirs:$d"
+  fi
+done
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  LD_LIBRARY_PATH="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+else
+  LD_LIBRARY_PATH="$_repro_nix_dirs"
+fi
+export LD_LIBRARY_PATH
+
 export QT_QPA_PLATFORM=wayland
 export QT_QUICK_CONTROLS_STYLE=Material
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
@@ -531,63 +557,62 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 EOF
 
-# M9.R.36.1 — profile.d entry that exports LD_LIBRARY_PATH with every
-# /nix/store/*/lib dir present in the live ISO root. The ``repro``
-# binary (and several from-source recipes) ``dlopen()`` libraries
-# like ``libclingo.so`` by bare leaf name from Nim's
-# ``{.dynlib: const-string.}`` pragma; without LD_LIBRARY_PATH the
-# dlopen runs through ld.so's default search list (``/lib``,
-# ``/usr/lib`` + the ld.so.cache built from ``/etc/ld.so.conf`` at
-# image-stage time) and misses the nix-store hash dirs the ISO
-# bundles for closures.
+# M9.R.36.1 — ``reproos-installer`` wrapper that sets a TARGETED
+# LD_LIBRARY_PATH for the installer's QProcess children.  Nim's
+# ``{.dynlib: const-string.}`` pragma calls ``dlopen("libclingo.so")``
+# with a BARE leaf name from the ``repro`` binary the installer
+# spawns; the live ISO bundles libclingo at
+# ``/nix/store/<hash>-clingo-*/lib/libclingo.so`` which no default
+# ld.so search rule covers.
 #
-# M9.R.33's stage script mirrors the full nix-store closure verbatim
-# at ``/nix/store/<hash>-<pkg>/lib`` to preserve RPATH resolution
-# for from-source ELFs, but the runtime ``dlopen("libclingo.so")``
-# call site doesn't get RPATH context — it relies on LD_LIBRARY_PATH
-# or the ld.so cache. We force-resolve via LD_LIBRARY_PATH at every
-# shell login so a manual ``/usr/bin/reproos-installer`` invocation
-# (or a manual ``repro hardware probe`` from a root shell) finds the
-# bundled libs without any further wrapper.
+# A naive shell-level LD_LIBRARY_PATH that includes ALL
+# ``/nix/store/*/lib`` dirs shadows Debian-installed glibc with a
+# foreign nix-store glibc (different ``__nptl_change_stack_perm``
+# private-symbol version), which then breaks every Debian binary
+# (``cat`` / ``head`` / ``ls`` / ``tail`` all fail with
+# ``symbol lookup error``).  So we surgically include ONLY the
+# clingo + qt6 + sqlite + nimcrypto-style dirs the ``repro``
+# binary's runtime dlopen needs — explicitly skipping any
+# ``/nix/store/*-glibc-*/lib`` dir so the Debian binaries keep
+# their compatible system glibc.
 #
-# The shell loop builds the path string lazily at login time by
-# globbing ``/nix/store/*/lib`` directories that contain at least one
-# ``*.so*`` file. Cheaper than mirroring every closure dir into a
-# pre-computed text file at stage time, and stays correct as the
-# closure grows in future M9.R.* iterations without a script edit.
-mkdir -p "$STAGE_DIR/etc/profile.d"
-cat > "$STAGE_DIR/etc/profile.d/zz-reproos-nixstore-ldpath.sh" <<'EOF'
-# Append every /nix/store/*/lib dir (containing .so libraries) to
-# LD_LIBRARY_PATH so dlopen() of bundled libs by leaf name works.
-# M9.R.36.1 — closes the libclingo.so dlopen gap that blocked
-# /usr/bin/reproos-installer's repro hardware probe phase.
-if [ -d /nix/store ] && [ -z "${REPRO_NIXSTORE_LDPATH_DONE:-}" ]; then
-  export REPRO_NIXSTORE_LDPATH_DONE=1
-  _repro_nix_dirs=""
-  for d in /nix/store/*/lib; do
-    [ -d "$d" ] || continue
-    # Cheap "contains at least one .so" check — restrict to lib dirs
-    # that actually ship shared objects (skip header-only / pkgconfig
-    # subdirs that have no dlopen-relevant content).
-    set -- "$d"/*.so*
-    [ -e "$1" ] || continue
-    if [ -z "$_repro_nix_dirs" ]; then
-      _repro_nix_dirs="$d"
-    else
-      _repro_nix_dirs="$_repro_nix_dirs:$d"
-    fi
-  done
-  if [ -n "$_repro_nix_dirs" ]; then
-    if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-      export LD_LIBRARY_PATH="$_repro_nix_dirs:$LD_LIBRARY_PATH"
-    else
-      export LD_LIBRARY_PATH="$_repro_nix_dirs"
-    fi
+# The wrapper applies the LD_LIBRARY_PATH only inside its own
+# ``exec env LD_LIBRARY_PATH=... reproos-installer`` invocation —
+# it doesn't leak into the parent shell.
+mkdir -p "$STAGE_DIR/usr/bin"
+cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh" <<'EOF'
+#!/bin/sh
+# ReproOS installer wrapper. M9.R.36.1.
+#
+# Build a targeted LD_LIBRARY_PATH that includes ``/nix/store/*/lib``
+# dirs the installer needs for dlopen() (libclingo, libsqlite3, ...)
+# WITHOUT shadowing the system glibc with a foreign nix-store glibc.
+_repro_nix_dirs=""
+for d in /nix/store/*/lib; do
+  [ -d "$d" ] || continue
+  # Skip glibc dirs — keeping the Debian system glibc as the canonical
+  # libc for every binary in the live ISO chain.
+  case "$d" in
+    /nix/store/*-glibc-*/lib) continue ;;
+  esac
+  set -- "$d"/*.so*
+  [ -e "$1" ] || continue
+  if [ -z "$_repro_nix_dirs" ]; then
+    _repro_nix_dirs="$d"
+  else
+    _repro_nix_dirs="$_repro_nix_dirs:$d"
   fi
-  unset _repro_nix_dirs
+done
+# Append system paths last so the Debian-installed libs still resolve
+# first when both exist.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  _repro_ldpath="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+else
+  _repro_ldpath="$_repro_nix_dirs"
 fi
+exec env LD_LIBRARY_PATH="$_repro_ldpath" /usr/bin/reproos-installer "$@"
 EOF
-chmod 0644 "$STAGE_DIR/etc/profile.d/zz-reproos-nixstore-ldpath.sh"
+chmod 0755 "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 
 # Profile hook to auto-launch the installer on root login (tty1 only).
 cat > "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh" <<'EOF'
@@ -607,8 +632,11 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
     echo "Config: $AUTO_CFG"
     echo ""
     sleep 3
+    # M9.R.36.1 — invoke through the launcher wrapper so the
+    # installer's QProcess children get the LD_LIBRARY_PATH the
+    # ``repro`` binary needs for libclingo / libsqlite3 dlopen.
     QT_QPA_PLATFORM=offscreen \
-      /usr/bin/reproos-installer --automated "$AUTO_CFG"
+      /usr/bin/reproos-installer-launcher.sh --automated "$AUTO_CFG"
     rc=$?
     echo ""
     echo "=== Installer exited with rc=$rc ==="

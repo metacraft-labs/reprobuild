@@ -62,10 +62,14 @@ mkfifo "$INSTALL_FIFO"
   echo "lsblk -o NAME,SIZE,TYPE 2>&1 | head -10"
   sleep 2
   # Invoke the installer manually (the tty1 autostart hook is bypassed
-  # because the serial console is ttyS0, not tty1).
+  # because the serial console is ttyS0, not tty1).  Use the
+  # M9.R.36.1 launcher wrapper so libclingo / libsqlite3 dlopen
+  # resolves via a targeted LD_LIBRARY_PATH (the naive shell-wide
+  # LD_LIBRARY_PATH approach shadows system glibc and breaks every
+  # Debian binary).
   echo "echo === M9R36_INSTALLER_LAUNCH ==="
   sleep 1
-  echo "QT_QPA_PLATFORM=offscreen /usr/bin/reproos-installer --automated /etc/reproos/auto-config.toml 2>&1 | tail -200; echo INSTALLER_RC=\$?"
+  echo "QT_QPA_PLATFORM=offscreen /usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml 2>&1 | tail -200; echo INSTALLER_RC=\$?"
   # Installer can take 2-6 minutes depending on disko-zap + nix-pop
   # closure copy speed.  Wait generously.
   sleep 360
