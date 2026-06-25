@@ -629,6 +629,33 @@ package plasmaWorkspaceSource:
         # __STDC_VERSION__ in C++ mode.  v1 plasmashell does not depend
         # on the autostart KCM at runtime.
         "sed -i 's|^add_subdirectory(autostart)$|# M9.R.15q.13.15: dropped — systemd sd-id128.h -Werror=undef|' src/kcms/CMakeLists.txt",
+        # M9.R.35.3 — qmltyperegistrar 6.8.1 doesn't recognize
+        # ``std::uint32_t`` as a valid enum-base type and emits
+        # ``Warning: playercontainer.h:25/38/50: std::uint32_t is used
+        # as enum type but cannot be found.`` — but the warning is
+        # not just cosmetic: it propagates into the metatypes JSON
+        # consumers (libcolorcorrect, libnotificationmanager, ...
+        # everything that imports kmpris's metatypes via
+        # ``foreign_types.txt``), where each consuming
+        # qmltyperegistrar invocation exits non-zero with
+        # ``Error: <target>.qmltypes:: Cannot generate qmltypes file``.
+        #
+        # qmltyperegistrar's enum-type parser handles ``quint32`` /
+        # ``qint32`` natively (they're typedef'd via
+        # ``QtCore/qtypes.h``) but the ``std::uint32_t`` form was
+        # only added in Qt 6.9.  plasma-workspace 6.2.5 was built
+        # against Qt 6.9+'s qmltyperegistrar at upstream KDE; pinning
+        # qt6-declarative to 6.8.1 leaves this gap open.
+        #
+        # Fix: substitute ``quint32`` for ``std::uint32_t`` in the
+        # three enum-base declarations in
+        # ``src/libkmpris/playercontainer.h``.  ``quint32`` is the
+        # Qt-canonical typedef of the same fixed-width unsigned 32-bit
+        # integer; the ABI is byte-identical to ``std::uint32_t`` on
+        # every supported platform, so the substitution is a pure
+        # source-level rewrite that doesn't change any link-time or
+        # runtime behaviour.
+        "sed -i 's| : std::uint32_t {| : quint32 {|' src/libkmpris/playercontainer.h",
         # M9.R.35.2 — plasma_session links ``KF6::KIOCore`` but
         # ``startup.cpp`` ``#include <KIO/ApplicationLauncherJob>`` which
         # is a KIOGui header (lives at
