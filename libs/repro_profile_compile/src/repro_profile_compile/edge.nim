@@ -131,17 +131,26 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
 # ---------------------------------------------------------------------------
 
 ## Selector args that turn ``<publicCliPath>`` into the in-process
-## ``repro internal fs-snoop`` monitor driver. ``monitoredAction``
-## prepends ``monitorCliPath & monitorCliArgs`` ahead of ``--depfile
-## <path> --`` and the real command, so WITHOUT these args the monitored
-## argv degenerates to ``repro --depfile <path> -- <cmd>`` — an invalid
+## ``repro internal io monitor`` driver. ``monitoredAction`` prepends
+## ``monitorCliPath & monitorCliArgs`` ahead of ``--depfile <path> --``
+## and the real command, so WITHOUT these args the monitored argv
+## degenerates to ``repro --depfile <path> -- <cmd>`` — an invalid
 ## invocation that exits non-zero and makes every profile-compile action
 ## fail under ``automaticMonitorGatheringPolicy``. Every production build
 ## config in ``repro_cli_support`` (``internalFsSnoopArgs``) sets the same
-## pair; we mirror the literal here because ``repro_profile_compile`` sits
-## below ``repro_cli_support`` in the dependency graph and cannot import
-## it without a cycle.
-const ProfileCompileMonitorCliArgs* = @["internal", "fs-snoop"]
+## triple; we mirror the literal here because ``repro_profile_compile``
+## sits below ``repro_cli_support`` in the dependency graph and cannot
+## import it without a cycle.
+##
+## NOTE: The dispatched subcommand was ``internal fs-snoop`` before the
+## Executable-Consolidation rename moved every internal helper under
+## category prefixes (``io`` here); the canonical CLI only recognizes
+## the new triple now. ``repro internal fs-snoop`` falls through to the
+## unknown-subcommand path and exits 2 with ``renderInternalUsage``,
+## which surfaces from the build engine as
+## ``__repro_profile_compile asFailed`` with the internal-namespace
+## usage as the diagnostic body.
+const ProfileCompileMonitorCliArgs* = @["internal", "io", "monitor"]
 
 proc profileCompileEngineConfig*(stateDir, publicCliPath: string):
     BuildEngineConfig =
