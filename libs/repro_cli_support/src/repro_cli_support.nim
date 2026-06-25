@@ -15949,6 +15949,218 @@ type
     project: ResolvedProject
     skippedLayers: seq[WorkspaceInitSkippedLayerEntry]
 
+# ---- RA-31: `repro workspace init <url>` — cold-start one-command join -------
+#
+# The cold-start entry point clones the org ROOT workspace repo (convention
+# ``<org>/repro-workspace``), reads its host bootstrap config, and syncs the
+# workspace into a NEW NAMED directory (defaulting to the org name) so init
+# never touches the current or any ancestor directory.
+#
+# ``<url>`` resolves three ways to the root-repo URL:
+#   - a full HTTPS/git/SSH URL → used verbatim;
+#   - a ``host:org`` shorthand (``github:metacraft-labs``) → mapped through a
+#     known host-alias base URL + the ``repro-workspace`` repo-name convention;
+#   - a bare org (``metacraft-labs``) → resolved via the DEFAULT VCS HOST from
+#     system/user config, then ``<default-host>/<org>/repro-workspace``.
+
+const
+  rootWorkspaceRepoName = "repro-workspace"
+    ## RA-31 — the convention repo name carrying the host bootstrap config.
+  defaultVcsHostAlias = "github"
+    ## RA-31 — GitHub is the initial default VCS host when system/user config
+    ## sets none. Documented in CLI/workspace.md § "Default VCS host".
+
+proc builtinHostAliasBase(host: string): string =
+  ## Map a known VCS-host alias to its HTTPS base URL (no trailing slash).
+  ## At least GitHub/GitLab/Bitbucket/Codeberg/sourcehut are grounded here;
+  ## an unknown alias returns the empty string and the caller fails loud.
+  case host.toLowerAscii()
+  of "github": "https://github.com"
+  of "gitlab": "https://gitlab.com"
+  of "bitbucket": "https://bitbucket.org"
+  of "codeberg": "https://codeberg.org"
+  of "sourcehut", "srht": "https://git.sr.ht"
+  else: ""
+
+proc hostAliasBase(host: string;
+                   env: proc(name: string): string): string =
+  ## Resolve a host alias (``github``, ``gitlab``, …) to its base URL. A
+  ## per-host env override (``REPRO_VCS_HOST_BASE_<HOST>``, uppercased) wins
+  ## over the built-in table — this is the hermetic test seam: a test points
+  ## ``github:`` / the default host at a local ``file://…/hosts/<host>`` dir.
+  let overrideKey = "REPRO_VCS_HOST_BASE_" & host.toUpperAscii()
+  let override = env(overrideKey)
+  if override.len > 0:
+    return override.strip(leading = false, chars = {'/'})
+  builtinHostAliasBase(host)
+
+proc readDefaultVcsHostFromConfig(env: proc(name: string): string): string =
+  ## RA-31 — read the DEFAULT VCS HOST setting from system/user config.
+  ## Resolution order (highest precedence first):
+  ##   1. ``REPRO_DEFAULT_VCS_HOST`` env override (also the hermetic test seam);
+  ##   2. user config ``$XDG_CONFIG_HOME/reprobuild/config.toml`` (else
+  ##      ``$HOME/.config/reprobuild/config.toml``);
+  ##   3. system config ``/etc/repro/config.toml``.
+  ## The setting is the single key ``default_vcs_host = "<alias>"`` under a
+  ## ``[vcs]`` table. Returns the empty string when unset (the caller then
+  ## falls back to the built-in GitHub default).
+  let envOverride = env("REPRO_DEFAULT_VCS_HOST")
+  if envOverride.len > 0:
+    return envOverride.strip()
+
+  proc readKey(path: string): string =
+    if not fileExists(path):
+      return ""
+    # A deliberately tiny line scanner: we only need ``default_vcs_host``
+    # under ``[vcs]`` and want zero coupling to the workspace TOML schema
+    # machinery (this is plain user/system config, not a manifest). Lines
+    # are ``key = "value"`` / ``key = value`` with ``#`` comments.
+    var inVcsTable = false
+    for rawLine in readFile(path).splitLines():
+      var line = rawLine.strip()
+      let hashAt = line.find('#')
+      if hashAt >= 0:
+        line = line[0 ..< hashAt].strip()
+      if line.len == 0:
+        continue
+      if line.startsWith("[") and line.endsWith("]"):
+        inVcsTable = line[1 ..< ^1].strip().toLowerAscii() == "vcs"
+        continue
+      if not inVcsTable:
+        continue
+      let eq = line.find('=')
+      if eq < 0:
+        continue
+      let key = line[0 ..< eq].strip()
+      if key != "default_vcs_host":
+        continue
+      var value = line[eq + 1 .. ^1].strip()
+      if value.len >= 2 and value[0] == '"' and value[^1] == '"':
+        value = value[1 ..< ^1]
+      return value.strip()
+    ""
+
+  let xdg = env("XDG_CONFIG_HOME")
+  let userBase =
+    if xdg.len > 0: xdg
+    else: env("HOME") / ".config"
+  let userConfig = userBase / "reprobuild" / "config.toml"
+  let fromUser = readKey(userConfig)
+  if fromUser.len > 0:
+    return fromUser
+  readKey("/etc/repro" / "config.toml")
+
+proc looksLikeFullVcsUrl(spec: string): bool =
+  ## A FULL URL is used verbatim. We recognise the scheme-bearing forms
+  ## (``https://``, ``http://``, ``git://``, ``ssh://``, ``file://``) and the
+  ## scp-like SSH form (``git@host:org/repo``), which carries a ``@`` before
+  ## the first ``:``. Everything else is a shorthand (``host:org``) or a bare
+  ## org and is resolved through the conventions below.
+  let lower = spec.toLowerAscii()
+  if lower.startsWith("https://") or lower.startsWith("http://") or
+      lower.startsWith("git://") or lower.startsWith("ssh://") or
+      lower.startsWith("file://"):
+    return true
+  # scp-like ssh: ``user@host:path`` — a ``@`` appearing before the ``:``.
+  let colon = spec.find(':')
+  let at = spec.find('@')
+  if at >= 0 and colon > at:
+    return true
+  false
+
+proc orgNameFromRootUrl(url: string): string =
+  ## Derive the org name (used as the default local-path directory) from a
+  ## resolved root-repo URL of the convention ``<base>/<org>/repro-workspace``.
+  ## Strips any ``.git`` suffix and a trailing slash, then takes the path
+  ## segment immediately before the ``repro-workspace`` repo name.
+  var trimmed = url.strip(leading = false, chars = {'/'})
+  if trimmed.toLowerAscii().endsWith(".git"):
+    trimmed = trimmed[0 ..< ^4]
+  # Split on both separators a URL/scp path may use.
+  var segments: seq[string]
+  for piece in trimmed.replace(':', '/').split('/'):
+    if piece.len > 0:
+      segments.add(piece)
+  if segments.len >= 2 and
+      segments[^1].toLowerAscii() == rootWorkspaceRepoName:
+    return segments[^2]
+  if segments.len >= 1:
+    return segments[^1]
+  ""
+
+type
+  RootRepoResolution = object
+    ## Outcome of RA-31 ``<url>`` resolution.
+    url: string      ## the resolved org root-repo URL (clone target)
+    org: string      ## the derived org name (default local-path)
+    form: string     ## "full-url" | "host:org" | "bare-org" (for diagnostics)
+
+proc resolveOrgRootRepoUrl(spec: string;
+                           env: proc(name: string): string):
+    RootRepoResolution =
+  ## RA-31 — resolve a ``<url>`` argument to the org ROOT workspace repo URL.
+  ## Three forms (most explicit to most terse):
+  ##   - a full HTTPS/git/SSH/file URL → used verbatim;
+  ##   - ``host:org`` → ``<host-base>/<org>/repro-workspace``;
+  ##   - bare ``org`` → ``<default-host-base>/<org>/repro-workspace``.
+  ## Raises ``ValueError`` with a clear message when a host alias is unknown
+  ## or the spec is empty.
+  let trimmed = spec.strip()
+  if trimmed.len == 0:
+    raise newException(ValueError,
+      "`repro workspace init` requires a <url> (a full repo URL, a " &
+        "`host:org` shorthand, or a bare org name)")
+
+  if looksLikeFullVcsUrl(trimmed):
+    result.url = trimmed
+    result.org = orgNameFromRootUrl(trimmed)
+    result.form = "full-url"
+    return
+
+  # ``host:org`` shorthand vs bare org. A single ``:`` with non-empty sides
+  # and no path separator on the left is the shorthand; otherwise treat the
+  # whole token as a bare org resolved through the default host.
+  let colon = trimmed.find(':')
+  if colon > 0 and colon < trimmed.high and '/' notin trimmed[0 ..< colon]:
+    let host = trimmed[0 ..< colon]
+    let org = trimmed[colon + 1 .. ^1].strip(chars = {'/'})
+    let base = hostAliasBase(host, env)
+    if base.len == 0:
+      raise newException(ValueError,
+        "unknown VCS host alias '" & host & "' in `repro workspace init " &
+          trimmed & "`: pass a full repo URL, set " &
+          "`REPRO_VCS_HOST_BASE_" & host.toUpperAscii() & "`, or use a " &
+          "known alias (github, gitlab, bitbucket, codeberg, sourcehut)")
+    if org.len == 0:
+      raise newException(ValueError,
+        "missing org in `host:org` shorthand '" & trimmed & "'")
+    result.url = base & "/" & org & "/" & rootWorkspaceRepoName
+    result.org = org
+    result.form = "host:org"
+    return
+
+  # Bare org → default VCS host.
+  let org = trimmed.strip(chars = {'/'})
+  if org.len == 0:
+    raise newException(ValueError,
+      "empty org name in `repro workspace init " & spec & "`")
+  var host = readDefaultVcsHostFromConfig(env)
+  if host.len == 0:
+    host = defaultVcsHostAlias
+  let base = hostAliasBase(host, env)
+  if base.len == 0:
+    raise newException(ValueError,
+      "default VCS host '" & host & "' is not a known alias: set " &
+        "`default_vcs_host` in your reprobuild config to a known host " &
+        "(github, gitlab, bitbucket, codeberg, sourcehut) or " &
+        "`REPRO_VCS_HOST_BASE_" & host.toUpperAscii() & "`")
+  result.url = base & "/" & org & "/" & rootWorkspaceRepoName
+  result.org = org
+  result.form = "bare-org"
+
+proc sysEnv(name: string): string = getEnv(name)
+  ## Default environment lookup for RA-31 resolution (overridable in tests).
+
 proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
   ## Parse ``repro workspace init`` argv. The single positional is the
   ## project-or-variant bare name. Optional flags:
@@ -16610,6 +16822,161 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
   if outcome.report.divergences.len > 0:
     return 2
   0
+
+# ---- RA-31: `repro workspace init <url> [local-path]` cold-start front-end --
+
+type
+  ColdStartInitArgs = object
+    ## Parsed argv for the RA-31 cold-start ``init <url> [local-path]`` form.
+    url: string                          ## the <url> argument (form 1/2/3)
+    localPath: string                    ## optional explicit destination dir
+    toolProvisioning: ToolProvisioningMode
+    printResolvedUrl: bool               ## ``--print-resolved-url`` dry-run
+    passthrough: seq[string]             ## remaining flags forwarded to init
+
+proc parseColdStartInitArgs(args: openArray[string]): ColdStartInitArgs =
+  ## Parse the cold-start ``init`` argv. The first positional is ``<url>``;
+  ## an optional second positional is ``local-path``. ``--print-resolved-url``
+  ## resolves and prints the root-repo URL WITHOUT cloning (a dry run); any
+  ## unrecognised flag is forwarded to the inner ``init`` (so e.g.
+  ## ``--allow-missing-layers`` still works).
+  result.toolProvisioning = tpmPathOnly
+  var positionals: seq[string]
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--print-resolved-url":
+      result.printResolvedUrl = true
+    elif arg == "--tool-provisioning" or
+        arg.startsWith("--tool-provisioning="):
+      result.toolProvisioning = parseToolProvisioning(
+        valueFromFlag(args, i, "--tool-provisioning"))
+      result.passthrough.add(arg)
+    elif arg.startsWith("-"):
+      result.passthrough.add(arg)
+    else:
+      positionals.add(arg)
+    inc i
+  if positionals.len >= 1:
+    result.url = positionals[0]
+  if positionals.len >= 2:
+    result.localPath = positionals[1]
+  if positionals.len > 2:
+    raise newException(ValueError,
+      "unexpected positional argument to `repro workspace init`: " &
+        positionals[2])
+
+proc looksLikeColdStartUrl(spec: string): bool =
+  ## A ``<url>`` argument (full URL, ``host:org`` shorthand, or bare org) is
+  ## the cold-start form. Distinguished from a legacy ``<project-or-variant>``
+  ## name purely by the dispatcher's surrounding conditions (no
+  ## ``--workspace-root`` / ``--manifest-url`` and no ``.repo/manifests`` in
+  ## cwd); this helper just rejects an empty spec.
+  spec.strip().len > 0
+
+proc cloneOrgRootRepo(identity: GitToolIdentity;
+                      url, destination: string):
+    tuple[ok: bool; diagnostic: string] =
+  ## Clone the org root workspace repo at ``url`` into ``destination`` (a
+  ## fresh named directory). Best-effort; returns a structured failure so
+  ## the caller can report a clear error instead of crashing.
+  var cmd = quoteShell(identity.binaryPath) & " clone " & quoteShell(url) &
+    " " & quoteShell(destination)
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  if res.exitCode != 0:
+    return (ok: false, diagnostic: res.output.strip())
+  (ok: true, diagnostic: "")
+
+proc runWorkspaceInitFromUrl*(args: openArray[string];
+                              env: proc(name: string): string = sysEnv): int =
+  ## RA-31 — the cold-start one-command join. ``repro workspace init <url>
+  ## [local-path]``:
+  ##   1. resolve ``<url>`` → the org ROOT workspace repo URL (full URL /
+  ##      ``host:org`` shorthand / bare-org via the default VCS host);
+  ##   2. derive the destination directory (``local-path`` else the org
+  ##      name) — ALWAYS a new NAMED directory, NEVER cwd or an ancestor;
+  ##   3. clone the root repo into that directory;
+  ##   4. run the existing ``executeWorkspaceInit`` rooted in that directory,
+  ##      which reads the cloned ``.repro-workspace.toml`` host bootstrap
+  ##      config, bootstraps the manifest cache (RA-11), verifies provenance
+  ##      (RA-17), and syncs the member repos.
+  ## Ends by pointing the user at ``repro health``.
+  let parsed = parseColdStartInitArgs(args)
+  let resolution = resolveOrgRootRepoUrl(parsed.url, env)
+
+  # ``--print-resolved-url``: resolution-only dry run (hermetic, no clone).
+  if parsed.printResolvedUrl:
+    stdout.writeLine(resolution.url)
+    return 0
+
+  # Destination: explicit ``local-path`` else the derived org name. This is
+  # ALWAYS a named directory; the cold-start path never operates on the
+  # current or an ancestor directory.
+  var dest = parsed.localPath
+  if dest.len == 0:
+    dest = resolution.org
+  if dest.len == 0:
+    raise newException(ValueError,
+      "could not derive a destination directory from '" & parsed.url &
+        "'; pass an explicit <local-path>")
+  let destAbs = absolutePath(dest)
+  let cwd = absolutePath(getCurrentDir())
+  # Safety: refuse to clone INTO the cwd itself or an ancestor of it. We test
+  # this by walking cwd's ancestry up to the filesystem root and checking
+  # whether destAbs is cwd or one of its ancestors.
+  proc isCwdOrAncestor(candidate, fromDir: string): bool =
+    var dir = fromDir
+    while true:
+      if dir == candidate:
+        return true
+      let parent = dir.parentDir
+      if parent.len == 0 or parent == dir:
+        break
+      dir = parent
+    false
+  if isCwdOrAncestor(destAbs, cwd):
+    raise newException(ValueError,
+      "`repro workspace init <url>` refuses to materialise into the " &
+        "current or an ancestor directory ('" & destAbs & "'); it always " &
+        "creates a fresh named directory (default: the org name)")
+  if dirExists(destAbs) and toSeq(walkDir(destAbs)).len > 0:
+    raise newException(ValueError,
+      "destination '" & destAbs & "' already exists and is not empty; " &
+        "choose a different <local-path> or remove it first")
+
+  # Announce the plan (communicate-before-execute, RA-27 principle).
+  stdout.writeLine("workspace init: resolved " & resolution.form & " '" &
+    parsed.url & "' → " & resolution.url)
+  stdout.writeLine("workspace init: plan — clone org root repo '" &
+    resolution.url & "' into '" & destAbs &
+    "', then read its bootstrap config and sync the workspace")
+
+  let identity = ensureGitToolResolvable(parsed.toolProvisioning, getEnv("PATH"))
+
+  # (3) Clone the org ROOT workspace repo into the named directory.
+  stdout.writeLine("workspace init: cloning org root repo …")
+  let cloned = cloneOrgRootRepo(identity, resolution.url, destAbs)
+  if not cloned.ok:
+    stderr.writeLine("repro workspace init: error: could not clone org root " &
+      "repo '" & resolution.url & "': " & cloned.diagnostic)
+    return 1
+
+  # (4) Run the existing in-workspace init rooted in the cloned directory. It
+  # reads the cloned ``.repro-workspace.toml`` (host bootstrap config), clones
+  # the manifest into the bootstrap cache, verifies provenance if configured,
+  # and syncs the declared member repos — we DO NOT duplicate that logic.
+  var innerArgs = @["--workspace-root=" & destAbs]
+  for flag in parsed.passthrough:
+    innerArgs.add(flag)
+  stdout.writeLine("workspace init: reading bootstrap config and syncing " &
+    "the workspace …")
+  let inner = runWorkspaceInitCommand(innerArgs)
+
+  if inner == 0:
+    stdout.writeLine("workspace init: workspace ready at '" & destAbs & "'.")
+    stdout.writeLine("workspace init: next, run `repro health` to confirm " &
+      "your environment is ready.")
+  inner
 
 # ---- M10: `repro workspace sync` ------------------------------------------
 #
@@ -28966,9 +29333,32 @@ proc runThinApp*(programName: string): int =
     try:
       let initArgs =
         if args.len > 2:
-          args[2 .. ^1]
+          @(args[2 .. ^1])
         else:
-          @[]
+          newSeq[string]()
+      # RA-31 — the cold-start ``init <url> [local-path]`` front-end fires
+      # when a positional argument is present, the in-workspace flags
+      # (``--workspace-root`` / ``--manifest-url``) are absent, and the cwd
+      # has no ``.repo/manifests`` checkout yet. That combination uniquely
+      # identifies the cold-start "join the workspace" form; everything else
+      # routes to the legacy in-workspace ``init <project-or-variant>``.
+      var hasPositional = false
+      var hasWorkspaceRoot = false
+      var hasManifestUrl = false
+      for a in initArgs:
+        if a == "--workspace-root" or a.startsWith("--workspace-root="):
+          hasWorkspaceRoot = true
+        elif a == "--manifest-url" or a.startsWith("--manifest-url="):
+          hasManifestUrl = true
+        elif a == "--print-resolved-url":
+          # The resolution-only dry run is always a cold-start form.
+          hasPositional = true
+        elif not a.startsWith("-"):
+          hasPositional = true
+      let cwdManifests = getCurrentDir() / ".repo" / "manifests"
+      if hasPositional and not hasWorkspaceRoot and not hasManifestUrl and
+          not dirExists(cwdManifests):
+        return runWorkspaceInitFromUrl(initArgs)
       return runWorkspaceInitCommand(initArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace init: error: " & err.msg)

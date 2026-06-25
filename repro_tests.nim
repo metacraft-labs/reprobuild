@@ -6294,6 +6294,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_init_resolves_url_shorthand_and_default_host.nim",
+    binary: "build/test-bin/t_workspace_init_resolves_url_shorthand_and_default_host",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path.nim",
+    binary: "build/test-bin/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_manifest_init_rejects_unsigned_or_tampered_manifest.nim",
     binary: "build/test-bin/t_manifest_init_rejects_unsigned_or_tampered_manifest",
     defines: @[],
