@@ -120,6 +120,30 @@ type
     # closure (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
     depends*: seq[string]
 
+  CertificateGateMode* = enum
+    ## TC-3 / TC-6 / RA-32 — the resolved `[certificates] gate_mode`.
+    ## `cgmOff` is the DEFAULT (and the value for a project that declares no
+    ## `[certificates]` table at all): the pre-push gate runs exactly as it
+    ## did before test certificates existed, so a newcomer's first push is
+    ## never cert-walled. `cgmAdvisory` records the coverage result in the
+    ## gate report (a warning when uncovered) but NEVER blocks the push.
+    ## `cgmRequired` refuses the push unless the submitted certificates cover
+    ## the pushed commit for the required targets on each required platform.
+    cgmOff = "off"
+    cgmAdvisory = "advisory"
+    cgmRequired = "required"
+
+  CertificatePolicy* = object
+    ## The resolved test-certificate gating policy for a project. The DEFAULT
+    ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
+    ## table resolves to, so the policy is a strict no-op until a project opts
+    ## in. `requiredTargets` are the targets a certificate set must cover;
+    ## `requiredPlatforms` are the platforms each of which must be covered
+    ## (the union of submitted certificates is checked per platform).
+    gateMode*: CertificateGateMode
+    requiredTargets*: seq[string]
+    requiredPlatforms*: seq[string]
+
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
     ## expansion and default application.
@@ -128,6 +152,10 @@ type
     trunk*: string
     repos*: seq[ResolvedRepo]
     projectFile*: string
+    certificatePolicy*: CertificatePolicy
+      ## TC-3 / TC-6 / RA-32 — resolved from the project manifest's
+      ## `[certificates]` table; defaults to `cgmOff` (no enforcement) when
+      ## the table is absent or omits `gate_mode`.
 
 const
   defaultRepoVcs* = "git"
@@ -136,6 +164,32 @@ const
     ## RA-18 — a repo with no declared `groups` belongs to this implicit
     ## group (the `repo`-tool convention). A repo's effective group set is
     ## therefore `groups` when non-empty, else `["default"]`.
+
+# ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
+
+proc resolveCertificatePolicy*(body: CertificatesBody;
+                               projectFile: string): CertificatePolicy =
+  ## Resolve a manifest `[certificates]` table into a `CertificatePolicy`.
+  ## The DEFAULT — an absent table, or one that omits `gate_mode` — is
+  ## `cgmOff`: a project that never opts in is never cert-gated (the RA-32
+  ## default-off / advisory-first onboarding guarantee). A `gate_mode` value
+  ## outside {off, advisory, required} is a structural error: a typo must
+  ## fail LOUD rather than silently fall back to `off` (which would mask an
+  ## intended `required`).
+  result.gateMode = cgmOff
+  if body.gate_mode.isSome:
+    let raw = body.gate_mode.get().strip()
+    case raw
+    of "", "off": result.gateMode = cgmOff
+    of "advisory": result.gateMode = cgmAdvisory
+    of "required": result.gateMode = cgmRequired
+    else:
+      raiseManifestError(projectFile, "certificates.gate_mode",
+        schemaProjectManifestV1, schemaProjectManifestV1,
+        "invalid `certificates.gate_mode` value '" & raw &
+          "' (expected: off | advisory | required)")
+  result.requiredTargets = body.required_targets
+  result.requiredPlatforms = body.required_platforms
 
 # ---- RA-18 group membership -----------------------------------------------
 
@@ -222,6 +276,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     result.defaultRevision = project.project.default_revision.get()
   if project.project.trunk.isSome:
     result.trunk = project.project.trunk.get()
+  # TC-3 / TC-6 / RA-32 — resolve the certificate gating policy (default off).
+  result.certificatePolicy =
+    resolveCertificatePolicy(project.certificates, absProject)
 
   # Build remote name -> fetch URL lookup. The M5 reader already enforces
   # non-empty `name` and `fetch` on each remote entry, so we can index

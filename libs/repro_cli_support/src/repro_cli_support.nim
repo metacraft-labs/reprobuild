@@ -20653,6 +20653,13 @@ type
     pushedBranch*: string
     pushedRefsPath*: string
     failures*: seq[CheckFailure]
+    # TC-3 / RA-32 — advisory (non-blocking) gate notices. The certificate
+    # gate in ``advisory`` mode records its coverage verdict here (a warning
+    # when uncovered, a confirmation when covered) WITHOUT ever touching
+    # ``exitCode`` — the load-bearing onboarding property (RA-32): advisory
+    # never blocks a push. Empty for the default ``off`` mode and for every
+    # gate run that predates a certificate policy.
+    notices*: seq[string]
     lockUpdate*: CheckLockUpdate
     # RA-7: the manifest-layer checkout that owns the lock subtree, so the
     # caller can publish (commit + push) the just-written lock after a
@@ -20688,6 +20695,10 @@ proc toJsonNode*(report: CheckReport): JsonNode =
     obj["source"] = %failure.source
     failures.add(obj)
   result["failures"] = failures
+  var notices = newJArray()
+  for n in report.notices:
+    notices.add(%n)
+  result["notices"] = notices
   var lockObj = newJObject()
   lockObj["kind"] = %lockUpdateKindTag(report.lockUpdate.kind)
   lockObj["lockFilePath"] = %report.lockUpdate.lockFilePath
@@ -20714,6 +20725,8 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     if failure.evidence.len > 0:
       line.add(" [" & failure.evidence & "]")
     result.add(line)
+  for notice in report.notices:
+    result.add("repro check: " & notice)
   case report.lockUpdate.kind
   of cluNone:
     discard
@@ -20740,6 +20753,14 @@ type
     pushedRefsPath*: string
     json*: bool
     toolProvisioning*: ToolProvisioningMode
+    skipCertificateGate*: bool
+      ## TC-3 / RA-32 — suppress the certificate-coverage stage of the
+      ## pre-push gate. Set ONLY by ``evaluateIssuancePreconditions`` (the
+      ## TC-1 issuance path), which REUSES the gate to decide whether a cert
+      ## is issuable: issuing a certificate must never itself require a
+      ## certificate (a chicken-and-egg that would make a project's FIRST
+      ## ``required`` cert un-issuable). The real pre-push hook leaves this
+      ## ``false`` so the gate enforces the policy as designed.
 
 proc parseCheckMode(value: string): CheckMode =
   case value
@@ -21146,6 +21167,568 @@ proc lockPathsTouchedInPush(identity: GitToolIdentity;
         seen.incl(p)
         result.add(p)
 
+# (relocated) certificate schema/verifier/transport — moved up so the
+# RA-21 pre-push gate (executeCheckPrePush) can call the TC-1 verifier
+# and TC-2 reader for the TC-3/RA-32 certificate-coverage stage.
+
+# ============================================================================
+# TC-1 — Test certificates: schema + reader/writer + verifier.
+#
+# A test certificate (``reprobuild.test-certificate.v1``; see
+# Test-Certificates.md §"What a certificate attests") is a small record that
+# attests: ON PLATFORM ``P``, the test targets ``T`` PASSED, with the repo at
+# commit ``C`` and its develop-mode dependency closure clean and at the
+# revisions pinned by lock ``L``. The binding fields (``commit`` / ``lock`` /
+# ``platform`` / ``targets``) make it CHECKABLE; the ``signature`` is what
+# makes it UNFORGEABLE WITHOUT THE KEY.
+#
+# TC-1 deferral (HONEST): TC-1 ships the schema, issuance, the incremental
+# no-op, and the verifier. The ``signature`` is left explicitly UNSIGNED
+# (empty ``algorithm`` + empty ``value``) — TC-5 wires the privileged daemon's
+# real ed25519 signing and key registration. We NEVER fabricate a signature.
+# The verifier below is a COVERAGE verifier (does the cert set cover a
+# (commit, lock, platform, targets) tuple); the TC-5 SIGNATURE verifier is a
+# separate, additive check.
+# ============================================================================
+
+const
+  testCertificateSchemaV1* = "reprobuild.test-certificate.v1"
+    ## The ``schema`` value every v1 certificate carries.
+
+type
+  TestCertificateResult* = enum
+    ## The ``result`` field. TC-1 issues a certificate ONLY for ``tcrPassed``;
+    ## a run with any failing target yields NO certificate (the attestation is
+    ## withheld). ``tcrFailed`` exists so a reader can round-trip a record that
+    ## was authored out-of-band, but the issuer never emits one.
+    tcrPassed = "passed"
+    tcrFailed = "failed"
+
+  TestCertificateSignature* = object
+    ## The detached signature over the canonical ``[certificate]`` body.
+    ## TC-1 leaves BOTH fields empty (clearly unsigned); TC-5 fills them.
+    algorithm*: string   ## e.g. ``ed25519`` once TC-5 lands; "" at TC-1.
+    value*: string       ## base64 detached signature; "" at TC-1.
+
+  TestCertificate* = object
+    ## One ``reprobuild.test-certificate.v1`` record.
+    schema*: string
+    project*: string
+    repo*: string
+    commit*: string      ## exact repo commit the tests ran against (HEAD)
+    lock*: string        ## digest of the dependency lock (clean deps)
+    platform*: string    ## OS/arch the tests executed on, e.g. ``linux/amd64``
+    targets*: seq[string]  ## the targets that PASSED (the covered set)
+    result*: TestCertificateResult
+    issuedAt*: string    ## RFC3339 UTC timestamp
+    issuer*: string      ## who observed/issued, e.g. ``repro-test@<host>``
+    keyId*: string       ## which registered key signed (empty until TC-5)
+    signature*: TestCertificateSignature
+
+proc isSigned*(cert: TestCertificate): bool =
+  ## A certificate is SIGNED only when both the algorithm and the signature
+  ## value are present. TC-1 always returns ``false`` (the deliberate,
+  ## documented deferral to TC-5).
+  cert.signature.algorithm.len > 0 and cert.signature.value.len > 0
+
+proc currentPlatformTag*(): string =
+  ## The ``platform`` field for a certificate issued on this host: the
+  ## ``<os>/<cpu>`` pair from the same ``hostOS`` / ``hostCPU`` the
+  ## ``repro capabilities`` host block reports.
+  hostOS & "/" & hostCPU
+
+proc certificateLockDigest*(lockFilePath: string): string =
+  ## RA-1/RA-7 reuse: the ``lock`` binding is a content digest of the
+  ## workspace lock file the gate resolved as current. We hash the lock
+  ## file's bytes with the same ``blake3DomainDigest`` the rest of the CLI
+  ## uses for metadata envelopes and prefix the algorithm so the digest is
+  ## self-describing (``blake3:<hex>``). An empty / missing path yields the
+  ## empty string so the caller can decline to issue rather than bind to a
+  ## non-existent lock.
+  if lockFilePath.len == 0 or not fileExists(lockFilePath):
+    return ""
+  let body =
+    try: readFile(lockFilePath)
+    except CatchableError: return ""
+  "blake3:" & digestHex(blake3DomainDigest(body.bytesOf(), hdMetadataEnvelope))
+
+proc tomlEscapeCert(value: string): string =
+  ## Local copy of the basic-string escaper (mirrors lock_writer's
+  ## ``tomlEscape``) so the certificate writer is self-contained.
+  result = newStringOfCap(value.len + 2)
+  for ch in value:
+    case ch
+    of '\\': result.add("\\\\")
+    of '"': result.add("\\\"")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    of '\b': result.add("\\b")
+    of '\f': result.add("\\f")
+    else: result.add(ch)
+
+proc serializeCertificateToToml*(cert: TestCertificate): string =
+  ## Render a ``TestCertificate`` to the canonical TOML form documented in
+  ## Test-Certificates.md. Key order is fixed and deterministic so two issues
+  ## of the same observed state produce byte-identical bodies (modulo the
+  ## ``issued_at`` timestamp). ``targets`` is a flat string ARRAY (not a
+  ## nested array-of-tables) — the nested-table TOML constraint other
+  ## milestones hit does not apply to a scalar list. The ``[certificate]``
+  ## body is what TC-5 will sign; the ``[certificate.signature]`` block sits
+  ## AFTER it and is excluded from the canonical signing payload.
+  result = newStringOfCap(512)
+  result.add("schema = \"")
+  result.add(tomlEscapeCert(testCertificateSchemaV1))
+  result.add("\"\n\n")
+  result.add("[certificate]\n")
+  template kv(key, value: string) =
+    result.add(key & " = \"" & tomlEscapeCert(value) & "\"\n")
+  kv("project", cert.project)
+  kv("repo", cert.repo)
+  kv("commit", cert.commit)
+  kv("lock", cert.lock)
+  kv("platform", cert.platform)
+  # targets as an inline string array, stable order (as observed/run).
+  result.add("targets = [")
+  for i, t in cert.targets:
+    if i > 0: result.add(", ")
+    result.add("\"" & tomlEscapeCert(t) & "\"")
+  result.add("]\n")
+  kv("result", $cert.result)
+  kv("issued_at", cert.issuedAt)
+  kv("issuer", cert.issuer)
+  if cert.keyId.len > 0:
+    kv("key_id", cert.keyId)
+  # Signature block. TC-1 emits it with empty fields so the on-disk shape is
+  # stable for TC-5 (which fills algorithm + value) and so a reader can tell
+  # "unsigned" (present, empty) from "absent". This is the explicit deferral.
+  result.add("\n[certificate.signature]\n")
+  result.add("algorithm = \"" &
+    tomlEscapeCert(cert.signature.algorithm) & "\"\n")
+  result.add("value = \"" & tomlEscapeCert(cert.signature.value) & "\"\n")
+
+proc canonicalCertificatePayload*(cert: TestCertificate): string =
+  ## The canonical serialization of the ``[certificate]`` body (EXCLUDING the
+  ## signature block) — the exact bytes TC-5's daemon will sign and the
+  ## verifier will check the signature against. Re-uses the writer and slices
+  ## off the trailing signature block so the two never drift.
+  let full = serializeCertificateToToml(cert)
+  let marker = "\n[certificate.signature]\n"
+  let idx = full.find(marker)
+  if idx >= 0: full[0 ..< idx] else: full
+
+type
+  TestCertificateParseError* = object of CatchableError
+
+proc unquoteTomlBasic(raw: string): string =
+  ## Reverse of ``tomlEscapeCert`` for the basic-string subset the writer
+  ## emits. ``raw`` is the text BETWEEN the surrounding double quotes.
+  result = newStringOfCap(raw.len)
+  var i = 0
+  while i < raw.len:
+    let ch = raw[i]
+    if ch == '\\' and i + 1 < raw.len:
+      let nxt = raw[i + 1]
+      case nxt
+      of '\\': result.add('\\')
+      of '"': result.add('"')
+      of 'n': result.add('\n')
+      of 'r': result.add('\r')
+      of 't': result.add('\t')
+      of 'b': result.add('\b')
+      of 'f': result.add('\f')
+      else: result.add(nxt)
+      i += 2
+    else:
+      result.add(ch)
+      inc i
+
+proc parseTomlBasicValue(rhs: string): string =
+  ## Extract the unescaped value of a ``key = "..."`` right-hand side.
+  let s = rhs.strip()
+  if s.len >= 2 and s[0] == '"' and s[^1] == '"':
+    unquoteTomlBasic(s[1 ..< s.high])
+  else:
+    s
+
+proc parseTomlStringArray(rhs: string): seq[string] =
+  ## Parse a ``[ "a", "b" ]`` inline string array. Tolerant of whitespace;
+  ## the writer always emits the canonical comma-space form.
+  var s = rhs.strip()
+  if s.len >= 2 and s[0] == '[' and s[^1] == ']':
+    s = s[1 ..< s.high]
+  var i = 0
+  while i < s.len:
+    while i < s.len and s[i] in {' ', '\t', ','}: inc i
+    if i >= s.len: break
+    if s[i] == '"':
+      inc i
+      var buf = ""
+      while i < s.len and s[i] != '"':
+        if s[i] == '\\' and i + 1 < s.len:
+          buf.add(s[i]); buf.add(s[i + 1]); i += 2
+        else:
+          buf.add(s[i]); inc i
+      inc i  # past closing quote
+      result.add(unquoteTomlBasic(buf))
+    else:
+      inc i
+
+proc parseCertificateFromToml*(content: string): TestCertificate =
+  ## Strict-enough reader for a ``reprobuild.test-certificate.v1`` record
+  ## that round-trips ``serializeCertificateToToml``. Raises
+  ## ``TestCertificateParseError`` on a missing/mismatched schema or a
+  ## malformed ``result``. Unknown keys are ignored (forward-compatible).
+  result.signature = TestCertificateSignature()
+  var inSignature = false
+  var sawSchema = false
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if line.startsWith("["):
+      inSignature = (line == "[certificate.signature]")
+      continue
+    let eq = line.find('=')
+    if eq <= 0: continue
+    let key = line[0 ..< eq].strip()
+    let rhs = line[eq + 1 .. ^1]
+    if key == "schema":
+      result.schema = parseTomlBasicValue(rhs)
+      sawSchema = true
+    elif inSignature:
+      case key
+      of "algorithm": result.signature.algorithm = parseTomlBasicValue(rhs)
+      of "value": result.signature.value = parseTomlBasicValue(rhs)
+      else: discard
+    else:
+      case key
+      of "project": result.project = parseTomlBasicValue(rhs)
+      of "repo": result.repo = parseTomlBasicValue(rhs)
+      of "commit": result.commit = parseTomlBasicValue(rhs)
+      of "lock": result.lock = parseTomlBasicValue(rhs)
+      of "platform": result.platform = parseTomlBasicValue(rhs)
+      of "targets": result.targets = parseTomlStringArray(rhs)
+      of "result":
+        let r = parseTomlBasicValue(rhs)
+        case r
+        of "passed": result.result = tcrPassed
+        of "failed": result.result = tcrFailed
+        else:
+          raise newException(TestCertificateParseError,
+            "invalid certificate result: '" & r & "'")
+      of "issued_at": result.issuedAt = parseTomlBasicValue(rhs)
+      of "issuer": result.issuer = parseTomlBasicValue(rhs)
+      of "key_id": result.keyId = parseTomlBasicValue(rhs)
+      else: discard
+  if not sawSchema or result.schema != testCertificateSchemaV1:
+    raise newException(TestCertificateParseError,
+      "not a " & testCertificateSchemaV1 & " certificate (schema='" &
+      result.schema & "')")
+
+proc writeCertificateFile*(cert: TestCertificate; path: string) =
+  ## Serialize ``cert`` and write it to ``path`` (creating parent dirs).
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, serializeCertificateToToml(cert))
+
+proc readCertificateFile*(path: string): TestCertificate =
+  ## Read + parse a certificate file. Raises on IO / parse error.
+  if not fileExists(path):
+    raise newException(TestCertificateParseError,
+      "certificate file not found: " & path)
+  parseCertificateFromToml(readFile(path))
+
+# ---- verifier --------------------------------------------------------------
+
+type
+  CoverageRequirement* = object
+    ## The tuple a verifier checks a certificate SET against.
+    commit*: string
+    lock*: string
+    platform*: string
+    requiredTargets*: seq[string]
+
+  CoverageResult* = object
+    ## Outcome of ``verifyCoverage``. ``covered`` is the verdict; the other
+    ## fields explain a miss so the gate (TC-3) / CI (TC-4) can render an
+    ## actionable diagnostic.
+    covered*: bool
+    coveredTargets*: seq[string]   ## union of targets across matching certs
+    missingTargets*: seq[string]   ## required ∖ covered
+    matchingCerts*: int            ## certs matching commit/lock/platform
+
+proc certificateMatches*(cert: TestCertificate;
+                         req: CoverageRequirement): bool =
+  ## A certificate is RELEVANT to a requirement iff it is a passed cert whose
+  ## ``commit`` / ``lock`` / ``platform`` all match. A mismatch on ANY binding
+  ## field means the cert attests a DIFFERENT state and is ignored (the spec:
+  ## "Verifiers ignore … notes whose ``commit`` field doesn't match").
+  cert.result == tcrPassed and
+    cert.commit == req.commit and
+    cert.lock == req.lock and
+    cert.platform == req.platform
+
+proc verifyCoverage*(certs: openArray[TestCertificate];
+                     req: CoverageRequirement): CoverageResult =
+  ## Does the certificate SET cover ``(commit, lock, platform,
+  ## required-targets)``? The covered set is the UNION of ``targets`` across
+  ## every matching certificate (partial coverage across several certs is
+  ## allowed, per Test-Certificates.md §"Gate integration"); coverage holds
+  ## iff that union ⊇ ``requiredTargets``. Certs whose commit/lock/platform
+  ## mismatch are ignored entirely.
+  var union = initHashSet[string]()
+  for cert in certs:
+    if certificateMatches(cert, req):
+      inc result.matchingCerts
+      for t in cert.targets:
+        union.incl(t)
+  for t in union: result.coveredTargets.add(t)
+  sort(result.coveredTargets)
+  for t in req.requiredTargets:
+    if t notin union:
+      result.missingTargets.add(t)
+  result.covered = result.missingTargets.len == 0
+
+# ============================================================================
+# TC-2: certificate TRANSPORT — attach/read certificates bound to a commit and
+# carry them on the push.
+# ============================================================================
+#
+# A certificate (TC-1) is a small TOML record that ATTESTS a state. TC-2 binds
+# an already-issued certificate to the COMMIT it attests and ships it to the
+# upstream alongside the branch, so reviewers, the gate (TC-3) and CI (TC-4)
+# read exactly what was attested.
+#
+# Carrier (Test-Certificates.md §"Transport"): **git notes** under
+# ``refs/notes/reprobuild/certificates`` keyed by the commit SHA. A note is
+# data attached to a commit WITHOUT changing the commit SHA, stored in its own
+# ref whose tree maps ``<commit-sha>`` → a blob holding the signed
+# certificate(s). We prefer notes over a ``refs/certificates/<commit>`` ref
+# because the note travels with a single, well-known ref (one refspec on the
+# push) and one commit may carry MULTIPLE certificates (typically one per
+# platform) in the SAME note.
+#
+# Multiple certs WITHOUT overwrite: each record is framed by a sentinel header
+# line and we APPEND (``git notes append``) rather than ``add``/overwrite, so a
+# second platform's cert accumulates next to the first instead of replacing it.
+# The reader splits on the sentinel and parses each record independently.
+#
+# Mismatch defense (Test-Certificates.md: "Verifiers ignore … notes whose
+# ``commit`` field doesn't match the target commit"): when reading the certs
+# attached to commit C, a record whose INTERNAL ``commit`` field is not C is
+# dropped — a stale/misfiled note never masquerades as an attestation of C.
+
+const
+  certificateNotesRef* = "refs/notes/reprobuild/certificates"
+    ## The git-notes ref the certificate carrier lives in. Notes are NOT
+    ## pushed/fetched by default; the push path pushes this ref explicitly and
+    ## verifiers fetch it.
+  certificateRecordSentinel = "# --- reprobuild-certificate ---"
+    ## Header line that frames each certificate record inside one commit's
+    ## note. ``git notes append`` concatenates records with a blank line, so we
+    ## split on this sentinel (which never appears in a serialized cert body —
+    ## the writer only emits ``[certificate]``/``[certificate.signature]``
+    ## tables and ``key = "..."`` lines) to recover individual records
+    ## deterministically regardless of git's join.
+
+proc gitNoteRun(gitBin: string;
+                args: openArray[string]): tuple[code: int; output: string] =
+  ## Free-standing argv runner for the notes commands (same shape as
+  ## ``gitRunPlain`` but takes a bare git binary path so the transport layer
+  ## does not require a resolved ``GitToolIdentity``).
+  var cmd = quoteShell(gitBin)
+  for arg in args:
+    cmd.add(" ")
+    cmd.add(quoteShell(arg))
+  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
+  (code: res.exitCode, output: res.output)
+
+proc framedCertificateRecord(cert: TestCertificate): string =
+  ## One certificate framed by the sentinel header so multiple records in the
+  ## same note can be split apart on read.
+  certificateRecordSentinel & "\n" & serializeCertificateToToml(cert)
+
+proc splitCertificateRecords(note: string): seq[string] =
+  ## Recover the individual serialized-certificate bodies from a note blob that
+  ## may hold several appended records. Splits on the sentinel header; tolerant
+  ## of the blank lines ``git notes append`` inserts between records and of a
+  ## leading record with no preceding sentinel (defensive).
+  var current = ""
+  var started = false
+  for rawLine in note.splitLines():
+    if rawLine.strip() == certificateRecordSentinel:
+      if started and current.strip().len > 0:
+        result.add(current)
+      current = ""
+      started = true
+    elif started:
+      current.add(rawLine)
+      current.add("\n")
+  if started and current.strip().len > 0:
+    result.add(current)
+
+proc attachCertificate*(gitBin, repoPath, commit: string;
+                        cert: TestCertificate): tuple[ok: bool; diagnostic: string] =
+  ## Bind ``cert`` to ``commit`` in ``repoPath`` as a git note under
+  ## ``refs/notes/reprobuild/certificates`` (TC-2 carrier). The cert is
+  ## APPENDED to any note already on ``commit`` so multiple platforms'
+  ## certificates accumulate on one commit WITHOUT overwriting each other.
+  ## Returns ``ok=false`` with a diagnostic on a git failure.
+  let record = framedCertificateRecord(cert)
+  # ``git notes append`` creates the note when absent and appends otherwise,
+  # so a second platform's cert never clobbers the first. ``-F -`` would need a
+  # pipe; we pass the framed record via ``-m`` (a single message argument).
+  let res = gitNoteRun(gitBin,
+    ["-C", repoPath, "notes", "--ref", certificateNotesRef,
+     "append", "--no-separator", "-m", record, commit])
+  if res.code != 0:
+    # Older git (< 2.31) lacks ``--no-separator``; retry without it (the
+    # sentinel-based splitter tolerates the extra blank line git inserts).
+    let res2 = gitNoteRun(gitBin,
+      ["-C", repoPath, "notes", "--ref", certificateNotesRef,
+       "append", "-m", record, commit])
+    if res2.code != 0:
+      return (ok: false, diagnostic: "git notes append failed: " &
+        res2.output.strip())
+  (ok: true, diagnostic: "")
+
+proc readAttachedCertificates*(gitBin, repoPath, commit: string):
+    seq[TestCertificate] =
+  ## Read the certificates attached to ``commit`` (the note under
+  ## ``refs/notes/reprobuild/certificates``) in ``repoPath``. Records whose
+  ## INTERNAL ``commit`` field does not equal ``commit`` are DROPPED (defense
+  ## against a stale/misfiled note); unparseable records are skipped. Returns
+  ## an empty seq when no note is attached.
+  let res = gitNoteRun(gitBin,
+    ["-C", repoPath, "notes", "--ref", certificateNotesRef, "show", commit])
+  if res.code != 0:
+    # No note for this commit (or the ref does not exist) → no attestations.
+    return @[]
+  for body in splitCertificateRecords(res.output):
+    var cert: TestCertificate
+    try:
+      cert = parseCertificateFromToml(body)
+    except TestCertificateParseError:
+      continue
+    # Mismatch filter: only certs that genuinely attest THIS commit.
+    if cert.commit == commit:
+      result.add(cert)
+
+proc pushCertificateNotes*(gitBin, repoPath, remote: string):
+    tuple[ok: bool; pushed: bool; diagnostic: string] =
+  ## Carry the certificate notes ref to ``remote`` (TC-2: the push path pushes
+  ## ``refs/notes/reprobuild/certificates`` explicitly, since notes are not
+  ## pushed by default). All certs attached to all pushed commits travel in the
+  ## single ref. ``pushed=false`` with ``ok=true`` means there were no
+  ## certificate notes to carry (benign — nothing attached).
+  let probe = gitNoteRun(gitBin,
+    ["-C", repoPath, "rev-parse", "--verify", "--quiet",
+     certificateNotesRef])
+  if probe.code != 0:
+    # The notes ref does not exist locally → nothing attached, nothing to push.
+    return (ok: true, pushed: false, diagnostic: "no certificate notes")
+  let res = gitNoteRun(gitBin,
+    ["-C", repoPath, "push", remote,
+     certificateNotesRef & ":" & certificateNotesRef])
+  if res.code != 0:
+    return (ok: false, pushed: false,
+      diagnostic: "git push " & certificateNotesRef & " failed: " &
+        res.output.strip())
+  (ok: true, pushed: true, diagnostic: "")
+
+proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
+                     pushedCommit, certRepoPath, gitBin,
+                     currentRepoName: string) =
+  ## TC-3 / RA-32 — the certificate-coverage stage of the RA-21 pre-push gate.
+  ## Called ONLY after every other gate stage has passed (clean + published +
+  ## at the locked revisions, lock current), from each exit point of stage 5.
+  ##
+  ## DEFAULT-OFF (RA-32): ``cgmOff`` — the value a project with NO
+  ## ``[certificates]`` table resolves to — is a strict NO-OP. It touches
+  ## neither ``failures`` nor ``exitCode`` nor ``notices``, so every existing
+  ## pre-push gate test (which sets no policy) is byte-for-byte unaffected.
+  ##
+  ## ``cgmAdvisory`` RECORDS the coverage verdict in ``report.notices`` but
+  ## never changes ``exitCode`` (the load-bearing onboarding property: advisory
+  ## never blocks). ``cgmRequired`` REFUSES the push (exit 2 + a structured
+  ## ``certificate-coverage`` failure) unless the submitted certificates COVER
+  ## the pushed commit for the required targets on EACH required platform.
+  if policy.gateMode == cgmOff:
+    return
+  # The lock digest binds a certificate to the clean dependency state. The
+  # stage-4 lock pass filled ``report.lockUpdate.lockFilePath`` in every arm
+  # (already-current / created / refreshed).
+  let lockDigest = certificateLockDigest(report.lockUpdate.lockFilePath)
+  # A policy that opts in but lists no required platforms means certificates
+  # are advisory-only (the spec: required_platforms may be none). There is
+  # nothing to enforce, so ``required`` degrades to a no-op rather than
+  # blocking on an empty requirement set.
+  if policy.requiredPlatforms.len == 0:
+    if policy.gateMode == cgmAdvisory:
+      report.notices.add("certificate advisory: policy sets no " &
+        "required_platforms — nothing to attest (pushes not gated)")
+    return
+  if pushedCommit.len == 0 or lockDigest.len == 0:
+    let why =
+      if pushedCommit.len == 0: "no HEAD commit to attest"
+      else: "no resolvable workspace lock to bind the certificate to"
+    if policy.gateMode == cgmAdvisory:
+      report.notices.add("certificate advisory: coverage NOT verified (" &
+        why & ")")
+    else:
+      report.failures.add(CheckFailure(
+        repo: currentRepoName,
+        property: "certificate-coverage",
+        remediation: "run 'repro certify' to issue a certificate, then " &
+          "'repro push' to carry it (" & why & ")",
+        evidence: why))
+      report.exitCode = 2
+    return
+  # Read whatever certificates are attached to the pushed commit (TC-2 git-
+  # notes carrier), then check EACH required platform independently. The
+  # per-platform covered set is the UNION of every matching cert's targets
+  # (multi-cert union: a linux cert + a macos cert together satisfy a
+  # {linux, macos} requirement).
+  let attached = readAttachedCertificates(gitBin, certRepoPath, pushedCommit)
+  var perPlatformMissing: seq[string] = @[]
+  for platform in policy.requiredPlatforms:
+    let req = CoverageRequirement(
+      commit: pushedCommit,
+      lock: lockDigest,
+      platform: platform,
+      requiredTargets: policy.requiredTargets)
+    let cov = verifyCoverage(attached, req)
+    if not cov.covered:
+      perPlatformMissing.add(platform & " (missing: " &
+        (if cov.missingTargets.len > 0: cov.missingTargets.join(", ")
+         else: "<no certificate>") & ")")
+  if perPlatformMissing.len == 0:
+    if policy.gateMode == cgmAdvisory:
+      report.notices.add("certificate advisory: coverage OK for " &
+        policy.requiredPlatforms.join(", ") & " × [" &
+        policy.requiredTargets.join(", ") & "] at " &
+        pushedCommit[0 ..< min(12, pushedCommit.len)])
+    # In required mode a clean pass adds no failure — the gate keeps whatever
+    # exit code stage 5 set (0 on success).
+    return
+  let detail = perPlatformMissing.join("; ")
+  if policy.gateMode == cgmAdvisory:
+    report.notices.add("certificate advisory: coverage INCOMPLETE — " &
+      detail & " (run 'repro certify' on the missing platform(s); advisory " &
+      "mode does not block this push)")
+  else:
+    report.failures.add(CheckFailure(
+      repo: currentRepoName,
+      property: "certificate-coverage",
+      remediation: "run 'repro certify' (on each required platform) to " &
+        "issue the missing certificate(s), then 'repro push' to carry them " &
+        "with this push",
+      evidence: "uncovered: " & detail,
+      source: ""))
+    report.exitCode = 2
+
 proc developSetClosure(repos: seq[ResolvedRepo];
                        pushedRepoName: string): HashSet[string] =
   ## RA-21 — compute the transitive develop-set dependency closure of the
@@ -21300,6 +21883,59 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # re-querying the M1 identity binding.
   discard toolDigest
   discard observedAt
+
+  # ---- TC-3 / RA-32: certificate-coverage gate (opt-in per project) ------
+  # This nested stage runs ONLY after every other stage has passed (the gate
+  # short-circuits on the first failure, so by the time we reach it the
+  # closure is clean + published + at the locked revisions and the lock is
+  # current). It is invoked from EACH exit point of stage 5 (and the final
+  # fall-through) via ``applyCertificateGate`` so it sees a resolved lock.
+  #
+  # DEFAULT-OFF guarantee (RA-32): when the project's resolved
+  # ``gateMode`` is ``cgmOff`` — which is exactly what a project with NO
+  # ``[certificates]`` table resolves to — this stage is a NO-OP: it touches
+  # neither ``failures`` nor ``exitCode`` nor ``notices``, so every existing
+  # pre-push gate test (none of which set a policy) behaves identically.
+  #
+  #   - ``cgmAdvisory`` RECORDS the coverage verdict in ``result.notices``
+  #     (a warning naming the missing platform/targets, or a confirmation)
+  #     but NEVER changes the exit code — advisory never blocks a push.
+  #   - ``cgmRequired`` REFUSES the push (exit 2 + a ``certificate-coverage``
+  #     CheckFailure naming what's missing and the ``repro certify`` remedy)
+  #     unless the submitted certificates (read via the TC-2 git-notes
+  #     reader for the pushed commit) COVER (via the TC-1 ``verifyCoverage``
+  #     verifier) the pushed commit, against the clean lock, for the required
+  #     targets, on EACH required platform. Coverage UNIONS multiple certs:
+  #     required {linux, macos} × {t-unit} is satisfied by a linux cert + a
+  #     macos cert together (each platform checked independently).
+  #
+  # The actual logic lives in the top-level ``certificateGate`` proc (defined
+  # with the certificate block above) because Nim forbids a nested closure
+  # from capturing ``result`` (a stack ``CheckReport``). We pre-compute the
+  # two pieces of context that depend on the local ``observations`` /
+  # ``identity`` here and pass them in; ``applyCertificateGate`` is a thin
+  # local wrapper so the stage-5 exit points read cleanly.
+  let certRepoPath =
+    if parsed.currentRepo.len > 0: parsed.currentRepo
+    else: parsed.workspaceRoot
+  var certPushedCommit = ""
+  if not parsed.skipCertificateGate and
+      resolved.certificatePolicy.gateMode != cgmOff:
+    # The pushed commit is the current repo's HEAD. Prefer the already-
+    # observed SHA; fall back to a fresh probe if the current repo was not
+    # one of the in-scope observations (e.g. an empty-closure fallback).
+    for obs in observations:
+      if obs.name == currentRepoName and obs.headSha.len > 0:
+        certPushedCommit = obs.headSha
+        break
+    if certPushedCommit.len == 0:
+      let headRes = queryGitState(headShaQuery(certRepoPath), identity)
+      if headRes.status == gqsOk:
+        certPushedCommit = headRes.headSha
+  template applyCertificateGate() =
+    if not parsed.skipCertificateGate:
+      certificateGate(result, resolved.certificatePolicy, certPushedCommit,
+        certRepoPath, identity.binaryPath, currentRepoName)
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -21559,9 +22195,11 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     parsed.workspaceRoot, workspaceLocal)
   if layerLocations.len == 0:
     result.exitCode = 0
+    applyCertificateGate()
     return
   if parsed.currentRepo.len == 0:
     result.exitCode = 0
+    applyCertificateGate()
     return
   let currentRepoAbs = parsed.currentRepo
   # Robust same-path test. Bare ``==`` is too brittle on Windows: the
@@ -21588,18 +22226,21 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       break
   if currentLayer.isNone:
     result.exitCode = 0
+    applyCertificateGate()
     return
   if currentLayer.get().visibility != wvPublic:
     # A non-public layer pushing locks is allowed to reference any
     # tier. The spec only blocks public-lock references to private-only
     # repos.
     result.exitCode = 0
+    applyCertificateGate()
     return
   let touchedLocks = lockPathsTouchedInPush(
     identity, currentRepoAbs, parsed.pushedRefsPath, resolved.projectName)
   if touchedLocks.len == 0:
     # No lock changes in this push — the rule is vacuously satisfied.
     result.exitCode = 0
+    applyCertificateGate()
     return
   let pathVisibility = classifyRepoPathVisibility(
     parsed.workspaceRoot, layerLocations, resolved.projectName)
@@ -21665,6 +22306,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.exitCode = 2
         return
   result.exitCode = 0
+  applyCertificateGate()
 
 proc writeCheckReport(report: CheckReport) =
   ## Persist the structured JSON report at the spec-mandated location.
@@ -21816,13 +22458,11 @@ proc runCheckCommand*(args: openArray[string]): int =
 #     RA-27's executor only fast-forwards, so the genuine upstream-integration
 #     step is push-owned per CLI/push.md §"--sync flavor").
 
-# TC-2 forward declaration: the certificate-notes carrier lives in the
-# certificate section (after the TC-1 schema/serializer it reuses), which is
-# defined later in this module. ``executePush`` calls it to ship the attached
-# certificates alongside each pushed branch; the signature is cert-type-free
-# (plain strings) so a forward declaration suffices.
-proc pushCertificateNotes*(gitBin, repoPath, remote: string):
-    tuple[ok: bool; pushed: bool; diagnostic: string]
+# TC-2: ``pushCertificateNotes`` (the certificate-notes carrier) is now
+# DEFINED earlier in this module (the certificate schema/verifier/transport
+# block was relocated above the RA-21 pre-push gate so the TC-3/RA-32
+# coverage stage can call the TC-1 verifier + TC-2 reader). ``executePush``
+# below calls it directly — no forward declaration is needed.
 
 type
   PushSyncMode = enum
@@ -27656,472 +28296,6 @@ proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
   except ValueError:
     return (false, 0, 0)
 
-# ============================================================================
-# TC-1 — Test certificates: schema + reader/writer + verifier.
-#
-# A test certificate (``reprobuild.test-certificate.v1``; see
-# Test-Certificates.md §"What a certificate attests") is a small record that
-# attests: ON PLATFORM ``P``, the test targets ``T`` PASSED, with the repo at
-# commit ``C`` and its develop-mode dependency closure clean and at the
-# revisions pinned by lock ``L``. The binding fields (``commit`` / ``lock`` /
-# ``platform`` / ``targets``) make it CHECKABLE; the ``signature`` is what
-# makes it UNFORGEABLE WITHOUT THE KEY.
-#
-# TC-1 deferral (HONEST): TC-1 ships the schema, issuance, the incremental
-# no-op, and the verifier. The ``signature`` is left explicitly UNSIGNED
-# (empty ``algorithm`` + empty ``value``) — TC-5 wires the privileged daemon's
-# real ed25519 signing and key registration. We NEVER fabricate a signature.
-# The verifier below is a COVERAGE verifier (does the cert set cover a
-# (commit, lock, platform, targets) tuple); the TC-5 SIGNATURE verifier is a
-# separate, additive check.
-# ============================================================================
-
-const
-  testCertificateSchemaV1* = "reprobuild.test-certificate.v1"
-    ## The ``schema`` value every v1 certificate carries.
-
-type
-  TestCertificateResult* = enum
-    ## The ``result`` field. TC-1 issues a certificate ONLY for ``tcrPassed``;
-    ## a run with any failing target yields NO certificate (the attestation is
-    ## withheld). ``tcrFailed`` exists so a reader can round-trip a record that
-    ## was authored out-of-band, but the issuer never emits one.
-    tcrPassed = "passed"
-    tcrFailed = "failed"
-
-  TestCertificateSignature* = object
-    ## The detached signature over the canonical ``[certificate]`` body.
-    ## TC-1 leaves BOTH fields empty (clearly unsigned); TC-5 fills them.
-    algorithm*: string   ## e.g. ``ed25519`` once TC-5 lands; "" at TC-1.
-    value*: string       ## base64 detached signature; "" at TC-1.
-
-  TestCertificate* = object
-    ## One ``reprobuild.test-certificate.v1`` record.
-    schema*: string
-    project*: string
-    repo*: string
-    commit*: string      ## exact repo commit the tests ran against (HEAD)
-    lock*: string        ## digest of the dependency lock (clean deps)
-    platform*: string    ## OS/arch the tests executed on, e.g. ``linux/amd64``
-    targets*: seq[string]  ## the targets that PASSED (the covered set)
-    result*: TestCertificateResult
-    issuedAt*: string    ## RFC3339 UTC timestamp
-    issuer*: string      ## who observed/issued, e.g. ``repro-test@<host>``
-    keyId*: string       ## which registered key signed (empty until TC-5)
-    signature*: TestCertificateSignature
-
-proc isSigned*(cert: TestCertificate): bool =
-  ## A certificate is SIGNED only when both the algorithm and the signature
-  ## value are present. TC-1 always returns ``false`` (the deliberate,
-  ## documented deferral to TC-5).
-  cert.signature.algorithm.len > 0 and cert.signature.value.len > 0
-
-proc currentPlatformTag*(): string =
-  ## The ``platform`` field for a certificate issued on this host: the
-  ## ``<os>/<cpu>`` pair from the same ``hostOS`` / ``hostCPU`` the
-  ## ``repro capabilities`` host block reports.
-  hostOS & "/" & hostCPU
-
-proc certificateLockDigest*(lockFilePath: string): string =
-  ## RA-1/RA-7 reuse: the ``lock`` binding is a content digest of the
-  ## workspace lock file the gate resolved as current. We hash the lock
-  ## file's bytes with the same ``blake3DomainDigest`` the rest of the CLI
-  ## uses for metadata envelopes and prefix the algorithm so the digest is
-  ## self-describing (``blake3:<hex>``). An empty / missing path yields the
-  ## empty string so the caller can decline to issue rather than bind to a
-  ## non-existent lock.
-  if lockFilePath.len == 0 or not fileExists(lockFilePath):
-    return ""
-  let body =
-    try: readFile(lockFilePath)
-    except CatchableError: return ""
-  "blake3:" & digestHex(blake3DomainDigest(body.bytesOf(), hdMetadataEnvelope))
-
-proc tomlEscapeCert(value: string): string =
-  ## Local copy of the basic-string escaper (mirrors lock_writer's
-  ## ``tomlEscape``) so the certificate writer is self-contained.
-  result = newStringOfCap(value.len + 2)
-  for ch in value:
-    case ch
-    of '\\': result.add("\\\\")
-    of '"': result.add("\\\"")
-    of '\n': result.add("\\n")
-    of '\r': result.add("\\r")
-    of '\t': result.add("\\t")
-    of '\b': result.add("\\b")
-    of '\f': result.add("\\f")
-    else: result.add(ch)
-
-proc serializeCertificateToToml*(cert: TestCertificate): string =
-  ## Render a ``TestCertificate`` to the canonical TOML form documented in
-  ## Test-Certificates.md. Key order is fixed and deterministic so two issues
-  ## of the same observed state produce byte-identical bodies (modulo the
-  ## ``issued_at`` timestamp). ``targets`` is a flat string ARRAY (not a
-  ## nested array-of-tables) — the nested-table TOML constraint other
-  ## milestones hit does not apply to a scalar list. The ``[certificate]``
-  ## body is what TC-5 will sign; the ``[certificate.signature]`` block sits
-  ## AFTER it and is excluded from the canonical signing payload.
-  result = newStringOfCap(512)
-  result.add("schema = \"")
-  result.add(tomlEscapeCert(testCertificateSchemaV1))
-  result.add("\"\n\n")
-  result.add("[certificate]\n")
-  template kv(key, value: string) =
-    result.add(key & " = \"" & tomlEscapeCert(value) & "\"\n")
-  kv("project", cert.project)
-  kv("repo", cert.repo)
-  kv("commit", cert.commit)
-  kv("lock", cert.lock)
-  kv("platform", cert.platform)
-  # targets as an inline string array, stable order (as observed/run).
-  result.add("targets = [")
-  for i, t in cert.targets:
-    if i > 0: result.add(", ")
-    result.add("\"" & tomlEscapeCert(t) & "\"")
-  result.add("]\n")
-  kv("result", $cert.result)
-  kv("issued_at", cert.issuedAt)
-  kv("issuer", cert.issuer)
-  if cert.keyId.len > 0:
-    kv("key_id", cert.keyId)
-  # Signature block. TC-1 emits it with empty fields so the on-disk shape is
-  # stable for TC-5 (which fills algorithm + value) and so a reader can tell
-  # "unsigned" (present, empty) from "absent". This is the explicit deferral.
-  result.add("\n[certificate.signature]\n")
-  result.add("algorithm = \"" &
-    tomlEscapeCert(cert.signature.algorithm) & "\"\n")
-  result.add("value = \"" & tomlEscapeCert(cert.signature.value) & "\"\n")
-
-proc canonicalCertificatePayload*(cert: TestCertificate): string =
-  ## The canonical serialization of the ``[certificate]`` body (EXCLUDING the
-  ## signature block) — the exact bytes TC-5's daemon will sign and the
-  ## verifier will check the signature against. Re-uses the writer and slices
-  ## off the trailing signature block so the two never drift.
-  let full = serializeCertificateToToml(cert)
-  let marker = "\n[certificate.signature]\n"
-  let idx = full.find(marker)
-  if idx >= 0: full[0 ..< idx] else: full
-
-type
-  TestCertificateParseError* = object of CatchableError
-
-proc unquoteTomlBasic(raw: string): string =
-  ## Reverse of ``tomlEscapeCert`` for the basic-string subset the writer
-  ## emits. ``raw`` is the text BETWEEN the surrounding double quotes.
-  result = newStringOfCap(raw.len)
-  var i = 0
-  while i < raw.len:
-    let ch = raw[i]
-    if ch == '\\' and i + 1 < raw.len:
-      let nxt = raw[i + 1]
-      case nxt
-      of '\\': result.add('\\')
-      of '"': result.add('"')
-      of 'n': result.add('\n')
-      of 'r': result.add('\r')
-      of 't': result.add('\t')
-      of 'b': result.add('\b')
-      of 'f': result.add('\f')
-      else: result.add(nxt)
-      i += 2
-    else:
-      result.add(ch)
-      inc i
-
-proc parseTomlBasicValue(rhs: string): string =
-  ## Extract the unescaped value of a ``key = "..."`` right-hand side.
-  let s = rhs.strip()
-  if s.len >= 2 and s[0] == '"' and s[^1] == '"':
-    unquoteTomlBasic(s[1 ..< s.high])
-  else:
-    s
-
-proc parseTomlStringArray(rhs: string): seq[string] =
-  ## Parse a ``[ "a", "b" ]`` inline string array. Tolerant of whitespace;
-  ## the writer always emits the canonical comma-space form.
-  var s = rhs.strip()
-  if s.len >= 2 and s[0] == '[' and s[^1] == ']':
-    s = s[1 ..< s.high]
-  var i = 0
-  while i < s.len:
-    while i < s.len and s[i] in {' ', '\t', ','}: inc i
-    if i >= s.len: break
-    if s[i] == '"':
-      inc i
-      var buf = ""
-      while i < s.len and s[i] != '"':
-        if s[i] == '\\' and i + 1 < s.len:
-          buf.add(s[i]); buf.add(s[i + 1]); i += 2
-        else:
-          buf.add(s[i]); inc i
-      inc i  # past closing quote
-      result.add(unquoteTomlBasic(buf))
-    else:
-      inc i
-
-proc parseCertificateFromToml*(content: string): TestCertificate =
-  ## Strict-enough reader for a ``reprobuild.test-certificate.v1`` record
-  ## that round-trips ``serializeCertificateToToml``. Raises
-  ## ``TestCertificateParseError`` on a missing/mismatched schema or a
-  ## malformed ``result``. Unknown keys are ignored (forward-compatible).
-  result.signature = TestCertificateSignature()
-  var inSignature = false
-  var sawSchema = false
-  for rawLine in content.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    if line.startsWith("["):
-      inSignature = (line == "[certificate.signature]")
-      continue
-    let eq = line.find('=')
-    if eq <= 0: continue
-    let key = line[0 ..< eq].strip()
-    let rhs = line[eq + 1 .. ^1]
-    if key == "schema":
-      result.schema = parseTomlBasicValue(rhs)
-      sawSchema = true
-    elif inSignature:
-      case key
-      of "algorithm": result.signature.algorithm = parseTomlBasicValue(rhs)
-      of "value": result.signature.value = parseTomlBasicValue(rhs)
-      else: discard
-    else:
-      case key
-      of "project": result.project = parseTomlBasicValue(rhs)
-      of "repo": result.repo = parseTomlBasicValue(rhs)
-      of "commit": result.commit = parseTomlBasicValue(rhs)
-      of "lock": result.lock = parseTomlBasicValue(rhs)
-      of "platform": result.platform = parseTomlBasicValue(rhs)
-      of "targets": result.targets = parseTomlStringArray(rhs)
-      of "result":
-        let r = parseTomlBasicValue(rhs)
-        case r
-        of "passed": result.result = tcrPassed
-        of "failed": result.result = tcrFailed
-        else:
-          raise newException(TestCertificateParseError,
-            "invalid certificate result: '" & r & "'")
-      of "issued_at": result.issuedAt = parseTomlBasicValue(rhs)
-      of "issuer": result.issuer = parseTomlBasicValue(rhs)
-      of "key_id": result.keyId = parseTomlBasicValue(rhs)
-      else: discard
-  if not sawSchema or result.schema != testCertificateSchemaV1:
-    raise newException(TestCertificateParseError,
-      "not a " & testCertificateSchemaV1 & " certificate (schema='" &
-      result.schema & "')")
-
-proc writeCertificateFile*(cert: TestCertificate; path: string) =
-  ## Serialize ``cert`` and write it to ``path`` (creating parent dirs).
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, serializeCertificateToToml(cert))
-
-proc readCertificateFile*(path: string): TestCertificate =
-  ## Read + parse a certificate file. Raises on IO / parse error.
-  if not fileExists(path):
-    raise newException(TestCertificateParseError,
-      "certificate file not found: " & path)
-  parseCertificateFromToml(readFile(path))
-
-# ---- verifier --------------------------------------------------------------
-
-type
-  CoverageRequirement* = object
-    ## The tuple a verifier checks a certificate SET against.
-    commit*: string
-    lock*: string
-    platform*: string
-    requiredTargets*: seq[string]
-
-  CoverageResult* = object
-    ## Outcome of ``verifyCoverage``. ``covered`` is the verdict; the other
-    ## fields explain a miss so the gate (TC-3) / CI (TC-4) can render an
-    ## actionable diagnostic.
-    covered*: bool
-    coveredTargets*: seq[string]   ## union of targets across matching certs
-    missingTargets*: seq[string]   ## required ∖ covered
-    matchingCerts*: int            ## certs matching commit/lock/platform
-
-proc certificateMatches*(cert: TestCertificate;
-                         req: CoverageRequirement): bool =
-  ## A certificate is RELEVANT to a requirement iff it is a passed cert whose
-  ## ``commit`` / ``lock`` / ``platform`` all match. A mismatch on ANY binding
-  ## field means the cert attests a DIFFERENT state and is ignored (the spec:
-  ## "Verifiers ignore … notes whose ``commit`` field doesn't match").
-  cert.result == tcrPassed and
-    cert.commit == req.commit and
-    cert.lock == req.lock and
-    cert.platform == req.platform
-
-proc verifyCoverage*(certs: openArray[TestCertificate];
-                     req: CoverageRequirement): CoverageResult =
-  ## Does the certificate SET cover ``(commit, lock, platform,
-  ## required-targets)``? The covered set is the UNION of ``targets`` across
-  ## every matching certificate (partial coverage across several certs is
-  ## allowed, per Test-Certificates.md §"Gate integration"); coverage holds
-  ## iff that union ⊇ ``requiredTargets``. Certs whose commit/lock/platform
-  ## mismatch are ignored entirely.
-  var union = initHashSet[string]()
-  for cert in certs:
-    if certificateMatches(cert, req):
-      inc result.matchingCerts
-      for t in cert.targets:
-        union.incl(t)
-  for t in union: result.coveredTargets.add(t)
-  sort(result.coveredTargets)
-  for t in req.requiredTargets:
-    if t notin union:
-      result.missingTargets.add(t)
-  result.covered = result.missingTargets.len == 0
-
-# ============================================================================
-# TC-2: certificate TRANSPORT — attach/read certificates bound to a commit and
-# carry them on the push.
-# ============================================================================
-#
-# A certificate (TC-1) is a small TOML record that ATTESTS a state. TC-2 binds
-# an already-issued certificate to the COMMIT it attests and ships it to the
-# upstream alongside the branch, so reviewers, the gate (TC-3) and CI (TC-4)
-# read exactly what was attested.
-#
-# Carrier (Test-Certificates.md §"Transport"): **git notes** under
-# ``refs/notes/reprobuild/certificates`` keyed by the commit SHA. A note is
-# data attached to a commit WITHOUT changing the commit SHA, stored in its own
-# ref whose tree maps ``<commit-sha>`` → a blob holding the signed
-# certificate(s). We prefer notes over a ``refs/certificates/<commit>`` ref
-# because the note travels with a single, well-known ref (one refspec on the
-# push) and one commit may carry MULTIPLE certificates (typically one per
-# platform) in the SAME note.
-#
-# Multiple certs WITHOUT overwrite: each record is framed by a sentinel header
-# line and we APPEND (``git notes append``) rather than ``add``/overwrite, so a
-# second platform's cert accumulates next to the first instead of replacing it.
-# The reader splits on the sentinel and parses each record independently.
-#
-# Mismatch defense (Test-Certificates.md: "Verifiers ignore … notes whose
-# ``commit`` field doesn't match the target commit"): when reading the certs
-# attached to commit C, a record whose INTERNAL ``commit`` field is not C is
-# dropped — a stale/misfiled note never masquerades as an attestation of C.
-
-const
-  certificateNotesRef* = "refs/notes/reprobuild/certificates"
-    ## The git-notes ref the certificate carrier lives in. Notes are NOT
-    ## pushed/fetched by default; the push path pushes this ref explicitly and
-    ## verifiers fetch it.
-  certificateRecordSentinel = "# --- reprobuild-certificate ---"
-    ## Header line that frames each certificate record inside one commit's
-    ## note. ``git notes append`` concatenates records with a blank line, so we
-    ## split on this sentinel (which never appears in a serialized cert body —
-    ## the writer only emits ``[certificate]``/``[certificate.signature]``
-    ## tables and ``key = "..."`` lines) to recover individual records
-    ## deterministically regardless of git's join.
-
-proc gitNoteRun(gitBin: string;
-                args: openArray[string]): tuple[code: int; output: string] =
-  ## Free-standing argv runner for the notes commands (same shape as
-  ## ``gitRunPlain`` but takes a bare git binary path so the transport layer
-  ## does not require a resolved ``GitToolIdentity``).
-  var cmd = quoteShell(gitBin)
-  for arg in args:
-    cmd.add(" ")
-    cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath})
-  (code: res.exitCode, output: res.output)
-
-proc framedCertificateRecord(cert: TestCertificate): string =
-  ## One certificate framed by the sentinel header so multiple records in the
-  ## same note can be split apart on read.
-  certificateRecordSentinel & "\n" & serializeCertificateToToml(cert)
-
-proc splitCertificateRecords(note: string): seq[string] =
-  ## Recover the individual serialized-certificate bodies from a note blob that
-  ## may hold several appended records. Splits on the sentinel header; tolerant
-  ## of the blank lines ``git notes append`` inserts between records and of a
-  ## leading record with no preceding sentinel (defensive).
-  var current = ""
-  var started = false
-  for rawLine in note.splitLines():
-    if rawLine.strip() == certificateRecordSentinel:
-      if started and current.strip().len > 0:
-        result.add(current)
-      current = ""
-      started = true
-    elif started:
-      current.add(rawLine)
-      current.add("\n")
-  if started and current.strip().len > 0:
-    result.add(current)
-
-proc attachCertificate*(gitBin, repoPath, commit: string;
-                        cert: TestCertificate): tuple[ok: bool; diagnostic: string] =
-  ## Bind ``cert`` to ``commit`` in ``repoPath`` as a git note under
-  ## ``refs/notes/reprobuild/certificates`` (TC-2 carrier). The cert is
-  ## APPENDED to any note already on ``commit`` so multiple platforms'
-  ## certificates accumulate on one commit WITHOUT overwriting each other.
-  ## Returns ``ok=false`` with a diagnostic on a git failure.
-  let record = framedCertificateRecord(cert)
-  # ``git notes append`` creates the note when absent and appends otherwise,
-  # so a second platform's cert never clobbers the first. ``-F -`` would need a
-  # pipe; we pass the framed record via ``-m`` (a single message argument).
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "notes", "--ref", certificateNotesRef,
-     "append", "--no-separator", "-m", record, commit])
-  if res.code != 0:
-    # Older git (< 2.31) lacks ``--no-separator``; retry without it (the
-    # sentinel-based splitter tolerates the extra blank line git inserts).
-    let res2 = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", certificateNotesRef,
-       "append", "-m", record, commit])
-    if res2.code != 0:
-      return (ok: false, diagnostic: "git notes append failed: " &
-        res2.output.strip())
-  (ok: true, diagnostic: "")
-
-proc readAttachedCertificates*(gitBin, repoPath, commit: string):
-    seq[TestCertificate] =
-  ## Read the certificates attached to ``commit`` (the note under
-  ## ``refs/notes/reprobuild/certificates``) in ``repoPath``. Records whose
-  ## INTERNAL ``commit`` field does not equal ``commit`` are DROPPED (defense
-  ## against a stale/misfiled note); unparseable records are skipped. Returns
-  ## an empty seq when no note is attached.
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "notes", "--ref", certificateNotesRef, "show", commit])
-  if res.code != 0:
-    # No note for this commit (or the ref does not exist) → no attestations.
-    return @[]
-  for body in splitCertificateRecords(res.output):
-    var cert: TestCertificate
-    try:
-      cert = parseCertificateFromToml(body)
-    except TestCertificateParseError:
-      continue
-    # Mismatch filter: only certs that genuinely attest THIS commit.
-    if cert.commit == commit:
-      result.add(cert)
-
-proc pushCertificateNotes*(gitBin, repoPath, remote: string):
-    tuple[ok: bool; pushed: bool; diagnostic: string] =
-  ## Carry the certificate notes ref to ``remote`` (TC-2: the push path pushes
-  ## ``refs/notes/reprobuild/certificates`` explicitly, since notes are not
-  ## pushed by default). All certs attached to all pushed commits travel in the
-  ## single ref. ``pushed=false`` with ``ok=true`` means there were no
-  ## certificate notes to carry (benign — nothing attached).
-  let probe = gitNoteRun(gitBin,
-    ["-C", repoPath, "rev-parse", "--verify", "--quiet",
-     certificateNotesRef])
-  if probe.code != 0:
-    # The notes ref does not exist locally → nothing attached, nothing to push.
-    return (ok: true, pushed: false, diagnostic: "no certificate notes")
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "push", remote,
-     certificateNotesRef & ":" & certificateNotesRef])
-  if res.code != 0:
-    return (ok: false, pushed: false,
-      diagnostic: "git push " & certificateNotesRef & " failed: " &
-        res.output.strip())
-  (ok: true, pushed: true, diagnostic: "")
 
 # ---- TC-1 issuance: precondition evaluation + no-op decision ----------------
 
@@ -28164,6 +28338,10 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     workspaceRoot: workspaceRoot,
     currentRepo: currentRepo,
     pushedRefsPath: "",
+    # Issuance must not require a certificate (chicken-and-egg): suppress the
+    # TC-3/RA-32 certificate stage when the gate is reused to decide whether a
+    # cert is ISSUABLE. The real pre-push hook keeps it enabled.
+    skipCertificateGate: true,
     toolProvisioning:
       if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
   if not isInitializedWorkspace(parsed.workspaceRoot):

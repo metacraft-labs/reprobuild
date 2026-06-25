@@ -6326,6 +6326,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim",
+    binary: "build/test-bin/t_pre_push_requires_certificate_coverage_when_project_opts_in",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim",
+    binary: "build/test-bin/t_cert_gate_defaults_off_and_advisory_does_not_block",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
     binary: "build/test-bin/t_recertify_is_noop_when_no_executed_function_changed",
     defines: @[],

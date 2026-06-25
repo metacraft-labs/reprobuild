@@ -161,6 +161,27 @@ type
     remote*: string
     revision*: Option[string]
 
+  CertificatesBody* = object
+    ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy
+    ## (Test-Certificates.md §"Per-project configuration"). Authored as a
+    ## top-level `[certificates]` table in `projects/<project>.toml`:
+    ##
+    ##   [certificates]
+    ##   gate_mode = "required"            # off (default) | advisory | required
+    ##   required_targets = ["t-unit"]    # targets a cert must cover
+    ##   required_platforms = ["linux/amd64", "macos/arm64"]
+    ##
+    ## Every field is OPTIONAL. A missing `[certificates]` table — or a table
+    ## that omits `gate_mode` — resolves to `off`, so a project that never
+    ## opts in is never cert-gated (the default-off onboarding guarantee:
+    ## RA-32). `gate_mode` ∈ {off, advisory, required}; `advisory` records
+    ## coverage without ever blocking the push; `required` refuses the push
+    ## unless the submitted certificates cover the pushed commit for the
+    ## required targets on each required platform.
+    gate_mode*: Option[string]
+    required_targets*: seq[string]
+    required_platforms*: seq[string]
+
   ProjectManifest* = object
     schema*: string
     project*: ProjectBody
@@ -171,6 +192,12 @@ type
       ## missing/empty array means the project declares no binary
       ## dependencies; backward-compatible with manifests authored before
       ## RA-22.
+    certificates*: CertificatesBody
+      ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy.
+      ## A missing `[certificates]` table leaves every field at its zero
+      ## value (`gate_mode` = none ⇒ resolved `off`), so enforcement is
+      ## strictly opt-in and backward-compatible with manifests authored
+      ## before this milestone.
     extensions*: Extensions
 
   # --- variants/<...>.toml ---------------------------------------------------
