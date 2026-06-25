@@ -202,6 +202,18 @@ package qt6DeclarativeSource:
         "FEATURE_clang=OFF",
         "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
         "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
+        # M9.R.35.5 — same WSL ``cmake -E cmake_autogen`` wedge as the
+        # plasma-workspace recipe (M9.R.15q.13.6).  Observed on
+        # ``qt6-declarative/build/tools/qmlprofiler/CMakeFiles/
+        # qmlprofiler_autogen.dir``: cmake's autogen-runner forks
+        # two moc children that exit quickly, but the parent blocks
+        # forever on a ``read(7)`` from the moc-stdout pipe because
+        # cmake never closes the write end in the parent before
+        # waitpid().  Single-moc serialisation (CMAKE_AUTOGEN_PARALLEL=1)
+        # eliminates the multi-pipe race that triggers the wedge.
+        # The compile parallelism stays at ``cmake --build --parallel``
+        # so wall-time impact is bounded.
+        "CMAKE_AUTOGEN_PARALLEL=1",
       ]
       # M9.R.35.4 — qmlcachegen, qmltyperegistrar, and qmlc compiler
       # all emit files via Qt's ``QSaveFile`` which on WSL ext4 under
