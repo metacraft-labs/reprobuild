@@ -6318,6 +6318,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_certificates_travel_with_pushed_commit.nim",
+    binary: "build/test-bin/t_certificates_travel_with_pushed_commit",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
     binary: "build/test-bin/t_recertify_is_noop_when_no_executed_function_changed",
     defines: @[],
