@@ -49,6 +49,14 @@ const ProfileNimPathLibs* = [
   "repro_domain_types",
   "repro_profile",
   "repro_profile_intent",
+  # Phase G: ``repro_profile`` now hosts ``build_actions.nim``, which
+  # imports ``repro_project_dsl`` to decode the typed-tool argv shape
+  # the macro lifts into ``ResourceIntent``. Without ``repro_project_dsl``
+  # on the profile-compile child's ``--path`` the macro expansion fails
+  # with ``cannot open file: repro_project_dsl`` even on profiles that
+  # don't directly reference any action-edge templates — the import
+  # chain reaches it transitively from every ``import repro_profile``.
+  "repro_project_dsl",
 ]
 
 proc reprobuildRepoRoot*(): string =
