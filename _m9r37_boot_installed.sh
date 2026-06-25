@@ -27,7 +27,13 @@ date
 BOOT_FIFO="$(mktemp -d)/boot-in.fifo"
 mkfifo "$BOOT_FIFO"
 (
-  sleep 90
+  # GRUB defaults to a 5s timeout + auto-boots the first entry; any
+  # keystroke during the menu (even an idle "root\n" from this FIFO)
+  # interrupts the timeout and the menu sits forever.  Sleep through
+  # the GRUB timeout + boot + login prompt before sending anything.
+  # M9.R.36 used sleep 90 here; bump to 150 to be safe in case the
+  # OVMF firmware adds a "Press any key to continue" extra step.
+  sleep 150
   echo "root"
   sleep 3
   echo "reproos"

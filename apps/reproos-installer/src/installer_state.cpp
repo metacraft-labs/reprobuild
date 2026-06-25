@@ -600,8 +600,21 @@ void InstallerState::runMinimalBootstrap(const QString &target) {
        "/boot --boot-directory=" + target +
        "/boot --no-nvram --removable --recheck " + grubDevice, 120000);
     appendLog("Phase 5e: writing GRUB config");
+    // M9.R.37.7 — wire the GRUB UI to BOTH console (tty1) AND serial
+    // (ttyS0) so headless QEMU runs see the menu + boot countdown
+    // tick.  Without ``serial --unit=0`` + ``terminal_input/_output
+    // serial console`` GRUB renders the menu on the framebuffer ONLY
+    // — which on ``qemu -nographic -serial mon:stdio`` is invisible —
+    // and the timeout ticks but no key event ever reaches GRUB.  A
+    // ``set timeout_style=hidden`` together with ``set timeout=3``
+    // also bypasses the interactive menu entirely on serial-only
+    // hardware (matching Debian's serial-installer pattern).
     QString grubCfg =
-        "set timeout=5\n"
+        "serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1\n"
+        "terminal_input console serial\n"
+        "terminal_output console serial\n"
+        "set timeout_style=hidden\n"
+        "set timeout=3\n"
         "set default=0\n"
         "menuentry 'ReproOS' {\n"
         "  linux /boot/vmlinuz root=/dev/vda2 ro console=tty1 console=ttyS0,115200\n"
