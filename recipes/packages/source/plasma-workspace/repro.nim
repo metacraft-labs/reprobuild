@@ -629,6 +629,26 @@ package plasmaWorkspaceSource:
         # __STDC_VERSION__ in C++ mode.  v1 plasmashell does not depend
         # on the autostart KCM at runtime.
         "sed -i 's|^add_subdirectory(autostart)$|# M9.R.15q.13.15: dropped — systemd sd-id128.h -Werror=undef|' src/kcms/CMakeLists.txt",
+        # M9.R.35.9 — replace ``KDE_INSTALL_FULL_LIBEXECDIR`` with
+        # ``KDE_INSTALL_LIBEXECDIR`` in the session-restore CMakeLists
+        # so ``cmake --install --prefix <install-mirror>`` actually
+        # relocates the install path.  Upstream plasma-workspace 6.2.5
+        # uses ``_FULL_`` (absolute) which expands to
+        # ``${CMAKE_INSTALL_PREFIX}/lib/libexec`` at configure time and
+        # bakes that absolute path into ``cmake_install.cmake`` — the
+        # subsequent ``cmake --install --prefix=<mirror>`` invocation
+        # only relocates RELATIVE paths, so the install attempts to
+        # write to ``/usr/local/lib/libexec/...`` and fails with
+        # ``Permission denied`` (the engine builds as an unprivileged
+        # user, never with write access to the system ``/usr/local``).
+        #
+        # Symmetric replacement: drop the ``_FULL_`` infix from both
+        # ``install(TARGETS ...)`` lines so the path becomes relative
+        # to ``CMAKE_INSTALL_PREFIX`` and ``--prefix`` works.
+        "sed -i 's|KDE_INSTALL_FULL_LIBEXECDIR|KDE_INSTALL_LIBEXECDIR|g' src/startkde/session-restore/CMakeLists.txt",
+        # Same fix for the lookandfeel KCM that installs lookandfeeltool
+        # to KDE_INSTALL_FULL_BINDIR.
+        "sed -i 's|KDE_INSTALL_FULL_BINDIR|KDE_INSTALL_BINDIR|g' src/kcms/lookandfeel/CMakeLists.txt",
         # M9.R.35.3 — qmltyperegistrar 6.8.1 doesn't recognize
         # ``std::uint32_t`` as a valid enum-base type and emits
         # ``Warning: playercontainer.h:25/38/50: std::uint32_t is used
