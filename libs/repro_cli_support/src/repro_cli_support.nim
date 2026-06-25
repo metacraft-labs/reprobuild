@@ -27202,6 +27202,28 @@ type
       ## real reprobuild workspace).  ``tpmUnspecified`` defers to the
       ## project-interface's declared default; if there is none the engine
       ## raises the documented "pass --tool-provisioning=path" diagnostic.
+    # ---- TC-1: certificate issuance flags --------------------------------
+    certify: bool
+      ## ``--certify`` (the default) — issue a test certificate when the run
+      ## passes AND the gate preconditions hold. ``--no-certify`` suppresses
+      ## issuance entirely (tests still run).
+    certifyExplicit: bool
+      ## ``repro certify`` / ``--certify`` was given explicitly (the "run the
+      ## full required set to get a certificate" form). Distinguishes the
+      ## explicit ceremony from a default-on ``repro test`` issuance for the
+      ## diagnostic text; does not change the issuance LOGIC.
+    noCertify: bool
+      ## ``--no-certify`` was given explicitly (suppress issuance).
+    certificateOut: string
+      ## ``--certificate-out=PATH`` — where to write the issued certificate.
+      ## Defaults to ``<workspaceRoot>/.repro/workspace/certificates/
+      ## <commit>-<platform>.toml`` when a workspace is resolvable.
+    certWorkspaceRoot: string  ## ``--workspace-root=PATH`` for the gate.
+    certCurrentRepo: string    ## ``--current-repo=PATH`` for the gate.
+    certTraceDir: string
+      ## ``--ct-incremental-trace-dir=PATH`` — the incremental adapter's
+      ## trace dir; when set, the no-op decision consults the canonical
+      ## ct-incremental change signal in addition to the commit/lock signal.
 
 proc emitShardDiagnostic(msg: string) =
   stderr.writeLine("repro test: error: " & msg)
@@ -27590,9 +27612,523 @@ proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
   except ValueError:
     return (false, 0, 0)
 
+# ============================================================================
+# TC-1 — Test certificates: schema + reader/writer + verifier.
+#
+# A test certificate (``reprobuild.test-certificate.v1``; see
+# Test-Certificates.md §"What a certificate attests") is a small record that
+# attests: ON PLATFORM ``P``, the test targets ``T`` PASSED, with the repo at
+# commit ``C`` and its develop-mode dependency closure clean and at the
+# revisions pinned by lock ``L``. The binding fields (``commit`` / ``lock`` /
+# ``platform`` / ``targets``) make it CHECKABLE; the ``signature`` is what
+# makes it UNFORGEABLE WITHOUT THE KEY.
+#
+# TC-1 deferral (HONEST): TC-1 ships the schema, issuance, the incremental
+# no-op, and the verifier. The ``signature`` is left explicitly UNSIGNED
+# (empty ``algorithm`` + empty ``value``) — TC-5 wires the privileged daemon's
+# real ed25519 signing and key registration. We NEVER fabricate a signature.
+# The verifier below is a COVERAGE verifier (does the cert set cover a
+# (commit, lock, platform, targets) tuple); the TC-5 SIGNATURE verifier is a
+# separate, additive check.
+# ============================================================================
+
+const
+  testCertificateSchemaV1* = "reprobuild.test-certificate.v1"
+    ## The ``schema`` value every v1 certificate carries.
+
+type
+  TestCertificateResult* = enum
+    ## The ``result`` field. TC-1 issues a certificate ONLY for ``tcrPassed``;
+    ## a run with any failing target yields NO certificate (the attestation is
+    ## withheld). ``tcrFailed`` exists so a reader can round-trip a record that
+    ## was authored out-of-band, but the issuer never emits one.
+    tcrPassed = "passed"
+    tcrFailed = "failed"
+
+  TestCertificateSignature* = object
+    ## The detached signature over the canonical ``[certificate]`` body.
+    ## TC-1 leaves BOTH fields empty (clearly unsigned); TC-5 fills them.
+    algorithm*: string   ## e.g. ``ed25519`` once TC-5 lands; "" at TC-1.
+    value*: string       ## base64 detached signature; "" at TC-1.
+
+  TestCertificate* = object
+    ## One ``reprobuild.test-certificate.v1`` record.
+    schema*: string
+    project*: string
+    repo*: string
+    commit*: string      ## exact repo commit the tests ran against (HEAD)
+    lock*: string        ## digest of the dependency lock (clean deps)
+    platform*: string    ## OS/arch the tests executed on, e.g. ``linux/amd64``
+    targets*: seq[string]  ## the targets that PASSED (the covered set)
+    result*: TestCertificateResult
+    issuedAt*: string    ## RFC3339 UTC timestamp
+    issuer*: string      ## who observed/issued, e.g. ``repro-test@<host>``
+    keyId*: string       ## which registered key signed (empty until TC-5)
+    signature*: TestCertificateSignature
+
+proc isSigned*(cert: TestCertificate): bool =
+  ## A certificate is SIGNED only when both the algorithm and the signature
+  ## value are present. TC-1 always returns ``false`` (the deliberate,
+  ## documented deferral to TC-5).
+  cert.signature.algorithm.len > 0 and cert.signature.value.len > 0
+
+proc currentPlatformTag*(): string =
+  ## The ``platform`` field for a certificate issued on this host: the
+  ## ``<os>/<cpu>`` pair from the same ``hostOS`` / ``hostCPU`` the
+  ## ``repro capabilities`` host block reports.
+  hostOS & "/" & hostCPU
+
+proc certificateLockDigest*(lockFilePath: string): string =
+  ## RA-1/RA-7 reuse: the ``lock`` binding is a content digest of the
+  ## workspace lock file the gate resolved as current. We hash the lock
+  ## file's bytes with the same ``blake3DomainDigest`` the rest of the CLI
+  ## uses for metadata envelopes and prefix the algorithm so the digest is
+  ## self-describing (``blake3:<hex>``). An empty / missing path yields the
+  ## empty string so the caller can decline to issue rather than bind to a
+  ## non-existent lock.
+  if lockFilePath.len == 0 or not fileExists(lockFilePath):
+    return ""
+  let body =
+    try: readFile(lockFilePath)
+    except CatchableError: return ""
+  "blake3:" & digestHex(blake3DomainDigest(body.bytesOf(), hdMetadataEnvelope))
+
+proc tomlEscapeCert(value: string): string =
+  ## Local copy of the basic-string escaper (mirrors lock_writer's
+  ## ``tomlEscape``) so the certificate writer is self-contained.
+  result = newStringOfCap(value.len + 2)
+  for ch in value:
+    case ch
+    of '\\': result.add("\\\\")
+    of '"': result.add("\\\"")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    of '\b': result.add("\\b")
+    of '\f': result.add("\\f")
+    else: result.add(ch)
+
+proc serializeCertificateToToml*(cert: TestCertificate): string =
+  ## Render a ``TestCertificate`` to the canonical TOML form documented in
+  ## Test-Certificates.md. Key order is fixed and deterministic so two issues
+  ## of the same observed state produce byte-identical bodies (modulo the
+  ## ``issued_at`` timestamp). ``targets`` is a flat string ARRAY (not a
+  ## nested array-of-tables) — the nested-table TOML constraint other
+  ## milestones hit does not apply to a scalar list. The ``[certificate]``
+  ## body is what TC-5 will sign; the ``[certificate.signature]`` block sits
+  ## AFTER it and is excluded from the canonical signing payload.
+  result = newStringOfCap(512)
+  result.add("schema = \"")
+  result.add(tomlEscapeCert(testCertificateSchemaV1))
+  result.add("\"\n\n")
+  result.add("[certificate]\n")
+  template kv(key, value: string) =
+    result.add(key & " = \"" & tomlEscapeCert(value) & "\"\n")
+  kv("project", cert.project)
+  kv("repo", cert.repo)
+  kv("commit", cert.commit)
+  kv("lock", cert.lock)
+  kv("platform", cert.platform)
+  # targets as an inline string array, stable order (as observed/run).
+  result.add("targets = [")
+  for i, t in cert.targets:
+    if i > 0: result.add(", ")
+    result.add("\"" & tomlEscapeCert(t) & "\"")
+  result.add("]\n")
+  kv("result", $cert.result)
+  kv("issued_at", cert.issuedAt)
+  kv("issuer", cert.issuer)
+  if cert.keyId.len > 0:
+    kv("key_id", cert.keyId)
+  # Signature block. TC-1 emits it with empty fields so the on-disk shape is
+  # stable for TC-5 (which fills algorithm + value) and so a reader can tell
+  # "unsigned" (present, empty) from "absent". This is the explicit deferral.
+  result.add("\n[certificate.signature]\n")
+  result.add("algorithm = \"" &
+    tomlEscapeCert(cert.signature.algorithm) & "\"\n")
+  result.add("value = \"" & tomlEscapeCert(cert.signature.value) & "\"\n")
+
+proc canonicalCertificatePayload*(cert: TestCertificate): string =
+  ## The canonical serialization of the ``[certificate]`` body (EXCLUDING the
+  ## signature block) — the exact bytes TC-5's daemon will sign and the
+  ## verifier will check the signature against. Re-uses the writer and slices
+  ## off the trailing signature block so the two never drift.
+  let full = serializeCertificateToToml(cert)
+  let marker = "\n[certificate.signature]\n"
+  let idx = full.find(marker)
+  if idx >= 0: full[0 ..< idx] else: full
+
+type
+  TestCertificateParseError* = object of CatchableError
+
+proc unquoteTomlBasic(raw: string): string =
+  ## Reverse of ``tomlEscapeCert`` for the basic-string subset the writer
+  ## emits. ``raw`` is the text BETWEEN the surrounding double quotes.
+  result = newStringOfCap(raw.len)
+  var i = 0
+  while i < raw.len:
+    let ch = raw[i]
+    if ch == '\\' and i + 1 < raw.len:
+      let nxt = raw[i + 1]
+      case nxt
+      of '\\': result.add('\\')
+      of '"': result.add('"')
+      of 'n': result.add('\n')
+      of 'r': result.add('\r')
+      of 't': result.add('\t')
+      of 'b': result.add('\b')
+      of 'f': result.add('\f')
+      else: result.add(nxt)
+      i += 2
+    else:
+      result.add(ch)
+      inc i
+
+proc parseTomlBasicValue(rhs: string): string =
+  ## Extract the unescaped value of a ``key = "..."`` right-hand side.
+  let s = rhs.strip()
+  if s.len >= 2 and s[0] == '"' and s[^1] == '"':
+    unquoteTomlBasic(s[1 ..< s.high])
+  else:
+    s
+
+proc parseTomlStringArray(rhs: string): seq[string] =
+  ## Parse a ``[ "a", "b" ]`` inline string array. Tolerant of whitespace;
+  ## the writer always emits the canonical comma-space form.
+  var s = rhs.strip()
+  if s.len >= 2 and s[0] == '[' and s[^1] == ']':
+    s = s[1 ..< s.high]
+  var i = 0
+  while i < s.len:
+    while i < s.len and s[i] in {' ', '\t', ','}: inc i
+    if i >= s.len: break
+    if s[i] == '"':
+      inc i
+      var buf = ""
+      while i < s.len and s[i] != '"':
+        if s[i] == '\\' and i + 1 < s.len:
+          buf.add(s[i]); buf.add(s[i + 1]); i += 2
+        else:
+          buf.add(s[i]); inc i
+      inc i  # past closing quote
+      result.add(unquoteTomlBasic(buf))
+    else:
+      inc i
+
+proc parseCertificateFromToml*(content: string): TestCertificate =
+  ## Strict-enough reader for a ``reprobuild.test-certificate.v1`` record
+  ## that round-trips ``serializeCertificateToToml``. Raises
+  ## ``TestCertificateParseError`` on a missing/mismatched schema or a
+  ## malformed ``result``. Unknown keys are ignored (forward-compatible).
+  result.signature = TestCertificateSignature()
+  var inSignature = false
+  var sawSchema = false
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if line.startsWith("["):
+      inSignature = (line == "[certificate.signature]")
+      continue
+    let eq = line.find('=')
+    if eq <= 0: continue
+    let key = line[0 ..< eq].strip()
+    let rhs = line[eq + 1 .. ^1]
+    if key == "schema":
+      result.schema = parseTomlBasicValue(rhs)
+      sawSchema = true
+    elif inSignature:
+      case key
+      of "algorithm": result.signature.algorithm = parseTomlBasicValue(rhs)
+      of "value": result.signature.value = parseTomlBasicValue(rhs)
+      else: discard
+    else:
+      case key
+      of "project": result.project = parseTomlBasicValue(rhs)
+      of "repo": result.repo = parseTomlBasicValue(rhs)
+      of "commit": result.commit = parseTomlBasicValue(rhs)
+      of "lock": result.lock = parseTomlBasicValue(rhs)
+      of "platform": result.platform = parseTomlBasicValue(rhs)
+      of "targets": result.targets = parseTomlStringArray(rhs)
+      of "result":
+        let r = parseTomlBasicValue(rhs)
+        case r
+        of "passed": result.result = tcrPassed
+        of "failed": result.result = tcrFailed
+        else:
+          raise newException(TestCertificateParseError,
+            "invalid certificate result: '" & r & "'")
+      of "issued_at": result.issuedAt = parseTomlBasicValue(rhs)
+      of "issuer": result.issuer = parseTomlBasicValue(rhs)
+      of "key_id": result.keyId = parseTomlBasicValue(rhs)
+      else: discard
+  if not sawSchema or result.schema != testCertificateSchemaV1:
+    raise newException(TestCertificateParseError,
+      "not a " & testCertificateSchemaV1 & " certificate (schema='" &
+      result.schema & "')")
+
+proc writeCertificateFile*(cert: TestCertificate; path: string) =
+  ## Serialize ``cert`` and write it to ``path`` (creating parent dirs).
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  writeFile(path, serializeCertificateToToml(cert))
+
+proc readCertificateFile*(path: string): TestCertificate =
+  ## Read + parse a certificate file. Raises on IO / parse error.
+  if not fileExists(path):
+    raise newException(TestCertificateParseError,
+      "certificate file not found: " & path)
+  parseCertificateFromToml(readFile(path))
+
+# ---- verifier --------------------------------------------------------------
+
+type
+  CoverageRequirement* = object
+    ## The tuple a verifier checks a certificate SET against.
+    commit*: string
+    lock*: string
+    platform*: string
+    requiredTargets*: seq[string]
+
+  CoverageResult* = object
+    ## Outcome of ``verifyCoverage``. ``covered`` is the verdict; the other
+    ## fields explain a miss so the gate (TC-3) / CI (TC-4) can render an
+    ## actionable diagnostic.
+    covered*: bool
+    coveredTargets*: seq[string]   ## union of targets across matching certs
+    missingTargets*: seq[string]   ## required ∖ covered
+    matchingCerts*: int            ## certs matching commit/lock/platform
+
+proc certificateMatches*(cert: TestCertificate;
+                         req: CoverageRequirement): bool =
+  ## A certificate is RELEVANT to a requirement iff it is a passed cert whose
+  ## ``commit`` / ``lock`` / ``platform`` all match. A mismatch on ANY binding
+  ## field means the cert attests a DIFFERENT state and is ignored (the spec:
+  ## "Verifiers ignore … notes whose ``commit`` field doesn't match").
+  cert.result == tcrPassed and
+    cert.commit == req.commit and
+    cert.lock == req.lock and
+    cert.platform == req.platform
+
+proc verifyCoverage*(certs: openArray[TestCertificate];
+                     req: CoverageRequirement): CoverageResult =
+  ## Does the certificate SET cover ``(commit, lock, platform,
+  ## required-targets)``? The covered set is the UNION of ``targets`` across
+  ## every matching certificate (partial coverage across several certs is
+  ## allowed, per Test-Certificates.md §"Gate integration"); coverage holds
+  ## iff that union ⊇ ``requiredTargets``. Certs whose commit/lock/platform
+  ## mismatch are ignored entirely.
+  var union = initHashSet[string]()
+  for cert in certs:
+    if certificateMatches(cert, req):
+      inc result.matchingCerts
+      for t in cert.targets:
+        union.incl(t)
+  for t in union: result.coveredTargets.add(t)
+  sort(result.coveredTargets)
+  for t in req.requiredTargets:
+    if t notin union:
+      result.missingTargets.add(t)
+  result.covered = result.missingTargets.len == 0
+
+# ---- TC-1 issuance: precondition evaluation + no-op decision ----------------
+
+type
+  IssuancePreconditionKind* = enum
+    ## Why a certificate can / cannot be issued for the current state.
+    ipOk                ## clean closure + at locked revisions → issuable.
+    ipDirty             ## a repo in the closure has a dirty tree.
+    ipUnpublished       ## a repo in the closure has unpublished HEAD.
+    ipOffLock           ## HEAD differs from the locked revision (lock stale).
+    ipNoWorkspace       ## not a resolvable workspace → cannot bind to a lock.
+    ipGateError         ## the gate raised (IO / resolve / VCS error).
+
+  IssuancePreconditions* = object
+    ## Result of evaluating the issuance preconditions by REUSING the RA-21
+    ## pre-push gate (cleanliness / develop-closure / lock-currency). On
+    ## ``ipOk`` the binding fields (``commit`` of the current repo's HEAD,
+    ## ``lockDigest`` from the resolved lock file, ``platform``) are filled.
+    ## On a non-OK kind, ``offender`` / ``remedy`` carry the RA-28-style
+    ## ambient message (Interactive-UX Principle 2).
+    kind*: IssuancePreconditionKind
+    commit*: string
+    lockDigest*: string
+    lockFilePath*: string
+    platform*: string
+    project*: string
+    repo*: string
+    offender*: string
+    remedy*: string
+
+proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
+    toolProvisioning: ToolProvisioningMode): IssuancePreconditions =
+  ## REUSE the RA-21 gate: a certificate is issuable EXACTLY when the pre-push
+  ## gate would pass (closure clean + published + at the locked revisions).
+  ## We run the gate logic (NOT the publish side-effect) and translate its
+  ## first failure into an issuance-precondition reason + RA-28-style remedy.
+  result.platform = currentPlatformTag()
+  var parsed = CheckArgs(
+    mode: cmPrePush,
+    workspaceRoot: workspaceRoot,
+    currentRepo: currentRepo,
+    pushedRefsPath: "",
+    toolProvisioning:
+      if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
+  if not isInitializedWorkspace(parsed.workspaceRoot):
+    result.kind = ipNoWorkspace
+    result.offender = parsed.workspaceRoot
+    result.remedy = "run inside an initialized reprobuild workspace " &
+      "(no resolved manifest checkout at " & parsed.workspaceRoot & ")"
+    return
+  var report: CheckReport
+  try:
+    report = executeCheckPrePush(parsed)
+  except CatchableError as err:
+    result.kind = ipGateError
+    result.offender = ""
+    result.remedy = "investigate the workspace gate error and retry: " & err.msg
+    return
+  result.project = report.project
+  if report.exitCode != 0 and report.failures.len > 0:
+    let f = report.failures[0]
+    result.offender = f.repo
+    result.remedy = f.remediation
+    case f.property
+    of "dirty", "develop_override_dirty":
+      result.kind = ipDirty
+    of "unpublished", "develop_override_unpublished",
+       "lock-publish-failure":
+      result.kind = ipUnpublished
+    of "lock-stale", "lock-failure":
+      result.kind = ipOffLock
+    else:
+      # A visibility / develop-missing failure is still a "not in a
+      # publishable state" condition; treat it as off-lock so no cert is
+      # issued and the gate's own remedy is surfaced.
+      result.kind = ipOffLock
+    return
+  # Gate passed → issuable. Resolve the binding fields.
+  result.lockFilePath = report.lockUpdate.lockFilePath
+  result.lockDigest = certificateLockDigest(result.lockFilePath)
+  if result.lockDigest.len == 0:
+    # The gate passed but no lock file was resolvable (a workspace with no
+    # lock subtree). Without a lock there is nothing reproducible to bind
+    # to, so decline rather than emit an unbindable certificate.
+    result.kind = ipOffLock
+    result.offender = report.project
+    result.remedy = "create a workspace lock first — run 'repro workspace lock'"
+    return
+  # The current repo's HEAD is the commit the certificate binds to.
+  let identity = ensureGitToolResolvable(
+    parsed.toolProvisioning, getEnv("PATH"))
+  installGitVcsExecutor()
+  let repoForHead =
+    if currentRepo.len > 0: currentRepo else: parsed.workspaceRoot
+  let headRes = queryGitState(headShaQuery(repoForHead), identity)
+  if headRes.status == gqsOk:
+    result.commit = headRes.headSha
+  if result.commit.len == 0:
+    result.kind = ipOffLock
+    result.offender = repoForHead
+    result.remedy = "commit your work so the certificate binds to a HEAD commit"
+    return
+  result.repo =
+    if report.lockUpdate.triggerRepo.len > 0: report.lockUpdate.triggerRepo
+    else: result.project
+  result.kind = ipOk
+
+proc certificateNoOpDecision*(existingCertPath: string;
+    pre: IssuancePreconditions; requestedTargets: seq[string];
+    traceDir, projectRoot, cachePath: string): bool =
+  ## TC-1 incremental no-op: a re-certify with NO relevant change is a NO-OP —
+  ## the existing valid certificate stands and the tests are NOT re-run.
+  ##
+  ## The decision is driven by TWO honest signals (both must say "unchanged"):
+  ##
+  ##   1. A CONTENT/COMMIT/LOCK signal: an existing certificate at the output
+  ##      path already covers (commit, lock, platform) and the requested
+  ##      targets. Because the issuance preconditions require a CLEAN tree at
+  ##      HEAD, the (commit, lock) pair is a precise fingerprint of the tested
+  ##      state — if it is unchanged AND a covering cert exists, nothing
+  ##      relevant changed.
+  ##   2. The canonical ct-incremental change signal, WHEN a trace dir is
+  ##      supplied: ``watchTestEdgeDecision`` (the codetracer-backed adapter)
+  ##      returns ``weaSkip`` only when no executed function changed. This is
+  ##      the spec's "re-run only tests whose executed functions changed".
+  ##      When no trace dir is supplied (the hermetic-without-the-ct-stack
+  ##      case) the decision rests on signal (1) alone — see the milestone
+  ##      note on how the test drives this.
+  if not fileExists(existingCertPath):
+    return false
+  var existing: TestCertificate
+  try:
+    existing = readCertificateFile(existingCertPath)
+  except CatchableError:
+    return false
+  let req = CoverageRequirement(
+    commit: pre.commit, lock: pre.lockDigest, platform: pre.platform,
+    requiredTargets: requestedTargets)
+  let cov = verifyCoverage(@[existing], req)
+  if not cov.covered:
+    return false
+  # Signal (1) says unchanged. If a trace dir is wired, also require the
+  # canonical adapter to agree (no executed function changed). The adapter is
+  # consulted per requested target; ANY rerun verdict means a relevant change.
+  if traceDir.len > 0:
+    for target in requestedTargets:
+      let decision = watchTestEdgeDecision(target, traceDir, projectRoot,
+        cachePath)
+      if decision.action != weaSkip:
+        return false
+  true
+
+proc issueCertificate*(pre: IssuancePreconditions;
+    passedTargets: seq[string]; issuer: string): TestCertificate =
+  ## Build a ``reprobuild.test-certificate.v1`` for an issuable state. The
+  ## ``result`` is always ``tcrPassed`` (callers only issue on a real pass);
+  ## the SIGNATURE is left explicitly EMPTY — TC-5 wires real daemon signing.
+  result = TestCertificate(
+    schema: testCertificateSchemaV1,
+    project: pre.project,
+    repo: pre.repo,
+    commit: pre.commit,
+    lock: pre.lockDigest,
+    platform: pre.platform,
+    targets: passedTargets,
+    result: tcrPassed,
+    issuedAt: getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+    issuer: issuer,
+    keyId: "",
+    signature: TestCertificateSignature(algorithm: "", value: ""))
+
+proc defaultCertificatePath*(workspaceRoot, commit, platform: string): string =
+  ## Default ``--certificate-out`` location: one file per (commit, platform)
+  ## under the workspace's ``.repro`` tree so re-certify finds the prior cert.
+  let safePlatform = platform.replace('/', '-')
+  let safeCommit = if commit.len >= 12: commit[0 ..< 12] else: commit
+  workspaceRoot / ".repro" / "workspace" / "certificates" /
+    (safeCommit & "-" & safePlatform & ".toml")
+
+type
+  TestRunOutcome* = object
+    ## TC-1: the REAL result of a test run, captured so certificate issuance
+    ## reflects what actually happened (never a hardcoded pass). ``ran`` is
+    ## true once a real run occurred (vs. a plan-only / discovery-only path);
+    ## ``allPassed`` is true only when at least one target ran and none
+    ## failed; ``passedTargets`` is exactly the targets that PASSED (the
+    ## certificate's covered set).
+    ran*: bool
+    allPassed*: bool
+    passedTargets*: seq[string]
+    failedTargets*: seq[string]
+
 proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
   result.strategy = "joint-duration"
   result.binDir = "build/test-bin"
+  # TC-1: issuance is on by default (a ``repro test`` run issues a certificate
+  # in a clean state). ``--no-certify`` opts out.
+  result.certify = true
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -27657,6 +28193,21 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       # the flag from ``repro build``.
       let v = valueFromFlag(args, i, "--daemon")
       result.daemonFlag = "--daemon=" & v
+    elif arg == "--certify":
+      result.certify = true
+      result.certifyExplicit = true
+    elif arg == "--no-certify":
+      result.certify = false
+      result.noCertify = true
+    elif arg == "--certificate-out" or arg.startsWith("--certificate-out="):
+      result.certificateOut = valueFromFlag(args, i, "--certificate-out")
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      result.certWorkspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
+      result.certCurrentRepo = valueFromFlag(args, i, "--current-repo")
+    elif arg == "--ct-incremental-trace-dir" or
+        arg.startsWith("--ct-incremental-trace-dir="):
+      result.certTraceDir = valueFromFlag(args, i, "--ct-incremental-trace-dir")
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported repro test flag: " & arg)
     else:
@@ -28125,11 +28676,14 @@ proc summarizeTestResults(summary: JsonNode): tuple[passed, failed: int] =
     else: 0
 
 proc runFixtureModeShard(opts: ReproTestShardOpts;
-                         peer: PeerCacheSpecResult): int =
+                         peer: PeerCacheSpecResult;
+                         outcome: var TestRunOutcome): int =
   ## The M2 fixture path, preserved verbatim for the existing M2 e2e
   ## tests.  Behaviour is unchanged from the original
   ## ``runReproTestCommand`` body — the workspace-mode dispatch above
-  ## simply forwards here when ``--fixture-from`` is supplied.
+  ## simply forwards here when ``--fixture-from`` is supplied. TC-1 adds
+  ## the ``outcome`` out-param so certificate issuance can reflect the REAL
+  ## per-target pass/fail (never a hardcoded pass).
   var fixture: ReproTestFixture
   try:
     fixture = loadReproTestFixture(opts.fixturePath)
@@ -28205,10 +28759,15 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
       node["exit_code"] = %res.code
       node["output"] = %res.output
       testResults.add(node)
+      # TC-1: record the REAL per-target verdict. The covered set is exactly
+      # the selectors whose run command exited 0.
+      let targetName = if e.selector.len > 0: e.selector else: e.testName
       if res.code == 0:
         inc passed
+        outcome.passedTargets.add(targetName)
       else:
         inc failed
+        outcome.failedTargets.add(targetName)
   let testElapsedNs = int64((epochTime() - testStart) * 1_000_000_000.0)
 
   let predictedNs = predictedShardCostNs(plan, opts.shardIndex)
@@ -28255,6 +28814,12 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
       "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
         $opts.shardCount & ".json")
   writeShardReport(reportPath, report)
+
+  # TC-1: finalise the run outcome. A run "ran" once we got past the build
+  # phase to the per-edge loop; ``allPassed`` requires at least one edge and
+  # no failure (and no build failure).
+  outcome.ran = not buildFailed
+  outcome.allPassed = (not buildFailed) and failed == 0 and passed > 0
 
   if buildFailed:
     return 1
@@ -28455,6 +29020,32 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
     return 1
   0
 
+proc issuerHostTag(): string =
+  ## A best-effort host label for the certificate's ``issuer`` field. Reads
+  ## the conventional env vars (set on every platform's shells / CI) and
+  ## falls back to ``unknown-host``. We avoid ``std/net.getHostname`` so this
+  ## module does not pull in the networking stack for a cosmetic label.
+  for key in ["HOSTNAME", "COMPUTERNAME", "HOST"]:
+    let v = getEnv(key)
+    if v.len > 0:
+      return v
+  "unknown-host"
+
+proc fixtureSelectors(opts: ReproTestShardOpts): seq[string] =
+  ## TC-1: the set of test-target selectors a fixture run will execute — the
+  ## covered set a re-certify's existing certificate must already include for
+  ## the no-op decision. Reads the fixture file; on any load error returns the
+  ## empty seq (the caller then treats it as "nothing to cover" → never a
+  ## no-op, so the tests run).
+  try:
+    let fixture = loadReproTestFixture(opts.fixturePath)
+    for e in fixture.edges:
+      let name = if e.selector.len > 0: e.selector else: e.testName
+      if name.len > 0:
+        result.add(name)
+  except CatchableError:
+    discard
+
 proc runReproTestCommand*(args: openArray[string];
                           publicCliPath: string): int =
   ## ``repro test`` entry point with the CI-sharding flag surface from
@@ -28549,7 +29140,80 @@ proc runReproTestCommand*(args: openArray[string];
   #       ct-test-runner.  This is the CI-Sharding M2 follow-up that
   #       this milestone fix delivers.
   if opts.fixturePath.len > 0:
-    return runFixtureModeShard(opts, peer)
+    # ---- TC-1 certificate issuance (fixture path) ----------------------
+    # The fixture path runs REAL trivial commands and reports REAL per-target
+    # pass/fail, so a certificate issued here reflects the actual run (never a
+    # hardcoded pass). When ``--certify`` is set (the default) AND a workspace
+    # is resolvable, we:
+    #   1. Evaluate the issuance preconditions by REUSING the RA-21 gate.
+    #   2. If a re-certify with NO relevant change → NO-OP (keep the existing
+    #      cert, do NOT re-run the tests).
+    #   3. Otherwise run the tests; on a real pass in a clean state, issue a
+    #      certificate; on dirty/unpushed/off-lock, run but withhold the cert
+    #      and print the ambient remedy.
+    if not opts.certify:
+      # ``--no-certify``: just run, no issuance.
+      var outcome: TestRunOutcome
+      return runFixtureModeShard(opts, peer, outcome)
+    if opts.certWorkspaceRoot.len == 0:
+      # No workspace target → fall back to a plain run (cannot bind a cert to
+      # a lock without a workspace). Honest: no silent partial issuance.
+      var outcome: TestRunOutcome
+      let code = runFixtureModeShard(opts, peer, outcome)
+      stderr.writeLine("repro test: no certificate — pass --workspace-root " &
+        "(and --current-repo) so the run can be bound to a committed lock")
+      return code
+    let pre = evaluateIssuancePreconditions(
+      opts.certWorkspaceRoot, opts.certCurrentRepo, opts.toolProvisioning)
+    let certOut =
+      if opts.certificateOut.len > 0: opts.certificateOut
+      elif pre.kind == ipOk:
+        defaultCertificatePath(opts.certWorkspaceRoot, pre.commit, pre.platform)
+      else: ""
+    # Requested targets = the selectors the fixture will run (the covered set
+    # a re-certify must already cover for the no-op to hold).
+    let requestedTargets = fixtureSelectors(opts)
+    # No-op check BEFORE running: only meaningful when issuable + a prior cert.
+    if pre.kind == ipOk and certOut.len > 0:
+      let projectRoot =
+        if opts.certCurrentRepo.len > 0: opts.certCurrentRepo
+        else: opts.certWorkspaceRoot
+      let cachePath = defaultCachePath(projectRoot)
+      if certificateNoOpDecision(certOut, pre, requestedTargets,
+          opts.certTraceDir, projectRoot, cachePath):
+        stderr.writeLine("repro test: re-certify is a no-op — the existing " &
+          "certificate at " & certOut & " already covers " &
+          $pre.commit & " on " & pre.platform & " (no relevant change; " &
+          "tests not re-run)")
+        return 0
+    # Run the tests (real result captured in ``outcome``).
+    var outcome: TestRunOutcome
+    let code = runFixtureModeShard(opts, peer, outcome)
+    # Decide issuance from the REAL outcome + preconditions.
+    if pre.kind != ipOk:
+      let label =
+        case pre.kind
+        of ipDirty: "working tree dirty"
+        of ipUnpublished: "dependency has unpushed commits"
+        of ipOffLock: "repo not at the locked revision"
+        of ipNoWorkspace: "not a workspace"
+        of ipGateError: "workspace gate error"
+        of ipOk: ""
+      stderr.writeLine("repro test: no certificate — " & label &
+        (if pre.offender.len > 0: " (" & pre.offender & ")" else: "") &
+        (if pre.remedy.len > 0: " — " & pre.remedy else: ""))
+    elif not outcome.allPassed:
+      stderr.writeLine("repro test: no certificate — the run did not pass " &
+        "(result is not 'passed'); fix the failing targets and re-run")
+    else:
+      let cert = issueCertificate(pre, outcome.passedTargets,
+        "repro-test@" & issuerHostTag())
+      writeCertificateFile(cert, certOut)
+      stderr.writeLine("repro test: issued " & testCertificateSchemaV1 &
+        " covering [" & outcome.passedTargets.join(", ") & "] for " &
+        cert.platform & " at " & cert.commit & " → " & certOut &
+        " (unsigned; signing lands in TC-5)")
+    return code
   return runWorkspaceModeShard(opts, peer, publicCliPath)
 
 # --------------------------------------------------------------------
@@ -30052,6 +30716,22 @@ proc runThinApp*(programName: string): int =
       return runReproTestCommand(testArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro test: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "certify":
+    # TC-1: ``repro certify`` is the explicit "run the full required set to
+    # obtain a certificate" form — an alias for ``repro test --certify``
+    # (Test-Certificates.md §"Issuance"). It forwards every remaining arg to
+    # ``runReproTestCommand`` with ``--certify`` prepended so the same
+    # issuance path runs; ``--no-certify`` would contradict the verb and is
+    # left to the user's responsibility (last-flag-wins in the parser).
+    try:
+      var certifyArgs = @["--certify"]
+      if args.len > 1:
+        for a in args[1 .. ^1]:
+          certifyArgs.add(a)
+      return runReproTestCommand(certifyArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro certify: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "bench":
     # Spec-Implementation M0: ``repro bench`` is a CLI verb alias for
