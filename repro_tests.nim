@@ -6230,6 +6230,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim",
+    binary: "build/test-bin/t_workspace_clone_auto_trusts_per_repo_envrc",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim",
     binary: "build/test-bin/t_sync_reports_partial_manifest_advance_without_rollback",
     defines: @[],

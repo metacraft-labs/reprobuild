@@ -15809,6 +15809,23 @@ type
     visibility*: string
     diagnostic*: string
 
+  TrustEntry* = object
+    ## RA-12 — one ``.envrc`` directory the auto-trust pass acted on.
+    dir*: string                ## absolute directory holding the ``.envrc``
+    status*: string             ## "trusted" | "failed" — the outcome tag
+    diagnostic*: string         ## populated when ``status == "failed"``
+
+  TrustReport* = object
+    ## RA-12 — structured outcome of one ``autoTrustEnvrcFiles`` pass.
+    ##
+    ## ``activatorAvailable`` is false when no activator (direnv) could be
+    ## resolved on PATH / via ``REPRO_DIRENV_BIN`` — in that case the whole
+    ## pass is skipped (``entries`` is empty and ``skipReason`` explains it).
+    activatorAvailable*: bool
+    activatorBin*: string       ## resolved activator path (empty when absent)
+    skipReason*: string         ## non-empty when the pass was skipped
+    entries*: seq[TrustEntry]
+
   WorkspaceInitReport* = object
     ## Structured outcome of one ``repro workspace init`` invocation.
     ## ``project`` carries the ``ResolvedProject.projectName`` (the
@@ -15831,6 +15848,9 @@ type
     skippedLayers*: seq[WorkspaceInitSkippedLayerEntry]
     materialized*: seq[MaterializedFileEntry]
       ## RA-18 — copyfile/linkfile dest paths materialized post-checkout.
+    autoTrust*: TrustReport
+      ## RA-12 — outcome of the post-clone shell-hook (.envrc) auto-trust
+      ## pass over the workspace/host roots and each checked-out repo.
 
   WorkspaceInitOutcome* = object
     ## Internal aggregate the dispatcher consumes to compute the exit
@@ -15889,6 +15909,34 @@ proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     materialized.add(obj)
   result["materialized"] = materialized
+  # RA-12 — the shell-hook (.envrc) auto-trust pass.
+  var autoTrust = newJObject()
+  autoTrust["activatorAvailable"] = %report.autoTrust.activatorAvailable
+  autoTrust["activatorBin"] = %report.autoTrust.activatorBin
+  autoTrust["skipReason"] = %report.autoTrust.skipReason
+  var trusted = newJArray()
+  for entry in report.autoTrust.entries:
+    var obj = newJObject()
+    obj["dir"] = %entry.dir
+    obj["status"] = %entry.status
+    obj["diagnostic"] = %entry.diagnostic
+    trusted.add(obj)
+  autoTrust["entries"] = trusted
+  result["autoTrust"] = autoTrust
+
+proc renderTrustReportLines*(prefix: string; report: TrustReport): seq[string] =
+  ## RA-12 — human-readable lines for the shell-hook auto-trust pass,
+  ## shared by both ``init`` and ``pull``.
+  if not report.activatorAvailable:
+    result.add(prefix & ": shell-hook auto-trust skipped — " &
+      report.skipReason)
+    return
+  for entry in report.entries:
+    if entry.status == "trusted":
+      result.add(prefix & ": trusted shell hook (.envrc) at " & entry.dir)
+    else:
+      result.add(prefix & ": shell-hook trust FAILED at " & entry.dir &
+        " — " & entry.diagnostic & " (continuing)")
 
 proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
   for entry in report.skippedLayers:
@@ -15904,6 +15952,8 @@ proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
     result.add("workspace init: divergence " & entry.path &
       " expected=" & entry.expected &
       " observed=" & entry.observed)
+  for line in renderTrustReportLines("workspace init", report.autoTrust):
+    result.add(line)
 
 type
   WorkspaceInitArgs = object
@@ -16618,6 +16668,86 @@ proc materializeRepoFiles(workspaceRoot: string;
   for entry in repo.linkfile:
     result.add(apply("linkfile", entry))
 
+# ---- RA-12: post-clone / post-pull shell-hook auto-trust ------------------
+#
+# After ``init`` / ``pull`` materialise repos, freshly cloned shell-hook
+# files (``.envrc``) are NOT yet trusted by the activator (direnv), so the
+# environment would not activate until the user manually ran ``direnv allow``
+# in each directory. RA-12 runs that trust pass automatically over every
+# discovered ``.envrc`` (workspace root, host/org root, and each checked-out
+# repo). The pass is best-effort: if the activator is unavailable it is
+# SKIPPED cleanly, and a single trust failure is reported but never aborts
+# init/pull.
+
+proc resolveDirenvBin*(): string =
+  ## Resolve the direnv activator binary. Honors the ``REPRO_DIRENV_BIN``
+  ## test/override seam FIRST (so a fake direnv can be injected hermetically),
+  ## then falls back to ``direnv`` on PATH. Returns the empty string when no
+  ## activator is available (the graceful-skip signal). An override pointing
+  ## at a NON-EXISTENT path resolves to empty, so the skip path is reachable
+  ## by pointing the seam at a missing file.
+  let override = getEnv("REPRO_DIRENV_BIN")
+  if override.len > 0:
+    if fileExists(override):
+      return override
+    return ""
+  findExe("direnv")
+
+proc autoTrustEnvrcFiles*(roots: openArray[string]): TrustReport =
+  ## Discover ``.envrc`` files across ``roots`` (deduplicated, in order) and
+  ## run the activator's trust command (``direnv allow <dir>``) for each.
+  ##
+  ## Graceful skip: when no activator resolves, the whole pass is skipped —
+  ## ``activatorAvailable`` is false and ``skipReason`` is set; no error is
+  ## raised. Per-file isolation: a trust failure on one ``.envrc`` is recorded
+  ## as a ``failed`` entry and does NOT abort the remaining roots. Trusting an
+  ## already-trusted ``.envrc`` is a no-op for direnv (idempotent).
+  let direnvBin = resolveDirenvBin()
+  if direnvBin.len == 0:
+    result.activatorAvailable = false
+    result.skipReason = "direnv not found on PATH (set REPRO_DIRENV_BIN to " &
+      "override); skipping shell-hook auto-trust"
+    return
+  result.activatorAvailable = true
+  result.activatorBin = direnvBin
+  var seen = initHashSet[string]()
+  for root in roots:
+    if root.len == 0:
+      continue
+    let envrcPath = root / ".envrc"
+    if not fileExists(envrcPath):
+      continue
+    let dir = absolutePath(root)
+    if seen.containsOrIncl(dir):
+      continue
+    var entry = TrustEntry(dir: dir)
+    try:
+      let res = execCmdEx(
+        quoteShell(direnvBin) & " allow " & quoteShell(dir))
+      if res.exitCode == 0:
+        entry.status = "trusted"
+      else:
+        entry.status = "failed"
+        entry.diagnostic = res.output.strip()
+    except CatchableError as err:
+      entry.status = "failed"
+      entry.diagnostic = err.msg
+    result.entries.add(entry)
+
+proc discoverEnvrcRoots(workspaceRoot: string;
+                        repos: seq[ResolvedRepo]): seq[string] =
+  ## Enumerate the candidate roots for the auto-trust pass, in a stable
+  ## order: the workspace root (which, after a cold-start ``init <url>``, is
+  ## ALSO the org/host root checkout), then every checked-out repo at its
+  ## declared ``path`` whose working tree exists on disk. The trust pass
+  ## itself filters to the roots that actually contain a ``.envrc`` and
+  ## deduplicates, so listing a root without one is harmless.
+  result.add(workspaceRoot)
+  for repo in repos:
+    let abs = workspaceRoot / repo.path
+    if dirExists(abs):
+      result.add(abs)
+
 proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## End-to-end driver. Resolves the named project / variant, classifies
   ## each declared repo against the on-disk workspace, schedules a
@@ -16763,6 +16893,19 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       if m.status == "failed":
         stderr.writeLine("workspace init: " & m.kind & " '" & m.dest &
           "' <- '" & repo.path & "/" & m.src & "' failed: " & m.diagnostic)
+
+  # RA-12: auto-trust freshly cloned shell-hook (.envrc) files. The
+  # workspace root doubles as the host/org root after a cold-start
+  # ``init <url>`` (which clones the org root repo and runs this in-workspace
+  # init rooted there), so discovering over the workspace root + each
+  # checked-out repo covers all three documented roots. The pass is
+  # best-effort: a missing activator skips cleanly and a single trust
+  # failure is reported without aborting init.
+  report.autoTrust = autoTrustEnvrcFiles(
+    discoverEnvrcRoots(args.workspaceRoot, resolved.repos))
+  for line in renderTrustReportLines("workspace init", report.autoTrust):
+    if "FAILED" in line or "skipped" in line:
+      stderr.writeLine(line)
 
   result.report = report
   result.cloneFailures = cloneFailures
@@ -18641,6 +18784,8 @@ type
     manifestLayers*: seq[WorkspaceSyncManifestLayerEntry]
     manifestStopped*: bool
     repos*: seq[WorkspacePullRepoEntry]
+    autoTrust*: TrustReport
+      ## RA-12 — outcome of the post-pull shell-hook (.envrc) auto-trust pass.
     exitCode*: int
 
   WorkspacePullOutcome* = object
@@ -18681,6 +18826,20 @@ proc toJsonNode*(report: WorkspacePullReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     repos.add(obj)
   result["repos"] = repos
+  # RA-12 — the shell-hook (.envrc) auto-trust pass.
+  var autoTrust = newJObject()
+  autoTrust["activatorAvailable"] = %report.autoTrust.activatorAvailable
+  autoTrust["activatorBin"] = %report.autoTrust.activatorBin
+  autoTrust["skipReason"] = %report.autoTrust.skipReason
+  var trusted = newJArray()
+  for entry in report.autoTrust.entries:
+    var obj = newJObject()
+    obj["dir"] = %entry.dir
+    obj["status"] = %entry.status
+    obj["diagnostic"] = %entry.diagnostic
+    trusted.add(obj)
+  autoTrust["entries"] = trusted
+  result["autoTrust"] = autoTrust
   result["exitCode"] = %report.exitCode
 
 proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
@@ -18700,6 +18859,8 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
     result.add("workspace pull: STOPPED after a step failed — the manifest " &
       "repo was advanced and is NOT rolled back; rerun `repro workspace " &
       "pull` to resume from the partial state")
+  for line in renderTrustReportLines("workspace pull", report.autoTrust):
+    result.add(line)
 
 type
   WorkspacePullArgs = object
@@ -18963,6 +19124,16 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
       except WorkspaceManifestParseError as e:
         stderr.writeLine(
           "workspace pull: could not record active branch: " & e.msg)
+
+  # RA-12: auto-trust freshly cloned shell-hook (.envrc) files across the
+  # workspace/host root + each checked-out repo. Runs regardless of the
+  # per-repo exit code so already-materialised hooks are trusted even when a
+  # later repo failed; best-effort (graceful skip + per-file isolation).
+  report.autoTrust = autoTrustEnvrcFiles(
+    discoverEnvrcRoots(args.workspaceRoot, resolved.repos))
+  for line in renderTrustReportLines("workspace pull", report.autoTrust):
+    if "FAILED" in line or "skipped" in line:
+      stderr.writeLine(line)
 
   result.report = report
 
@@ -23045,7 +23216,7 @@ proc detectDirenvEnvrcState(workspaceRoot: string):
   result.trusted = false
   if not result.hasEnvrc:
     return
-  let direnvBin = findExe("direnv")
+  let direnvBin = resolveDirenvBin()
   if direnvBin.len == 0:
     return
   let res = execCmdEx(quoteShell(direnvBin) & " status",
@@ -23135,7 +23306,7 @@ proc gatherHealthChecks(parsed: HealthArgs):
 
   # 4. direnv — installed, and the workspace .envrc is trusted.
   block direnvCheck:
-    let direnvBin = findExe("direnv")
+    let direnvBin = resolveDirenvBin()
     let envrc = detectDirenvEnvrcState(parsed.workspaceRoot)
     if direnvBin.len == 0:
       checks.add(HealthCheck(
@@ -23351,7 +23522,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         " (no safe auto-fix; remedy: " & c.remedy & ")")
     of hfDirenvAllow:
       result.add("fix: running `direnv allow " & parsed.workspaceRoot & "`")
-      let direnvBin = findExe("direnv")
+      let direnvBin = resolveDirenvBin()
       if direnvBin.len == 0:
         result.add("fix: direnv not on PATH; cannot allow")
       else:
