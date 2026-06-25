@@ -474,13 +474,20 @@ fi
 # Debian-installed libc.so.6 with a foreign nix-store glibc (which
 # would break every Debian binary in the chain).
 _repro_nix_dirs=""
+# M9.R.37.2 — use a subshell for the glob-existence test so the
+# script's positional parameters ($@) are not clobbered.  This GUI
+# launcher doesn't pass $@ to the installer (it execs sway, then sway
+# execs the installer via SWAY_INIT), but the hygiene fix matches the
+# sister-launcher fix in the ``.sh`` variant and prevents future
+# regressions.
 for d in /nix/store/*/lib; do
   [ -d "$d" ] || continue
   case "$d" in
     /nix/store/*-glibc-*/lib) continue ;;
   esac
-  set -- "$d"/*.so*
-  [ -e "$1" ] || continue
+  if ! ( set -- "$d"/*.so*; [ -e "$1" ] ); then
+    continue
+  fi
   if [ -z "$_repro_nix_dirs" ]; then
     _repro_nix_dirs="$d"
   else
@@ -603,6 +610,18 @@ _repro_nix_libs=""
 _repro_qt_plugins=""
 _repro_qml_imports=""
 _repro_qpa_plugins=""
+# M9.R.37.2 — DO NOT use ``set -- "$d"/*.so*`` to test for the glob
+# existence: ``set --`` overwrites the script's positional parameters
+# ($@), which is what we ultimately pass to ``reproos-installer``.
+# The previous M9.R.36.1 launcher (this script's prior shape) clobbered
+# $@ on every loop iteration and ended up exec-ing the installer with
+# the LAST nix-store dir's ``*.so*`` glob expansion as its argv —
+# silently dropping ``--automated /etc/reproos/auto-config.toml``,
+# so the installer fell into GUI mode + QML engine init + endless
+# dlopen() churn through LD_LIBRARY_PATH (the M9.R.36 "silent wedge
+# after Qt init").  Use a subshell's exit code instead: if the first
+# entry of the expansion exists, the subshell succeeds; otherwise it
+# fails.  $@ is untouched.
 for d in /nix/store/*/lib; do
   [ -d "$d" ] || continue
   # Skip glibc dirs — Debian system glibc must remain canonical so
@@ -610,8 +629,7 @@ for d in /nix/store/*/lib; do
   case "$d" in
     /nix/store/*-glibc-*/lib) continue ;;
   esac
-  set -- "$d"/*.so*
-  if [ -e "$1" ]; then
+  if ( set -- "$d"/*.so*; [ -e "$1" ] ); then
     if [ -z "$_repro_nix_libs" ]; then
       _repro_nix_libs="$d"
     else
