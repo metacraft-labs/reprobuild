@@ -564,6 +564,66 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 EOF
 
+# M9.R.39.2 — installer auto-run unit, gated on the
+# ``repro.installer.autorun=1`` kernel cmdline parameter.  Without this
+# unit the live-ISO investigation chain depends on the FIFO + login +
+# manual ``echo /usr/bin/reproos-installer-launcher.sh ...`` dance, which
+# M9.R.39.1 found to wedge in QEMU -nographic mode (serial-getty's
+# autologin chain hangs in a terminal-size probe loop on certain hosts).
+# The unit runs the launcher BEFORE multi-user.target so it doesn't
+# depend on getty / login / bash startup at all.  It boots straight from
+# systemd, no FIFO required.
+#
+# Activation: the GRUB cmdline appends ``repro.installer.autorun=1`` and
+# the unit's ``ConditionKernelCommandLine=`` predicate gates the run.
+# The companion ``repro.installer.diag=1`` flag flips DIAG mode on so
+# the M9.R.39.1 LD_DEBUG=libs + strace + /dev/vdb persistence fires.
+#
+# The unit's ExecStart includes the FULL pre-installer environment the
+# launcher relied on:
+#   * QT_QPA_PLATFORM=offscreen (the launcher checks this; without it
+#     the binary tries to load the wayland QPA plugin and fails before
+#     anything useful happens).
+#   * REPRO_INSTALLER_DIAG=1 (DIAG mode -> LD_DEBUG + strace + persist).
+#
+# After the installer exits (success or SIGABRT), the unit runs
+# ``poweroff`` so QEMU shuts down cleanly + the driver's wait completes
+# without needing a timeout kill that could interrupt the diag-persist
+# dd to /dev/vdb.
+mkdir -p "$STAGE_DIR/etc/systemd/system"
+cat > "$STAGE_DIR/etc/systemd/system/reproos-installer-autorun.service" <<'EOF'
+[Unit]
+Description=ReproOS Installer auto-run (M9.R.39.2 diagnostic boot path)
+ConditionKernelCommandLine=repro.installer.autorun=1
+DefaultDependencies=no
+After=local-fs.target sysinit.target
+Before=multi-user.target getty.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+Environment=QT_QPA_PLATFORM=offscreen
+Environment=REPRO_INSTALLER_DIAG=1
+ExecStart=/bin/sh -c 'echo === REPROOS-INSTALLER-AUTORUN-BEGIN ===; /usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml; echo === REPROOS-INSTALLER-AUTORUN-END RC=$? ==='
+# Always poweroff after the run so the host driver can detect end-of-life
+# via QEMU exit; even on SIGABRT we want a clean shutdown so the
+# /dev/vdb diag dd reaches stable storage.
+ExecStopPost=/bin/sh -c 'sync; sync; /sbin/poweroff -f'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable the unit via a symlink under multi-user.target.wants/ so
+# systemd activates it during boot (when the kernel-cmdline condition
+# is satisfied).  Without the explicit Wants link the unit is staged
+# but never triggered.
+mkdir -p "$STAGE_DIR/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/reproos-installer-autorun.service \
+  "$STAGE_DIR/etc/systemd/system/multi-user.target.wants/reproos-installer-autorun.service"
+
 # M9.R.36.1 — ``reproos-installer`` wrapper that sets a TARGETED
 # LD_LIBRARY_PATH for the installer's QProcess children.  Nim's
 # ``{.dynlib: const-string.}`` pragma calls ``dlopen("libclingo.so")``
