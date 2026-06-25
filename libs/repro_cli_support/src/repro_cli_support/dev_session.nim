@@ -569,14 +569,17 @@ proc computeFreshArtifact(config: DevSessionSupervisorConfig): DevEnvEdgeResult 
     publicCliPath: config.publicCliPath,
     monitorCliPath: config.monitorCliPath,
     # Executable-Consolidation M1: when ``monitorCliPath`` is the ``repro``
-    # image (self-spawn), prepend the ``internal fs-snoop`` selector. The
+    # image (self-spawn), prepend the ``internal io monitor`` selector. The
     # selector is derived here rather than serialized through ``--monitor-cli``
     # because the supervisor subprocess inherits the same ``REPRO_FS_SNOOP``
     # env override decision (empty override ⇒ self-spawn ⇒ selector; a custom
-    # standalone driver ⇒ no selector).
+    # standalone driver ⇒ no selector). The literal mirrors
+    # ``internalFsSnoopArgs`` in ``repro_cli_support.nim``; the previous
+    # ``internal fs-snoop`` spelling fell through to the unknown-subcommand
+    # path after the rename.
     monitorCliArgs:
       if getEnv("REPRO_FS_SNOOP").len > 0: @[]
-      else: @["internal", "fs-snoop"],
+      else: @["internal", "io", "monitor"],
     monitorShimLibPath: config.monitorShimLibPath,
     activity: config.activity,
     lockSliceId: config.lockSliceId,
