@@ -233,6 +233,11 @@ PKG_LIST=(
   #   grub-common            FS:none STAGE:no
   #   grub2-common           FS:none STAGE:no
   grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
+  # M9.R.37.1 — diagnostic tools the installer's REPRO_INSTALLER_DIAG=1
+  # mode invokes to characterise the silent-wedge gap M9.R.36 left
+  # open.  ``strace`` traces every syscall the installer + its children
+  # make; ``gdb`` is for post-wedge core dumps.  Both are FS:none.
+  strace gdb
 )
 
 PKG_DIGEST="$(printf '%s\n' "${PKG_LIST[@]}" | LC_ALL=C sort | sha256sum | awk '{print $1}')"

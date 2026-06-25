@@ -648,6 +648,91 @@ if [ -n "${LD_LIBRARY_PATH:-}" ]; then
 else
   _repro_ldpath="$_repro_nix_libs"
 fi
+
+# M9.R.37.1 — diagnostic mode.  When ``REPRO_INSTALLER_DIAG=1`` is
+# set, the launcher:
+#   (a) wraps the installer process in ``strace -f -ttt -o
+#       /tmp/installer.strace`` so we capture every syscall on every
+#       thread with microsecond timestamps;
+#   (b) forces stderr line-buffering via ``stdbuf -oL -eL`` so the
+#       installer's ``appendLog`` ``QTextStream(stderr)`` writes
+#       reach the pipe BEFORE any wedge stalls subsequent buffer
+#       flushes;
+#   (c) starts a side-thread that snapshots the installer's
+#       ``/proc/<pid>/status``, ``/proc/<pid>/stack``,
+#       ``/proc/<pid>/wchan`` + every TID under
+#       ``/proc/<pid>/task/`` every 5 seconds into
+#       ``/tmp/installer.kernelstacks``; lets us see WHICH thread is
+#       blocked on WHICH kernel function (futex / read / connect /
+#       wait4 / poll / ...) without needing a corefile.
+#
+# This diagnostic apparatus is the M9.R.37 wedge characterisation
+# infrastructure the M9.R.36 closeout flagged as a follow-up.
+_repro_diag="${REPRO_INSTALLER_DIAG:-0}"
+if [ "$_repro_diag" = "1" ]; then
+  # Launch the kernel-stack snapshotter as a background sub-shell.
+  # The installer's PID becomes its parent shell's $$ once exec
+  # replaces this script, so we sample $$ from the child's POV via
+  # a marker file: write our own PID to /tmp/installer.diag.pid AFTER
+  # we exec strace, then the snapshotter reads it.
+  (
+    # Wait for the marker to appear (max 10s) — if the strace failed
+    # to start we just exit cleanly.
+    n=0
+    while [ ! -f /tmp/installer.diag.pid ] && [ $n -lt 20 ]; do
+      sleep 0.5
+      n=$((n+1))
+    done
+    [ -f /tmp/installer.diag.pid ] || exit 0
+    INSTPID="$(cat /tmp/installer.diag.pid 2>/dev/null)"
+    [ -n "$INSTPID" ] || exit 0
+    while kill -0 "$INSTPID" 2>/dev/null; do
+      ts="$(date -u '+%Y-%m-%d %H:%M:%S.%N')"
+      {
+        echo "=== $ts pid=$INSTPID ==="
+        echo "--- /proc/$INSTPID/status ---"
+        head -8 "/proc/$INSTPID/status" 2>/dev/null
+        echo "--- /proc/$INSTPID/wchan ---"
+        cat "/proc/$INSTPID/wchan" 2>/dev/null
+        echo ""
+        echo "--- /proc/$INSTPID/stack ---"
+        cat "/proc/$INSTPID/stack" 2>/dev/null
+        echo "--- per-tid wchan / stack ---"
+        for t in /proc/$INSTPID/task/*; do
+          [ -d "$t" ] || continue
+          tid="${t##*/}"
+          comm="$(cat $t/comm 2>/dev/null)"
+          wch="$(cat $t/wchan 2>/dev/null)"
+          echo "tid=$tid comm=$comm wchan=$wch"
+          head -10 "$t/stack" 2>/dev/null | sed 's/^/  /'
+        done
+        echo ""
+      } >> /tmp/installer.kernelstacks 2>/dev/null
+      sleep 5
+    done
+  ) &
+  rm -f /tmp/installer.strace /tmp/installer.kernelstacks /tmp/installer.diag.pid
+  # ``strace -ff`` writes per-process logs to <prefix>.<pid>; we use
+  # plain ``-f`` so all children land in one file with the leading pid
+  # column.  ``-ttt`` for absolute microsecond timestamps; ``-y`` to
+  # decode fd numbers as paths; ``-s 256`` to capture longer strings.
+  # ``-e signal=!SIGCHLD`` to silence the spammy SIGCHLD entries.
+  # Write our own pid post-exec so the snapshotter can find us.
+  # ``stdbuf -oL -eL`` line-buffers the installer's stdio so
+  # ``appendLog`` writes reach the pipe immediately.
+  echo $$ > /tmp/installer.diag.pid
+  exec env \
+    LD_LIBRARY_PATH="$_repro_ldpath" \
+    QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
+    QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
+    QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
+    QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
+    strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
+      -o /tmp/installer.strace \
+      stdbuf -oL -eL \
+      /usr/bin/reproos-installer "$@"
+fi
+
 exec env \
   LD_LIBRARY_PATH="$_repro_ldpath" \
   QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
