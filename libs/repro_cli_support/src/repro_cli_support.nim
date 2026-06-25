@@ -29378,6 +29378,160 @@ proc defaultCertificatePath*(workspaceRoot, commit, platform: string): string =
   workspaceRoot / ".repro" / "workspace" / "certificates" /
     (safeCommit & "-" & safePlatform & ".toml")
 
+# ============================================================================
+# TC-4 — CI fast-track: skip targets covered by a valid certificate per platform.
+#
+# CI for a platform ``P`` should not re-run a target set that a VALID
+# certificate already attests passed for ``(commit, lock, P, targets)`` — it can
+# SKIP that work and fast-track the PR (Test-Certificates.md §"CI integration —
+# skipping certified work"). The decision is a PURE function of the same
+# primitives the push gate (TC-3/TC-6) uses, so the trust boundary is identical:
+#
+#   * the BINDING — ``commit`` (HEAD), ``lock`` digest, platform ``P`` — is
+#     resolved exactly as issuance/gating resolves it, so a cert only counts for
+#     the state it actually attests (a wrong-commit / wrong-lock / wrong-platform
+#     cert is ignored — TC-1 ``certificateMatches``).
+#   * a cert counts toward a SKIP ONLY when ``verifyCertificateSignature``
+#     (TC-5) returns ``svValid`` — registered key, unrevoked, ed25519 signature
+#     over the canonical payload checks. An unsigned / wrong-key / unregistered /
+#     revoked / tampered cert is DROPPED before coverage, so a FORGED cert can
+#     NEVER cause a skip (the security-critical property).
+#   * coverage is the TC-1 ``verifyCoverage`` UNION over the trusted certs: a
+#     required target is SKIPPED iff it is in the covered set for ``P``; every
+#     other required target is RUN. A platform with no valid cert runs the full
+#     required set (skip set empty) — exactly the "platforms without a valid
+#     certificate run normally" rule.
+#
+# Trust is an EXPLICIT project decision (``ci_trust``): under ``cctSkip`` the
+# covered targets are skipped; under ``cctAdvisory`` (the default) NOTHING is
+# skipped — CI re-runs everything authoritatively and the valid cert is surfaced
+# as an informational note. So a project never fast-tracks by omission; granting
+# the trust is a deliberate ``ci_trust = "skip"``.
+#
+# The GitHub-Actions YAML / external CI wiring is OUT OF SCOPE here (the same
+# honest deferral as the TC-6 Vivafolio/GitHub receiving side): this milestone
+# ships the DECISION + issuance core (``repro ci plan`` + the existing TC-1/TC-5
+# issuance path) and DOCUMENTS how a CI job consumes the machine-readable plan
+# (run the RUN set, skip the SKIP set, issue a cert on green). See
+# DEFER-TC4-CI-YAML below.
+# ============================================================================
+
+type
+  CiTargetDecision* = enum
+    ## Per-target verdict in a CI plan. ``ctdSkip`` — a VALID cert covers this
+    ## target for the platform and the project's ``ci_trust`` is ``skip`` →
+    ## fast-track (do not re-run). ``ctdRun`` — no valid coverage (or
+    ## ``ci_trust = advisory``) → CI runs the target authoritatively.
+    ctdSkip = "skip"
+    ctdRun = "run"
+
+  CiPlatformPlan* = object
+    ## The CI fast-track plan for ONE platform. ``skip`` is the set of required
+    ## targets a valid certificate already covers (empty under ``advisory`` or
+    ## when no valid cert covers them); ``run`` is the complement CI must
+    ## execute. ``advisoryNote`` carries the human-readable trust framing
+    ## (e.g. "valid cert present but ci_trust=advisory — re-running").
+    platform*: string
+    skip*: seq[string]
+    run*: seq[string]
+    matchingCerts*: int          ## valid certs matching commit/lock/platform.
+    untrustedCerts*: seq[string] ## why a present-but-untrusted cert was dropped.
+    advisoryNote*: string
+
+  CiPlan* = object
+    ## The whole-project CI fast-track plan: one ``CiPlatformPlan`` per platform
+    ## requested (or per required platform when ``--platform`` is omitted),
+    ## plus the binding the decision was made against.
+    commit*: string
+    lock*: string
+    requiredTargets*: seq[string]
+    ciTrust*: CertificateCiTrust
+    platforms*: seq[CiPlatformPlan]
+
+proc computeCiPlatformPlan*(certs: openArray[TestCertificate];
+                            commit, lock, platform: string;
+                            requiredTargets: seq[string];
+                            ciTrust: CertificateCiTrust;
+                            keyStore: RegisteredKeyStore): CiPlatformPlan =
+  ## The CORE per-platform decision (pure: no IO). Given the certs attached to
+  ## ``commit`` and the project's required targets, returns which targets CI can
+  ## SKIP (covered by a VALID cert for ``platform``) and which it must RUN.
+  ##
+  ## SECURITY-CRITICAL: a cert counts ONLY when ``verifyCertificateSignature``
+  ## says ``svValid`` (TC-5) AND it matches the binding (TC-1
+  ## ``certificateMatches`` inside ``verifyCoverage``). A forged / unsigned /
+  ## wrong-key / revoked / wrong-commit / wrong-platform cert is dropped, so it
+  ## CANNOT move a target into ``skip``.
+  result.platform = platform
+  # 1. Filter to TRUSTED certs (registered-signed, unrevoked, sig verifies).
+  #    REUSE the exact TC-5 verifier the push gate uses — no second code path.
+  var trusted: seq[TestCertificate]
+  for cert in certs:
+    let verdict = verifyCertificateSignature(cert, keyStore)
+    if verdict == svValid:
+      trusted.add(cert)
+    else:
+      let why =
+        case verdict
+        of svUnsigned: "unsigned"
+        of svUnregisteredKey: "key_id '" & cert.keyId & "' not registered"
+        of svRevokedKey: "key_id '" & cert.keyId & "' revoked"
+        of svBadSignature: "signature does not verify"
+        of svToolingUnavailable: "ssh-keygen unavailable (cannot verify)"
+        of svValid: ""
+      result.untrustedCerts.add(cert.platform & ": " & why)
+  # 2. Coverage for THIS platform — REUSE the TC-1 ``verifyCoverage`` union (it
+  #    also enforces the commit/lock/platform binding via ``certificateMatches``).
+  let req = CoverageRequirement(
+    commit: commit, lock: lock, platform: platform,
+    requiredTargets: requiredTargets)
+  let cov = verifyCoverage(trusted, req)
+  result.matchingCerts = cov.matchingCerts
+  # 3. Apply the EXPLICIT trust decision. Under ``cctSkip`` a covered required
+  #    target is skipped; under ``cctAdvisory`` nothing is skipped (re-run all)
+  #    but a valid covering cert is surfaced as advisory. ``coveredTargets`` is
+  #    already the union restricted to matching certs, so intersecting with the
+  #    required set yields exactly the skippable targets.
+  let covered = cov.coveredTargets.toHashSet()
+  for t in requiredTargets:
+    if ciTrust == cctSkip and t in covered:
+      result.skip.add(t)
+    else:
+      result.run.add(t)
+  if ciTrust == cctAdvisory and result.matchingCerts > 0:
+    # A valid cert exists but the project chose advisory: re-run everything,
+    # surface the cert as a signal (NOT a skip).
+    let coveredReq = requiredTargets.filterIt(it in covered)
+    if coveredReq.len > 0:
+      result.advisoryNote = "valid certificate covers [" &
+        coveredReq.join(", ") & "] for " & platform &
+        " but ci_trust=advisory — re-running authoritatively (cert is a signal)"
+
+proc renderCiPlanJson*(plan: CiPlan): JsonNode =
+  ## Machine-readable plan a CI job consumes: per platform, the ``skip`` and
+  ## ``run`` target sets plus the binding and trust mode. A CI job runs the
+  ## ``run`` set, skips the ``skip`` set, and (on green) issues a cert for the
+  ## platform covering the run set (see DEFER-TC4-CI-YAML).
+  result = newJObject()
+  result["schema"] = %"reprobuild.ci-plan.v1"
+  result["commit"] = %plan.commit
+  result["lock"] = %plan.lock
+  result["ci_trust"] = %($plan.ciTrust)
+  result["required_targets"] = %plan.requiredTargets
+  var platforms = newJArray()
+  for pp in plan.platforms:
+    var o = newJObject()
+    o["platform"] = %pp.platform
+    o["skip"] = %pp.skip
+    o["run"] = %pp.run
+    o["matching_certs"] = %pp.matchingCerts
+    if pp.untrustedCerts.len > 0:
+      o["untrusted_certs"] = %pp.untrustedCerts
+    if pp.advisoryNote.len > 0:
+      o["advisory_note"] = %pp.advisoryNote
+    platforms.add(o)
+  result["platforms"] = platforms
+
 type
   TestRunOutcome* = object
     ## TC-1: the REAL result of a test run, captured so certificate issuance
@@ -30497,6 +30651,150 @@ proc runReproTestCommand*(args: openArray[string];
         cert.keyId & ")")
     return code
   return runWorkspaceModeShard(opts, peer, publicCliPath)
+
+# --------------------------------------------------------------------
+# TC-4 — `repro ci plan` subcommand (the CI fast-track decision)
+# --------------------------------------------------------------------
+#
+# `repro ci plan [--platform=P ...] [--json]` resolves the project's certificate
+# policy + the (commit, lock) binding the certs must match, reads the certs
+# attached to HEAD (TC-2 git-notes carrier), and emits the per-platform SKIP/RUN
+# plan a CI job consumes. The decision REUSES the TC-5 signature verifier + the
+# TC-1 coverage union (via ``computeCiPlatformPlan``) so the CI trust boundary is
+# byte-for-byte the push gate's: only a registered-signed, unrevoked,
+# commit+lock+platform-matching cert can move a target into SKIP, and only when
+# the project explicitly set ``ci_trust = "skip"``.
+#
+# HOW A CI JOB CONSUMES THE PLAN (the external-YAML deferral, DEFER-TC4-CI-YAML):
+# a CI workflow runs `repro ci plan --platform=$RUNNER_PLATFORM --json`, runs the
+# `run` target set (e.g. `repro test --certify <run targets>`), skips the `skip`
+# set, and — on green — the issuance path (already wired into `repro test`)
+# writes + signs a certificate covering the run set for the platform, which the
+# workflow attaches with `repro push` so a green CI run is itself a presentable
+# certificate. The `.github/workflows/*.yml` that glues these calls together is
+# EXTERNAL (CI-runner-specific) and intentionally NOT shipped here — the
+# hermetically-testable decision + issuance core is complete and the YAML is the
+# honest deferral.
+
+type
+  CiPlanArgs = object
+    workspaceRoot: string
+    currentRepo: string
+    platforms: seq[string]   ## explicit ``--platform`` values; empty ⇒ all required.
+    json: bool
+    toolProvisioning: ToolProvisioningMode
+
+proc parseCiPlanArgs(args: openArray[string]): CiPlanArgs =
+  result.toolProvisioning = tpmUnspecified
+  for a in args:
+    if a == "--json": result.json = true
+    elif a.startsWith("--platform="):
+      let v = a["--platform=".len .. ^1].strip()
+      if v.len > 0: result.platforms.add(v)
+    elif a.startsWith("--workspace-root="):
+      result.workspaceRoot = a["--workspace-root=".len .. ^1]
+    elif a.startsWith("--current-repo="):
+      result.currentRepo = a["--current-repo=".len .. ^1]
+    else:
+      raise newException(ValueError, "repro ci plan: unknown argument '" &
+        a & "'")
+  if result.workspaceRoot.len == 0:
+    result.workspaceRoot = getCurrentDir()
+  result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc runCiPlanCommand(args: openArray[string]): int =
+  ## ``repro ci plan`` — the per-platform CI fast-track decision (TC-4).
+  let parsed = parseCiPlanArgs(args)
+  # Resolve the project's certificate policy (required targets/platforms +
+  # ci_trust). REUSE the same manifest resolution the develop/check paths use.
+  var policy: CertificatePolicy
+  try:
+    let resolved = resolveDevelopWorkspaceProject(parsed.workspaceRoot)
+    policy = resolved.certificatePolicy
+  except CatchableError as err:
+    stderr.writeLine("repro ci plan: could not resolve a project policy: " &
+      err.msg)
+    return 1
+  # The platforms to plan for: explicit ``--platform`` values, else every
+  # required platform. (A platform CI asks about that is NOT in the required set
+  # is still planned — it simply has no required coverage obligation, so it runs
+  # the full required target set.)
+  let planPlatforms =
+    if parsed.platforms.len > 0: parsed.platforms
+    else: policy.requiredPlatforms
+  if policy.requiredTargets.len == 0:
+    stderr.writeLine("repro ci plan: project declares no required_targets — " &
+      "nothing to plan (CI runs its own targets normally)")
+  # Resolve the (commit, lock) binding the certs must match. We REUSE the
+  # issuance-precondition evaluator so the binding is IDENTICAL to what issuance
+  # and the push gate bind to (HEAD commit + clean-lock digest). When the state
+  # is not issuable (dirty / off-lock / no lock), there is no trustworthy
+  # binding, so NOTHING is skipped — CI runs everything (fail-safe).
+  let pre = evaluateIssuancePreconditions(
+    parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
+  var commit = pre.commit
+  var lock = pre.lockDigest
+  var bindingNote = ""
+  if pre.kind != ipOk:
+    commit = ""
+    lock = ""
+    bindingNote = "no trustworthy (commit, lock) binding (" &
+      (if pre.remedy.len > 0: pre.remedy else: "state not issuable") &
+      ") — running every target"
+  # Read the certs attached to HEAD (TC-2). With no binding we have nothing to
+  # match against, so the trusted-cert set is empty and every target runs.
+  var attached: seq[TestCertificate]
+  if commit.len > 0:
+    let certRepoPath =
+      if parsed.currentRepo.len > 0: parsed.currentRepo
+      else: parsed.workspaceRoot
+    let identity = ensureGitToolResolvable(
+      if parsed.toolProvisioning == tpmUnspecified: tpmPathOnly
+      else: parsed.toolProvisioning, getEnv("PATH"))
+    attached = readAttachedCertificates(identity.binaryPath, certRepoPath, commit)
+  let keyStore = readRegisteredKeyStore(
+    registeredKeyStorePath(parsed.workspaceRoot))
+  var plan = CiPlan(
+    commit: commit, lock: lock,
+    requiredTargets: policy.requiredTargets,
+    ciTrust: policy.ciTrust)
+  for platform in planPlatforms:
+    var pp =
+      if commit.len == 0 or lock.len == 0:
+        # No binding ⇒ run the full required set on this platform.
+        CiPlatformPlan(platform: platform, run: policy.requiredTargets)
+      else:
+        computeCiPlatformPlan(attached, commit, lock, platform,
+          policy.requiredTargets, policy.ciTrust, keyStore)
+    if bindingNote.len > 0 and pp.advisoryNote.len == 0:
+      pp.advisoryNote = bindingNote
+    plan.platforms.add(pp)
+  if parsed.json:
+    echo renderCiPlanJson(plan).pretty()
+  else:
+    echo "ci plan @ " & (if commit.len >= 12: commit[0 ..< 12]
+                         else: "<no-binding>") &
+      "  ci_trust=" & $policy.ciTrust
+    for pp in plan.platforms:
+      echo "  " & pp.platform & ":  skip=[" & pp.skip.join(", ") &
+        "]  run=[" & pp.run.join(", ") & "]" &
+        (if pp.advisoryNote.len > 0: "  (" & pp.advisoryNote & ")" else: "")
+  return 0
+
+proc runCiCommand(args: openArray[string]): int =
+  ## ``repro ci <subcommand>``. Currently ``plan`` (the TC-4 fast-track
+  ## decision) is the only subcommand; the verb namespace is reserved for
+  ## further CI-facing helpers.
+  if args.len == 0:
+    stderr.writeLine("repro ci: missing subcommand (expected: plan)")
+    return 1
+  case args[0]
+  of "plan":
+    return runCiPlanCommand(if args.len > 1: args[1 .. ^1] else: @[])
+  else:
+    stderr.writeLine("repro ci: unknown subcommand '" & args[0] &
+      "' (expected: plan)")
+    return 1
 
 # --------------------------------------------------------------------
 # Spec-Implementation M2e — `repro lock explain <variant>` subcommand
@@ -32014,6 +32312,22 @@ proc runThinApp*(programName: string): int =
       return runReproTestCommand(certifyArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro certify: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "ci":
+    # TC-4: ``repro ci plan`` — the per-platform CI fast-track decision (skip
+    # targets a valid certificate already covers; run the rest). The decision
+    # reuses the TC-5 signature verifier + TC-1 coverage union, so a forged
+    # cert can never cause a skip; the skip-vs-advisory choice is the project's
+    # explicit ``ci_trust`` policy (Test-Certificates.md §"CI integration").
+    try:
+      let ciArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runCiCommand(ciArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro ci: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "bench":
     # Spec-Implementation M0: ``repro bench`` is a CLI verb alias for

@@ -178,9 +178,19 @@ type
     ## coverage without ever blocking the push; `required` refuses the push
     ## unless the submitted certificates cover the pushed commit for the
     ## required targets on each required platform.
+    ##
+    ## TC-4 — `ci_trust` controls whether CI fast-tracks (skips) targets a
+    ## valid certificate already covers, or treats the certificate as purely
+    ## informational and re-runs everything. `skip` is the high-trust
+    ## fast-track ("trust the certificate, don't re-run"); `advisory` (the
+    ## DEFAULT, the SAFER choice) re-runs everything but surfaces the
+    ## certificate as a signal. Trust is an EXPLICIT project decision: an
+    ## absent / omitted `ci_trust` never silently fast-tracks
+    ## (Test-Certificates.md §"CI integration — skipping certified work").
     gate_mode*: Option[string]
     required_targets*: seq[string]
     required_platforms*: seq[string]
+    ci_trust*: Option[string]
 
   ProjectManifest* = object
     schema*: string

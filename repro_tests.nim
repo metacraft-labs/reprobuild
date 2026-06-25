@@ -6342,6 +6342,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim",
+    binary: "build/test-bin/t_ci_skips_targets_covered_by_valid_certificate_per_platform",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim",
     binary: "build/test-bin/t_unsigned_or_wrong_key_certificate_is_rejected",
     defines: @[],

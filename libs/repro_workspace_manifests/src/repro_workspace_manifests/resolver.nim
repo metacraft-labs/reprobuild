@@ -133,6 +133,20 @@ type
     cgmAdvisory = "advisory"
     cgmRequired = "required"
 
+  CertificateCiTrust* = enum
+    ## TC-4 — the resolved `[certificates] ci_trust`, the project's EXPLICIT
+    ## decision about whether CI fast-tracks certified work. `cctAdvisory` is
+    ## the DEFAULT (and the value for a project that declares no `ci_trust`):
+    ## CI re-runs every required target authoritatively but surfaces a valid
+    ## certificate as an informational signal — nothing is skipped on trust.
+    ## `cctSkip` is the high-trust fast-track: a target covered by a VALID
+    ## (registered-signed, unrevoked, commit+lock+platform-matching)
+    ## certificate is SKIPPED and the PR fast-tracked. The default is the
+    ## SAFER `cctAdvisory` so trust is never granted by omission
+    ## (Test-Certificates.md §"CI integration — skipping certified work").
+    cctAdvisory = "advisory"
+    cctSkip = "skip"
+
   CertificatePolicy* = object
     ## The resolved test-certificate gating policy for a project. The DEFAULT
     ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
@@ -143,6 +157,12 @@ type
     gateMode*: CertificateGateMode
     requiredTargets*: seq[string]
     requiredPlatforms*: seq[string]
+    ciTrust*: CertificateCiTrust
+      ## TC-4 — whether CI skips certified targets (`cctSkip`) or re-runs them
+      ## while surfacing the certificate as advisory (`cctAdvisory`, the
+      ## default). Independent of `gateMode`: a project can require coverage on
+      ## push yet still re-run in CI (advisory), or run advisory pushes yet
+      ## fast-track CI (skip). Defaults to `cctAdvisory` (no trust by omission).
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -190,6 +210,23 @@ proc resolveCertificatePolicy*(body: CertificatesBody;
           "' (expected: off | advisory | required)")
   result.requiredTargets = body.required_targets
   result.requiredPlatforms = body.required_platforms
+  # TC-4 — resolve the CI-trust decision. The DEFAULT — an absent / omitted
+  # `ci_trust` — is `cctAdvisory`: CI never fast-tracks on trust unless the
+  # project explicitly opts in, so a forged certificate can never cause a skip
+  # in a project that did not ask for it. As with `gate_mode`, an out-of-range
+  # value is a structural error (a typo must fail LOUD, never silently grant
+  # the higher-trust `skip`).
+  result.ciTrust = cctAdvisory
+  if body.ci_trust.isSome:
+    let raw = body.ci_trust.get().strip()
+    case raw
+    of "", "advisory": result.ciTrust = cctAdvisory
+    of "skip": result.ciTrust = cctSkip
+    else:
+      raiseManifestError(projectFile, "certificates.ci_trust",
+        schemaProjectManifestV1, schemaProjectManifestV1,
+        "invalid `certificates.ci_trust` value '" & raw &
+          "' (expected: advisory | skip)")
 
 # ---- RA-18 group membership -----------------------------------------------
 
