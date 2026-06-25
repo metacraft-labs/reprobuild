@@ -21933,19 +21933,68 @@ proc attachCertificate*(gitBin, repoPath, commit: string;
         res2.output.strip())
   (ok: true, diagnostic: "")
 
-proc readAttachedCertificates*(gitBin, repoPath, commit: string):
-    seq[TestCertificate] =
-  ## Read the certificates attached to ``commit`` (the note under
-  ## ``refs/notes/reprobuild/certificates``) in ``repoPath``. Records whose
-  ## INTERNAL ``commit`` field does not equal ``commit`` are DROPPED (defense
-  ## against a stale/misfiled note); unparseable records are skipped. Returns
-  ## an empty seq when no note is attached.
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "notes", "--ref", certificateNotesRef, "show", commit])
-  if res.code != 0:
-    # No note for this commit (or the ref does not exist) → no attestations.
+proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
+                             commit: string): string =
+  ## Read the note blob attached to ``commit`` straight out of a raw
+  ## NOTES-COMMIT SHA (not a ref). ``git notes --ref <raw-sha>`` does NOT work
+  ## (``--ref`` resolves a ref NAME, not a commit-ish), but a notes tree maps
+  ## ``<commit-sha>`` (possibly under fanout dirs like ``ab/cdef…``) → a blob,
+  ## so we walk the tree with ``git ls-tree -r <notesCommitSha>`` and match the
+  ## entry whose path (with fanout ``/`` separators removed) equals ``commit``,
+  ## then ``git cat-file blob`` it. This is what lets the gateway read an
+  ## INCOMING certificate note in ``pre-receive`` BEFORE the notes ref has been
+  ## moved into place (the objects are already present; only the ref update is
+  ## pending). Returns "" when there is no note for ``commit``.
+  let ls = gitNoteRun(gitBin,
+    ["-C", repoPath, "ls-tree", "-r", notesCommitSha])
+  if ls.code != 0:
+    return ""
+  for rawLine in ls.output.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0: continue
+    # ``<mode> <type> <objsha>\t<path>``
+    let tabIdx = line.find('\t')
+    if tabIdx < 0: continue
+    let meta = line[0 ..< tabIdx].splitWhitespace()
+    if meta.len < 3: continue
+    let objSha = meta[2]
+    let path = line[tabIdx + 1 .. ^1].strip()
+    if path.replace("/", "") == commit:
+      let blob = gitNoteRun(gitBin,
+        ["-C", repoPath, "cat-file", "blob", objSha])
+      if blob.code == 0:
+        return blob.output
+      return ""
+  ""
+
+proc readAttachedCertificatesFromRef*(gitBin, repoPath, commit,
+                                      notesRef: string): seq[TestCertificate] =
+  ## Like ``readAttachedCertificates`` but reads from an EXPLICIT notes ref
+  ## (a ref name OR a raw notes-commit SHA). The receiving-side gateway (TC-6)
+  ## needs this: in a ``pre-receive`` hook the certificate note arrives as a
+  ## brand-new value for ``refs/notes/reprobuild/certificates`` that has NOT
+  ## yet been moved into place (the ref update is still pending), so the
+  ## gateway resolves the certs straight from the INCOMING notes-commit SHA it
+  ## reads off the pre-receive stdin. Records whose internal ``commit`` field
+  ## does not equal ``commit`` are DROPPED; unparseable records are skipped.
+  ##
+  ## ``notesRef`` may be a 40-hex notes-COMMIT SHA (the pre-receive case) or a
+  ## ref NAME (the post-receive / settled case). ``git notes --ref`` only
+  ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
+  ## ``git notes show`` for a ref name.
+  var noteBody = ""
+  let looksLikeSha = notesRef.len == 40 and
+    notesRef.allCharsInSet(HexDigits)
+  if looksLikeSha:
+    noteBody = noteBlobFromNotesCommit(gitBin, repoPath, notesRef, commit)
+  else:
+    let res = gitNoteRun(gitBin,
+      ["-C", repoPath, "notes", "--ref", notesRef, "show", commit])
+    if res.code == 0:
+      noteBody = res.output
+  if noteBody.len == 0:
     return @[]
-  for body in splitCertificateRecords(res.output):
+  for body in splitCertificateRecords(noteBody):
     var cert: TestCertificate
     try:
       cert = parseCertificateFromToml(body)
@@ -21954,6 +22003,15 @@ proc readAttachedCertificates*(gitBin, repoPath, commit: string):
     # Mismatch filter: only certs that genuinely attest THIS commit.
     if cert.commit == commit:
       result.add(cert)
+
+proc readAttachedCertificates*(gitBin, repoPath, commit: string):
+    seq[TestCertificate] =
+  ## Read the certificates attached to ``commit`` (the note under
+  ## ``refs/notes/reprobuild/certificates``) in ``repoPath``. Records whose
+  ## INTERNAL ``commit`` field does not equal ``commit`` are DROPPED (defense
+  ## against a stale/misfiled note); unparseable records are skipped. Returns
+  ## an empty seq when no note is attached.
+  readAttachedCertificatesFromRef(gitBin, repoPath, commit, certificateNotesRef)
 
 proc pushCertificateNotes*(gitBin, repoPath, remote: string):
     tuple[ok: bool; pushed: bool; diagnostic: string] =
@@ -22095,6 +22153,461 @@ proc certificateGate(report: var CheckReport; policy: CertificatePolicy;
       evidence: "uncovered: " & detail,
       source: ""))
     report.exitCode = 2
+
+# ============================================================================
+# TC-6 — Receiving-side enforcement: the local push gateway.
+#
+# The CLIENT pre-push gate (TC-3) gives fast local feedback but is bypassable:
+# ``git push --no-verify`` skips ALL client hooks and there is no git config
+# that disables it (Test-Certificates.md §"Enforcement"). So the AUTHORITATIVE
+# certificate check runs on the RECEIVING side, where ``--no-verify`` has no
+# effect (it only skips client hooks; ``pre-receive`` always runs on the repo
+# being pushed to).
+#
+# Model (Test-Certificates.md §"Enforcement", "Hosts you don't control"):
+#   - reprobuild already controls cloning and keeps a local bare cache, so it
+#     sets a daemon-managed BARE repo as the repo's push remote at clone time
+#     (``remote.origin.pushurl`` → the gateway bare). A developer's
+#     ``git push`` / ``repro push`` lands on the gateway, NOT directly on the
+#     real upstream (GitHub).
+#   - The gateway bare's ``pre-receive`` hook reads the incoming pushed commit
+#     + its certificates (from the INCOMING notes ref / objects already in the
+#     repo's quarantine), resolves the project's certificate policy, and — when
+#     the policy is ``required`` — VERIFIES that a registered-signed (TC-5)
+#     certificate COVERS (TC-1) the pushed commit for the required targets on
+#     each required platform. On failure it exits non-zero → git rejects the
+#     whole push, so an accidental ``--no-verify`` is caught even though the
+#     upstream host can't run a custom hook.
+#   - On success the gateway's ``post-receive`` FORWARDS the push to the real
+#     upstream bare (a second bare standing in for GitHub). A covered push thus
+#     lands on the upstream; an uncovered push is rejected at the gateway and
+#     never reaches it.
+#
+# Both hooks are THIN: they invoke ``repro gateway pre-receive`` /
+# ``repro gateway post-receive`` so the verify/forward logic lives here, not in
+# shell. A ``deliberate`` ``git remote set-url`` to the upstream bypasses the
+# gateway — deliberate circumvention is explicitly out of scope; the goal is to
+# stop ACCIDENTS.
+#
+# Vivafolio-hosted workspaces (vivafolio-specs ``Vivafolio-Hosted-Workspace-
+# SaaS.md``) and GitHub branch-protection + a required status check are the
+# OTHER receiving-side equivalents. They are EXTERNAL (a separate SaaS / GitHub
+# config); the local gateway here is the fully-implemented, hermetically-tested
+# path, and the external wiring is documented + honestly deferred
+# (DEFER-TC6-VIVAFOLIO-GITHUB below).
+# ============================================================================
+
+const
+  gatewayConfigSchemaV1* = "reprobuild.push-gateway.v1"
+    ## ``schema`` line the gateway config carries.
+  gatewayConfigRelPath* = "reprobuild-gateway.toml"
+    ## Where the gateway config lives, relative to the gateway BARE repo dir.
+    ## The daemon writes it when it wires the gateway; the ``pre-receive`` /
+    ## ``post-receive`` hooks read it. (A bare repo has no working tree, so a
+    ## file under ``$GIT_DIR`` is the natural home for daemon-owned metadata.)
+
+type
+  GatewayConfig* = object
+    ## The daemon-owned configuration the gateway bare repo carries. It is the
+    ## standalone equivalent of what the client gate resolves from the
+    ## workspace: the project's certificate policy (gate mode + required
+    ## targets/platforms), the ``lock`` digest a certificate must bind to, the
+    ## registered-keys (allowed-signers) store, and the real upstream the
+    ## ``post-receive`` forwards a verified push to. It is written by
+    ## ``wirePushGateway`` and read by the hooks; the bare repo has no checkout,
+    ## so the policy can't be re-resolved from a manifest on the receiving side.
+    gateMode*: CertificateGateMode
+    requiredTargets*: seq[string]
+    requiredPlatforms*: seq[string]
+    lockDigest*: string
+      ## The ``blake3:<hex>`` lock digest a covering certificate must bind to
+      ## (``certificateLockDigest`` of the resolved workspace lock). Empty when
+      ## the project does not bind certificates to a lock.
+    registeredKeysPath*: string
+      ## Absolute path to the allowed-signers store (TC-5 registered keys). The
+      ## ``pre-receive`` reads it to verify each cert's signature.
+    upstreamUrl*: string
+      ## The real upstream (a second bare repo standing in for GitHub) the
+      ## ``post-receive`` forwards the push to on success.
+
+proc serializeGatewayConfig*(cfg: GatewayConfig): string =
+  ## Deterministic TOML writer for the gateway config.
+  result = "schema = \"" & gatewayConfigSchemaV1 & "\"\n\n"
+  result.add("[gateway]\n")
+  result.add("gate_mode = \"" & $cfg.gateMode & "\"\n")
+  result.add("lock = \"" & tomlEscapeCert(cfg.lockDigest) & "\"\n")
+  result.add("registered_keys = \"" &
+    tomlEscapeCert(cfg.registeredKeysPath) & "\"\n")
+  result.add("upstream = \"" & tomlEscapeCert(cfg.upstreamUrl) & "\"\n")
+  result.add("required_targets = [")
+  for i, t in cfg.requiredTargets:
+    if i > 0: result.add(", ")
+    result.add("\"" & tomlEscapeCert(t) & "\"")
+  result.add("]\n")
+  result.add("required_platforms = [")
+  for i, p in cfg.requiredPlatforms:
+    if i > 0: result.add(", ")
+    result.add("\"" & tomlEscapeCert(p) & "\"")
+  result.add("]\n")
+
+proc parseGatewayConfig*(content: string): GatewayConfig =
+  ## Reader for ``serializeGatewayConfig``. An unrecognized / missing
+  ## ``gate_mode`` resolves to ``cgmOff`` (fail-OPEN on policy is wrong for a
+  ## security check, but ``cgmOff`` here means "this gateway was not configured
+  ## to gate" — an unconfigured gateway forwards transparently; a gateway the
+  ## daemon wired for a ``required`` project always carries ``gate_mode =
+  ## "required"``).
+  result.gateMode = cgmOff
+  var sawSchema = false
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"): continue
+    if line.startsWith("["): continue
+    let eq = line.find('=')
+    if eq <= 0: continue
+    let key = line[0 ..< eq].strip()
+    let rhs = line[eq + 1 .. ^1]
+    case key
+    of "schema":
+      sawSchema = parseTomlBasicValue(rhs) == gatewayConfigSchemaV1
+    of "gate_mode":
+      case parseTomlBasicValue(rhs)
+      of "advisory": result.gateMode = cgmAdvisory
+      of "required": result.gateMode = cgmRequired
+      else: result.gateMode = cgmOff
+    of "lock": result.lockDigest = parseTomlBasicValue(rhs)
+    of "registered_keys": result.registeredKeysPath = parseTomlBasicValue(rhs)
+    of "upstream": result.upstreamUrl = parseTomlBasicValue(rhs)
+    of "required_targets": result.requiredTargets = parseTomlStringArray(rhs)
+    of "required_platforms":
+      result.requiredPlatforms = parseTomlStringArray(rhs)
+    else: discard
+  if not sawSchema:
+    raise newException(ValueError,
+      "not a " & gatewayConfigSchemaV1 & " gateway config")
+
+proc gatewayConfigPath*(gatewayBareDir: string): string =
+  ## Where the gateway config lives for a given bare repo dir.
+  gatewayBareDir / gatewayConfigRelPath
+
+proc readGatewayConfig*(gatewayBareDir: string): GatewayConfig =
+  ## Read the gateway config for ``gatewayBareDir``; raises when absent (a
+  ## gateway hook firing without a config is a wiring bug, not a benign state).
+  let path = gatewayConfigPath(gatewayBareDir)
+  if not fileExists(path):
+    raise newException(ValueError,
+      "gateway config not found at '" & path & "'")
+  parseGatewayConfig(readFile(path))
+
+# ---- gateway hook bodies (thin: invoke ``repro gateway <phase>``) ----------
+
+proc gatewayPreReceiveHookBody*(): string =
+  ## The bare gateway's ``pre-receive`` hook. git feeds it
+  ## ``<old> <new> <ref>`` lines on stdin (one per pushed ref). The body is
+  ## THIN: it locates ``repro`` and forwards stdin to ``repro gateway
+  ## pre-receive --gateway-dir <GIT_DIR>``. A non-zero exit REJECTS the whole
+  ## push — which is exactly the ``--no-verify``-proof enforcement point.
+  result = "#!/usr/bin/env sh\n"
+  result.add("# reprobuild managed pre-receive hook (push gateway)\n")
+  result.add("set -eu\n\n")
+  result.add("GATEWAY_DIR=$(git rev-parse --git-dir)\n")
+  result.add("case \"$GATEWAY_DIR\" in /*) : ;; *) " &
+    "GATEWAY_DIR=\"$(pwd)/$GATEWAY_DIR\" ;; esac\n")
+  result.add("if [ -n \"${REPROBUILD_REPRO:-}\" ] && " &
+    "[ -x \"$REPROBUILD_REPRO\" ]; then\n")
+  result.add("  REPRO_CMD=\"$REPROBUILD_REPRO\"\n")
+  result.add("elif command -v repro >/dev/null 2>&1; then\n")
+  result.add("  REPRO_CMD=$(command -v repro)\n")
+  result.add("else\n")
+  result.add("  echo \"reprobuild gateway: repro CLI not found; " &
+    "REJECTING push (fail closed)\" >&2\n")
+  result.add("  exit 1\n")
+  result.add("fi\n")
+  result.add("exec \"$REPRO_CMD\" gateway pre-receive " &
+    "--gateway-dir \"$GATEWAY_DIR\"\n")
+
+proc gatewayPostReceiveHookBody*(): string =
+  ## The bare gateway's ``post-receive`` hook. Fires only AFTER ``pre-receive``
+  ## accepted + the refs were updated. It forwards the just-received refs to the
+  ## real upstream by invoking ``repro gateway post-receive``. git feeds it the
+  ## same ``<old> <new> <ref>`` lines on stdin.
+  result = "#!/usr/bin/env sh\n"
+  result.add("# reprobuild managed post-receive hook (push gateway)\n")
+  result.add("set -eu\n\n")
+  result.add("GATEWAY_DIR=$(git rev-parse --git-dir)\n")
+  result.add("case \"$GATEWAY_DIR\" in /*) : ;; *) " &
+    "GATEWAY_DIR=\"$(pwd)/$GATEWAY_DIR\" ;; esac\n")
+  result.add("if [ -n \"${REPROBUILD_REPRO:-}\" ] && " &
+    "[ -x \"$REPROBUILD_REPRO\" ]; then\n")
+  result.add("  REPRO_CMD=\"$REPROBUILD_REPRO\"\n")
+  result.add("elif command -v repro >/dev/null 2>&1; then\n")
+  result.add("  REPRO_CMD=$(command -v repro)\n")
+  result.add("else\n")
+  result.add("  echo \"reprobuild gateway: repro CLI not found; " &
+    "cannot forward to upstream\" >&2\n")
+  result.add("  exit 1\n")
+  result.add("fi\n")
+  result.add("exec \"$REPRO_CMD\" gateway post-receive " &
+    "--gateway-dir \"$GATEWAY_DIR\"\n")
+
+# ---- clone-time push-remote wiring -----------------------------------------
+
+proc installGatewayHooks*(gatewayBareDir: string) =
+  ## Write the gateway bare's ``pre-receive`` + ``post-receive`` hooks (thin
+  ## wrappers that invoke ``repro gateway <phase>``). Idempotent: overwrites
+  ## with the canonical bodies.
+  let hooksDir = gatewayBareDir / "hooks"
+  if not dirExists(hooksDir): createDir(hooksDir)
+  let pre = hooksDir / "pre-receive"
+  let post = hooksDir / "post-receive"
+  writeFile(pre, gatewayPreReceiveHookBody())
+  writeFile(post, gatewayPostReceiveHookBody())
+  when not defined(windows):
+    inclFilePermissions(pre, {fpUserExec, fpGroupExec, fpOthersExec})
+    inclFilePermissions(post, {fpUserExec, fpGroupExec, fpOthersExec})
+
+proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
+                      cfg: GatewayConfig):
+    tuple[ok: bool; diagnostic: string] =
+  ## CLONE-TIME wiring (Test-Certificates.md §"Enforcement"): make the
+  ## daemon-managed BARE repo at ``gatewayBareDir`` the repo's push remote so a
+  ## developer's ``git push`` lands on the gateway, not directly on the real
+  ## upstream. Concretely:
+  ##   1. ``git init --bare`` the gateway if absent.
+  ##   2. Install the gateway's ``pre-receive`` + ``post-receive`` hooks.
+  ##   3. Write the daemon-owned ``GatewayConfig`` (policy + lock + registered
+  ##      keys + the real upstream to forward to) under the bare dir.
+  ##   4. Set ``remote.origin.pushurl`` of ``repoPath`` to the gateway bare,
+  ##      while ``remote.origin.url`` (FETCH) stays the real upstream — so the
+  ##      developer still fetches from upstream but PUSHES through the gateway.
+  ## The fetch/push split is the load-bearing piece: it routes the OUTBOUND
+  ## push through the gateway's ``pre-receive`` without disturbing fetches.
+  if not dirExists(gatewayBareDir):
+    let initRes = gitNoteRun(gitBin,
+      ["init", "--bare", gatewayBareDir])
+    if initRes.code != 0:
+      return (ok: false, diagnostic: "git init --bare (gateway) failed: " &
+        initRes.output.strip())
+  installGatewayHooks(gatewayBareDir)
+  var fullCfg = cfg
+  fullCfg.upstreamUrl = upstreamUrl
+  writeFile(gatewayConfigPath(gatewayBareDir), serializeGatewayConfig(fullCfg))
+  # Point the repo's push at the gateway; leave fetch on the real upstream.
+  # A local bare repo is addressed by its absolute path (git's "local
+  # transport"); no ``file://`` wrapper is needed and a plain path avoids the
+  # URL-encoding / Windows-drive pitfalls of ``file://``.
+  let setRes = gitNoteRun(gitBin,
+    ["-C", repoPath, "remote", "set-url", "--push", "origin",
+     absolutePath(gatewayBareDir)])
+  if setRes.code != 0:
+    return (ok: false, diagnostic: "git remote set-url --push failed: " &
+      setRes.output.strip())
+  (ok: true, diagnostic: "")
+
+# ---- pre-receive: the AUTHORITATIVE certificate verify ----------------------
+
+type
+  GatewayRefUpdate* = object
+    ## One ``<old> <new> <ref>`` line from a pre/post-receive stdin stream.
+    oldSha*: string
+    newSha*: string
+    refName*: string
+
+proc parseGatewayRefUpdates*(stdinText: string): seq[GatewayRefUpdate] =
+  ## Parse the receive-hook stdin stream into ref updates. Blank / malformed
+  ## lines are skipped.
+  for rawLine in stdinText.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0: continue
+    let parts = line.split(' ')
+    if parts.len < 3: continue
+    result.add(GatewayRefUpdate(oldSha: parts[0], newSha: parts[1],
+      refName: parts[2]))
+
+type
+  GatewayVerifyResult* = object
+    ## Outcome of the pre-receive certificate verify for ONE pushed branch.
+    accepted*: bool
+    diagnostic*: string
+
+proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
+                        updates: seq[GatewayRefUpdate];
+                        cfg: GatewayConfig): GatewayVerifyResult =
+  ## The AUTHORITATIVE receiving-side check. For each pushed BRANCH update,
+  ## read the certificates that arrived for the pushed commit (from the
+  ## INCOMING ``refs/notes/reprobuild/certificates`` value — already an object
+  ## in this bare repo because the push delivered it) and, under a ``required``
+  ## policy, require that a registered-SIGNED (TC-5) certificate COVERS (TC-1)
+  ## the pushed commit for the required targets on EACH required platform.
+  ##
+  ## REUSE, not re-implementation: the per-cert signature check is the TC-5
+  ## ``verifyCertificateSignature`` and the per-platform coverage is the TC-1
+  ## ``verifyCoverage`` — exactly what the client gate (TC-3) runs, but here on
+  ## the receiving side where ``--no-verify`` cannot reach.
+  result.accepted = true
+  # ``off`` → transparent forward (no cert check at all). ``advisory`` →
+  # records the verdict but never rejects. ``required`` → rejects on a miss.
+  if cfg.gateMode == cgmOff:
+    return
+  if cfg.requiredPlatforms.len == 0:
+    # Opted in but nothing to enforce (required_platforms may be none).
+    return
+  # Locate the incoming notes-ref value: the new SHA the push set for
+  # ``refs/notes/reprobuild/certificates``. In pre-receive the ref is not yet
+  # in place, but the SHA is already a reachable object, so we read the note
+  # straight off that commit-ish.
+  var notesSha = ""
+  for u in updates:
+    if u.refName == certificateNotesRef:
+      notesSha = u.newSha
+  let keyStore = readRegisteredKeyStore(cfg.registeredKeysPath)
+  let zeroSha = "0000000000000000000000000000000000000000"
+  for u in updates:
+    # Only gate branch pushes; the notes ref + tags are not the gated unit.
+    if not u.refName.startsWith("refs/heads/"): continue
+    if u.newSha == zeroSha: continue  # branch deletion — nothing to attest.
+    let pushedCommit = u.newSha
+    # Read the certs that arrived for this commit. Prefer the incoming notes
+    # SHA (pre-receive: ref not yet updated); fall back to the well-known ref
+    # for a post-receive / already-updated read.
+    var attached: seq[TestCertificate]
+    if notesSha.len > 0 and notesSha != zeroSha:
+      attached = readAttachedCertificatesFromRef(
+        gitBin, gatewayBareDir, pushedCommit, notesSha)
+    if attached.len == 0:
+      attached = readAttachedCertificatesFromRef(
+        gitBin, gatewayBareDir, pushedCommit, certificateNotesRef)
+    # Drop every cert that is not a registered-signed, unrevoked, valid-sig
+    # attestation (TC-5) BEFORE coverage (TC-1).
+    var trusted: seq[TestCertificate]
+    var sigNotes: seq[string]
+    for cert in attached:
+      let verdict = verifyCertificateSignature(cert, keyStore)
+      if verdict == svValid:
+        trusted.add(cert)
+      else:
+        let why =
+          case verdict
+          of svUnsigned: "unsigned"
+          of svUnregisteredKey: "key_id '" & cert.keyId & "' not registered"
+          of svRevokedKey: "key_id '" & cert.keyId & "' revoked"
+          of svBadSignature: "signature does not verify"
+          of svToolingUnavailable: "ssh-keygen unavailable"
+          of svValid: ""
+        sigNotes.add(cert.platform & ": " & why)
+    var missing: seq[string]
+    for platform in cfg.requiredPlatforms:
+      let req = CoverageRequirement(
+        commit: pushedCommit,
+        lock: cfg.lockDigest,
+        platform: platform,
+        requiredTargets: cfg.requiredTargets)
+      let cov = verifyCoverage(trusted, req)
+      if not cov.covered:
+        missing.add(platform & " (missing: " &
+          (if cov.missingTargets.len > 0: cov.missingTargets.join(", ")
+           else: "<no certificate>") & ")")
+    if missing.len > 0:
+      let sigDetail =
+        if sigNotes.len > 0: " (untrusted certs ignored: " &
+          sigNotes.join("; ") & ")"
+        else: ""
+      let detail = u.refName & ": uncovered: " & missing.join("; ") & sigDetail
+      if cfg.gateMode == cgmRequired:
+        result.accepted = false
+        result.diagnostic = detail
+        return
+      else:  # advisory — record but accept.
+        result.diagnostic = "advisory: " & detail
+
+proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
+                               updates: seq[GatewayRefUpdate]):
+    tuple[ok: bool; diagnostic: string] =
+  ## ``post-receive`` forward: push the just-received refs from the gateway
+  ## bare to the REAL upstream bare. We push each received ref by its value;
+  ## branch deletions propagate as deletions. The certificate notes ref is
+  ## forwarded too so the upstream carries the attestations. A failure to
+  ## forward is reported but does NOT roll back the gateway (the gateway is the
+  ## reproducibility boundary; the upstream catches up on the next push).
+  var refspecs: seq[string]
+  let zeroSha = "0000000000000000000000000000000000000000"
+  for u in updates:
+    if u.newSha == zeroSha:
+      refspecs.add(":" & u.refName)             # deletion
+    else:
+      refspecs.add(u.newSha & ":" & u.refName)  # set ref to the received value
+  if refspecs.len == 0:
+    return (ok: true, diagnostic: "no refs to forward")
+  var argv = @["-C", gatewayBareDir, "push", upstreamUrl]
+  for r in refspecs: argv.add(r)
+  let res = gitNoteRun(gitBin, argv)
+  if res.code != 0:
+    return (ok: false, diagnostic: "forward push to upstream failed: " &
+      res.output.strip())
+  (ok: true, diagnostic: "")
+
+# ---- ``repro gateway <phase>`` dispatch ------------------------------------
+
+proc parseGatewayDirFlag(args: openArray[string]): string =
+  ## Extract ``--gateway-dir <PATH>`` (or ``--gateway-dir=PATH``). Defaults to
+  ## ``GIT_DIR`` / cwd so an operator can run the verb manually inside the bare.
+  for i, a in args:
+    if a == "--gateway-dir" and i + 1 < args.len:
+      return args[i + 1]
+    if a.startsWith("--gateway-dir="):
+      return a["--gateway-dir=".len .. ^1]
+  let gitDir = getEnv("GIT_DIR")
+  if gitDir.len > 0: return gitDir
+  getCurrentDir()
+
+proc runGatewayCommand*(args: openArray[string]): int =
+  ## ``repro gateway <phase> [--gateway-dir PATH]`` — the thin entry point the
+  ## gateway bare's hooks invoke. Two phases:
+  ##   - ``pre-receive``  : read ``<old> <new> <ref>`` lines from stdin, run the
+  ##     AUTHORITATIVE certificate verify, exit non-zero to REJECT on a miss.
+  ##   - ``post-receive`` : read the same stream, FORWARD the received refs to
+  ##     the real upstream bare.
+  if args.len == 0:
+    stderr.writeLine("repro gateway: expected a phase " &
+      "(pre-receive | post-receive)")
+    return 2
+  let phase = args[0]
+  let gatewayDir = parseGatewayDirFlag(args)
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    stderr.writeLine("repro gateway: git not found on PATH; " &
+      "REJECTING (fail closed)")
+    return 1
+  var cfg: GatewayConfig
+  try:
+    cfg = readGatewayConfig(gatewayDir)
+  except CatchableError as err:
+    stderr.writeLine("repro gateway: " & err.msg & "; REJECTING (fail closed)")
+    return 1
+  let stdinText = stdin.readAll()
+  let updates = parseGatewayRefUpdates(stdinText)
+  case phase
+  of "pre-receive":
+    let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg)
+    if verdict.diagnostic.len > 0:
+      stderr.writeLine("reprobuild gateway: " & verdict.diagnostic)
+    if not verdict.accepted:
+      stderr.writeLine("reprobuild gateway: push REJECTED — no covering " &
+        "test certificate (run 'repro certify' then push). The receiving-" &
+        "side gateway is authoritative; '--no-verify' does not bypass it.")
+      return 1
+    return 0
+  of "post-receive":
+    let fwd = gatewayForwardToUpstream(gitBin, gatewayDir, cfg.upstreamUrl,
+      updates)
+    if not fwd.ok:
+      stderr.writeLine("reprobuild gateway: " & fwd.diagnostic)
+      return 1
+    return 0
+  else:
+    stderr.writeLine("repro gateway: unknown phase '" & phase &
+      "' (expected: pre-receive | post-receive)")
+    return 2
 
 proc developSetClosure(repos: seq[ResolvedRepo];
                        pushedRepoName: string): HashSet[string] =
@@ -31700,6 +32213,24 @@ proc runThinApp*(programName: string): int =
       return runCheckCommand(checkArgs)
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "gateway":
+    # TC-6 — the receiving-side push gateway. The bare gateway repo's
+    # ``pre-receive`` / ``post-receive`` hooks invoke ``repro gateway
+    # <phase>`` so the AUTHORITATIVE certificate verify (pre-receive) and the
+    # forward-to-upstream (post-receive) live here, not in shell. This is the
+    # ``--no-verify``-proof enforcement point (Test-Certificates.md
+    # §"Enforcement").
+    try:
+      let gatewayArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runGatewayCommand(gatewayArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro gateway: error: " & err.msg &
+        "; REJECTING (fail closed)")
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "health":
     # RA-30 — top-level `repro health` (the environment doctor) per

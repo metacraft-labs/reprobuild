@@ -6358,6 +6358,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_certificate_policy_required_advisory_off_modes.nim",
+    binary: "build/test-bin/t_certificate_policy_required_advisory_off_modes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim",
+    binary: "build/test-bin/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
     binary: "build/test-bin/t_recertify_is_noop_when_no_executed_function_changed",
     defines: @[],
