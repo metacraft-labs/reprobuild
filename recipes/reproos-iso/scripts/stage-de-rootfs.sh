@@ -924,11 +924,32 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
 
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
 if [ -x "$chroot_ldconfig" ]; then
-  chroot "$STAGE_DIR" /sbin/ldconfig 2>&1 | \
+  # M9.R.37.3 — ``chroot $STAGE_DIR /sbin/ldconfig`` requires root
+  # privilege (Linux's mount-namespace barrier).  The engine runs the
+  # ISO build as the invoking user, NOT root, so the chroot syscall
+  # returned EPERM, ldconfig never ran, and ld.so.cache was either
+  # absent (causing every bare-name dlopen to fall through to the
+  # Debian system cache) or left at the 16027-byte base-rootfs.tar.xz
+  # fossil (which Knew NOTHING about the from-source install-mirrors).
+  # Concretely: ``mkfs.ext4`` shipped via ``e2fsprogs/.repro/output/
+  # install/usr/sbin/mkfs.ext4`` failed at runtime with exit 127
+  # because its DT_NEEDED libs (libext2fs.so.2, libcom_err.so.2,
+  # libe2p.so.2) were ABSENT from /etc/ld.so.cache, and the binary's
+  # own DT_RUNPATH did NOT include its sister-lib dir.  ``repro disk
+  # apply`` consequently failed at Phase 2 / step mkfs.ext4 with
+  # ``mkfs.ext4 failed (exit 127)``, which surfaced to the M9.R.36
+  # investigation as a "silent installer wedge after Qt init".
+  #
+  # ``ldconfig -r <root>`` does what chroot+ldconfig does but WITHOUT
+  # requiring chroot privilege — it pretends ``<root>`` is "/" for
+  # all path resolution + writes the cache at ``<root>/etc/ld.so.cache``.
+  # This is the canonical unprivileged-build replacement Debian's
+  # debootstrap + Arch's pacstrap both use.
+  "$chroot_ldconfig" -r "$STAGE_DIR" 2>&1 | \
     grep -vE 'is not a symbolic link|file format not recognized' || true
-  echo "[stage-de-rootfs] rebuilt ld.so.cache via chroot/sbin/ldconfig"
+  echo "[stage-de-rootfs] rebuilt ld.so.cache via /sbin/ldconfig -r $STAGE_DIR (size: $(stat -c %s "$STAGE_DIR/etc/ld.so.cache" 2>/dev/null || echo missing))"
 else
-  echo "[stage-de-rootfs] no chroot/sbin/ldconfig; dlopen() bare-name libs may fail" >&2
+  echo "[stage-de-rootfs] no $chroot_ldconfig; dlopen() bare-name libs may fail" >&2
 fi
 
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"
