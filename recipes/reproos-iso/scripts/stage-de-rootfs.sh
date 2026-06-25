@@ -584,33 +584,77 @@ cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh" <<'EOF'
 #!/bin/sh
 # ReproOS installer wrapper. M9.R.36.1.
 #
-# Build a targeted LD_LIBRARY_PATH that includes ``/nix/store/*/lib``
-# dirs the installer needs for dlopen() (libclingo, libsqlite3, ...)
-# WITHOUT shadowing the system glibc with a foreign nix-store glibc.
-_repro_nix_dirs=""
+# Build TARGETED env vars (LD_LIBRARY_PATH + QT_PLUGIN_PATH +
+# QML2_IMPORT_PATH + QT_QPA_PLATFORM_PLUGIN_PATH) so the installer
+# + its QProcess children find every bundled lib + Qt plugin + QML
+# module WITHOUT shadowing the system glibc with a foreign nix-store
+# glibc.
+#
+# Channels:
+#   * LD_LIBRARY_PATH       — dlopen("libclingo.so") / libsqlite3
+#   * QT_PLUGIN_PATH        — Qt platform / image / sql / styles plugins
+#   * QML2_IMPORT_PATH      — QtQuick.Controls + every QML module
+#   * QT_QPA_PLATFORM_PLUGIN_PATH — QPA backend (offscreen / wayland /
+#                              minimal) — explicit so the
+#                              ``QT_QPA_PLATFORM=offscreen`` env var
+#                              the installer respects resolves the
+#                              ``libqoffscreen.so`` plugin.
+_repro_nix_libs=""
+_repro_qt_plugins=""
+_repro_qml_imports=""
+_repro_qpa_plugins=""
 for d in /nix/store/*/lib; do
   [ -d "$d" ] || continue
-  # Skip glibc dirs — keeping the Debian system glibc as the canonical
-  # libc for every binary in the live ISO chain.
+  # Skip glibc dirs — Debian system glibc must remain canonical so
+  # every Debian binary in the live ISO chain keeps working.
   case "$d" in
     /nix/store/*-glibc-*/lib) continue ;;
   esac
   set -- "$d"/*.so*
-  [ -e "$1" ] || continue
-  if [ -z "$_repro_nix_dirs" ]; then
-    _repro_nix_dirs="$d"
-  else
-    _repro_nix_dirs="$_repro_nix_dirs:$d"
+  if [ -e "$1" ]; then
+    if [ -z "$_repro_nix_libs" ]; then
+      _repro_nix_libs="$d"
+    else
+      _repro_nix_libs="$_repro_nix_libs:$d"
+    fi
+  fi
+  # Qt6 plugin dirs ship under ``<prefix>/lib/qt-6/plugins/``.
+  if [ -d "$d/qt-6/plugins" ]; then
+    if [ -z "$_repro_qt_plugins" ]; then
+      _repro_qt_plugins="$d/qt-6/plugins"
+    else
+      _repro_qt_plugins="$_repro_qt_plugins:$d/qt-6/plugins"
+    fi
+    if [ -d "$d/qt-6/plugins/platforms" ]; then
+      if [ -z "$_repro_qpa_plugins" ]; then
+        _repro_qpa_plugins="$d/qt-6/plugins/platforms"
+      else
+        _repro_qpa_plugins="$_repro_qpa_plugins:$d/qt-6/plugins/platforms"
+      fi
+    fi
+  fi
+  # Qt6 QML modules ship under ``<prefix>/lib/qt-6/qml/``.
+  if [ -d "$d/qt-6/qml" ]; then
+    if [ -z "$_repro_qml_imports" ]; then
+      _repro_qml_imports="$d/qt-6/qml"
+    else
+      _repro_qml_imports="$_repro_qml_imports:$d/qt-6/qml"
+    fi
   fi
 done
-# Append system paths last so the Debian-installed libs still resolve
-# first when both exist.
+# Append caller-supplied paths last so any operator override wins.
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-  _repro_ldpath="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+  _repro_ldpath="$_repro_nix_libs:$LD_LIBRARY_PATH"
 else
-  _repro_ldpath="$_repro_nix_dirs"
+  _repro_ldpath="$_repro_nix_libs"
 fi
-exec env LD_LIBRARY_PATH="$_repro_ldpath" /usr/bin/reproos-installer "$@"
+exec env \
+  LD_LIBRARY_PATH="$_repro_ldpath" \
+  QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
+  QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
+  QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
+  QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
+  /usr/bin/reproos-installer "$@"
 EOF
 chmod 0755 "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 
