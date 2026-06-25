@@ -609,6 +609,15 @@ void InstallerState::runMinimalBootstrap(const QString &target) {
     // ``set timeout_style=hidden`` together with ``set timeout=3``
     // also bypasses the interactive menu entirely on serial-only
     // hardware (matching Debian's serial-installer pattern).
+    //
+    // M9.R.37.8 — vmlinuz + initrd.img live on the ESP root, NOT at
+    // ``(esp)/boot/vmlinuz``: ESP is mounted at ``/mnt/boot`` during
+    // install, so ``cp ... /mnt/boot/vmlinuz`` writes to
+    // ``(esp)/vmlinuz``.  GRUB's root after BOOTX64.EFI loads IS the
+    // ESP, so the kernel + initramfs paths in grub.cfg must be
+    // ``/vmlinuz`` + ``/initrd.img``, NOT ``/boot/vmlinuz``.  Without
+    // this fix GRUB errors with ``file '/boot/vmlinuz' not found``
+    // every boot.
     QString grubCfg =
         "serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1\n"
         "terminal_input console serial\n"
@@ -617,8 +626,8 @@ void InstallerState::runMinimalBootstrap(const QString &target) {
         "set timeout=3\n"
         "set default=0\n"
         "menuentry 'ReproOS' {\n"
-        "  linux /boot/vmlinuz root=/dev/vda2 ro console=tty1 console=ttyS0,115200\n"
-        "  initrd /boot/initrd.img\n"
+        "  linux /vmlinuz root=/dev/vda2 ro console=tty1 console=ttyS0,115200\n"
+        "  initrd /initrd.img\n"
         "}\n";
     QString tmp = "/tmp/repro-installer-" +
         QString::number(QCoreApplication::applicationPid()) + "/grub.cfg";
