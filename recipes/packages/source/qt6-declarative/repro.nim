@@ -203,7 +203,44 @@ package qt6DeclarativeSource:
         "CMAKE_DISABLE_FIND_PACKAGE_Clang=TRUE",
         "CMAKE_DISABLE_FIND_PACKAGE_LLVM=TRUE",
       ]
-      let pkg = cmake_package(srcDir = "./src", cacheVars = opts)
+      # M9.R.35.4 — qmlcachegen, qmltyperegistrar, and qmlc compiler
+      # all emit files via Qt's ``QSaveFile`` which on WSL ext4 under
+      # high build parallelism produces files with mode ``0000`` (the
+      # M9.R.33 "qmlcachegen mode corruption" report).  The
+      # M9.R.35.1 engine-side umask=022 pin closes most of the gap
+      # but a residual subset still leaks through ``QTemporaryFileEngine``
+      # + ``rename()`` — the kernel reports the file at the moment of
+      # rename with whatever the temp-file mode was, which on WSL ext4
+      # can be 0 under specific concurrency patterns (kernel + fs
+      # interaction documented at
+      # https://github.com/microsoft/WSL/issues/15014 and similar).
+      #
+      # Hard fix: force-chmod the QSaveFile output to 0644 BEFORE
+      # commit() via an explicit ``setPermissions`` call.  Qt's
+      # ``QSaveFile::setPermissions`` is documented to call
+      # ``fchmod()`` on the underlying temp file descriptor before
+      # the rename, which then preserves through the atomic-replace
+      # so the final file lands with deterministic mode bits.
+      #
+      # Three patch sites (one per QSaveFile usage in the qmlcompiler
+      # / qmltyperegistrar tools):
+      #   * qqmljsloadergenerator.cpp  — qmlcache_loader.cpp emit
+      #   * qqmljscompiler.cpp          — per-QML .qmlc emit
+      #   * qqmltypescreator.cpp        — .qmltypes emit
+      #
+      # The patch inserts ``file.setPermissions(<perms>)`` immediately
+      # after the ``file.write(...) != ...`` check and before the
+      # ``file.commit()`` / return statement.  The permission bitmask
+      # is the explicit ``ReadOwner | WriteOwner | ReadGroup | ReadOther``
+      # combination — 0644 in octal — same canonical mode every other
+      # build tool emits.
+      let patches = @[
+        "sed -i 's@    return file.commit();@    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);\\n    return file.commit();@' src/src/qmltyperegistrar/qqmltypescreator.cpp",
+        "sed -i 's@^    if (!f.commit()) {@    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);\\n    if (!f.commit()) {@' src/src/qmlcompiler/qqmljsloadergenerator.cpp",
+        "sed -i 's@^    if (!f.commit()) {@    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);\\n    if (!f.commit()) {@' src/src/qmlcompiler/qqmljscompiler.cpp",
+      ]
+      let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
+                              srcPatches = patches)
       discard pkg.library("libQt6Qml")
       discard pkg.library("libQt6Quick")
       discard pkg.library("libQt6QuickControls2")
