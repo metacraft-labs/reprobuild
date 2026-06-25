@@ -20128,16 +20128,77 @@ proc parsePostCommitArgs(args: openArray[string]):
       except CatchableError: discard
     inc i
 
-# ---- RA-4: post-commit detached cache-ref push ---------------------------
+# ---- RA-4 / RA-19: post-commit detached cache-ref push -------------------
 #
 # After the best-effort lock refresh, the post-commit hook fires a
 # detached, fire-and-forget push of the just-committed branch into the
 # shared bare cache under ``refs/cache/<workspace>/<branch>`` (the RA-5
 # ``pushCacheRef`` mechanism). The push MUST NOT block the commit: it
-# runs in a new session (``setsid ... &``) with stdio redirected to
-# /dev/null, so it survives the post-commit process exiting. On Windows
-# the eager push is skipped (parity with the pilot ``spawnAsyncCachePush``);
-# siblings rely on an explicit ``repro workspace shared-clones rewire``.
+# runs detached with stdio redirected away, so it survives the
+# post-commit process exiting.
+#
+#   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
+#   * Windows (RA-19): a detached child via ``cmd /c start /b "" ...``
+#     with stdio to NUL — ``start /b`` launches the re-invoked
+#     ``repro hooks cache-push`` without a new window and returns
+#     immediately, so the commit is never blocked.
+#
+# The DECISION (which detach mechanism + command line for a given OS) is
+# factored into the pure ``cachePushSpawnCommand`` below so it is
+# computable and assertable on any host; only the actual ``execShellCmd``
+# launch is platform-guarded.
+
+type
+  WorkspaceTargetOs* = enum
+    ## Platform parameter for the workspace decision/plan layer. Kept
+    ## independent of ``when defined(windows)`` so the plan builders can be
+    ## exercised for either target on any host (e.g. asserting the Windows
+    ## provisioning plan + detached-spawn form from a Linux test).
+    wtPosix
+    wtWindows
+
+  CachePushSpawnSpec* = object
+    ## The fully-resolved, platform-parameterized spec for the detached
+    ## post-commit cache push. ``shellInvocation`` is the command handed to
+    ## the host shell; ``detach`` names the mechanism (for diagnostics /
+    ## tests). Empty ``shellInvocation`` means "nothing to launch".
+    targetOs*: WorkspaceTargetOs
+    detach*: string            ## e.g. "setsid&" (POSIX) / "start /b" (Win)
+    shellInvocation*: string   ## the command string for the host shell
+
+proc cachePushSpawnCommand*(targetOs: WorkspaceTargetOs;
+                            exePath, repoRoot, workspaceName: string):
+                            CachePushSpawnSpec =
+  ## PURE decision function: given a target OS and the re-invocation
+  ## arguments, build the detached-spawn command for the post-commit eager
+  ## cache push. No process is launched here — callers feed
+  ## ``shellInvocation`` to the host shell under a platform guard.
+  ##
+  ##   * ``wtPosix``  → ``setsid <repro hooks cache-push …> </dev/null
+  ##                    >/dev/null 2>&1 &`` (new session, fully detached).
+  ##   * ``wtWindows``→ ``cmd /c start /b "" <repro hooks cache-push …>
+  ##                    >NUL 2>&1`` (no new window, returns immediately).
+  ##
+  ## Returns an empty ``shellInvocation`` when ``workspaceName`` or
+  ## ``exePath`` is empty (nothing to push / no re-invokable binary).
+  result.targetOs = targetOs
+  if workspaceName.len == 0 or exePath.len == 0:
+    return
+  let childArgs = shellCommand(@[exePath, "hooks", "cache-push",
+    "--repo-root", repoRoot, "--workspace-name", workspaceName])
+  case targetOs
+  of wtPosix:
+    result.detach = "setsid&"
+    result.shellInvocation =
+      "setsid " & childArgs & " </dev/null >/dev/null 2>&1 &"
+  of wtWindows:
+    # ``start /b`` (via ``cmd /c``) launches the child without a console
+    # window and returns immediately, detaching it from the post-commit
+    # process. The empty ``""`` is ``start``'s title argument (required so
+    # a quoted exe path is not mistaken for the title). Stdio → NUL.
+    result.detach = "start /b"
+    result.shellInvocation =
+      "start /b \"\" " & childArgs & " >NUL 2>&1"
 
 proc resolveRepoFetchUrl(workspaceRoot, repoAbsPath: string): string =
   ## Resolve the upstream fetch URL of the repo whose working tree is at
@@ -20220,29 +20281,34 @@ proc runCachePushCommand*(args: openArray[string]): int =
 proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ## Fire a detached, fire-and-forget cache-ref push and return
   ## immediately so the originating commit is never blocked. The child
-  ## re-invokes ``repro hooks cache-push`` in a new session (``setsid``)
-  ## with stdio detached from the parent. Best-effort: any failure to
-  ## even launch the child is swallowed.
+  ## re-invokes ``repro hooks cache-push`` detached from the parent.
+  ## Best-effort: any failure to even launch the child is swallowed.
+  ##
+  ## The command itself is computed by the pure ``cachePushSpawnCommand``
+  ## (POSIX ``setsid … &`` vs Windows ``start /b``); only the host-shell
+  ## launch is platform-guarded.
+  ##   * POSIX: ``sh -c "setsid … &"`` — new session, stdio to /dev/null.
+  ##   * Windows (RA-19): ``cmd /c "start /b …"`` — no new window, returns
+  ##     immediately, stdio to NUL.
+  if workspaceName.len == 0:
+    return
+  let myExe = getAppFilename()
+  if myExe.len == 0:
+    return
   when defined(windows):
-    # `start /b`-style detachment is deferred (RA-19). Skip the eager push
-    # on Windows; siblings rely on `repro workspace shared-clones rewire`.
-    discard
+    const targetOs = wtWindows
   else:
-    if workspaceName.len == 0:
-      return
-    let myExe = getAppFilename()
-    if myExe.len == 0:
-      return
-    let childArgs = shellCommand(@[myExe, "hooks", "cache-push",
-      "--repo-root", repoRoot, "--workspace-name", workspaceName])
-    # `setsid ... &` detaches into a new session; redirecting all stdio to
-    # /dev/null lets the child outlive the post-commit process. The whole
-    # thing is best-effort — a failed launch never blocks the commit.
-    let cmd = "setsid " & childArgs & " </dev/null >/dev/null 2>&1 &"
-    try:
-      discard execShellCmd("sh -c " & q(cmd))
-    except CatchableError:
-      discard
+    const targetOs = wtPosix
+  let spec = cachePushSpawnCommand(targetOs, myExe, repoRoot, workspaceName)
+  if spec.shellInvocation.len == 0:
+    return
+  try:
+    when defined(windows):
+      discard execShellCmd("cmd /c " & q(spec.shellInvocation))
+    else:
+      discard execShellCmd("sh -c " & q(spec.shellInvocation))
+  except CatchableError:
+    discard
 
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
@@ -31605,6 +31671,148 @@ proc runWorkspaceBootstrapCommand*(args: openArray[string]): int =
     $skipped & " skipped in " & targetDir)
   0
 
+# ---- RA-19: Windows env activation + toolchain provisioning parity ---------
+#
+# On Linux/macOS the Nix devShell (``repro shell hook`` / the scaffolded
+# ``.envrc``) supplies the workspace toolchain. Windows has no such flake,
+# so — mirroring the repo-workspaces pilot (``env.ps1`` +
+# ``windows/ensure-{gcc,gh,gpg,just,nim,python,repo}.ps1``) — reprobuild
+# ensures each required tool itself and activates a PowerShell env.
+#
+# The DECISION (which ensure-steps, in what order, with which check /
+# install commands, under which skip toggle, and the env activation) is
+# factored into the PURE, platform-parameterized ``windowsProvisioningPlan``
+# below so it is computable + assertable on any host. Only the actual
+# ``& pwsh -Command …`` execution (``runWorkspaceProvisionCommand``) is
+# guarded by ``when defined(windows)``; live Windows toolchain provisioning
+# cannot be exercised on a Linux host.
+
+type
+  ProvisionStep* = object
+    ## One toolchain ensure-step in a host provisioning plan. ``tool`` names
+    ## the tool; ``checkCommand`` is the idempotent "already installed?"
+    ## probe (skip the install when it succeeds with the wanted version);
+    ## ``installCommand`` is the ensure/install action; ``skipEnvVar`` is the
+    ## operator toggle that bypasses this step (parity with the pilot's
+    ## ``WINDOWS_DIY_SKIP_*`` knobs).
+    tool*: string
+    checkCommand*: string
+    installCommand*: string
+    skipEnvVar*: string
+
+  HostEnvActivation* = object
+    ## The env-activation descriptor a provisioning plan produces. On
+    ## Windows this is the PowerShell dot-source of the scaffolded
+    ## ``env.ps1`` that puts the ensured toolchain on ``$env:PATH``.
+    targetOs*: WorkspaceTargetOs
+    shell*: string             ## e.g. "powershell"
+    activateCommand*: string   ## the env-activation command line
+
+  WindowsProvisioningPlan* = object
+    ## The fully-resolved Windows provisioning plan: the ordered ensure
+    ## steps plus the env activation. Pure data — no side effects.
+    installRoot*: string
+    arch*: string
+    steps*: seq[ProvisionStep]
+    activation*: HostEnvActivation
+
+const
+  ## The Windows toolchain reprobuild ensures, in dependency order. ``nim``
+  ## + ``gcc`` come first (needed to build/run the native workspace tools),
+  ## then the per-workspace dev tools (``just``/``gh``/``python``), then the
+  ## ``repo`` launcher, then native ``gpg`` (used to verify the repo release
+  ## tag without msys2 gpg's path-mangling). Mirrors the pilot ``env.ps1``
+  ## ``$frameworkScripts`` order.
+  windowsProvisionTools* = [
+    "nim", "gcc", "just", "gh", "python", "repo", "gpg"]
+
+proc windowsToolSkipEnvVar(tool: string): string =
+  ## The ``WINDOWS_DIY_SKIP_<TOOL>`` operator toggle for a given tool —
+  ## parity with the pilot env.ps1 skip knobs.
+  "WINDOWS_DIY_SKIP_" & tool.toUpperAscii()
+
+proc windowsProvisioningPlan*(installRoot: string;
+                              arch = "x64"): WindowsProvisioningPlan =
+  ## PURE decision function: compute the ordered Windows toolchain ensure
+  ## steps + the PowerShell env activation for a host with toolchains under
+  ## ``installRoot`` (``%LOCALAPPDATA%\reprobuild\toolchains`` by default)
+  ## and CPU ``arch``. No process is launched; the returned plan is asserted
+  ## by the RA-19 test on any host and executed only under Windows by
+  ## ``runWorkspaceProvisionCommand``.
+  ##
+  ## Each step names a tool, an idempotent ``--version`` check (skip the
+  ## install when the wanted tool is already present), an ensure/install
+  ## command (the reprobuild equivalent of ``windows/ensure-<tool>.ps1``),
+  ## and the ``WINDOWS_DIY_SKIP_<TOOL>`` toggle. The activation dot-sources
+  ## the scaffolded ``env.ps1`` so the ensured toolchain lands on PATH.
+  result.installRoot = installRoot
+  result.arch = arch
+  for tool in windowsProvisionTools:
+    let toolDir = installRoot & "\\" & tool
+    result.steps.add(ProvisionStep(
+      tool: tool,
+      checkCommand: tool & " --version",
+      installCommand: "repro internal windows ensure-" & tool &
+        " --install-root " & q(toolDir) & " --arch " & arch,
+      skipEnvVar: windowsToolSkipEnvVar(tool)))
+  result.activation = HostEnvActivation(
+    targetOs: wtWindows,
+    shell: "powershell",
+    # Dot-source the scaffolded env.ps1 so the ensured toolchain (under
+    # installRoot) is put on $env:PATH for this PowerShell session.
+    activateCommand: ". " & q(installRoot & "\\env.ps1"))
+
+proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
+  ## ``repro workspace provision`` — ensure the host toolchain and activate
+  ## the workspace env. On Linux/macOS this is a no-op (the Nix devShell /
+  ## ``.envrc`` already provides the toolchain) and we say so. On Windows it
+  ## walks ``windowsProvisioningPlan`` and runs each non-skipped ensure step
+  ## through PowerShell, then activates the env.
+  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
+    echo "repro workspace provision [--install-root=PATH] [--arch=x64|arm64]"
+    return 0
+  var installRoot = ""
+  var arch = "x64"
+  for arg in args:
+    if arg.startsWith("--install-root="):
+      installRoot = arg["--install-root=".len .. ^1]
+    elif arg.startsWith("--arch="):
+      arch = arg["--arch=".len .. ^1]
+  when defined(windows):
+    if installRoot.len == 0:
+      let localAppData = getEnv("LOCALAPPDATA")
+      installRoot =
+        if localAppData.len > 0:
+          localAppData & "\\reprobuild\\toolchains"
+        else:
+          getHomeDir() / "reprobuild-toolchains"
+    let plan = windowsProvisioningPlan(installRoot, arch)
+    for step in plan.steps:
+      if getEnv(step.skipEnvVar).len > 0:
+        stdout.writeLine("repro workspace provision: skipped " & step.tool &
+          " (" & step.skipEnvVar & " set)")
+        continue
+      stdout.writeLine("repro workspace provision: ensuring " & step.tool)
+      # Run the idempotent check; install only when it fails. Best-effort
+      # per tool — a failed ensure is reported, not fatal to the others.
+      let checkRc = execShellCmd("powershell -NoProfile -Command " &
+        q(step.checkCommand))
+      if checkRc != 0:
+        discard execShellCmd("powershell -NoProfile -Command " &
+          q(step.installCommand))
+    stdout.writeLine("repro workspace provision: activating env via " &
+      plan.activation.activateCommand)
+    discard execShellCmd("powershell -NoProfile -Command " &
+      q(plan.activation.activateCommand))
+    return 0
+  else:
+    # POSIX hosts get their toolchain from the Nix devShell / scaffolded
+    # .envrc; explicit provisioning is a Windows-only concern.
+    stdout.writeLine("repro workspace provision: no-op on this platform " &
+      "(toolchain comes from the Nix devShell / .envrc; Windows hosts " &
+      "ensure the toolchain via windowsProvisioningPlan)")
+    return 0
+
 # ---- RA-6: `repro workspace projects [list|add]` ---------------------------
 
 proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
@@ -31720,7 +31928,7 @@ const reproTopLevelCommands = [
 
 const reproWorkspaceSubcommands = [
   "init", "sync", "pull", "lock", "status", "list", "start", "manifests",
-  "shared-clones", "forall", "bootstrap", "projects", "project",
+  "shared-clones", "forall", "bootstrap", "provision", "projects", "project",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -32754,6 +32962,20 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceBootstrapCommand(bsArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace bootstrap: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "provision":
+    # RA-19 — `repro workspace provision`. Ensure the host toolchain and
+    # activate the workspace env. No-op on POSIX (the Nix devShell / .envrc
+    # already provides the toolchain); on Windows it walks
+    # `windowsProvisioningPlan` and runs each non-skipped ensure step.
+    try:
+      let pvArgs =
+        if args.len > 2: args[2 .. ^1]
+        else: @[]
+      return runWorkspaceProvisionCommand(pvArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace provision: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "projects":
