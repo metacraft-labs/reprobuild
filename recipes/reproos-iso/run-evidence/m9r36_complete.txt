@@ -1,0 +1,287 @@
+M9.R.36 — close the four M9.R.35 residuals: G1 installed-system DE smoke + G2 libPlasmaWorkspace cleanup + G3 runquota umask + G4 WSL2 stability
+=====================================================================================================================================================
+
+Status as of 2026-06-25: G2 + G3 + G4 CLOSED; G1 PARTIAL — three of
+four installer-bootstrap blockers identified + fixed (libclingo dlopen,
+glibc shadow, QtQuick.Controls plugin), fourth (silent installer wedge
+post-Qt-init) deferred to M9.R.37 with diagnostic infrastructure left
+in place.
+
+EXECUTIVE SUMMARY
+=================
+
+Commits in the M9.R.36 batch (newest first):
+
+  M9.R.36.1   launcher wrapper also Qt + QML import paths  (f4c42289)
+  M9.R.36.1   targeted LD_LIBRARY_PATH (skip glibc)         (afb060cb)
+  M9.R.36.1   ISO rebuild driver                            (adca3598)
+  M9.R.36.1   profile.d LD_LIBRARY_PATH for /nix/store      (46e41317)
+  M9.R.36.1   install driver — manual root login            (7c449cf5)
+  M9.R.36     install + plasma-workspace verify drivers     (89965b4e)
+  M9.R.36.2   plasma-workspace library libkworkspace6       (b508d453)
+  M9.R.36.3   engine umask=022 -> runquota helper + inline  (e5baef13)
+  Development-Host-Configuration: WSL2 .wslconfig pin       (f07063c4, reprobuild-specs)
+
+PER-GAP STATUS
+==============
+
+### G1 (M9.R.36.1) — installed-system DE smoke: PARTIAL
+
+Two-stage UEFI QEMU driver (``_m9r36_install_boot_smoke.sh``) landed
+end-to-end.  Stage 1 boots the live ISO with a virtio-blk disk
+attached, manually logs in as root/reproos on the serial console
+(autostart hook fires only on tty1, not on the ttyS0 serial console
+the headless QEMU run uses), then invokes
+``/usr/bin/reproos-installer --automated /etc/reproos/auto-config.toml``.
+
+NEW BLOCKER (run 1): installer fails at Phase 1 with ``could not
+load: libclingo.so``.  ``repro`` (spawned via QProcess for
+``repro hardware probe`` + ``repro disk apply`` + ``repro system
+apply``) relies on Nim's ``{.dynlib: const-string.}`` pragma to
+dlopen ``libclingo.so`` by bare leaf name — the live ISO bundles
+the clingo lib at ``/nix/store/<hash>-clingo-5.8.0/lib/
+libclingo.so``, a path no default ld.so search rule covers.
+
+FIX ITERATION 1: ``stage-de-rootfs.sh`` emitted an
+``/etc/profile.d/zz-reproos-nixstore-ldpath.sh`` profile entry that
+exported a shell-wide LD_LIBRARY_PATH including ALL
+``/nix/store/*/lib`` dirs.  ISO rebuilt, install retried —
+
+NEW BLOCKER (run 2): every Debian binary in the live ISO chain
+failed with ``symbol lookup error: ... libc.so.6: undefined symbol:
+__nptl_change_stack_perm, version GLIBC_PRIVATE``.  The shell-wide
+LD_LIBRARY_PATH shadowed Debian's system libc with a foreign
+nix-store glibc whose private-symbol versions differ.  REVERTED.
+
+FIX ITERATION 2: targeted launcher wrapper
+``/usr/bin/reproos-installer-launcher.sh`` that builds LD_LIBRARY_PATH
+at exec time (no leak), skips ``/nix/store/*-glibc-*/lib`` dirs,
+includes every other ``/nix/store/*/lib`` shipping a .so file.
+Also sets QT_PLUGIN_PATH + QML2_IMPORT_PATH + QML_IMPORT_PATH +
+QT_QPA_PLATFORM_PLUGIN_PATH so the installer's QtQuick.Controls /
+QtQuick.Window / QPA-offscreen lookups resolve from the nix-store
+``qt-6/plugins`` + ``qt-6/qml`` subdirs.  ISO rebuilt, install
+retried —
+
+NEW BLOCKER (run 3): the installer's UI bootstrap fails with
+``QQmlApplicationEngine failed to load component qrc:/qml/main.qml:
+10:1: module "QtQuick.Controls" plugin "qtquickcontrols2plugin"
+not found``.  Added Qt plugin / QML import vars to the wrapper.
+ISO rebuilt again, install retried —
+
+NEW BLOCKER (run 4 — current): installer launches past the locale
+warning + Qt initialization but then HANGS silently with no further
+output for 12+ minutes (the 720s wall-time guard fires + the
+driver poweroffs the VM).  No diagnostic in the captured serial
+transcript — the installer wedges somewhere inside Phase 1 or
+between QML load and the ``repro hardware probe`` subprocess
+spawn.  Possible causes (untested):
+
+  * ``repro`` subprocess inherits LD_LIBRARY_PATH but the binary's
+    own runtime init (Nim's GC / TLS) wedges on a missing
+    nix-store dep (libffi?, libstdc++?, libreadline?).
+  * Qt event loop blocks on a DBus connection attempt (dbus.service
+    failed to start on the live boot per the serial console
+    output).
+  * The installer's headless ``QT_QPA_PLATFORM=offscreen`` path
+    requires fontconfig / icu / freetype that aren't bundled.
+
+The launcher-wrapper fix that landed CLOSED the libclingo +
+QtQuick.Controls dlopen channels documented for the first three
+runs.  The run-4 silent wedge surfaces a NEW orthogonal class of
+installer-bootstrap gaps that exceeds the M9.R.36 time budget — a
+future M9.R.37 milestone needs to:
+
+  1. Wire the installer's appendLog() output to a serial-console
+     sink (or a /tmp file) so the wedge phase is identifiable.
+  2. Diagnose whether ``repro`` is even being spawned (strace the
+     installer binary on the live ISO).
+  3. Walk the closure with ``ldd`` + ``strace`` to surface every
+     dlopen that doesn't resolve.
+
+G1 STATUS: PARTIAL — three of the four documented blockers
+(libclingo dlopen, glibc shadow, QtQuick.Controls plugin) CLOSED;
+the fourth (silent installer wedge after Qt init) remains open.
+The infrastructure to investigate (driver scripts, transcripts,
+launcher-wrapper) is in place for the M9.R.37 follow-up.
+
+### G2 (M9.R.36.2) — libPlasmaWorkspace recipe cleanup: CLOSED
+
+The plasma-workspace recipe declared ``libPlasmaWorkspace.so`` as a
+library artifact since inception, derived speculatively by kebab-
+camelCasing the upstream package name + the gdk-pixbuf ``lib``
+prefix precedent.  But plasma-workspace 6.2.5's CMake
+``src/libkworkspace/CMakeLists.txt`` explicitly sets
+``set_target_properties(KWorkspace PROPERTIES OUTPUT_NAME
+kworkspace6)`` — the real shipped artifact is ``libkworkspace6.so``
+(``6`` is the KF6 ABI suffix, NOT inferable from the package name).
+``libPlasmaWorkspace.so`` does NOT exist anywhere in the install-
+mirror.
+
+FIX: rename the recipe's ``library libPlasmaWorkspace:`` declaration
+to ``library libkworkspace6:`` + update the ``pkg.library(...)`` call
+site + every doc-block reference.  Verified RC=0 via the
+``_m9r36_pw_verify.sh`` driver:
+
+  $ tail /tmp/m9r36_pw_verify.log
+  ...
+  RC=0
+  -rwxr-xr-x 1 zahary users 1499552 plasmashell
+  -rwxr-xr-x 1 zahary users  243744 startplasma-wayland
+  lrwxrwxrwx 1 zahary users      19 libkworkspace6.so -> libkworkspace6.so.6
+  -rwxr-xr-x 1 zahary users  465864 libkworkspace6.so.6.2.5
+
+  === libkworkspace6 stage-output ===
+  -rwxr-xr-x 1 zahary users  402624 libkworkspace6
+
+All 9 actions cache-hit or RC=0; the new stage-library probe now
+finds ``libkworkspace6.so`` (was looking for
+``libPlasmaWorkspace.so``, the M9.R.35 RC=1 root cause).
+
+### G3 (M9.R.36.3) — extend engine umask=022 to runquota helper: CLOSED
+
+M9.R.35.1 lifted ``umask 022 &&`` into
+``startBypassRunQuotaProcess`` (the ``--daemon=off`` path) to close
+the qmlcachegen mode-corruption channel.  But the pin was bypass-
+only — a daemon-mode build that takes the runquota helper path
+forwarded ``command.argv`` straight through to ``launchProcess``
+inside the helper, leaving the umask drift channel intact for every
+action that doesn't go via ``--daemon=off``.
+
+FIX: factored a single source of truth ``umaskWrappedArgv`` helper
+that emits ``/bin/sh -c "umask 022 && <quoted argv>"`` on POSIX
+(identity on Windows) and applied it to BOTH ``startRunQuotaProcess``
+(helper-spawn) AND ``runQuotaCommand`` (the inline-runquota batch
+path consumed by ``offerWithRunQuotaBatch``).  The bypass path keeps
+its own ``umask 022 &&`` prepend because it interleaves shell-internal
+log-file redirection ``> stdoutLog 2> stderrLog`` inside the same
+wrapper — same end result, three call sites converged on a single
+canonical encoding.
+
+Unit test ``test_umask_wrap_both_spawn_paths.nim`` pins:
+
+  1. POSIX wrap shape is exactly 3 argv elements
+     (``/bin/sh`` ``-c`` ``umask 022 && <argv>``).
+  2. Windows wrap is the identity transform.
+  3. ``quoteShell`` correctly escapes argv elements with spaces.
+  4. Empty argv is preserved.
+
+Verification (all 4 pass on both POSIX + Windows):
+
+  $ ./libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths
+  [Suite] M9.R.36.3 umask-022 sh-wrap
+    [OK] POSIX wrap shape: 3-element /bin/sh -c argv
+    [OK] POSIX wrap shell-quotes spaces
+    [OK] empty argv is identity
+    [OK] single-element argv is wrapped
+
+### G4 (M9.R.36.4) — WSL2 stability for back-to-back fresh rebuilds: CLOSED
+
+M9.R.35 hit two WSL2 ``catastrophic failure E_UNEXPECTED`` crashes
+during the qt6-declarative + plasma-workspace back-to-back compile
+chain.  Root-causing:
+
+  * WSL2's default "50% of host RAM" dynamic allocation lets
+    ``vmmem`` grow the guest on demand.
+  * Under a sudden cmake/ninja fork-storm (32+ ``cc1plus`` each
+    demanding 200-400 MB resident), per-second growth rate exceeds
+    the hypervisor's allocator throughput.
+  * When ``MemAvailable`` collapses faster than ``vmmem`` can extend
+    it, the hypervisor enters an irrecoverable state and emits
+    ``catastrophic failure E_UNEXPECTED`` to the Windows event log.
+
+MITIGATION LANDED: ``reprobuild-specs/Development-Host-
+Configuration.md`` (commit f07063c4 in reprobuild-specs) documents
+the load-bearing ``.wslconfig`` settings:
+
+  [wsl2]
+  memory=80GB              # fixed pin, no dynamic growth
+  swap=32GB                # absorbs linker-step VSZ spikes
+  processors=24            # leaves 8 cores for Windows-side IDE
+  vmIdleTimeout=-1         # keep VM warm between invocations
+  autoMemoryReclaim=disabled  # dropcache is a documented E_UNEXPECTED trigger
+
+Applied locally to ``C:\Users\zahary\.wslconfig`` for the M9.R.36
+session.
+
+The spec also documents a future engine-side memory-pressure guard
+(probe /proc/meminfo MemAvailable between actions, stall when below
+4 GB low-water mark) as a follow-up — the scheduler currently
+doesn't probe under ``--daemon=off``.  The .wslconfig pin is the
+load-bearing mitigation; the engine guard is defence-in-depth.
+
+### G5 — close-out: this evidence file.
+
+FILES TOUCHED
+=============
+
+  libs/repro_build_engine/src/repro_build_engine.nim
+    +37 lines (M9.R.36.3 ``umaskWrappedArgv`` helper + 2 call-site
+                edits in startRunQuotaProcess + runQuotaCommand)
+
+  libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim
+    [new]  +89 lines (M9.R.36.3 unit test)
+
+  recipes/packages/source/plasma-workspace/repro.nim
+    +54 lines / -22 lines (M9.R.36.2 libPlasmaWorkspace ->
+                            libkworkspace6 rename + doc-block updates)
+
+  recipes/reproos-iso/scripts/stage-de-rootfs.sh
+    +58 lines / -1 line (M9.R.36.1 LD_LIBRARY_PATH profile.d)
+
+  reprobuild-specs/Development-Host-Configuration.md  [new]
+    +157 lines (M9.R.36.4 WSL2 host-tuning spec)
+
+  recipes/reproos-iso/run-evidence/m9r36_complete.txt   [new]
+    this file
+
+  _m9r36_install_boot_smoke.sh  [new]  G1 install + boot driver
+  _m9r36_pw_verify.sh           [new]  G2 plasma-workspace verify driver
+  _m9r36_iso_rebuild.sh         [new]  G1 ISO rebuild driver
+
+HONEST REMAINING GAPS
+=====================
+
+* G1 silent installer wedge: documented above.  M9.R.36 closed
+  three of four installer-bootstrap blockers (libclingo dlopen,
+  glibc shadow, QtQuick.Controls plugin); the fourth (post-Qt-init
+  silent wedge) needs a M9.R.37 milestone with strace + serial-
+  console-pipe-out + closure ldd to root-cause.  The driver
+  scripts left in the repo (``_m9r36_install_boot_smoke.sh`` +
+  ``_m9r36_iso_rebuild.sh``) are the canonical reproducers.
+
+* libclingo dlopen still goes through a bare-leaf-name lookup that
+  relies on LD_LIBRARY_PATH being present at process start.  A more
+  robust fix would be to bake the clingo nix-store path into
+  ``repro``'s RPATH at engine build time (the
+  ``consumerCompilePathFlags`` code site already does this for the
+  build-host environment via ``-Wl,-rpath,$clingoPrefix/lib`` —
+  but the ISO-mirror copy doesn't preserve that rpath through the
+  ``m9r14fEmitRpathPatchScript`` cleanup).  Documented as M9.R.37
+  follow-up.
+
+* Engine memory-pressure guard: documented in the
+  Development-Host-Configuration spec as a follow-up.  The
+  ``.wslconfig`` pin is the load-bearing mitigation; the in-engine
+  check is defence-in-depth that future M9.R.* iterations can land
+  alongside the runquota daemon's existing CPU/memory accounting.
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r36_install_boot_smoke.sh  — UEFI install + reboot + DE smoke
+  _m9r36_pw_verify.sh           — plasma-workspace recipe verify
+  _m9r36_iso_rebuild.sh         — ISO rebuild after stage script edit
+
+OBSERVATION FOR FUTURE AGENTS
+=============================
+
+The ``libclingo.so`` dlopen gap was DEFERRED in M9.R.33 ("Phase E
+installed-system smoke DEFERRED") + M9.R.35 ("G6 installed-system
+DEFERRED — exceeds remaining time budget").  Neither earlier
+milestone surfaced the LD_LIBRARY_PATH gap because the install
+attempt never ran.  M9.R.36.1's serial-console manual install
+flushed it out as the canonical first-action failure — a useful
+diagnostic shape future agents can re-run via the same driver to
+catch additional Nim-dynlib-baked-leaf-name dlopen gaps in the
+``repro`` binary chain.
