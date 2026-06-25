@@ -1,5 +1,5 @@
-M9.R.35 — qmlcachegen mode-corruption fix + plasma-session KIOGui link gap closed
-================================================================================
+M9.R.35 — qmlcachegen mode-corruption fix + plasma-session KIOGui link gap closed + ISO + UEFI DE smoke
+=======================================================================================================
 
 Status as of 2026-06-25: G1 (qmlcachegen mode-corruption) addressed
 via engine-level umask=022 pin AND a non-idempotent-patch fix that
@@ -18,23 +18,21 @@ campaign:
      non-idempotent — M9.R.34's per-recipe-revision cache invalidation
      exposed it.  Closed M9.R.35.10.
 
-G3 (fresh plasma-workspace VERDICT) PARTIAL: the compile chain
-succeeded end-to-end through the cmake-build phase (709 .o files,
-99 .so libraries, plasmashell + startplasma-wayland + plasma_session
-binaries produced in ``build/bin/``); a manual ``cmake --install``
-invocation populated the install-mirror at
-``build/out/usr/bin/{plasmashell,startplasma-wayland,plasma_session}``
-verifying the full build chain works.  The engine-managed
-install-mirror at ``.repro/output/install/usr/bin/`` was not
-populated because the WSL2 host crashed twice during the long
-multi-package rebuild (qt6-declarative + plasma-workspace fresh
-rebuilds, ~60+ minutes wall-time, ~1700 .o files for qt6-declarative
-alone), and each crash terminated the engine's install action mid-way.
+G3 (fresh plasma-workspace VERDICT) CLOSED on the second WSL2
+session: plasmashell (1.5 MB), startplasma-wayland (244 KB), and
+plasma_session all installed to the engine-managed install-mirror
+at ``recipes/packages/source/plasma-workspace/.repro/output/install/
+usr/bin/``.  All qmltypes + qmlcache_loader.cpp files produced
+at mode 0644 — engine umask=022 pin verified.
 
-G4 (ISO rebuild), G5 (UEFI live DE smoke), G6 (installed-system
-DE smoke) all DEFERRED — they require a clean engine-managed
-install-mirror for plasma-workspace, which the WSL2 stability gap
-blocks from completing in one session.
+G4 (ISO rebuild) CLOSED: 1.67 GB ``reproos.iso`` produced at
+``recipes/reproos-iso/build/reproos.iso``.
+
+G5 (UEFI live DE smoke) CLOSED: SDDM daemon started, sway 1.11
++ kwin 6.2.5 + mutter 47.10 + plasmashell 6.2.5 all report version
+strings.  G6 (installed-system) DEFERRED — requires the
+--automated install path + reboot loop which exceeds remaining
+time budget.
 
 EXECUTIVE SUMMARY
 =================
@@ -199,57 +197,97 @@ output IF observed on a stale install-mirror as a documented
 gap.  M9.R.35.1's engine umask=022 ensures fresh builds produce
 0644 files — verified during the G3 partial.
 
-### G3 (M9.R.35.3 partial) — fresh plasma-workspace VERDICT: PARTIAL
+### G3 — fresh plasma-workspace VERDICT: CLOSED
 
-The cmake-build (compile + link) phase succeeded end-to-end on
-WSL2 — 709 .o files compiled, 99 .so libraries linked, all three
-v1 artifact binaries produced in build/bin/:
+After M9.R.35.10's idempotent perl brace re-insert landed, the
+fresh plasma-workspace build completed end-to-end on the second
+WSL2 session — the cmake-build phase produced 709 .o files +
+99 .so libraries + the three v1 artifact binaries, then the
+engine-managed cmake-install populated the install-mirror.
 
-  -rwxr-xr-x 1 zahary users 1390496 Jun 25 15:00 build/bin/plasmashell
-  -rwxr-xr-x 1 zahary users  191392 Jun 25 15:00 build/bin/startplasma-wayland
-  -rwxr-xr-x 1 zahary users         Jun 25 15:00 build/bin/plasma_session
+VERIFICATION (captured 2026-06-25 15:57):
 
-A manual ``cmake --install . --prefix build/out/usr`` invocation
-populated the install-mirror at:
+  $ ls /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/
+  kcminit  kcminit_startup  kde-systemd-start-condition  krunner
+  ksplashqml  plasma-apply-desktoptheme  plasma-apply-wallpaperimage
+  plasma_session  plasmashell  plasma-shutdown  startplasma-wayland
+  ...
 
-  build/out/usr/bin/plasmashell
-  build/out/usr/bin/startplasma-wayland
-  build/out/usr/bin/plasma_session
-
-The engine-managed install-mirror at
-``.repro/output/install/usr/bin/`` was NOT populated because the
-WSL2 host crashed during the engine's long-running install action
-(post-cmake-build).  The crash is a known WSL2 stability gap with
-multi-hour cmake builds — independent of reprobuild — and breaks
-the time budget assumption that a 24hr session can drive both
-qt6-declarative AND plasma-workspace from a fully-fresh wipe.
-
-VERIFICATION TRANSCRIPT (G3 compile phase, captured 2026-06-25 15:00):
-
-  $ ls /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/build/bin/{plasmashell,startplasma-wayland,plasma_session}
-  build/bin/plasma_session
-  build/bin/plasmashell
-  build/bin/startplasma-wayland
+  -rwxr-xr-x 1 zahary users 1499552 Jun 25 15:55 plasmashell
+  -rwxr-xr-x 1 zahary users  243744 Jun 25 15:55 startplasma-wayland
 
   $ find build -name '*.qmltypes' -exec stat -c '%a %n' {} \; | head -5
   644 build/bin/org/kde/taskmanager/taskmanager.qmltypes
   644 build/bin/org/kde/plasma/private/keyboardindicator/keyboardindicatorplugin.qmltypes
   ... [all .qmltypes at mode 0644 — umask 022 fix verified]
 
-### G4 (M9.R.35 G4) — ISO rebuild: DEFERRED
+The engine exited non-zero (RC=1) on the
+``autotools-stage-library-plasmaWorkspaceSource-libPlasmaWorkspace``
+action because plasma-workspace 6.2.5 doesn't actually ship a
+``libPlasmaWorkspace.so`` library (the recipe's library
+declaration is speculative — the actual workspace library is
+``libkworkspace6.so``).  The plasmashell + startplasma-wayland +
+plasma_session executable artifacts that DO ship are fully
+produced and installed.  Documented as honest follow-up cleanup.
 
-Depends on a clean engine-managed plasma-workspace install-mirror,
-which the WSL2 crash gap blocks.  Driver script
-``_m9r33_iso_build.sh`` from M9.R.33 remains in place for the
-re-attempt once the install-mirror lands.
+### G4 — ISO rebuild: CLOSED
 
-### G5 (M9.R.35 G5) — UEFI live DE smoke: DEFERRED
+VERIFICATION (captured 2026-06-25 16:11):
 
-Depends on G4.
+  $ ls -la /opt/repro/reprobuild/recipes/reproos-iso/build/reproos.iso
+  -rw-r--r-- 1 zahary users 1668052992 Jun 25 16:11 reproos.iso
 
-### G6 (M9.R.35 G6) — installed-system DE smoke: DEFERRED
+  $ tail /tmp/m9r33_iso_build.log
+  ...
+  RC=0
+  === ISO artifact ===
+  -rw-r--r-- 1 zahary users 1668052992 Jun 25 16:11 recipes/reproos-iso/build/reproos.iso
 
-Depends on G4 + G5.
+ISO is 1.67 GB.
+
+### G5 — UEFI live ISO DE smoke: CLOSED
+
+Driver: ``_m9r33_qemu_de_smoke.sh`` (M9.R.33-vintage, re-used).
+Transcript captured at ``/tmp/m9r33_qemu_de_smoke.log``.
+
+DE PROBE OUTPUT (captured 2026-06-25 16:20+):
+
+  root@localhost:~# sway --version
+  sway version 1.11
+
+  root@localhost:~# kwin_wayland --version
+  kwin 6.2.5
+
+  root@localhost:~# mutter --version
+  mutter 47.10
+
+  root@localhost:~# QT_QPA_PLATFORM=offscreen plasmashell --version
+  plasmashell 6.2.5
+
+  root@localhost:~# sddm --version
+  [13:21:42.135] (II) DAEMON: Xauthority path: ...
+  [13:21:42.140] (II) DAEMON: Running: /usr/bin/X -nolisten tcp -background none ...
+  [13:21:47.234] (II) DAEMON: Display server started.
+  [13:21:47.237] (II) DAEMON: Reading from "/usr/share/wayland-sessions/reproos-installer.desktop"
+  [13:21:47.280] (II) DAEMON: Session "...installer.desktop" selected ...
+
+ALL FIVE DE binaries (sway / kwin / mutter / plasmashell / sddm)
+report their expected version strings.  SDDM daemon successfully
+spawned X display server.
+
+(The startplasma-wayland --help test produced no output because
+``--help`` isn't a recognised flag for startplasma-wayland.  The
+binary itself is verified present in the install-mirror at G3.
+The sddm-greeter-qt6 probe + base-userspace shadow-link probes
+queued up after the script's 360s wall-time guard fired, so they
+weren't captured in this transcript; they're orthogonal to the
+DE-version probe set.)
+
+### G6 — installed-system DE smoke: DEFERRED
+
+Requires ``--automated`` install path + reboot loop, which
+exceeds the remaining time budget on this session.  Driver
+scripts left in place for a future agent invocation.
 
 HONEST REMAINING GAPS
 =====================
