@@ -20,8 +20,16 @@
 ## All operations go through ``./disk_tools.nim`` so the apply path is
 ## uniformly dry-run-able (``REPRO_DISK_DRY_RUN=1``) and uniformly
 ## errors via ``DiskToolError``.
+##
+## M9.R.42.1: when ``REPRO_DISK_DIAG=<path>`` is set, a kernel-state
+## snapshot is appended to ``<path>`` around each sgdisk + partprobe
+## call so the udev/devtmpfs/sgdisk race the M9.R.41 close-out
+## documented can be characterised end-to-end on the live ISO. The
+## snapshot includes ``/proc/partitions``, ``ls /dev/<diskBase>*``,
+## ``ls /sys/class/block``, and an ``udevadm settle --timeout=10`` exit
+## code.
 
-import std/[algorithm, options, os, osproc, sequtils, strutils, tables]
+import std/[algorithm, options, os, osproc, sequtils, strutils, tables, times]
 
 import ./types
 import ./disk_tools
@@ -60,6 +68,82 @@ proc newApplyContext*(layout: DiskLayout;
 
 proc recordOperation(ctx: ApplyContext; ex: ExecResult) =
   ctx.result.operations.add ex
+
+# ---------------------------------------------------------------------
+# M9.R.42.1 — kernel-state diagnostic hook around sgdisk + partprobe.
+# ---------------------------------------------------------------------
+
+proc diagPath*(): string {.inline.} =
+  ## Returns the value of ``REPRO_DISK_DIAG`` or an empty string when
+  ## diagnostics are off. The env-var is read on every call so the
+  ## installer / test harness can flip it at runtime without restarting.
+  getEnv("REPRO_DISK_DIAG")
+
+proc diagAppend(text: string) =
+  ## Append ``text`` to the diag file. Best-effort: if writing fails
+  ## (e.g. the path is unwritable) we silently swallow — the diag
+  ## channel must never crash the apply driver, only inform.
+  let p = diagPath()
+  if p.len == 0: return
+  try:
+    let f = open(p, fmAppend)
+    defer: f.close()
+    f.write(text)
+  except CatchableError:
+    discard
+
+proc diagCmd(label, cmd: string): string =
+  ## Run ``cmd`` via ``execCmdEx``, capture stdout+stderr+exit, and
+  ## render a labelled block for the diag file. Never raises.
+  result = "  $ " & cmd & "\n"
+  try:
+    let pair = execCmdEx(cmd)
+    result.add "    [exit=" & $pair.exitCode & "]\n"
+    if pair.output.len > 0:
+      var lineCount = 0
+      for ln in pair.output.splitLines():
+        if lineCount >= 40:
+          result.add "    ... (truncated)\n"
+          break
+        result.add "    " & ln & "\n"
+        inc lineCount
+  except CatchableError as e:
+    result.add "    [exec-failed: " & e.msg & "]\n"
+
+proc snapshotKernelState*(label, device: string): string =
+  ## Render a labelled snapshot of /proc/partitions, /sys/class/block,
+  ## /dev/<diskBase>*, and the most recent udev/kobject events visible
+  ## to userspace. Returns the rendered block as a string. Called
+  ## twice around each sgdisk invocation (before + after) when
+  ## ``REPRO_DISK_DIAG`` is set so the time-series of kernel state can
+  ## be inspected post-mortem.
+  let ts = $now()
+  result = "\n=== M9.R.42.1 SNAPSHOT label=" & label & " device=" &
+    device & " ts=" & ts & " ===\n"
+  let base = extractFilename(device)
+  result.add diagCmd("cat /proc/partitions",
+    "cat /proc/partitions 2>&1")
+  result.add diagCmd("ls -la /dev/" & base & "*",
+    "ls -la /dev/" & base & "* 2>&1")
+  result.add diagCmd("ls /sys/class/block",
+    "ls /sys/class/block 2>&1")
+  result.add diagCmd("ls /sys/block/" & base & "/",
+    "ls /sys/block/" & base & "/ 2>&1")
+  result.add diagCmd("cat /sys/block/" & base & "/size",
+    "cat /sys/block/" & base & "/size 2>&1")
+  result.add diagCmd("ls /dev/disk/by-partuuid",
+    "ls /dev/disk/by-partuuid 2>&1")
+  # Force udev to drain its queue and report how long it took. If udev
+  # is the source of the /dev/<base>1 absence this exit will be non-
+  # zero or take a long time.
+  result.add diagCmd("udevadm settle --timeout=10 + status",
+    "udevadm settle --timeout=10 2>&1; echo settle-exit=$?")
+
+proc diagSnapshot*(label, device: string) =
+  ## Emit a labelled snapshot to ``REPRO_DISK_DIAG`` (if set). No-op
+  ## when diag is off — the apply-driver hot path stays clean.
+  if diagPath().len == 0: return
+  diagAppend(snapshotKernelState(label, device))
 
 # Forward declarations for the content-walker so applyDiskLayout can
 # call applyContentNode and applyContentNode can call its variants.
@@ -124,6 +208,7 @@ proc applyDiskLayout*(layout: DiskLayout;
     # (which sgdisk supports via its MBR mode).
     for diskName, d in ctx.layout.disks:
       let tableKind = if d.`type`.len == 0: "gpt" else: d.`type`
+      diagSnapshot("before-table-" & diskName, d.device)
       if tableKind == "gpt":
         # `sgdisk -o` zaps any existing GPT and creates a fresh empty
         # GPT in one operation, which avoids the parted-then-sgdisk
@@ -133,6 +218,7 @@ proc applyDiskLayout*(layout: DiskLayout;
       else:
         # MBR path: parted is the right tool for the label.
         ctx.recordOperation(partedMklabel(d.device, tableKind))
+      diagSnapshot("after-table-" & diskName, d.device)
       var num = 1
       for pName, p in d.partitions:
         let gptType = gptTypeCodeFor(p.`type`)
@@ -148,16 +234,20 @@ proc applyDiskLayout*(layout: DiskLayout;
           # aligned sector); subsequent partitions start at "0"
           # which is sgdisk's "first available sector".
           "0"
+        diagSnapshot("before-sgdisk-n-" & pName, d.device)
         ctx.recordOperation(sgdiskCreatePartition(d.device, num,
           startArg, sizeArg, gptType, pName))
+        diagSnapshot("after-sgdisk-n-" & pName, d.device)
         if p.bootable:
           ctx.recordOperation(partedSetBootable(d.device, num, true))
         inc num
       # After writing partitions, ask the kernel to re-read the table
       # so /dev/<disk>pN show up for the mkfs / cryptsetup steps.
       if findExe("partprobe").len > 0:
+        diagSnapshot("before-partprobe-" & diskName, d.device)
         ctx.recordOperation(execTool("partprobe",
           @["partprobe", d.device]))
+        diagSnapshot("after-partprobe-" & diskName, d.device)
 
     # Step 5 + 6 + 7 + 8: walk each partition's content recursively.
     for diskName, d in ctx.layout.disks:
