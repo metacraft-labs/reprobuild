@@ -332,6 +332,62 @@ proc writeHostname(opts: InstallRootOptions) =
   except CatchableError:
     discard  # non-fatal; the rsync'd /etc/hostname is a good fallback.
 
+proc copyLiveKernelAndInitrd(opts: InstallRootOptions;
+                             outcome: var InstallRootOutcome) =
+  ## The live ISO's vmlinuz + initrd.img live OUTSIDE the live root
+  ## overlay (they're on the ISO medium, mounted at /run/live/medium
+  ## by the M9.R.18 initramfs).  rsync from / cannot reach them under
+  ## --one-file-system, so we copy them explicitly into
+  ## <target>/boot/{vmlinuz,initrd.img}.
+  ##
+  ## Fallback list mirrors what runMinimalBootstrap (M9.R.24-era,
+  ## now deleted) probed: ``/run/live/medium/{live/,}vmlinuz`` first
+  ## (Debian-live layout), then ``/vmlinuz`` (Debian non-live layout
+  ## where the kernel is at the rootfs root via the kernel package),
+  ## then a bare ``/run/live/medium/vmlinuz``.
+  if opts.dryRun: return
+  let bootDir = opts.target / "boot"
+  createDir(bootDir)
+  let kernelCandidates = [
+    "/run/live/medium/live/vmlinuz",
+    "/vmlinuz",
+    "/run/live/medium/vmlinuz",
+    "/boot/vmlinuz",
+  ]
+  let initrdCandidates = [
+    "/run/live/medium/live/initrd.img",
+    "/initrd.img",
+    "/run/live/medium/initrd.img",
+    "/boot/initrd.img",
+  ]
+  var kernelFound = false
+  for src in kernelCandidates:
+    if fileExists(src):
+      try:
+        copyFile(src, bootDir / "vmlinuz")
+        kernelFound = true
+        break
+      except CatchableError:
+        discard
+  var initrdFound = false
+  for src in initrdCandidates:
+    if fileExists(src):
+      try:
+        copyFile(src, bootDir / "initrd.img")
+        initrdFound = true
+        break
+      except CatchableError:
+        discard
+  if not kernelFound:
+    stderr.writeLine("repro infra install-root: WARNING: no vmlinuz " &
+      "found in any candidate path; the installed system will not " &
+      "boot.  Probed: " & kernelCandidates.join(", "))
+  if not initrdFound:
+    stderr.writeLine("repro infra install-root: WARNING: no initrd.img " &
+      "found in any candidate path; the installed system will not " &
+      "boot.  Probed: " & initrdCandidates.join(", "))
+  discard outcome
+
 proc runGrubInstall(opts: InstallRootOptions;
                     outcome: var InstallRootOutcome) =
   if opts.skipGrub:
@@ -457,7 +513,12 @@ proc runInstallRoot*(args: seq[string];
   # Phase 4: hostname (non-fatal; the rsync'd copy is a fallback).
   writeHostname(opts)
 
-  # Phase 5: GRUB install + cfg.
+  # Phase 5: copy live kernel + initrd into <target>/boot/.
+  # They live OUTSIDE the live overlay (on the ISO medium) so rsync
+  # with --one-file-system cannot reach them.
+  copyLiveKernelAndInitrd(opts, result)
+
+  # Phase 6: GRUB install + cfg.
   runGrubInstall(opts, result)
   if result.failure: return
   writeGrubCfg(layout, opts, result)
