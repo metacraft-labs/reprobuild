@@ -10340,6 +10340,85 @@ proc committedLockPath*(projectDir: string): string =
 proc solverInputsPath*(projectDir: string): string =
   projectDir / SolverInputsFileName
 
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-2 — committed-lock-derived workspace
+# resolution.
+#
+# When a workspace has NO ``.repo/manifests`` resolved checkout and NO
+# compositional ``.repo/workspace.toml``, but DOES carry the committed
+# ``repro.lock`` (the MO-1 solved-graph lock), the participating repo set +
+# locked revisions are derived from REPO-LOCAL STATE instead of requiring a
+# manifest repo. This is the fallback that makes ``sync`` / ``pull`` /
+# ``check`` / the pre-push gate OPERATE on an all-public, single-repo
+# workspace with no manifest repo, rather than raising "no manifest".
+#
+# Honest boundary: MO-1's ``repro.lock`` pins the SOLVED PACKAGE GRAPH
+# (versions / options / source identities), NOT per-repo workspace SHAs. So
+# the locked revision here comes from the repo's own ``HEAD`` (repo-local
+# state), and the participating set is the workspace repo ITSELF. Develop-
+# mode siblings are not yet folded into this committed-lock-derived set —
+# that participation model lands with a later milestone; until then the set
+# is exactly the one repo, which is the all-public single-repo workspace the
+# milestone targets.
+# ---------------------------------------------------------------------------
+
+proc committedLockRepoFacts(repoRoot: string):
+    tuple[headSha, branch, originUrl: string] =
+  ## Read the repo-local facts the committed-lock-derived model needs: the
+  ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
+  ## the ``origin`` fetch URL (empty when no ``origin`` remote). Best-effort:
+  ## a missing ``git`` or a non-git directory yields empty fields (sync's
+  ## plan and the gate's own per-repo probes still work without them).
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    return ("", "", "")
+  proc run(extra: openArray[string]): string =
+    var cmd = quoteShell(gitBin)
+    for a in extra:
+      cmd.add(" ")
+      cmd.add(quoteShell(a))
+    let r = execCmdEx(cmd, options = {poUsePath})
+    if r.exitCode == 0: r.output.strip() else: ""
+  result.headSha = run(["-C", repoRoot, "rev-parse", "HEAD"])
+  result.branch = run(["-C", repoRoot, "symbolic-ref", "--short", "-q", "HEAD"])
+  result.originUrl = run(["-C", repoRoot, "remote", "get-url", "origin"])
+
+proc committedLockDerivedProject(workspaceRoot: string):
+    Option[ResolvedProject] =
+  ## MO-2 — derive a single-repo ``ResolvedProject`` for a committed-lock-
+  ## only workspace. Returns ``none`` when ``workspaceRoot`` carries no
+  ## committed ``repro.lock`` (so the caller keeps its existing manifest-
+  ## required behavior). The derived project's lone repo is the workspace
+  ## repo itself (``path = "."``), with its revision pinned to the repo's
+  ## own ``HEAD`` and its fetch URL taken from ``origin`` when present.
+  if not hasCommittedLockWorkspaceMarker(workspaceRoot):
+    return none(ResolvedProject)
+  let root = absolutePath(workspaceRoot)
+  let facts = committedLockRepoFacts(root)
+  let bareName = extractFilename(root.strip(
+    leading = false, trailing = true, chars = {'/', '\\'}))
+  let repoName = if bareName.len > 0: bareName else: "workspace"
+  let trunk = if facts.branch.len > 0: facts.branch else: "HEAD"
+  let revision =
+    if facts.headSha.len > 0: facts.headSha
+    elif facts.branch.len > 0: facts.branch
+    else: "HEAD"
+  let repo = ResolvedRepo(
+    name: repoName,
+    path: ".",
+    remoteName: "origin",
+    fetchUrl: facts.originUrl,
+    revision: revision,
+    vcs: defaultRepoVcs,
+    stability: defaultRepoStability,
+    visibility: wvPublic)
+  some(ResolvedProject(
+    projectName: repoName,
+    defaultRevision: revision,
+    trunk: trunk,
+    repos: @[repo],
+    projectFile: committedLockPath(root)))
+
 proc resolveProjectDirFromTarget(target: string): string =
   ## Resolve the directory that owns the committed lock for a build
   ## target. An existing directory is itself; an existing file resolves
@@ -17701,6 +17780,17 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
+  # MO-2 — manifest-optional fallback. When there is no resolved manifest
+  # checkout (and no compositional workspace.toml, handled above), a
+  # committed-lock-only workspace resolves its participating repo set from
+  # repo-local state instead of raising. This fires ONLY when no manifest
+  # data is present on disk, so every manifest-present path below is
+  # byte-unchanged (a workspace with `.repo/manifests` always takes the
+  # existing branches).
+  if not hasResolvedManifestCheckout(parsed.workspaceRoot):
+    let derived = committedLockDerivedProject(parsed.workspaceRoot)
+    if derived.isSome:
+      return derived.get()
   if parsed.projectName.len == 0:
     # If a metadata-only workspace.toml records the project name, we
     # can still resolve in single-project mode without the user having
@@ -19081,6 +19171,13 @@ proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
   let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     return composeManifestLayersFromFile(workspaceToml)
+  # MO-2 — manifest-optional fallback (see ``resolveWorkspaceSyncProject``).
+  # Only fires when no manifest data is on disk, so the manifest-present
+  # path below is byte-unchanged.
+  if not hasResolvedManifestCheckout(parsed.workspaceRoot):
+    let derived = committedLockDerivedProject(parsed.workspaceRoot)
+    if derived.isSome:
+      return derived.get()
   if parsed.projectName.len == 0:
     if fileExists(workspaceToml):
       try:
@@ -21032,6 +21129,15 @@ proc resolveCheckProject(parsed: CheckArgs):
     let resolved = composeManifestLayers(
       workspaceLocal, parsed.workspaceRoot, absToml)
     return (resolved, some(workspaceLocal))
+  # MO-2 — manifest-optional fallback (see ``resolveWorkspaceSyncProject``).
+  # A committed-lock-only workspace resolves its participating repo set from
+  # repo-local state so the pre-push gate enforces there too instead of
+  # raising. Fires ONLY when no manifest data is on disk; the manifest-
+  # present path below is byte-unchanged.
+  if not hasResolvedManifestCheckout(parsed.workspaceRoot):
+    let derived = committedLockDerivedProject(parsed.workspaceRoot)
+    if derived.isSome:
+      return (derived.get(), none(WorkspaceLocal))
   var projectName = ""
   if fileExists(workspaceToml):
     try:
@@ -23163,6 +23269,23 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     toolProvisioning: parsed.toolProvisioning,
     dirtyScopeNames: scopeClosure)
   let manifestLayerRoot = pickManifestLayerRoot(lockArgs, workspaceLocal)
+  # MO-2 — manifest-optional gate. When the workspace has NO manifest store
+  # on disk (a committed-lock-only / manifest-less workspace, where
+  # ``pickManifestLayerRoot`` points at a ``.repo/manifests`` that does not
+  # exist), there is no manifest-repo SHA-lock to write or publish: the
+  # committed ``repro.lock`` is the reproducibility artifact (validated
+  # separately by the MO-1 ``validateCommittedLockAdvisory``). The
+  # cleanliness / publication STAGES above already ran on the committed-lock-
+  # derived participating set, so the gate verdict is sound; here we simply
+  # skip the manifest-SHA-lock write/publish and leave ``manifestLayerRoot``
+  # empty so the caller's publish step is a no-op. Manifest-present
+  # workspaces always have a real ``.repo/manifests`` (or a composed layer)
+  # on disk, so this never changes their behavior.
+  if not dirExists(manifestLayerRoot):
+    result.lockUpdate.kind = cluNone
+    result.exitCode = 0
+    applyCertificateGate()
+    return
   # RA-7: surface the manifest-layer root so the caller can publish
   # (commit + push) the lock after the gate passes.
   result.manifestLayerRoot = manifestLayerRoot
