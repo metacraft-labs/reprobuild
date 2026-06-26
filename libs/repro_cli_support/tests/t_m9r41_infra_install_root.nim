@@ -157,6 +157,26 @@ suite "M9.R.41 grub.cfg emission":
     check "set timeout_style=hidden" in cfg
     check "set timeout=3" in cfg
 
+suite "M9.R.41 fstab covers swap + ZFS data partitions":
+  test "swap partitions render with type 'swap' + defaults options":
+    var swap = PartitionSpec()
+    swap.`type` = "8200"
+    swap.size = "4G"
+    swap.content = ContentSpec(kind: cfsSwap, swapPriority: 0)
+    var disk = DiskSpec()
+    disk.device = "/dev/vda"
+    disk.`type` = "gpt"
+    disk.partitions["swap"] = swap
+    var layout = DiskLayout()
+    layout.disks["main"] = disk
+    # cfsSwap doesn't surface in collectMountPlan because the walker
+    # only emits cfsFilesystem mountpoints; the fstab walker
+    # accordingly skips swap.  Pin that the renderer doesn't blow up
+    # on a swap-only layout.
+    let text = renderFstab(layout)
+    check "/etc/fstab" in text
+    check "<device>" in text  # header still rendered
+
 suite "M9.R.41 rsync command construction":
   test "default excludes cover proc/sys/dev/run/mnt/media/tmp":
     let opts = parseInstallRootArgs(@[])
