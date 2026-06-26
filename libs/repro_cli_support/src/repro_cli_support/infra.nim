@@ -27,6 +27,8 @@ import repro_profile
 import repro_profile_intent
 import repro_profile_compile
 import repro_cli_support/home as cli_home
+import repro_cli_support/disk as cli_disk
+import repro_cli_support/infra_install_root
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `system.nim` profiles.
@@ -789,10 +791,43 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
 # Dispatch.
 # ---------------------------------------------------------------------------
 
+proc runInfraInstallRootCli(args: seq[string]): int =
+  ## ``repro infra install-root --target /mnt --device /dev/vda``.
+  ##
+  ## M9.R.41: install-time root-mirror.  Distinct from ``repro infra
+  ## apply``: it does NOT reconcile a system profile in place — it
+  ## materialises a content-addressed REPLICA of the live root onto a
+  ## freshly-formatted target, then generates the target-side fstab +
+  ## installs GRUB.  Used by the M9.R.18 reproos-installer's Phase 5
+  ## driver to close the install -> boot loop.
+  let loader: DiskoLoader = proc(path: string): DiskPlanOutcome =
+    loadDiskoFromSource(path)
+  let outcome = runInstallRoot(args, loader)
+  if outcome.failure:
+    stderr.writeLine("repro infra install-root: " & outcome.failureMsg)
+    case outcome.failureKind
+    of irfBadFlag: return 2
+    of irfMissingTarget, irfMissingSource: return 2
+    of irfRsyncFailed, irfGrubInstallFailed,
+       irfFstabWriteFailed, irfGrubCfgWriteFailed,
+       irfDiskoLoadFailed: return 1
+  echo "repro infra install-root"
+  echo "  rsync exit       : " & $outcome.rsyncExitCode
+  echo "  mount entries    : " & $outcome.mountPlan.len
+  for (dev, mp) in outcome.mountPlan:
+    let shown = if mp.len == 0: "/" else: mp
+    echo "    " & dev & "  ->  " & shown
+  if outcome.fstabPath.len > 0:
+    echo "  fstab            : " & outcome.fstabPath
+  if outcome.grubCfgPath.len > 0:
+    echo "  grub.cfg         : " & outcome.grubCfgPath
+  echo "  grub-install exit: " & $outcome.grubInstallExit
+  return 0
+
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
-    stderr.writeLine("usage: repro infra {plan | apply} ...")
+    stderr.writeLine("usage: repro infra {plan | apply | install-root} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -800,6 +835,7 @@ proc runInfraCommand*(args: seq[string]): int =
     case sub
     of "plan": return runInfraPlan(rest)
     of "apply": return runInfraApply(rest)
+    of "install-root": return runInfraInstallRootCli(rest)
     else:
       stderr.writeLine("repro infra: unknown subcommand: " & sub)
       return 2

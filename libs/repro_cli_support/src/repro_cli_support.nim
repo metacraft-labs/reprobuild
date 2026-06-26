@@ -213,7 +213,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " store {gc | recover | roots | list | daemon} ...\n       " &
           programName &
-      " infra {plan | apply} ...\n       " &
+      " infra {plan | apply | install-root} ...\n       " &
           programName &
       " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
           programName &
