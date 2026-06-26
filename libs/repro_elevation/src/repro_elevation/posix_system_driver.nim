@@ -892,19 +892,23 @@ when defined(windows):
     let (output, code) = execCmdEx(cmd)
     (output, code)
 
-  proc icaclsSetOwnerDir(path, owner: string):
-      tuple[output: string; code: int] =
-    ## Mirror of `takeownOf` in `windows_system_driver.nim`: take
-    ## ownership via `takeown /F <path> /A` (a directory is OK — the
-    ## `/A` flag still seizes to Administrators) then pin the owner
-    ## via `icacls <path> /setowner <owner>`. The first call's
-    ## failure is non-fatal (the directory may already be owned by
-    ## an Administrator account). Argv assembled by the pure
-    ## `renderTakeownDirCommandArgs` /
-    ## `renderIcaclsSetOwnerCommandArgs` helpers so the EXACT command
-    ## string is unit-testable cross-platform.
+  proc takeownAdminsDir(path: string) =
+    ## `takeown /F <path> /A` — seize ownership to the Administrators
+    ## group so subsequent icacls invocations have WRITE_DAC even when
+    ## the current owner has set a deny-admin ACE (e.g. from a prior
+    ## partial apply). Failure is non-fatal: if the path is already
+    ## owned by an Administrator account `takeown` is a no-op anyway,
+    ## and the inheritance / grant calls below give an actionable
+    ## diagnostic if access really is the problem.
     discard execCmdEx(renderArgvAsShellCmd(
       renderTakeownDirCommandArgs(path)))
+
+  proc icaclsSetOwnerDir(path, owner: string):
+      tuple[output: string; code: int] =
+    ## Pin the directory's owner to ``owner`` via
+    ## ``icacls <path> /setowner <owner>``. Argv assembled by the pure
+    ## ``renderIcaclsSetOwnerCommandArgs`` helper so the EXACT command
+    ## string is unit-testable cross-platform.
     let (output, code) = execCmdEx(renderArgvAsShellCmd(
       renderIcaclsSetOwnerCommandArgs(path, owner)))
     (output, code)
@@ -1036,13 +1040,15 @@ proc applyFsSystemDirectory*(op: PrivilegedOperation):
     createDir(op.fsdPath)
     when defined(windows):
       if op.fsdAclPresent:
-        if op.fsdAclOwner.len > 0:
-          let (ownOut, ownCode) = icaclsSetOwnerDir(
-            op.fsdPath, op.fsdAclOwner)
-          if ownCode != 0:
-            raiseProtocol("fs.systemDirectory `icacls /setowner " &
-              op.fsdAclOwner & "` of '" & op.fsdPath & "' failed: " &
-              ownOut.strip())
+        # Order matters: takeown /A -> inheritance -> grant -> setowner.
+        # Pinning the operator-declared owner first (e.g. SYSTEM)
+        # strips the running Administrator of WRITE_DAC mid-apply, so
+        # the subsequent `icacls /grant` calls fail with
+        # `Access is denied`. Grant the explicit ACEs first (every
+        # well-formed spec includes an Administrators ACE that keeps
+        # WRITE_DAC for the broker through the setowner step), then
+        # pin the declared owner.
+        takeownAdminsDir(op.fsdPath)
         let mode =
           if op.fsdAclInheritance.len > 0: op.fsdAclInheritance
           else: "enabled"
@@ -1056,6 +1062,13 @@ proc applyFsSystemDirectory*(op: PrivilegedOperation):
           if aceCode != 0:
             raiseProtocol("fs.systemDirectory `icacls /grant " & ace &
               "` of '" & op.fsdPath & "' failed: " & aceOut.strip())
+        if op.fsdAclOwner.len > 0:
+          let (ownOut, ownCode) = icaclsSetOwnerDir(
+            op.fsdPath, op.fsdAclOwner)
+          if ownCode != 0:
+            raiseProtocol("fs.systemDirectory `icacls /setowner " &
+              op.fsdAclOwner & "` of '" & op.fsdPath & "' failed: " &
+              ownOut.strip())
     let post = observeFsSystemDirectory(op)
     if not post.present:
       raiseProtocol("fs.systemDirectory " & op.fsdPath &

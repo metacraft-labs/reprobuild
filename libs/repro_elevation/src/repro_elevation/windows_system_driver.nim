@@ -1441,6 +1441,26 @@ proc applyWindowsOsHostname*(op: PrivilegedOperation):
 # Post-apply re-probe is the integrity check.
 # ===========================================================================
 
+proc splitScheduledTaskName*(full: string): tuple[path, leaf: string] =
+  ## Split a Task Scheduler full task path (e.g.
+  ## ``\Reprobuild\WindowsRunner-EnvBootstrap``) into the ``-TaskPath``
+  ## folder (``\Reprobuild\``) and the ``-TaskName`` leaf
+  ## (``WindowsRunner-EnvBootstrap``). Get-/Register-/Unregister-
+  ## ScheduledTask take these as two separate parameters; passing the
+  ## full path as ``-TaskName`` makes the cmdlets create / look up a
+  ## task at the root with a literal-backslash name, which Task
+  ## Scheduler silently rejects (Register returns 0 but
+  ## Get-ScheduledTask never sees the task).
+  ##
+  ## Names without a folder collapse to ``-TaskPath '\'``.
+  let i = full.rfind('\\')
+  if i < 0:
+    return (path: "\\", leaf: full)
+  let p =
+    if i == 0: "\\"
+    else: full[0 .. i]  # include trailing backslash
+  (path: p, leaf: full[i + 1 .. ^1])
+
 when defined(windows):
   proc scheduledTaskProbeScript(name: string): string =
     ## A deterministic `key=value` probe of a scheduled task. The probe
@@ -1448,7 +1468,9 @@ when defined(windows):
     ## `ScheduleKind=<lower-case-token>`; the pure parser
     ## (`parseScheduledTaskQuery`) collapses absent lines to empty
     ## strings.
-    "$t = Get-ScheduledTask -TaskName " & psQuote(name) &
+    let parts = splitScheduledTaskName(name)
+    "$t = Get-ScheduledTask -TaskPath " & psQuote(parts.path) &
+      " -TaskName " & psQuote(parts.leaf) &
       " -ErrorAction SilentlyContinue; " &
       "if ($null -eq $t) { 'Missing=1' } else { " &
       "'TaskName=' + $t.TaskName; " &
@@ -1510,11 +1532,13 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
       scheduledTaskProbeScript(op.wstTaskName))
     let before = parseScheduledTaskQuery(preOut)
 
+    let pathParts = splitScheduledTaskName(op.wstTaskName)
+
     if op.wstDestroy:
       if before.present:
         let (rmOut, rmCode) = runPowerShell(wrapCmdletTerminating(
-          "Unregister-ScheduledTask -TaskName " &
-          psQuote(op.wstTaskName) & " -Confirm:$false"))
+          "Unregister-ScheduledTask -TaskPath " & psQuote(pathParts.path) &
+          " -TaskName " & psQuote(pathParts.leaf) & " -Confirm:$false"))
         if rmCode != 0:
           raiseProtocol("windows.scheduledTask " &
             "Unregister-ScheduledTask of '" & op.wstTaskName &
@@ -1560,8 +1584,9 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
       else: "New-ScheduledTaskSettingsSet -Disable"
 
     if not before.present:
-      let cmd = "Register-ScheduledTask -TaskName " &
-        psQuote(op.wstTaskName) &
+      let cmd = "Register-ScheduledTask -TaskPath " &
+        psQuote(pathParts.path) &
+        " -TaskName " & psQuote(pathParts.leaf) &
         " -Action (" & actionExpr & ")" &
         " -Trigger (" & triggerExpr & ")" &
         " -Principal (" & principalExpr & ")" &
@@ -1575,14 +1600,15 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
       # Execute / Arguments — the safest converge is unregister +
       # re-register. The post-apply re-probe is the integrity check.
       let (rmOut, rmCode) = runPowerShell(wrapCmdletTerminating(
-        "Unregister-ScheduledTask -TaskName " &
-        psQuote(op.wstTaskName) & " -Confirm:$false"))
+        "Unregister-ScheduledTask -TaskPath " & psQuote(pathParts.path) &
+        " -TaskName " & psQuote(pathParts.leaf) & " -Confirm:$false"))
       if rmCode != 0:
         raiseProtocol("windows.scheduledTask intermediate " &
           "Unregister-ScheduledTask of '" & op.wstTaskName &
           "' failed: " & rmOut.strip())
-      let cmd = "Register-ScheduledTask -TaskName " &
-        psQuote(op.wstTaskName) &
+      let cmd = "Register-ScheduledTask -TaskPath " &
+        psQuote(pathParts.path) &
+        " -TaskName " & psQuote(pathParts.leaf) &
         " -Action (" & actionExpr & ")" &
         " -Trigger (" & triggerExpr & ")" &
         " -Principal (" & principalExpr & ")" &
