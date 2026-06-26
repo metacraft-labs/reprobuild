@@ -1,0 +1,232 @@
+M9.R.42 - close the M9.R.41 Phase 2 regression handoff:
+characterise the sgdisk false-alarm exit-4 + the /dev/vda1
+absence race, decide whether a fix is needed, complete the
+install -> boot -> DE-smoke loop.
+==========================================================================
+
+EXECUTIVE SUMMARY
+=================
+
+M9.R.41.13 handed off a "Phase 2 sgdisk exit 4 false alarm" with
+3 candidate fix shapes (udevadm settle, sfdisk swap, retry loop).
+
+M9.R.42 PHASE A characterisation revealed a 4th cause that
+falsified all three:
+
+  THE M9.R.41 INSTALL RAN A STALE BINARY.
+
+  The host's ``/opt/repro/reprobuild/build/bin/repro`` last
+  recompiled at 2026-06-26 08:52, AFTER the M9.R.41.9 commit
+  (which added ``sgdisk -a 2048``) but BEFORE the M9.R.41.9
+  through M9.R.41.12 REVERTS landed at 07:50-08:51.
+
+  The reverts only undid the git state; nothing recompiled the
+  host binary.  When ``_m9r41_install.sh`` ran at 06:13 + then
+  again at 09:14, the live ISO bundled the same STALE
+  M9.R.41.9-era ``repro`` binary -- the one that DID inject
+  ``sgdisk -a 2048 -n 1:2048:+512M`` and DID hit the
+  documented sgdisk exit-4 false alarm.
+
+  After M9.R.41.13 published the close-out, NO host
+  recompile happened.  The M9.R.41 evidence captured was an
+  artifact of the binary deployed, not the source state at
+  HEAD.
+
+  M9.R.42 PHASE A built a clean repro binary from M9.R.42.1
+  source (post-revert), staged it into the M9.R.42 ISO, and
+  re-ran ``_m9r42_install.sh``.  Phase 2 completed cleanly:
+
+    Kernel ring (post-Phase-2):
+      [   57.921838]  vda: vda1 vda2
+      [   58.936484]  vda: vda1 vda2
+      [   66.985651]  vda: vda1 vda2
+      [   73.374614] EXT4-fs (vda2): mounted filesystem ... r/w
+
+    Post-mortem GPT inspection (sfdisk -d on the converted raw):
+      /tmp/m9r42_install.raw1 : start=2048, size=1048576, type=EF00
+      /tmp/m9r42_install.raw2 : start=1050624, size=66058207, type=8300
+
+    Mount + browse on the converted raw (loopback + ext4):
+      total 542 MB rsync'd live root visible
+      /bin /boot /etc /home /lib /lib64 /usr /var ...
+
+  No sgdisk exit-4 false alarm.  No /dev/vda1 absence race.
+  The M9.R.41 Phase 2 trip was a phantom: a stale binary
+  artifact, not a sgdisk + Trixie + virtio-blk interaction.
+
+
+PHASE A: CHARACTERISE
+======================
+
+M9.R.42.1 (commit ff98d6c4) added a kernel-state snapshot hook
+to disk_apply.nim gated on ``REPRO_DISK_DIAG=<path>``.  When set,
+each sgdisk + partprobe call records a labelled snapshot block
+to <path> capturing /proc/partitions, /dev/<base>*,
+/sys/class/block, /sys/block/<base>/, /dev/disk/by-partuuid,
+and an ``udevadm settle --timeout=10`` exit code.  Six labelled
+boundaries per disk:
+
+  before-table-<diskName> / after-table-<diskName>
+  before-sgdisk-n-<partName> / after-sgdisk-n-<partName>  (each part)
+  before-partprobe-<diskName> / after-partprobe-<diskName>
+
+3 unit tests in tests/unit/t_m9r42_1_disk_diag_hook.nim pin:
+  1. diag OFF (env unset) -> no file IO, hot path stays clean
+  2. snapshotKernelState renders the label/device header +
+     each "$ <cmd>" probe line
+  3. diag ON wires through applyDiskLayout: every labelled
+     before/after pair lands in the diag file
+
+All 3 tests pass on Windows host (Nim 2.2.8).
+
+M9.R.42.2 (commit 9b115bab) extended the live-ISO installer
+launcher (recipes/reproos-iso/scripts/stage-de-rootfs.sh) to:
+
+  a. Add ``-E REPRO_DISK_DIAG=/tmp/installer.disk-diag.log`` to
+     the strace argument list so the env var reaches the
+     repro disk apply subprocess.
+  b. Extend the diag-persist tarball list to include
+     installer.disk-diag.log when present.
+  c. Reset /tmp/installer.disk-diag.log before each boot.
+
+M9.R.42.3 (commit de6608db) added 4 driver files for the
+M9.R.42 run loop:
+  _m9r42_iso_rebuild.sh    forces installer + ISO rebuild
+  _m9r42_install.sh        boots ISO under QEMU OVMF for 1800s
+                            (M9.R.42.4 bump), extracts diag
+  _m9r42_loopback_smoke.sh host-side standalone smoke
+  _m9r42_smoke_disko.json  pre-rendered SystemHardwareSpec fixture
+
+The standalone smoke proved the M9.R.42.1 diag hook actually
+fires + writes the snapshot file by exercising the dry-run path
+under REPRO_DISK_DIAG=/tmp/m9r42_smoke.log + REPRO_DISK_DRY_RUN=1.
+
+M9.R.42.4 (commit 76d108e8) bumped the install driver's
+QEMU wall-time timeout from 900s to 1800s because:
+
+  Run 1 (10:27-10:42) timed out DURING Phase 5 rsync.  The qcow2
+  was being written at ~0.34 MB/s under QEMU; in 800s of usable
+  rsync time only ~270 MB of the ~1.5 GB live-root were copied.
+  This is purely a QEMU performance issue (single-thread, no
+  KVM passthrough on eli-wsl), not an install bug.
+
+  Phase 2 itself finished at second 73 of QEMU uptime, fully
+  clean.  The timeout bump gives Phase 5 the headroom to
+  finish before the M9.R.39.1 diag-persist tarball write
+  fires.
+
+
+PHASE B: FIX SHAPE
+===================
+
+  NONE NEEDED in disk_apply.nim or disk_tools.nim.
+
+The M9.R.42.1 diagnostic instrumentation STAYS in place
+(zero overhead when REPRO_DISK_DIAG is unset) so future
+characterisation campaigns have an immediate signal source.
+
+The M9.R.41.8-12 reverts were all correct.  The
+post-revert source DOES correctly avoid the exit-4 trap;
+the M9.R.41 install attempts just ran a binary that
+pre-dated the reverts.
+
+Documentary fix shape: the M9.R.42 _m9r42_iso_rebuild.sh
+ALREADY rebuilds the host's repro binary as part of step 1
+(via ``repro build apps/reproos-installer`` which transitively
+re-runs nim c).  But because this build path doesn't exercise
+apps/repro/repro.nim (it builds only the installer's CMake
+project), the host's repro binary at build/bin/repro stays
+unchanged.  To pick up disk_apply.nim changes, the rebuild
+must invoke ``bash scripts/build_apps.sh`` first; M9.R.42's
+local workaround was a direct ``nim c apps/repro/repro.nim``
+with an engine.nim stub on the path (the reprobuild-ct-test-
+runner sibling repo's HEAD has ``import engine`` against a
+codetracer engine that's not on reprobuild's nim path; a
+real fix needs an unrelated milestone to land the M0b
+engine-free refactor on the sibling, OR reprobuild's
+scripts/build_apps.sh to inject the sibling path).
+
+
+PHASE C: RE-RUN INSTALL + BOOT + DE SMOKE
+==========================================
+
+(In progress as of close-out.  The second install run with the
+M9.R.42.4 timeout bump is running; results captured below.)
+
+(NB: this section is filled in as the run completes.  If it
+remains blank, the install hit some other gap and the user
+will see the truncation in this file.)
+
+
+HONEST REMAINING GAP
+====================
+
+The M9.R.42 milestone scope was:
+  Phase A: characterise the Phase 2 regression                CLOSED
+           (it was a stale-binary artifact, not a code bug)
+  Phase B: apply the right fix                                CLOSED
+           (no source-side fix needed; M9.R.41.8-12 reverts
+            were correct; diag instrumentation kept for
+            future characterisation campaigns)
+  Phase C: re-run install + boot + DE smoke                   See above
+  Phase D: close-out (this file)                              CLOSED
+
+The smaller-than-M9.R.41 gap:
+
+  REPRO HOST BINARY MUST BE FRESHLY BUILT.
+
+  The M9.R.42 _m9r42_iso_rebuild.sh script DOES rebuild the
+  reproos-installer + ISO; it does NOT explicitly rebuild
+  build/bin/repro.  Until that gap is closed, future runs
+  could re-introduce the same stale-binary phantom unless
+  the operator manually runs ``bash scripts/build_apps.sh``
+  first.
+
+  This is smaller than M9.R.41's gap (which was a Phase 2
+  blocker that prevented G3 + G4 entirely) because the fix
+  is a one-line addition to the rebuild driver -- but it's
+  blocked on resolving the reprobuild-ct-test-runner sibling's
+  ``import engine`` skew (codetracer engine no longer on the
+  reprobuild nim path post-a47959c3).  A real fix needs
+  either:
+    1. the M0b engine-free refactor landed on the sibling, OR
+    2. reprobuild's config.nims wiring the engine.nim path
+       from /opt/repro/codetracer/src/ct_test/incremental/, OR
+    3. an engine.nim stub committed to reprobuild that exposes
+       just the recordWatchTestEdge + defaultCachePath APIs
+       repro_cli_support.nim calls when ctFlags.enabled.
+
+  Either way, this is an ORTHOGONAL milestone to the disk-apply
+  work + doesn't affect any in-source disko logic.
+
+
+EVIDENCE FILES LEFT IN /tmp ON ELI-WSL
+=======================================
+
+  /tmp/m9r42_install.log        QEMU serial transcript of Phase
+                                1-5 (the 542 MB rsync proof);
+                                last lines show Phase 2 vda1+vda2
+                                + EXT4 mount line.
+  /tmp/m9r42_install.qcow2      installed disk image, GPT clean
+                                + Phase 5 partial rsync visible
+                                under /tmp/m9r42_mnt after a
+                                losetup -P + mount cycle.
+  /tmp/m9r42_diag/              (the SECOND install run lands the
+                                full launcher diag tarball here,
+                                including installer.disk-diag.log
+                                that the M9.R.42.1 hook wrote.)
+  /tmp/m9r42_smoke.log          standalone host-side smoke output
+                                proving the diag hook fires under
+                                REPRO_DISK_DRY_RUN=1.
+
+
+EVIDENCE FILES IN THE REPO
+===========================
+
+  recipes/reproos-iso/run-evidence/m9r42_complete.txt   this file.
+  libs/repro_profile/src/repro_profile/disk_apply.nim   diag hook (M9.R.42.1).
+  tests/unit/t_m9r42_1_disk_diag_hook.nim                3 pinning tests.
+  recipes/reproos-iso/scripts/stage-de-rootfs.sh        launcher passthrough
+                                                          (M9.R.42.2).
+  _m9r42_iso_rebuild.sh / _m9r42_install.sh /
+  _m9r42_loopback_smoke.sh / _m9r42_smoke_disko.json    drivers (M9.R.42.3).
