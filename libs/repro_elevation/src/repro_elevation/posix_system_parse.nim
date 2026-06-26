@@ -1204,14 +1204,43 @@ proc renderIcaclsGrantCommandArgs*(path, entry: string): seq[string] =
   of icaclsDenyVerb:
     @["icacls", path, "/deny", split.spec]
 
+proc canonicalizeAclPrincipal*(p: string): string =
+  ## Collapse the well-known Windows principal aliases ``icacls``
+  ## accepts as INPUT to the domain-qualified form it emits as
+  ## OUTPUT, so a desired entry written ``SYSTEM:(F)`` matches an
+  ## observed entry written ``NT AUTHORITY\SYSTEM:(F)``.
+  ## Case-insensitive on the alias side (``System``, ``SYSTEM``,
+  ## ``system`` are all icacls-equivalent); the canonical form keeps
+  ## the exact spelling icacls emits (mixed-case on the
+  ## Network/Local Service family, all-caps on SYSTEM).
+  ##
+  ## Without this collapse the post-apply digest of a
+  ## ``fs.systemDirectory`` recipe declaring
+  ## ``aclEntry(principal = "SYSTEM", ...)`` disagrees with the
+  ## observed ACL even when ``icacls`` happily granted exactly that
+  ## ACE — operators would have to hand-write
+  ## ``NT AUTHORITY\SYSTEM`` to make the digest converge.
+  case p.toLowerAscii
+  of "system": "NT AUTHORITY\\SYSTEM"
+  of "localservice", "local service": "NT AUTHORITY\\LOCAL SERVICE"
+  of "networkservice", "network service": "NT AUTHORITY\\NETWORK SERVICE"
+  of "administrators": "BUILTIN\\Administrators"
+  of "users": "BUILTIN\\Users"
+  of "everyone": "Everyone"
+  of "authenticated users": "NT AUTHORITY\\Authenticated Users"
+  else: p
+
 proc normalizeDirAclEntry*(ace: string): string =
-  ## Stable rendering of an ACE for digest purposes: trim outer
-  ## whitespace and collapse all internal whitespace runs to single
-  ## spaces. icacls permits extra whitespace inside the perm groups;
-  ## the canonical form collapses these so two visually-equivalent
-  ## ACE strings hash to the same digest. Mirrors the
-  ## `normalizeAclEntry` shape in `windows_system_parse.nim` so the
-  ## two ACL kinds digest equivalent entries identically.
+  ## Stable rendering of an ACE for digest purposes: collapse
+  ## internal whitespace and canonicalise the principal alias
+  ## (``SYSTEM`` ↔ ``NT AUTHORITY\SYSTEM`` etc.). icacls permits
+  ## extra whitespace inside the perm groups and accepts well-known
+  ## short names as input but always emits the domain-qualified form
+  ## on output; the canonical form collapses both axes so two
+  ## visually-equivalent ACE strings hash to the same digest.
+  ## Mirrors the ``normalizeAclEntry`` shape in
+  ## ``windows_system_parse.nim`` so the two ACL kinds digest
+  ## equivalent entries identically.
   var collapsed = ""
   var prevWasSpace = false
   for ch in ace.strip():
@@ -1222,7 +1251,25 @@ proc normalizeDirAclEntry*(ace: string): string =
     else:
       collapsed.add(ch)
       prevWasSpace = false
-  collapsed
+  # Split principal:perm-spec at the FIRST ``:`` that is NOT inside a
+  # parenthesised group (an ACE shape is ``Principal[\Name]:(perms)``).
+  # The principal canonicalisation only rewrites the prefix.
+  var depth = 0
+  var splitIdx = -1
+  for i, ch in collapsed:
+    case ch
+    of '(': inc depth
+    of ')': dec depth
+    of ':':
+      if depth == 0:
+        splitIdx = i
+        break
+    else: discard
+  if splitIdx < 0:
+    return collapsed
+  let principal = collapsed[0 ..< splitIdx]
+  let rest = collapsed[splitIdx .. ^1]
+  canonicalizeAclPrincipal(principal) & rest
 
 proc canonicalDirAclDesired*(present: bool; owner: string;
                              entries: seq[string];

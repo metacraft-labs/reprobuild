@@ -928,7 +928,8 @@ fi
 _repro_diag="${REPRO_INSTALLER_DIAG:-0}"
 if [ "$_repro_diag" = "1" ]; then
   rm -f /tmp/installer.strace /tmp/installer.kernelstacks \
-        /tmp/installer.lddebug /tmp/installer.log /tmp/installer.diag.pid
+        /tmp/installer.lddebug /tmp/installer.log /tmp/installer.diag.pid \
+        /tmp/installer.disk-diag.log
   # Launch the kernel-stack snapshotter as a background sub-shell.
   # The installer's PID becomes its parent shell's $$ once exec
   # replaces this script, so we sample $$ from the child's POV via
@@ -1050,6 +1051,7 @@ if [ "$_repro_diag" = "1" ]; then
       -E QML_IMPORT_PATH="$_repro_qml_imports" \
       -E QT_QPA_PLATFORM_PLUGIN_PATH="$_repro_qpa_plugins" \
       -E REPRO_HARDWARE_PROBE_RAWLOG_DIR=/tmp/hw_probe_raw \
+      -E REPRO_DISK_DIAG=/tmp/installer.disk-diag.log \
       "$_repro_glibc_dir/ld-linux-x86-64.so.2" \
         --library-path "$_repro_ldpath" \
         /usr/bin/reproos-installer "$@" \
@@ -1074,10 +1076,16 @@ if [ "$_repro_diag" = "1" ]; then
     if [ -d /tmp/hw_probe_raw ]; then
       _hw_probe_files="hw_probe_raw"
     fi
+    # M9.R.42.1 — include the disk-apply kernel-state diag if it
+    # exists (REPRO_DISK_DIAG was set as an strace passthrough above).
+    _disk_diag_file=""
+    if [ -f /tmp/installer.disk-diag.log ]; then
+      _disk_diag_file="installer.disk-diag.log"
+    fi
     tar -czf "$_diagtar" -C /tmp \
       installer.strace installer.kernelstacks installer.lddebug \
       installer.log installer.binfo installer.rc installer.diag.pid \
-      $_hw_probe_files \
+      $_hw_probe_files $_disk_diag_file \
       2>/dev/null || true
     _diagsz="$(stat -c %s "$_diagtar" 2>/dev/null || echo 0)"
     # ASCII-only header for portability.  The host extractor parses

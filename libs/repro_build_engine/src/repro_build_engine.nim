@@ -4076,6 +4076,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               "exit=" & $brokerOutcome.exitCode)
             blockClosure(id, id)
             emitProgress(bpkActionCompleted, id)
+            # ``blockClosure`` marks every transitively-dependent
+            # action as ``asBlocked`` without touching the local
+            # ``completed`` counter. ``inc completed`` here would
+            # only count THIS action (the broker-failed one) — the
+            # cascaded blocked descendants would stay invisible to
+            # the loop's "completed < total" termination check, so
+            # the next iteration would find no pending / running /
+            # ready work and raise the spec-mandated
+            # ``build graph made no progress; pending actions: ``
+            # diagnostic with an empty pending list. Every OTHER
+            # blockClosure site in this file uses ``terminalCount()``
+            # for exactly this reason; this branch was the lone
+            # offender.
+            completed = terminalCount()
+            launchedAny = true
+            continue
           inc completed
           launchedAny = true
           continue

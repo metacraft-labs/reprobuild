@@ -44,7 +44,12 @@ if [ ! -x "${io_mon_src}/scripts/build_shim.sh" ]; then
   echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
   exit 2
 fi
+# Point BOTH the shim's output dir and its nimcache at reprobuild's own
+# (writable) build tree. io-mon's source is read-only when it comes from a Nix
+# flake input / store path (the package build + dev shell), so the shim must not
+# write its nimcache into its own source — pass an absolute writable dir.
 IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
+IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
   bash "${io_mon_src}/scripts/build_shim.sh"
 

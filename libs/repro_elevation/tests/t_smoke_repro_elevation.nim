@@ -1175,11 +1175,26 @@ suite "repro_elevation: fs.systemDirectory Phase D — drift digest":
       observedInheritanceDisabled = false,
       desiredInheritance = "enabled")
 
-  test "normalizeDirAclEntry collapses internal whitespace":
-    check normalizeDirAclEntry("SYSTEM:(F)") == "SYSTEM:(F)"
-    check normalizeDirAclEntry("  SYSTEM:(F)  ") == "SYSTEM:(F)"
-    check normalizeDirAclEntry("SYSTEM:(F)  (OI)") == "SYSTEM:(F) (OI)"
-    check normalizeDirAclEntry("SYSTEM:(F)\t (CI)") == "SYSTEM:(F) (CI)"
+  test "normalizeDirAclEntry collapses internal whitespace + canonicalises principal":
+    # The principal-alias collapse (added alongside the whitespace
+    # pass) rewrites ``SYSTEM`` to ``NT AUTHORITY\SYSTEM`` so the
+    # desired digest matches the icacls-emitted observed digest.
+    check normalizeDirAclEntry("SYSTEM:(F)") == "NT AUTHORITY\\SYSTEM:(F)"
+    check normalizeDirAclEntry("  SYSTEM:(F)  ") ==
+      "NT AUTHORITY\\SYSTEM:(F)"
+    check normalizeDirAclEntry("SYSTEM:(F)  (OI)") ==
+      "NT AUTHORITY\\SYSTEM:(F) (OI)"
+    check normalizeDirAclEntry("SYSTEM:(F)\t (CI)") ==
+      "NT AUTHORITY\\SYSTEM:(F) (CI)"
+    # A principal already in domain-qualified form is left alone.
+    check normalizeDirAclEntry("NT AUTHORITY\\SYSTEM:(F)") ==
+      "NT AUTHORITY\\SYSTEM:(F)"
+    # NetworkService -> NT AUTHORITY\NETWORK SERVICE.
+    check normalizeDirAclEntry("NetworkService:(RX)") ==
+      "NT AUTHORITY\\NETWORK SERVICE:(RX)"
+    # An unknown principal is left alone (the canonicaliser only
+    # rewrites the documented well-known set).
+    check normalizeDirAclEntry("DOMAIN\\Alice:(F)") == "DOMAIN\\Alice:(F)"
 
   test "fsSystemDirectoryDigestPayload back-compat for ACL-unmanaged":
     # The aclPresent==false branch MUST produce a string

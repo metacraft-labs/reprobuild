@@ -170,7 +170,13 @@ jobs:
           set -euo pipefail
           ct_root="$(cd "${{ github.workspace }}/../codetracer" && pwd)"
           direnv allow "$ct_root"
-          ( cd "$ct_root" && direnv exec "$ct_root" just build )
+          # codetracer's build uses tup, which mounts a FUSE filesystem. Point
+          # libfuse at NixOS's setuid fusermount3 wrapper (programs.fuse provides
+          # /run/wrappers/bin/fusermount3) so the privileged mount can run; the
+          # github-runner service must also permit it (DevicePolicy /
+          # NoNewPrivileges — see metacraft-labs/infra services/github-runners).
+          ( cd "$ct_root" && direnv exec "$ct_root" \
+              bash -c 'export FUSERMOUNT_PROG=/run/wrappers/bin/fusermount3; just build' )
           ct_bin="$ct_root/src/build-debug/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
