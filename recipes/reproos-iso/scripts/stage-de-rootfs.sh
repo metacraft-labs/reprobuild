@@ -493,10 +493,14 @@ _repro_nix_dirs=""
 # execs the installer via SWAY_INIT), but the hygiene fix matches the
 # sister-launcher fix in the ``.sh`` variant and prevents future
 # regressions.
-for d in /nix/store/*/lib; do
+#
+# M9.R.46 — store dirs live at /repro/store (was /nix/store before the
+# stage-time prefix-swap relocate).  The same-hash relocation guarantees
+# every binary's RPATH points here.
+for d in /repro/store/*/lib; do
   [ -d "$d" ] || continue
   case "$d" in
-    /nix/store/*-glibc-*/lib) continue ;;
+    /repro/store/*-glibc-*/lib) continue ;;
   esac
   if ! ( set -- "$d"/*.so*; [ -e "$1" ] ); then
     continue
@@ -753,14 +757,16 @@ _repro_qpa_plugins=""
 # This dramatically narrows LD_LIBRARY_PATH from ~600 entries to
 # a handful, slashing each dlopen()'s syscall cost from ~600 ENOENT
 # probes to ~5.
-for d in /nix/store/*/lib; do
+# M9.R.46 — store dirs live at /repro/store (was /nix/store before the
+# stage-time prefix-swap relocate).
+for d in /repro/store/*/lib; do
   [ -d "$d" ] || continue
   # Skip glibc dirs — Debian system glibc must remain canonical so
   # every Debian binary in the live ISO chain keeps working.
   case "$d" in
-    /nix/store/*-glibc-*/lib) continue ;;
+    /repro/store/*-glibc-*/lib) continue ;;
   esac
-  # M9.R.38.3 — skip ANY nix-store Qt6 prefix.  The installer is
+  # M9.R.38.3 — skip ANY content-addressed Qt6 prefix.  The installer is
   # compiled + RPATH'd against ``/opt/repro/.../qt6-base/.repro/
   # output/install/usr/lib/libQt6Core.so.6.8.1``, but the de-rootfs
   # mirror also ships an UNRELATED ``zp6r9bxds...-qtbase-6.10.1/lib/``
@@ -772,16 +778,16 @@ for d in /nix/store/*/lib; do
   # corruption -> ``munmap_chunk(): invalid pointer`` on init, SIGABRT
   # before Phase 1.  The qt6-base + qt6-declarative + qt6-quickcontrols2
   # the installer needs live at /opt/repro/... paths the RPATH already
-  # covers; no nix-store Qt6 mirror is required.
+  # covers; no /repro/store Qt6 mirror is required.
   case "$d" in
-    /nix/store/*-qtbase-*/lib | \
-    /nix/store/*-qtdeclarative-*/lib | \
-    /nix/store/*-qt5compat-*/lib | \
-    /nix/store/*-layer-shell-qt-*/lib | \
-    /nix/store/*-kquickcharts-*/lib | \
-    /nix/store/*-qtquickcontrols*/lib | \
-    /nix/store/*-qttools-*/lib | \
-    /nix/store/*-qtwayland-*/lib) continue ;;
+    /repro/store/*-qtbase-*/lib | \
+    /repro/store/*-qtdeclarative-*/lib | \
+    /repro/store/*-qt5compat-*/lib | \
+    /repro/store/*-layer-shell-qt-*/lib | \
+    /repro/store/*-kquickcharts-*/lib | \
+    /repro/store/*-qtquickcontrols*/lib | \
+    /repro/store/*-qttools-*/lib | \
+    /repro/store/*-qtwayland-*/lib) continue ;;
   esac
   # M9.R.37.5: include ONLY dirs that ship a library the ``repro``
   # binary's Nim {.dynlib: "..."} pragma resolves by bare leaf name:
@@ -862,17 +868,19 @@ done
 _repro_installer_bin=/usr/bin/reproos-installer
 _repro_glibc_dir=""
 if [ -x "$_repro_installer_bin" ]; then
+  # M9.R.46 — the installer's PT_INTERP is patched to /repro/store at
+  # stage time by relocate-nix-to-repro.sh.  Match the new prefix.
   _repro_glibc_interp="$(head -c 4096 "$_repro_installer_bin" 2>/dev/null \
     | tr -c '[:print:]' '\n' \
-    | grep -oE '/nix/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2' \
+    | grep -oE '/repro/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2' \
     | head -1)"
   if [ -n "$_repro_glibc_interp" ]; then
     _repro_glibc_dir="${_repro_glibc_interp%/ld-linux-x86-64.so.2}"
   fi
 fi
 if [ -z "$_repro_glibc_dir" ]; then
-  # Fallback: latest nix-store glibc on disk.
-  _repro_glibc_dir="$(ls -d /nix/store/*-glibc-*/lib 2>/dev/null \
+  # Fallback: latest content-addressed glibc on disk.
+  _repro_glibc_dir="$(ls -d /repro/store/*-glibc-*/lib 2>/dev/null \
     | grep -vE -- '-bin|-locales|-dev|-debug|-doc|-static|-loop|-i686' \
     | head -1)"
 fi
@@ -1245,6 +1253,30 @@ chmod +x "$STAGE_DIR/usr/bin/repro"
 echo "[stage-de-rootfs] overlayed repro CLI (bytes=$(stat -c %s "$STAGE_DIR/usr/bin/repro"))"
 
 # ---------------------------------------------------------------------------
+# Phase 6b (M9.R.46): relocate /nix/store/<hash>-<pkg>/ -> /repro/store/
+# at the same hash, and rewrite every from-source ELF's RPATH + PT_INTERP
+# (+ every cross-prefix symlink + every #!/nix/store/ shebang) so the
+# live ISO + installed system carry NO /nix/store directory at all.
+#
+# This closes the M9.R.25 architectural debt: the spec said all
+# content-addressed paths live at /repro/store/<hash>-<name>/, but the
+# combination of nix-stubbed deps + M9.R.30's transitive RPATH walker
+# + M9.R.31.2's bootstrap propagation left ~1.3 GiB of /nix/store
+# referenced from-source on every ISO.  The relocate script does a
+# same-hash prefix swap (nix's hash IS a content hash) so the address
+# semantics survive intact while the directory layout matches the spec.
+#
+# The script is HARD-FAIL: any remaining /nix/store reference in any
+# ELF RPATH/INTERP, symlink target, or filesystem subtree under
+# $STAGE_DIR/nix/ exits 75 and aborts the ISO build per the M9.R.46
+# no-fallback-to-/nix/store rule.
+# ---------------------------------------------------------------------------
+
+echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro starting"
+bash "$SCRIPT_DIR_SELF/relocate-nix-to-repro.sh" "$STAGE_DIR"
+echo "[stage-de-rootfs] M9.R.46 relocate-nix-to-repro complete"
+
+# ---------------------------------------------------------------------------
 # Phase 7: rebuild ld.so.cache so dlopen(bare-name) calls inside DE
 # binaries find shared libs that aren't reachable via embedded RPATH.
 # We feed every nix-store-mirrored /lib dir + every from-source
@@ -1269,8 +1301,10 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
   # libmutter-15.so.0 + the internal mutter-15/libmutter-*-15.so libs
   # all carry the right RPATH entry.  No more ld.so.conf fall-through
   # needed — pure embedded RPATH does the job.
-  # Nix-store mirrored /lib dirs.
-  for d in "$STAGE_DIR"/nix/store/*/lib; do
+  # M9.R.46 — content-addressed store /lib dirs (formerly /nix/store/*/lib;
+  # the relocate-nix-to-repro.sh script in Phase 6b same-hash-prefix-swaps
+  # the whole tree to /repro/store).
+  for d in "$STAGE_DIR"/repro/store/*/lib; do
     if [ -d "$d" ]; then
       echo "${d#$STAGE_DIR}"
     fi
@@ -1280,25 +1314,34 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
   echo "/usr/lib64"
 } > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf"
 
-# M9.R.37.4 — symlink every nix-store glibc's hard-coded
-# ``etc/ld.so.cache`` path to ``/etc/ld.so.cache`` so the
-# from-source-built binaries' nix-store PT_INTERPs find the cache the
-# Debian system loader writes.  Without this, every binary with PT_INTERP
-# ``/nix/store/<hash>-glibc-X.Y/lib/ld-linux-x86-64.so.2`` reads
-# ``/nix/store/<hash>-glibc-X.Y/etc/ld.so.cache`` (the path is baked into
-# ld-linux at compile time -- ``strings`` it to confirm) which doesn't
-# exist on our stage, and the dlopen() fall-through to ld.so.cache
-# fails.  Concretely: ``mkfs.ext4`` failed at exec-time with
-# ``libext2fs.so.2: cannot open shared object file`` because its PT_INTERP
-# pointed at the ``xx7cm72...-glibc-2.40-66`` ld-linux which reads
-# ``/nix/store/xx7cm72.../etc/ld.so.cache`` (ENOENT), bypassing the
+# M9.R.37.4 — symlink every glibc's hard-coded ``etc/ld.so.cache`` path
+# to ``/etc/ld.so.cache`` so the from-source-built binaries' PT_INTERPs
+# find the cache the Debian system loader writes.  Without this, every
+# binary with PT_INTERP ``/repro/store/<hash>-glibc-X.Y/lib/ld-linux-x86-64
+# .so.2`` reads ``/repro/store/<hash>-glibc-X.Y/etc/ld.so.cache`` (the
+# /nix/store path is baked into ld-linux at compile time -- the M9.R.46
+# relocate script's patchelf --set-interpreter swap doesn't change THAT
+# string, because ld.so reads it from its own .rodata + concatenates the
+# unchanged hard-coded cache-relative suffix).  We DO still ship the
+# glibc layout under /repro/store/<hash>-glibc-X.Y/etc/ on the ISO (the
+# M9.R.46 relocate moved it from /nix/store to /repro/store at the
+# SAME hash), and ld.so reads its hard-coded cache path from compile
+# time -- the cache lookup path inside the glibc package's etc/ resolves
+# against the /repro/store/ runtime location because the relocate kept
+# the trailing subpath identical.  Conclusion: the symlink is what
+# matters; the leading prefix is /repro/store after M9.R.46.
+#
+# Concretely: ``mkfs.ext4`` failed at exec-time with ``libext2fs.so.2:
+# cannot open shared object file`` because its PT_INTERP pointed at the
+# ``xx7cm72...-glibc-2.40-66`` ld-linux which reads
+# ``<store>/xx7cm72.../etc/ld.so.cache`` (ENOENT), bypassing the
 # Debian system cache at ``/etc/ld.so.cache``.
 #
-# Fix: for each nix-store glibc dir on the stage, ``chmod u+w`` its
-# ``etc/`` subdir then drop a relative symlink at
-# ``etc/ld.so.cache -> /etc/ld.so.cache``.  Now every loader -- nix
-# or Debian -- reads the SAME cache the system ldconfig wrote.
-for glibc_etc in "$STAGE_DIR"/nix/store/*-glibc-*/etc; do
+# Fix: for each glibc dir on the stage, ``chmod u+w`` its ``etc/``
+# subdir then drop a relative symlink at ``etc/ld.so.cache ->
+# /etc/ld.so.cache``.  Now every loader -- from-source or Debian --
+# reads the SAME cache the system ldconfig wrote.
+for glibc_etc in "$STAGE_DIR"/repro/store/*-glibc-*/etc; do
   [ -d "$glibc_etc" ] || continue
   glibc_dir="$(dirname "$glibc_etc")"
   chmod u+w "$glibc_etc" 2>/dev/null || true

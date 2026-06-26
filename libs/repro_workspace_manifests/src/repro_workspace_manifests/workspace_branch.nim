@@ -184,22 +184,48 @@ proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
           return true
   false
 
+const committedLockFileName = "repro.lock"
+  ## Workspace-Manifest-Optional MO-2 — the committed solved-graph lock
+  ## filename. Mirrors ``repro_lock.CommittedLockFileName`` /
+  ## ``repro_cli_support.CommittedLockFileName``; duplicated here as a
+  ## stable filename convention so ``repro_workspace_manifests`` does not
+  ## acquire an upward dependency on the CLI / lock modules.
+
+proc hasCommittedLockWorkspaceMarker*(workspaceRoot: string): bool =
+  ## MO-2 — true iff ``workspaceRoot`` carries a committed ``repro.lock``
+  ## (the MO-1 solved-graph lock) at its root. This is the manifest-OPTIONAL
+  ## workspace marker: an all-public, single-repo workspace whose
+  ## reproducibility boundary is the committed lock needs no manifest repo,
+  ## yet must still count as an initialized workspace so the managed hooks
+  ## and the pre-push gate enforce there too. A project file alone (no
+  ## committed lock) is intentionally NOT a marker — the committed lock is
+  ## the reproducibility boundary the manifest-optional model leans on, so
+  ## ``repro lock refresh`` establishes it first.
+  if workspaceRoot.len == 0:
+    return false
+  fileExists(workspaceRoot / committedLockFileName)
+
 proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ## RA-10 canonical "initialized workspace" marker. A directory counts
   ## as an initialized workspace only when its ``.repo/`` shell carries a
   ## *resolved manifest checkout* — NOT merely a bare ``.repo/``/
-  ## ``.repro/`` directory left behind by a half-finished bootstrap.
+  ## ``.repro/`` directory left behind by a half-finished bootstrap — OR
+  ## (MO-2) when it carries a committed ``repro.lock`` (the manifest-
+  ## optional reproducibility artifact).
   ##
-  ## Concretely, the marker is present when EITHER:
+  ## Concretely, the marker is present when ANY of:
   ##
   ##   * ``<workspaceRoot>/.repo/workspace.toml`` exists (the metadata
   ##     file ``repro workspace init`` writes once the workspace shell is
   ##     established — single-project or compositional), OR
   ##   * ``<workspaceRoot>/.repo/manifests`` holds at least one resolved
   ##     project/variant manifest (``projects/*.toml`` /
-  ##     ``variants/*.toml``).
+  ##     ``variants/*.toml``), OR
+  ##   * (MO-2) ``<workspaceRoot>/repro.lock`` exists — a committed-lock-
+  ##     only repo with no manifest repo is a manifest-optional workspace,
+  ##     so the hooks/gate must enforce there too.
   ##
-  ## A bare ``.repo/`` (or ``.repro/``) with neither of those is treated
+  ## A bare ``.repo/`` (or ``.repro/``) with none of those is treated
   ## as "not an initialized workspace": the shared predicate the hook
   ## bodies and any init-skip logic consult so a managed hook installed
   ## under a half-bootstrapped or non-workspace parent no-ops with
@@ -208,7 +234,9 @@ proc isInitializedWorkspace*(workspaceRoot: string): bool =
     return false
   if fileExists(workspaceTomlPath(workspaceRoot)):
     return true
-  hasResolvedManifestCheckout(workspaceRoot)
+  if hasResolvedManifestCheckout(workspaceRoot):
+    return true
+  hasCommittedLockWorkspaceMarker(workspaceRoot)
 
 proc readWorkspaceFeatureStarted*(workspaceRoot: string): bool =
   ## M16 — Return ``true`` iff the workspace metadata records that the

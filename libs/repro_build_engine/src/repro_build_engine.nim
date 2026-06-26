@@ -1648,12 +1648,29 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # from reprobuild's former repro_monitor_shim / repro_monitor_depfile libs).
   # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
   # injection mechanism differs.
+  # Monitor-Hook-Shim.md:501 — when monitoring cannot be performed (no
+  # fs-snoop wired, or an unsupported platform), the failure semantics are
+  # "fail the monitored action OR make it non-cacheable, depending on
+  # policy". A NON-CACHEABLE action is the "make it non-cacheable" branch:
+  # it is always re-executed, so no cache entry's soundness depends on its
+  # monitor evidence and there is nothing to gather. Run it unmonitored
+  # (leave ``monitorDepfile`` empty so ``monitorEvidenceRequired`` stays
+  # false) rather than failing it. This is the sanctioned home for pure
+  # network actions with no monitorable file evidence — e.g. ``workspace
+  # sync``'s ``git fetch`` (cacheable = false) — which must still run on a
+  # host without the snoop driver wired (the hermetic workspace/VCS
+  # integration tests). A CACHEABLE action still fails: caching it without
+  # complete evidence would be the removed declared-only soundness hole.
   when not (defined(macosx) or defined(linux) or defined(windows)):
+    if not action.cacheable:
+      return
     result.diagnostic =
       "automatic monitor dependency gathering is unsupported on this platform"
   else:
     let monitorCli = monitorCliPath(config)
     if monitorCli.len == 0:
+      if not action.cacheable:
+        return
       result.diagnostic =
         "automatic monitor dependency gathering requires repro-fs-snoop"
       return

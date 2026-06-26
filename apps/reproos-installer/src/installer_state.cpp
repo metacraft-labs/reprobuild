@@ -560,12 +560,17 @@ bool InstallerState::runReproSystemApply(const QString &target) {
                         "--device", grubDevice,
                         "--hostname", hn,
                         "--disko", diskoJson};
-    // Cap at 30 minutes — the rsync bulk-copy of the live ISO root
-    // (sized at ~14 GiB across the from-source closure + nix-store
-    // prefixes + base userspace as of M9.R.40) takes a few minutes
-    // on a HDD and seconds on an SSD, so 30 min covers worst case
-    // with headroom.
-    return runReproSubcommand(args, 1800000) == 0;
+    // M9.R.44b: cap bumped from 30 min -> 3 hr.  The original 30 min
+    // was sized for an SSD host with KVM passthrough; on the eli-wsl
+    // host (Windows -> WSL2 -> QEMU triple-virt, no KVM) Phase 5 rsync
+    // runs at ~0.8 MB/s and the from-source live root closure is ~3 GB
+    // by M9.R.44, putting Phase 5 wall at 60-90 min.  The 30 min cap
+    // killed Phase 5 mid-rsync in the M9.R.42/M9.R.43/M9.R.44b runs;
+    // installer reported Phase 5 FAILED while the orphaned rsync child
+    // continued silently in the background for another hour.  3 hr
+    // covers the slow path with headroom and is still finite enough to
+    // surface a genuine wedge.
+    return runReproSubcommand(args, 10800000) == 0;
 }
 
 void InstallerState::writeFileAtomic(const QString &path,
