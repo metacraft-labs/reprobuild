@@ -1,0 +1,324 @@
+M9.R.40 - close the M9.R.39 carry: characterise + fix the live-ISO
+``repro hardware probe`` lsblk JSON parse failure
+==========================================================================
+
+Status as of 2026-06-26: CLOSED for the M9.R.39 carry.
+
+  M9.R.39 carry              CLOSED  hardware probe now succeeds;
+                                      install loop runs Phase 1
+                                      through Phase 6 + writes
+                                      ``install complete``.
+  G2 (clean install)         CLOSED  installer.rc=0; all 6 phases
+                                      executed; disk apply ran
+                                      11 disko operations; GRUB
+                                      installed to /dev/vda;
+                                      /etc/repro/{system,hardware}.nim
+                                      written; minimal bootstrap done.
+  G3 (boot installed)        BLOCKED on the M9.R.24 stub: the
+                                      installed disk holds the live
+                                      ISO's vmlinuz + initrd.img +
+                                      /etc/fstab + /etc/repro/*.nim +
+                                      GRUB only.  No actual Debian
+                                      root filesystem is staged onto
+                                      the disk -- ``repro infra apply
+                                      --target /mnt`` is stubbed at
+                                      M9.R.24.  This is acknowledged
+                                      in the installer log itself:
+                                      ``system apply (`repro infra
+                                      apply --target`) is stubbed
+                                      for the M9.R.24 demo``.
+                                      Out of M9.R.40 scope; needs
+                                      M9.R.41+ to unstub.
+  G4 (DE smoke transcript)   BLOCKED on G3 (no DE binaries on the
+                                      installed root).
+
+EXECUTIVE SUMMARY
+=================
+
+M9.R.39 closed the live-ISO Qt heap-corruption SIGABRT but left the
+install loop blocked on a downstream gap: ``repro hardware probe``
+called ``lsblk --json`` and the captured output failed JSON parse
+with ``input(1, 1) Error: { expected``.  M9.R.40 characterised the
+real cause + landed the fix.
+
+Phase A characterisation, taken straight from the M9.R.39.6 strace
+evidence already on disk in ``/tmp/m9r39_diag_phaseC/``:
+
+  673   1782437742.734548 execve("/bin/sh", ["/bin/sh", "-c",
+                                  "lsblk -f -J -o NAME,UUID,FSTYPE,MOUNTPOINT,SIZE"],
+                                  0x7f... /* 20 vars */) = 0
+  ...
+  673   1782437742.760233 writev(6</tmp/installer.lddebug.653>,
+        [{..."undefined symbol: __nptl_change_stack_perm,
+          version GLIBC_PRIVATE"...}])
+  651   1782437742.761561 read(7<pipe:[4109]>,
+        "/bin/sh: symbol lookup error: /nix/store/.../glibc-2.40-66/lib/libc.so.6:
+         undefined symbol: __nptl_change_stack_perm, version GLIBC_PRIVATE\n", 4096)
+        = 169
+  673   1782437742.761787 exit_group(127) = ?
+
+The ``lsblk`` binary never even ran.  ``/bin/sh`` (Debian dash) was
+launched by ``execCmdEx``, inherited the installer's
+``LD_LIBRARY_PATH=/nix/store/.../glibc-2.40-66/lib:...``, the loader
+preferred the nix glibc-2.40-66 ``libc.so.6`` over Debian's, and the
+nix glibc-2.40-66 ``libpthread.so.0`` lacked the
+``__nptl_change_stack_perm`` GLIBC_PRIVATE symbol Debian dash was
+linked against -> RC=127 -> ``execCmdEx`` returned the symbol-lookup
+-error stderr text (it merges stderr into stdout) as the "lsblk
+output" -> ``parseJson`` choked on ``/`` at position (1,1).
+
+WHAT LANDED
+===========
+
+  M9.R.40.1   clean child env for hardware probe + mirror bare      (1eb577d1)
+              ``bin/`` + use ld.so under strace.  Three independent
+              fixes baked into one commit (each is a small focused
+              edit; bundling them shaves an iso-rebuild cycle):
+
+              (a) ``recipes/reproos-iso/scripts/stage-de-rootfs.sh``
+                  (launcher DIAG branch): drop ``-E LD_LIBRARY_PATH``
+                  from strace's env exports and replace the bare
+                  ``reproos-installer`` exec with
+                  ``ld.so --library-path "$_repro_ldpath"
+                  reproos-installer``.  Same shape as the non-DIAG
+                  branch.  Sets the installer's library search path
+                  via ld.so's own argv rather than via the env, so
+                  children spawned by ``execCmdEx`` see a clean env
+                  without ``LD_LIBRARY_PATH``.
+
+              (b) ``libs/repro_profile/src/repro_profile/hardware_probe.nim``
+                  (defence-in-depth): introduce ``execShellCmdCleanEnv``
+                  + ``childEnvWithoutLdLibPath``.  ``runOrEmpty``
+                  routes through the clean-env wrapper.  Strips
+                  ``LD_LIBRARY_PATH`` / ``LD_DEBUG`` /
+                  ``LD_DEBUG_OUTPUT`` / ``LD_PRELOAD`` / ``LD_AUDIT``
+                  from every probe child env regardless of what the
+                  launcher does.  ``probeFilesystems`` also dumps
+                  raw lsblk output to ``$REPRO_HARDWARE_PROBE_RAWLOG_DIR
+                  /lsblk.raw.txt`` for Phase A characterisation
+                  without code changes.
+
+              (c) ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/
+                  package_result.nim`` (bare ``bin/`` mirror):
+                  ``emitInstallTreeMirror`` already copied bare
+                  ``sbin/`` + ``lib/`` + ``lib64/`` + ``etc/`` but
+                  NOT bare ``bin/``.  util-linux's autotools detects
+                  the legacy non-merged-usr layout and installs lsblk
+                  / mount / umount / findmnt / dmesg / kill / lsfd /
+                  mountpoint / pipesz / wdctl into ``<destdir>/bin/``,
+                  so they never reached ``.repro/output/install/``.
+                  Add ``"bin"`` to the bare-subdir list with the same
+                  copy semantics as ``"sbin"``.
+
+              (d) ``recipes/reproos-iso/scripts/stage-de-rootfs.sh``
+                  (shadow-link loop): extend
+                  ``link_base_recipe_binaries`` to walk BOTH
+                  ``install/usr/{bin,sbin}`` AND bare
+                  ``install/{bin,sbin}``.  Without this, even the
+                  M9.R.40.1(c) mirror fix would leave from-source
+                  lsblk invisible to PATH lookups on the live ISO.
+
+  M9.R.40.2   gate the new helpers via unit tests                  (0b4338c5)
+              ``tests/unit/t_m9r40_1_probe_clean_env.nim``: three
+              checks pinning the M9.R.40.1(b) defence-in-depth
+              behaviour against future regressions.  Passes locally.
+
+  M9.R.40.3   Phase D boot+DE-smoke driver                          (e556485a)
+              ``_m9r40_boot_installed.sh``.  Mirrors the M9.R.37
+              driver's shape; default disk path follows
+              _m9r39_install.sh's output.
+
+PHASE A: CHARACTERISE
+======================
+
+Pre-existing evidence from M9.R.39.6 already proved the case (see
+``/tmp/m9r39_diag_phaseC/installer.strace`` line numbers 5226-5400).
+No fresh QEMU run needed for Phase A; the M9.R.40.1(b)
+``REPRO_HARDWARE_PROBE_RAWLOG_DIR`` raw-output dump is a forward-
+looking instrumentation channel for future similar gaps.
+
+The captured ``lsblk output`` is ``/bin/sh``'s stderr text:
+
+  "/bin/sh: symbol lookup error:
+  /nix/store/5m9amsvvh2z8sl7jrnc87hzy21glw6k1-glibc-2.40-66/lib/libc.so.6:
+  undefined symbol: __nptl_change_stack_perm, version GLIBC_PRIVATE\n"
+
+PHASE B: ROOT CAUSE
+====================
+
+The M9.R.39.6 launcher set ``-E LD_LIBRARY_PATH=$_repro_ldpath``
+on strace's env-export list, which puts ``LD_LIBRARY_PATH`` in the
+TRACED CHILD's env (the installer).  M9.R.39 needed this to fix
+the heap-corruption SIGABRT (both halves of glibc had to resolve
+through the same nix instance).
+
+The installer is a Nim binary; ``execCmdEx`` calls ``startProcess``
+which forks + execs ``/bin/sh -c <cmd>``.  ``/bin/sh`` is Debian's
+``dash`` binary on the live ISO, PT_INTERP'd at
+``/lib64/ld-linux-x86-64.so.2`` (Debian's ld).  ``/bin/sh`` inherits
+the parent's env including ``LD_LIBRARY_PATH``.  Debian ld walks
+``LD_LIBRARY_PATH`` BEFORE ``/etc/ld.so.cache`` when resolving
+``libc.so.6``.  The first hit in the launcher's prepended nix-glibc
+dir is ``glibc-2.40-66/libc.so.6``.
+
+dash was linked against Debian glibc-2.41's ``libpthread.so.0``,
+which exports ``__nptl_change_stack_perm`` at GLIBC_PRIVATE.  Nix
+glibc-2.40-66's ``libpthread.so.0`` doesn't export that symbol --
+the GLIBC_PRIVATE symbol set drifts every minor version.  Loader
+fails the relocation -> dash exits 127 with the symbol-lookup-error
+text on stderr.
+
+``execCmdEx`` merges stderr into stdout via ``poStdErrToStdOut``;
+the caller (probeFilesystems) sees the symbol-lookup-error text
+as the "lsblk JSON output" and ``parseJson`` fails at byte 0.
+
+The bug is not in lsblk itself -- lsblk never ran.  The bug is
+that ``LD_LIBRARY_PATH`` set for the installer's nix-glibc
+resolution leaks into the env of every Debian subprocess the
+installer spawns.
+
+PHASE C: FIX
+=============
+
+Two layers of defence (M9.R.40.1):
+
+1. Launcher level (a): mirror the non-DIAG branch's existing trick.
+   Invoke ``ld.so --library-path`` AS the strace child.  ld.so
+   processes ``--library-path`` itself; the kernel exec path
+   ignores ``LD_LIBRARY_PATH`` (it's not in env); the installer's
+   children get a clean env without ``LD_LIBRARY_PATH`` and Debian
+   binaries (/bin/sh, lsblk, mount, findmnt, lspci) keep using
+   Debian glibc.
+
+2. Probe level (b): even with the launcher fix, the
+   ``runOrEmpty`` wrapper now uses ``execShellCmdCleanEnv`` which
+   strips every LD_* env var.  Forward-compatible against any
+   future launcher change that re-introduces propagation.
+
+The util-linux bare-``bin/`` mirror (c+d) is a separate concern but
+related: lsblk on the live ISO had been silently resolving to
+apt-installed Debian lsblk because the from-source one was missing
+from the ``install/`` tree.  The mirror fix routes ``/usr/bin/lsblk``
+to a from-source shadow-link in the staged ISO, matching the M9.R.33
+"from-source-first" architectural principle.
+
+PHASE D: INSTALL RC + BOOT + DE SMOKE TRANSCRIPTS
+==================================================
+
+Install RC=0 (full transcript: /tmp/m9r40_install_phase1_success.log
+= /tmp/m9r39_diag/installer.log on the eli-wsl host).
+
+  [2026-06-26 02:20:42] Phase 1: probing hardware...
+  [2026-06-26 02:20:42] $ /usr/bin/repro hardware probe --output ... --regenerate
+  [2026-06-26 02:20:45]   repro hardware probe: wrote /tmp/repro-installer-627/probed-hardware.nim
+  [2026-06-26 02:20:45] Phase 2: applying disk layout...
+  [2026-06-26 02:21:01]   [apply] wipefs: wipefs -af /dev/vda (exit 0)
+  [2026-06-26 02:21:01]   [apply] sgdisk: sgdisk -o /dev/vda (exit 0)
+  [2026-06-26 02:21:01]   [apply] sgdisk: sgdisk -n 1:0:+512M -t 1:EF00 -c 1:esp /dev/vda (exit 0)
+  [2026-06-26 02:21:01]   [apply] parted: parted -s /dev/vda set 1 boot on (exit 0)
+  [2026-06-26 02:21:01]   [apply] sgdisk: sgdisk -n 2:0:0 -t 2:8300 -c 2:root /dev/vda (exit 0)
+  [2026-06-26 02:21:01]   [apply] partprobe: partprobe /dev/vda (exit 0)
+  [2026-06-26 02:21:01]   [apply] mkfs.vfat: mkfs.vfat -F 32 /dev/vda1 (exit 0)
+  [2026-06-26 02:21:01]   [apply] mkfs.ext4: mkfs.ext4 -F /dev/vda2 (exit 0)
+  [2026-06-26 02:21:01]   repro disk apply: OK (11 operations)
+  [2026-06-26 02:21:01] Phase 3: mounting target rootfs at /mnt
+  [2026-06-26 02:21:03]   repro disk mount: mounted 2 entries under /mnt
+  [2026-06-26 02:21:03] Phase 4: writing /etc/repro/{system,hardware}.nim
+  [2026-06-26 02:21:03] wrote /mnt/etc/repro/system.nim (672 bytes)
+  [2026-06-26 02:21:03] wrote /mnt/etc/repro/hardware.nim (718 bytes)
+  [2026-06-26 02:21:03] Phase 5: applying system profile...
+  [2026-06-26 02:21:03] $ /usr/bin/repro infra apply --target /mnt
+  [2026-06-26 02:21:03]   repro infra apply: unknown flag: --target
+  [2026-06-26 02:21:03] system apply (`repro infra apply --target`) is stubbed for the M9.R.24 demo;
+                        proceeding with a minimal bootable-system bootstrap
+  [2026-06-26 02:21:03] Phase 5b: copying live kernel + initramfs into /mnt/boot/
+  [2026-06-26 02:21:09] Phase 5d: installing GRUB to /dev/vda
+  [2026-06-26 02:21:09]   Installation finished. No error reported.
+  [2026-06-26 02:21:09] Phase 5e: writing GRUB config
+  [2026-06-26 02:21:10] Phase 6: unmounting target...
+  [2026-06-26 02:21:10] install complete
+
+lsblk subprocess in the strace shows the from-source binary running:
+
+  673  1782440443.913387 newfstatat(AT_FDCWD</>, "/usr/bin/lsblk",
+       {st_mode=S_IFREG|0755, st_size=816368, ...}, 0) = 0
+  674  1782440443.921472 execve("/usr/bin/lsblk",
+       ["lsblk", "-f", "-J", "-o", "NAME,UUID,FSTYPE,MOUNTPOINT,SIZE"],
+       0x557f164ce790 /* 20 vars */ <unfinished ...>
+  674  1782440443.953353 writev(7</tmp/installer.lddebug.674>,
+       ["RUNPATH from file lsblk\n"])
+
+(``816368`` bytes = the from-source lsblk; Debian's was ``248208``).
+
+Boot installed (G3): BLOCKED on M9.R.24 stub.  The boot driver
+``_m9r40_boot_installed.sh`` reached the GRUB menu but the
+installed grub.cfg has no timeout default + no real Debian root
+exists on the installed disk (only vmlinuz + initrd + grub + the
+configs).  GRUB sat at its menu prompt and the keystroke input
+was consumed by GRUB's edit buffer.  This is OUT OF SCOPE for
+M9.R.40 -- it's the documented M9.R.24 stub the installer log
+itself flags.
+
+DE smoke (G4): BLOCKED on G3 (no installed DE binaries to probe).
+
+EVIDENCE FILES LEFT IN /tmp ON ELI-WSL
+=======================================
+
+  /tmp/m9r39_diag/                M9.R.40.1 successful install run.
+    installer.log                  RC=0 + full Phase 1-6 transcript.
+    installer.rc                   0
+    installer.binfo                installer DT_NEEDED + ldd view.
+    installer.strace               8.4 MiB strace of the run; shows
+                                    from-source lsblk executing.
+    installer.kernelstacks         per-tid kernel stacks snapshots.
+    installer.diag.tar.gz          756 KiB tarball.
+  /tmp/m9r40_install_phase1_success.log
+                                  copy of installer.log archived.
+  /tmp/m9r40_boot_installed.log   GRUB-menu-stuck boot run; documents
+                                  the M9.R.24-stub block on G3.
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r39_install.sh               (unchanged from M9.R.39) install
+                                   driver still works against the
+                                   M9.R.40.1 ISO.
+  _m9r39_iso_rebuild.sh           (unchanged from M9.R.39) ISO
+                                   rebuild driver still works.
+  _m9r40_boot_installed.sh        boot-the-installed-disk + DE smoke
+                                   driver; reaches GRUB but stops
+                                   there pending M9.R.24 unstub.
+
+HONEST REMAINING GAP
+====================
+
+M9.R.40's scope -- characterise + fix the M9.R.39 lsblk-parse
+downstream gap -- is CLOSED.  The installer completes all 6 phases
+end-to-end and writes ``install complete``.
+
+The next layer down is the M9.R.24 install-time ``repro infra
+apply --target`` stub.  The installer flags this explicitly:
+
+  Phase 5: applying system profile...
+  $ /usr/bin/repro infra apply --target /mnt
+    repro infra apply: unknown flag: --target
+  system apply (`repro infra apply --target`) is stubbed for the
+  M9.R.24 demo; proceeding with a minimal bootable-system bootstrap
+
+The minimal bootstrap copies the live ISO's vmlinuz + initrd into
+``/mnt/boot/`` and installs GRUB -- but there's no Debian root on
+the installed disk (no /bin /usr /etc/* beyond a tiny stub).  The
+installed system can't boot to a usable shell, let alone a DE.
+
+Closing the install -> boot -> DE-smoke loop end-to-end requires
+M9.R.41+ to unstub ``repro infra apply --target``, which is a
+materially different task than the M9.R.39/40 character + fix
+cycle: it needs the apt-rootfs squashfs (or a from-source root)
+to be copied onto /mnt + the initramfs regenerated for the
+installed root rather than the live medium.
+
+The M9.R.40 milestone closes its own gap (the hardware probe
+JSON parse error) + hands off the NEXT gap (the M9.R.24 apply
+stub) with full evidence + the M9.R.40.3 boot-installed driver
+ready for the next investigator to wire up against a fully-staged
+installed disk.
