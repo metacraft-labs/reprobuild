@@ -26,3 +26,9 @@ nim-agents=dev
 nim-everywhere=dev
 nim-pty=dev
 nim-termctl=dev
+
+# The TestRunner cross-cutting contract (Nim package `repro_test_adapters`)
+# lives in this standalone repo; `repro_dsl_stdlib` re-exports it, so the
+# recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
+# the --path as `../reprobuild-test-adapters/src`. Mainline branch is `main`.
+reprobuild-test-adapters=main
