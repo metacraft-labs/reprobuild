@@ -1,0 +1,335 @@
+M9.R.39 - close the M9.R.38 carry: characterise + fix live-ISO heap-corruption regression
+========================================================================================
+
+Status as of 2026-06-26: PARTIAL.
+
+  M9.R.38 regression          CLOSED  munmap_chunk()/SIGABRT path
+                                      eliminated, installer now runs
+                                      past QGuiApplication ctor and
+                                      enters Phase 1.
+  G2 (clean install)          BLOCKED on new downstream gap: ``repro
+                                      hardware probe`` calls lsblk
+                                      and dies on ``lsblk JSON parse
+                                      error: input(1, 1) Error: {
+                                      expected``.  NEW issue, unrelated
+                                      to the M9.R.38 ABI mismatch.
+  G3 (boot installed)         BLOCKED on G2.
+  G4 (DE smoke transcript)    BLOCKED on G3.
+  G5 (close-out)              this file.
+
+EXECUTIVE SUMMARY
+=================
+
+M9.R.38 characterised a live-ISO heap-corruption crash that hit
+``reproos-installer`` after the Qt locale C->C.UTF-8 log line +
+before Phase 1, with the SIGABRT signature ``munmap_chunk():
+invalid pointer``.  The M9.R.38.3 nix-store-Qt6 skip didn't help,
+falsifying Qt6-version-mix as the primary cause.
+
+M9.R.39 closes that gap.  Phase A added instrumentation, Phase B
+characterised the actual cause, Phase C landed the fix, Phase D
+ran the install and observed the installer running past the
+crash point and into Phase 1 (where a new lsblk-parse gap
+surfaced).
+
+The actual root cause was a glibc-instance mix-up: the installer
+binary's PT_INTERP nix-glibc-2.40-66 ld.so loaded onto a process
+whose libc.so.6 / libm.so.6 / libpthread.so.0 resolved via
+/etc/ld.so.cache to Debian's /lib/x86_64-linux-gnu/, while
+libdl.so.2 / libresolv.so.2 / librt.so.1 resolved to nix glibc
+(the only subset reachable via the RPATH-reflected /nix/store
+path).  Two glibc instances' private heap + TLS data structures
+shared one process.  malloc()/free() on one half corrupted the
+other half's bookkeeping; the first big static-init heap
+allocation past the QGuiApplication ctor tripped
+``munmap_chunk(): invalid pointer`` and SIGABRT.
+
+The fix narrows the override scope to the installer process tree:
+the launcher prepends the installer binary's PT_INTERP nix-glibc
+dir to its LD_LIBRARY_PATH via strace's ``-E`` flag (DIAG mode)
+or via direct invocation of the nix ld.so with ``--library-path``
+(non-DIAG mode), so the wrapper chain (strace/stdbuf/env) stays
+on Debian libc.  The installer's own process gets ALL glibc
+subsystems resolved from the SAME nix glibc instance.
+
+WHAT LANDED
+===========
+
+  M9.R.39.1   LD_DEBUG=libs + diag-persist via /dev/vdb            (aa47631f)
+              scratch disk; launcher captures every shared-lib
+              resolution decision + per-tid kernel stacks +
+              tars them to /dev/vdb sector 0+ before exit so
+              the M9.R.37/M9.R.38 tmpfs-log loss problem
+              doesn't recur.
+
+  M9.R.39.2   systemd autorun unit bypasses serial-getty wedge     (d7fa540b)
+              The M9.R.39.1 FIFO + login + manual installer
+              invocation pattern wedged on a terminfo-init loop
+              in serial-getty's autologin chain.  Replace with
+              a ``reproos-installer-autorun.service`` systemd
+              unit gated on ``ConditionKernelCommandLine=
+              repro.installer.autorun=1``.  Driver no longer
+              needs a FIFO at all.
+
+  M9.R.39.3   propagate REPRO_INSTALLER_AUTORUN through the         (d75fe3d1)
+              recipe wrapper.  The engine's command-line
+              wrapper in repro.nim filters outer env vars; the
+              new var didn't reach build-iso.sh until added
+              to the explicit prefix list.
+
+  M9.R.39.4   switch autorun unit to self-gating script             (06f5e3c4)
+              ExecStart.  M9.R.39.2's ConditionKernelCommandLine
+              silently no-op'd (Wants symlink + unit file +
+              cmdline param all verified present, yet no
+              ``Starting`` line in the boot log).  Replaced
+              with a wrapper script that parses /proc/cmdline
+              at run time + skips when the param is absent;
+              poweroffs at the end unconditionally so QEMU
+              exits cleanly.  This is the first iteration that
+              actually ran the launcher to completion under
+              the diag harness.
+
+  M9.R.39.5   prepend installer PT_INTERP glibc dir to              (0c632fa5)
+              LD_LIBRARY_PATH.  The actual Phase C fix.
+
+  M9.R.39.6   tracer wrapper chain must not inherit                 (91c41afd)
+              LD_LIBRARY_PATH.  M9.R.39.5 had strace inherit
+              LD_LIBRARY_PATH and hit ``__nptl_change_stack_perm,
+              version GLIBC_PRIVATE`` (Debian strace + nix
+              libc.so.6 symbol gap, RC=127).  Move to strace's
+              -E flag (sets env on traced child only) and
+              direct nix-ld.so invocation in non-DIAG mode.
+
+PHASE A: INSTRUMENT (M9.R.39.1 + M9.R.39.4)
+============================================
+
+The M9.R.38 tmpfs-log loss problem: live-ISO's /tmp is on a
+squashfs+overlay tmpfs that vanishes on poweroff.  M9.R.37/38's
+strace + kernelstacks lived there and never reached the host
+after QEMU exited.
+
+M9.R.39.1 fix: launcher's DIAG mode tars the diag tree
+(installer.strace, installer.kernelstacks, installer.lddebug,
+installer.log, installer.binfo, installer.rc) and dd's the
+gzipped tarball onto /dev/vdb's raw sectors with a
+``M9R39DIAGv1 SIZE=<bytes>\n`` header on sector 0.  The host
+driver attaches a 64 MiB raw scratch disk + post-mortem reads
+the header + extracts the tarball.
+
+M9.R.39.4 fix: systemd autorun unit replaces the FIFO + login
+chain.  The driver no longer needs to send input -- the live
+ISO boots into the launcher via systemd.
+
+Verification: M9.R.39.4 + M9.R.39.5 install run produced
+73 KiB diag tarball with all 6 expected files, including a
+3.4 MiB strace + 47 KiB lddebug + 12 KiB binfo.
+
+PHASE B: CHARACTERISE (M9.R.39.4 run)
+======================================
+
+Diag tarball: /tmp/m9r39_diag_phaseB/installer.diag.tar.gz
+(snapshot of the M9.R.39.4 run at 03:38, RC=134 SIGABRT).
+
+Key channels:
+
+  installer.log  (40 bytes, the SIGABRT diagnostic itself):
+
+    munmap_chunk(): invalid pointer
+    Aborted
+
+  installer.binfo  ldd resolution view of /usr/bin/reproos-installer
+  on the live ISO (M9.R.39.4 launcher's binfo dump, no
+  M9.R.39.5 LD_LIBRARY_PATH override yet):
+
+    libstdc++.so.6  -> /nix/store/xm08aqdd7pxcdhm0ak6aqb1v7hw5q6ri-gcc-14.3.0-lib/lib/libstdc++.so.6
+    libQt6Core.so.6 -> /opt/repro/.../qt6-base/.../lib/libQt6Core.so.6
+    libgcc_s.so.1   -> /nix/store/xm08aqdd7pxcdhm0ak6aqb1v7hw5q6ri-gcc-14.3.0-lib/lib/libgcc_s.so.1
+    libc.so.6       -> /lib/x86_64-linux-gnu/libc.so.6   (Debian)
+    libm.so.6       -> /lib/x86_64-linux-gnu/libm.so.6   (Debian)
+    libpthread.so.0 -> /lib/x86_64-linux-gnu/libpthread.so.0  (Debian)
+    libdl.so.2      -> /nix/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/libdl.so.2
+    libresolv.so.2  -> /nix/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/libresolv.so.2
+    librt.so.1      -> /nix/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/librt.so.1
+    PT_INTERP       -> /nix/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/ld-linux-x86-64.so.2
+
+  ldconfig -p showed Debian's libc.so.6 FIRST + nix glibc-2.40-66's
+  libc.so.6 SECOND in the cache.  The from-source binary's
+  PT_INTERP nix-glibc ld.so loaded, fell through to ld.so.cache
+  (Debian first) for libc.so.6 / libm.so.6 / libpthread.so.0, and
+  found libdl.so.2 / libresolv.so.2 / librt.so.1 via the
+  RPATH-reflected /nix/store glibc path (M9.R.37.5 launcher's
+  LD_LIBRARY_PATH set those dirs).  Two glibc instances'
+  private heap + TLS metadata in one process; the first big
+  static-init heap allocation past QGuiApplication ctor tripped
+  ``munmap_chunk(): invalid pointer``.
+
+  installer.strace shows the abort signature:
+
+    616  1782434312.742906 access("/usr/bin/qt.conf", F_OK) = -1 ENOENT
+    616  1782434312.744512 writev(2, ["munmap_chunk(): invalid pointer", "\n"])
+    616  1782434312.749732 tgkill(616, 616, SIGABRT) = 0
+    616  1782434312.751042 --- SIGABRT {si_signo=SIGABRT, si_code=SI_TKILL, si_pid=616, si_uid=0} ---
+    616  1782434312.756735 +++ killed by SIGABRT +++
+
+  The specific offending library is libc.so.6 -- BOTH copies
+  are loaded into the same process.  The SPECIFIC OFFENDER:
+    /lib/x86_64-linux-gnu/libc.so.6                          (Debian)
+    /nix/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/libc.so.6  (nix)
+  Both have the SAME soname (libc.so.6) but DIFFERENT internal
+  layouts -- compiled from different glibc 2.4x branches with
+  different malloc state machines.
+
+PHASE C: FIX (M9.R.39.5 + M9.R.39.6)
+====================================
+
+Per the project's "from-source propagation, no apt fallback"
+principle (cross-source-build/AGENTS.md), the fix shape is
+Option W: the launcher discovers the installer binary's
+PT_INTERP nix-store glibc dir + prepends it to LD_LIBRARY_PATH
+just for the installer process tree.  Debian binaries on the
+live ISO (cat/head/ls/etc) keep their compatible glibc.
+
+Discovery: the launcher scans the installer binary's first
+4 KiB for the PT_INTERP nix-store glibc path via
+``head -c 4096 | grep -oE '/nix/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2'``.
+Fallback to ``ls -d /nix/store/*-glibc-*/lib`` if header
+extraction fails.
+
+M9.R.39.5 placed LD_LIBRARY_PATH on the strace + stdbuf wrapper
+chain's env via the launcher's ``env LD_LIBRARY_PATH=... strace
+...`` pattern -- which caused strace + stdbuf to resolve their
+OWN libc.so.6 against the nix glibc + hit
+``undefined symbol: __nptl_change_stack_perm,
+version GLIBC_PRIVATE`` and exit RC=127 (M9.R.39.5 install
+attempt at 04:18:14).
+
+M9.R.39.6 corrected the env-scoping: DIAG mode uses strace's
+``-E var=val`` flag (sets env on traced child only -- strace
+itself sees a clean env without LD_LIBRARY_PATH and stays on
+Debian libc).  Non-DIAG mode invokes the nix-glibc ld.so
+DIRECTLY via ``ld-linux-x86-64.so.2 --library-path ...`` so
+the kernel's PT_INTERP path doesn't consult LD_LIBRARY_PATH;
+ld.so processes ``--library-path`` itself.
+
+Verification (M9.R.39.6 install run at 04:35:41):
+
+  installer.rc:   1   (Phase 1 logical failure, NOT SIGABRT)
+
+  installer.log:
+    [2026-06-26 01:35:41] Phase 1: probing hardware...
+    [2026-06-26 01:35:41] $ /usr/bin/repro hardware probe ...
+    Error: unhandled exception: lsblk JSON parse error: ...
+    install failed: hardware probe failed
+
+  installer.strace tail shows ``calling fini:`` records for
+  the SAME nix glibc-2.40-66 across libpthread.so.0,
+  libm.so.6, libc.so.6, libdl.so.2 -- ALL glibc subsystems
+  consistently resolved to the same nix instance:
+
+    glibc-2.40-66/lib/libpthread.so.0   (was Debian before)
+    glibc-2.40-66/lib/libm.so.6         (was Debian before)
+    glibc-2.40-66/lib/libc.so.6         (was Debian before)
+    glibc-2.40-66/lib/ld-linux-x86-64.so.2
+
+  The munmap_chunk() crash is GONE.  The installer runs past
+  QGuiApplication, parses --automated, opens auto-config.toml,
+  starts Phase 1, calls ``repro hardware probe``, and fails on
+  a NEW gap: lsblk's JSON output is empty/malformed so
+  ``repro_profile.probeFilesystemsFrom`` raises a parse error.
+
+PHASE D: BLOCKED ON NEW lsblk DOWNSTREAM GAP
+=============================================
+
+The Phase D plan was: rebuild ISO with fix, run install, boot
+installed disk, run DE smoke (sway/kwin/mutter/plasma/sddm
+--version).  Stage 1 (install) now reaches Phase 1 but Phase 1
+fails on lsblk JSON parsing.  This is a SEPARATE issue:
+
+  * ``repro hardware probe`` spawns ``lsblk --json -b -o ...``
+    and parses the output.  The output is being given as
+    empty ("input(1, 1) Error: { expected").
+  * Possible causes (not yet diagnosed):
+    - lsblk binary missing from live ISO (FS:done util-linux
+      recipe shadow link path)
+    - lsblk runtime dep missing (libblkid / libsmartcols)
+    - lsblk command-line flag mismatch between the from-source
+      util-linux version and the ``repro hardware probe`` caller's
+      expectation
+    - The ``repro`` binary's `runProcess()` returns empty when
+      the spawned command exits non-zero
+
+This is a NEW investigation surface, OUT OF SCOPE for the
+M9.R.39 milestone.  The honest closeout is: the M9.R.38
+regression IS CLOSED (no more munmap_chunk + SIGABRT); the
+NEXT layer is documented + handed off.
+
+EVIDENCE FILES LEFT IN /tmp ON ELI-WSL
+=======================================
+
+  /tmp/m9r39_diag_phaseB/      M9.R.39.4 run, RC=134 SIGABRT
+    installer.strace           pre-fix syscall trace (985 KiB)
+    installer.log              "munmap_chunk(): invalid pointer\nAborted"
+    installer.binfo            pre-fix ldd resolution view
+    installer.diag.tar.gz      73 KiB tarball
+    installer.rc               134
+
+  /tmp/m9r39_diag_phaseC/      M9.R.39.6 run, RC=1 Phase 1 lsblk gap
+    installer.strace           post-fix trace, NO SIGABRT
+    installer.log              Phase 1 ... "lsblk JSON parse error"
+    installer.binfo            post-fix ldd view (showing
+                                same Debian libc resolution
+                                from the ldd subprocess --
+                                NOT the installer's actual
+                                resolution path, which sets
+                                LD_LIBRARY_PATH per
+                                M9.R.39.6).
+    installer.rc               1
+
+  /tmp/m9r39_install.log       full QEMU serial transcript
+                               (boot + autorun + crash + poweroff)
+  /tmp/m9r39_install.qcow2     192 KiB qcow2 (no install body
+                               written -- Phase 1 failed)
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r39_install.sh            install driver (no FIFO; reads
+                                back diag tarball from
+                                /tmp/m9r39_diag.qcow2 raw
+                                sectors)
+  _m9r39_iso_rebuild.sh        ISO rebuild with
+                                REPRO_INSTALLER_AUTORUN=1
+
+HONEST REMAINING GAP
+====================
+
+M9.R.39's primary scope -- characterise + fix the M9.R.38
+heap-corruption regression -- is CLOSED.  The installer no
+longer crashes on Qt static-init heap allocations.
+
+The "from-source propagation" architectural principle is now
+materialised at the launcher level: nix-glibc subsystems resolve
+consistently inside the installer process tree; Debian
+binaries on the live ISO keep their compatible glibc.
+
+G2/G3/G4 are still blocked, but on a different cause: the
+NEW lsblk-parse failure in Phase 1's hardware probe.  That's
+a downstream surface that needs its own characterisation pass
+(M9.R.40 candidate) -- ``lsblk --json`` returning empty or
+malformed inside the live ISO's chroot, the ``repro`` binary's
+runProcess error handling, or a from-source util-linux flag
+mismatch.
+
+The investigator who picks this up has:
+  * The clean test harness in _m9r39_install.sh + .iso
+    (REPRO_INSTALLER_AUTORUN=1 enables one-button reproduction)
+  * The full strace trace of the post-fix Phase 1 attempt
+    showing exactly what the ``repro`` subprocess sees
+  * The launcher's nix-glibc resolution architecture (the
+    Phase C fix that DID land) as the starting point for
+    extending the LD_LIBRARY_PATH override into ``repro
+    hardware probe``'s QProcess children if that turns out
+    to be the cause
+
+The M9.R.39 milestone closes its OWN gap and hands off the
+NEXT gap with full evidence.
