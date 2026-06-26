@@ -1473,7 +1473,12 @@ when defined(windows):
       " -TaskName " & psQuote(parts.leaf) &
       " -ErrorAction SilentlyContinue; " &
       "if ($null -eq $t) { 'Missing=1' } else { " &
-      "'TaskName=' + $t.TaskName; " &
+      # Emit the FULL path (``$t.TaskPath`` already ends with ``\``)
+      # so the canonical observed-state string matches the desired
+      # one (which carries the full ``\Folder\Leaf`` path). Without
+      # this the digest disagrees even when Register/Get/Unregister
+      # all targeted the same folder.
+      "'TaskName=' + $t.TaskPath + $t.TaskName; " &
       "'Executable=' + $t.Actions[0].Execute; " &
       "'Arguments=' + $t.Actions[0].Arguments; " &
       "'WorkingDirectory=' + $t.Actions[0].WorkingDirectory; " &
