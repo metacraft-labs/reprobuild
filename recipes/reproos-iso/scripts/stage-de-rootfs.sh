@@ -591,35 +591,78 @@ EOF
 # without needing a timeout kill that could interrupt the diag-persist
 # dd to /dev/vdb.
 mkdir -p "$STAGE_DIR/etc/systemd/system"
+# M9.R.39.4 — drop the M9.R.39.2 ConditionKernelCommandLine approach
+# (the condition's match against /proc/cmdline silently no-op'd in the
+# M9.R.39.3 boot — no "Starting" line ever appeared in the boot log).
+# Replace with a self-gating ExecStart wrapper script that parses
+# /proc/cmdline at run time and skips the install body when the
+# ``repro.installer.autorun=1`` token is absent.  systemd doesn't need
+# to evaluate the gate; the script handles it.
+#
+# The wrapper also re-exports a small env tail so the launcher's
+# inner ``exec env LD_LIBRARY_PATH=...`` chain stays intact, and
+# unconditionally poweroffs at the end so QEMU exits and the host
+# driver's wait completes.
+mkdir -p "$STAGE_DIR/usr/local/sbin"
+cat > "$STAGE_DIR/usr/local/sbin/reproos-installer-autorun.sh" <<'EOF'
+#!/bin/sh
+# M9.R.39.4 — installer autorun wrapper invoked from the
+# reproos-installer-autorun.service systemd unit at boot.
+#
+# Self-gates on /proc/cmdline -> only runs the installer if
+# ``repro.installer.autorun=1`` is present.  Always poweroffs at the
+# end so QEMU exits cleanly + the host driver's wait completes.
+set -u
+
+echo "=== REPROOS-INSTALLER-AUTORUN-BEGIN ===" 1>&2
+echo "uptime: $(cat /proc/uptime 2>/dev/null)" 1>&2
+echo "cmdline: $(cat /proc/cmdline 2>/dev/null)" 1>&2
+
+if ! grep -qE '(^| )repro\.installer\.autorun=1( |$)' /proc/cmdline 2>/dev/null; then
+  echo "=== REPROOS-INSTALLER-AUTORUN-SKIP (cmdline lacks repro.installer.autorun=1) ===" 1>&2
+  exit 0
+fi
+
+export QT_QPA_PLATFORM=offscreen
+export REPRO_INSTALLER_DIAG=1
+
+# Run the launcher synchronously.
+/usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml
+rc=$?
+
+echo "=== REPROOS-INSTALLER-AUTORUN-END RC=$rc ===" 1>&2
+
+# Poweroff so QEMU exits + driver wait completes.  We do it from the
+# wrapper (not ExecStopPost) so the systemd unit's life-cycle is
+# uncomplicated.
+sync
+sync
+/sbin/poweroff -f
+exit "$rc"
+EOF
+chmod 0755 "$STAGE_DIR/usr/local/sbin/reproos-installer-autorun.sh"
+
 cat > "$STAGE_DIR/etc/systemd/system/reproos-installer-autorun.service" <<'EOF'
 [Unit]
-Description=ReproOS Installer auto-run (M9.R.39.2 diagnostic boot path)
-ConditionKernelCommandLine=repro.installer.autorun=1
-DefaultDependencies=no
-After=local-fs.target sysinit.target
-Before=multi-user.target getty.target
+Description=ReproOS Installer auto-run (M9.R.39.4 diagnostic boot path)
+After=local-fs.target sysinit.target multi-user.target
+Wants=multi-user.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
-Environment=QT_QPA_PLATFORM=offscreen
-Environment=REPRO_INSTALLER_DIAG=1
-ExecStart=/bin/sh -c 'echo === REPROOS-INSTALLER-AUTORUN-BEGIN ===; /usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml; echo === REPROOS-INSTALLER-AUTORUN-END RC=$? ==='
-# Always poweroff after the run so the host driver can detect end-of-life
-# via QEMU exit; even on SIGABRT we want a clean shutdown so the
-# /dev/vdb diag dd reaches stable storage.
-ExecStopPost=/bin/sh -c 'sync; sync; /sbin/poweroff -f'
+ExecStart=/usr/local/sbin/reproos-installer-autorun.sh
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 # Enable the unit via a symlink under multi-user.target.wants/ so
-# systemd activates it during boot (when the kernel-cmdline condition
-# is satisfied).  Without the explicit Wants link the unit is staged
-# but never triggered.
+# systemd activates it during boot.  The script ExecStart self-gates
+# on the kernel cmdline param, so the symlink is unconditional —
+# a non-investigator boot just sees the script print SKIP and exit.
 mkdir -p "$STAGE_DIR/etc/systemd/system/multi-user.target.wants"
 ln -sf /etc/systemd/system/reproos-installer-autorun.service \
   "$STAGE_DIR/etc/systemd/system/multi-user.target.wants/reproos-installer-autorun.service"
