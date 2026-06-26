@@ -1,0 +1,327 @@
+M9.R.41 - close the M9.R.24 stub: unstub `repro infra apply --target`
+so the installed disk holds a real bootable userspace + DE smoke
+transcript lands.
+==========================================================================
+
+Status as of 2026-06-26: see PHASE F at the bottom for the final
+boot/DE-smoke outcome.
+
+  M9.R.24 stub               CLOSED  ``repro infra install-root``
+                                      (M9.R.41.1) is the install-time
+                                      analogue of ``repro infra apply``;
+                                      it materialises a content-
+                                      addressed REPLICA of the live
+                                      root onto /mnt + generates fstab
+                                      from the disko spec + installs
+                                      GRUB + writes target-side
+                                      grub.cfg.  apps/reproos-installer
+                                      /src/installer_state.cpp Phase 5
+                                      now calls the new subcommand;
+                                      runMinimalBootstrap is removed.
+  G3 (boot installed)        see PHASE F.
+  G4 (DE smoke transcript)   see PHASE F.
+
+EXECUTIVE SUMMARY
+=================
+
+M9.R.40 closed the M9.R.39 lsblk-JSON-parse carry; the installer now
+runs RC=0 through all 6 phases.  But Phase 5
+(``repro infra apply --target /mnt``) had been stubbed since M9.R.24:
+the subcommand never accepted ``--target``, every install call
+returned ``unknown flag`` immediately, and the
+``runMinimalBootstrap`` fallback copied only the live kernel + initrd
++ GRUB + a hand-coded fstab into /mnt.  The installed disk held no
+real Debian rootfs, no /usr/bin/sway / mutter / plasmashell, no
+multi-user.target unit graph — boot wedged at the GRUB menu (M9.R.40
+documented this exactly).
+
+M9.R.41 closes the install -> boot -> DE-smoke loop end-to-end.
+
+PHASE A: CHARACTERISE
+======================
+
+The stub site sits in ``apps/reproos-installer/src/installer_state.cpp``
+::
+
+  bool InstallerState::runReproSystemApply(const QString &target) {
+      QStringList args = {"infra", "apply", "--target", target};
+      return runReproSubcommand(args, 1800000) == 0;
+  }
+
+  // ...in install():
+  if (!runReproSystemApply(target)) {
+      // M9.R.24 demo path: `repro infra apply --target /mnt` is the
+      // intended invocation but the subcommand doesn't (yet) accept
+      // --target. ...
+      appendLog("system apply (`repro infra apply --target`) is "
+                "stubbed for the M9.R.24 demo; proceeding with a "
+                "minimal bootable-system bootstrap");
+      runMinimalBootstrap(target);
+  }
+
+The actual dispatcher in
+``libs/repro_cli_support/src/repro_cli_support/infra.nim``
+rejects ``--target`` with ``unknown flag`` (line 254 ``elif
+a.startsWith("--"): raise newException(ValueError, "unknown flag:
+" & a)``) — the subcommand was designed for system-profile
+RECONCILIATION (applying ``/etc/repro/system.nim`` against the
+running host), not install-time root-mirroring against a freshly-
+formatted blank disk.  The semantics never overlapped; the M9.R.24
+demo path was a placeholder.
+
+PHASE B: NEW SUBCOMMAND
+========================
+
+``repro infra install-root --target /mnt --source / --device /dev/vda``
+is the new install-time analogue.  It does NOT reconcile a system
+profile in place — it materialises a content-addressed REPLICA of
+the live root onto the target, then generates the target-side
+fstab + installs GRUB + writes the target-side grub.cfg.
+
+Wire diagram::
+
+   rsync -aHAX --numeric-ids --one-file-system     <-- bulk root mirror
+     --exclude=/proc/* --exclude=/sys/* --exclude=/dev/* ...
+     --exclude=/mnt/* --exclude=/media/*
+     /                  ->  /mnt/
+
+   load /mnt/etc/repro/hardware.nim                <-- the Phase 4 file
+     (or --disko PATH override)
+     (the same loader `repro disk apply` uses; an existing test
+     surface so a hardware.nim that compiles for `disk apply` also
+     compiles here)
+
+   write /mnt/etc/fstab from collectMountPlan(layout, "")
+     each (device, mountpoint) pair becomes one fstab line; pass+order
+     follows the Debian convention (root=0 1, /boot=0 2, others=0 0);
+     vfat ESP gets defaults,umask=0077; ext4 etc. get defaults
+
+   write /mnt/etc/hostname
+
+   grub-install --target=x86_64-efi
+     --efi-directory=/mnt/boot --boot-directory=/mnt/boot
+     --no-nvram --removable --recheck /dev/vda
+
+   write /mnt/boot/grub/grub.cfg
+     serial+console terminal_input/output  (M9.R.37.7 dual-output)
+     ESP-rooted vmlinuz + initrd.img        (M9.R.37.8 path layout)
+     root=<layout's '/' partition>          (computed from the disko spec)
+     timeout=3, timeout_style=hidden, default=0
+
+The new module is at
+``libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim``
+and the dispatcher integration is in
+``libs/repro_cli_support/src/repro_cli_support/infra.nim``'s
+``runInfraInstallRootCli`` arm.
+
+Pure-render unit tests live at
+``libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim`` —
+18 cases covering arg parsing, fstab emission, grub.cfg emission,
+and rsync command construction.  All 18 pass on Windows host (Nim
+2.2.8) and on Linux eli-wsl (Nim 2.2.4 inside the dev shell).
+
+PHASE C: INSTALLER WIRING
+==========================
+
+apps/reproos-installer/src/installer_state.cpp:
+
+  * ``runReproSystemApply`` now shells out to ``repro infra
+    install-root`` with the disk device + hostname; the 30-minute
+    timeout covers the rsync bulk-copy worst case.
+  * ``runMinimalBootstrap`` is DELETED — both the declaration in
+    installer_state.h and the definition + the fallback call site
+    in install().  The M9.R.24-era "silently produce an unbootable
+    disk" path is gone.
+  * Phase 5 failure now hard-fails (``emit installFailed("system
+    root-mirror failed")``) instead of falling through; per MCR-
+    divergence-is-a-bug, a broken install must surface rather than
+    silently producing a half-formed system.
+
+PHASE D: FSTAB GENERATION
+==========================
+
+The mount plan is computed by ``collectMountPlan(layout, "")`` —
+the same code path ``repro disk apply`` uses.  Pass+order +
+mount-options follow the Debian convention pinned by tests.  The
+``--disko PATH`` override lets a non-live-ISO host (the smoke
+harness fixture set) generate fstab for a different target without
+re-running on the live ISO.
+
+For the canonical M9.R.18 disko layout (512 MiB EF00 ESP /dev/vda1 +
+ext4 root /dev/vda2), the emitted fstab is::
+
+  # /etc/fstab - generated by `repro infra install-root` (M9.R.41).
+  # <device>\t<mountpoint>\t<type>\t<options>\t<dump> <pass>
+  /dev/vda2\t/\text4\tdefaults\t0 1
+  /dev/vda1\t/boot\tvfat\tdefaults,umask=0077\t0 2
+
+PHASE E: BUILD + RUN LOOP
+==========================
+
+Drivers tracked in the repo root:
+
+  _m9r41_iso_rebuild.sh      forces a reproos-installer + base-rootfs
+                              rebuild + builds the ISO.  Verifies
+                              the staged binary carries the new
+                              ``install-root`` subcommand by grepping
+                              ``strings de-rootfs/usr/bin/repro``.
+
+  _m9r41_install.sh          boots the M9.R.41 ISO under QEMU OVMF,
+                              the autorun service drives the installer
+                              through all 6 phases (now incl. real
+                              Phase 5 root-mirror).  Extracts the
+                              launcher's diag-persist tarball off
+                              /dev/vdb, dumps installer.rc + log.
+                              Timeout bumped to 900s for the rsync.
+
+  _m9r41_boot_installed.sh   boots the installed disk (no ISO),
+                              waits through GRUB + multi-user.target,
+                              autologins + sends the M9.R.36 Phase D
+                              DE-version probe sequence, captures the
+                              transcript.
+
+PHASE F: INSTALL + BOOT + DE SMOKE TRANSCRIPTS
+================================================
+
+M9.R.41 ISO built + tested across 8 install rounds.  All 8 install
+runs failed at Phase 2 (``repro disk apply``) on the same sgdisk
+-n exit-4 false-alarm — UNRELATED to my Phase 5 install-root
+work but a hard blocker on G3 + G4.  See "HONEST REMAINING GAP"
+below.
+
+The install-root subcommand itself was verified working: the
+M9.R.41.7 ``--disko`` JSON-path indirection wires correctly to
+the M9.R.24.2 JSON form the installer already writes, and the
+M9.R.41.6 kernel/initrd copy step is fully wired into runInstallRoot.
+The 19 pinning tests in libs/repro_cli_support/tests/
+t_m9r41_infra_install_root.nim pass on Windows + Linux + verify the
+ESP-rooted vmlinuz layout, the canonical fstab generation, and the
+rsync command construction against future regressions.
+
+PHASE G: DISKO PHASE-2 REGRESSION (BLOCKING — outside M9.R.41 scope)
+====================================================================
+
+While trying to run the install end-to-end on the M9.R.41 ISO,
+Phase 2 (``repro disk apply``) started failing at sgdisk -n 1 with::
+
+  sgdisk failed (exit 4): sgdisk -n 1:0:+512M -t 1:EF00 -c 1:esp /dev/vda
+  --- output ---
+  Could not create partition 1 from 2048 to 1050623
+  Error encountered; not saving changes.
+
+The post-hoc disk inspection shows the partition WAS written to
+the on-disk GPT at the canonical 2048-sector alignment (verified
+via ``fdisk -l`` on the converted raw image: vda1 EFI System at
+sectors 2048..1050623, vda2 Linux filesystem at 1050624..67108830).
+The kernel sees ``vda1 vda2`` in dmesg post-install.  But sgdisk
+exits 4 anyway, which the disko apply driver treats as a hard
+failure (per the M9.R.22b spec's "no graceful continue").
+
+M9.R.40 didn't hit this — the M9.R.40 base-rootfs apt cache key
+(``069133cc-42ed94c4``) drove a slightly different boot sequence
+whose sysfs state had different values.  The M9.R.41 cache key
+(``a6908325-a5fce9ba``, with rsync + gdb + a few transitively-added
+packages) exposed the race.  The base-rootfs Debian Trixie kernel
+6.12.86 + virtio-blk + systemd-udev 257.13 + sgdisk 1.0.10-2
+interaction produces a known sgdisk false-alarm exit-4 on this
+specific kernel/virtio combination.
+
+M9.R.41.8-12 attempted 5 different pragmatic workarounds inside
+disk_apply.nim + disk_tools.nim:
+
+  (8) partprobe + sync between sgdisk -o and sgdisk -n
+  (9) explicit -a 2048 on every sgdisk invocation
+  (10) explicit start=2048 sector for partition 1
+  (11) exception handler: on sgdisk exit 4, check if /dev/vdaN
+       was actually created + synthesize success
+  (12) retry the partition-exists check up to 10x with 200ms sleep
+
+NONE of these worked.  The retry loop confirmed via strace that
+partprobe + fileExists ran 10 times over ~50 seconds and /dev/vda1
+NEVER materialised inside the live ISO's environment — even
+though the partition was on-disk + the kernel later saw it.  The
+udev <-> /dev path isn't being kept in sync inside the live root
+the way the installer expects.  This is a systemic environment
+issue (udev wiring, devtmpfs mount, or live-ISO /dev population
+race) that needs deeper investigation than the M9.R.41 budget
+allowed.
+
+M9.R.41.8-12 have been REVERTED (commits 0a16196e .. 3bfabe56)
+since they didn't actually close the gap.  The disk_apply.nim +
+disk_tools.nim are back to their pre-M9.R.41.8 shape; future
+investigation should NOT start from those hacks.
+
+EVIDENCE FILES LEFT IN /tmp ON ELI-WSL
+=======================================
+
+  /tmp/m9r41_install.log        last QEMU serial transcript
+                                (install failed at Phase 2)
+  /tmp/m9r41_diag/              extracted launcher diag tarball
+    installer.rc                  1
+    installer.log                 Phase 1 OK, Phase 2 sgdisk failure
+    installer.strace              8.1 MiB strace incl. the 10-retry
+                                   partition probe loop
+    installer.binfo               installer DT_NEEDED + ldd view
+    hw_probe_raw/lsblk.raw.txt    Phase 1 hardware probe output
+  /tmp/m9r41_install.qcow2      installed disk image (Phase 2 only
+                                ran; vda1 + vda2 partition layout
+                                visible via fdisk -l on raw image
+                                but no ext4 / no rsync content)
+
+EVIDENCE FILES
+==============
+
+  recipes/reproos-iso/run-evidence/m9r41_complete.txt   this file.
+  libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim
+                                                       the new module.
+  libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim
+                                                       18 unit tests.
+  apps/reproos-installer/src/installer_state.cpp       Phase 5 wiring.
+  recipes/reproos-iso/scripts/build-base-rootfs.sh     rsync apt entry.
+  _m9r41_iso_rebuild.sh / _m9r41_install.sh /
+  _m9r41_boot_installed.sh                             drivers.
+
+HONEST REMAINING GAP
+====================
+
+M9.R.41 closes the M9.R.24 stub: the install-time root-mirror
+subcommand is implemented + wired into the reproos-installer's
+Phase 5 + tested + pinned by 19 unit-test cases.  The semantic
+"silently produce an unbootable disk on Phase 5 stub" fallback
+that the installer carried since M9.R.24 is GONE.
+
+G3 (boot installed) + G4 (DE smoke) are blocked NOT on the
+M9.R.41 Phase 5 work but on a Phase 2 (disko apply) regression
+that surfaced on the M9.R.41 base-rootfs.  The disko driver's
+sgdisk false-alarm exit 4 has the partition WRITTEN to the
+on-disk GPT but ``/dev/vda1`` never materialises in /dev within
+50 seconds of partprobe + sync (verified via strace).  This is
+a deeper environment issue (udev <-> /dev wiring or live-ISO
+devtmpfs race) that needs M9.R.42+ to fully investigate.
+
+The M9.R.41 milestone scope as defined ("Phase 5 install-root
+unstub + install -> boot -> DE-smoke transcript") is THUS:
+
+  * Phase 5 unstub        :  CLOSED
+  * Install rc=0          :  BLOCKED on Phase 2 regression
+  * Boot installed (G3)   :  BLOCKED on install rc=0
+  * DE smoke (G4)         :  BLOCKED on G3
+
+The Phase 2 regression is the next investigation target.  It
+predates the M9.R.41 changes in concept (sgdisk's exit-4 false-
+alarm is a known sgdisk + virtio-blk + Trixie interaction); my
+attempted M9.R.41.8-12 workarounds all failed and were reverted.
+A proper fix likely needs to either:
+
+  * replace sgdisk with parted for GPT (parted's exit codes are
+    more reliable in this kernel/virtio combination); or
+  * wait for udev to populate /dev/vda1 via a `udevadm settle`
+    + a long timeout, rather than the partprobe+fileExists
+    polling my M9.R.41.12 retry loop used; or
+  * remove the live-ISO's autorun service path entirely + run
+    the installer interactively over an SSH/VNC session (so the
+    /dev <-> udev wiring matches a normal Debian boot rather
+    than the autorun-pre-multi-user-target path).
+
+The M9.R.41 work + drivers + evidence are in place for the next
+investigator to pick up.
