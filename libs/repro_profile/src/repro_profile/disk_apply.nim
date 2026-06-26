@@ -130,6 +130,24 @@ proc applyDiskLayout*(layout: DiskLayout;
         # metadata race.
         ctx.recordOperation(execTool("sgdisk",
           @["sgdisk", "-o", d.device]))
+        # M9.R.41: force the kernel block layer to flush + re-read the
+        # partition table AFTER sgdisk -o so the subsequent sgdisk -n
+        # sees the freshly written GPT (not a cached stale view via
+        # the block-layer buffer cache).  Without this, on the
+        # M9.R.41 base-rootfs (Debian Trixie kernel 6.12.86 +
+        # systemd-udev 257.13), sgdisk -n on the next call reads the
+        # disk and reports "Caution! After loading partitions, the
+        # CRC doesn't check out!" + falls back to start=34 alignment
+        # (instead of the canonical 2048) + sgdisk exits 4.  The
+        # partprobe + sync forces the kernel to re-scan + flush so
+        # the next sgdisk loads a clean state.  M9.R.40 happened to
+        # work without this because the older base-rootfs apt-pkg
+        # set drove a slightly slower udev settle that hid the race;
+        # it is a real race either way and this fix closes it.
+        if findExe("partprobe").len > 0:
+          ctx.recordOperation(execTool("partprobe",
+            @["partprobe", d.device]))
+        ctx.recordOperation(execTool("sync", @["sync"]))
       else:
         # MBR path: parted is the right tool for the label.
         ctx.recordOperation(partedMklabel(d.device, tableKind))
