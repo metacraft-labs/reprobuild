@@ -170,7 +170,13 @@ jobs:
           set -euo pipefail
           ct_root="$(cd "${{ github.workspace }}/../codetracer" && pwd)"
           direnv allow "$ct_root"
-          ( cd "$ct_root" && direnv exec "$ct_root" just build )
+          # codetracer's build uses tup, which mounts a FUSE filesystem. The dev
+          # shell puts the nixpkgs `fuse` package's NON-setuid fusermount3 on
+          # PATH, which can't mount (EPERM). Prepend NixOS's setuid wrapper dir
+          # (programs.fuse provides /run/wrappers/bin/fusermount3) INSIDE the
+          # dev-shell env so tup uses the privileged wrapper.
+          ( cd "$ct_root" && direnv exec "$ct_root" \
+              bash -c 'export PATH=/run/wrappers/bin:"$PATH"; just build' )
           ct_bin="$ct_root/src/build-debug/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
