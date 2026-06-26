@@ -519,14 +519,37 @@ bool InstallerState::runReproDiskUnmount(const QString &mountPoint) {
 
 bool InstallerState::runReproSystemApply(const QString &target) {
     if (dryRunDestructive()) {
-        appendLog(QString("[dry-run] would run `repro infra apply "
-                          "--target %1`").arg(target));
+        appendLog(QString("[dry-run] would run `repro infra install-root "
+                          "--target %1 --device %2`")
+                  .arg(target,
+                       m_targetDevice.isEmpty() ? QStringLiteral("/dev/vda")
+                                                : m_targetDevice));
         return true;
     }
-    // The system-apply path uses the M9.R.20 system macro. The
-    // `repro infra apply` subcommand discovers /etc/repro/system.nim
-    // relative to the --target prefix.
-    QStringList args = {"infra", "apply", "--target", target};
+    // M9.R.41: install-time root-mirror.  The previous
+    // ``runReproSystemApply`` path called ``repro infra apply
+    // --target`` which the dispatcher never accepted (apply is a
+    // system-profile reconciliation, not a root-mirror); the
+    // ``runMinimalBootstrap`` fallback only copied kernel + initrd +
+    // GRUB and left the rest of /mnt empty.  ``repro infra
+    // install-root`` is the install-time analogue: rsync -aHAX the
+    // live root onto /mnt, generate fstab from the disko spec Phase
+    // 4 wrote to <target>/etc/repro/hardware.nim, then install GRUB
+    // + write the target-side grub.cfg.  See M9.R.41.1 commit body.
+    const QString grubDevice = m_targetDevice.isEmpty()
+        ? QStringLiteral("/dev/vda") : m_targetDevice;
+    const QString hn = m_hostname.isEmpty()
+        ? QStringLiteral("reproos-vm") : m_hostname;
+    QStringList args = {"infra", "install-root",
+                        "--target", target,
+                        "--source", "/",
+                        "--device", grubDevice,
+                        "--hostname", hn};
+    // Cap at 30 minutes — the rsync bulk-copy of the live ISO root
+    // (sized at ~14 GiB across the from-source closure + nix-store
+    // prefixes + base userspace as of M9.R.40) takes a few minutes
+    // on a HDD and seconds on an SSD, so 30 min covers worst case
+    // with headroom.
     return runReproSubcommand(args, 1800000) == 0;
 }
 
@@ -545,96 +568,12 @@ void InstallerState::writeFileAtomic(const QString &path,
               .arg(text.toUtf8().size()));
 }
 
-void InstallerState::runMinimalBootstrap(const QString &target) {
-    // Helper: run a shell command via QProcess + log output.
-    auto sh = [this](const QString &cmd, int timeoutMs = 60000) -> int {
-        appendLog("$ " + cmd);
-        QProcess p;
-        p.setProcessChannelMode(QProcess::MergedChannels);
-        p.start("/bin/sh", {"-c", cmd});
-        if (!p.waitForStarted(5000)) {
-            appendLog("spawn failed: " + p.errorString());
-            return -1;
-        }
-        if (!p.waitForFinished(timeoutMs)) {
-            p.kill();
-            appendLog(QString("timeout after %1ms").arg(timeoutMs));
-            return -2;
-        }
-        const QString output = QString::fromUtf8(p.readAllStandardOutput());
-        for (const QString &line : output.split('\n')) {
-            if (!line.isEmpty()) appendLog("  " + line);
-        }
-        return p.exitCode();
-    };
-    appendLog("Phase 5b: copying live kernel + initramfs into " + target + "/boot/");
-    sh("mkdir -p " + target + "/boot");
-    sh("cp -v /run/live/medium/live/vmlinuz " + target + "/boot/vmlinuz 2>/dev/null "
-       "|| cp -v /vmlinuz " + target + "/boot/vmlinuz 2>/dev/null "
-       "|| cp -v /run/live/medium/vmlinuz " + target + "/boot/vmlinuz 2>/dev/null "
-       "|| true");
-    sh("cp -v /run/live/medium/live/initrd.img " + target + "/boot/initrd.img 2>/dev/null "
-       "|| cp -v /initrd.img " + target + "/boot/initrd.img 2>/dev/null "
-       "|| cp -v /run/live/medium/initrd.img " + target + "/boot/initrd.img 2>/dev/null "
-       "|| true");
-    appendLog("Phase 5c: writing /etc/fstab + /etc/hostname");
-    sh("mkdir -p " + target + "/etc");
-    sh("printf '%s\\n%s\\n' '/dev/vda2 / ext4 defaults 0 1' "
-       "'/dev/vda1 /boot vfat defaults 0 2' > " + target + "/etc/fstab");
-    const QString hn = m_hostname.isEmpty()
-        ? QStringLiteral("reproos-vm") : m_hostname;
-    sh("echo '" + hn + "' > " + target + "/etc/hostname");
-    appendLog("Phase 5d: installing GRUB to " +
-              (m_targetDevice.isEmpty() ? QStringLiteral("/dev/vda")
-                                        : m_targetDevice));
-    // Use grub-install via UEFI (the GPT layout has an ESP at /boot
-    // but no BIOS Boot Partition, so i386-pc embedding fails with
-    // "will not proceed with blocklists"). --target=x86_64-efi +
-    // --efi-directory=<mnt>/boot writes the EFI binary into the ESP
-    // and registers the boot entry. --removable installs it under the
-    // EFI/BOOT/BOOTX64.EFI canonical path so QEMU OVMF picks it up
-    // without an NVRAM variable.
-    const QString grubDevice = m_targetDevice.isEmpty()
-        ? QStringLiteral("/dev/vda") : m_targetDevice;
-    sh("grub-install --target=x86_64-efi --efi-directory=" + target +
-       "/boot --boot-directory=" + target +
-       "/boot --no-nvram --removable --recheck " + grubDevice, 120000);
-    appendLog("Phase 5e: writing GRUB config");
-    // M9.R.37.7 — wire the GRUB UI to BOTH console (tty1) AND serial
-    // (ttyS0) so headless QEMU runs see the menu + boot countdown
-    // tick.  Without ``serial --unit=0`` + ``terminal_input/_output
-    // serial console`` GRUB renders the menu on the framebuffer ONLY
-    // — which on ``qemu -nographic -serial mon:stdio`` is invisible —
-    // and the timeout ticks but no key event ever reaches GRUB.  A
-    // ``set timeout_style=hidden`` together with ``set timeout=3``
-    // also bypasses the interactive menu entirely on serial-only
-    // hardware (matching Debian's serial-installer pattern).
-    //
-    // M9.R.37.8 — vmlinuz + initrd.img live on the ESP root, NOT at
-    // ``(esp)/boot/vmlinuz``: ESP is mounted at ``/mnt/boot`` during
-    // install, so ``cp ... /mnt/boot/vmlinuz`` writes to
-    // ``(esp)/vmlinuz``.  GRUB's root after BOOTX64.EFI loads IS the
-    // ESP, so the kernel + initramfs paths in grub.cfg must be
-    // ``/vmlinuz`` + ``/initrd.img``, NOT ``/boot/vmlinuz``.  Without
-    // this fix GRUB errors with ``file '/boot/vmlinuz' not found``
-    // every boot.
-    QString grubCfg =
-        "serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1\n"
-        "terminal_input console serial\n"
-        "terminal_output console serial\n"
-        "set timeout_style=hidden\n"
-        "set timeout=3\n"
-        "set default=0\n"
-        "menuentry 'ReproOS' {\n"
-        "  linux /vmlinuz root=/dev/vda2 ro console=tty1 console=ttyS0,115200\n"
-        "  initrd /initrd.img\n"
-        "}\n";
-    QString tmp = "/tmp/repro-installer-" +
-        QString::number(QCoreApplication::applicationPid()) + "/grub.cfg";
-    writeFileAtomic(tmp, grubCfg);
-    sh("cp -v " + tmp + " " + target + "/boot/grub/grub.cfg");
-    appendLog("minimal bootstrap done");
-}
+// M9.R.41: ``runMinimalBootstrap`` is DELETED.  The previous M9.R.24
+// stub fell through to a kernel+initrd+GRUB-only path when ``repro
+// infra apply --target`` failed (which it always did — the subcommand
+// never accepted --target).  ``repro infra install-root`` is the real
+// implementation; on failure the installer now aborts with an explicit
+// error rather than silently producing an unbootable disk.
 
 void InstallerState::install() {
     if (m_installRunning) {
@@ -698,17 +637,22 @@ void InstallerState::install() {
     setInstallStatus("Applying system profile");
     setInstallProgress(0.7);
     if (!runReproSystemApply(target)) {
-        // M9.R.24 demo path: `repro infra apply --target /mnt` is the
-        // intended invocation but the subcommand doesn't (yet) accept
-        // --target. For the demo, fall through to a minimal bootable-
-        // system bootstrap: cp the live kernel/initrd into /mnt/boot,
-        // install GRUB to /dev/vda, write fstab. This gets us to a
-        // post-reboot state that reaches userspace; the real `repro
-        // infra apply --target` lands in a follow-up milestone.
-        appendLog("system apply (`repro infra apply --target`) is "
-                  "stubbed for the M9.R.24 demo; proceeding with a "
-                  "minimal bootable-system bootstrap");
-        runMinimalBootstrap(target);
+        // M9.R.41: ``repro infra install-root`` failed.  This is now
+        // a hard error — the M9.R.24 stub's "minimal bootstrap"
+        // fallback intentionally left the installed disk without a
+        // real rootfs, blocking G3 (boot installed) + G4 (DE smoke).
+        // The campaign close-out makes Phase 5 the SOURCE OF TRUTH
+        // for the installed system's contents; a failure here means
+        // the install is broken and the user must investigate, not
+        // silently proceed with a half-formed system.
+        appendLog("Phase 5 FAILED: `repro infra install-root` did "
+                  "not complete; aborting install (the previous "
+                  "M9.R.24 minimal-bootstrap fallback is removed in "
+                  "M9.R.41 — a failed install must surface, not "
+                  "silently produce an unbootable disk).");
+        setInstallRunning(false);
+        emit installFailed("system root-mirror failed");
+        return;
     }
 
     appendLog("Phase 6: unmounting target...");
