@@ -2020,26 +2020,45 @@ proc launchChildEnv(action: BuildAction;
   when defined(macosx):
     # Portable-Macos-Sandbox-Tools: select the io-mon macOS monitoring backend
     # for every monitored action's process tree. The io-mon shim reads
-    # ``IO_MON_MACOS_BACKEND`` in its dyld constructor (default ``both`` =
-    # interpose + body-patch). On this Apple-Silicon (arm64e) host the
-    # body-patch backend is known to crash gnulib/clang subprocesses (it
-    # corrupts the monitored compiler's ``open``/``read`` of its own
-    # nimcache ``.nim.c`` files — observed as ``Permission denied`` / SIGTRAP
-    # exit 133), which aborts the engine's own ``__repro_provider_compile``
-    # and any autotools ``configure``/``make`` action before its dep set can
-    # be captured. The interpose-only backend does NOT body-patch, so it does
-    # not trip that crash while still capturing the direct-spawn read/write
-    # dep set. We therefore default monitored actions to ``interpose`` on
-    # macOS. This is a constant seed (like ``REPRO_MONITOR_SHIM_LIB`` above),
-    # so it does not perturb the action-cache fingerprint.
+    # ``IO_MON_MACOS_BACKEND`` in its dyld constructor; the values are
+    # ``both`` (interpose + body-patch) | ``bodypatch`` | ``interpose``.
     #
-    # An explicit parent-process ``IO_MON_MACOS_BACKEND`` (e.g. a test that
-    # wants the ``both`` body-patch coverage) wins: the seed is only added
-    # when the parent did not already set the variable, and ``action.env``
-    # overrides still win because they are appended after this seed. The
-    # full body-patch arm64e fix is a tracked io-mon follow-up.
+    # We seed ``both`` — the fuller, now-working backend that gives the most
+    # complete dependency capture (the correctness goal of the coverage
+    # envelope in ``Sandbox-And-Monitoring.md``). Per
+    # ``MacOS-Interpose-Limitations-Under-Chained-Fixups.md`` the two layers
+    # are **additive, not redundant**: interpose redirects the monitored
+    # binary's own import-stub ``open``/``read`` calls before they reach
+    # libsystem, while the ``mach_vm_remap`` body-patch overwrites the
+    # libsystem wrapper bodies and so catches the **shared-cache-internal**
+    # and ``$NOCANCEL`` calls interpose structurally cannot see (e.g. the
+    # ``open$NOCANCEL`` that ``fopen``/stdio issues *inside* the shared cache,
+    # measured non-interposable on macOS 26). A given call hits at most one
+    # layer, so they compose without double-counting. Interpose-only — the
+    # historical seed here — is therefore a downgrade that misses exactly the
+    # shared-cache-internal reads the body patch exists to capture.
+    #
+    # The body-patch was previously seeded down to ``interpose`` as a
+    # workaround because, on Apple-Silicon (arm64e), it crashed/corrupted
+    # monitored gnulib/clang subprocesses (``Permission denied`` / SIGTRAP
+    # exit 133 on a compiler's read of its own ``.nim.c``). Those io-mon
+    # body-patch defects are now ALL FIXED — io-mon commits ``60a72b6``
+    # (repair the body-patch backend / SIGTRAP / spawn-resolution / rename),
+    # ``6cd688e`` (stop the ``both`` spawn backend recursing), and
+    # ``4722b04`` (variadic ``open`` mode / worker-thread write capture).
+    # A reprobuild monitored sandbox-tool build under
+    # ``both`` now completes with ``failed=0`` and full dep capture, so the
+    # downgrade is no longer warranted. This is a constant seed (like
+    # ``REPRO_MONITOR_SHIM_LIB`` above), so it does not perturb the
+    # action-cache fingerprint.
+    #
+    # An explicit parent-process ``IO_MON_MACOS_BACKEND`` (e.g. a test or
+    # operator pinning ``interpose`` to A/B the coverage delta) still wins:
+    # the seed is only added when the parent did not already set the
+    # variable, and any ``action.env`` override wins because it is appended
+    # after this seed. Linux/Windows are unaffected (this arm is macOS-only).
     if not existsEnv("IO_MON_MACOS_BACKEND"):
-      result.add("IO_MON_MACOS_BACKEND=interpose")
+      result.add("IO_MON_MACOS_BACKEND=both")
   for entry in action.env:
     result.add(entry)
   # M9.N Batch B: the resolved-tool ``PATH`` prepend happens in

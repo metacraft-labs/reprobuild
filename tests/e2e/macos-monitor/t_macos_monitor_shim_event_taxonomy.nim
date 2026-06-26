@@ -313,11 +313,31 @@ int main(int argc, char **argv) {
       check threadedWrites >= 5
       check dep.summary.eventLossCount == 0
 
-      var unsupportedRequired = MacosMonitorShimTaxonomyCapabilities
-      unsupportedRequired.incl mcapRename
-      let renameRequiredProfile = evaluateMonitorEvidence(dep, unsupportedRequired)
-      check not renameRequiredProfile.evidenceComplete
-      check hasGap(renameRequiredProfile, mcapRename, true)
+      # rename/renameat is now a SUPPORTED macOS capability: io-mon fix
+      # 60a72b6 added rename hooking on both the interpose and body-patch
+      # backends, recording the move as an output write on the destination
+      # path (the gnulib/autotools ``mv $@t $@`` atomic-write idiom). It is
+      # accordingly part of ``MacosMonitorShimTaxonomyCapabilities`` and of the
+      # macOS supported set in io-mon's ``capabilities.nim``. Requiring
+      # ``mcapRename`` must therefore leave the evidence COMPLETE with no
+      # capability gap (it used to be asserted as an unsupported gap before the
+      # hook landed).
+      check mcapRename in MacosMonitorShimTaxonomyCapabilities
+      var renameRequired = MacosMonitorShimTaxonomyCapabilities
+      renameRequired.incl mcapRename
+      let renameRequiredProfile = evaluateMonitorEvidence(dep, renameRequired)
+      check renameRequiredProfile.evidenceComplete
+      check mcapRename in renameRequiredProfile.supportedCapabilities
+      check not hasGap(renameRequiredProfile, mcapRename, true)
+      # The fixture's ``rename(create-truncate.txt -> renamed-unsupported.txt)``
+      # must surface as the captured destination output write, with the source
+      # temp preserved in ``detail`` for provenance.
+      check hasRecord(records, proc(record: MonitorRecord): bool =
+        record.kind == mrFileWrite and
+          record.observationKind == moFileWrite and
+          record.path.endsWith("renamed-unsupported.txt") and
+          record.detail.contains("from=") and
+          record.detail.contains("create-truncate.txt"))
 
       let eventStream = readFile(eventsPath)
       check eventStream.contains("\"kind\":\"observation\"")
