@@ -138,6 +138,13 @@ for libName in [
   # types. M2b-M2e extend it with the ASP encoder; downstream libs
   # import it via ``import repro_solver`` once the encoder is alive.
   "repro_solver",
+  # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
+  # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
+  # conversions). ``repro_cli_support`` imports it via ``import
+  # repro_lock`` for ``repro lock refresh/validate`` and the build-path
+  # lock consumption. Separate from the manifest-repo SHA lock
+  # (``repro_workspace_manifests/lock_writer.nim``).
+  "repro_lock",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

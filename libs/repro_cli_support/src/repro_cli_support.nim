@@ -85,6 +85,11 @@ import ct_incremental_adapter
 # Spec-Implementation M2e — ``repro lock explain`` consumes the
 # explainer surface to render structured chosen / unsat justifications.
 import repro_solver
+# Workspace-Manifest-Optional MO-1 — the committed solved-graph lock
+# writer/reader. ``repro lock refresh/validate`` and the build-path lock
+# consumption serialize/load ``UnifiedSolution`` through this module.
+# Distinct from the manifest-repo SHA lock in repro_workspace_manifests.
+import repro_lock
 # M9.L.4-refactor Step C: the off-the-shelf factory that returns a
 # ``BinaryCachePublisher`` closure ready to wire into
 # ``BuildEngineConfig.binaryCachePublisher``. The closure reads
@@ -8502,6 +8507,7 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # down (after ``runWorkspaceLockCommand``, which the gate calls to
 # create / refresh the workspace lock).
 proc runCheckCommand*(args: openArray[string]): int
+proc validateCommittedLockAdvisory(repoRoot: string)
 proc runPostCommitLockCommand*(args: openArray[string]): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc runManifestRefreshHookCommand*(hookName: string;
@@ -10308,6 +10314,57 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
                            asJson: bool; packageFilter: string;
                            bypassRunQuota: bool): int
 
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-1 — committed solved-graph lock.
+#
+# Canonical path convention: the committed lock lives next to the project
+# file (``repro.nim`` / ``reprobuild.nim``) at ``<projectDir>/repro.lock``.
+# The solver inputs the CLI solves for ``repro lock refresh`` / build-time
+# lock consumption come (in MO-1) from a sidecar ``<projectDir>/repro.solver``
+# in the M2e explain-fixture format (variants + packages + version ranges).
+# A future milestone extracts the solver inputs/solution directly from the
+# compiled project provider; until then the sidecar is the CLI-readable
+# source of the same solve the DSL runs.
+#
+# ``--lock <file>`` (build/test/run + the lock verbs) selects an alternate
+# committed lock; the default is the canonical path.
+# ---------------------------------------------------------------------------
+
+const
+  CommittedLockFileName* = "repro.lock"
+  SolverInputsFileName* = "repro.solver"
+
+proc committedLockPath*(projectDir: string): string =
+  projectDir / CommittedLockFileName
+
+proc solverInputsPath*(projectDir: string): string =
+  projectDir / SolverInputsFileName
+
+proc resolveProjectDirFromTarget(target: string): string =
+  ## Resolve the directory that owns the committed lock for a build
+  ## target. An existing directory is itself; an existing file resolves
+  ## to its parent; everything else (a bare name selector, or an empty
+  ## target) falls back to the current working directory.
+  if target.len == 0:
+    return getCurrentDir()
+  let abs = absolutePath(target)
+  if dirExists(extendedPath(abs)):
+    return abs
+  if fileExists(extendedPath(abs)):
+    return parentDir(abs)
+  getCurrentDir()
+
+# Forward declarations — bodies live after ``parseExplainFixture`` (which
+# they consume to turn the sidecar solver-inputs text into the solver's
+# ``VariantDecl`` / ``PackageDecl`` lists).
+proc loadSolverInputsFile(path: string): tuple[
+    variants: seq[variant_encoder.VariantDecl],
+    packages: seq[PackageDecl], text: string]
+proc resolveSolvedGraphForBuild(projectDir, lockOverride,
+                                inputsOverride: string): tuple[
+    solution: UnifiedSolution, source: string, lockPath: string,
+    found: bool]
+
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
@@ -10332,6 +10389,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var dryRun = false
   var forceRebuild = false
   var skipCmakeRegeneration = false
+  # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
+  # alternate committed lock (default = ``<projectDir>/repro.lock``);
+  # ``--print-solved-graph`` resolves + prints the solved graph the build
+  # would pin from the lock (or a fresh solve when no lock is present) and
+  # exits WITHOUT building — the no-build inspection surface that exercises
+  # the exact lock-consumption path the real build uses.
+  var lockOverride = ""
+  var printSolvedGraph = false
   var logModeExplicit = false
   var statsModeExplicit = false
   # Default: use runquota when reachable; --no-runquota forces full bypass.
@@ -10439,6 +10504,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       bypassRunQuota = false
     elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
       peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
+    elif arg == "--lock" or arg.startsWith("--lock="):
+      # MO-1 alternate committed lock. ``--lock-slice`` is a distinct flag
+      # handled elsewhere; the exact ``--lock`` / ``--lock=`` match here
+      # never swallows it.
+      lockOverride = valueFromFlag(args, i, "--lock")
+    elif arg == "--print-solved-graph":
+      printSolvedGraph = true
     elif arg == "--variant" or arg.startsWith("--variant="):
       # Spec-Implementation M1 — ``--variant name=value`` registers a
       # ``prSet`` contribution against the named solver-participating
@@ -10482,6 +10554,32 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     inc i
 
   # ----------------------------------------------------------------
+  # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
+  # selector classification so it works against a committed-lock-only
+  # fixture directory that has no ``repro.nim``. Prints the solved graph
+  # the build would pin (from the committed lock when present, else a
+  # fresh solve of the ``repro.solver`` sidecar) and exits without
+  # building — exercising the exact lock-consumption loader the real build
+  # uses.
+  # ----------------------------------------------------------------
+  if printSolvedGraph:
+    let rawTarget =
+      if positionalSelectors.len > 0: positionalSelectors[0] else: ""
+    let projDir = resolveProjectDirFromTarget(rawTarget)
+    let graph = resolveSolvedGraphForBuild(projDir, lockOverride, "")
+    var inputsTxt = ""
+    let sip = solverInputsPath(projDir)
+    if fileExists(extendedPath(sip)):
+      try:
+        inputsTxt = readFile(extendedPath(sip))
+      except CatchableError:
+        inputsTxt = ""
+    let lk = solutionToLock(graph.solution, currentPlatformId(), inputsTxt)
+    stdout.write(serializeSolvedGraphLock(lk))
+    stdout.write("# source: " & graph.source & "\n")
+    return 0
+
+  # ----------------------------------------------------------------
   # Named-Targets M2 positional resolution lives in the shared M3
   # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
   # ``runWatchCommand`` cannot drift. The helper classifies every
@@ -10497,6 +10595,33 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
+
+  # ----------------------------------------------------------------
+  # MO-1 — consume the committed solved-graph lock.
+  #
+  # When a committed lock is present at the canonical path (or at
+  # ``--lock <file>``), the build PINS the solved graph from it: the
+  # locked variant assignments are injected into ``REPRO_VARIANTS`` (the
+  # env the DSL solve honours) so the build reproduces the locked graph
+  # instead of a fresh re-solve that could differ. Explicit ``--variant``
+  # overrides already present win; only locked names not already set are
+  # added.
+  # ----------------------------------------------------------------
+  block lockConsumption:
+    let projDir = resolveProjectDirFromTarget(splitTarget(target).base)
+    let graph = resolveSolvedGraphForBuild(projDir, lockOverride, "")
+    if graph.found and graph.source == "lock":
+      var existing = getEnv("REPRO_VARIANTS")
+      var present: seq[string] = @[]
+      for asg in existing.split(','):
+        let e = asg.find('=')
+        if e > 0: present.add(asg[0 ..< e].strip())
+      for name, value in graph.solution.variants:
+        if name in present: continue
+        if existing.len > 0: existing.add(',')
+        existing.add(name & "=" & value)
+      if existing.len > 0:
+        putEnv("REPRO_VARIANTS", existing)
 
   # Apply the REPRO_TOOL_PROVISIONING env override before any dispatch so
   # both ``--list-targets`` and the engine build observe the same mode. A
@@ -23295,6 +23420,13 @@ proc runCheckCommand*(args: openArray[string]): int =
         "(no resolved manifest checkout at " & parsed.workspaceRoot &
         "); pre-push gate is a no-op")
       return 0
+    # MO-1: non-gating advisory when the current repo carries a committed
+    # solved-graph lock (the manifest-optional reproducibility artifact).
+    # Fires ONLY when a ``repro.lock`` is present, so it never perturbs the
+    # RA gate fixtures (which have none) and never changes the exit code.
+    validateCommittedLockAdvisory(
+      if parsed.currentRepo.len > 0: parsed.currentRepo
+      else: parsed.workspaceRoot)
     var report: CheckReport
     try:
       report = executeCheckPrePush(parsed)
@@ -28845,6 +28977,10 @@ type
     reportPath: string
     daemonFlag: string             # ``--daemon=on|off|auto`` carry-through
                                    # for the verb-alias path.
+    lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
+                                   # the alternate committed solved-graph
+                                   # lock, forwarded to ``runBuildCommand``
+                                   # on the verb-alias path.
     toolProvisioning: ToolProvisioningMode
       ## Workspace-mode discovery needs typed tool provisioning when the
       ## project's interface declares ``uses:`` blocks (the default for any
@@ -29681,6 +29817,11 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       # the flag from ``repro build``.
       let v = valueFromFlag(args, i, "--daemon")
       result.daemonFlag = "--daemon=" & v
+    elif arg == "--lock" or arg.startsWith("--lock="):
+      # MO-1 carry-through: select an alternate committed solved-graph
+      # lock for the verb-alias path. ``runBuildCommand`` honours
+      # ``--lock <file>`` (default = the canonical ``repro.lock``).
+      result.lockFlag = "--lock=" & valueFromFlag(args, i, "--lock")
     elif arg == "--certify":
       result.certify = true
       result.certifyExplicit = true
@@ -30612,6 +30753,8 @@ proc runReproTestCommand*(args: openArray[string];
       buildArgs.add("--tool-provisioning=" & opts.toolProvisioning.modeName)
     if opts.daemonFlag.len > 0:
       buildArgs.add(opts.daemonFlag)
+    if opts.lockFlag.len > 0:
+      buildArgs.add(opts.lockFlag)
     if opts.selectors.len == 0:
       buildArgs.add("test")
     else:
@@ -31052,6 +31195,56 @@ proc parseExplainFixture(text: string): tuple[
     flushFixtureBlock(s)
   result = (variants: s.variants, packages: s.packages)
 
+# ---------------------------------------------------------------------------
+# MO-1 — committed solved-graph lock: solver-inputs loading + the shared
+# build-time resolver. These consume ``parseExplainFixture`` (above) and the
+# ``repro_lock`` writer/reader, so their bodies live here; the forward
+# declarations near ``runBuildCommand`` let the build path call them.
+# ---------------------------------------------------------------------------
+
+proc loadSolverInputsFile(path: string): tuple[
+    variants: seq[variant_encoder.VariantDecl],
+    packages: seq[PackageDecl], text: string] =
+  ## Read a sidecar ``repro.solver`` (explain-fixture format) and parse it
+  ## into the solver's input lists. ``text`` is the raw body, retained so
+  ## the lock can record its ``inputs_digest`` provenance.
+  let text = readFile(extendedPath(path))
+  let parsed = parseExplainFixture(text)
+  (variants: parsed.variants, packages: parsed.packages, text: text)
+
+proc resolveSolvedGraphForBuild(projectDir, lockOverride,
+                                inputsOverride: string): tuple[
+    solution: UnifiedSolution, source: string, lockPath: string,
+    found: bool] =
+  ## The single chokepoint both ``repro build`` and ``--print-solved-graph``
+  ## use to obtain the solved graph:
+  ##   * a committed lock present (``--lock`` override or the canonical
+  ##     ``<projectDir>/repro.lock``) → LOAD it (``source = "lock"``); the
+  ##     build pins this graph rather than re-solving.
+  ##   * else a ``repro.solver`` sidecar present → solve it implicitly
+  ##     (``source = "solve"``), matching the spec's "ordinary commands
+  ##     solve implicitly when no lock is present".
+  ##   * else → an empty graph (``found = false``).
+  let effectiveLock =
+    if lockOverride.len > 0: lockOverride
+    else: committedLockPath(projectDir)
+  if fileExists(extendedPath(effectiveLock)):
+    let lock = parseSolvedGraphLock(readFile(extendedPath(effectiveLock)))
+    return (solution: lockToSolution(lock), source: "lock",
+            lockPath: effectiveLock, found: true)
+  let inputsP =
+    if inputsOverride.len > 0: inputsOverride
+    else: solverInputsPath(projectDir)
+  if fileExists(extendedPath(inputsP)):
+    let inputs = loadSolverInputsFile(inputsP)
+    let sol = solve(inputs.variants, inputs.packages)
+    return (solution: sol, source: "solve", lockPath: effectiveLock,
+            found: true)
+  (solution: UnifiedSolution(variants: initTable[string, string](),
+                             packages: initTable[string, string](),
+                             optimal: false),
+   source: "none", lockPath: effectiveLock, found: false)
+
 proc renderExplainChainText(chain: ExplainChain): string =
   ## Human-readable rendering of an ExplainChain. Mirrors the shape
   ## of Spack's ``spack spec --explain`` output: one block per
@@ -31150,18 +31343,223 @@ proc renderUnsatCoreJson(entries: seq[UnsatCoreEntry];
     arr.add(j)
   result["core"] = arr
 
-proc runReproLockCommand*(args: openArray[string]): int =
-  ## Top-level dispatcher for ``repro lock <verb> ...``. M2e ships the
-  ## ``explain`` verb; future milestones land ``solve``, ``debug``,
-  ## ``visualize`` per Locking-And-Solver.md §"CLI Surface".
-  if args.len == 0:
-    stderr.writeLine("repro lock: error: missing verb (try `explain`)")
+proc parseLockVerbArgs(rest: openArray[string]; verb: string;
+                       projectDir, inputsOverride, lockOverride,
+                       platformOverride: var string; asJson: var bool): int =
+  ## Shared arg parser for ``repro lock refresh`` / ``validate``:
+  ## ``[<projectDir>] [--inputs <file>] [--lock <file>] [--platform <p>]
+  ## [--json]``. Returns 0 on success, 2 on a usage error (diagnostic
+  ## already emitted).
+  var i = 0
+  while i < rest.len:
+    let arg = rest[i]
+    if arg == "--inputs" or arg.startsWith("--inputs="):
+      inputsOverride = valueFromFlag(rest, i, "--inputs")
+    elif arg == "--lock" or arg.startsWith("--lock="):
+      lockOverride = valueFromFlag(rest, i, "--lock")
+    elif arg == "--platform" or arg.startsWith("--platform="):
+      platformOverride = valueFromFlag(rest, i, "--platform")
+    elif arg == "--json":
+      asJson = true
+    elif arg.startsWith("--"):
+      stderr.writeLine("repro lock " & verb & ": unknown flag " & arg)
+      return 2
+    else:
+      if projectDir.len > 0:
+        stderr.writeLine("repro lock " & verb &
+          ": at most one <projectDir> positional accepted")
+        return 2
+      projectDir = arg
+    inc i
+  if projectDir.len == 0:
+    projectDir = getCurrentDir()
+  projectDir = absolutePath(projectDir)
+  return 0
+
+proc runReproLockRefresh(rest: openArray[string]): int =
+  ## ``repro lock refresh`` — re-solve the project's solver inputs and
+  ## (re)write the committed lock WITHOUT building. No build artifacts are
+  ## produced; only the lock file is written.
+  var projectDir, inputsOverride, lockOverride, platformOverride: string
+  var asJson = false
+  let rc = parseLockVerbArgs(rest, "refresh", projectDir, inputsOverride,
+                             lockOverride, platformOverride, asJson)
+  if rc != 0: return rc
+  let inputsP =
+    if inputsOverride.len > 0: absolutePath(inputsOverride)
+    else: solverInputsPath(projectDir)
+  if not fileExists(extendedPath(inputsP)):
+    stderr.writeLine("repro lock refresh: no solver inputs found at " &
+      inputsP & " (expected a `" & SolverInputsFileName &
+      "` sidecar, or pass --inputs <file>)")
+    return 1
+  let lockP =
+    if lockOverride.len > 0: absolutePath(lockOverride)
+    else: committedLockPath(projectDir)
+  let inputs =
+    try: loadSolverInputsFile(inputsP)
+    except CatchableError as e:
+      stderr.writeLine("repro lock refresh: failed to read inputs: " & e.msg)
+      return 1
+  var sol: UnifiedSolution
+  try:
+    sol = solve(inputs.variants, inputs.packages)
+  except EUnsatisfiable as e:
+    stderr.writeLine("repro lock refresh: solver UNSAT — cannot pin a " &
+      "lock: " & e.msg)
+    return 3
+  let platform =
+    if platformOverride.len > 0: platformOverride else: currentPlatformId()
+  let lock = solutionToLock(sol, platform, inputs.text)
+  try:
+    writeFile(extendedPath(lockP), serializeSolvedGraphLock(lock))
+  except CatchableError as e:
+    stderr.writeLine("repro lock refresh: failed to write lock: " & e.msg)
+    return 1
+  stdout.writeLine("repro lock refresh: wrote " & lockP & " (" &
+    $lock.variants.len & " variant(s), " & $lock.packages.len &
+    " package(s); platform " & platform & ")")
+  return 0
+
+proc runReproLockValidate(rest: openArray[string]): int =
+  ## ``repro lock validate`` — check the committed lock is loadable,
+  ## internally consistent, platform-resolvable, and (when the solver
+  ## inputs are available) still consistent with a fresh solve. No build.
+  ## Exit 0 = valid; exit 2 = invalid/tampered/stale (diagnostic emitted);
+  ## exit 1 = IO error.
+  var projectDir, inputsOverride, lockOverride, platformOverride: string
+  var asJson = false
+  let rc = parseLockVerbArgs(rest, "validate", projectDir, inputsOverride,
+                             lockOverride, platformOverride, asJson)
+  if rc != 0: return rc
+  let lockP =
+    if lockOverride.len > 0: absolutePath(lockOverride)
+    else: committedLockPath(projectDir)
+  if not fileExists(extendedPath(lockP)):
+    stderr.writeLine("repro lock validate: no committed lock at " & lockP &
+      " (run `repro lock refresh` first)")
     return 2
+  var lock: SolvedGraphLock
+  try:
+    lock = parseSolvedGraphLock(readFile(extendedPath(lockP)))
+  except SolvedGraphLockParseError as e:
+    stderr.writeLine("repro lock validate: malformed lock: " & e.msg)
+    return 2
+  except CatchableError as e:
+    stderr.writeLine("repro lock validate: failed to read lock: " & e.msg)
+    return 1
+  var problems: seq[string] = @[]
+  # (a) structural consistency: every package has a concrete version,
+  #     every variant has a name.
+  for p in lock.packages:
+    if p.name.len == 0 or p.version.len == 0:
+      problems.add("package entry missing name/version")
+  for v in lock.variants:
+    if v.name.len == 0:
+      problems.add("variant entry missing name")
+  # (b) loadable + round-trips deterministically.
+  let reparsed =
+    try: parseSolvedGraphLock(serializeSolvedGraphLock(lock))
+    except CatchableError:
+      problems.add("lock does not round-trip through the serializer")
+      lock
+  if not sameSolution(lockToSolution(lock), lockToSolution(reparsed)):
+    problems.add("lock is not deterministically loadable (round-trip drift)")
+  # (c) platform-resolvable on THIS host.
+  let host = currentPlatformId()
+  if lock.platform != host:
+    problems.add("lock platform '" & lock.platform &
+      "' is not resolvable on this host '" & host & "'")
+  # (d) consistency with the current solver inputs (tamper/stale check).
+  let inputsP =
+    if inputsOverride.len > 0: absolutePath(inputsOverride)
+    else: solverInputsPath(projectDir)
+  if fileExists(extendedPath(inputsP)):
+    try:
+      let inputs = loadSolverInputsFile(inputsP)
+      let fresh = solve(inputs.variants, inputs.packages)
+      if not sameSolution(lockToSolution(lock), fresh):
+        problems.add("lock does not match a fresh solve of the current " &
+          "inputs (tampered or stale — run `repro lock refresh`)")
+      if lock.inputsDigest != inputsDigestOf(inputs.text):
+        problems.add("inputs_digest mismatch (the solver inputs changed " &
+          "since the lock was written)")
+    except EUnsatisfiable:
+      problems.add("current solver inputs are UNSAT")
+    except CatchableError as e:
+      stderr.writeLine("repro lock validate: failed to re-solve inputs: " &
+        e.msg)
+      return 1
+  if asJson:
+    let arr = newJArray()
+    for p in problems: arr.add(%p)
+    let obj = %*{
+      "lock": lockP,
+      "valid": problems.len == 0,
+      "platform": lock.platform,
+      "problems": arr,
+    }
+    stdout.writeLine($obj)
+  if problems.len > 0:
+    if not asJson:
+      stderr.writeLine("repro lock validate: INVALID (" & lockP & ")")
+      for p in problems:
+        stderr.writeLine("  - " & p)
+    return 2
+  if not asJson:
+    stdout.writeLine("repro lock validate: OK (" & lockP & ")")
+  return 0
+
+proc validateCommittedLockAdvisory(repoRoot: string) =
+  ## MO-1 — ``repro check`` advisory. When the current repo carries a
+  ## committed solved-graph lock AND its solver inputs, validate it and
+  ## print a NON-GATING advisory. Never raises and never alters the gate
+  ## exit code; emits nothing when no committed lock is present (so the
+  ## RA pre-push gate fixtures, which have no ``repro.lock``, stay
+  ## byte-stable).
+  if repoRoot.len == 0: return
+  let lockP = committedLockPath(absolutePath(repoRoot))
+  if not fileExists(extendedPath(lockP)): return
+  try:
+    let lock = parseSolvedGraphLock(readFile(extendedPath(lockP)))
+    let inputsP = solverInputsPath(absolutePath(repoRoot))
+    if fileExists(extendedPath(inputsP)):
+      let inputs = loadSolverInputsFile(inputsP)
+      let fresh = solve(inputs.variants, inputs.packages)
+      if sameSolution(lockToSolution(lock), fresh):
+        stderr.writeLine("repro check: committed solved-graph lock OK (" &
+          lockP & ")")
+      else:
+        stderr.writeLine("repro check: committed solved-graph lock is stale " &
+          "— run `repro lock refresh` (" & lockP & ")")
+    else:
+      stderr.writeLine("repro check: committed solved-graph lock present (" &
+        lockP & ")")
+  except CatchableError:
+    discard
+
+proc runReproLockCommand*(args: openArray[string]): int =
+  ## Top-level dispatcher for ``repro lock <verb> ...``.
+  ##
+  ## MO-1 (Workspace-Manifest-Optional) lands the committed solved-graph
+  ## lock verbs ``refresh`` / ``validate`` and folds in the existing M2e
+  ## ``explain``. The spec's ``solve`` / ``debug`` / ``visualize``
+  ## (Locking-And-Solver.md §"CLI Surface") are future work; ``solve`` is
+  ## accepted as an alias of ``refresh`` (it is the preflight-solve that
+  ## writes the lock).
+  if args.len == 0:
+    stderr.writeLine("repro lock: error: missing verb " &
+      "(one of: refresh, validate, explain)")
+    return 2
+  let rest =
+    if args.len > 1: args[1 .. ^1]
+    else: @[]
   case args[0]
+  of "refresh", "solve":
+    return runReproLockRefresh(rest)
+  of "validate":
+    return runReproLockValidate(rest)
   of "explain":
-    let rest =
-      if args.len > 1: args[1 .. ^1]
-      else: @[]
     var variantName = ""
     var fixturePath = ""
     var asJson = false
