@@ -12,3 +12,17 @@
 # dependency: reprobuild -> codetracer.
 codetracer=dev
 codetracer-trace-format-nim=dev
+
+# codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
+# ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
+# stack and the shared Nim agent libs, so its Nim compile needs these adjacent on
+# the --path. Pinned to mainline; reprobuild only ever execs the resulting `ct`.
+isonim=dev
+isonim-gpui=dev
+isonim-tui=dev
+nim-acp=dev
+nim-agent-harbor=dev
+nim-agents=dev
+nim-everywhere=dev
+nim-pty=dev
+nim-termctl=dev
