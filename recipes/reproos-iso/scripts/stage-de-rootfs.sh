@@ -989,28 +989,41 @@ if [ "$_repro_diag" = "1" ]; then
     fi
     echo ""
   } > /tmp/installer.binfo 2>&1
-  # Run the installer SYNCHRONOUSLY (not via exec) so we can persist
-  # the diagnostic logs to the scratch disk BEFORE poweroff regardless
-  # of whether the binary exits cleanly, aborts, or wedges (in which
-  # case the driver's timeout kills us and we still drop logs first).
+  # M9.R.39.6 — Run the installer SYNCHRONOUSLY (not via exec) so we can
+  # persist the diagnostic logs to the scratch disk BEFORE poweroff
+  # regardless of whether the binary exits cleanly, aborts, or wedges
+  # (in which case the driver's timeout kills us and we still drop
+  # logs first).
+  #
   # ``LD_DEBUG=libs`` makes glibc's loader dump every library lookup
-  # decision to stderr; we redirect that to /tmp/installer.lddebug
-  # via ``LD_DEBUG_OUTPUT`` so it doesn't interleave with the
-  # installer's QTextStream(stderr) writes.
+  # decision; we redirect that to /tmp/installer.lddebug via
+  # ``LD_DEBUG_OUTPUT``.  glibc appends ``.<pid>`` to the file name.
+  #
+  # CRITICAL (M9.R.39.6): the env vars MUST NOT leak into the strace +
+  # stdbuf wrapper chain.  Those are Debian binaries linked against
+  # Debian's libc.so.6; with LD_LIBRARY_PATH set to a nix-glibc dir
+  # they hit ``undefined symbol: __nptl_change_stack_perm,
+  # version GLIBC_PRIVATE`` (M9.R.39.5 regression) and exit RC=127
+  # before the installer ever runs.  Use strace's ``-E var=val`` flag
+  # to set env on the TRACED process only -- strace itself sees a clean
+  # env without LD_LIBRARY_PATH and stays on Debian libc.
+  #
+  # Also drop ``stdbuf -oL -eL`` from the chain: stdbuf is also a Debian
+  # binary and would hit the same -- the installer's stderr buffering
+  # isn't the load-bearing concern given the binary crashes within ~5
+  # seconds of QGuiApplication ctor (M9.R.39.4 evidence).
   (
-    env \
-      LD_LIBRARY_PATH="$_repro_ldpath" \
-      LD_DEBUG=libs \
-      LD_DEBUG_OUTPUT=/tmp/installer.lddebug \
-      QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
-      QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
-      QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
-      QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
-      strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
-        -o /tmp/installer.strace \
-        stdbuf -oL -eL \
-        /usr/bin/reproos-installer "$@" \
-          > /tmp/installer.log 2>&1
+    strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
+      -o /tmp/installer.strace \
+      -E LD_LIBRARY_PATH="$_repro_ldpath" \
+      -E LD_DEBUG=libs \
+      -E LD_DEBUG_OUTPUT=/tmp/installer.lddebug \
+      -E QT_PLUGIN_PATH="$_repro_qt_plugins" \
+      -E QML2_IMPORT_PATH="$_repro_qml_imports" \
+      -E QML_IMPORT_PATH="$_repro_qml_imports" \
+      -E QT_QPA_PLATFORM_PLUGIN_PATH="$_repro_qpa_plugins" \
+      /usr/bin/reproos-installer "$@" \
+        > /tmp/installer.log 2>&1
     echo $? > /tmp/installer.rc
   ) &
   _instpid=$!
@@ -1043,13 +1056,21 @@ if [ "$_repro_diag" = "1" ]; then
   exit "$_rc"
 fi
 
-exec env \
-  LD_LIBRARY_PATH="$_repro_ldpath" \
-  QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
-  QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
-  QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
-  QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
-  /usr/bin/reproos-installer "$@"
+# M9.R.39.6 — non-DIAG exec path.  Same constraint as the DIAG branch
+# above: ``env`` is a Debian binary that breaks if LD_LIBRARY_PATH
+# points at a nix-glibc dir (``__nptl_change_stack_perm`` symbol gap).
+# Set the env vars one level deeper by running the installer through
+# its OWN PT_INTERP nix-glibc ld.so via ``--argv0`` so the kernel
+# exec path doesn't consult LD_LIBRARY_PATH; ld.so itself processes
+# ``--library-path`` and avoids any glibc-version drift between PT_INTERP
+# and the resolved libraries.
+QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
+QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
+QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
+QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
+  exec "$_repro_glibc_dir/ld-linux-x86-64.so.2" \
+    --library-path "$_repro_ldpath" \
+    /usr/bin/reproos-installer "$@"
 EOF
 chmod 0755 "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
 
