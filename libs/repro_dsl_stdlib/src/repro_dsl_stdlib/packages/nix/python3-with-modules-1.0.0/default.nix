@@ -14,7 +14,7 @@
 # pre-populated with the declared module set; no PYTHONPATH gymnastics
 # needed at the consumer site.
 let
-  pkgs = import <nixpkgs> {};
+  pkgs = import ../nixpkgs.nix;
 in
   pkgs.python3.withPackages (ps: [
     ps.setuptools
