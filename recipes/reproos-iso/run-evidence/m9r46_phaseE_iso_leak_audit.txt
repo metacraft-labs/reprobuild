@@ -1,0 +1,12 @@
+M9.R.46 Phase A leak baseline
+=============================
+rootfs scanned       : /tmp/m9r46_squashfs2/root
+scan dirs            : /tmp/m9r46_squashfs2/root/opt /tmp/m9r46_squashfs2/root/usr /tmp/m9r46_squashfs2/root/bin /tmp/m9r46_squashfs2/root/sbin /tmp/m9r46_squashfs2/root/lib /tmp/m9r46_squashfs2/root/lib64
+ELF candidates       : 2848
+ELFs inspected (true ELF magic): 2468
+ELFs referencing /nix/store    : 0
+unique /nix/store/<hash> prefixes: 0
+total bytes on rootfs across them: 0
+                                 : 0.00 MiB
+
+Per-prefix referenced-by-ELF count (sorted):
