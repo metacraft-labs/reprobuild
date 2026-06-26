@@ -540,11 +540,26 @@ bool InstallerState::runReproSystemApply(const QString &target) {
         ? QStringLiteral("/dev/vda") : m_targetDevice;
     const QString hn = m_hostname.isEmpty()
         ? QStringLiteral("reproos-vm") : m_hostname;
+    // M9.R.41: point install-root at the JSON form of the disko spec
+    // the Phase 2 disk-apply step already wrote to /tmp/repro-
+    // installer-<pid>/disko.json (via writeFileAtomic +
+    // renderDiskoJson).  The Phase 4 /mnt/etc/repro/hardware.nim
+    // file is a Nim SOURCE file; loading it via `loadDiskoFromSource`
+    // requires ``nim r`` which is NOT bundled on the live ISO (the
+    // M9.R.24.2 commit body documented this), so we pass --disko
+    // explicitly at the JSON path.
+    const QString tmpDir = QString("/tmp/repro-installer-%1")
+        .arg(QCoreApplication::applicationPid());
+    const QString diskoJson = tmpDir + "/disko.json";
+    if (!QFileInfo::exists(diskoJson)) {
+        writeFileAtomic(diskoJson, renderDiskoJson());
+    }
     QStringList args = {"infra", "install-root",
                         "--target", target,
                         "--source", "/",
                         "--device", grubDevice,
-                        "--hostname", hn};
+                        "--hostname", hn,
+                        "--disko", diskoJson};
     // Cap at 30 minutes — the rsync bulk-copy of the live ISO root
     // (sized at ~14 GiB across the from-source closure + nix-store
     // prefixes + base userspace as of M9.R.40) takes a few minutes
