@@ -246,6 +246,74 @@ suite "Windows-System-Resources Phase E — engine broker-dispatch hook":
     # the file's absence here is the negative pin.
     check not fileExists(outputPath)
 
+  test "broker returns ok=false on root edge — cascaded asBlocked deps are counted (regression)":
+    ## Regression for a build-engine scheduler bug: when ``brokerSpawn``
+    ## returns ``ok = false`` for a root elevated edge, the engine
+    ## calls ``blockClosure`` to mark every transitively-dependent
+    ## edge as ``asBlocked``. The surrounding ``inc completed`` ONLY
+    ## counted the failed root, NOT the cascaded blocked deps — so
+    ## the next loop iteration saw ``completed < total`` with no
+    ## pending / running / ready work and raised
+    ## ``build graph made no progress; pending actions: `` (with an
+    ## empty pending list because all surviving actions were
+    ## ``asBlocked``, not ``asPending``).
+    ##
+    ## Every OTHER ``blockClosure`` site in the engine uses
+    ## ``completed = terminalCount()`` for exactly this reason. The
+    ## fix aligns the broker-returns-ok=false branch with the same
+    ## pattern.
+    ##
+    ## Pin: a 3-action chain (root + 2 dependents) where the root
+    ## broker call returns ``ok = false`` must terminate with the
+    ## root ``asFailed`` and the two deps ``asBlocked`` — NOT raise
+    ## ``BuildEngineError``.
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-cascade"
+    let rootOut = absolutePath(TmpDir / "outputs-cascade" / "root.out")
+    let midOut  = absolutePath(TmpDir / "outputs-cascade" / "mid.out")
+    let leafOut = absolutePath(TmpDir / "outputs-cascade" / "leaf.out")
+    createDir(cacheRoot)
+    createDir(splitPath(rootOut).head)
+
+    let rec = newRecorder(returnOk = false, returnExitCode = 1,
+      stderrText = "simulated broker failure\n",
+      diagnosticText = "simulated broker failure")
+    var root = elevatedAction("t-root", rootOut, @["/bin/true"],
+      fingerprintToken = "cascade-root")
+    var mid = elevatedAction("t-mid", midOut, @["/bin/true"],
+      fingerprintToken = "cascade-mid")
+    mid.deps = @["t-root"]
+    var leaf = elevatedAction("t-leaf", leafOut, @["/bin/true"],
+      fingerprintToken = "cascade-leaf")
+    leaf.deps = @["t-mid"]
+
+    let g = graph(@[root, mid, leaf], newSeq[BuildPool]())
+    var raised = false
+    var res: BuildRunResult
+    try:
+      res = runBuild(g, elevatedConfig(cacheRoot, rec))
+    except BuildEngineError:
+      raised = true
+    check not raised  # the engine MUST NOT raise the "no progress" error.
+    check res.results.len == 3
+    var statusById = newSeq[tuple[id: string; status: ActionStatus]]()
+    for r in res.results:
+      statusById.add((id: r.id, status: r.status))
+    var rootStatus, midStatus, leafStatus = asPending
+    for s in statusById:
+      case s.id
+      of "t-root": rootStatus = s.status
+      of "t-mid":  midStatus  = s.status
+      of "t-leaf": leafStatus = s.status
+      else: discard
+    check rootStatus == asFailed
+    check midStatus  == asBlocked
+    check leafStatus == asBlocked
+    # The broker was invoked exactly once — for the root. The
+    # cascaded blocked deps must NOT reach the broker.
+    check rec.invocations.len == 1
+    check rec.invocations[0].actionId == "t-root"
+
   test "non-elevated edges remain byte-identical (broker hook ignored)":
     ## A graph with NO ``requiresElevation = true`` edges must run
     ## end-to-end without consulting the broker hook even when one
