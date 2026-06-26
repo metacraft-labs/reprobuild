@@ -57,6 +57,20 @@ const ProfileNimPathLibs* = [
   # don't directly reference any action-edge templates — the import
   # chain reaches it transitively from every ``import repro_profile``.
   "repro_project_dsl",
+  # ``repro_project_dsl`` imports
+  # ``repro_binary_cache_client/cache_key`` and
+  # ``repro_binary_cache_server/types`` (cache-key parity between the
+  # profile-side intent and the binary-cache RPC layer). Both live under
+  # ``libs/`` and need their own ``--path:`` entries — PR #13's wrapper
+  # config.nims only unlocks sibling-repo paths (env-var driven), not
+  # local ``libs/`` packages.
+  "repro_binary_cache_client",
+  "repro_binary_cache_server",
+  # Production profiles typically import package definitions from
+  # ``repro_dsl_stdlib/packages/<name>`` (e.g. ``expand_archive`` for
+  # zip-fetch action edges). It is a libs/ package like the others, so
+  # has to land on the profile-compile child's ``--path:``.
+  "repro_dsl_stdlib",
 ]
 
 proc reprobuildRepoRoot*(): string =
