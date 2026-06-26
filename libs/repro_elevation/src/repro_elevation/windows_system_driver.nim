@@ -1151,21 +1151,34 @@ proc applyWindowsAcl*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Reconcile the file/directory's ACL to the desired state:
   ##
-  ##   1. If `aclOwner` is set, take ownership (`takeown /F /A` +
-  ##      `icacls /setowner`).
-  ##   2. If `aclInheritanceMode != enabled`, apply
-  ##      `icacls /inheritance:r` / `/inheritance:d` once. The
+  ##   1. ``takeown /F /A`` — seize ownership to the Administrators
+  ##      group so the broker (running as an elevated Admin) has
+  ##      ``WRITE_DAC`` for the rest of the apply, regardless of who
+  ##      currently owns the resource. Without this, an
+  ##      ``ACCESS_DENIED`` from a previous failed apply (or a
+  ##      hand-set deny ACL) wedges all subsequent ``icacls`` calls.
+  ##   2. If ``aclInheritanceMode != enabled``, apply
+  ##      ``icacls /inheritance:r`` / ``/inheritance:d`` once. The
   ##      cache-hit predicate already short-circuits the no-op case.
   ##   3. For every desired ACE that is missing on disk (or differs),
-  ##      invoke `icacls /grant <ACE>`. icacls's grant verb is
-  ##      idempotent — re-running with the same `<principal>:<perms>`
-  ##      replaces the existing entry.
-  ##   4. Post-apply re-probe via `icacls <path>` to assert the
+  ##      invoke ``icacls /grant <ACE>``. icacls's grant verb is
+  ##      idempotent — re-running with the same
+  ##      ``<principal>:<perms>`` replaces the existing entry.
+  ##   4. If ``aclOwner`` is set, pin ownership to the declared
+  ##      principal (``icacls /setowner``). Done LAST because once
+  ##      the owner is e.g. ``SYSTEM`` and the explicit Administrators
+  ##      ACE has not been granted yet, the broker (running as
+  ##      Administrator) loses ``WRITE_DAC`` and step 3's
+  ##      ``icacls /grant`` fails with ``Access is denied``. Granting
+  ##      the desired ACEs first (which include an Administrators ACE
+  ##      in every well-formed spec) ensures the broker keeps DAC
+  ##      write access through the pin.
+  ##   5. Post-apply re-probe via ``icacls <path>`` to assert the
   ##      observed ACL contains every desired ACE; a disagreement
-  ##      raises `EProtocol`.
+  ##      raises ``EProtocol``.
   ##
-  ## The destroy direction (`op.aclDestroy == true`) calls
-  ## `icacls /reset` to re-inherit from the parent.
+  ## The destroy direction (``op.aclDestroy == true``) calls
+  ## ``icacls /reset`` to re-inherit from the parent.
   when defined(windows):
     if op.aclDestroy:
       let (rmOut, rmCode) = icaclsReset(op.aclPath)
@@ -1180,13 +1193,13 @@ proc applyWindowsAcl*(op: PrivilegedOperation):
       result.digestHex = ZeroDigestHex
       return
 
-    # 1. Owner change (optional).
-    if op.aclOwner.len > 0:
-      let (ownOut, ownCode) = takeownOf(op.aclPath, op.aclOwner)
-      if ownCode != 0:
-        raiseProtocol("windows.acl `icacls /setowner " &
-          op.aclOwner & "` of '" & op.aclPath & "' failed: " &
-          ownOut.strip())
+    # 1. Seize ownership to Administrators so subsequent icacls
+    #    invocations have WRITE_DAC (a deny ACE from a prior partial
+    #    apply otherwise wedges every following call). The pin to the
+    #    declared aclOwner happens after the ACEs are in place — see
+    #    step 4.
+    let takeownCmd = "takeown /F " & quoteShell(op.aclPath) & " /A"
+    discard execCmdEx(takeownCmd)
 
     # 2. Inheritance-mode change (optional).
     let mode =
@@ -1223,7 +1236,18 @@ proc applyWindowsAcl*(op: PrivilegedOperation):
         raiseProtocol("windows.acl `icacls /grant " & ace &
           "` of '" & op.aclPath & "' failed: " & gOut.strip())
 
-    # 4. Post-apply re-probe.
+    # 4. Pin owner to the declared principal (after the explicit
+    #    ACEs are in place — see proc-doc step 4).
+    if op.aclOwner.len > 0:
+      let setownerCmd = "icacls " & quoteShell(op.aclPath) &
+        " /setowner " & quoteShell(op.aclOwner)
+      let (ownOut, ownCode) = execCmdEx(setownerCmd)
+      if ownCode != 0:
+        raiseProtocol("windows.acl `icacls /setowner " &
+          op.aclOwner & "` of '" & op.aclPath & "' failed: " &
+          ownOut.strip())
+
+    # 5. Post-apply re-probe.
     let (postOutput, _) = icaclsQuery(op.aclPath)
     let after = parseIcaclsOutput(postOutput, op.aclPath)
     if not aclMatchesDesired(after, op.aclPath, op.aclOwner,
@@ -1507,8 +1531,14 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
       result.digestHex = ZeroDigestHex
       return
 
-    # Build the trigger XML + the action + principal cmdlet expressions.
-    let scheduleXml = renderScheduledTaskScheduleXml(op.wstSchedule)
+    # Build the action + principal + trigger cmdlet expressions. The
+    # observation side still compares against the canonical XML the
+    # Task Scheduler reports back, but the Register / Set cmdlets
+    # require a ``CimInstance[]`` for ``-Trigger`` — passing an
+    # ``[xml]`` cast there raises a binding error (``Cannot convert
+    # System.Xml.XmlDocument ... to CimInstance[]``).
+    let triggerExpr =
+      renderScheduledTaskTriggerCmdletExpr(op.wstSchedule)
     var argList = ""
     for i, a in op.wstArguments:
       if i > 0:
@@ -1533,7 +1563,7 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
       let cmd = "Register-ScheduledTask -TaskName " &
         psQuote(op.wstTaskName) &
         " -Action (" & actionExpr & ")" &
-        " -Trigger ([xml]'<Triggers>" & scheduleXml & "</Triggers>')" &
+        " -Trigger (" & triggerExpr & ")" &
         " -Principal (" & principalExpr & ")" &
         " -Settings (" & settingsExpr & ")"
       let (cOut, cCode) = runPowerShell(wrapCmdletTerminating(cmd))
@@ -1554,7 +1584,7 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
       let cmd = "Register-ScheduledTask -TaskName " &
         psQuote(op.wstTaskName) &
         " -Action (" & actionExpr & ")" &
-        " -Trigger ([xml]'<Triggers>" & scheduleXml & "</Triggers>')" &
+        " -Trigger (" & triggerExpr & ")" &
         " -Principal (" & principalExpr & ")" &
         " -Settings (" & settingsExpr & ")"
       let (cOut, cCode) = runPowerShell(wrapCmdletTerminating(cmd))

@@ -1588,6 +1588,52 @@ proc renderScheduledTaskScheduleXml*(
       "M</Interval></Repetition></TimeTrigger>")
     xml
 
+proc renderScheduledTaskTriggerCmdletExpr*(
+    s: ScheduledTaskScheduleSpec): string =
+  ## Build a PowerShell expression that evaluates to the trigger
+  ## ``CimInstance[]`` expected by ``Register-ScheduledTask -Trigger``
+  ## and ``Set-ScheduledTask -Trigger``. The cmdlet binding rejects
+  ## an XML document there (``Cannot convert the System.Xml.XmlDocument
+  ## value ... to type Microsoft.Management.Infrastructure.CimInstance[]``)
+  ## — the raw XML body is only valid via the ``-Xml`` parameter set,
+  ## which we do not use because the other arguments (Action, Principal,
+  ## Settings) are passed as cmdlet objects.
+  ##
+  ## The mapping mirrors the Task Scheduler shape rendered by
+  ## ``renderScheduledTaskScheduleXml`` so the observe / desired
+  ## comparison still lines up.
+  case s.kind
+  of wstskOnBoot:
+    var expr = "New-ScheduledTaskTrigger -AtStartup"
+    if s.delaySeconds > 0:
+      expr.add(" -RandomDelay (New-TimeSpan -Seconds " &
+        $s.delaySeconds & ")")
+    expr
+  of wstskOnLogon:
+    var expr = "New-ScheduledTaskTrigger -AtLogOn"
+    if s.forUser.len > 0:
+      expr.add(" -User '" & s.forUser & "'")
+    expr
+  of wstskOnce:
+    "New-ScheduledTaskTrigger -Once -At '" & s.runAt & "'"
+  of wstskDaily:
+    # The cmdlet wants an absolute time-of-day; the renderer's
+    # epoch-anchored convention from the XML form keeps observe-side
+    # parity with the canonical text the driver compares against.
+    "New-ScheduledTaskTrigger -Daily -At '1970-01-01T" &
+      s.timeOfDay & ":00'"
+  of wstskInterval:
+    var expr = "New-ScheduledTaskTrigger -Once"
+    if s.startAt.len > 0:
+      expr.add(" -At '" & s.startAt & "'")
+    else:
+      # ``-Once -At`` is required; fall back to the epoch anchor so
+      # the cmdlet binding succeeds. The repetition is what matters.
+      expr.add(" -At '1970-01-01T00:00:00'")
+    expr.add(" -RepetitionInterval (New-TimeSpan -Minutes " &
+      $s.everyMinutes & ")")
+    expr
+
 proc renderRegisterScheduledTaskCommand*(taskName, executable: string;
                                          arguments: seq[string];
                                          workingDirectory: string;
