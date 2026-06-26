@@ -129,15 +129,7 @@ proc sgdiskCreatePartition*(device: string; num: int;
       $num)
   let startStr = if start.len == 0: "0" else: start
   let sizeStr  = if size.len  == 0: "0" else: size
-  # M9.R.41: pin alignment to 2048 sectors (1 MiB) — the canonical
-  # alignment that GPT partitioning tools use for SSD/HDD-friendly
-  # geometry.  sgdisk's auto-alignment falls back to sector 34 (just
-  # past the GPT entries) on Debian Trixie kernel 6.12.86 + virtio-
-  # blk, which produces partitions that sgdisk itself then rejects
-  # on the second call.  ``-a 2048`` is per-invocation so we set it
-  # on every ``sgdisk -n`` we drive.
   var argv = @["sgdisk",
-    "-a", "2048",
     "-n", $num & ":" & startStr & ":" & sizeStr]
   if gptType.len > 0:
     argv.add "-t"; argv.add $num & ":" & gptType
