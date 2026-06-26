@@ -45,7 +45,17 @@ export REPRO_INSTALLER_AUTORUN=1
 # path; the override resolves it via the local clone).
 export IO_MON_SRC=/opt/repro/io-mon/src
 
-echo "=== building ISO with REPRO_INSTALLER_AUTORUN=1 ===" >> "$LOG"
+echo "=== step 1: rebuild reproos-installer (M9.R.41.2 cpp changes) ===" >> "$LOG"
+nix-shell -p openssl patchelf gcc binutils gnumake autoconf automake libtool pkg-config gettext perl python3 bison flex xz gawk kmod cpio squashfsTools libisoburn grub2 mtools dosfstools curl docker rsync --run "PATH=/opt/repro/reprobuild/build/bin:\$PATH LD_LIBRARY_PATH=$LD_LIBRARY_PATH repro build --daemon=off --tool-provisioning=from-source apps/reproos-installer" >> "$LOG" 2>&1
+INSTALLER_RC=$?
+echo "INSTALLER_RC=$INSTALLER_RC" >> "$LOG"
+ls -la apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer 2>&1 | tee -a "$LOG"
+if [ "$INSTALLER_RC" -ne 0 ]; then
+  echo "FAIL: reproos-installer rebuild RC=$INSTALLER_RC; ISO build aborted" >> "$LOG"
+  exit "$INSTALLER_RC"
+fi
+
+echo "=== step 2: rebuild ISO with REPRO_INSTALLER_AUTORUN=1 ===" >> "$LOG"
 nix-shell -p openssl patchelf gcc binutils gnumake autoconf automake libtool pkg-config gettext perl python3 bison flex xz gawk kmod cpio squashfsTools libisoburn grub2 mtools dosfstools curl docker rsync --run "PATH=/opt/repro/reprobuild/build/bin:\$PATH LD_LIBRARY_PATH=$LD_LIBRARY_PATH REPRO_INSTALLER_AUTORUN=1 repro build --daemon=off --tool-provisioning=from-source recipes/reproos-iso" >> "$LOG" 2>&1
 RC=$?
 echo "" >> "$LOG"
