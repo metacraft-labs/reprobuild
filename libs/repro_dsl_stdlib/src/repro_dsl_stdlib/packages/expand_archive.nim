@@ -252,15 +252,15 @@ proc markerInsideDestination*(marker, destination: string): bool =
   if marker.len == 0 or destination.len == 0:
     return false
   proc canon(p: string): string =
-    var lowered = p
-    when not defined(windows):
-      # On non-Windows hosts the input may still be a Windows-style
-      # path (when the test fixture mirrors a Windows recipe). We
-      # canonicalise backslash -> forward slash so the prefix check
-      # is direction-agnostic; the path itself stays unevaluated
-      # because we are not touching the filesystem here.
-      lowered = lowered.replace("\\", "/")
-    if lowered.len > 1 and lowered[^1] in {'/', '\\'}:
+    # Canonicalise backslash -> forward slash on EVERY host. On non-Windows
+    # the input may still be a Windows-style path (test fixture mirrors a
+    # Windows recipe); on Windows the input may be either separator — and
+    # the prefix check below appends "/", so leaving backslashes in place
+    # made an in-destination marker like ``C:\foo\bar`` look outside
+    # ``C:\foo``. The path itself stays unevaluated because we are not
+    # touching the filesystem here.
+    var lowered = p.replace("\\", "/")
+    if lowered.len > 1 and lowered[^1] == '/':
       lowered.setLen(lowered.len - 1)
     lowered
   let m = canon(marker)
