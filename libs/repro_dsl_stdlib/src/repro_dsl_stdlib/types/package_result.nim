@@ -1369,14 +1369,29 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # Merge ``<destdir>/lib`` and ``<destdir>/lib64`` into the mirrored
   # ``usr/lib`` and ``usr/lib64`` so consumers' resolver search paths
   # (anchored at ``<recipeDir>/.repro/output/install/usr``) find them.
-  for bareSubdir in ["lib", "lib64", "etc", "sbin"]:
+  #
+  # M9.R.40.3 — same problem for bare ``bin/``.  util-linux's configure
+  # detects the legacy non-merged-usr layout (separate ``/bin`` +
+  # ``/usr/bin``) and installs ``lsblk`` / ``mount`` / ``umount`` /
+  # ``findmnt`` / ``dmesg`` / ``kill`` / ``lsfd`` / ``mountpoint`` /
+  # ``pipesz`` / ``wdctl`` to ``<destdir>/bin/`` (NOT
+  # ``<destdir>/usr/bin/``).  Without mirroring bare ``bin/`` into the
+  # canonical ``.repro/output/install/`` tree, downstream consumers
+  # (e.g. the reproos-iso ``link_base_recipe_binaries`` shadow-link
+  # loop) never see those binaries and the live ISO falls back to
+  # apt-installed lsblk -- which then fails opaquely when the
+  # hardware-probe shells out to it.  Mirror bare ``bin/`` the same
+  # way as bare ``sbin/`` so the ``/bin/lsblk`` etc. land at
+  # ``<install>/bin/<name>``.
+  for bareSubdir in ["lib", "lib64", "etc", "sbin", "bin"]:
     let srcBare = effectiveDestRoot & "/" & bareSubdir
     let escapedSrcBare = srcBare.replace("\\", "/").replace("\"", "\\\"")
     let usrTarget = "usr/" & bareSubdir
-    if bareSubdir in ["etc", "sbin"]:
-      # ``etc`` + ``sbin`` are not nested under ``usr/`` in the FHS;
-      # mirror them at the dstUsrRoot directly so the canonical install
-      # tree carries them at ``<install>/etc`` / ``<install>/sbin``.
+    if bareSubdir in ["etc", "sbin", "bin"]:
+      # ``etc`` + ``sbin`` + ``bin`` are not nested under ``usr/`` in
+      # the FHS; mirror them at the dstUsrRoot directly so the
+      # canonical install tree carries them at ``<install>/etc`` /
+      # ``<install>/sbin`` / ``<install>/bin``.
       script.add("if [ -d \"" & escapedSrcBare & "\" ]; then ")
       script.add("cp -a -- \"" & escapedSrcBare & "\" \"" & escapedDstUsrRoot & "/\"; ")
       script.add("fi; ")

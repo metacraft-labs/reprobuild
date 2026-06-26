@@ -355,39 +355,52 @@ BASE_USERSPACE_RECIPES=(
 
 link_base_recipe_binaries() {
   local recipe="$1"
-  local install_usr="$ISO_SRC_MIRROR_ROOT/$recipe/.repro/output/install/usr"
-  if [ ! -d "$install_usr" ]; then
+  local install_root="$ISO_SRC_MIRROR_ROOT/$recipe/.repro/output/install"
+  local install_usr="$install_root/usr"
+  if [ ! -d "$install_usr" ] && [ ! -d "$install_root/bin" ] && \
+     [ ! -d "$install_root/sbin" ]; then
     echo "[stage-de-rootfs] base-userspace mirror missing: $recipe (recipe not built; skipped)" >&2
     return 0
   fi
   local sub
   local linked=0
   local skipped=0
-  for sub in bin sbin; do
-    local src_dir="$install_usr/$sub"
-    [ -d "$src_dir" ] || continue
-    mkdir -p "$STAGE_DIR/usr/$sub"
-    local file
-    # Walk regular files + symlinks (some recipes ship multi-call
-    # binaries as symlinks under bin/; we want the link target's path
-    # but the original name).
-    for file in "$src_dir"/*; do
-      [ -e "$file" ] || continue
-      local name
-      name="$(basename "$file")"
-      # M9.R.33.3 — strip the $STAGE_DIR prefix so the symlink target is
-      # absolute WITHIN the rootfs (resolves correctly after pivot_root).
-      local link_target="${file#$STAGE_DIR}"
-      local dst="$STAGE_DIR/usr/$sub/$name"
-      # If the apt-installed binary is already at this path and is NOT
-      # the from-source link, the apt entry shadows from-source.  We
-      # ALWAYS prefer from-source per the M9.R.33 task brief; force
-      # replace the apt-installed copy with the from-source symlink.
-      # (The M9.R.33.4..12 follow-up commits remove the matching apt
-      # PKG_LIST entries; until then the force-link gives from-source
-      # precedence.)
-      ln -sf "$link_target" "$dst"
-      linked=$((linked + 1))
+  # M9.R.40.3 — walk BOTH usr/{bin,sbin} AND bare {bin,sbin}.  util-linux's
+  # autotools detects the legacy non-merged-usr layout and ships its
+  # essential filesystem CLIs (lsblk / mount / umount / findmnt /
+  # dmesg / kill / lsfd / mountpoint / pipesz / wdctl) under
+  # ``<install>/bin/`` rather than ``<install>/usr/bin/``.  The mirror
+  # writer (M9.R.40.3 in emitInstallTreeMirror) preserves both
+  # locations; this shadow-link walk also covers both, so the live ISO
+  # gets shadow symlinks at ``/usr/bin/lsblk`` -> the from-source path
+  # even when the binary is at ``install/bin/lsblk``.
+  for src_root in "$install_usr" "$install_root"; do
+    for sub in bin sbin; do
+      local src_dir="$src_root/$sub"
+      [ -d "$src_dir" ] || continue
+      mkdir -p "$STAGE_DIR/usr/$sub"
+      local file
+      # Walk regular files + symlinks (some recipes ship multi-call
+      # binaries as symlinks under bin/; we want the link target's path
+      # but the original name).
+      for file in "$src_dir"/*; do
+        [ -e "$file" ] || continue
+        local name
+        name="$(basename "$file")"
+        # M9.R.33.3 — strip the $STAGE_DIR prefix so the symlink target is
+        # absolute WITHIN the rootfs (resolves correctly after pivot_root).
+        local link_target="${file#$STAGE_DIR}"
+        local dst="$STAGE_DIR/usr/$sub/$name"
+        # If the apt-installed binary is already at this path and is NOT
+        # the from-source link, the apt entry shadows from-source.  We
+        # ALWAYS prefer from-source per the M9.R.33 task brief; force
+        # replace the apt-installed copy with the from-source symlink.
+        # (The M9.R.33.4..12 follow-up commits remove the matching apt
+        # PKG_LIST entries; until then the force-link gives from-source
+        # precedence.)
+        ln -sf "$link_target" "$dst"
+        linked=$((linked + 1))
+      done
     done
   done
   # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
@@ -1012,17 +1025,34 @@ if [ "$_repro_diag" = "1" ]; then
   # binary and would hit the same -- the installer's stderr buffering
   # isn't the load-bearing concern given the binary crashes within ~5
   # seconds of QGuiApplication ctor (M9.R.39.4 evidence).
+  #
+  # M9.R.40.1 — invoke ``ld.so --library-path`` AS the strace child rather
+  # than putting LD_LIBRARY_PATH on the installer's env.  Otherwise the
+  # installer's child processes (``execCmdEx`` -> /bin/sh -c -> lsblk
+  # / findmnt / lspci) inherit LD_LIBRARY_PATH and Debian's /bin/sh
+  # ends up loading nix's libc.so.6, which lacks the GLIBC_PRIVATE
+  # symbol layout dash was linked against -> ``symbol lookup error:
+  # __nptl_change_stack_perm, version GLIBC_PRIVATE`` -> RC=127 ->
+  # ``execCmdEx`` returns the symbol-lookup-error text as the
+  # "lsblk output", which then fails JSON parse with ``input(1, 1)
+  # Error: { expected``.  Same shape as the non-DIAG branch below.
+  # LD_DEBUG / LD_DEBUG_OUTPUT remain via ``-E`` because they're
+  # harmless even when inherited (they just make children also log
+  # their lib lookups to the same file; merging is acceptable for
+  # diagnostics).
   (
     strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
       -o /tmp/installer.strace \
-      -E LD_LIBRARY_PATH="$_repro_ldpath" \
       -E LD_DEBUG=libs \
       -E LD_DEBUG_OUTPUT=/tmp/installer.lddebug \
       -E QT_PLUGIN_PATH="$_repro_qt_plugins" \
       -E QML2_IMPORT_PATH="$_repro_qml_imports" \
       -E QML_IMPORT_PATH="$_repro_qml_imports" \
       -E QT_QPA_PLATFORM_PLUGIN_PATH="$_repro_qpa_plugins" \
-      /usr/bin/reproos-installer "$@" \
+      -E REPRO_HARDWARE_PROBE_RAWLOG_DIR=/tmp/hw_probe_raw \
+      "$_repro_glibc_dir/ld-linux-x86-64.so.2" \
+        --library-path "$_repro_ldpath" \
+        /usr/bin/reproos-installer "$@" \
         > /tmp/installer.log 2>&1
     echo $? > /tmp/installer.rc
   ) &
@@ -1038,9 +1068,16 @@ if [ "$_repro_diag" = "1" ]; then
   #   sector 1+ (4096+):     gzipped tar of /tmp/installer.* files
   if [ -b /dev/vdb ]; then
     _diagtar=/tmp/installer.diag.tar.gz
+    # Mirror the hardware-probe raw dump into the tarball if the probe
+    # produced one (M9.R.40.1 lsblk.raw.txt characterisation).
+    _hw_probe_files=""
+    if [ -d /tmp/hw_probe_raw ]; then
+      _hw_probe_files="hw_probe_raw"
+    fi
     tar -czf "$_diagtar" -C /tmp \
       installer.strace installer.kernelstacks installer.lddebug \
       installer.log installer.binfo installer.rc installer.diag.pid \
+      $_hw_probe_files \
       2>/dev/null || true
     _diagsz="$(stat -c %s "$_diagtar" 2>/dev/null || echo 0)"
     # ASCII-only header for portability.  The host extractor parses
