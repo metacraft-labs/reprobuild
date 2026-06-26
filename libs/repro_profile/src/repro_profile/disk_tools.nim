@@ -144,7 +144,50 @@ proc sgdiskCreatePartition*(device: string; num: int;
   if label.len > 0:
     argv.add "-c"; argv.add $num & ":" & label
   argv.add device
-  execTool("sgdisk", argv)
+  # M9.R.41: tolerate sgdisk exit code 4 when the partition actually
+  # got written.  sgdisk on Debian Trixie kernel 6.12.86 + virtio-blk
+  # exits 4 ("Could not create partition N from S to E") for
+  # partition 1 EVEN WHEN the partition was successfully written to
+  # the on-disk GPT (verified post-hoc via fdisk -l + kernel re-read
+  # showing /dev/<dev>1 with the expected range).  This is a sgdisk
+  # quirk specific to this kernel/virtio combination; the actual
+  # partitioning succeeded.  The post-step partprobe forces the
+  # kernel to re-read so the next sgdisk + mkfs calls see the
+  # written state.
+  try:
+    result = execTool("sgdisk", argv)
+  except DiskToolError as e:
+    if e.exit == 4:
+      # Probe: did the partition actually get written?
+      # Inline the partition-device-path computation (the dedicated
+      # ``partitionDevicePath`` helper is declared later in the same
+      # file and Nim's single-pass resolution can't see it here).
+      let base = extractFilename(device)
+      let probeDev =
+        if "/by-id/" in device or "/by-path/" in device:
+          device & "-part" & $num
+        elif base.len > 0 and base[^1] in {'0'..'9'}:
+          device & "p" & $num
+        else:
+          device & $num
+      # Wait a tick + partprobe so the kernel sees the new partition.
+      discard execCmdEx("sync")
+      if findExe("partprobe").len > 0:
+        discard execCmdEx("partprobe " & quoteShell(device))
+      if fileExists(probeDev) or fileExists("/sys/class/block/" &
+          extractFilename(probeDev)):
+        # The partition node exists — sgdisk's exit 4 was a false-
+        # alarm.  Synthesize a success result so the disko driver
+        # continues to mkfs + mount.
+        result.tool = "sgdisk"
+        result.argv = argv
+        result.cmd = renderArgv(argv)
+        result.exit = 0
+        result.output = "[M9.R.41 false-alarm] sgdisk exited 4 but " &
+          probeDev & " exists; treating as success.  Original " &
+          "stderr:\n" & e.output
+        return result
+    raise e
 
 proc partedSetBootable*(device: string; num: int; bootable: bool):
                        ExecResult {.discardable.} =
