@@ -3527,6 +3527,47 @@ macro package*(name: untyped; body: untyped): untyped =
   # run before the provider protocol takes over the process).
   result.add(buildCodeEmission)
 
+macro projectExtension*(name: untyped; originalProject: untyped;
+                        body: untyped): untyped =
+  ## Workspace-Manifest-Optional MO-6 — ``projectExtension <name>,
+  ## <originalProject>:`` declares an EXTENSION recipe that contributes
+  ## libraries, build-graph edges, and named targets ONTO an
+  ## already-defined ``originalProject`` *without modifying that
+  ## project's source*. See
+  ## ``reprobuild-specs/Project-DSL-Composition.md`` §"Project
+  ## extensions".
+  ##
+  ## The body shape is identical to ``package`` / ``project`` — ``uses:``,
+  ## ``library``, ``executable``, ``build:`` with typed-tool calls,
+  ## let-bound edges, and ``aggregate(...)`` targets all mean exactly
+  ## what they mean inside a ``package`` block. The macro therefore
+  ## lowers the body through the SAME package mechanics, emitting a
+  ## fully-formed provider package named ``name``. When this recipe is
+  ## checked out as a develop-mode sibling of ``originalProject``, the
+  ## CLI's recipe-discovery pass
+  ## (``discoverProjectExtensionRecipes`` in
+  ## ``libs/repro_cli_support/src/repro_cli_support.nim``) finds it by
+  ## the ``projectExtension <ext>, <originalProject>:`` head and merges
+  ## the extension's provider-graph fragments into ``originalProject``'s
+  ## snapshot at build time — so ``repro build <originalProject>`` yields
+  ## the AUGMENTED graph. When the extension repo is absent it is simply
+  ## not discovered and ``originalProject`` builds standalone (the
+  ## extension is inert; no error).
+  ##
+  ## This is distinct from ``uses:`` (the CONSUME path): ``uses:`` pulls
+  ## a producer's exported binding INTO a consumer; ``projectExtension``
+  ## pushes new edges/targets OUTWARD onto an unaware target. The two do
+  ## NOT share a code path — ``uses:`` flows through
+  ## ``registerCrossProjectUses`` / ``generatedCrossProjectAccessors``;
+  ## ``projectExtension`` flows through the CLI's snapshot-merge pass.
+  expectKind(name, {nnkIdent, nnkSym, nnkAccQuoted, nnkStrLit})
+  expectKind(originalProject, {nnkIdent, nnkSym, nnkAccQuoted, nnkStrLit})
+  # The ``originalProject`` argument names the extended project; it is
+  # consumed by the CLI's textual recipe-discovery convention rather than
+  # by macro expansion. Validate it (above) so a malformed head fails at
+  # the recipe rather than silently mis-routing the contribution.
+  result = newStmtList(newCall(bindSym"package", name, body))
+
 proc collectDependsOnEntries(node: NimNode; output: var seq[string]) =
   ## Flatten a ``depends_on`` body into a list of declared dep names.
   ##

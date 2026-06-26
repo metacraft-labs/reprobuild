@@ -4796,6 +4796,17 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
     dependencyEvidencePath(cmakeCacheRoot, regenerationAction.id), record)
   true
 
+proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
+                            projectRoot, originalPackageName: string;
+                            mode: ToolProvisioningMode;
+                            publicCliPath, workRoot: string)
+  ## Workspace-Manifest-Optional MO-6 — forward declaration. Defined
+  ## after ``prepareBuildGraphInspection`` (which it reuses to compile +
+  ## evaluate each discovered extension recipe). ``executeBuildTarget``
+  ## and ``prepareBuildGraphInspection`` both call it to fold any
+  ## present ``projectExtension`` sibling's fragments into the target
+  ## project's snapshot before lowering / target-export aggregation.
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -5730,6 +5741,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       providerGraphStart)
     logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
     logSummary("providerInvocations: " & $refresh.invoked.len)
+
+    # Workspace-Manifest-Optional MO-6 — presence-driven projectExtension
+    # auto-activation. Any develop-mode sibling carrying a
+    # ``projectExtension <ext>, <thisProject>:`` recipe contributes its
+    # edges / targets into THIS project's graph. The merge runs in-memory
+    # on every build invocation (even on a provider-graph cache hit, since
+    # the snapshot is re-read into ``refresh.snapshot`` above), so a newly
+    # checked-out extension auto-activates without any explicit enable
+    # step. When no sibling extension targets this project the snapshot is
+    # left byte-identical and the legacy single-project build is preserved.
+    mergeProjectExtensions(refresh.snapshot, projectRoot,
+      artifact.projectInterface.packageName, effectiveMode, publicCliPath,
+      workRoot)
 
     var selectedActionId = parsedTarget.selectedActionId
     if selectDefaultAction and selectedActionId.len == 0:
@@ -10995,6 +11019,11 @@ type
       ## Named-Targets M5: every explicit ``target "name", handle`` label
       ## visible in the lowered graph, captured before lowering so
       ## ``resolveTargetExportSelector`` can pass it through.
+    snapshot: ProviderGraphSnapshot
+      ## Workspace-Manifest-Optional MO-6: the (possibly extension-merged)
+      ## provider-graph snapshot this inspection lowered. Exposed so
+      ## ``mergeProjectExtensions`` can reuse this proc to compile + evaluate
+      ## a discovered ``projectExtension`` recipe and harvest its fragments.
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
@@ -11307,7 +11336,13 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  publicCliPath: string;
                                  selectDefaultAction = false;
                                  workRoot = "";
-                                 forceRefresh = false): BuildGraphInspection =
+                                 forceRefresh = false;
+                                 mergeExtensions = true): BuildGraphInspection =
+  ## ``mergeExtensions`` (MO-6) folds any present ``projectExtension``
+  ## sibling's fragments into this project's snapshot before lowering /
+  ## target-export aggregation. It is set to ``false`` when this proc is
+  ## reused by ``mergeProjectExtensions`` to evaluate an extension recipe
+  ## itself, so extensions do not recurse into their own extensions.
   var parsedTarget = parseBuildTarget(target)
   parsedTarget.modulePath = absolutePath(parsedTarget.modulePath)
   let modulePath = parsedTarget.modulePath
@@ -11439,6 +11474,15 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       lockSliceId: digestHex(artifact.interfaceFingerprint),
       activity: "build",
       providerWorkingDir: projectRoot))
+  # Workspace-Manifest-Optional MO-6 — fold any present projectExtension
+  # sibling's fragments into this project's snapshot (see the matching
+  # call in ``executeBuildTarget``). Skipped when this proc is reused to
+  # evaluate an extension recipe itself so extensions do not recurse.
+  if mergeExtensions:
+    mergeProjectExtensions(refresh.snapshot, projectRoot,
+      artifact.projectInterface.packageName, effectiveMode, publicCliPath,
+      workRoot)
+  result.snapshot = refresh.snapshot
   result.providerGraphSnapshotPath = refresh.persistedSnapshotPath
   result.providerInvocations = refresh.invoked.len
   result.defaultActionId = defaultBuildActionId(refresh.snapshot)
@@ -11484,6 +11528,169 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
         let target = decodeBuildTargetPayload(toBytes(node.payload))
         if result.explicitTargetNames.find(target.name) < 0:
           result.explicitTargetNames.add(target.name)
+
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-6 — projectExtension discovery + merge.
+#
+# A ``projectExtension <ext>, <originalProject>:`` recipe (see the macro in
+# ``libs/repro_project_dsl/src/repro_project_dsl/macros_b.nim``) contributes
+# libraries, build-graph edges, and named targets ONTO an already-defined
+# ``originalProject`` *without modifying that project's source*. The
+# extension is activated by mere PRESENCE in the develop workspace: when its
+# repo is checked out as a sibling (one level up from the target project's
+# root — the same workspace-sibling convention ``findSiblingProjectFile``
+# uses), the recipe-discovery pass below finds it by its
+# ``projectExtension`` head and the build folds its provider-graph fragments
+# into ``originalProject``'s snapshot. Absence leaves ``originalProject``
+# building standalone (the extension is inert; no error).
+#
+# This is the EXTEND inverse of the consume-only ``uses:`` path: ``uses:``
+# pulls a producer's exported binding into a consumer (routed through
+# ``registerCrossProjectUses`` / ``generatedCrossProjectAccessors`` in the
+# DSL); ``projectExtension`` pushes new edges/targets outward onto an
+# unaware target via this snapshot-merge pass. The two share no code.
+# ---------------------------------------------------------------------------
+
+proc parseProjectExtensionHead(recipeText, originalPackageName: string): string =
+  ## Lightweight textual recognition of a ``projectExtension <ext>,
+  ## <originalProject>:`` recipe head — the recipe-discovery convention's
+  ## presence check (no provider compile needed to decide candidacy).
+  ## Returns the extension name when the recipe extends
+  ## ``originalPackageName``; the empty string otherwise.
+  for rawLine in recipeText.splitLines:
+    var line = rawLine.strip()
+    if not line.startsWith("projectExtension"):
+      continue
+    line = line["projectExtension".len .. ^1]
+    if line.len == 0 or line[0] notin {' ', '\t', '('}:
+      continue
+    # Tolerate both ``projectExtension ext, orig:`` and the parenthesised
+    # ``projectExtension(ext, orig):`` spelling.
+    line = line.strip()
+    if line.len > 0 and line[0] == '(':
+      line = line[1 .. ^1]
+    let colon = line.find(':')
+    if colon < 0:
+      continue
+    var head = line[0 ..< colon].strip()
+    if head.len > 0 and head[^1] == ')':
+      head = head[0 ..< head.len - 1].strip()
+    let comma = head.find(',')
+    if comma < 0:
+      continue
+    let extName = head[0 ..< comma].strip()
+    let orig = head[comma + 1 .. ^1].strip()
+    if extName.len > 0 and orig == originalPackageName:
+      return extName
+  return ""
+
+proc discoverProjectExtensionRecipes(projectRoot, originalPackageName: string):
+    seq[tuple[extName: string; recipePath: string]] =
+  ## Scan the develop-workspace siblings (one level up from ``projectRoot``)
+  ## for recipe files whose ``projectExtension`` head names
+  ## ``originalPackageName``. Returns ``(extName, recipePath)`` pairs sorted
+  ## by ``extName`` so the merge order is DETERMINISTIC (stable across
+  ## checkout layout) rather than dependent on filesystem iteration order.
+  result = @[]
+  if originalPackageName.len == 0:
+    return
+  let workspaceRoot = projectRoot.parentDir
+  if workspaceRoot.len == 0 or not dirExists(extendedPath(workspaceRoot)):
+    return
+  let canonicalProject = absolutePath(projectRoot)
+  var seenExtNames = initTable[string, string]()
+  for kind, path in walkDir(workspaceRoot):
+    if kind notin {pcDir, pcLinkToDir}:
+      continue
+    if absolutePath(path) == canonicalProject:
+      continue
+    var recipePath = ""
+    try:
+      recipePath = resolveProjectFile(path).path
+    except CatchableError:
+      # Ambiguous (both repro.nim + reprobuild.nim) or unreadable — skip;
+      # a sibling that cannot present one canonical recipe is not a
+      # discoverable extension here.
+      continue
+    if recipePath.len == 0 or not fileExists(extendedPath(recipePath)):
+      continue
+    var recipeText = ""
+    try:
+      recipeText = readFile(extendedPath(recipePath))
+    except CatchableError:
+      continue
+    let extName = parseProjectExtensionHead(recipeText, originalPackageName)
+    if extName.len == 0:
+      continue
+    if seenExtNames.hasKey(extName):
+      raise newException(ValueError,
+        "projectExtension conflict: two extensions of '" &
+        originalPackageName & "' share the name '" & extName & "' (" &
+        seenExtNames[extName] & " and " & recipePath &
+        "). Extension names must be unique within a workspace.")
+    seenExtNames[extName] = recipePath
+    result.add((extName: extName, recipePath: recipePath))
+  result.sort(proc(a, b: tuple[extName: string; recipePath: string]): int =
+    cmp(a.extName, b.extName))
+
+proc fragmentTargetNames(frags: seq[StoredGraphFragment]): seq[string] =
+  ## Every ``aggregate`` / ``target`` name carried by ``frags`` (the
+  ## ``reprobuild.build-target.v1`` metadata nodes). Used for the
+  ## cross-contributor conflict check below.
+  result = @[]
+  for f in frags:
+    for node in f.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if target.name.len > 0 and result.find(target.name) < 0:
+          result.add(target.name)
+
+proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
+                            projectRoot, originalPackageName: string;
+                            mode: ToolProvisioningMode;
+                            publicCliPath, workRoot: string) =
+  ## Fold every present ``projectExtension`` sibling's provider-graph
+  ## fragments into ``snapshot`` (the target project's graph). Composition
+  ## rules (Project-DSL-Composition.md §"Project extensions"):
+  ##
+  ##   * **Additive.** Extensions only ADD fragments; the base project's
+  ##     own fragments are never rewritten or removed.
+  ##   * **Deterministic ordering.** Extensions merge in ``extName`` order
+  ##     (see ``discoverProjectExtensionRecipes``), not filesystem order.
+  ##   * **Conflicts diagnosed, not silently resolved.** Two contributors
+  ##     (an extension and the base, or two extensions) that define the
+  ##     same target name raise a clear error naming BOTH.
+  if originalPackageName.len == 0:
+    return
+  let discovered = discoverProjectExtensionRecipes(projectRoot,
+    originalPackageName)
+  if discovered.len == 0:
+    return
+  # Seed the conflict map with the base project's target names so an
+  # extension that collides with a base target is caught too.
+  var targetOrigin = initTable[string, string]()
+  for name in fragmentTargetNames(snapshot.fragments):
+    if not targetOrigin.hasKey(name):
+      targetOrigin[name] = "base project '" & originalPackageName & "'"
+  for ext in discovered:
+    # Reuse the standard compile + provider-evaluate pipeline; the
+    # extension is just another DSL recipe. ``mergeExtensions = false``
+    # keeps an extension from recursively merging its own extensions.
+    let info = prepareBuildGraphInspection(ext.recipePath, mode,
+      publicCliPath, selectDefaultAction = false, workRoot = workRoot,
+      mergeExtensions = false)
+    let extFrags = info.snapshot.fragments
+    for name in fragmentTargetNames(extFrags):
+      if targetOrigin.hasKey(name):
+        raise newException(ValueError,
+          "projectExtension conflict: target '" & name &
+          "' is contributed by both " & targetOrigin[name] &
+          " and projectExtension '" & ext.extName & "' (" & ext.recipePath &
+          "). Two contributors must not define the same target name.")
+      targetOrigin[name] = "projectExtension '" & ext.extName & "'"
+    for f in extFrags:
+      snapshot.fragments.add(f)
 
 proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
                            publicCliPath, workRoot: string;

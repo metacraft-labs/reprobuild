@@ -6406,6 +6406,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_project_extension_adds_edges_to_original_when_present.nim",
+    binary: "build/test-bin/t_project_extension_adds_edges_to_original_when_present",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim",
+    binary: "build/test-bin/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_project_interface_artifact_import_modes.nim",
     binary: "build/test-bin/t_project_interface_artifact_import_modes",
     defines: @[],
