@@ -106,6 +106,16 @@ type
     revision*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
+    # MO-5 — evidence-only private participation marker
+    # (Workspace-And-Develop-Mode.md §"Evidence-only participation"). When set
+    # to ``"evidence-only"`` the repo participates in the build WITHOUT being
+    # shared: only its source-free ``WorkspaceVcsEvidence`` (head-sha / is-clean
+    # / is-published) is published to its assigned locking backend, never its
+    # source. A teammate who cannot clone it verifies the reproducibility
+    # boundary from that evidence + the lock. Any other value (or absent) means
+    # a normal SHARED repo whose source IS expected to be present (a missing
+    # checkout is then an actionable clone-required error, not evidence-only).
+    participation*: Option[string]
     # RA-14 — optional fetch-acceleration hints (Workspace-Manifests.md
     # §"Optional fetch-acceleration hints"). These never change the
     # resolved tree at the pinned revision; they only change how much is

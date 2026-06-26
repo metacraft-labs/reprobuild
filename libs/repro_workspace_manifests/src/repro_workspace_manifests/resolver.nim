@@ -99,6 +99,12 @@ type
     revision*: string
     vcs*: string
     stability*: string
+    # MO-5 — evidence-only private participation marker carried verbatim from
+    # the fragment's ``participation`` field. ``"evidence-only"`` means the repo
+    # participates via published source-free evidence and is never cloned; any
+    # other value (default "") means a normal SHARED repo. See
+    # ``RepoBody.participation`` in ``types.nim``.
+    participation*: string
     fragmentPath*: string
     manifestLayer*: string
     visibility*: WorkspaceVisibility
@@ -407,6 +413,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         fragment.repo.stability.get()
       else:
         defaultRepoStability
+    # MO-5 — carry the evidence-only participation marker verbatim (default "").
+    if fragment.repo.participation.isSome:
+      resolved.participation = fragment.repo.participation.get()
 
     # RA-14 — carry the fetch-acceleration hints through unchanged. They
     # are pure download knobs; the resolved revision above is the single
@@ -649,6 +658,9 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
         fragment.repo.stability.get()
       else:
         defaultRepoStability
+    # MO-5 — carry the evidence-only participation marker verbatim (default "").
+    if fragment.repo.participation.isSome:
+      resolved.participation = fragment.repo.participation.get()
 
     # RA-14 — carry the fetch-acceleration hints through unchanged. They
     # are pure download knobs; the resolved revision above is the single

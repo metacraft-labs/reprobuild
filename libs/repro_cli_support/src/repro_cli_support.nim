@@ -18349,6 +18349,163 @@ proc recordRoutedParticipation*(workspaceRoot: string;
     locking, repos, workspaceRoot, identity, identity.binaryPath)
   recordWorkspaceParticipation(assignments, projectName, repoShas)
 
+# ---------------------------------------------------------------------------
+# MO-5 — evidence-only private-repo participation
+# ---------------------------------------------------------------------------
+#
+# A private repo can participate in the build WITHOUT being shared
+# (Workspace-And-Develop-Mode.md §"Evidence-only participation"). Instead of
+# exposing its source, the workspace publishes only the source-free
+# ``WorkspaceVcsEvidence`` triple (head-sha / is-clean / is-published) through
+# the repo's MO-4-assigned backend (MO-3 ``putEvidence``). A teammate who cannot
+# clone the private source verifies the reproducibility boundary from that
+# published evidence + the committed lock — the gate/check CONSUME the evidence
+# (MO-3 ``getEvidence``) in lieu of a clonable sibling rather than refusing
+# because the repo is unreadable.
+#
+# The marker is the EXPLICIT per-repo ``ResolvedRepo.participation`` field
+# (authored as ``participation = "evidence-only"`` in a ``repos/<repo>.toml``
+# fragment; see ``RepoBody.participation``). A private repo WITHOUT the marker
+# is a SHARED-private repo whose source is expected present — an unreadable one
+# is an actionable clone-required error, NOT evidence-only.
+#
+# SECURITY: ``WorkspaceVcsEvidence`` carries NO source (no file blobs / no
+# working-tree contents) — only the three observation scalars. The verdict is
+# computed from the REAL evidence: a dirty or unpublished evidence-only repo, or
+# one whose published head-sha does not match the locked SHA, still FAILS the
+# gate. Evidence-only participation never silently passes a bad boundary.
+
+const participationEvidenceOnly* = "evidence-only"
+  ## The sole ``ResolvedRepo.participation`` value that designates a private
+  ## repo as evidence-only (published-evidence-sufficient, never cloned).
+
+proc isEvidenceOnlyRepo*(repo: ResolvedRepo): bool =
+  ## True iff ``repo`` is explicitly marked evidence-only. Independent of
+  ## visibility, but only meaningful for a private repo (a public repo is
+  ## always shared/cloneable).
+  repo.participation.strip().toLowerAscii() == participationEvidenceOnly
+
+type
+  UnreadableRepoVerdict* = enum
+    ## The MO-5 reproducibility verdict for a private repo whose source is NOT
+    ## present locally (unreadable / never cloned).
+    urvCloneRequired        ## shared-private — source expected; actionable error
+    urvEvidenceSatisfied    ## evidence-only — evidence clean+published+at-locked-sha
+    urvEvidenceMissing      ## evidence-only — store holds NO published evidence
+    urvEvidenceDirty        ## evidence-only — evidence says the repo was dirty
+    urvEvidenceUnpublished  ## evidence-only — evidence says HEAD not published
+    urvEvidenceShaMismatch  ## evidence-only — head-sha != the locked SHA
+    urvEvidenceNoLock       ## evidence-only — no locked SHA to verify against
+    urvEvidenceNoBackend    ## evidence-only — repo has no assigned store backend
+
+  UnreadableRepoResult* = object
+    ## Outcome of evaluating one unreadable repo's participation.
+    verdict*: UnreadableRepoVerdict
+    headSha*: string
+    lockedSha*: string
+    isClean*: bool
+    isPublished*: bool
+    diagnostic*: string
+
+proc gatherRepoEvidence*(identity: GitToolIdentity;
+    repoAbsPath, recordPath, toolDigestHex: string; observedAtUnixMs: int64):
+    seq[WorkspaceVcsEvidence] =
+  ## Observe the source-free head-sha / is-clean / is-published triple for a
+  ## repo's LOCAL checkout at ``repoAbsPath``. The OWNER of an evidence-only
+  ## private repo (the one that HAS the source) runs this and publishes the
+  ## result via the store's ``putEvidence`` — NO source content (no file blobs /
+  ## no working-tree contents) is ever captured; ``WorkspaceVcsEvidence`` has no
+  ## source field. ``recordPath`` is the workspace-relative path stamped on each
+  ## record (never the absolute on-disk path).
+  let headRes = queryGitState(headShaQuery(repoAbsPath), identity)
+  let cleanRes = queryGitState(isCleanQuery(repoAbsPath), identity)
+  let pubRes = queryGitState(isPublishedQuery(repoAbsPath, "origin"), identity)
+  @[
+    workspaceVcsEvidence.evidenceFor(
+      headRes, recordPath, wvqHeadSha, toolDigestHex, observedAtUnixMs),
+    workspaceVcsEvidence.evidenceFor(
+      cleanRes, recordPath, wvqIsClean, toolDigestHex, observedAtUnixMs),
+    workspaceVcsEvidence.evidenceFor(
+      pubRes, recordPath, wvqIsPublished, toolDigestHex, observedAtUnixMs)]
+
+proc evidenceTriple(ev: seq[WorkspaceVcsEvidence]):
+    tuple[headSha: string; isClean, isPublished, haveClean, havePub: bool] =
+  ## Reduce a published evidence list to the three meaningful scalars,
+  ## honoring each record's ``op`` discriminator and ``status``.
+  for rec in ev:
+    if rec.status != wvesResolved: continue
+    case rec.op
+    of wvqHeadSha:
+      if rec.headSha.len > 0: result.headSha = rec.headSha
+    of wvqIsClean:
+      result.isClean = rec.isClean
+      result.haveClean = true
+    of wvqIsPublished:
+      result.isPublished = rec.isPublished
+      result.havePub = true
+
+proc evaluateEvidenceOnlyParticipation*(store: LockStore;
+    project, repoName, repoPath, lockedSha: string): UnreadableRepoResult =
+  ## MO-5 — compute the reproducibility verdict for an EVIDENCE-ONLY private
+  ## repo whose source is unreadable, from its PUBLISHED source-free evidence
+  ## (read via MO-3 ``getEvidence``) plus the locked SHA. The boundary is
+  ## verified ONLY when the evidence proves the repo was clean, published, AND
+  ## at the locked SHA — every other case is a falsifiable failure verdict.
+  if store.isNil:
+    return UnreadableRepoResult(verdict: urvEvidenceNoBackend,
+      diagnostic: "evidence-only repo '" & repoName &
+        "' has no assigned locking backend to read published evidence from")
+  let ev = store.getEvidence(project, repoName)
+  if ev.len == 0:
+    return UnreadableRepoResult(verdict: urvEvidenceMissing,
+      diagnostic: "no published WorkspaceVcsEvidence for evidence-only repo '" &
+        repoName & "' in its assigned " & store.backendId() & " store")
+  let t = evidenceTriple(ev)
+  result.headSha = t.headSha
+  result.lockedSha = lockedSha
+  result.isClean = t.haveClean and t.isClean
+  result.isPublished = t.havePub and t.isPublished
+  if not t.haveClean or not t.isClean:
+    result.verdict = urvEvidenceDirty
+    result.diagnostic = "published evidence reports evidence-only repo '" &
+      repoName & "' was NOT clean at observation"
+    return
+  if not t.havePub or not t.isPublished:
+    result.verdict = urvEvidenceUnpublished
+    result.diagnostic = "published evidence reports evidence-only repo '" &
+      repoName & "' HEAD is NOT published"
+    return
+  if lockedSha.len == 0:
+    result.verdict = urvEvidenceNoLock
+    result.diagnostic = "no locked revision recorded for evidence-only repo '" &
+      repoName & "' to verify the published head-sha against"
+    return
+  if t.headSha != lockedSha:
+    result.verdict = urvEvidenceShaMismatch
+    result.diagnostic = "evidence-only repo '" & repoName &
+      "' published head-sha " & t.headSha & " does not match locked SHA " &
+      lockedSha
+    return
+  result.verdict = urvEvidenceSatisfied
+  result.diagnostic = "evidence-only repo '" & repoName &
+    "' verified from published evidence: clean, published, at locked SHA " &
+    lockedSha
+
+proc lockedShaFromStore*(store: LockStore; project, repoName, repoPath: string):
+    string =
+  ## Read the locked revision an evidence-only repo's assigned backend holds
+  ## for it (the MO-4 participation record's ``path -> revision`` body). The
+  ## locked SHA the published evidence head-sha must match. "" when absent.
+  if store.isNil: return ""
+  let latest = store.latestLock(project, repoName)
+  if latest.isNone: return ""
+  let shas = shasFromBody(latest.get().body)
+  if repoPath in shas: return shas[repoPath]
+  # Fall back to a single-entry body keyed by some other path form.
+  for _, v in shas:
+    return v
+  ""
+
 proc commitReachableLocally(identity: GitToolIdentity;
                             repoPath, sha: string): bool =
   ## RA-14 optimized-fetch predicate. Return ``true`` iff ``sha`` names a
@@ -23342,6 +23499,63 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
+type
+  UnreadableRepoGateOutcome* = object
+    ## MO-5 — the gate's decision for ONE private repo whose source is not
+    ## present locally. ``failed`` ⇒ ``failure`` is the actionable
+    ## ``CheckFailure`` the gate surfaces (clone-required for a shared-private
+    ## repo, or evidence-unverified for an evidence-only repo whose published
+    ## evidence does not prove the boundary). Otherwise ``notice`` describes the
+    ## satisfied evidence-only boundary the gate consumed in lieu of a clone.
+    failed*: bool
+    failure*: CheckFailure
+    notice*: string
+    verdict*: UnreadableRepoResult
+
+proc gateDecideUnreadableRepo*(repo: ResolvedRepo; store: LockStore;
+    project: string): UnreadableRepoGateOutcome =
+  ## MO-5 — the single source of truth for how the pre-push gate / ``repro
+  ## check`` treats a PRIVATE repo with no local checkout. Both
+  ## ``executeCheckPrePush`` and the MO-5 integration test call this exact proc,
+  ## so the test exercises the gate's real decision rather than a re-implementation.
+  ##
+  ##   * A SHARED-private repo (no ``participation = "evidence-only"`` marker) is
+  ##     expected to be cloned — a missing checkout is an actionable
+  ##     ``clone-required`` failure.
+  ##   * An EVIDENCE-ONLY repo is verified by CONSUMING its published source-free
+  ##     evidence (``store.getEvidence``) + the locked SHA from the same backend:
+  ##     clean + published + at-locked-SHA satisfies the boundary; anything else
+  ##     (dirty / unpublished / sha-mismatch / evidence-missing) still FAILS.
+  if not isEvidenceOnlyRepo(repo):
+    result.failed = true
+    result.failure = CheckFailure(
+      repo: repo.path,
+      property: "clone-required",
+      remediation: "gain read access to '" & repo.fetchUrl &
+        "' and clone it into " & repo.path &
+        " (a shared-private repo must be checked out), or mark it " &
+        "`participation = \"evidence-only\"` if it should participate by " &
+        "published evidence instead",
+      evidence: "shared-private repo source is not present locally " &
+        "(no .git at " & repo.path & ") and the repo is not evidence-only")
+    return
+  let lockedSha = lockedShaFromStore(store, project, repo.name, repo.path)
+  result.verdict = evaluateEvidenceOnlyParticipation(
+    store, project, repo.name, repo.path, lockedSha)
+  if result.verdict.verdict == urvEvidenceSatisfied:
+    result.notice = "evidence-only private repo '" & repo.path &
+      "' verified from published evidence (clean, published, at locked SHA " &
+      result.verdict.lockedSha & ") — source not required"
+  else:
+    result.failed = true
+    result.failure = CheckFailure(
+      repo: repo.path,
+      property: "evidence-only-unverified",
+      remediation: "re-publish current evidence for '" & repo.path &
+        "' from a clean, published checkout at the locked revision " &
+        "(repro records the source-free head-sha/clean/published triple)",
+      evidence: result.verdict.diagnostic)
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -23424,12 +23638,20 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       branch: string
       hasGit: bool
   var observations: seq[RepoObs]
+  # MO-5 — PRIVATE repos whose source is NOT present locally (unreadable /
+  # never cloned). A public missing repo keeps the prior vacuous-skip
+  # behavior (no regression); only a private one is routed to the MO-5 stage
+  # below, where an evidence-only repo is verified from published evidence and
+  # a shared-private repo is an actionable clone-required error.
+  var unreadablePrivate: seq[ResolvedRepo]
   for repo in resolved.repos:
     if not repoInScope(repo.name):
       continue
     let absRepo = parsed.workspaceRoot / repo.path
     var obs = RepoObs(name: repo.name, path: repo.path, absPath: absRepo)
     if not dirExists(absRepo / ".git"):
+      if repo.visibility != wvPublic:
+        unreadablePrivate.add(repo)
       observations.add(obs)
       continue
     obs.hasGit = true
@@ -23461,6 +23683,58 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # re-querying the M1 identity binding.
   discard toolDigest
   discard observedAt
+
+  # ---- MO-5: evidence-only / shared-private unreadable repos -------------
+  # A private repo whose source is not present locally is NOT silently skipped
+  # (that would be unsound) and is NOT blanket-refused. Two cases, two clearly
+  # distinct diagnostics (Workspace-And-Develop-Mode.md §"Evidence-only
+  # participation"):
+  #
+  #   * SHARED-private (no ``participation = "evidence-only"`` marker): the repo
+  #     IS expected to be cloned; a missing checkout is an actionable
+  #     ``clone-required`` error (exit 2). This is the "shared private (clone
+  #     required)" tier.
+  #   * EVIDENCE-ONLY private (marker set): the gate CONSUMES the repo's
+  #     PUBLISHED source-free ``WorkspaceVcsEvidence`` (MO-3 ``getEvidence`` via
+  #     the repo's MO-4-assigned backend) in lieu of a clone. The verdict is
+  #     computed from the REAL evidence + the locked SHA: only a repo that was
+  #     clean, published, AND at the locked SHA satisfies the boundary — a
+  #     dirty / unpublished / sha-mismatched / evidence-missing repo still FAILS
+  #     (exit 2). This is the "evidence-only private (evidence sufficient)" tier.
+  #
+  # The stage is a strict no-op when no private repo is unreadable, so every
+  # all-public / fully-cloned workspace (the existing gate tests) is unchanged.
+  if unreadablePrivate.len > 0:
+    let routing = loadLockingRouting(parsed.workspaceRoot)
+    var assignments: seq[RepoBackendAssignment]
+    var routingFailed = false
+    try:
+      assignments = resolveRepoBackends(
+        routing, resolved.repos, parsed.workspaceRoot, identity,
+        identity.binaryPath)
+    except StoreRoutingError as err:
+      routingFailed = true
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "evidence-only-no-backend",
+        remediation: "declare a `[[locking.route]]` backend for the private " &
+          "repo so its participation evidence has a store to read",
+        evidence: err.msg))
+      result.exitCode = 2
+    if routingFailed:
+      return
+    var byName = initTable[string, RepoBackendAssignment]()
+    for asg in assignments:
+      byName[asg.repoName] = asg
+    for repo in unreadablePrivate:
+      let asg = byName.getOrDefault(repo.name)
+      let outcome = gateDecideUnreadableRepo(
+        repo, asg.store, resolved.projectName)
+      if outcome.failed:
+        result.failures.add(outcome.failure)
+        result.exitCode = 2
+        return
+      result.notices.add(outcome.notice)
 
   # ---- TC-3 / RA-32: certificate-coverage gate (opt-in per project) ------
   # This nested stage runs ONLY after every other stage has passed (the gate

@@ -5662,6 +5662,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim",
+    binary: "build/test-bin/t_private_repo_participates_via_evidence_without_source_exposure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo.nim",
+    binary: "build/test-bin/t_gate_consumes_published_evidence_for_unclonable_private_repo",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
     defines: @[],
