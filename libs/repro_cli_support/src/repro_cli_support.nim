@@ -18126,6 +18126,229 @@ method getEvidence*(s: GitCheckoutLockStore; project, repo: string):
   if not fileExists(abs): return @[]
   decodeEvidenceBlob(readFile(abs))
 
+# ---------------------------------------------------------------------------
+# MO-4 — per-repo-set locking-backend routing (config → per-repo backend)
+# ---------------------------------------------------------------------------
+#
+# The host bootstrap config's ``[locking]`` table (``BootstrapLockingBody``)
+# maps each visibility tier (``wvPublic`` / ``wvOrg`` / ``wvTeam`` /
+# ``wvPersonal``) to a ``LockStore`` backend (the five MO-3 mediums). MO-4
+# RESOLVES that table into a PER-REPO backend assignment — reusing the
+# ``ResolvedRepo.visibility`` tier the manifest-layer composer already stamps
+# — and the workspace operations record each repo's participation through its
+# ASSIGNED backend.
+#
+# Defaults & boundary (per the milestone):
+#   - A PUBLIC repo with NO route ⇒ the committed solved-graph lock
+#     (``repro.lock``, MO-1): ``store == nil``, NO backend constructed. With no
+#     ``[locking]`` table at all and an all-public workspace this is every
+#     repo, so an all-public workspace touches no store backend (MO-2/MO-3).
+#   - A PRIVATE repo (org/team/personal) with NO route ⇒ a loud
+#     ``StoreRoutingError`` naming the repo + the remedy: its participation
+#     cannot be recorded in the public committed lock and there is nowhere
+#     else to put it.
+#   - Backends are constructed ONLY for repos that actually need one, and at
+#     most once per distinct (kind, location) so sibling repos of the same
+#     tier share a single backend object.
+
+type
+  RepoBackendAssignment* = object
+    ## One repo's resolved store assignment. ``store`` is ``nil`` exactly for
+    ## the ``committed-lock`` kind (a public repo covered by ``repro.lock``);
+    ## every other kind carries a constructed ``LockStore``.
+    repoName*: string
+    repoPath*: string
+    visibility*: WorkspaceVisibility
+    backendKind*: string
+    store*: LockStore
+
+  ParticipationOutcome* = object
+    ## Result of recording one repo's participation through its assigned
+    ## backend. ``recorded`` is false for a committed-lock repo (already
+    ## captured by ``repro.lock`` — nothing is written to a separate store).
+    repoName*: string
+    backendKind*: string
+    recorded*: bool
+    diagnostic*: string
+
+  StoreRoutingError* = object of CatchableError
+
+proc lockingTierLabel*(v: WorkspaceVisibility): string =
+  case v
+  of wvPublic: "public"
+  of wvOrg: "org"
+  of wvTeam: "team"
+  of wvPersonal: "personal"
+
+proc visibilityMatchesRouteLabel(v: WorkspaceVisibility; label: string): bool =
+  case label.strip().toLowerAscii()
+  of "public": v == wvPublic
+  of "org": v == wvOrg
+  of "team": v == wvTeam
+  of "personal", "private": v == wvPersonal
+  else: false
+
+proc routeForVisibility(locking: BootstrapLockingBody;
+                        v: WorkspaceVisibility): Option[LockingRouteEntry] =
+  for entry in locking.route:
+    if visibilityMatchesRouteLabel(v, entry.visibility):
+      return some(entry)
+  none(LockingRouteEntry)
+
+proc resolveStoreLocation(workspaceRoot, p: string): string =
+  if p.len == 0: workspaceRoot
+  elif isAbsolute(p): p
+  else: workspaceRoot / p
+
+proc constructRoutedBackend(entry: LockingRouteEntry;
+    workspaceRoot, repoPath: string; identity: GitToolIdentity;
+    gitBin: string): LockStore =
+  ## Construct the MO-3 backend named by one route entry. Raises
+  ## ``StoreRoutingError`` on an unknown kind or a kind missing its required
+  ## location parameter.
+  let kind = entry.backend.strip().toLowerAscii()
+  let pathParam = (if entry.path.isSome: entry.path.get() else: "")
+  case kind
+  of "committed-file":
+    let base =
+      if pathParam.len > 0: resolveStoreLocation(workspaceRoot, pathParam)
+      else: workspaceRoot / ".repro" / "lockstore"
+    newCommittedFileLockStore(base)
+  of "git-checkout":
+    if pathParam.len == 0:
+      raise newException(StoreRoutingError,
+        "locking backend 'git-checkout' for visibility=\"" & entry.visibility &
+        "\" requires a `path` (the manifest-repo root, e.g. " &
+        "`.repo/manifests-team`)")
+    newGitCheckoutLockStore(identity,
+      resolveStoreLocation(workspaceRoot, pathParam))
+  of "git-notes":
+    let repo =
+      if pathParam.len > 0: resolveStoreLocation(workspaceRoot, pathParam)
+      else: workspaceRoot / repoPath
+    newGitNotesLockStore(gitBin, repo)
+  of "separate-branch":
+    let repo =
+      if pathParam.len > 0: resolveStoreLocation(workspaceRoot, pathParam)
+      else: workspaceRoot / repoPath
+    newSeparateBranchLockStore(gitBin, repo)
+  of "external-cli":
+    if entry.program.isNone or entry.program.get().len == 0:
+      raise newException(StoreRoutingError,
+        "locking backend 'external-cli' for visibility=\"" & entry.visibility &
+        "\" requires a `program` (the store CLI honoring " &
+        ExternalCliContractSchemaV1 & ")")
+    newExternalCliLockStore(
+      resolveStoreLocation(workspaceRoot, entry.program.get()))
+  else:
+    raise newException(StoreRoutingError,
+      "unknown locking backend '" & entry.backend & "' for visibility=\"" &
+      entry.visibility & "\" (expected: committed-file | git-checkout | " &
+      "git-notes | separate-branch | external-cli)")
+
+proc resolveRepoBackends*(locking: BootstrapLockingBody;
+    repos: seq[ResolvedRepo]; workspaceRoot: string;
+    identity: GitToolIdentity; gitBin: string): seq[RepoBackendAssignment] =
+  ## MO-4 — resolve each repo to the backend that records its participation,
+  ## keyed by ``ResolvedRepo.visibility``. See the section comment for the
+  ## default (public ⇒ committed lock, no backend) and the loud
+  ## ``StoreRoutingError`` for an unrouted private repo.
+  result = @[]
+  var cache = initTable[string, LockStore]()
+  for repo in repos:
+    var asg = RepoBackendAssignment(
+      repoName: repo.name, repoPath: repo.path, visibility: repo.visibility)
+    let route = routeForVisibility(locking, repo.visibility)
+    if route.isNone:
+      if repo.visibility == wvPublic:
+        asg.backendKind = "committed-lock"
+        asg.store = nil
+      else:
+        raise newException(StoreRoutingError,
+          "no locking backend configured for " &
+          lockingTierLabel(repo.visibility) & " repo '" & repo.name &
+          "': a " & lockingTierLabel(repo.visibility) & " repo's " &
+          "participation cannot be recorded in the public committed lock. " &
+          "Add a `[[locking.route]]` entry with visibility=\"" &
+          lockingTierLabel(repo.visibility) & "\" (e.g. backend=" &
+          "\"git-checkout\" or backend=\"external-cli\") to " &
+          bootstrapConfigFileName & ".")
+    else:
+      let entry = route.get()
+      let kind = entry.backend.strip().toLowerAscii()
+      # Per-tier backends are shared; git-notes / separate-branch attach to a
+      # specific repo's checkout, so they key on the repo path too.
+      let locKey =
+        if kind in ["git-notes", "separate-branch"] and
+            (entry.path.isNone or entry.path.get().len == 0): repo.path
+        else: (if entry.path.isSome: entry.path.get() else: "")
+      let cacheKey = kind & "\0" & locKey & "\0" &
+        (if entry.program.isSome: entry.program.get() else: "")
+      if cache.hasKey(cacheKey):
+        asg.store = cache[cacheKey]
+      else:
+        asg.store = constructRoutedBackend(
+          entry, workspaceRoot, repo.path, identity, gitBin)
+        cache[cacheKey] = asg.store
+      asg.backendKind = asg.store.backendId()
+    result.add(asg)
+
+proc routedParticipationBody(repoPath, sha: string): string =
+  ## A minimal workspace-lock-shaped body recording a single repo's pinned
+  ## revision. ``shasFromBody`` (repro_lock_store) parses it back to the
+  ## ``path -> revision`` map the gate/check consume.
+  "[[repo]]\npath = \"" & repoPath & "\"\nrevision = \"" & sha & "\"\n"
+
+proc recordWorkspaceParticipation*(assignments: seq[RepoBackendAssignment];
+    projectName: string; repoShas: Table[string, string]):
+    seq[ParticipationOutcome] =
+  ## The MO-4 workspace operation: record EACH repo's participation through
+  ## its ASSIGNED backend. A committed-lock (public, ``store == nil``) repo is
+  ## already captured by the committed solved-graph lock, so it is not
+  ## re-recorded. Every repo with a real backend gets a ``StoreLockRecord``
+  ## written into that backend's own medium.
+  result = @[]
+  for asg in assignments:
+    var outc = ParticipationOutcome(
+      repoName: asg.repoName, backendKind: asg.backendKind)
+    if asg.store.isNil:
+      outc.recorded = false
+      result.add(outc)
+      continue
+    let sha = repoShas.getOrDefault(asg.repoPath,
+      repoShas.getOrDefault(asg.repoName, ""))
+    let rec = StoreLockRecord(
+      key: StoreLockKey(project: projectName, repo: asg.repoName, sha: sha),
+      body: routedParticipationBody(asg.repoPath, sha))
+    let put = asg.store.putLock(rec)
+    outc.recorded = put.outcome == spoOk
+    outc.diagnostic = put.diagnostic
+    result.add(outc)
+
+proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
+  ## Read the ``[locking]`` routing table from the host bootstrap config, or an
+  ## empty body (the all-public default) when no config is present. The
+  ## empty-default keeps the no-``[locking]`` operations byte-unchanged.
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0: return BootstrapLockingBody()
+  let cfg = readWorkspaceBootstrap(configPath)
+  cfg.locking
+
+proc recordRoutedParticipation*(workspaceRoot: string;
+    repos: seq[ResolvedRepo]; repoShas: Table[string, string];
+    projectName: string; identity: GitToolIdentity):
+    seq[ParticipationOutcome] =
+  ## MO-4 — the shared step the lock / publish operations call. A no-op
+  ## (empty result) when the workspace declares NO ``[locking]`` routes, so
+  ## the all-public default + every manifest-present operation is unchanged.
+  ## When routes ARE declared, resolve each repo to its backend and record
+  ## participation; an unrouted private repo raises ``StoreRoutingError``.
+  let locking = loadLockingRouting(workspaceRoot)
+  if locking.route.len == 0: return @[]
+  let assignments = resolveRepoBackends(
+    locking, repos, workspaceRoot, identity, identity.binaryPath)
+  recordWorkspaceParticipation(assignments, projectName, repoShas)
+
 proc commitReachableLocally(identity: GitToolIdentity;
                             repoPath, sha: string): bool =
   ## RA-14 optimized-fetch predicate. Return ``true`` iff ``sha`` names a
@@ -19638,6 +19861,10 @@ type
     replacedExistingEntry*: bool
     repos*: seq[WorkspaceLockRepoEntry]
     dirty*: seq[WorkspaceLockDirtyEntry]
+    participation*: seq[ParticipationOutcome]
+      ## MO-4 — per-repo participation recorded through each repo's ASSIGNED
+      ## locking backend (empty unless the host bootstrap config declares
+      ## `[locking]` routes; the all-public default records nothing here).
     exitCode*: int
 
   WorkspaceLockOutcome* = object
@@ -19687,6 +19914,18 @@ proc renderLockTextLines*(report: WorkspaceLockReport): seq[string] =
     if report.replacedExistingEntry:
       result.add("workspace lock: overwrote existing lock for (" &
         report.triggerRepo & ", " & report.triggerSha & ")")
+    # MO-4 — per-repo locking-backend routing (only when `[locking]` routes
+    # are declared; otherwise `participation` is empty and nothing prints).
+    for p in report.participation:
+      if p.recorded:
+        result.add("workspace lock: recorded " & p.repoName &
+          " via " & p.backendKind & " backend")
+      elif p.backendKind == "committed-lock":
+        result.add("workspace lock: " & p.repoName &
+          " covered by committed lock (no backend)")
+      elif p.diagnostic.len > 0:
+        result.add("workspace lock: failed to record " & p.repoName &
+          " via " & p.backendKind & " backend: " & p.diagnostic)
   for entry in report.dirty:
     result.add("workspace lock: refused — '" & entry.path &
       "' is dirty (" & entry.reason & ")")
@@ -20016,6 +20255,16 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
       remote: entry.remoteName,
       revision: entry.revision,
       branch: entry.branch))
+
+  # MO-4 — record each repo's participation through its ASSIGNED locking
+  # backend (config → per-repo backend, keyed by visibility). A no-op when the
+  # workspace declares no `[locking]` routes, so the all-public default and
+  # every manifest-present operation are byte-unchanged. An unrouted private
+  # repo raises `StoreRoutingError` (loud, names the repo) — propagated to the
+  # operator by `repro workspace lock`; the gate surfaces it as a lock-failure.
+  report.participation = recordRoutedParticipation(
+    args.workspaceRoot, lockRepos, headShas, resolved.projectName, identity)
+
   report.exitCode = 0
   result.report = report
 

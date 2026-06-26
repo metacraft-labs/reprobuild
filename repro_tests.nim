@@ -5646,6 +5646,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim",
+    binary: "build/test-bin/t_workspace_routes_repo_sets_to_distinct_backends",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
+    binary: "build/test-bin/t_public_committed_team_manifest_personal_db_mixed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
     defines: @[],
