@@ -170,17 +170,13 @@ jobs:
           set -euo pipefail
           ct_root="$(cd "${{ github.workspace }}/../codetracer" && pwd)"
           direnv allow "$ct_root"
-          # codetracer's build uses tup, which mounts a FUSE filesystem. libfuse
-          # invokes fusermount3 by an absolute (nix-store, NON-setuid) path, so a
-          # PATH prepend is ignored — it must be pointed at NixOS's setuid wrapper
-          # via libfuse's FUSERMOUNT_PROG. (programs.fuse provides
-          # /run/wrappers/bin/fusermount3.) Diagnostics below confirm the wrapper
-          # exists + its setuid bit on the runner.
-          echo "RBDIAG wrapper:"; ls -l /run/wrappers/bin/fusermount3 2>&1 || echo "  NO WRAPPER on runner"
-          echo "RBDIAG id: $(id)"
-          fuse_wrapper=/run/wrappers/bin/fusermount3
+          # codetracer's build uses tup, which mounts a FUSE filesystem. Point
+          # libfuse at NixOS's setuid fusermount3 wrapper (programs.fuse provides
+          # /run/wrappers/bin/fusermount3) so the privileged mount can run; the
+          # github-runner service must also permit it (DevicePolicy /
+          # NoNewPrivileges — see metacraft-labs/infra services/github-runners).
           ( cd "$ct_root" && direnv exec "$ct_root" \
-              bash -c 'export FUSERMOUNT_PROG='"$fuse_wrapper"'; export PATH=/run/wrappers/bin:"$PATH"; just build' )
+              bash -c 'export FUSERMOUNT_PROG=/run/wrappers/bin/fusermount3; just build' )
           ct_bin="$ct_root/src/build-debug/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
