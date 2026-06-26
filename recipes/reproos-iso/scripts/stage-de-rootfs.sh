@@ -826,6 +826,53 @@ for repro_qt_pkg in qt6-base qt6-declarative qt6-quickcontrols2 qt6-tools; do
     _repro_qml_imports="${qtpkg_dir}/qt-6/qml${_repro_qml_imports:+:$_repro_qml_imports}"
   fi
 done
+# M9.R.39.5 — PROPER glibc resolution: place the installer binary's
+# PT_INTERP glibc dir at the FRONT of LD_LIBRARY_PATH.  Without this,
+# the installer's nix-glibc PT_INTERP loads (e.g. ld-linux-x86-64
+# .so.2 from glibc-2.40-66) but the dependent libraries libc.so.6 /
+# libm.so.6 / libpthread.so.0 resolve via /etc/ld.so.cache to
+# Debian's /lib/x86_64-linux-gnu/libc.so.6 (because the cache puts
+# Debian first), while libdl.so.2 / libresolv.so.2 / librt.so.1
+# resolve to nix glibc (the RPATH-reflected /nix/store path covers
+# only a SUBSET of glibc subsystems).  Mixing two glibc instances'
+# private heap + TLS data structures is what trips
+# ``munmap_chunk(): invalid pointer`` on Qt static-init heap
+# allocations.
+#
+# Discovery: scan the installer binary's first 4096 bytes for the
+# PT_INTERP nix-store glibc path.  ELF's PT_INTERP segment is a
+# nul-terminated string under the PHDR table, normally near the
+# beginning.  ``grep -aoE`` on a fixed-size head is the simplest
+# portable extraction.  Fallback to the most recent nix-store glibc
+# if extraction fails (shouldn't, given the binary is RPATH-laced
+# with /nix/store paths).
+_repro_installer_bin=/usr/bin/reproos-installer
+_repro_glibc_dir=""
+if [ -x "$_repro_installer_bin" ]; then
+  _repro_glibc_interp="$(head -c 4096 "$_repro_installer_bin" 2>/dev/null \
+    | tr -c '[:print:]' '\n' \
+    | grep -oE '/nix/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2' \
+    | head -1)"
+  if [ -n "$_repro_glibc_interp" ]; then
+    _repro_glibc_dir="${_repro_glibc_interp%/ld-linux-x86-64.so.2}"
+  fi
+fi
+if [ -z "$_repro_glibc_dir" ]; then
+  # Fallback: latest nix-store glibc on disk.
+  _repro_glibc_dir="$(ls -d /nix/store/*-glibc-*/lib 2>/dev/null \
+    | grep -vE -- '-bin|-locales|-dev|-debug|-doc|-static|-loop|-i686' \
+    | head -1)"
+fi
+# Prepend the PT_INTERP glibc dir to LD_LIBRARY_PATH so the loader
+# resolves ALL glibc subsystems via the SAME nix glibc instance.
+if [ -n "$_repro_glibc_dir" ] && [ -d "$_repro_glibc_dir" ]; then
+  if [ -n "$_repro_nix_libs" ]; then
+    _repro_nix_libs="$_repro_glibc_dir:$_repro_nix_libs"
+  else
+    _repro_nix_libs="$_repro_glibc_dir"
+  fi
+fi
+
 # Append caller-supplied paths last so any operator override wins.
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
   _repro_ldpath="$_repro_nix_libs:$LD_LIBRARY_PATH"
