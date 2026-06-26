@@ -18,7 +18,7 @@ ISO="${ISO:-/opt/repro/reprobuild/recipes/reproos-iso/build/reproos.iso}"
 DISK="${DISK:-/tmp/m9r42_install.qcow2}"
 DIAG_DISK="${DIAG_DISK:-/tmp/m9r42_diag.qcow2}"
 INSTALL_LOG="${INSTALL_LOG:-/tmp/m9r42_install.log}"
-INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-900}"
+INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-1800}"
 DIAG_OUT="${DIAG_OUT:-/tmp/m9r42_diag}"
 
 [ -f "$ISO" ] || { echo "ISO $ISO does not exist" >&2; exit 2; }
