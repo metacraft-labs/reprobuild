@@ -158,26 +158,35 @@ jobs:
             ct-test-src=../ct-test
             runquota-src=../runquota
 
-      # Build codetracer's `ct` binary in the sibling checkout (cloned adjacent
-      # by setup-dev-env's clone-siblings, per .github/sibling-repos). The
-      # ct_incremental_adapter that `repro watch --ct-incremental` uses execs
-      # `ct test --incremental --watch-decide|--watch-record` as a subprocess
-      # (reprobuild no longer compiles codetracer's engine), resolving the binary
-      # from $CT_BIN. codetracer's own dev env (its flake, via direnv) supplies
-      # the toolchain; `just build` emits src/build-debug/bin/ct.
-      - name: Build codetracer ct (sibling)
+      # Build codetracer's `ct` binary that the ct_incremental_adapter execs
+      # (`ct test --incremental --watch-decide|--watch-record`; resolved from
+      # $CT_BIN). We build ONLY the `ct` target with reprobuild itself —
+      # codetracer ships a `reprobuild.nim` recipe and its build-once.sh drives
+      # `repro build <target>` (target from CODETRACER_REPROBUILD_TARGET), so
+      # this avoids tup/FUSE and the full-product frontend build, and the
+      # reprobuild content-addressed cache (persistent /nix/store + repro's own
+      # cache on the self-hosted runners) makes rebuilds fast once warm.
+      - name: Build codetracer ct (via reprobuild)
         run: |
           set -euo pipefail
-          ct_root="$(cd "${{ github.workspace }}/../codetracer" && pwd)"
+          repro_root="${{ github.workspace }}"
+          ct_root="$(cd "$repro_root/../codetracer" && pwd)"
+          # 1. Materialise reprobuild's own `repro` binary (idempotent bootstrap).
+          dev-exec just bootstrap
+          repro_bin="$repro_root/build/bin/repro"
+          test -x "$repro_bin" || { echo "repro not bootstrapped at $repro_bin" >&2; exit 1; }
+          # 2. Build only the `ct` target via codetracer's reprobuild.nim recipe.
+          #    build-once.sh's reprobuild path (CODETRACER_REPROBUILD_LINUX=1)
+          #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
+          #    toolchain comes from its dev shell (direnv).
           direnv allow "$ct_root"
-          # codetracer's build uses tup, which mounts a FUSE filesystem. Point
-          # libfuse at NixOS's setuid fusermount3 wrapper (programs.fuse provides
-          # /run/wrappers/bin/fusermount3) so the privileged mount can run; the
-          # github-runner service must also permit it (DevicePolicy /
-          # NoNewPrivileges — see metacraft-labs/infra services/github-runners).
-          ( cd "$ct_root" && direnv exec "$ct_root" \
-              bash -c 'export FUSERMOUNT_PROG=/run/wrappers/bin/fusermount3; just build' )
-          ct_bin="$ct_root/src/build-debug/bin/ct"
+          ( cd "$ct_root" && \
+            CODETRACER_REPROBUILD_LINUX=1 \
+            CODETRACER_REPROBUILD_TARGET=ct \
+            CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
+            REPROBUILD_BIN="$repro_bin" \
+            direnv exec "$ct_root" just build-once )
+          ct_bin="$ct_root/src/build-debug-repro/bin/ct"
           test -x "$ct_bin" || { echo "ct not built at $ct_bin" >&2; exit 1; }
           echo "CT_BIN=$ct_bin" >> "$GITHUB_ENV"
 
