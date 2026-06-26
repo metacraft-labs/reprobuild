@@ -36,19 +36,22 @@ suite "Portable-Macos-Sandbox-Tools B2: monitor banner does not bury real stderr
     # A realistic captured stderr from a failing monitored autotools action:
     # many shim banner lines (one per injected process) interleaved with the
     # single real error line the user actually needs to see.
+    # The current io-mon macOS banners: the install banner (one per injected
+    # process), optionally carrying a debug per-mechanism note, and the
+    # body-patch-skipped line emitted when body-patch is disabled for diagnosis.
+    # All begin ``io-mon: macOS body-patch ``.
     let captured =
-      "io-mon: macOS body-patch installed=24 failed=2 absent=3 spawn_tramp=skip spawnp_tramp=skip\n" &
-      "io-mon: macOS body-patch installed=24 failed=2 absent=3 spawn_tramp=skip spawnp_tramp=skip\n" &
+      "io-mon: macOS body-patch installed=24 failed=2 absent=3 fork_tramp=ok spawn_tramp=skip spawnp_tramp=skip\n" &
+      "io-mon: macOS body-patch installed=28 failed=0 absent=3 fork_tramp=ok spawn_tramp=ok spawnp_tramp=ok [debug] interpose disabled\n" &
       "configure: error: C compiler cannot create executables\n" &
-      "io-mon: macOS body-patch installed=24 failed=2 absent=3 spawn_tramp=skip spawnp_tramp=skip\n" &
-      "io-mon: macOS backend=interpose (body-patch skipped)\n"
+      "io-mon: macOS body-patch installed=28 failed=0 absent=3 fork_tramp=ok spawn_tramp=ok spawnp_tramp=ok\n" &
+      "io-mon: macOS body-patch not installed [debug] body-patch disabled\n"
     let cleaned = stripMonitorBanner(captured)
     # The real error MUST survive verbatim.
     check cleaned.contains("configure: error: C compiler cannot create executables")
     # Every banner line MUST be gone — otherwise the failure diagnostic is
     # buried and the user is forced back to the raw log (the B2 regression).
     check not cleaned.contains("io-mon: macOS body-patch")
-    check not cleaned.contains("io-mon: macOS backend=")
 
   test "stripMonitorBanner is a no-op on banner-free output":
     let captured = "ld: symbol(s) not found for architecture arm64\n"
