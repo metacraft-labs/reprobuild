@@ -59,6 +59,22 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
 
+  # Stage a wrapper config.nims next to the profile so nim's parent-walk
+  # picks it up and pulls in reprobuild's config.nims (which resolves
+  # sibling-repo paths from env vars: NIMCRYPTO_SRC, BEARSSL_SRC, IO_MON_SRC,
+  # etc.). Without this, a profile at e.g. C:\Users\admin\reprobuild-source\
+  # never sees reprobuild's config.nims, and transitive imports of
+  # repro_project_dsl -> nimcrypto/sha2 fail with "cannot open file".
+  let profileDir = profileRoot.parentDir
+  let stagedConfig = profileDir / "config.nims"
+  let upstreamConfig = repoRoot / "config.nims"
+  var didStageConfig = false
+  if fileExists(extendedPath(upstreamConfig)) and
+     not fileExists(extendedPath(stagedConfig)):
+    writeFile(extendedPath(stagedConfig),
+      "include \"" & upstreamConfig.replace('\\', '/') & "\"\n")
+    didStageConfig = true
+
   var compileCmd = quoteShell(nimExe) & " c --hints:off --warnings:off" &
     " --nimcache:" & quoteShell(nimcacheDir) &
     " --out:" & quoteShell(outBinary)
@@ -68,23 +84,28 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   if verbose:
     stderr.writeLine("repro profile compile: " & compileCmd)
 
-  let compileRes = execCmdEx(compileCmd)
-  if compileRes.exitCode != 0:
-    var err = new CompileFailure
-    err.msg = "nim compile failed for " & profileRoot &
-      " (exit " & $compileRes.exitCode & ")"
-    err.stderrText = compileRes.output
-    raise err
+  try:
+    let compileRes = execCmdEx(compileCmd)
+    if compileRes.exitCode != 0:
+      var err = new CompileFailure
+      err.msg = "nim compile failed for " & profileRoot &
+        " (exit " & $compileRes.exitCode & ")"
+      err.stderrText = compileRes.output
+      raise err
 
-  let runRes = execCmdEx(quoteShell(outBinary))
-  if runRes.exitCode != 0:
-    var err = new CompileFailure
-    err.msg = "compiled profile binary exited " & $runRes.exitCode &
-      " for " & profileRoot
-    err.stderrText = runRes.output
-    raise err
-  result.jsonOutput = runRes.output
-  result.stderrText = compileRes.output
+    let runRes = execCmdEx(quoteShell(outBinary))
+    if runRes.exitCode != 0:
+      var err = new CompileFailure
+      err.msg = "compiled profile binary exited " & $runRes.exitCode &
+        " for " & profileRoot
+      err.stderrText = runRes.output
+      raise err
+    result.jsonOutput = runRes.output
+    result.stderrText = compileRes.output
+  finally:
+    if didStageConfig:
+      try: removeFile(extendedPath(stagedConfig))
+      except OSError: discard
 
 proc rbpiBytesFromJson*(jsonText: string): seq[byte] =
   ## Parse the JSON ProfileIntent emitted by the compiled profile and

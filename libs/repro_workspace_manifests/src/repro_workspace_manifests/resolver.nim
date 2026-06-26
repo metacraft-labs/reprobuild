@@ -102,6 +102,67 @@ type
     fragmentPath*: string
     manifestLayer*: string
     visibility*: WorkspaceVisibility
+    # RA-14 — fetch-acceleration hints carried from the fragment. Empty /
+    # zero / false means "no acceleration" (full clone of every head).
+    # These never change the resolved tree at the pinned revision.
+    cloneFilter*: string
+    depth*: int
+    singleBranch*: bool
+    # RA-18 — post-sync file materialization + group membership, carried
+    # verbatim from the fragment. An empty `groups` means the repo belongs
+    # to the implicit `default` group only (see `repoInGroups`).
+    copyfile*: seq[CopyLinkFileEntry]
+    linkfile*: seq[CopyLinkFileEntry]
+    groups*: seq[string]
+    # RA-21 — develop-set dependency edges carried verbatim from the
+    # fragment. Names the other repos this repo depends on; the pre-push
+    # gate uses these to compute the pushed repo's transitive dependency
+    # closure (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
+    depends*: seq[string]
+
+  CertificateGateMode* = enum
+    ## TC-3 / TC-6 / RA-32 — the resolved `[certificates] gate_mode`.
+    ## `cgmOff` is the DEFAULT (and the value for a project that declares no
+    ## `[certificates]` table at all): the pre-push gate runs exactly as it
+    ## did before test certificates existed, so a newcomer's first push is
+    ## never cert-walled. `cgmAdvisory` records the coverage result in the
+    ## gate report (a warning when uncovered) but NEVER blocks the push.
+    ## `cgmRequired` refuses the push unless the submitted certificates cover
+    ## the pushed commit for the required targets on each required platform.
+    cgmOff = "off"
+    cgmAdvisory = "advisory"
+    cgmRequired = "required"
+
+  CertificateCiTrust* = enum
+    ## TC-4 — the resolved `[certificates] ci_trust`, the project's EXPLICIT
+    ## decision about whether CI fast-tracks certified work. `cctAdvisory` is
+    ## the DEFAULT (and the value for a project that declares no `ci_trust`):
+    ## CI re-runs every required target authoritatively but surfaces a valid
+    ## certificate as an informational signal — nothing is skipped on trust.
+    ## `cctSkip` is the high-trust fast-track: a target covered by a VALID
+    ## (registered-signed, unrevoked, commit+lock+platform-matching)
+    ## certificate is SKIPPED and the PR fast-tracked. The default is the
+    ## SAFER `cctAdvisory` so trust is never granted by omission
+    ## (Test-Certificates.md §"CI integration — skipping certified work").
+    cctAdvisory = "advisory"
+    cctSkip = "skip"
+
+  CertificatePolicy* = object
+    ## The resolved test-certificate gating policy for a project. The DEFAULT
+    ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
+    ## table resolves to, so the policy is a strict no-op until a project opts
+    ## in. `requiredTargets` are the targets a certificate set must cover;
+    ## `requiredPlatforms` are the platforms each of which must be covered
+    ## (the union of submitted certificates is checked per platform).
+    gateMode*: CertificateGateMode
+    requiredTargets*: seq[string]
+    requiredPlatforms*: seq[string]
+    ciTrust*: CertificateCiTrust
+      ## TC-4 — whether CI skips certified targets (`cctSkip`) or re-runs them
+      ## while surfacing the certificate as advisory (`cctAdvisory`, the
+      ## default). Independent of `gateMode`: a project can require coverage on
+      ## push yet still re-run in CI (advisory), or run advisory pushes yet
+      ## fast-track CI (skip). Defaults to `cctAdvisory` (no trust by omission).
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -111,10 +172,90 @@ type
     trunk*: string
     repos*: seq[ResolvedRepo]
     projectFile*: string
+    certificatePolicy*: CertificatePolicy
+      ## TC-3 / TC-6 / RA-32 — resolved from the project manifest's
+      ## `[certificates]` table; defaults to `cgmOff` (no enforcement) when
+      ## the table is absent or omits `gate_mode`.
 
 const
   defaultRepoVcs* = "git"
   defaultRepoStability* = "tracked"
+  defaultManifestGroup* = "default"
+    ## RA-18 — a repo with no declared `groups` belongs to this implicit
+    ## group (the `repo`-tool convention). A repo's effective group set is
+    ## therefore `groups` when non-empty, else `["default"]`.
+
+# ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
+
+proc resolveCertificatePolicy*(body: CertificatesBody;
+                               projectFile: string): CertificatePolicy =
+  ## Resolve a manifest `[certificates]` table into a `CertificatePolicy`.
+  ## The DEFAULT — an absent table, or one that omits `gate_mode` — is
+  ## `cgmOff`: a project that never opts in is never cert-gated (the RA-32
+  ## default-off / advisory-first onboarding guarantee). A `gate_mode` value
+  ## outside {off, advisory, required} is a structural error: a typo must
+  ## fail LOUD rather than silently fall back to `off` (which would mask an
+  ## intended `required`).
+  result.gateMode = cgmOff
+  if body.gate_mode.isSome:
+    let raw = body.gate_mode.get().strip()
+    case raw
+    of "", "off": result.gateMode = cgmOff
+    of "advisory": result.gateMode = cgmAdvisory
+    of "required": result.gateMode = cgmRequired
+    else:
+      raiseManifestError(projectFile, "certificates.gate_mode",
+        schemaProjectManifestV1, schemaProjectManifestV1,
+        "invalid `certificates.gate_mode` value '" & raw &
+          "' (expected: off | advisory | required)")
+  result.requiredTargets = body.required_targets
+  result.requiredPlatforms = body.required_platforms
+  # TC-4 — resolve the CI-trust decision. The DEFAULT — an absent / omitted
+  # `ci_trust` — is `cctAdvisory`: CI never fast-tracks on trust unless the
+  # project explicitly opts in, so a forged certificate can never cause a skip
+  # in a project that did not ask for it. As with `gate_mode`, an out-of-range
+  # value is a structural error (a typo must fail LOUD, never silently grant
+  # the higher-trust `skip`).
+  result.ciTrust = cctAdvisory
+  if body.ci_trust.isSome:
+    let raw = body.ci_trust.get().strip()
+    case raw
+    of "", "advisory": result.ciTrust = cctAdvisory
+    of "skip": result.ciTrust = cctSkip
+    else:
+      raiseManifestError(projectFile, "certificates.ci_trust",
+        schemaProjectManifestV1, schemaProjectManifestV1,
+        "invalid `certificates.ci_trust` value '" & raw &
+          "' (expected: advisory | skip)")
+
+# ---- RA-18 group membership -----------------------------------------------
+
+proc effectiveGroups*(repo: ResolvedRepo): seq[string] =
+  ## The repo's effective group membership: its declared `groups` when it
+  ## has any, otherwise the implicit `["default"]`. A repo that explicitly
+  ## lists groups WITHOUT naming `default` is NOT in `default` (mirroring
+  ## `repo`, where listing a group opts out of the implicit membership).
+  if repo.groups.len > 0: repo.groups
+  else: @[defaultManifestGroup]
+
+proc repoSelectedByGroups*(repo: ResolvedRepo;
+                           includeGroups, excludeGroups: seq[string]): bool =
+  ## RA-18 subset selection. `includeGroups` is the requested `--groups`
+  ## set (empty means "no `--groups` filter": every repo is selected unless
+  ## excluded). `excludeGroups` is the `-<group>` set. A repo is selected
+  ## when (a) `includeGroups` is empty OR the repo is in at least one
+  ## included group, AND (b) the repo is in NONE of the excluded groups.
+  ## Exclusion wins over inclusion, matching `repo`'s `groups=foo,-bar`.
+  let groups = effectiveGroups(repo)
+  for g in excludeGroups:
+    if g in groups:
+      return false
+  if includeGroups.len == 0:
+    return true
+  for g in includeGroups:
+    if g in groups:
+      return true
+  false
 
 # ---- helpers --------------------------------------------------------------
 
@@ -172,6 +313,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     result.defaultRevision = project.project.default_revision.get()
   if project.project.trunk.isSome:
     result.trunk = project.project.trunk.get()
+  # TC-3 / TC-6 / RA-32 — resolve the certificate gating policy (default off).
+  result.certificatePolicy =
+    resolveCertificatePolicy(project.certificates, absProject)
 
   # Build remote name -> fetch URL lookup. The M5 reader already enforces
   # non-empty `name` and `fetch` on each remote entry, so we can index
@@ -263,6 +407,26 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         fragment.repo.stability.get()
       else:
         defaultRepoStability
+
+    # RA-14 — carry the fetch-acceleration hints through unchanged. They
+    # are pure download knobs; the resolved revision above is the single
+    # source of truth for what the checkout resolves to.
+    if fragment.repo.clone_filter.isSome:
+      resolved.cloneFilter = fragment.repo.clone_filter.get()
+    if fragment.repo.depth.isSome:
+      resolved.depth = fragment.repo.depth.get()
+    if fragment.repo.single_branch.isSome:
+      resolved.singleBranch = fragment.repo.single_branch.get()
+
+    # RA-18 — carry the copyfile/linkfile directives and group membership
+    # through verbatim. These are workspace-layout facts, not download
+    # knobs; the materialization step runs post-checkout in the CLI driver.
+    resolved.copyfile = fragment.repo.copyfile
+    resolved.linkfile = fragment.repo.linkfile
+    resolved.groups = fragment.repo.groups
+
+    # RA-21 — carry the develop-set dependency edges through verbatim.
+    resolved.depends = fragment.repo.depends
 
     # Duplicate check on the `(name, path, remoteName)` triple. We use
     # a tab-joined key because none of the three components legally
@@ -485,6 +649,25 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
         fragment.repo.stability.get()
       else:
         defaultRepoStability
+
+    # RA-14 — carry the fetch-acceleration hints through unchanged. They
+    # are pure download knobs; the resolved revision above is the single
+    # source of truth for what the checkout resolves to.
+    if fragment.repo.clone_filter.isSome:
+      resolved.cloneFilter = fragment.repo.clone_filter.get()
+    if fragment.repo.depth.isSome:
+      resolved.depth = fragment.repo.depth.get()
+    if fragment.repo.single_branch.isSome:
+      resolved.singleBranch = fragment.repo.single_branch.get()
+
+    # RA-18 — carry the copyfile/linkfile directives and group membership
+    # through verbatim (same as the project path above).
+    resolved.copyfile = fragment.repo.copyfile
+    resolved.linkfile = fragment.repo.linkfile
+    resolved.groups = fragment.repo.groups
+
+    # RA-21 — carry the develop-set dependency edges through verbatim.
+    resolved.depends = fragment.repo.depends
 
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.remoteName
     if triple in seen:

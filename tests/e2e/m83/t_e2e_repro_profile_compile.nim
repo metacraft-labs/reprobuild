@@ -7,8 +7,9 @@
 ## pipeline does NOT invoke this code path yet -- but the gate stays
 ## green so Phase D's apply integration can rely on it.
 
-import std/[os, osproc, sets, strutils, tables, unittest]
+import std/[json, os, osproc, sets, strutils, tables, unittest]
 
+import repro_elevation
 import repro_profile
 
 const
@@ -106,6 +107,95 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check byKind["fs.systemFile"].fields["content"].s ==
       "127.0.0.1 dev"
 
+  test "system_fssystemfile_sources.nim builds fs.systemFile with all three sources":
+    # Windows-System-Resources Phase A e2e: compile + run the fixture
+    # that declares one inline-content, one URL-fetch, and one
+    # controller-side `sourceLocal` `fs.systemFile`. The e2e gate
+    # checks the ProfileIntent JSON — no real fetch, no apply.
+    let js = compileAndRun("system_fssystemfile_sources.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemFsFileSources"
+    check p.resources.len == 3
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    check "hostsInline" in byAddr
+    check byAddr["hostsInline"].kind == "fs.systemFile"
+    check byAddr["hostsInline"].fields["path"].s == "/etc/hosts.d/local"
+    check byAddr["hostsInline"].fields["content"].s == "127.0.0.1 dev"
+    check "sourceUrl" notin byAddr["hostsInline"].fields
+    check "sha256" notin byAddr["hostsInline"].fields
+    check "sourceLocal" notin byAddr["hostsInline"].fields
+
+    check "actionsRunnerZip" in byAddr
+    check byAddr["actionsRunnerZip"].kind == "fs.systemFile"
+    check byAddr["actionsRunnerZip"].fields["path"].s ==
+      "C:\\actions-runner-cache\\actions-runner-win-x64.zip"
+    check byAddr["actionsRunnerZip"].fields["sourceUrl"].s.startsWith(
+      "https://github.com/actions/runner/releases/download/")
+    check byAddr["actionsRunnerZip"].fields["sha256"].s.len == 64
+    check "sourceLocal" notin byAddr["actionsRunnerZip"].fields
+    # Inline `content` is still emitted by the template (empty), since
+    # the template always pushes the `content` key for stable codec
+    # shape — the load-bearing fact is that it is empty.
+    check byAddr["actionsRunnerZip"].fields["content"].s == ""
+
+    check "myappConfig" in byAddr
+    check byAddr["myappConfig"].kind == "fs.systemFile"
+    check byAddr["myappConfig"].fields["path"].s ==
+      "/etc/myapp/config.toml"
+    check byAddr["myappConfig"].fields["sourceLocal"].s ==
+      "/home/zah/profiles/myapp.toml"
+    check "sourceUrl" notin byAddr["myappConfig"].fields
+    check "sha256" notin byAddr["myappConfig"].fields
+
+  test "system_windowsservice_phaseb.nim builds windows.service with Phase B fields":
+    # Windows-System-Resources Phase B e2e: compile + run the fixture
+    # that declares one legacy three-field windows.service alongside
+    # one with all four Phase B optional fields. The e2e gate checks
+    # the ProfileIntent JSON — no real apply, no Windows host needed.
+    let js = compileAndRun("system_windowsservice_phaseb.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemWindowsServicePhaseB"
+    check p.resources.len == 2
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    # Legacy three-field shape: back-compat invariant — the four
+    # Phase B fields are ABSENT from the intent (the template skips
+    # them when they're at default), so a profile that doesn't use
+    # them emits byte-identical JSON to today.
+    check "legacyService" in byAddr
+    check byAddr["legacyService"].kind == "windows.service"
+    check byAddr["legacyService"].fields["name"].s == "sshd"
+    check byAddr["legacyService"].fields["startType"].s == "Automatic"
+    check byAddr["legacyService"].fields["state"].s == "Running"
+    check "displayName" notin byAddr["legacyService"].fields
+    check "binPath" notin byAddr["legacyService"].fields
+    check "recoveryActions" notin byAddr["legacyService"].fields
+    check "recoveryResetSeconds" notin byAddr["legacyService"].fields
+
+    # Phase B shape: all four optional fields carry through with the
+    # canonical encoding — recovery actions as `action:delayMs` strings
+    # in a list, reset as an int, displayName/binPath as strings.
+    check "actionsRunnerService" in byAddr
+    let svc = byAddr["actionsRunnerService"]
+    check svc.kind == "windows.service"
+    check svc.fields["name"].s ==
+      "actions.runner.metacraft-labs.windows-runner-001"
+    check svc.fields["displayName"].s ==
+      "GitHub Actions Runner (windows-runner-001)"
+    check svc.fields["binPath"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    let actions = svc.fields["recoveryActions"].items
+    check actions.len == 3
+    check actions[0] == "restart:5000"
+    check actions[1] == "restart:10000"
+    check actions[2] == "reboot:60000"
+    check svc.fields["recoveryResetSeconds"].i == 86400
+
   test "system_fssystemdirectory.nim builds an fs.systemDirectory + acl":
     let js = compileAndRun("system_fssystemdirectory.nim")
     let p = parseProfileIntentJson(js)
@@ -134,6 +224,134 @@ suite "M83 Phase A e2e: compile + run user profiles":
     check aces[0] == "SYSTEM:(F)"
     check aces[1] == "BUILTIN\\Administrators:(F)"
     check aces[2] == "NetworkService:(RX)"
+
+  test "system_fssystemdirectory_acl.nim covers every Phase-D ACL variant":
+    # Windows-System-Resources Phase D e2e: compile + run the fixture
+    # that declares one fsSystemDirectory per inheritance vocabulary
+    # value PLUS the Allow / Deny ACE pivot PLUS an owner-unset
+    # stanza. The e2e gate checks the ProfileIntent JSON — no Windows
+    # host, no icacls call, no apply.
+    let js = compileAndRun("system_fssystemdirectory_acl.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemFsDirAcl"
+    check p.resources.len == 4
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    # runnerTokenDir: protected-clear-inherited + 3 Allow ACEs +
+    # SYSTEM owner. The production actions-runner-tokens shape.
+    check "runnerTokenDir" in byAddr
+    check byAddr["runnerTokenDir"].kind == "fs.systemDirectory"
+    check byAddr["runnerTokenDir"].fields["path"].s ==
+      "C:\\actions-runner-tokens"
+    check byAddr["runnerTokenDir"].fields["aclOwner"].s == "SYSTEM"
+    check byAddr["runnerTokenDir"].fields["aclInheritance"].s ==
+      "protected-clear-inherited"
+    let runnerAces = byAddr["runnerTokenDir"].fields["aclEntries"].items
+    check runnerAces.len == 3
+    check runnerAces[0] == "SYSTEM:(F)"
+    check runnerAces[1] == "BUILTIN\\Administrators:(F)"
+    check runnerAces[2] == "NetworkService:(RX)"
+
+    # runnerCacheDir: disabled-replace + Deny ACE + Administrators
+    # owner. Covers the Deny direction's `:(D,W)` marker the driver
+    # pivots on at apply time.
+    check "runnerCacheDir" in byAddr
+    check byAddr["runnerCacheDir"].fields["aclOwner"].s ==
+      "BUILTIN\\Administrators"
+    check byAddr["runnerCacheDir"].fields["aclInheritance"].s ==
+      "disabled-replace"
+    let cacheAces = byAddr["runnerCacheDir"].fields["aclEntries"].items
+    check cacheAces.len == 3
+    check cacheAces[0] == "BUILTIN\\Administrators:(F)"
+    check cacheAces[1] == "Users:(RX)"
+    check cacheAces[2] == "Guests:(D,W)"
+
+    # reproManagedDir: owner-unset + disabled-convert. The driver
+    # skips the takeown / icacls /setowner calls and applies only the
+    # entries + inheritance mode.
+    check "reproManagedDir" in byAddr
+    check byAddr["reproManagedDir"].fields["aclOwner"].s == ""
+    check byAddr["reproManagedDir"].fields["aclInheritance"].s ==
+      "disabled-convert"
+    let managedAces = byAddr["reproManagedDir"].fields["aclEntries"].items
+    check managedAces.len == 1
+    check managedAces[0] == "NT AUTHORITY\\SYSTEM:(F)"
+
+    # reproDataDir: inheritance = Enabled (the OS default; the driver
+    # emits no /inheritance call).
+    check "reproDataDir" in byAddr
+    check byAddr["reproDataDir"].fields["aclOwner"].s == "SYSTEM"
+    check byAddr["reproDataDir"].fields["aclInheritance"].s == "enabled"
+    let dataAces = byAddr["reproDataDir"].fields["aclEntries"].items
+    check dataAces.len == 1
+    check dataAces[0] == "SYSTEM:(M)"
+
+  test "system_windowsscheduledtask.nim builds a windows.scheduledTask per ScheduleKind":
+    # Windows-System-Resources Phase C e2e: compile + run the fixture
+    # that declares one task per ScheduleKind variant. The e2e gate
+    # checks the ProfileIntent JSON — no Windows host, no Task
+    # Scheduler call, no apply.
+    let js = compileAndRun("system_windowsscheduledtask.nim")
+    let p = parseProfileIntentJson(js)
+    check p.name == "systemWindowsScheduledTask"
+    check p.resources.len == 5
+    var byAddr = initTable[string, ResourceIntent]()
+    for r in p.resources:
+      byAddr[r.address] = r
+
+    # onBoot variant.
+    check "onBootTask" in byAddr
+    check byAddr["onBootTask"].kind == "windows.scheduledTask"
+    check byAddr["onBootTask"].fields["taskName"].s ==
+      "\\Reprobuild\\OnBootTask"
+    check byAddr["onBootTask"].fields["executable"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check byAddr["onBootTask"].fields["arguments"].items.len == 1
+    check byAddr["onBootTask"].fields["arguments"].items[0] ==
+      "--unattended"
+    check byAddr["onBootTask"].fields["workingDirectory"].s ==
+      "C:\\actions-runner"
+    check byAddr["onBootTask"].fields["schedule"].items.len == 1
+    check byAddr["onBootTask"].fields["schedule"].items[0] ==
+      "onBoot:30"
+    check byAddr["onBootTask"].fields["runAsUser"].s == "SYSTEM"
+    # Spec §1.3: `runWithHighestPrivileges` is sentinel-aware at the
+    # template surface. The fixture does NOT set it explicitly so the
+    # field is absent from the intent map; the principal-dependent
+    # default (`true` for SYSTEM) applies downstream in the parser and
+    # the adapter — exercised in `t_smoke_repro_infra.nim`.
+    check "runWithHighestPrivileges" notin byAddr["onBootTask"].fields
+    check byAddr["onBootTask"].fields["enabled"].b == true
+
+    # onLogon variant + non-SYSTEM principal. The fixture omits
+    # `runWithHighestPrivileges` so the field is absent — the
+    # principal-dependent default (`false` for a non-SYSTEM
+    # principal) applies downstream.
+    check "onLogonTask" in byAddr
+    check byAddr["onLogonTask"].fields["schedule"].items[0] ==
+      "onLogon:DOMAIN\\runner"
+    check byAddr["onLogonTask"].fields["runAsUser"].s ==
+      "DOMAIN\\runner"
+    check "runWithHighestPrivileges" notin
+      byAddr["onLogonTask"].fields
+
+    # once variant.
+    check "onceTask" in byAddr
+    check byAddr["onceTask"].fields["schedule"].items[0] ==
+      "once:2030-01-01T08:00:00Z"
+
+    # daily variant.
+    check "dailyTask" in byAddr
+    check byAddr["dailyTask"].fields["schedule"].items[0] ==
+      "daily:08:30"
+
+    # interval variant + enabled=false.
+    check "intervalTask" in byAddr
+    check byAddr["intervalTask"].fields["schedule"].items[0] ==
+      "interval:15:2030-01-01T00:00:00Z"
+    check byAddr["intervalTask"].fields["enabled"].b == false
 
   test "home_with_config_and_hosts.nim assembles all four sections":
     let js = compileAndRun("home_with_config_and_hosts.nim")
@@ -176,6 +394,88 @@ suite "M83 Phase A e2e: compile + run user profiles":
     let js1 = compileAndRun("home_basic.nim")
     let js2 = compileAndRun("home_basic.nim")
     check js1 == js2
+
+  test "Phase E: pokInlineExecCall is in the elevation closed-set":
+    # Windows-System-Resources Phase E e2e — the privileged-operation
+    # broker's closed-set now includes `pokInlineExecCall` (the
+    # elevated `inlineExecCall` build-graph hand-off). This e2e check
+    # pins the kind tag + the `requiresElevation` predicate so a
+    # downstream profile change that drops the new kind from the set
+    # surfaces here (not at apply time on a Windows host).
+    #
+    # The fixture-driven path (a profile that declares an elevated
+    # `inlineExecCall(...)` resource) is Phase F+ territory — Phase E
+    # is the engine + broker plumbing only. This test stays in the
+    # e2e binary so the gate set is consistent across phases.
+    block:
+      check $repro_elevation.pokInlineExecCall ==
+        "reprobuild.inlineExecCall"
+      check repro_elevation.requiresElevation(
+        repro_elevation.pokInlineExecCall)
+      check repro_elevation.isKnownPrivilegedOperationKind(
+        $repro_elevation.pokInlineExecCall)
+
+  test "Phase F expandArchive fixture: format override + auto-detect emit the right argv":
+    # Windows-System-Resources Phase F e2e — the new fixture exercises
+    # the typed `expandArchive.build(...)` wrapper for every load-
+    # bearing dispatch (format override + auto-detect, zip + tar
+    # family, requiresElevation toggle). The fixture emits one JSON
+    # object per build edge; we assert the load-bearing fields match
+    # the spec's lowering.
+    let raw = compileAndRun("system_expandarchive.nim")
+    let doc = parseJson(raw)
+    # The fixture marks the host platform so the gate can branch on
+    # which dispatch was compiled in.
+    let host = doc{"host"}.getStr()
+    check host in @["windows", "posix"]
+    # Edge 1 — actions-runner zip with requiresElevation = true. The
+    # archive's `.zip` suffix auto-detects to eafZip; the marker is
+    # wired into outputs.
+    let zipEdge = doc{"runnerZip"}
+    check zipEdge{"id"}.getStr() == "extractRunnerZip"
+    check zipEdge{"requiresElevation"}.getBool() == true
+    check zipEdge{"outputs"}.elems[0].getStr() ==
+      "C:\\actions-runner\\config.cmd"
+    check zipEdge{"inputs"}.elems[0].getStr() ==
+      "C:\\actions-runner-cache\\runner.zip"
+    check zipEdge{"callPackage"}.getStr() == "reprobuild.builtin"
+    check zipEdge{"callExecutable"}.getStr() == "exec"
+    check zipEdge{"commandStatsId"}.getStr() == "expandArchive.eafZip"
+    let zipArgv = zipEdge{"argv"}
+    if host == "windows":
+      check zipArgv.elems[0].getStr() == "powershell"
+      check zipArgv.elems[1].getStr() == "-NoProfile"
+      check zipArgv.elems[2].getStr() == "-Command"
+      check zipArgv.elems[3].getStr().contains("Expand-Archive")
+      check zipArgv.elems[3].getStr().contains("-Force")
+    else:
+      check zipArgv.elems[0].getStr() == "unzip"
+      check zipArgv.elems[1].getStr() == "-q"
+      check zipArgv.elems[2].getStr() == "-o"
+      check zipArgv.elems[3].getStr() ==
+        "C:\\actions-runner-cache\\runner.zip"
+    # Edge 2 — explicit format = "tar.gz" override + strip-components.
+    let tgz = doc{"runnerTarGz"}
+    check tgz{"commandStatsId"}.getStr() == "expandArchive.eafTarGz"
+    check tgz{"requiresElevation"}.getBool() == false
+    let tgzArgv = tgz{"argv"}
+    check tgzArgv.elems[0].getStr() == "tar"
+    check tgzArgv.elems[1].getStr() == "-z"
+    check tgzArgv.elems[2].getStr() == "-x"
+    var sawStrip = false
+    for a in tgzArgv.elems:
+      if a.getStr() == "--strip-components=1":
+        sawStrip = true
+    check sawStrip
+    # Edge 3 — auto-detect tar.xz from the suffix.
+    let txz = doc{"runnerTarXz"}
+    check txz{"commandStatsId"}.getStr() == "expandArchive.eafTarXz"
+    let txzArgv = txz{"argv"}
+    check txzArgv.elems[0].getStr() == "tar"
+    check txzArgv.elems[1].getStr() == "-J"
+    # Edge 4 — explicit format = "zip" with a non-zip suffix.
+    let amb = doc{"ambiguousZip"}
+    check amb{"commandStatsId"}.getStr() == "expandArchive.eafZip"
 
   test "byte-exact home_basic JSON matches the in-process construction":
     # Sanity check that the JSON the compiled fixture emits matches

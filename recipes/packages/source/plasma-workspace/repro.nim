@@ -21,13 +21,14 @@
 ## of gnome-shell for the Plasma story. The standalone ``plasmashell``
 ## binary is the user-session leader: it owns the task bar, system
 ## tray, application launcher, activities, lock screen, and global
-## notifications. ``libPlasmaWorkspace.so`` is the Plasma workspace
-## library third-party Plasma widgets + applets link against to
-## register UI contributions. NDE-K1's
+## notifications. ``libkworkspace6.so`` (M9.R.36.2 — was speculatively
+## named ``libPlasmaWorkspace.so`` in the recipe pre-M9.R.36) is the
+## Plasma workspace library third-party Plasma widgets + applets link
+## against to register UI contributions. NDE-K1's
 ## ``startplasma-wayland`` chain-execs into ``plasmashell`` after kwin
 ## hands off the Wayland compositor. The from-source recipe lifts the
 ## NDE-K1 apt-jammy plasma-workspace .deb pin to a real
-## ``plasmashell`` binary + ``libPlasmaWorkspace.so`` library artifact
+## ``plasmashell`` binary + ``libkworkspace6.so`` library artifact
 ## for the v2 Plasma story.
 ##
 ## ## sha256 strategy
@@ -80,10 +81,17 @@
 ## standalone binary (among many others — we only register the v1
 ## artifacts the NDE-K1 desktop entry depends on):
 ##
-##   * ``libPlasmaWorkspace.so`` — the Plasma workspace library third-
-##                                  party Plasma widgets + applets link
-##                                  against to register UI
-##                                  contributions.
+##   * ``libkworkspace6.so`` — the Plasma workspace library third-
+##                              party Plasma widgets + applets link
+##                              against to register UI contributions.
+##                              Upstream CMake target name is
+##                              ``KWorkspace`` with explicit
+##                              ``OUTPUT_NAME kworkspace6`` (so the
+##                              ``6`` is the KF6 major-version ABI
+##                              suffix, NOT the package name).
+##                              M9.R.36.2 fixed the recipe's
+##                              previously-speculative
+##                              ``libPlasmaWorkspace`` declaration.
 ##   * ``plasmashell`` — the standalone shell binary that drives the
 ##                       Plasma user-session UI (task bar, system
 ##                       tray, application launcher, activities, lock
@@ -93,10 +101,10 @@
 ##                       compositor.
 ##
 ## We register the library under the package-level identifier
-## ``libPlasmaWorkspace`` (camelCased from the upstream hyphenated
-## package name ``plasma-workspace`` per the gdk-pixbuf precedent of
-## kebab-to-PascalCase + preserved ``lib`` prefix), and the executable
-## under ``plasmashell`` (kept verbatim — the upstream binary name is
+## ``libkworkspace6`` (the upstream CMake ``OUTPUT_NAME`` for the
+## ``KWorkspace`` target — kebab-passes-through verbatim, single
+## lowercase word + KF6 ABI suffix), and the executable under
+## ``plasmashell`` (kept verbatim — the upstream binary name is
 ## already a single lowercase word, no kebab segments to camelCase).
 ##
 ## ## Configurables
@@ -335,13 +343,47 @@ package plasmaWorkspaceSource:
     ## convention's ninja-spawn + install-glue closes.
     discard
 
-  library libPlasmaWorkspace:
-    ## ``libPlasmaWorkspace.so`` — the Plasma workspace library
-    ## third-party Plasma widgets + applets link against to register
-    ## UI contributions. The kebab-cased upstream package name
-    ## ``plasma-workspace`` is camelCased to ``libPlasmaWorkspace``
-    ## per the gdk-pixbuf precedent + preserved ``lib`` prefix.
-    ## v1 records the artifact only.
+  executable startplasmaWayland:
+    ## M9.R.32.1 — ``/usr/bin/startplasma-wayland`` is the Plasma
+    ## Wayland session entry-point.  SDDM's autologin chain ultimately
+    ## exec's this binary, which sets up the XDG environment, launches
+    ## kwin_wayland, then chain-exec's plasmashell.  The CMake target
+    ## lives in ``src/CMakeLists.txt``'s ``add_subdirectory(startkde)``
+    ## (restored below in ``srcPatches``) and emits the binary under
+    ## ``build/startkde/startplasma-wayland`` -> ``usr/bin/startplasma-
+    ## wayland`` in the install-mirror.  The DSL identifier
+    ## ``startplasmaWayland`` kebabs to ``startplasma-wayland`` via
+    ## the stage-copy probe.
+    discard
+
+  library libkworkspace6:
+    ## ``libkworkspace6.so`` — the Plasma workspace library third-party
+    ## Plasma widgets + applets link against to register UI contributions.
+    ##
+    ## M9.R.36.2 — the original recipe declared ``libPlasmaWorkspace.so``
+    ## as the artifact name (speculative, derived by kebab-camelCasing
+    ## the upstream package name + the gdk-pixbuf ``lib`` prefix
+    ## precedent).  M9.R.35.G3 verified that plasma-workspace 6.2.5's
+    ## ``src/libkworkspace/CMakeLists.txt`` actually emits
+    ## ``libkworkspace6.so`` (the ``6`` suffix is the KF6 major-version
+    ## ABI marker, set explicitly via ``set_target_properties(...
+    ## OUTPUT_NAME kworkspace6 ...)`` in the CMake build — NOT a name
+    ## the convention layer could have inferred from the package name).
+    ## ``libPlasmaWorkspace.so`` does NOT exist in the install-mirror,
+    ## which caused the ``stage-library`` post-install probe to fail
+    ## with the M9.R.35 RC=1 even though every other artifact built
+    ## cleanly.
+    ##
+    ## Verification (captured 2026-06-25 via M9.R.35.G3):
+    ##
+    ##   $ ls .repro/output/install/usr/lib/lib*workspace*.so*
+    ##   libkworkspace6.so
+    ##   libkworkspace6.so.6
+    ##   libkworkspace6.so.6.2.5
+    ##
+    ## The artifact identifier ``libkworkspace6`` kebab-passes-through
+    ## the stage-copy probe verbatim (single lowercase word, no kebab
+    ## segments to re-camel) — same convention as ``plasmashell``.
     discard
 
   build:
@@ -428,7 +470,7 @@ package plasmaWorkspaceSource:
         # from-source siblings (they're part of the legacy X11
         # session-management protocol, not load-bearing for a pure-
         # Wayland Plasma session). Skip the subdir entirely; the
-        # plasmashell + libPlasmaWorkspace artifacts the recipe
+        # plasmashell + libkworkspace6 artifacts the recipe
         # registers don't depend on ksmserver targets.
         "sed -i 's|^add_subdirectory(ksmserver)$|if(WITH_X11)\\n    add_subdirectory(ksmserver)\\nendif()|' src/CMakeLists.txt",
         # M9.R.15q.12.11 — wrap ``ecm_optional_add_subdirectory(xembed-
@@ -484,7 +526,7 @@ package plasmaWorkspaceSource:
         # call sites in each TU is more invasive than the v1 surface
         # justifies. Both are Plasma applets (per-applet QML packages
         # that plasmashell loads at runtime). plasmashell itself +
-        # libPlasmaWorkspace.so (the two artifacts this recipe ships)
+        # libkworkspace6.so (the two artifacts this recipe ships)
         # build + ship without them; users get a Plasma session with
         # fewer panel applets out of the box. A future plasma-
         # fullbuild milestone can add ICU + restore both applets.
@@ -550,18 +592,160 @@ package plasmaWorkspaceSource:
         # in HAVE_X11 (the field is gated on HAVE_X11 in the header but
         # the bare assignment in the .cpp isn't).
         "sed -i 's|^    m_previousWId = 0;$|#if HAVE_X11\\n    m_previousWId = 0;\\n#endif|' src/shell/shellcorona.cpp",
-        # M9.R.15q.13.14 — also drop startplasma since its startplasma.cpp
-        # includes lookandfeelmanager.h from the dropped lookandfeel
-        # KCM.  startplasma is the session launcher — the v1 path
-        # uses the upstream NDE-K1 startplasma-wayland script directly
-        # without rebuilding it from this source tree.  Drop the
-        # startkde subdir from src/CMakeLists.txt.
-        "sed -i 's|^add_subdirectory(startkde)$|# M9.R.15q.13.14: dropped — needs lookandfeel KCM headers|' src/CMakeLists.txt",
+        # M9.R.32.1 — restore ``add_subdirectory(startkde)`` so the
+        # startplasma-wayland binary is produced.  Without it, the
+        # Plasma Wayland session entry-point is missing and the live
+        # ISO falls through to a console.  Below patches strip the
+        # lookandfeelmanager dependency from startplasma.cpp +
+        # startkde/CMakeLists.txt so the build no longer needs the
+        # dropped lookandfeel KCM library (M9.R.15q.13.12 dropped
+        # the lookandfeel KCM itself; that decision stands — only the
+        # session-launcher's compile dependency on its header is
+        # surgically removed here).
+        #
+        # The LookAndFeelManager-using code in startplasma.cpp's
+        # ``setupPlasmaEnvironment()`` reapplies the user's
+        # look-and-feel package (color scheme, cursor theme,
+        # default Plasma layout) on session start when the active
+        # package changed since last login.  Stripping it makes
+        # session start use the kdedefaults already on disk + any
+        # KConfig overrides — a soft degradation users can recover
+        # from by re-applying the look-and-feel KCM in a fullbuild
+        # milestone that ships PolkitQt6-1 + krdb + libcrypt + ICU
+        # + qtx11extras.
+        "sed -i 's|^#include \"../kcms/lookandfeel/lookandfeelmanager.h\"$|// M9.R.32.1: dropped — lookandfeel KCM not built (see M9.R.15q.13.12)|' src/startkde/startplasma.cpp",
+        # Replace the LookAndFeelManager-using block inside
+        # setupPlasmaEnvironment() with a no-op marker, then re-close
+        # the function.  We use a sed range delete anchored on the
+        # ``const KConfig globals;`` line (start) and the final closing
+        # brace of setupPlasmaEnvironment (last ``    }`` line before
+        # ``cleanupPlasmaEnvironment``).  After the delete we re-add a
+        # bare ``}`` so the function terminates cleanly.
+        #
+        # The delete range:
+        #   FROM:  /^    const KConfig globals;$/
+        #   TO:    /^void cleanupPlasmaEnvironment/
+        # captures the entire tail (both lookandfeel blocks + the
+        # implicit setupPlasmaEnvironment close brace + the blank
+        # line) up to but NOT including the next function header.
+        # We then insert a single ``}\n\n`` before
+        # cleanupPlasmaEnvironment to restore the function close.
+        "sed -i '/^    const KConfig globals;$/,/^void cleanupPlasmaEnvironment/{ /^void cleanupPlasmaEnvironment/!d; }' src/startkde/startplasma.cpp",
+        # M9.R.35.10 — the brace-insert below was non-idempotent under
+        # the M9.R.34 recipe-revision cache-invalidation regime.
+        # The original ``sed s|^void cleanup|}\\n\\nvoid cleanup|``
+        # inserted a closing ``}`` every time the patches ran; pre-M9.R.34
+        # the patch-action cache was hit on no-source-edit so the sed
+        # ran exactly once.  Post-M9.R.34, every edit to ``repro.nim``
+        # buses the patch-action's weakFingerprint and the sed re-runs,
+        # producing TWO (then THREE, ...) closing braces and a compile
+        # error ``startplasma.cpp:379:1: expected declaration before '}'
+        # token``.  Idempotent shape: only insert ``}`` if the line
+        # immediately before ``void cleanupPlasmaEnvironment`` is not
+        # already ``}``.
+        # Use perl's negative lookbehind ``(?<!\\}\\n\\n)`` to ensure
+        # the insertion only fires when ``}\\n\\n`` doesn't already
+        # immediately precede ``void cleanupPlasmaEnvironment``.
+        # Truly idempotent: a second invocation finds the pattern
+        # already there and is a no-op.
+        "perl -0777 -i -pe 's/(?<!\\}\\n\\n)void cleanupPlasmaEnvironment/}\\n\\nvoid cleanupPlasmaEnvironment/m;' src/startkde/startplasma.cpp",
+        # Drop the ``lookandfeelmanager`` entry from the startplasma
+        # OBJECT lib's target_link_libraries.  The startkde
+        # CMakeLists block:
+        #
+        #     target_link_libraries(startplasma PUBLIC
+        #         Qt::Core
+        #         ...
+        #         lookandfeelmanager
+        #     )
+        #
+        # becomes the same block minus the final library name.
+        "sed -i '/^    lookandfeelmanager$/d' src/startkde/CMakeLists.txt",
+        # M9.R.32.1 — gate the startplasma-x11 target on WITH_X11.  The
+        # target links X11::X11 + kcheckrunning.cpp which both need the
+        # X11 client libraries we don't ship.  startplasma-wayland is
+        # the v1 path and stays unconditional.  Delete the four
+        # x11-target lines (add_executable, target_link_libraries
+        # block, install TARGETS).
+        "sed -i '/^add_executable(startplasma-x11/d' src/startkde/CMakeLists.txt",
+        "sed -i '/^target_link_libraries(startplasma-x11 PRIVATE$/,/^)$/d' src/startkde/CMakeLists.txt",
+        "sed -i '/^install(TARGETS startplasma-x11/d' src/startkde/CMakeLists.txt",
         # M9.R.15q.13.15 — drop kcm_autostart since its unit.cpp
         # #includes systemd/sd-journal.h which trips -Werror=undef on
         # __STDC_VERSION__ in C++ mode.  v1 plasmashell does not depend
         # on the autostart KCM at runtime.
         "sed -i 's|^add_subdirectory(autostart)$|# M9.R.15q.13.15: dropped — systemd sd-id128.h -Werror=undef|' src/kcms/CMakeLists.txt",
+        # M9.R.35.9 — replace ``KDE_INSTALL_FULL_LIBEXECDIR`` with
+        # ``KDE_INSTALL_LIBEXECDIR`` in the session-restore CMakeLists
+        # so ``cmake --install --prefix <install-mirror>`` actually
+        # relocates the install path.  Upstream plasma-workspace 6.2.5
+        # uses ``_FULL_`` (absolute) which expands to
+        # ``${CMAKE_INSTALL_PREFIX}/lib/libexec`` at configure time and
+        # bakes that absolute path into ``cmake_install.cmake`` — the
+        # subsequent ``cmake --install --prefix=<mirror>`` invocation
+        # only relocates RELATIVE paths, so the install attempts to
+        # write to ``/usr/local/lib/libexec/...`` and fails with
+        # ``Permission denied`` (the engine builds as an unprivileged
+        # user, never with write access to the system ``/usr/local``).
+        #
+        # Symmetric replacement: drop the ``_FULL_`` infix from both
+        # ``install(TARGETS ...)`` lines so the path becomes relative
+        # to ``CMAKE_INSTALL_PREFIX`` and ``--prefix`` works.
+        "sed -i 's|KDE_INSTALL_FULL_LIBEXECDIR|KDE_INSTALL_LIBEXECDIR|g' src/startkde/session-restore/CMakeLists.txt",
+        # Same fix for the lookandfeel KCM that installs lookandfeeltool
+        # to KDE_INSTALL_FULL_BINDIR.
+        "sed -i 's|KDE_INSTALL_FULL_BINDIR|KDE_INSTALL_BINDIR|g' src/kcms/lookandfeel/CMakeLists.txt",
+        # M9.R.35.3 — qmltyperegistrar 6.8.1 doesn't recognize
+        # ``std::uint32_t`` as a valid enum-base type and emits
+        # ``Warning: playercontainer.h:25/38/50: std::uint32_t is used
+        # as enum type but cannot be found.`` — but the warning is
+        # not just cosmetic: it propagates into the metatypes JSON
+        # consumers (libcolorcorrect, libnotificationmanager, ...
+        # everything that imports kmpris's metatypes via
+        # ``foreign_types.txt``), where each consuming
+        # qmltyperegistrar invocation exits non-zero with
+        # ``Error: <target>.qmltypes:: Cannot generate qmltypes file``.
+        #
+        # qmltyperegistrar's enum-type parser handles ``quint32`` /
+        # ``qint32`` natively (they're typedef'd via
+        # ``QtCore/qtypes.h``) but the ``std::uint32_t`` form was
+        # only added in Qt 6.9.  plasma-workspace 6.2.5 was built
+        # against Qt 6.9+'s qmltyperegistrar at upstream KDE; pinning
+        # qt6-declarative to 6.8.1 leaves this gap open.
+        #
+        # Fix: substitute ``quint32`` for ``std::uint32_t`` in the
+        # three enum-base declarations in
+        # ``src/libkmpris/playercontainer.h``.  ``quint32`` is the
+        # Qt-canonical typedef of the same fixed-width unsigned 32-bit
+        # integer; the ABI is byte-identical to ``std::uint32_t`` on
+        # every supported platform, so the substitution is a pure
+        # source-level rewrite that doesn't change any link-time or
+        # runtime behaviour.
+        "sed -i 's| : std::uint32_t {| : quint32 {|' src/libkmpris/playercontainer.h",
+        # M9.R.35.2 — plasma_session links ``KF6::KIOCore`` but
+        # ``startup.cpp`` ``#include <KIO/ApplicationLauncherJob>`` which
+        # is a KIOGui header (lives at
+        # ``${KF6_INSTALL}/include/KF6/KIOGui/KIO/ApplicationLauncherJob``;
+        # the camelCased forwarding header is correctly installed but
+        # CMake's interface-include resolution only walks the link
+        # closure).  Without ``KF6::KIOGui`` on the link line, the
+        # KIOGui include dir is never added to the compiler's ``-I``
+        # set, and ``startup.cpp`` fails with
+        # ``KIO/ApplicationLauncherJob: No such file or directory``.
+        # The fix is an upstream-style addition of ``KF6::KIOGui`` to
+        # plasma-session's ``target_link_libraries`` (KIOGui depends
+        # on KIOCore at link time, so the existing KIOCore entry is
+        # transitively re-supplied — this addition only forces the
+        # include-path threading).
+        #
+        # Reported upstream as a latent bug in plasma-workspace 6.2.5:
+        # the build only happens to work in distros where ``KF6KIO``
+        # ships the umbrella library that re-exports KIOGui headers
+        # under KIOCore's include dir; our from-source kio recipe
+        # splits them per upstream KF6 6.10.0's CMake config (the kio
+        # tarball already separates ``KF6KIOCore.so`` / ``KF6KIOGui.so``
+        # / ``KF6KIOWidgets.so`` / ``KF6KIOFileWidgets.so`` since 6.0).
+        "sed -i 's|^    KF6::KIOCore$|    KF6::KIOCore\\n    KF6::KIOGui|' src/startkde/plasma-session/CMakeLists.txt",
         # M9.R.15q.13.7 — bracket the X11-only KX11Extras calls in
         # panelconfigview.cpp with ``#if HAVE_X11`` / ``#endif``.  The
         # KX11Extras include at the top is already gated on HAVE_X11
@@ -575,10 +759,22 @@ package plasmaWorkspaceSource:
         "sed -i 's|^        KX11Extras::setType(winId(), NET::Dock);$|#if HAVE_X11\\n        KX11Extras::setType(winId(), NET::Dock);|' src/shell/panelconfigview.cpp",
         "sed -i 's|^        KX11Extras::setState(winId(), NET::KeepAbove);$|        KX11Extras::setState(winId(), NET::KeepAbove);\\n#endif|' src/shell/panelconfigview.cpp",
       ]
+      # M9.R.33.2 — the M9.R.32.1.2 recipe-local CMAKE_MODULE_PATH +
+      # GLESv2 hint block was lifted to the M9.R.33.2 walker
+      # (``m9r33Collect2Qt6CmakeModulePathDirs`` +
+      # ``m9r33Emit2MesaGlesv2CacheVars``) so every qt6-* consumer
+      # (plasma-workspace + every KF6 module + every Plasma component)
+      # gets the fresh-configure fix automatically.  The walker emits
+      # the same dirs + hints whenever a qt6-* dep is declared AND the
+      # corresponding install-mirror is present on disk.
       let pkg = cmake_package(srcDir = "./src", cacheVars = opts,
                               extraEnv = env, srcPatches = patches)
       discard pkg.executable("plasmashell")
-      discard pkg.library("libPlasmaWorkspace")
+      discard pkg.executable("startplasmaWayland")
+      # M9.R.36.2 — renamed from speculative ``libPlasmaWorkspace`` to
+      # the real shipped artifact ``libkworkspace6`` (see the library
+      # declaration above for the rationale).
+      discard pkg.library("libkworkspace6")
     finally:
       clearCurrentOwningPackageOverride()
 

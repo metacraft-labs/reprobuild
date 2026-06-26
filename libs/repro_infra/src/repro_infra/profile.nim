@@ -38,6 +38,7 @@ type
     srkWindowsOptionalFeature = "windows.optionalFeature"
     srkWindowsCapability = "windows.capability"
     srkWindowsService = "windows.service"
+    srkWindowsScheduledTask = "windows.scheduledTask"
     srkWindowsVsInstaller = "windows.vsInstaller"
     srkWindowsFirewallRule = "windows.firewallRule"
     srkWindowsAcl = "windows.acl"
@@ -101,6 +102,45 @@ type
       serviceName*: string
       serviceStartType*: string
       serviceRunning*: bool
+      serviceDisplayName*: string
+        ## Windows-System-Resources Phase B: optional service
+        ## `DISPLAY_NAME`. Empty (default) means "derived from `name`"
+        ## — the driver does NOT reconfigure the display name.
+      serviceBinPath*: string
+        ## Phase B: optional service `BINARY_PATH_NAME`. Empty
+        ## (default) means "reuse the SCM's current `sc qc` value" —
+        ## the driver does NOT reconfigure the binPath. A non-empty
+        ## value drives `sc.exe config <name> binPath= "<value>"`.
+      serviceRecoveryActions*: seq[WindowsServiceRecoverySpec]
+        ## Phase B: optional failure-recovery policy. Empty seq
+        ## (default) means "leave the SCM's failure policy untouched";
+        ## a non-empty seq drives `sc.exe failure <name> actions= ...`.
+        ## The driver consumes up to three (action, delayMs) slots in
+        ## declaration order.
+      serviceRecoveryResetSeconds*: int
+        ## Phase B: optional failure-count reset window. `0` (default)
+        ## means "do not emit `reset= ` to `sc.exe failure`"; a
+        ## positive value drives `sc.exe failure <name> reset= <secs>`.
+    of srkWindowsScheduledTask:
+      ## Windows-System-Resources Phase C: a Task Scheduler entry.
+      ## Identity is the fully-qualified `wstTaskName`; the schedule +
+      ## principal + executable + enabled flag are observable live
+      ## state. `wst*` field prefix avoids collisions with the
+      ## `serviceX` / `sd*` / `sda*` families already in this object.
+      wstTaskName*: string
+      wstExecutable*: string
+      wstArguments*: seq[string]
+      wstWorkingDirectory*: string
+      wstRunAsUser*: string
+      wstRunWithHighestPrivileges*: bool
+      wstSchedule*: ScheduledTaskScheduleSpec
+        ## Discriminated trigger union — the `repro_elevation`
+        ## `ScheduledTaskScheduleSpec` mirrors the front-end
+        ## `repro_profile.types.ScheduleSpec` byte-for-byte (closed
+        ## set of variants + lower-case wire tokens); the dep-inversion
+        ## stays clean because `repro_elevation` does NOT import
+        ## `repro_profile`.
+      wstEnabled*: bool
     of srkWindowsVsInstaller:
       vsEdition*: string
       vsChannel*: string
@@ -138,6 +178,27 @@ type
     of srkFsSystemFile:
       sfPath*: string
       sfContent*: string
+      sfSourceUrl*: string
+        ## External content source: URL fetched at apply time on the
+        ## controller side. Empty when the file is content-inline or
+        ## sourced from a local path. When non-empty, `sfSha256` MUST
+        ## also be set (the validator enforces this).
+      sfSha256*: string
+        ## Lowercase 64-char hex BLAKE3 digest of the bytes the
+        ## controller expects `sfSourceUrl` to serve. The driver
+        ## compares the fetched bytes' digest against this string and
+        ## raises `EProtocol` on mismatch BEFORE asking the broker to
+        ## write.
+      sfSourceLocal*: string
+        ## External content source: path on the controller side
+        ## re-read on every apply (so a between-step edit between two
+        ## applies of the same plan lands).
+        ##
+        ## These three external-source fields are mutually exclusive
+        ## with each other AND with `sfContent`: at most one of
+        ## `sfContent` / `sfSourceUrl` / `sfSourceLocal` may be
+        ## non-empty. The validator rejects an over-specified profile
+        ## with `ESystemProfileInvalid`.
     of srkFsSystemDirectory:
       dirPath*: string
       dirAclPresent*: bool                ## false => ACL is unmanaged
@@ -221,6 +282,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "capability:" & r.capabilityName
   of srkWindowsService:
     "service:" & r.serviceName
+  of srkWindowsScheduledTask:
+    "scheduledTask:" & r.wstTaskName
   of srkWindowsVsInstaller:
     "vsInstaller:" & r.vsEdition &
       (if r.vsInstallPath.len > 0: "@" & r.vsInstallPath else: "")
@@ -293,6 +356,7 @@ proc resourceName*(r: SystemResource): string =
   of srkWindowsOptionalFeature: r.featureName
   of srkWindowsCapability: r.capabilityName
   of srkWindowsService: r.serviceName
+  of srkWindowsScheduledTask: r.wstTaskName
   of srkWindowsVsInstaller: r.vsEdition
   of srkWindowsFirewallRule: r.fwName
   of srkWindowsAcl: r.aclPath
@@ -504,6 +568,7 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkWindowsOptionalFeature: srk = srkWindowsOptionalFeature
     of $srkWindowsCapability: srk = srkWindowsCapability
     of $srkWindowsService: srk = srkWindowsService
+    of $srkWindowsScheduledTask: srk = srkWindowsScheduledTask
     of $srkWindowsVsInstaller: srk = srkWindowsVsInstaller
     of $srkWindowsFirewallRule: srk = srkWindowsFirewallRule
     of $srkWindowsAcl: srk = srkWindowsAcl
@@ -613,10 +678,123 @@ proc parseSystemProfile*(text: string): SystemProfile =
       if stateStr notin ["running", "stopped"]:
         raiseSystemProfileInvalid("windows.service state '" & stateStr &
           "' is not one of Running / Stopped")
+      # Windows-System-Resources Phase B: the four new optional fields.
+      # Each is "default = leave unmanaged" — the parser accepts a
+      # stanza that omits them (the back-compat case) and the SystemResource
+      # carries the absent value as empty string / 0 / empty seq.
+      let svcName = need("name")
+      let svcDisplay =
+        if "displayName" in fields: fields["displayName"] else: ""
+      let svcBinPath =
+        if "binPath" in fields: fields["binPath"] else: ""
+      var svcRecovery: seq[WindowsServiceRecoverySpec] = @[]
+      if "recoveryActions" in rawFields:
+        let tokens = parseListLiteral(rawFields["recoveryActions"])
+        if tokens.len > 3:
+          raiseSystemProfileInvalid("windows.service '" & svcName &
+            "' recoveryActions has " & $tokens.len &
+            " entries — sc.exe failure consumes at most 3 slots")
+        for tok in tokens:
+          let sep = tok.find(':')
+          if sep <= 0 or sep == tok.len - 1:
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' is malformed (expected '<action>:<delayMs>')")
+          let actionTok = tok[0 ..< sep]
+          let delayStr = tok[sep + 1 .. ^1]
+          if not isKnownWindowsServiceRecoveryActionToken(actionTok):
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' names an unknown action '" & actionTok &
+              "' (expected restart / runcommand / reboot / none)")
+          var delayMs: int
+          try:
+            delayMs = parseInt(delayStr)
+          except ValueError:
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' has a non-integer delay '" & delayStr & "'")
+          if delayMs < 0:
+            raiseSystemProfileInvalid("windows.service '" & svcName &
+              "' recoveryActions entry '" & tok &
+              "' has a negative delay (must be >= 0)")
+          svcRecovery.add(WindowsServiceRecoverySpec(
+            action: windowsServiceRecoveryActionFromToken(actionTok),
+            delayMs: delayMs))
+      var svcRecoveryReset = 0
+      if "recoveryResetSeconds" in fields:
+        let raw = fields["recoveryResetSeconds"].strip()
+        try:
+          svcRecoveryReset = parseInt(raw)
+        except ValueError:
+          raiseSystemProfileInvalid("windows.service '" & svcName &
+            "' recoveryResetSeconds '" & raw & "' is not an integer")
+        if svcRecoveryReset < 0:
+          raiseSystemProfileInvalid("windows.service '" & svcName &
+            "' recoveryResetSeconds '" & raw &
+            "' is negative (must be >= 0)")
       res = SystemResource(kind: srkWindowsService,
-        serviceName: need("name"),
+        serviceName: svcName,
         serviceStartType: st,
-        serviceRunning: stateStr == "running")
+        serviceRunning: stateStr == "running",
+        serviceDisplayName: svcDisplay,
+        serviceBinPath: svcBinPath,
+        serviceRecoveryActions: svcRecovery,
+        serviceRecoveryResetSeconds: svcRecoveryReset)
+    of srkWindowsScheduledTask:
+      # Windows-System-Resources Phase C: every layer in the
+      # closed-set defence chain (template / text parser / adapter /
+      # broker validator) re-checks the same shape so a bypass through
+      # any one path still fails closed. The text parser is layer 2.
+      let wstTaskName = need("taskName")
+      if wstTaskName.len == 0:
+        raiseSystemProfileInvalid("windows.scheduledTask requires a " &
+          "non-empty taskName")
+      let wstExecutable = need("executable")
+      if wstExecutable.len == 0:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' requires a non-empty executable")
+      let wstArguments =
+        if "arguments" in rawFields: parseListLiteral(rawFields["arguments"])
+        else: @[]
+      let wstWorkingDirectory =
+        if "workingDirectory" in fields: fields["workingDirectory"] else: ""
+      let wstRunAsUser =
+        if "runAsUser" in fields: fields["runAsUser"] else: "SYSTEM"
+      let wstRunWithHighest =
+        if "runWithHighestPrivileges" in fields:
+          parseBoolField("runWithHighestPrivileges",
+            fields["runWithHighestPrivileges"])
+        else: wstRunAsUser == "SYSTEM"
+      let wstEnabled =
+        if "enabled" in fields: parseBoolField("enabled",
+          fields["enabled"]) else: true
+      # `schedule` arrives as a single-element list literal under the
+      # canonical wire-token convention (`<kind>:<payload>`). A missing
+      # field is a hard error — the spec requires the trigger.
+      if "schedule" notin rawFields:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' is missing required field 'schedule'")
+      let scheduleTokens = parseListLiteral(rawFields["schedule"])
+      if scheduleTokens.len != 1:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' schedule must be a single-element list (got " &
+          $scheduleTokens.len & " entries)")
+      var wstSchedule: ScheduledTaskScheduleSpec
+      try:
+        wstSchedule = decodeScheduledTaskScheduleToken(scheduleTokens[0])
+      except ValueError as e:
+        raiseSystemProfileInvalid("windows.scheduledTask '" & wstTaskName &
+          "' schedule: " & e.msg)
+      res = SystemResource(kind: srkWindowsScheduledTask,
+        wstTaskName: wstTaskName,
+        wstExecutable: wstExecutable,
+        wstArguments: wstArguments,
+        wstWorkingDirectory: wstWorkingDirectory,
+        wstRunAsUser: wstRunAsUser,
+        wstRunWithHighestPrivileges: wstRunWithHighest,
+        wstSchedule: wstSchedule,
+        wstEnabled: wstEnabled)
     of srkWindowsVsInstaller:
       let workloads =
         if "workloads" in rawFields: parseListLiteral(rawFields["workloads"])
@@ -745,9 +923,43 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "runAtLoad" in fields: parseBoolField("runAtLoad",
             fields["runAtLoad"]) else: true)
     of srkFsSystemFile:
+      let sfPath = need("path")
+      let sfContent =
+        if "content" in fields: fields["content"] else: ""
+      let sfSourceUrl =
+        if "sourceUrl" in fields: fields["sourceUrl"] else: ""
+      let sfSha256 =
+        if "sha256" in fields: fields["sha256"] else: ""
+      let sfSourceLocal =
+        if "sourceLocal" in fields: fields["sourceLocal"] else: ""
+      # Mutual-exclusion: at most one of `content` / `sourceUrl` /
+      # `sourceLocal` may be non-empty. Defence-in-depth — the template
+      # already raises at compile time, but a hand-authored / generated
+      # profile that bypasses the template MUST also fail closed here.
+      let nonEmptySources = (if sfContent.len > 0: 1 else: 0) +
+                            (if sfSourceUrl.len > 0: 1 else: 0) +
+                            (if sfSourceLocal.len > 0: 1 else: 0)
+      if nonEmptySources > 1:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
+          "' declares more than one content source — at most one of " &
+          "`content`, `sourceUrl`, `sourceLocal` may be non-empty")
+      # `sourceUrl` MUST be paired with `sha256` so a fetch always has
+      # something to verify against. A bare `sha256` without a URL is
+      # equally meaningless — both directions fail closed.
+      if sfSourceUrl.len > 0 and sfSha256.len == 0:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
+          "' sets `sourceUrl` but no `sha256` — the URL fetch requires " &
+          "a lowercase 64-char BLAKE3 hex digest to verify against")
+      if sfSha256.len > 0 and sfSourceUrl.len == 0:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
+          "' sets `sha256` but no `sourceUrl` — the digest is only " &
+          "meaningful when paired with a URL fetch")
       res = SystemResource(kind: srkFsSystemFile,
-        sfPath: need("path"),
-        sfContent: (if "content" in fields: fields["content"] else: ""))
+        sfPath: sfPath,
+        sfContent: sfContent,
+        sfSourceUrl: sfSourceUrl,
+        sfSha256: sfSha256,
+        sfSourceLocal: sfSourceLocal)
     of srkFsSystemDirectory:
       let dirPath = need("path")
       # ACL is optional: a stanza without aclEntries leaves ACL
@@ -1116,7 +1328,22 @@ proc toPrivilegedOperation*(r: SystemResource;
     PrivilegedOperation(kind: pokWindowsService, address: r.address,
       serviceName: r.serviceName,
       serviceStartType: r.serviceStartType,
-      serviceRunning: r.serviceRunning)
+      serviceRunning: r.serviceRunning,
+      serviceDisplayName: r.serviceDisplayName,
+      serviceBinPath: r.serviceBinPath,
+      serviceRecoveryActions: r.serviceRecoveryActions,
+      serviceRecoveryResetSeconds: r.serviceRecoveryResetSeconds)
+  of srkWindowsScheduledTask:
+    PrivilegedOperation(kind: pokWindowsScheduledTask, address: r.address,
+      wstTaskName: r.wstTaskName,
+      wstExecutable: r.wstExecutable,
+      wstArguments: r.wstArguments,
+      wstWorkingDirectory: r.wstWorkingDirectory,
+      wstRunAsUser: r.wstRunAsUser,
+      wstRunWithHighestPrivileges: r.wstRunWithHighestPrivileges,
+      wstSchedule: r.wstSchedule,
+      wstEnabled: r.wstEnabled,
+      wstDestroy: destroy)
   of srkWindowsVsInstaller:
     PrivilegedOperation(kind: pokWindowsVsInstaller, address: r.address,
       vsEdition: r.vsEdition,
@@ -1167,6 +1394,9 @@ proc toPrivilegedOperation*(r: SystemResource;
     PrivilegedOperation(kind: pokFsSystemFile, address: r.address,
       sfPath: r.sfPath,
       sfContent: r.sfContent,
+      sfSourceUrl: r.sfSourceUrl,
+      sfSha256: r.sfSha256,
+      sfSourceLocal: r.sfSourceLocal,
       sfDestroy: destroy)
   of srkFsSystemDirectory:
     PrivilegedOperation(kind: pokFsSystemDirectory, address: r.address,

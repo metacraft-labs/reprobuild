@@ -228,6 +228,20 @@ while :; do
           177ELF*) extract_nix_prefixes_from_elf "$elf" ;;
         esac
       done
+    # M9.R.29.19 — also walk symlink targets that point into
+    # /nix/store. nix's multi-output gcc-lib library ships
+    # libgcc_s.so.1 as a symlink into a SEPARATE store path
+    # (gcc-X.Y.Z-libgcc), and the loader follows the symlink at
+    # dlopen() time. Without this walk the closure missed every
+    # gcc-libgcc output and plasmashell + kwin_wayland + sway
+    # crashed at startup with 'cannot open shared object file:
+    # libgcc_s.so.1'.
+    # M9.R.29.19b — use find's -lname predicate to match symlinks
+    # whose target is under /nix/store in ONE pass + -printf '%l'
+    # to emit the target string directly, avoiding a per-symlink
+    # shell fork (breeze-icons alone has 24k+ symlinks).
+    find "$staged_prefix" -type l -lname '/nix/store/*' -printf '%l\n' 2>/dev/null | \
+      sed -nE 's|^(/nix/store/[^/]+)(/.*)?$|\1|p'
   done < "$nix_prefixes_file" | sort -u > "$new_prefixes_file"
 
   # Filter out prefixes we already mirrored.
@@ -300,6 +314,121 @@ link_entry plasma-workspace startplasma-x11
 link_entry gdm gdm-session-worker
 link_entry gdm gdm
 
+# ---------------------------------------------------------------------------
+# Phase 4b (M9.R.33.3): base-userspace from-source mirror loop.
+#
+# The per-recipe Phase 1 mirror already copies every from-source
+# install-mirror into the squashfs at the absolute path the build host
+# uses (e.g. /opt/repro/reprobuild/recipes/packages/source/systemd/
+# .repro/output/install/usr/bin/systemctl).  What's missing is the
+# /usr/{bin,sbin}/<name> shadow link so PID 1 / login shell / agetty
+# find these binaries via PATH; without it the Debian apt entries in
+# build-base-rootfs.sh's PKG_LIST shadow the from-source equivalents
+# for ever.
+#
+# This loop walks every recipe in BASE_USERSPACE_RECIPES and emits an
+# absolute /usr/bin or /usr/sbin symlink for every regular file under
+# the install-mirror's bin/ + sbin/ subtrees (matching the link_entry
+# helper above's pattern).  M9.R.33.4..12 then drop the corresponding
+# apt entries from build-base-rootfs.sh's PKG_LIST one commit at a
+# time, verified by rebuilding the base-rootfs + confirming the from-
+# source binary is the one resolved at PATH lookup time on the staged
+# ISO.
+#
+# The list mirrors the 9 FS:done entries documented in the M9.R.32.4
+# audit annotations of build-base-rootfs.sh PKG_LIST (systemd,
+# util-linux, kmod, dbus, sudo, e2fsprogs, btrfs-progs, shadow-utils,
+# iana-tzdata).  iana-tzdata ships /usr/share/zoneinfo + a small
+# /usr/bin tzdata helper; the rest ship pure executables.
+
+BASE_USERSPACE_RECIPES=(
+  systemd
+  util-linux
+  kmod
+  dbus
+  sudo
+  e2fsprogs
+  btrfs-progs
+  shadow-utils
+  iana-tzdata
+)
+
+link_base_recipe_binaries() {
+  local recipe="$1"
+  local install_root="$ISO_SRC_MIRROR_ROOT/$recipe/.repro/output/install"
+  local install_usr="$install_root/usr"
+  if [ ! -d "$install_usr" ] && [ ! -d "$install_root/bin" ] && \
+     [ ! -d "$install_root/sbin" ]; then
+    echo "[stage-de-rootfs] base-userspace mirror missing: $recipe (recipe not built; skipped)" >&2
+    return 0
+  fi
+  local sub
+  local linked=0
+  local skipped=0
+  # M9.R.40.3 — walk BOTH usr/{bin,sbin} AND bare {bin,sbin}.  util-linux's
+  # autotools detects the legacy non-merged-usr layout and ships its
+  # essential filesystem CLIs (lsblk / mount / umount / findmnt /
+  # dmesg / kill / lsfd / mountpoint / pipesz / wdctl) under
+  # ``<install>/bin/`` rather than ``<install>/usr/bin/``.  The mirror
+  # writer (M9.R.40.3 in emitInstallTreeMirror) preserves both
+  # locations; this shadow-link walk also covers both, so the live ISO
+  # gets shadow symlinks at ``/usr/bin/lsblk`` -> the from-source path
+  # even when the binary is at ``install/bin/lsblk``.
+  for src_root in "$install_usr" "$install_root"; do
+    for sub in bin sbin; do
+      local src_dir="$src_root/$sub"
+      [ -d "$src_dir" ] || continue
+      mkdir -p "$STAGE_DIR/usr/$sub"
+      local file
+      # Walk regular files + symlinks (some recipes ship multi-call
+      # binaries as symlinks under bin/; we want the link target's path
+      # but the original name).
+      for file in "$src_dir"/*; do
+        [ -e "$file" ] || continue
+        local name
+        name="$(basename "$file")"
+        # M9.R.33.3 — strip the $STAGE_DIR prefix so the symlink target is
+        # absolute WITHIN the rootfs (resolves correctly after pivot_root).
+        local link_target="${file#$STAGE_DIR}"
+        local dst="$STAGE_DIR/usr/$sub/$name"
+        # If the apt-installed binary is already at this path and is NOT
+        # the from-source link, the apt entry shadows from-source.  We
+        # ALWAYS prefer from-source per the M9.R.33 task brief; force
+        # replace the apt-installed copy with the from-source symlink.
+        # (The M9.R.33.4..12 follow-up commits remove the matching apt
+        # PKG_LIST entries; until then the force-link gives from-source
+        # precedence.)
+        ln -sf "$link_target" "$dst"
+        linked=$((linked + 1))
+      done
+    done
+  done
+  # iana-tzdata: also stage /usr/share/zoneinfo from the recipe's
+  # install-mirror.  Other base-userspace recipes ship usr/share/
+  # files (man pages, locale, ...) that the apt-installed equivalents
+  # cover; we don't shadow those at v1 (the data-only files don't
+  # affect runtime correctness for the v1 DE smoke surface).  The
+  # /usr/share/zoneinfo case is special-cased because date(1) +
+  # systemd-timesyncd both probe it at process start.
+  if [ "$recipe" = "iana-tzdata" ]; then
+    local zoneinfo_src="$install_usr/share/zoneinfo"
+    if [ -d "$zoneinfo_src" ]; then
+      local zoneinfo_link_target="${zoneinfo_src#$STAGE_DIR}"
+      mkdir -p "$STAGE_DIR/usr/share"
+      # /usr/share/zoneinfo is a directory in apt-debian; we shadow it
+      # with a symlink to the from-source dir.  Replace if present.
+      rm -rf "$STAGE_DIR/usr/share/zoneinfo"
+      ln -sf "$zoneinfo_link_target" "$STAGE_DIR/usr/share/zoneinfo"
+    fi
+  fi
+  echo "[stage-de-rootfs] base-userspace: $recipe -> $linked /usr/{bin,sbin} shadow links"
+}
+
+echo "[stage-de-rootfs] staging base-userspace shadow links"
+for base_recipe in "${BASE_USERSPACE_RECIPES[@]}"; do
+  link_base_recipe_binaries "$base_recipe"
+done
+
 # Stage /etc/wayland-sessions/ session files for SDDM/GDM to enumerate.
 cat > "$STAGE_DIR/usr/share/wayland-sessions/sway.desktop" <<EOF
 [Desktop Entry]
@@ -351,6 +480,39 @@ INSTALLER_BIN=/usr/bin/reproos-installer
 if [ ! -x "$INSTALLER_BIN" ]; then
   exec /usr/bin/startplasma-wayland
 fi
+
+# M9.R.36.1 — build a TARGETED LD_LIBRARY_PATH for the installer's
+# QProcess children (libclingo / libsqlite3 dlopen via Nim
+# {.dynlib: const-string.}).  Skip glibc dirs to avoid shadowing the
+# Debian-installed libc.so.6 with a foreign nix-store glibc (which
+# would break every Debian binary in the chain).
+_repro_nix_dirs=""
+# M9.R.37.2 — use a subshell for the glob-existence test so the
+# script's positional parameters ($@) are not clobbered.  This GUI
+# launcher doesn't pass $@ to the installer (it execs sway, then sway
+# execs the installer via SWAY_INIT), but the hygiene fix matches the
+# sister-launcher fix in the ``.sh`` variant and prevents future
+# regressions.
+for d in /nix/store/*/lib; do
+  [ -d "$d" ] || continue
+  case "$d" in
+    /nix/store/*-glibc-*/lib) continue ;;
+  esac
+  if ! ( set -- "$d"/*.so*; [ -e "$1" ] ); then
+    continue
+  fi
+  if [ -z "$_repro_nix_dirs" ]; then
+    _repro_nix_dirs="$d"
+  else
+    _repro_nix_dirs="$_repro_nix_dirs:$d"
+  fi
+done
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  LD_LIBRARY_PATH="$_repro_nix_dirs:$LD_LIBRARY_PATH"
+else
+  LD_LIBRARY_PATH="$_repro_nix_dirs"
+fi
+export LD_LIBRARY_PATH
 
 export QT_QPA_PLATFORM=wayland
 export QT_QUICK_CONTROLS_STYLE=Material
@@ -415,8 +577,541 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud %I 115200,38400,9600 $TERM
 EOF
 
+# M9.R.39.2 — installer auto-run unit, gated on the
+# ``repro.installer.autorun=1`` kernel cmdline parameter.  Without this
+# unit the live-ISO investigation chain depends on the FIFO + login +
+# manual ``echo /usr/bin/reproos-installer-launcher.sh ...`` dance, which
+# M9.R.39.1 found to wedge in QEMU -nographic mode (serial-getty's
+# autologin chain hangs in a terminal-size probe loop on certain hosts).
+# The unit runs the launcher BEFORE multi-user.target so it doesn't
+# depend on getty / login / bash startup at all.  It boots straight from
+# systemd, no FIFO required.
+#
+# Activation: the GRUB cmdline appends ``repro.installer.autorun=1`` and
+# the unit's ``ConditionKernelCommandLine=`` predicate gates the run.
+# The companion ``repro.installer.diag=1`` flag flips DIAG mode on so
+# the M9.R.39.1 LD_DEBUG=libs + strace + /dev/vdb persistence fires.
+#
+# The unit's ExecStart includes the FULL pre-installer environment the
+# launcher relied on:
+#   * QT_QPA_PLATFORM=offscreen (the launcher checks this; without it
+#     the binary tries to load the wayland QPA plugin and fails before
+#     anything useful happens).
+#   * REPRO_INSTALLER_DIAG=1 (DIAG mode -> LD_DEBUG + strace + persist).
+#
+# After the installer exits (success or SIGABRT), the unit runs
+# ``poweroff`` so QEMU shuts down cleanly + the driver's wait completes
+# without needing a timeout kill that could interrupt the diag-persist
+# dd to /dev/vdb.
+mkdir -p "$STAGE_DIR/etc/systemd/system"
+# M9.R.39.4 — drop the M9.R.39.2 ConditionKernelCommandLine approach
+# (the condition's match against /proc/cmdline silently no-op'd in the
+# M9.R.39.3 boot — no "Starting" line ever appeared in the boot log).
+# Replace with a self-gating ExecStart wrapper script that parses
+# /proc/cmdline at run time and skips the install body when the
+# ``repro.installer.autorun=1`` token is absent.  systemd doesn't need
+# to evaluate the gate; the script handles it.
+#
+# The wrapper also re-exports a small env tail so the launcher's
+# inner ``exec env LD_LIBRARY_PATH=...`` chain stays intact, and
+# unconditionally poweroffs at the end so QEMU exits and the host
+# driver's wait completes.
+mkdir -p "$STAGE_DIR/usr/local/sbin"
+cat > "$STAGE_DIR/usr/local/sbin/reproos-installer-autorun.sh" <<'EOF'
+#!/bin/sh
+# M9.R.39.4 — installer autorun wrapper invoked from the
+# reproos-installer-autorun.service systemd unit at boot.
+#
+# Self-gates on /proc/cmdline -> only runs the installer if
+# ``repro.installer.autorun=1`` is present.  Always poweroffs at the
+# end so QEMU exits cleanly + the host driver's wait completes.
+set -u
+
+echo "=== REPROOS-INSTALLER-AUTORUN-BEGIN ===" 1>&2
+echo "uptime: $(cat /proc/uptime 2>/dev/null)" 1>&2
+echo "cmdline: $(cat /proc/cmdline 2>/dev/null)" 1>&2
+
+if ! grep -qE '(^| )repro\.installer\.autorun=1( |$)' /proc/cmdline 2>/dev/null; then
+  echo "=== REPROOS-INSTALLER-AUTORUN-SKIP (cmdline lacks repro.installer.autorun=1) ===" 1>&2
+  exit 0
+fi
+
+export QT_QPA_PLATFORM=offscreen
+export REPRO_INSTALLER_DIAG=1
+
+# Run the launcher synchronously.
+/usr/bin/reproos-installer-launcher.sh --automated /etc/reproos/auto-config.toml
+rc=$?
+
+echo "=== REPROOS-INSTALLER-AUTORUN-END RC=$rc ===" 1>&2
+
+# Poweroff so QEMU exits + driver wait completes.  We do it from the
+# wrapper (not ExecStopPost) so the systemd unit's life-cycle is
+# uncomplicated.
+sync
+sync
+/sbin/poweroff -f
+exit "$rc"
+EOF
+chmod 0755 "$STAGE_DIR/usr/local/sbin/reproos-installer-autorun.sh"
+
+cat > "$STAGE_DIR/etc/systemd/system/reproos-installer-autorun.service" <<'EOF'
+[Unit]
+Description=ReproOS Installer auto-run (M9.R.39.4 diagnostic boot path)
+After=local-fs.target sysinit.target multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/local/sbin/reproos-installer-autorun.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable the unit via a symlink under multi-user.target.wants/ so
+# systemd activates it during boot.  The script ExecStart self-gates
+# on the kernel cmdline param, so the symlink is unconditional —
+# a non-investigator boot just sees the script print SKIP and exit.
+mkdir -p "$STAGE_DIR/etc/systemd/system/multi-user.target.wants"
+ln -sf /etc/systemd/system/reproos-installer-autorun.service \
+  "$STAGE_DIR/etc/systemd/system/multi-user.target.wants/reproos-installer-autorun.service"
+
+# M9.R.36.1 — ``reproos-installer`` wrapper that sets a TARGETED
+# LD_LIBRARY_PATH for the installer's QProcess children.  Nim's
+# ``{.dynlib: const-string.}`` pragma calls ``dlopen("libclingo.so")``
+# with a BARE leaf name from the ``repro`` binary the installer
+# spawns; the live ISO bundles libclingo at
+# ``/nix/store/<hash>-clingo-*/lib/libclingo.so`` which no default
+# ld.so search rule covers.
+#
+# A naive shell-level LD_LIBRARY_PATH that includes ALL
+# ``/nix/store/*/lib`` dirs shadows Debian-installed glibc with a
+# foreign nix-store glibc (different ``__nptl_change_stack_perm``
+# private-symbol version), which then breaks every Debian binary
+# (``cat`` / ``head`` / ``ls`` / ``tail`` all fail with
+# ``symbol lookup error``).  So we surgically include ONLY the
+# clingo + qt6 + sqlite + nimcrypto-style dirs the ``repro``
+# binary's runtime dlopen needs — explicitly skipping any
+# ``/nix/store/*-glibc-*/lib`` dir so the Debian binaries keep
+# their compatible system glibc.
+#
+# The wrapper applies the LD_LIBRARY_PATH only inside its own
+# ``exec env LD_LIBRARY_PATH=... reproos-installer`` invocation —
+# it doesn't leak into the parent shell.
+mkdir -p "$STAGE_DIR/usr/bin"
+cat > "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh" <<'EOF'
+#!/bin/sh
+# ReproOS installer wrapper. M9.R.36.1.
+#
+# Build TARGETED env vars (LD_LIBRARY_PATH + QT_PLUGIN_PATH +
+# QML2_IMPORT_PATH + QT_QPA_PLATFORM_PLUGIN_PATH) so the installer
+# + its QProcess children find every bundled lib + Qt plugin + QML
+# module WITHOUT shadowing the system glibc with a foreign nix-store
+# glibc.
+#
+# Channels:
+#   * LD_LIBRARY_PATH       — dlopen("libclingo.so") / libsqlite3
+#   * QT_PLUGIN_PATH        — Qt platform / image / sql / styles plugins
+#   * QML2_IMPORT_PATH      — QtQuick.Controls + every QML module
+#   * QT_QPA_PLATFORM_PLUGIN_PATH — QPA backend (offscreen / wayland /
+#                              minimal) — explicit so the
+#                              ``QT_QPA_PLATFORM=offscreen`` env var
+#                              the installer respects resolves the
+#                              ``libqoffscreen.so`` plugin.
+_repro_nix_libs=""
+_repro_qt_plugins=""
+_repro_qml_imports=""
+_repro_qpa_plugins=""
+# M9.R.37.2 — DO NOT use ``set -- "$d"/*.so*`` to test for the glob
+# existence: ``set --`` overwrites the script's positional parameters
+# ($@), which is what we ultimately pass to ``reproos-installer``.
+# The previous M9.R.36.1 launcher (this script's prior shape) clobbered
+# $@ on every loop iteration and ended up exec-ing the installer with
+# the LAST nix-store dir's ``*.so*`` glob expansion as its argv —
+# silently dropping ``--automated /etc/reproos/auto-config.toml``,
+# so the installer fell into GUI mode + QML engine init + endless
+# dlopen() churn through LD_LIBRARY_PATH (the M9.R.36 "silent wedge
+# after Qt init").  Use a subshell's exit code instead: if the first
+# entry of the expansion exists, the subshell succeeds; otherwise it
+# fails.  $@ is untouched.
+#
+# M9.R.37.5 — be SURGICAL about which dirs go on LD_LIBRARY_PATH.  The
+# previous wholesale ``/nix/store/*/lib`` walk added ~600 dirs to
+# LD_LIBRARY_PATH; every dlopen() inside the installer's QProcess
+# children then had to iterate all 600 before falling through to
+# ld.so.cache.  The DT_NEEDED libs the ``repro`` binary uses at
+# runtime (libclingo / libsqlite3) are well-known leaf names hit via
+# Nim's ``{.dynlib: const-string.}`` pragma, so we only need their
+# specific dirs on LD_LIBRARY_PATH.  Every OTHER library the binaries
+# need is already resolvable via either embedded RPATH or ld.so.cache
+# (M9.R.37.3 + M9.R.37.4 made the cache reachable from every PT_INTERP).
+#
+# This dramatically narrows LD_LIBRARY_PATH from ~600 entries to
+# a handful, slashing each dlopen()'s syscall cost from ~600 ENOENT
+# probes to ~5.
+for d in /nix/store/*/lib; do
+  [ -d "$d" ] || continue
+  # Skip glibc dirs — Debian system glibc must remain canonical so
+  # every Debian binary in the live ISO chain keeps working.
+  case "$d" in
+    /nix/store/*-glibc-*/lib) continue ;;
+  esac
+  # M9.R.38.3 — skip ANY nix-store Qt6 prefix.  The installer is
+  # compiled + RPATH'd against ``/opt/repro/.../qt6-base/.repro/
+  # output/install/usr/lib/libQt6Core.so.6.8.1``, but the de-rootfs
+  # mirror also ships an UNRELATED ``zp6r9bxds...-qtbase-6.10.1/lib/``
+  # tree pulled in as a transitive of layer-shell-qt-6.5.3 (which is
+  # in the DE closure).  Without this skip the launcher's qt-6/plugins
+  # / qt-6/qml walk below picks up the 6.10.1 plugin tree as well, and
+  # the Qt 6.8.1 binary loading a 6.10.1 ``libqoffscreen.so`` /
+  # ``QtQuick.Controls`` plugin trips C++ ABI mismatch -> heap
+  # corruption -> ``munmap_chunk(): invalid pointer`` on init, SIGABRT
+  # before Phase 1.  The qt6-base + qt6-declarative + qt6-quickcontrols2
+  # the installer needs live at /opt/repro/... paths the RPATH already
+  # covers; no nix-store Qt6 mirror is required.
+  case "$d" in
+    /nix/store/*-qtbase-*/lib | \
+    /nix/store/*-qtdeclarative-*/lib | \
+    /nix/store/*-qt5compat-*/lib | \
+    /nix/store/*-layer-shell-qt-*/lib | \
+    /nix/store/*-kquickcharts-*/lib | \
+    /nix/store/*-qtquickcontrols*/lib | \
+    /nix/store/*-qttools-*/lib | \
+    /nix/store/*-qtwayland-*/lib) continue ;;
+  esac
+  # M9.R.37.5: include ONLY dirs that ship a library the ``repro``
+  # binary's Nim {.dynlib: "..."} pragma resolves by bare leaf name:
+  #   * libclingo.so      (libs/repro_solver/.../clingo_bindings.nim)
+  #   * libsqlite3.so(.0) (libs/repro_local_store/.../sqlite3_binding.nim)
+  # plus any sqlite3 successor name (the bindings tries _64 / _32
+  # variants on Windows only; libsqlite3.so covers POSIX).
+  if [ -e "$d/libclingo.so" ] || [ -e "$d/libsqlite3.so" ] || \
+     [ -e "$d/libsqlite3.so.0" ]; then
+    if [ -z "$_repro_nix_libs" ]; then
+      _repro_nix_libs="$d"
+    else
+      _repro_nix_libs="$_repro_nix_libs:$d"
+    fi
+  fi
+  # Qt6 plugin dirs ship under ``<prefix>/lib/qt-6/plugins/``.
+  if [ -d "$d/qt-6/plugins" ]; then
+    if [ -z "$_repro_qt_plugins" ]; then
+      _repro_qt_plugins="$d/qt-6/plugins"
+    else
+      _repro_qt_plugins="$_repro_qt_plugins:$d/qt-6/plugins"
+    fi
+    if [ -d "$d/qt-6/plugins/platforms" ]; then
+      if [ -z "$_repro_qpa_plugins" ]; then
+        _repro_qpa_plugins="$d/qt-6/plugins/platforms"
+      else
+        _repro_qpa_plugins="$_repro_qpa_plugins:$d/qt-6/plugins/platforms"
+      fi
+    fi
+  fi
+  # Qt6 QML modules ship under ``<prefix>/lib/qt-6/qml/``.
+  if [ -d "$d/qt-6/qml" ]; then
+    if [ -z "$_repro_qml_imports" ]; then
+      _repro_qml_imports="$d/qt-6/qml"
+    else
+      _repro_qml_imports="$_repro_qml_imports:$d/qt-6/qml"
+    fi
+  fi
+done
+# M9.R.38.3 — the installer's RPATH points to /opt/repro/.../qt6-base
+# /.repro/output/install/usr/lib/qt-6/plugins/ + qt6-declarative's
+# qt-6/qml/.  Wire those EXPLICITLY since the loop above only walks
+# /nix/store; without this Qt finds no plugins + falls back to system
+# Debian Qt6 (which doesn't exist in the live DE rootfs) + crashes on
+# QtQuick init.
+for repro_qt_pkg in qt6-base qt6-declarative qt6-quickcontrols2 qt6-tools; do
+  qtpkg_dir="/opt/repro/reprobuild/recipes/packages/source/${repro_qt_pkg}/.repro/output/install/usr/lib"
+  if [ -d "${qtpkg_dir}/qt-6/plugins" ]; then
+    _repro_qt_plugins="${qtpkg_dir}/qt-6/plugins${_repro_qt_plugins:+:$_repro_qt_plugins}"
+    if [ -d "${qtpkg_dir}/qt-6/plugins/platforms" ]; then
+      _repro_qpa_plugins="${qtpkg_dir}/qt-6/plugins/platforms${_repro_qpa_plugins:+:$_repro_qpa_plugins}"
+    fi
+  fi
+  if [ -d "${qtpkg_dir}/qt-6/qml" ]; then
+    _repro_qml_imports="${qtpkg_dir}/qt-6/qml${_repro_qml_imports:+:$_repro_qml_imports}"
+  fi
+done
+# M9.R.39.5 — PROPER glibc resolution: place the installer binary's
+# PT_INTERP glibc dir at the FRONT of LD_LIBRARY_PATH.  Without this,
+# the installer's nix-glibc PT_INTERP loads (e.g. ld-linux-x86-64
+# .so.2 from glibc-2.40-66) but the dependent libraries libc.so.6 /
+# libm.so.6 / libpthread.so.0 resolve via /etc/ld.so.cache to
+# Debian's /lib/x86_64-linux-gnu/libc.so.6 (because the cache puts
+# Debian first), while libdl.so.2 / libresolv.so.2 / librt.so.1
+# resolve to nix glibc (the RPATH-reflected /nix/store path covers
+# only a SUBSET of glibc subsystems).  Mixing two glibc instances'
+# private heap + TLS data structures is what trips
+# ``munmap_chunk(): invalid pointer`` on Qt static-init heap
+# allocations.
+#
+# Discovery: scan the installer binary's first 4096 bytes for the
+# PT_INTERP nix-store glibc path.  ELF's PT_INTERP segment is a
+# nul-terminated string under the PHDR table, normally near the
+# beginning.  ``grep -aoE`` on a fixed-size head is the simplest
+# portable extraction.  Fallback to the most recent nix-store glibc
+# if extraction fails (shouldn't, given the binary is RPATH-laced
+# with /nix/store paths).
+_repro_installer_bin=/usr/bin/reproos-installer
+_repro_glibc_dir=""
+if [ -x "$_repro_installer_bin" ]; then
+  _repro_glibc_interp="$(head -c 4096 "$_repro_installer_bin" 2>/dev/null \
+    | tr -c '[:print:]' '\n' \
+    | grep -oE '/nix/store/[a-z0-9]+-glibc-[^/]+/lib/ld-linux-x86-64\.so\.2' \
+    | head -1)"
+  if [ -n "$_repro_glibc_interp" ]; then
+    _repro_glibc_dir="${_repro_glibc_interp%/ld-linux-x86-64.so.2}"
+  fi
+fi
+if [ -z "$_repro_glibc_dir" ]; then
+  # Fallback: latest nix-store glibc on disk.
+  _repro_glibc_dir="$(ls -d /nix/store/*-glibc-*/lib 2>/dev/null \
+    | grep -vE -- '-bin|-locales|-dev|-debug|-doc|-static|-loop|-i686' \
+    | head -1)"
+fi
+# Prepend the PT_INTERP glibc dir to LD_LIBRARY_PATH so the loader
+# resolves ALL glibc subsystems via the SAME nix glibc instance.
+if [ -n "$_repro_glibc_dir" ] && [ -d "$_repro_glibc_dir" ]; then
+  if [ -n "$_repro_nix_libs" ]; then
+    _repro_nix_libs="$_repro_glibc_dir:$_repro_nix_libs"
+  else
+    _repro_nix_libs="$_repro_glibc_dir"
+  fi
+fi
+
+# Append caller-supplied paths last so any operator override wins.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+  _repro_ldpath="$_repro_nix_libs:$LD_LIBRARY_PATH"
+else
+  _repro_ldpath="$_repro_nix_libs"
+fi
+
+# M9.R.37.1 / M9.R.39.1 — diagnostic mode.  When ``REPRO_INSTALLER_DIAG=1``
+# is set, the launcher:
+#   (a) wraps the installer process in ``strace -f -ttt -o
+#       /tmp/installer.strace`` so we capture every syscall on every
+#       thread with microsecond timestamps;
+#   (b) forces stderr line-buffering via ``stdbuf -oL -eL`` so the
+#       installer's ``appendLog`` ``QTextStream(stderr)`` writes
+#       reach the pipe BEFORE any wedge stalls subsequent buffer
+#       flushes;
+#   (c) starts a side-thread that snapshots the installer's
+#       ``/proc/<pid>/status``, ``/proc/<pid>/stack``,
+#       ``/proc/<pid>/wchan`` + every TID under
+#       ``/proc/<pid>/task/`` every 5 seconds into
+#       ``/tmp/installer.kernelstacks``;
+#   (d) M9.R.39.1 — exports ``LD_DEBUG=libs`` so glibc's loader dumps
+#       every shared-lib resolution decision (DT_NEEDED -> path, RPATH
+#       walk, ld.so.cache fall-through, version-mismatch warnings) to
+#       a file we can read post-crash.  This is the canonical channel
+#       for identifying ABI / version mismatches between the installer
+#       binary's expected libs and what the live ISO presents.
+#   (e) M9.R.39.1 — on installer exit (success OR SIGABRT), persists
+#       /tmp/installer.{strace,kernelstacks,log,lddebug} onto the
+#       second virtio disk (/dev/vdb) which the driver attaches.
+#       Without this, the M9.R.37/38 tmpfs logs vanish on poweroff.
+#       We format /dev/vdb as ext4 if it's blank, mount it at /mnt/diag,
+#       cp the logs in, sync, then return the installer's exit code.
+#       The driver post-mortem extracts the logs from the qcow2.
+#
+# This diagnostic apparatus is the M9.R.37 wedge characterisation
+# infrastructure the M9.R.36 closeout flagged as a follow-up, plus
+# the M9.R.39 LD_DEBUG + log-persistence extension the M9.R.38
+# closeout flagged as the next investigation step.
+_repro_diag="${REPRO_INSTALLER_DIAG:-0}"
+if [ "$_repro_diag" = "1" ]; then
+  rm -f /tmp/installer.strace /tmp/installer.kernelstacks \
+        /tmp/installer.lddebug /tmp/installer.log /tmp/installer.diag.pid
+  # Launch the kernel-stack snapshotter as a background sub-shell.
+  # The installer's PID becomes its parent shell's $$ once exec
+  # replaces this script, so we sample $$ from the child's POV via
+  # a marker file: write our own PID to /tmp/installer.diag.pid AFTER
+  # we fork the installer.
+  (
+    n=0
+    while [ ! -f /tmp/installer.diag.pid ] && [ $n -lt 20 ]; do
+      sleep 0.5
+      n=$((n+1))
+    done
+    [ -f /tmp/installer.diag.pid ] || exit 0
+    INSTPID="$(cat /tmp/installer.diag.pid 2>/dev/null)"
+    [ -n "$INSTPID" ] || exit 0
+    while kill -0 "$INSTPID" 2>/dev/null; do
+      ts="$(date -u '+%Y-%m-%d %H:%M:%S.%N')"
+      {
+        echo "=== $ts pid=$INSTPID ==="
+        echo "--- /proc/$INSTPID/status ---"
+        head -8 "/proc/$INSTPID/status" 2>/dev/null
+        echo "--- /proc/$INSTPID/wchan ---"
+        cat "/proc/$INSTPID/wchan" 2>/dev/null
+        echo ""
+        echo "--- /proc/$INSTPID/stack ---"
+        cat "/proc/$INSTPID/stack" 2>/dev/null
+        echo "--- per-tid wchan / stack ---"
+        for t in /proc/$INSTPID/task/*; do
+          [ -d "$t" ] || continue
+          tid="${t##*/}"
+          comm="$(cat $t/comm 2>/dev/null)"
+          wch="$(cat $t/wchan 2>/dev/null)"
+          echo "tid=$tid comm=$comm wchan=$wch"
+          head -10 "$t/stack" 2>/dev/null | sed 's/^/  /'
+        done
+        echo ""
+      } >> /tmp/installer.kernelstacks 2>/dev/null
+      sleep 5
+    done
+  ) &
+  # M9.R.39.1 — capture a snapshot of the installer binary's
+  # DT_NEEDED + RPATH + INTERP so the post-mortem can correlate against
+  # the LD_DEBUG=libs trace.
+  {
+    echo "=== installer binary inventory ==="
+    /usr/bin/stat /usr/bin/reproos-installer 2>&1 || true
+    /usr/bin/sha256sum /usr/bin/reproos-installer 2>&1 || true
+    if command -v patchelf >/dev/null 2>&1; then
+      echo "--- patchelf --print-interpreter ---"
+      patchelf --print-interpreter /usr/bin/reproos-installer 2>&1
+      echo "--- patchelf --print-rpath ---"
+      patchelf --print-rpath /usr/bin/reproos-installer 2>&1
+      echo "--- patchelf --print-needed ---"
+      patchelf --print-needed /usr/bin/reproos-installer 2>&1
+    elif command -v readelf >/dev/null 2>&1; then
+      echo "--- readelf -d (dynamic section) ---"
+      readelf -d /usr/bin/reproos-installer 2>&1 | \
+        grep -E 'NEEDED|RUNPATH|RPATH|INTERP' || true
+    else
+      echo "patchelf + readelf both unavailable"
+    fi
+    echo "--- ldd (resolution view) ---"
+    ldd /usr/bin/reproos-installer 2>&1 | head -60 || true
+    echo "=== launcher env ==="
+    echo "LD_LIBRARY_PATH=$_repro_ldpath"
+    echo "QT_PLUGIN_PATH=$_repro_qt_plugins"
+    echo "QML2_IMPORT_PATH=$_repro_qml_imports"
+    echo "QT_QPA_PLATFORM_PLUGIN_PATH=$_repro_qpa_plugins"
+    echo "=== /etc/ld.so.cache (head) ==="
+    if command -v ldconfig >/dev/null 2>&1; then
+      ldconfig -p 2>&1 | grep -E 'libstdc\+\+|libgcc_s|libc\.so|libQt6Core|libQt6Gui|libQt6Qml' | head -40
+    fi
+    echo ""
+  } > /tmp/installer.binfo 2>&1
+  # M9.R.39.6 — Run the installer SYNCHRONOUSLY (not via exec) so we can
+  # persist the diagnostic logs to the scratch disk BEFORE poweroff
+  # regardless of whether the binary exits cleanly, aborts, or wedges
+  # (in which case the driver's timeout kills us and we still drop
+  # logs first).
+  #
+  # ``LD_DEBUG=libs`` makes glibc's loader dump every library lookup
+  # decision; we redirect that to /tmp/installer.lddebug via
+  # ``LD_DEBUG_OUTPUT``.  glibc appends ``.<pid>`` to the file name.
+  #
+  # CRITICAL (M9.R.39.6): the env vars MUST NOT leak into the strace +
+  # stdbuf wrapper chain.  Those are Debian binaries linked against
+  # Debian's libc.so.6; with LD_LIBRARY_PATH set to a nix-glibc dir
+  # they hit ``undefined symbol: __nptl_change_stack_perm,
+  # version GLIBC_PRIVATE`` (M9.R.39.5 regression) and exit RC=127
+  # before the installer ever runs.  Use strace's ``-E var=val`` flag
+  # to set env on the TRACED process only -- strace itself sees a clean
+  # env without LD_LIBRARY_PATH and stays on Debian libc.
+  #
+  # Also drop ``stdbuf -oL -eL`` from the chain: stdbuf is also a Debian
+  # binary and would hit the same -- the installer's stderr buffering
+  # isn't the load-bearing concern given the binary crashes within ~5
+  # seconds of QGuiApplication ctor (M9.R.39.4 evidence).
+  #
+  # M9.R.40.1 — invoke ``ld.so --library-path`` AS the strace child rather
+  # than putting LD_LIBRARY_PATH on the installer's env.  Otherwise the
+  # installer's child processes (``execCmdEx`` -> /bin/sh -c -> lsblk
+  # / findmnt / lspci) inherit LD_LIBRARY_PATH and Debian's /bin/sh
+  # ends up loading nix's libc.so.6, which lacks the GLIBC_PRIVATE
+  # symbol layout dash was linked against -> ``symbol lookup error:
+  # __nptl_change_stack_perm, version GLIBC_PRIVATE`` -> RC=127 ->
+  # ``execCmdEx`` returns the symbol-lookup-error text as the
+  # "lsblk output", which then fails JSON parse with ``input(1, 1)
+  # Error: { expected``.  Same shape as the non-DIAG branch below.
+  # LD_DEBUG / LD_DEBUG_OUTPUT remain via ``-E`` because they're
+  # harmless even when inherited (they just make children also log
+  # their lib lookups to the same file; merging is acceptable for
+  # diagnostics).
+  (
+    strace -f -ttt -y -s 256 -e signal='!SIGCHLD' \
+      -o /tmp/installer.strace \
+      -E LD_DEBUG=libs \
+      -E LD_DEBUG_OUTPUT=/tmp/installer.lddebug \
+      -E QT_PLUGIN_PATH="$_repro_qt_plugins" \
+      -E QML2_IMPORT_PATH="$_repro_qml_imports" \
+      -E QML_IMPORT_PATH="$_repro_qml_imports" \
+      -E QT_QPA_PLATFORM_PLUGIN_PATH="$_repro_qpa_plugins" \
+      -E REPRO_HARDWARE_PROBE_RAWLOG_DIR=/tmp/hw_probe_raw \
+      "$_repro_glibc_dir/ld-linux-x86-64.so.2" \
+        --library-path "$_repro_ldpath" \
+        /usr/bin/reproos-installer "$@" \
+        > /tmp/installer.log 2>&1
+    echo $? > /tmp/installer.rc
+  ) &
+  _instpid=$!
+  echo $_instpid > /tmp/installer.diag.pid
+  wait $_instpid
+  _rc="$(cat /tmp/installer.rc 2>/dev/null || echo 255)"
+  # M9.R.39.1 — persist diag logs to /dev/vdb (the driver attaches a
+  # scratch virtio disk for this purpose).  Raw layout for the host
+  # extractor (host has gzip + tail, the live ISO has tar + dd):
+  #   sector 0 (512 bytes): ASCII header 'M9R39DIAGv1 SIZE=<bytes>\n'
+  #                          padded to 512 with spaces; nul-terminated
+  #   sector 1+ (4096+):     gzipped tar of /tmp/installer.* files
+  if [ -b /dev/vdb ]; then
+    _diagtar=/tmp/installer.diag.tar.gz
+    # Mirror the hardware-probe raw dump into the tarball if the probe
+    # produced one (M9.R.40.1 lsblk.raw.txt characterisation).
+    _hw_probe_files=""
+    if [ -d /tmp/hw_probe_raw ]; then
+      _hw_probe_files="hw_probe_raw"
+    fi
+    tar -czf "$_diagtar" -C /tmp \
+      installer.strace installer.kernelstacks installer.lddebug \
+      installer.log installer.binfo installer.rc installer.diag.pid \
+      $_hw_probe_files \
+      2>/dev/null || true
+    _diagsz="$(stat -c %s "$_diagtar" 2>/dev/null || echo 0)"
+    # ASCII-only header for portability.  The host extractor parses
+    # SIZE=<decimal> + skips one 512-byte sector + reads SIZE bytes.
+    printf 'M9R39DIAGv1 SIZE=%d\n' "$_diagsz" \
+      | dd of=/tmp/installer.diag.header bs=512 count=1 conv=sync 2>/dev/null
+    dd if=/tmp/installer.diag.header of=/dev/vdb bs=512 count=1 \
+      conv=notrunc 2>/dev/null || true
+    dd if="$_diagtar" of=/dev/vdb bs=512 seek=1 conv=notrunc 2>/dev/null || true
+    sync
+    sync
+  fi
+  exit "$_rc"
+fi
+
+# M9.R.39.6 — non-DIAG exec path.  Same constraint as the DIAG branch
+# above: ``env`` is a Debian binary that breaks if LD_LIBRARY_PATH
+# points at a nix-glibc dir (``__nptl_change_stack_perm`` symbol gap).
+# Set the env vars one level deeper by running the installer through
+# its OWN PT_INTERP nix-glibc ld.so via ``--argv0`` so the kernel
+# exec path doesn't consult LD_LIBRARY_PATH; ld.so itself processes
+# ``--library-path`` and avoids any glibc-version drift between PT_INTERP
+# and the resolved libraries.
+QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}${QT_PLUGIN_PATH:+:}$_repro_qt_plugins" \
+QML2_IMPORT_PATH="${QML2_IMPORT_PATH:-}${QML2_IMPORT_PATH:+:}$_repro_qml_imports" \
+QML_IMPORT_PATH="${QML_IMPORT_PATH:-}${QML_IMPORT_PATH:+:}$_repro_qml_imports" \
+QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-}${QT_QPA_PLATFORM_PLUGIN_PATH:+:}$_repro_qpa_plugins" \
+  exec "$_repro_glibc_dir/ld-linux-x86-64.so.2" \
+    --library-path "$_repro_ldpath" \
+    /usr/bin/reproos-installer "$@"
+EOF
+chmod 0755 "$STAGE_DIR/usr/bin/reproos-installer-launcher.sh"
+
 # Profile hook to auto-launch the installer on root login (tty1 only).
-mkdir -p "$STAGE_DIR/etc/profile.d"
 cat > "$STAGE_DIR/etc/profile.d/zz-reproos-installer-autostart.sh" <<'EOF'
 # ReproOS live-ISO console-mode installer autostart.
 if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
@@ -434,8 +1129,11 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "${REPRO_INSTALLER_RAN:-}" ]; then
     echo "Config: $AUTO_CFG"
     echo ""
     sleep 3
+    # M9.R.36.1 — invoke through the launcher wrapper so the
+    # installer's QProcess children get the LD_LIBRARY_PATH the
+    # ``repro`` binary needs for libclingo / libsqlite3 dlopen.
     QT_QPA_PLATFORM=offscreen \
-      /usr/bin/reproos-installer --automated "$AUTO_CFG"
+      /usr/bin/reproos-installer-launcher.sh --automated "$AUTO_CFG"
     rc=$?
     echo ""
     echo "=== Installer exited with rc=$rc ==="
@@ -574,13 +1272,65 @@ mkdir -p "$STAGE_DIR/etc/ld.so.conf.d"
   echo "/usr/lib64"
 } > "$STAGE_DIR/etc/ld.so.conf.d/zz-reproos-overlay.conf"
 
+# M9.R.37.4 — symlink every nix-store glibc's hard-coded
+# ``etc/ld.so.cache`` path to ``/etc/ld.so.cache`` so the
+# from-source-built binaries' nix-store PT_INTERPs find the cache the
+# Debian system loader writes.  Without this, every binary with PT_INTERP
+# ``/nix/store/<hash>-glibc-X.Y/lib/ld-linux-x86-64.so.2`` reads
+# ``/nix/store/<hash>-glibc-X.Y/etc/ld.so.cache`` (the path is baked into
+# ld-linux at compile time -- ``strings`` it to confirm) which doesn't
+# exist on our stage, and the dlopen() fall-through to ld.so.cache
+# fails.  Concretely: ``mkfs.ext4`` failed at exec-time with
+# ``libext2fs.so.2: cannot open shared object file`` because its PT_INTERP
+# pointed at the ``xx7cm72...-glibc-2.40-66`` ld-linux which reads
+# ``/nix/store/xx7cm72.../etc/ld.so.cache`` (ENOENT), bypassing the
+# Debian system cache at ``/etc/ld.so.cache``.
+#
+# Fix: for each nix-store glibc dir on the stage, ``chmod u+w`` its
+# ``etc/`` subdir then drop a relative symlink at
+# ``etc/ld.so.cache -> /etc/ld.so.cache``.  Now every loader -- nix
+# or Debian -- reads the SAME cache the system ldconfig wrote.
+for glibc_etc in "$STAGE_DIR"/nix/store/*-glibc-*/etc; do
+  [ -d "$glibc_etc" ] || continue
+  glibc_dir="$(dirname "$glibc_etc")"
+  chmod u+w "$glibc_etc" 2>/dev/null || true
+  if [ -e "$glibc_etc/ld.so.cache" ] && [ ! -L "$glibc_etc/ld.so.cache" ]; then
+    rm -f "$glibc_etc/ld.so.cache"
+  fi
+  if [ ! -L "$glibc_etc/ld.so.cache" ]; then
+    ln -s /etc/ld.so.cache "$glibc_etc/ld.so.cache"
+  fi
+  echo "[stage-de-rootfs] linked $glibc_etc/ld.so.cache -> /etc/ld.so.cache"
+done
+
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
 if [ -x "$chroot_ldconfig" ]; then
-  chroot "$STAGE_DIR" /sbin/ldconfig 2>&1 | \
+  # M9.R.37.3 — ``chroot $STAGE_DIR /sbin/ldconfig`` requires root
+  # privilege (Linux's mount-namespace barrier).  The engine runs the
+  # ISO build as the invoking user, NOT root, so the chroot syscall
+  # returned EPERM, ldconfig never ran, and ld.so.cache was either
+  # absent (causing every bare-name dlopen to fall through to the
+  # Debian system cache) or left at the 16027-byte base-rootfs.tar.xz
+  # fossil (which Knew NOTHING about the from-source install-mirrors).
+  # Concretely: ``mkfs.ext4`` shipped via ``e2fsprogs/.repro/output/
+  # install/usr/sbin/mkfs.ext4`` failed at runtime with exit 127
+  # because its DT_NEEDED libs (libext2fs.so.2, libcom_err.so.2,
+  # libe2p.so.2) were ABSENT from /etc/ld.so.cache, and the binary's
+  # own DT_RUNPATH did NOT include its sister-lib dir.  ``repro disk
+  # apply`` consequently failed at Phase 2 / step mkfs.ext4 with
+  # ``mkfs.ext4 failed (exit 127)``, which surfaced to the M9.R.36
+  # investigation as a "silent installer wedge after Qt init".
+  #
+  # ``ldconfig -r <root>`` does what chroot+ldconfig does but WITHOUT
+  # requiring chroot privilege — it pretends ``<root>`` is "/" for
+  # all path resolution + writes the cache at ``<root>/etc/ld.so.cache``.
+  # This is the canonical unprivileged-build replacement Debian's
+  # debootstrap + Arch's pacstrap both use.
+  "$chroot_ldconfig" -r "$STAGE_DIR" 2>&1 | \
     grep -vE 'is not a symbolic link|file format not recognized' || true
-  echo "[stage-de-rootfs] rebuilt ld.so.cache via chroot/sbin/ldconfig"
+  echo "[stage-de-rootfs] rebuilt ld.so.cache via /sbin/ldconfig -r $STAGE_DIR (size: $(stat -c %s "$STAGE_DIR/etc/ld.so.cache" 2>/dev/null || echo missing))"
 else
-  echo "[stage-de-rootfs] no chroot/sbin/ldconfig; dlopen() bare-name libs may fail" >&2
+  echo "[stage-de-rootfs] no $chroot_ldconfig; dlopen() bare-name libs may fail" >&2
 fi
 
 echo "[stage-de-rootfs] stage-dir bytes=$(du -sb "$STAGE_DIR" | awk '{print $1}')"

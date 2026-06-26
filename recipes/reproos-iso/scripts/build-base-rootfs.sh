@@ -79,34 +79,171 @@ BASE_IMAGE='debian:trixie-slim'
 #   - keyboard data (xkb-data, console-data) -- data packages
 #   - CA certificate bundle (data package)
 #
+## M9.R.32.4 -- per-entry from-source audit (user's "no apt" principle).
+##
+## Each line of PKG_LIST below carries an audit annotation:
+##   FS:done|partial|none -- from-source recipe state:
+##     done    -- recipe exists AND has a populated install-mirror
+##     partial -- recipe exists but install-mirror is empty/incomplete
+##     none    -- no from-source recipe authored yet
+##   STAGE:yes|no -- whether stage-de-rootfs.sh currently mirrors the
+##     from-source artifacts into the live ISO (the architectural piece
+##     gating apt removal: even with FS:done, removing the apt entry
+##     breaks the live ISO when STAGE:no).
+##
+## DROP-CRITERION (when both hold the apt entry is removable):
+##   1. FS:done -- the from-source recipe has a real install mirror.
+##   2. STAGE:yes -- stage-de-rootfs.sh mirrors that install-mirror
+##                   tree onto the live ISO.
+##
+## At M9.R.32 NO entry satisfies BOTH criteria simultaneously: every
+## from-source replacement that exists (FS:done) is NOT mirrored by
+## stage-de-rootfs.sh (STAGE:no, because the script only mirrors the
+## DE entry-point binaries -- sway/kwin/mutter/sddm/plasma-workspace/
+## gdm -- not the base userspace).  The honest M9.R.33 work shape is:
+##   * Extend stage-de-rootfs.sh with a per-recipe base-mirror loop
+##     that walks every PKG_LIST entry's from-source equivalent and
+##     mirrors install/usr/{bin,sbin,lib,lib64,share} into the rootfs.
+##   * Once that lands, this PKG_LIST shrinks to ONLY the FS:none
+##     entries (data packages + recipes not yet authored).
+##
+## The annotations below were measured 2026-06-24 by checking each
+## ``recipes/packages/source/<recipe>/.repro/output/install/`` tree.
+##
 PKG_LIST=(
-  # init shim + libc -- needed by PID 1 until the from-source systemd
-  # + glibc install-mirrors are wired into the boot chain.  When
-  # M9.R.26 lands the from-source systemd init unit + glibc shim,
-  # systemd / systemd-sysv / libpam* drop out of this list.
-  systemd systemd-sysv libpam-systemd dbus dbus-user-session
-  # Essential userspace -- bootstrap busybox-equivalents until the
-  # from-source coreutils/util-linux/grep recipes are wired through.
-  util-linux mount kmod udev tzdata passwd login procps less nano
+  # PID 1 / dbus -- core init stack.
+  #
+  # M9.R.33.4 dropped: ``systemd`` + ``systemd-sysv`` -- the FS:done
+  # systemd recipe ships /usr/sbin/init + /usr/sbin/{halt,poweroff,
+  # reboot,shutdown,telinit,runlevel} + /usr/lib/systemd/systemd; the
+  # M9.R.33.3 stage-de-rootfs.sh Phase 4b shadow-link loop emits the
+  # /usr/{bin,sbin}/<name> symlinks at staging time.  Note that
+  # ``systemd-sysv`` is dropped alongside systemd because it's an
+  # alias-only Debian package (provides the /sbin/init -> systemd
+  # symlink) which our recipe already covers.
+  #
+  #   libpam-systemd   FS:partial STAGE:no  (`pam` recipe install dir
+  #                                          exists but no usr/bin yet)
+  #
+  # M9.R.33.7 dropped: ``dbus`` -- FS:done recipe ships 9 binaries in
+  # usr/bin (dbus-daemon, dbus-launch, dbus-monitor, dbus-send,
+  # dbus-cleanup-sockets, dbus-uuidgen, dbus-update-activation-environment,
+  # dbus-test-tool, dbus-run-session); the Phase 4b shadow-link loop
+  # covers them.
+  #
+  #   dbus-user-session FS:partial STAGE:no  (uses dbus recipe; user
+  #                                           session unit files aren't
+  #                                           shipped by from-source)
+  libpam-systemd dbus-user-session
+  # Essential userspace.
+  #
+  # M9.R.33.5 dropped: ``util-linux`` -- FS:done recipe ships 63
+  # binaries in usr/bin + 9 in usr/sbin (mount/umount/fdisk/blkid/
+  # lsblk/findmnt/...).  ``mount`` apt entry is also dropped since
+  # mount(8) ships from the same util-linux source.  The Phase 4b
+  # shadow-link loop emits /usr/{bin,sbin}/<name> symlinks at staging
+  # time.
+  #
+  # M9.R.33.6 dropped: ``kmod`` -- FS:done recipe ships 7 binaries
+  # in usr/bin (kmod, depmod, insmod, lsmod, modinfo, modprobe, rmmod);
+  # the Phase 4b shadow-link loop covers them.
+  #
+  #   udev             FS:none    STAGE:no  (eudev recipe exists but
+  #                                          install-mirror is empty)
+  # M9.R.33.12 dropped: ``tzdata`` -- FS:done iana-tzdata recipe
+  # ships usr/share/zoneinfo + 2 binaries in usr/bin (zdump, zic) +
+  # 1 in usr/sbin (zic alias).  The Phase 4b shadow-link loop emits
+  # the bin/sbin shadow + special-cases /usr/share/zoneinfo to a
+  # symlink at the iana-tzdata recipe's install-mirror.  Both date(1)
+  # + systemd-timesyncd probe /usr/share/zoneinfo at process start;
+  # the symlink keeps them happy.
+  #
+  # M9.R.33.11 dropped: ``passwd`` + ``login`` -- both ship via the
+  # FS:done from-source shadow-utils recipe (11 binaries in usr/bin
+  # incl. passwd + login + chsh + chage + 19 in usr/sbin incl.
+  # useradd + userdel + usermod + groupadd + groupdel + groupmod);
+  # the Phase 4b shadow-link loop covers them.
+  #
+  #   procps           FS:partial STAGE:no  (recipe exists; install dir
+  #                                          missing)
+  #   less             FS:done    STAGE:no
+  #   nano             FS:none    STAGE:no  (not in from-source corpus;
+  #                                          editor convenience, no
+  #                                          runtime dep)
+  udev procps less nano
   # Locale data (no build cost; pure data).
+  #   locales          FS:none    STAGE:no  (glibc recipe exists but
+  #                                          locale-gen is a runtime
+  #                                          glibc helper; locale data
+  #                                          generation needs the
+  #                                          glibc install-mirror's
+  #                                          localedef + locales
+  #                                          source tree)
   locales
   # Keyboard + console data.
+  #   xkb-data         FS:partial STAGE:no  (xkeyboard-config recipe
+  #                                          exists; not built)
+  #   console-data     FS:none    STAGE:no
+  #   console-setup    FS:none    STAGE:no
+  #   keyboard-configuration FS:none STAGE:no
   xkb-data console-data console-setup keyboard-configuration
   # Network / CA / users.
-  ca-certificates iputils-ping iproute2 sudo
+  #   ca-certificates  FS:partial STAGE:no  (recipe exists but install
+  #                                          dir empty; needs upstream
+  #                                          ca-cert-bundle staging)
+  #   iputils-ping     FS:none    STAGE:no
+  #   iproute2         FS:partial STAGE:no  (recipe exists; not built)
+  #
+  # M9.R.33.8 dropped: ``sudo`` -- FS:done recipe ships 4 binaries
+  # in usr/bin (sudo, sudoedit, sudoreplay, visudo) and 3 in usr/sbin;
+  # the Phase 4b shadow-link loop covers them.
+  ca-certificates iputils-ping iproute2
   # SDDM systemd unit + PAM glue.  The BINARY is shadowed by the
-  # from-source recipe in stage-de-rootfs.sh; we keep the package to
-  # pick up the .service file and the /etc/pam.d/sddm policy until a
-  # from-source sddm recipe ships those files itself (TODO M9.R.26).
+  # from-source recipe in stage-de-rootfs.sh (Phase 4); we keep the
+  # apt entry to pick up the .service file + /etc/pam.d/sddm policy.
+  #   sddm             FS:done    STAGE:partial (binary staged; service
+  #                                              + PAM files NOT staged)
   sddm
   # M9.R.24.2 -- disko apply tools the installer's Phase 2 driver
   # shells out to.  These are the on-target install-time utilities;
   # the from-source equivalents are part of a longer-tail recipe
-  # campaign (TODO M9.R.27).
-  gdisk parted e2fsprogs dosfstools btrfs-progs cryptsetup lvm2
+  # campaign (TODO M9.R.33).
+  #   gdisk            FS:partial STAGE:no
+  #   parted           FS:partial STAGE:no
+  #
+  # M9.R.33.9 dropped: ``e2fsprogs`` -- FS:done recipe ships 4 binaries
+  # in usr/bin (chattr, lsattr, ...) + 24 in usr/sbin (mke2fs, tune2fs,
+  # fsck.ext2/3/4, dumpe2fs, debugfs, ...); the Phase 4b shadow-link
+  # loop covers them.
+  #
+  #   dosfstools       FS:partial STAGE:no
+  #
+  # M9.R.33.10 dropped: ``btrfs-progs`` -- FS:done recipe ships 9
+  # binaries in usr/bin (btrfs, btrfs-convert, btrfs-find-root,
+  # btrfs-image, btrfs-map-logical, btrfs-select-super, btrfstune,
+  # fsck.btrfs, mkfs.btrfs); the Phase 4b shadow-link loop covers them.
+  #
+  #   cryptsetup       FS:partial STAGE:no
+  #   lvm2             FS:partial STAGE:no
+  gdisk parted dosfstools cryptsetup lvm2
   # Bootloader tools the installer's Phase 5 (system apply) shells
-  # out to.  GRUB has no from-source recipe yet (TODO M9.R.27).
+  # out to.  GRUB has no from-source recipe yet (TODO M9.R.33).
+  #   grub-efi-amd64-bin     FS:none STAGE:no
+  #   grub-pc-bin            FS:none STAGE:no
+  #   grub-common            FS:none STAGE:no
+  #   grub2-common           FS:none STAGE:no
   grub-efi-amd64-bin grub-pc-bin grub-common grub2-common
+  # M9.R.37.1 — diagnostic tools the installer's REPRO_INSTALLER_DIAG=1
+  # mode invokes to characterise the silent-wedge gap M9.R.36 left
+  # open.  ``strace`` traces every syscall the installer + its children
+  # make; ``gdb`` is for post-wedge core dumps.  Both are FS:none.
+  strace gdb
+  # M9.R.41 — ``repro infra install-root`` (Phase 5 root-mirror) shells
+  # out to ``rsync -aHAX --numeric-ids --one-file-system`` to mirror
+  # the live ISO root onto /mnt.  ``rsync`` has no from-source recipe
+  # yet (TODO future M9.R milestone); the apt entry is the bridge.
+  #   rsync           FS:none STAGE:no
+  rsync
 )
 
 PKG_DIGEST="$(printf '%s\n' "${PKG_LIST[@]}" | LC_ALL=C sort | sha256sum | awk '{print $1}')"

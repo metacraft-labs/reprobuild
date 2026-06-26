@@ -308,6 +308,685 @@ fs.systemDirectory {
     check op.fsdAclPresent == false
     check op.fsdDestroy == false
 
+  # -----------------------------------------------------------------
+  # Windows-System-Resources Phase D — fs.systemDirectory ACL apply.
+  # The Phase A-C codec already round-trips the dirAcl* fields (PR #7
+  # landed the schema); Phase D bolts on apply-time tests asserting:
+  # (a) every inheritance vocabulary value round-trips, (b) the ACL
+  # fields ride into PrivilegedOperation correctly, (c) back-compat
+  # round-trips when aclPresent==false stay byte-identical, and
+  # (d) the Deny-direction ACE rides through unmangled.
+  # -----------------------------------------------------------------
+
+  test "fs.systemDirectory roundtrips with full ACL -> PrivilegedOperation":
+    # Phase D — the apply-side coverage: every dirAcl* field MUST land
+    # in the PrivilegedOperation so the driver sees the same shape
+    # the profile declared.
+    let parsed = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "BUILTIN\Administrators:(F)",
+                "NetworkService:(RX)"]
+  aclInheritance = "protected-clear-inherited"
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.kind == pokFsSystemDirectory
+    check op.fsdPath == "C:\\actions-runner-tokens"
+    check op.fsdAclPresent == true
+    check op.fsdAclOwner == "SYSTEM"
+    check op.fsdAclEntries.len == 3
+    check op.fsdAclEntries[0] == "SYSTEM:(F)"
+    check op.fsdAclEntries[2] == "NetworkService:(RX)"
+    check op.fsdAclInheritance == "protected-clear-inherited"
+    check operationValidationError(op) == ""
+
+  test "fs.systemDirectory every inheritance variant round-trips":
+    # Phase D closed-set defence-in-depth: the codec MUST emit + parse
+    # every documented `aclInheritance` vocabulary value identically.
+    for mode in @["enabled", "disabled-replace", "disabled-convert",
+                  "protected-clear-inherited"]:
+      let text = """
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)"]
+  aclInheritance = "$1"
+}
+""".replace("$1", mode)
+      let parsed = parseSystemProfile(text)
+      check parsed.resources.len == 1
+      check parsed.resources[0].dirAclInheritance == mode
+      let op = toPrivilegedOperation(parsed.resources[0])
+      check op.fsdAclInheritance == mode
+      check op.fsdAclPresent
+      check operationValidationError(op) == ""
+
+  test "fs.systemDirectory back-compat: no-ACL stanza re-renders cleanly":
+    # PR #7's pre-Phase-D shape: a stanza without any acl* fields MUST
+    # parse to `dirAclPresent == false`, render BACK without acl*
+    # fields, AND round-trip a second pass without drift. Phase D's
+    # observe digest preserves this back-compat via
+    # `fsSystemDirectoryDigestPayload(present, false, ...)`.
+    let text = "fs.systemDirectory {\n  path = \"/etc/myapp.d\"\n}\n"
+    let parsed = parseSystemProfile(text)
+    check parsed.resources[0].dirAclPresent == false
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.fsdAclPresent == false
+    check op.fsdAclOwner == ""
+    check op.fsdAclEntries.len == 0
+    check op.fsdAclInheritance == ""
+
+  test "fs.systemDirectory Deny ACE round-trips through the codec":
+    # Phase D — the Deny direction. The profile builder's
+    # `aclEntry(... type=Deny)` emits the `:(D,...)` marker; the codec
+    # MUST carry it verbatim so the driver's pure
+    # `splitDirAclEntry` can pivot to icacls's `/deny` verb.
+    let parsed = parseSystemProfile("""
+fs.systemDirectory {
+  path = "C:\actions-runner-tokens"
+  aclOwner = "SYSTEM"
+  aclEntries = ["SYSTEM:(F)", "Guests:(D,W)"]
+  aclInheritance = "disabled-replace"
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.fsdAclEntries.len == 2
+    check op.fsdAclEntries[0] == "SYSTEM:(F)"
+    check op.fsdAclEntries[1] == "Guests:(D,W)"
+
+  # -----------------------------------------------------------------
+  # Windows-System-Resources Phase C: windows.scheduledTask parser +
+  # adapter + codec coverage.
+  # -----------------------------------------------------------------
+
+  test "windows.scheduledTask parses onBoot variant + defaults":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\WindowsRunner-Env"
+  executable = "C:\actions-runner\bin\Runner.Listener.exe"
+  schedule = ["onBoot:30"]
+}
+""")
+    check parsed.resources.len == 1
+    let r = parsed.resources[0]
+    check r.kind == srkWindowsScheduledTask
+    check r.wstTaskName == "\\Reprobuild\\WindowsRunner-Env"
+    check r.wstExecutable ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check r.wstArguments.len == 0
+    check r.wstWorkingDirectory == ""
+    check r.wstRunAsUser == "SYSTEM"
+    check r.wstRunWithHighestPrivileges == true
+    check r.wstEnabled == true
+    check r.wstSchedule.kind == wstskOnBoot
+    check r.wstSchedule.delaySeconds == 30
+    check r.address ==
+      "scheduledTask:\\Reprobuild\\WindowsRunner-Env"
+
+  test "windows.scheduledTask parses every schedule kind":
+    # Closed-set vocabulary: parse one stanza per ScheduleKind and
+    # assert each kind round-trips through the parser.
+    let cases = @[
+      ("onBoot:60", wstskOnBoot),
+      ("onLogon:", wstskOnLogon),
+      ("onLogon:DOMAIN\\u", wstskOnLogon),
+      ("once:2030-01-01T08:00:00Z", wstskOnce),
+      ("daily:08:30", wstskDaily),
+      ("interval:15:", wstskInterval),
+      ("interval:5:2030-01-01T00:00:00Z", wstskInterval)]
+    for (tok, kind) in cases:
+      let text = """
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["""" & tok & """"]
+}
+"""
+      let parsed = parseSystemProfile(text)
+      check parsed.resources.len == 1
+      check parsed.resources[0].wstSchedule.kind == kind
+
+  test "windows.scheduledTask parses optional arguments + workingDirectory":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  arguments = ["--flag", "--cfg", "C:\config.toml"]
+  workingDirectory = "C:\actions-runner"
+  schedule = ["daily:08:30"]
+}
+""")
+    let r = parsed.resources[0]
+    check r.wstArguments.len == 3
+    check r.wstArguments[0] == "--flag"
+    check r.wstArguments[2] == "C:\\config.toml"
+    check r.wstWorkingDirectory == "C:\\actions-runner"
+
+  test "windows.scheduledTask rejects missing required fields":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  executable = "C:\bin\foo.exe"
+  schedule = ["onBoot:0"]
+}
+""")
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  schedule = ["onBoot:0"]
+}
+""")
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+}
+""")
+
+  test "windows.scheduledTask rejects malformed schedule tokens":
+    # Defence-in-depth: the parser is the second layer (after the
+    # template). Each malformed token must raise.
+    for bad in ["", "onBoot", "unknown:30", "onBoot:abc",
+                "once:not-iso", "daily:25:00", "interval:0:",
+                "interval:5"]:
+      expect ESystemProfileInvalid:
+        discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["""" & bad & """"]
+}
+""")
+
+  test "windows.scheduledTask rejects multi-element schedule list":
+    # The schedule field carries EXACTLY ONE canonical wire token.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["onBoot:0", "daily:08:30"]
+}
+""")
+
+  test "windows.scheduledTask: realWorldIdentity + resourceName + kind tag":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\Hook"
+  executable = "C:\bin\hook.exe"
+  schedule = ["onBoot:0"]
+}
+""")
+    let r = parsed.resources[0]
+    check realWorldIdentity(r) == "scheduledTask:\\Reprobuild\\Hook"
+    check resourceName(r) == "\\Reprobuild\\Hook"
+    check resourceKindTag(r) == "windows.scheduledTask"
+
+  test "windows.scheduledTask roundtrips to PrivilegedOperation":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  arguments = ["--unattended"]
+  runAsUser = "LOCAL_SERVICE"
+  runWithHighestPrivileges = false
+  schedule = ["interval:15:"]
+  enabled = false
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.kind == pokWindowsScheduledTask
+    check op.wstTaskName == "\\Foo"
+    check op.wstExecutable == "C:\\bin\\foo.exe"
+    check op.wstArguments == @["--unattended"]
+    check op.wstRunAsUser == "LOCAL_SERVICE"
+    check op.wstRunWithHighestPrivileges == false
+    check op.wstSchedule.kind == wstskInterval
+    check op.wstSchedule.everyMinutes == 15
+    check op.wstEnabled == false
+    check op.wstDestroy == false
+
+  # -----------------------------------------------------------------
+  # Spec §1.3 schema: `runWithHighestPrivileges` default depends on
+  # principal (`true` for SYSTEM, `false` otherwise). The three tests
+  # below pin the end-to-end path — text profile → parser →
+  # SystemResource → `toPrivilegedOperation` — for the three corners
+  # of the two-axis rule that the template surface (whose parameter
+  # is `Option[bool]`) no longer pre-fills. The same three corners
+  # are pinned at the template surface in
+  # `t_smoke_repro_profile.nim`.
+  # -----------------------------------------------------------------
+
+  test "windows.scheduledTask: runAsUser=LOCAL_SERVICE without explicit runWithHighestPrivileges defaults to false end-to-end":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\LocalSvcTask"
+  executable = "C:\bin\svc.exe"
+  runAsUser = "LOCAL_SERVICE"
+  schedule = ["onBoot:0"]
+}
+""")
+    check parsed.resources.len == 1
+    let r = parsed.resources[0]
+    check r.wstRunAsUser == "LOCAL_SERVICE"
+    # Parser-side default: non-SYSTEM principal -> false.
+    check r.wstRunWithHighestPrivileges == false
+    # Adapter-side default (independent layer): same answer.
+    let op = toPrivilegedOperation(r)
+    check op.kind == pokWindowsScheduledTask
+    check op.wstRunAsUser == "LOCAL_SERVICE"
+    check op.wstRunWithHighestPrivileges == false
+
+  test "windows.scheduledTask: runAsUser=SYSTEM without explicit runWithHighestPrivileges defaults to true end-to-end":
+    # Back-compat sentinel — a bare SYSTEM stanza still ends up with
+    # `wstRunWithHighestPrivileges = true` at the apply layer.
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Reprobuild\SysTask"
+  executable = "C:\bin\sys.exe"
+  runAsUser = "SYSTEM"
+  schedule = ["onBoot:0"]
+}
+""")
+    check parsed.resources.len == 1
+    let r = parsed.resources[0]
+    check r.wstRunAsUser == "SYSTEM"
+    check r.wstRunWithHighestPrivileges == true
+    let op = toPrivilegedOperation(r)
+    check op.wstRunAsUser == "SYSTEM"
+    check op.wstRunWithHighestPrivileges == true
+
+  test "windows.scheduledTask: runAsUser=SYSTEM with explicit runWithHighestPrivileges=false round-trips through render+parse":
+    # Operator override on the SYSTEM principal MUST survive the
+    # canonical-text round-trip — the renderer in `intent.nim` already
+    # emits the field only when it deviates from the principal-default,
+    # which means the `false` override on SYSTEM is exactly the case
+    # the deviation rule covers. Round-trip via renderStanza +
+    # parseSystemProfile must preserve the `false` end-to-end.
+    let r0 = SystemResource(kind: srkWindowsScheduledTask,
+      address: "scheduledTask:\\Reprobuild\\SysOverrideTask",
+      wstTaskName: "\\Reprobuild\\SysOverrideTask",
+      wstExecutable: "C:\\bin\\sys.exe",
+      wstRunAsUser: "SYSTEM",
+      wstRunWithHighestPrivileges: false,
+      wstSchedule: ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+        delaySeconds: 0),
+      wstEnabled: true)
+    let lines = renderStanza(r0)
+    # Sanity: the deviation triggers the renderer to emit the field.
+    var emittedFlag = false
+    for ln in lines:
+      if "runWithHighestPrivileges = false" in ln:
+        emittedFlag = true
+    check emittedFlag
+    let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+    check reparsed.resources.len == 1
+    let r1 = reparsed.resources[0]
+    check r1.wstRunAsUser == "SYSTEM"
+    check r1.wstRunWithHighestPrivileges == false
+    # And the adapter respects the round-tripped override (no silent
+    # flip back to true).
+    let op = toPrivilegedOperation(r1)
+    check op.wstRunAsUser == "SYSTEM"
+    check op.wstRunWithHighestPrivileges == false
+
+  test "windows.scheduledTask destroy direction sets wstDestroy=true":
+    let parsed = parseSystemProfile("""
+windows.scheduledTask {
+  taskName = "\Foo"
+  executable = "C:\bin\foo.exe"
+  schedule = ["onBoot:0"]
+}
+""")
+    let op = toPrivilegedOperation(parsed.resources[0],
+      destroy = true)
+    check op.kind == pokWindowsScheduledTask
+    check op.wstDestroy == true
+
+  test "fs.systemFile parses with sourceUrl + sha256":
+    # Windows-System-Resources Phase A: the URL-fetch content source.
+    let parsed = parseSystemProfile("""
+fs.systemFile {
+  path = "C:\actions-runner-cache\runner.zip"
+  sourceUrl = "https://example.com/runner.zip"
+  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+""")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemFile
+    check parsed.resources[0].sfPath ==
+      "C:\\actions-runner-cache\\runner.zip"
+    check parsed.resources[0].sfSourceUrl ==
+      "https://example.com/runner.zip"
+    check parsed.resources[0].sfSha256.len == 64
+    check parsed.resources[0].sfContent == ""
+    check parsed.resources[0].sfSourceLocal == ""
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.sfSourceUrl == "https://example.com/runner.zip"
+    check op.sfSha256.len == 64
+
+  test "fs.systemFile parses with sourceLocal":
+    # Windows-System-Resources Phase A: the controller-side path
+    # content source.
+    let parsed = parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  sourceLocal = "/home/zah/profiles/myapp.toml"
+}
+""")
+    check parsed.resources.len == 1
+    check parsed.resources[0].kind == srkFsSystemFile
+    check parsed.resources[0].sfSourceLocal ==
+      "/home/zah/profiles/myapp.toml"
+    check parsed.resources[0].sfContent == ""
+    check parsed.resources[0].sfSourceUrl == ""
+    let op = toPrivilegedOperation(parsed.resources[0])
+    check op.sfSourceLocal == "/home/zah/profiles/myapp.toml"
+
+  test "fs.systemFile rejects content + sourceUrl together":
+    # Mutual-exclusion: the validator MUST refuse a profile that sets
+    # more than one of the three sources, regardless of which two.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  content = "x = 1"
+  sourceUrl = "https://example.com/c.toml"
+  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+""")
+
+  test "fs.systemFile rejects content + sourceLocal together":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  content = "x = 1"
+  sourceLocal = "/home/zah/profiles/myapp.toml"
+}
+""")
+
+  test "fs.systemFile rejects sourceUrl without sha256":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  sourceUrl = "https://example.com/c.toml"
+}
+""")
+
+  test "fs.systemFile rejects sourceUrl + sourceLocal together":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+fs.systemFile {
+  path = "/etc/myapp/config.toml"
+  sourceUrl = "https://example.com/c.toml"
+  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  sourceLocal = "/home/zah/profiles/myapp.toml"
+}
+""")
+
+  test "fs.systemFile PrivilegedOperation frame round-trips all three sources":
+    # Codec round-trip: encode + decode preserves every source field.
+    let inline = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "inlineCfg", sfPath: "/etc/inline.cfg",
+      sfContent: "k = v\n", sfDestroy: false)
+    check operationValidationError(inline) == ""
+    let inlineRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: inline,
+        baselineDigestHex: ""))).body).operation
+    check inlineRT.kind == pokFsSystemFile
+    check inlineRT.sfPath == "/etc/inline.cfg"
+    check inlineRT.sfContent == "k = v\n"
+    check inlineRT.sfSourceUrl == ""
+    check inlineRT.sfSha256 == ""
+    check inlineRT.sfSourceLocal == ""
+
+    let urlOp = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "urlCfg", sfPath: "/etc/url.cfg",
+      sfSourceUrl: "https://example.com/url.cfg",
+      sfSha256: "0123456789abcdef0123456789abcdef" &
+                "0123456789abcdef0123456789abcdef",
+      sfDestroy: false)
+    check operationValidationError(urlOp) == ""
+    let urlRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: urlOp,
+        baselineDigestHex: ""))).body).operation
+    check urlRT.sfSourceUrl == "https://example.com/url.cfg"
+    check urlRT.sfSha256.len == 64
+    check urlRT.sfContent == ""
+    check urlRT.sfSourceLocal == ""
+
+    let localOp = PrivilegedOperation(kind: pokFsSystemFile,
+      address: "localCfg", sfPath: "/etc/local.cfg",
+      sfSourceLocal: "/home/zah/profiles/local.cfg",
+      sfDestroy: false)
+    check operationValidationError(localOp) == ""
+    let localRT = decodeOperation(decodeFrame(encodeOperation(
+      WireOperation(operation: localOp,
+        baselineDigestHex: ""))).body).operation
+    check localRT.sfSourceLocal == "/home/zah/profiles/local.cfg"
+    check localRT.sfContent == ""
+    check localRT.sfSourceUrl == ""
+    check localRT.sfSha256 == ""
+
+  test "fs.systemFile rendered stanza round-trips through parseSystemProfile":
+    for r in [
+      SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/url.cfg",
+        sfPath: "/etc/url.cfg",
+        sfSourceUrl: "https://example.com/url.cfg",
+        sfSha256: "0123456789abcdef0123456789abcdef" &
+                  "0123456789abcdef0123456789abcdef"),
+      SystemResource(kind: srkFsSystemFile,
+        address: "systemFile:/etc/local.cfg",
+        sfPath: "/etc/local.cfg",
+        sfSourceLocal: "/home/zah/profiles/local.cfg")]:
+      let lines = renderStanza(r)
+      let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+      check reparsed.resources.len == 1
+      check reparsed.resources[0].kind == r.kind
+      check reparsed.resources[0].sfPath == r.sfPath
+      check reparsed.resources[0].sfSourceUrl == r.sfSourceUrl
+      check reparsed.resources[0].sfSha256 == r.sfSha256
+      check reparsed.resources[0].sfSourceLocal == r.sfSourceLocal
+
+  test "windows.service Phase B: bare stanza parses with default Phase B fields":
+    # Sentinel test: a stanza that DOESN'T set the four new fields
+    # produces a SystemResource with all four at their "leave unmanaged"
+    # defaults — empty strings, empty seq, 0 — matching the back-compat
+    # invariant.
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+}
+""")
+    check profile.resources.len == 1
+    check profile.resources[0].kind == srkWindowsService
+    check profile.resources[0].serviceName == "sshd"
+    check profile.resources[0].serviceDisplayName == ""
+    check profile.resources[0].serviceBinPath == ""
+    check profile.resources[0].serviceRecoveryActions.len == 0
+    check profile.resources[0].serviceRecoveryResetSeconds == 0
+
+  test "windows.service Phase B: parses all four new fields":
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "actions.runner.metacraft-labs.windows-runner-001"
+  startType = Automatic
+  state = Running
+  displayName = "GitHub Actions Runner"
+  binPath = "C:\actions-runner\Runner.Listener.exe"
+  recoveryActions = ["restart:5000", "restart:10000", "reboot:60000"]
+  recoveryResetSeconds = 86400
+}
+""")
+    check profile.resources.len == 1
+    let r = profile.resources[0]
+    check r.kind == srkWindowsService
+    check r.serviceDisplayName == "GitHub Actions Runner"
+    check r.serviceBinPath == "C:\\actions-runner\\Runner.Listener.exe"
+    check r.serviceRecoveryActions.len == 3
+    check r.serviceRecoveryActions[0].action == wsrakRestart
+    check r.serviceRecoveryActions[0].delayMs == 5000
+    check r.serviceRecoveryActions[1].action == wsrakRestart
+    check r.serviceRecoveryActions[1].delayMs == 10000
+    check r.serviceRecoveryActions[2].action == wsrakReboot
+    check r.serviceRecoveryActions[2].delayMs == 60000
+    check r.serviceRecoveryResetSeconds == 86400
+
+  test "windows.service Phase B: rejects an unknown recovery action token":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["panic:5000"]
+}
+""")
+
+  test "windows.service Phase B: rejects malformed recoveryActions entry":
+    # Missing delay half.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart"]
+}
+""")
+    # Non-integer delay.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart:nope"]
+}
+""")
+    # Negative delay.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart:-5"]
+}
+""")
+
+  test "windows.service Phase B: rejects more than 3 recovery slots":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryActions = ["restart:1000", "restart:2000", "restart:3000", "restart:4000"]
+}
+""")
+
+  test "windows.service Phase B: rejects a negative recoveryResetSeconds":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryResetSeconds = -1
+}
+""")
+
+  test "windows.service Phase B: rejects a non-integer recoveryResetSeconds":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  recoveryResetSeconds = bogus
+}
+""")
+
+  test "windows.service Phase B: toPrivilegedOperation carries new fields":
+    let profile = parseSystemProfile("""
+windows.service {
+  name = "sshd"
+  startType = Automatic
+  state = Running
+  displayName = "OpenSSH SSH Server"
+  binPath = "C:\Windows\System32\OpenSSH\sshd.exe"
+  recoveryActions = ["restart:5000", "runcommand:30000"]
+  recoveryResetSeconds = 3600
+}
+""")
+    let op = toPrivilegedOperation(profile.resources[0])
+    check op.kind == pokWindowsService
+    check op.serviceDisplayName == "OpenSSH SSH Server"
+    check op.serviceBinPath == "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
+    check op.serviceRecoveryActions.len == 2
+    check op.serviceRecoveryActions[0].action == wsrakRestart
+    check op.serviceRecoveryActions[0].delayMs == 5000
+    check op.serviceRecoveryActions[1].action == wsrakRunCommand
+    check op.serviceRecoveryActions[1].delayMs == 30000
+    check op.serviceRecoveryResetSeconds == 3600
+
+  test "windows.service Phase B: rendered stanza skips Phase B lines when default":
+    # Back-compat: a SystemResource without any Phase B fields renders
+    # identically to today's three-line stanza. The renderer MUST NOT
+    # emit `displayName = ""` or any other empty-default line.
+    let r = SystemResource(kind: srkWindowsService,
+      address: "windows.service:sshd",
+      serviceName: "sshd",
+      serviceStartType: "Automatic",
+      serviceRunning: true)
+    let lines = renderStanza(r)
+    let joined = lines.join("\n")
+    check "displayName" notin joined
+    check "binPath" notin joined
+    check "recoveryActions" notin joined
+    check "recoveryResetSeconds" notin joined
+    # And it still parses back into an equivalent SystemResource.
+    let reparsed = parseSystemProfile(joined & "\n")
+    check reparsed.resources.len == 1
+    check reparsed.resources[0].serviceName == "sshd"
+    check reparsed.resources[0].serviceDisplayName == ""
+
+  test "windows.service Phase B: rendered stanza round-trips Phase B fields":
+    let r = SystemResource(kind: srkWindowsService,
+      address: "actionsRunnerService",
+      serviceName: "actions.runner.001",
+      serviceStartType: "Automatic",
+      serviceRunning: true,
+      serviceDisplayName: "GitHub Actions Runner",
+      serviceBinPath: "C:\\actions-runner\\Runner.Listener.exe",
+      serviceRecoveryActions: @[
+        WindowsServiceRecoverySpec(action: wsrakRestart, delayMs: 5000),
+        WindowsServiceRecoverySpec(action: wsrakRunCommand, delayMs: 30000)],
+      serviceRecoveryResetSeconds: 86400)
+    let lines = renderStanza(r)
+    let reparsed = parseSystemProfile(lines.join("\n") & "\n")
+    check reparsed.resources.len == 1
+    check reparsed.resources[0].serviceDisplayName ==
+      "GitHub Actions Runner"
+    check reparsed.resources[0].serviceBinPath ==
+      "C:\\actions-runner\\Runner.Listener.exe"
+    check reparsed.resources[0].serviceRecoveryActions.len == 2
+    check reparsed.resources[0].serviceRecoveryActions[0].action ==
+      wsrakRestart
+    check reparsed.resources[0].serviceRecoveryActions[1].delayMs ==
+      30000
+    check reparsed.resources[0].serviceRecoveryResetSeconds == 86400
+
   test "an unclosed block is rejected":
     expect ESystemProfileInvalid:
       discard parseSystemProfile("windows.capability {\n  name = \"X\"\n")

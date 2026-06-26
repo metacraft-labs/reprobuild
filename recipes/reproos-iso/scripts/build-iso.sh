@@ -199,6 +199,21 @@ REPRO_GRUB_VARIANT="${REPRO_GRUB_VARIANT:-single}"
 REPRO_GRUB_DEFAULT="${REPRO_GRUB_DEFAULT:-0}"
 REPRO_GRUB_TIMEOUT="${REPRO_GRUB_TIMEOUT:-0}"
 
+# M9.R.39.2 — when ``REPRO_INSTALLER_AUTORUN=1`` is set at build time,
+# the default Hyprland menu entry's cmdline gets
+# ``repro.installer.autorun=1`` appended, which trips the
+# ``reproos-installer-autorun.service`` systemd unit
+# (stage-de-rootfs.sh Phase 5) on boot.  The unit runs the launcher in
+# DIAG mode BEFORE multi-user.target so the M9.R.39.1 LD_DEBUG + strace
+# evidence capture doesn't depend on the wedge-prone serial-getty
+# autologin flow.  Default is empty so the live ISO behaves normally
+# unless an investigator opts in.
+if [ "${REPRO_INSTALLER_AUTORUN:-0}" = "1" ]; then
+  REPRO_INSTALLER_AUTORUN_PARAM=" repro.installer.autorun=1"
+else
+  REPRO_INSTALLER_AUTORUN_PARAM=""
+fi
+
 case "$REPRO_GRUB_VARIANT" in
   single)
     cat > "$WORK/boot/grub/grub.cfg" <<EOF
@@ -239,7 +254,7 @@ terminal_input  serial console
 terminal_output serial console
 
 menuentry 'ReproOS -- Hyprland (default)' {
-  linux  /vmlinuz repro.de=hyprland i915.modeset=1 console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text
+  linux  /vmlinuz repro.de=hyprland i915.modeset=1 console=tty1 console=ttyS0,115200n8 earlyprintk=ttyS0,115200 loglevel=7 DEBIAN_FRONTEND=text${REPRO_INSTALLER_AUTORUN_PARAM}
   initrd /initrd.img
 }
 

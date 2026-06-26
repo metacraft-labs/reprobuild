@@ -110,8 +110,35 @@ M9.R.29 DSL / INFRA CHANGES
               edits invalidate the stale base-rootfs tarball.
 
 
+UEFI + LIVE DE SMOKE — CAPTURED 2026-06-24 06:05
+=================================================
+ISO: build/reproos.iso (1,651,443,712 bytes)
+Build: M9.R.29.19b symlink-walker closure; 563 nix-store prefixes
+       on the ISO (vs 540 with the M9.R.29 RPATH-only walker).
+Smoke: see m9r29_de_smoke.log in the same directory.
+
+KEY RESULTS:
+- Auto-login as root over /dev/ttyS0 worked end-to-end.
+- All four DE binaries land at /usr/bin/{sway,kwin_wayland,
+  mutter,plasmashell} as symlinks to the from-source mirrors.
+- All four DEs fail at startup with `cannot open shared object
+  file` for a transitive dep NOT in the on-disk RPATH chain:
+    sway          libdrm.so.2 missing
+    kwin_wayland  libz.so.1 missing
+    mutter        libGLESv2.so.2 missing
+    plasmashell   libmount.so.1 missing
+- Build-host `ldd` reports the SAME set of unmet deps — this is
+  a PRE-EXISTING recipe-architecture gap unrelated to M9.R.29
+  (the M9.R.14f LD_LIBRARY_PATH-reflected RPATH didn't pick up
+  every transitive lib).
+
+
 REMAINING HONEST GAPS (smaller than M9.R.28)
 =============================================
+- DE binaries' RPATH chains miss util-linux/zlib/libdrm/libglvnd
+  transitive deps. The M9.R.14f mechanism delivers most but not
+  all. Fix shape: enforce transitive buildDep RPATH propagation,
+  OR post-install patchelf to add the missing dirs.
 - cryptsetup: nix multi-output bin (libgcrypt-dev/bin/libgcrypt-config)
   not on PATH at configure time. M9.R.14h.5-style multi-output walk
   threads include / lib but not bin. Genuine resolver fix shape:
@@ -124,6 +151,3 @@ REMAINING HONEST GAPS (smaller than M9.R.28)
   libxext / libxau / libxdmcp from-source recipes (estimated ~15
   additional leaf recipes; each is a copy-paste of an xorgproto-style
   recipe + a custom sha256 + correct sibling-recipe deps).
-
-ISO + DE smoke evidence: see m9r29_qemu_de_smoke.log under
-recipes/reproos-iso/run-evidence/ once the ISO build completes.

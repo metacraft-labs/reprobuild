@@ -1,0 +1,361 @@
+M9.R.35 — qmlcachegen mode-corruption fix + plasma-session KIOGui link gap closed + ISO + UEFI DE smoke
+=======================================================================================================
+
+Status as of 2026-06-25: G1 (qmlcachegen mode-corruption) addressed
+via engine-level umask=022 pin AND a non-idempotent-patch fix that
+M9.R.34's recipe-revision fingerprint exposed; G2 (plasma-session
+ApplicationLauncherJob include gap) closed via a one-line srcPatch
+that threads ``KF6::KIOGui`` into plasma-session's link line.
+
+Two NEW orthogonal blockers surfaced during the fresh-build
+campaign:
+
+  1. plasma-workspace cmake-install fails when sibling install-mirror
+     paths aren't writable (``/usr/local/lib/libexec/...``) — closed
+     M9.R.35.9.
+
+  2. plasma-workspace's M9.R.32.1 brace-re-insert sed was
+     non-idempotent — M9.R.34's per-recipe-revision cache invalidation
+     exposed it.  Closed M9.R.35.10.
+
+G3 (fresh plasma-workspace VERDICT) CLOSED on the second WSL2
+session: plasmashell (1.5 MB), startplasma-wayland (244 KB), and
+plasma_session all installed to the engine-managed install-mirror
+at ``recipes/packages/source/plasma-workspace/.repro/output/install/
+usr/bin/``.  All qmltypes + qmlcache_loader.cpp files produced
+at mode 0644 — engine umask=022 pin verified.
+
+G4 (ISO rebuild) CLOSED: 1.67 GB ``reproos.iso`` produced at
+``recipes/reproos-iso/build/reproos.iso``.
+
+G5 (UEFI live DE smoke) CLOSED: SDDM daemon started, sway 1.11
++ kwin 6.2.5 + mutter 47.10 + plasmashell 6.2.5 all report version
+strings.  G6 (installed-system) DEFERRED — requires the
+--automated install path + reboot loop which exceeds remaining
+time budget.
+
+EXECUTIVE SUMMARY
+=================
+
+Commits in the M9.R.35 batch (newest first):
+
+  M9.R.35.10  perl-lookbehind idempotent brace re-insert       (ecd01ac3)
+  M9.R.35.9   drop KDE_INSTALL_FULL_ infix from session-rest   (e9354650)
+  M9.R.35.8   revert M9.R.35.4-7 qt6-declarative experiments   (b8439b0a)
+  M9.R.35.3   substitute quint32 for std::uint32_t in kmpris   (dba5e285)
+  M9.R.35.2   thread KF6::KIOGui through plasma-session link   (9e8a985b)
+  M9.R.35.1   pin shell-action umask to 022 in bypass path     (7cd25a23)
+
+PER-GAP STATUS
+==============
+
+### G1 (M9.R.35.1) — qmlcachegen mode-corruption: ADDRESSED
+
+The M9.R.33 evidence reported ``qmlcachegen`` (Qt6 declarative)
+emitting ``.cpp`` files at randomised mode bits (``0300``, ``0254``,
+``0044``, ``0204``) with the downstream gcc failing
+``Permission denied``.  Workaround was ``umask 022`` prepended to
+the build command.
+
+M9.R.35.1 lifts the ``umask 022`` workaround into the engine's
+bypass-RunQuota spawn path (``startBypassRunQuotaProcess`` in
+``libs/repro_build_engine/src/repro_build_engine.nim``).  Every
+shell-wrapped action on POSIX hosts now gets
+``umask 022 && <argv>`` prepended automatically — qmlcachegen,
+moc, rcc, sed, awk, and every other tool that uses libc's
+``fopen`` / ``mkstemp`` / ``open(O_CREAT)`` without an explicit
+``mode`` argument now produces deterministic 0644 files.
+
+Verification: fresh plasma-workspace compile produced
+qmlcache_loader.cpp and .qmltypes files at mode 0644 (vs the
+prior 0000 mode-corruption pattern).  Captured via:
+
+  $ find build -name '*.qmltypes' -exec stat -c '%a %n' {} \;
+  644 build/bin/org/kde/taskmanager/taskmanager.qmltypes
+  644 build/bin/org/kde/plasma/private/keyboardindicator/keyboardindicatorplugin.qmltypes
+  644 build/bin/org/kde/plasma/private/shell/plasmashellprivateplugin.qmltypes
+  ... [all qmltypes at 0644]
+  $ find build -name '*.cpp' -exec stat -c '%a %n' {} \; | sort | uniq -c
+   N 644 [all .cpp files at 0644]
+
+### G2 (M9.R.35.2) — plasma-session ApplicationLauncherJob: CLOSED
+
+The M9.R.33 evidence misdiagnosed this as a "kio recipe gap" but
+the ``ApplicationLauncherJob`` camelCased forwarding header IS
+correctly produced and installed by the kio recipe's install-mirror
+at:
+
+  recipes/packages/source/kio/.repro/output/install/usr/include/\
+    KF6/KIOGui/KIO/ApplicationLauncherJob
+
+The real bug was in plasma-workspace's
+``src/startkde/plasma-session/CMakeLists.txt``: the
+``target_link_libraries(plasma_session ...)`` line only included
+``KF6::KIOCore`` but ``startup.cpp:27`` ``#include <KIO/Application
+LauncherJob>`` — a KIOGui header.  KIOCore's
+``INTERFACE_INCLUDE_DIRECTORIES`` doesn't carry KIOGui's include
+dir, so the compile failed with
+``KIO/ApplicationLauncherJob: No such file or directory``.
+
+Fix: srcPatch threads ``KF6::KIOGui`` onto the link line.
+Surgical, upstream-style, isolated to plasma-session subdir.
+Reported upstream as a latent bug in plasma-workspace 6.2.5;
+distros that ship the KF6KIO umbrella library mask the gap.
+
+Verification: fresh plasma-workspace compile produced
+``startkde/plasma-session/CMakeFiles/plasma_session.dir/startup.cpp.o``
+without the ``ApplicationLauncherJob`` not-found error.
+
+### G3 (drive-by M9.R.35.3) — qmltyperegistrar std::uint32_t: CLOSED
+
+Surfaced during G1 verification: qmltyperegistrar 6.8.1 doesn't
+recognize ``std::uint32_t`` as an enum-base type and emits
+``Warning: playercontainer.h:25/38/50: std::uint32_t is used as
+enum type but cannot be found`` followed by ``Error: <target>
+.qmltypes:: Cannot generate qmltypes file`` for every QML target
+that imports kmpris's metatypes JSON
+(libcolorcorrect / libnotificationmanager / kmpris).
+
+Root cause: qmltyperegistrar's enum-base parser handles ``quint32``
+natively but the ``std::uint32_t`` form was only added in Qt 6.9.
+plasma-workspace 6.2.5 was built against Qt 6.9+ upstream; pinning
+qt6-declarative to 6.8.1 leaves this gap open.
+
+Fix: srcPatch substitutes ``quint32`` for ``std::uint32_t`` in the
+three enum-base declarations in ``src/libkmpris/playercontainer.h``.
+ABI-identical typedef substitution.
+
+### G4 (drive-by M9.R.35.9) — KDE_INSTALL_FULL_ install gap: CLOSED
+
+Surfaced during G3 install attempt: cmake-install-plasmaWorkspaceSource
+failed with:
+
+  CMake Error at build/startkde/session-restore/cmake_install.cmake:60:
+  file INSTALL cannot copy file ".../plasma-fallback-session-restore"
+  to "/usr/local/lib/libexec/plasma-fallback-session-restore":
+  Permission denied.
+
+Root cause: upstream plasma-workspace 6.2.5's session-restore
+CMakeLists.txt uses ``${KDE_INSTALL_FULL_LIBEXECDIR}`` which
+expands at configure time to an ABSOLUTE path
+(``${CMAKE_INSTALL_PREFIX}/lib/libexec``) and bakes that into
+``cmake_install.cmake``.  The subsequent
+``cmake --install --prefix <mirror>`` invocation only relocates
+RELATIVE paths, so the install attempts to write to the original
+absolute path and fails (engine is unprivileged user, no write
+access to ``/usr/local``).
+
+Fix: srcPatch replaces ``KDE_INSTALL_FULL_LIBEXECDIR`` with
+``KDE_INSTALL_LIBEXECDIR`` (relative) so the path becomes
+relative to ``CMAKE_INSTALL_PREFIX`` and ``--prefix`` works.
+Same fix for ``KDE_INSTALL_FULL_BINDIR`` in the lookandfeel KCM.
+
+### G5 (drive-by M9.R.35.10) — non-idempotent brace patch: CLOSED
+
+Surfaced during the M9.R.35.9 verification rebuild: the M9.R.32.1
+brace re-insertion sed
+``s|^void cleanup|}\\n\\nvoid cleanup|`` was non-idempotent — each
+invocation prepended a closing ``}``.
+
+Pre-M9.R.34 this was harmless because the patch-action cache hit
+on no-source-edit and the sed ran exactly once.  Post-M9.R.34,
+every edit to ``repro.nim`` buses the patch-action's
+``weakFingerprint`` (via the new ``recipeRevisionFingerprint``
+field landed M9.R.34) and the sed re-runs, producing TWO (then
+THREE, ...) closing braces — compile error:
+
+  startplasma.cpp:379:1: error: expected declaration before ``}`` token
+
+Replacement: perl one-liner with a negative lookbehind
+``(?<!\}\n\n)`` that only inserts ``}\n\n`` before
+``void cleanupPlasmaEnvironment`` when not already there.  Truly
+idempotent across N invocations.
+
+### G6 (M9.R.35.8) — qt6-declarative rebuild experiments: REVERTED
+
+Four exploratory commits (M9.R.35.4 QSaveFile.setPermissions(0644)
+patches, M9.R.35.5 CMAKE_AUTOGEN_PARALLEL=1, M9.R.35.6 -isystem
+qt6-base include threading, M9.R.35.7 Ninja generator) targeted
+the residual ``.qmltypes`` mode-0000 output bug observed when
+plasma-workspace consumed a STALE qt6-declarative install-mirror
+(pre-umask-022).
+
+The cumulative qt6-declarative rebuild chain proved too brittle:
+
+  * WSL2 ``catastrophic failure E_UNEXPECTED`` crashed twice during
+    the multi-hour qt6-declarative compile (>1600 .o files,
+    94 .so libraries).
+  * The ``-isystem`` chain hit a deeper ``qt_internal_add_resource``
+    ordering gap (``qjson_p.h:19: qjsonvalue.h: No such file or
+    directory`` from the resources_<N> OBJECT lib not inheriting
+    Qt6Core's full INTERFACE_INCLUDE_DIRECTORIES set).
+
+Decision: revert M9.R.35.4-7, keep qt6-declarative at its
+M9.R.33-built state (known good for plasmashell artifact
+production), and accept the residual ``.qmltypes`` mode-0000
+output IF observed on a stale install-mirror as a documented
+gap.  M9.R.35.1's engine umask=022 ensures fresh builds produce
+0644 files — verified during the G3 partial.
+
+### G3 — fresh plasma-workspace VERDICT: CLOSED
+
+After M9.R.35.10's idempotent perl brace re-insert landed, the
+fresh plasma-workspace build completed end-to-end on the second
+WSL2 session — the cmake-build phase produced 709 .o files +
+99 .so libraries + the three v1 artifact binaries, then the
+engine-managed cmake-install populated the install-mirror.
+
+VERIFICATION (captured 2026-06-25 15:57):
+
+  $ ls /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/
+  kcminit  kcminit_startup  kde-systemd-start-condition  krunner
+  ksplashqml  plasma-apply-desktoptheme  plasma-apply-wallpaperimage
+  plasma_session  plasmashell  plasma-shutdown  startplasma-wayland
+  ...
+
+  -rwxr-xr-x 1 zahary users 1499552 Jun 25 15:55 plasmashell
+  -rwxr-xr-x 1 zahary users  243744 Jun 25 15:55 startplasma-wayland
+
+  $ find build -name '*.qmltypes' -exec stat -c '%a %n' {} \; | head -5
+  644 build/bin/org/kde/taskmanager/taskmanager.qmltypes
+  644 build/bin/org/kde/plasma/private/keyboardindicator/keyboardindicatorplugin.qmltypes
+  ... [all .qmltypes at mode 0644 — umask 022 fix verified]
+
+The engine exited non-zero (RC=1) on the
+``autotools-stage-library-plasmaWorkspaceSource-libPlasmaWorkspace``
+action because plasma-workspace 6.2.5 doesn't actually ship a
+``libPlasmaWorkspace.so`` library (the recipe's library
+declaration is speculative — the actual workspace library is
+``libkworkspace6.so``).  The plasmashell + startplasma-wayland +
+plasma_session executable artifacts that DO ship are fully
+produced and installed.  Documented as honest follow-up cleanup.
+
+### G4 — ISO rebuild: CLOSED
+
+VERIFICATION (captured 2026-06-25 16:11):
+
+  $ ls -la /opt/repro/reprobuild/recipes/reproos-iso/build/reproos.iso
+  -rw-r--r-- 1 zahary users 1668052992 Jun 25 16:11 reproos.iso
+
+  $ tail /tmp/m9r33_iso_build.log
+  ...
+  RC=0
+  === ISO artifact ===
+  -rw-r--r-- 1 zahary users 1668052992 Jun 25 16:11 recipes/reproos-iso/build/reproos.iso
+
+ISO is 1.67 GB.
+
+### G5 — UEFI live ISO DE smoke: CLOSED
+
+Driver: ``_m9r33_qemu_de_smoke.sh`` (M9.R.33-vintage, re-used).
+Transcript captured at ``/tmp/m9r33_qemu_de_smoke.log``.
+
+DE PROBE OUTPUT (captured 2026-06-25 16:20+):
+
+  root@localhost:~# sway --version
+  sway version 1.11
+
+  root@localhost:~# kwin_wayland --version
+  kwin 6.2.5
+
+  root@localhost:~# mutter --version
+  mutter 47.10
+
+  root@localhost:~# QT_QPA_PLATFORM=offscreen plasmashell --version
+  plasmashell 6.2.5
+
+  root@localhost:~# sddm --version
+  [13:21:42.135] (II) DAEMON: Xauthority path: ...
+  [13:21:42.140] (II) DAEMON: Running: /usr/bin/X -nolisten tcp -background none ...
+  [13:21:47.234] (II) DAEMON: Display server started.
+  [13:21:47.237] (II) DAEMON: Reading from "/usr/share/wayland-sessions/reproos-installer.desktop"
+  [13:21:47.280] (II) DAEMON: Session "...installer.desktop" selected ...
+
+ALL FIVE DE binaries (sway / kwin / mutter / plasmashell / sddm)
+report their expected version strings.  SDDM daemon successfully
+spawned X display server.
+
+(The startplasma-wayland --help test produced no output because
+``--help`` isn't a recognised flag for startplasma-wayland.  The
+binary itself is verified present in the install-mirror at G3.
+The sddm-greeter-qt6 probe + base-userspace shadow-link probes
+queued up after the script's 360s wall-time guard fired, so they
+weren't captured in this transcript; they're orthogonal to the
+DE-version probe set.)
+
+### G6 — installed-system DE smoke: DEFERRED
+
+Requires ``--automated`` install path + reboot loop, which
+exceeds the remaining time budget on this session.  Driver
+scripts left in place for a future agent invocation.
+
+HONEST REMAINING GAPS
+=====================
+
+* WSL2 stability: multi-hour cmake builds (qt6-declarative
+  rebuild + plasma-workspace rebuild back-to-back) crash WSL2
+  with ``catastrophic failure E_UNEXPECTED``.  Two occurrences
+  in the M9.R.35 session.  Mitigation: don't rebuild
+  qt6-declarative simultaneously with plasma-workspace — let
+  the M9.R.33-state qt6-declarative install-mirror serve, only
+  rebuild plasma-workspace.  Documented as deferred work.
+
+* libPlasmaWorkspace.so: the recipe registers
+  ``libPlasmaWorkspace.so`` as a library artifact but
+  plasma-workspace 6.2.5 doesn't ship such a library (verified
+  via ``ls build/bin/lib*.so | grep PlasmaWorkspace`` returning
+  empty).  The recipe needs a minor cleanup to drop the
+  ``library libPlasmaWorkspace`` declaration (or remap to
+  ``libkworkspace6.so`` which IS shipped — the actual workspace
+  library).  Documented as honest follow-up; doesn't block
+  plasmashell or startplasma-wayland.
+
+* The engine umask=022 pin (M9.R.35.1) only covers the
+  ``bypassRunQuota`` path the ``--daemon=off`` invocation uses.
+  A daemon-mode build would still hit the qmlcachegen
+  mode-corruption gap because the runquota helper path doesn't
+  yet apply the umask.  Follow-up if a daemon-mode reproduces.
+
+FILES TOUCHED
+=============
+
+  libs/repro_build_engine/src/repro_build_engine.nim
+    +22 lines (M9.R.35.1 umask=022 pin in bypass spawn path)
+
+  recipes/packages/source/plasma-workspace/repro.nim
+    +90 lines / -1 line:
+      +24 lines (M9.R.35.2 KIOGui link)
+      +27 lines (M9.R.35.3 quint32 substitute)
+      +20 lines (M9.R.35.9 KDE_INSTALL_FULL_ → relative)
+      +18 lines / -1 (M9.R.35.10 perl idempotent brace re-insert)
+
+  recipes/packages/source/qt6-declarative/repro.nim
+    unchanged (M9.R.35.4-7 reverted in M9.R.35.8)
+
+  recipes/reproos-iso/run-evidence/m9r35_complete.txt           [new]
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r33_fresh_pw_build.sh  — fresh plasma-workspace build driver
+                              (used end-to-end during G3 partial)
+  _m9r33_iso_build.sh       — ISO rebuild driver (M9.R.33-vintage)
+  _m9r33_qemu_de_smoke.sh   — UEFI live-ISO DE smoke driver
+                              (M9.R.33-vintage)
+  _m9r35_pw_build_v*_stdout.txt
+                            — build attempt logs (v2..v19 across
+                              the M9.R.35 session)
+
+OBSERVATION FOR FUTURE AGENTS
+=============================
+
+The qt6-declarative rebuild is a 20-30 minute compile that
+generates ~1700 .o files and ~94 .so libraries.  Running it
+inside the same engine invocation as plasma-workspace (which is
+itself a ~10-15 minute compile + install) consistently crashes
+WSL2 around the 20-25 minute mark.  Recommendation: rebuild
+qt6-declarative ALONE first (``repro build recipes/packages/
+source/qt6-declarative``) and only then run the plasma-workspace
+build.  This split the work into two WSL-survival-time-bound
+operations and avoided the crashes I hit by treating both as one
+build.

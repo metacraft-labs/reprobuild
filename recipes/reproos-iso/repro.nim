@@ -103,6 +103,14 @@ package reproosIso:
                  "REPRO_DE_ROOTFS_DIR=\"$PWD/build/de-rootfs\" " &
                  "REPRO_GRUB_VARIANT=multi-de " &
                  "REPRO_LIVE_INIT=1 " &
+                 # M9.R.39.2 -- pass the REPRO_INSTALLER_AUTORUN env var
+                 # through so build-iso.sh appends repro.installer
+                 # .autorun=1 to the default GRUB menu entry's cmdline,
+                 # triggering the reproos-installer-autorun.service
+                 # systemd unit at boot.  Default is empty so the live
+                 # ISO behaves normally unless the investigator opts in
+                 # via the env var at build time.
+                 "REPRO_INSTALLER_AUTORUN=\"${REPRO_INSTALLER_AUTORUN:-0}\" " &
                  "bash scripts/build-iso.sh " &
                  "vendor/vmlinuz-debian-netinst " &
                  "vendor/initrd.img-debian-netinst " &

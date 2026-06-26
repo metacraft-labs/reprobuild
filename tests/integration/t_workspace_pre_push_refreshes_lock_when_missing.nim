@@ -204,10 +204,13 @@ suite "M18 — repro check --mode=pre-push (lock-refresh path)":
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
 
-      # No lock has been created yet — confirm preconditions.
+      # No lock has been created yet — confirm preconditions. RA-1: no
+      # per-repo lock file and no legacy index.toml exist.
       let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
-      let lockIndex = manifestsRoot / "locks" / "lib-a" / "index.toml"
-      check not fileExists(lockIndex)
+      let lockFile = manifestsRoot / "locks" / "lib-a" / "lib-a" /
+        (fx.libA.sha & ".toml")
+      check not fileExists(lockFile)
+      check not fileExists(manifestsRoot / "locks" / "lib-a" / "index.toml")
 
       let refsFile = fx.scratch / "pushed-refs.txt"
       writeRefsFile(refsFile, "refs/heads/main", fx.libA.sha)
@@ -224,12 +227,13 @@ suite "M18 — repro check --mode=pre-push (lock-refresh path)":
       check report["failures"].len == 0
       let lockUpdate = report["lockUpdate"]
       check lockUpdate["kind"].getStr() == "created"
-      check lockUpdate["lockFilePath"].getStr().len > 0
-      check lockUpdate["indexFilePath"].getStr() == lockIndex
+      check lockUpdate["lockFilePath"].getStr() == lockFile
+      # RA-1: no index is written.
+      check lockUpdate["indexFilePath"].getStr() == ""
       check lockUpdate["triggerRepo"].getStr() == "lib-a"
       check lockUpdate["triggerSha"].getStr() == fx.libA.sha
 
-      # On-disk side effects: the gate wrote both the lock file and
-      # the index entry under the single-project manifest layer.
-      check fileExists(lockIndex)
-      check fileExists(lockUpdate["lockFilePath"].getStr())
+      # On-disk side effects: the gate wrote the per-repo lock file and
+      # NO index.toml under the single-project manifest layer.
+      check fileExists(lockFile)
+      check not fileExists(manifestsRoot / "locks" / "lib-a" / "index.toml")

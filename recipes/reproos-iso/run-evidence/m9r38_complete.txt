@@ -1,0 +1,232 @@
+M9.R.38 — close the M9.R.37 carry: ISO rebuild + clean install/boot/DE smoke
+==============================================================================
+
+Status as of 2026-06-26: PARTIAL.
+
+  G1 (ISO rebuild)         CLOSED  RC=0, M9.R.37.7+8 GRUB fixes baked in
+  G2 (clean install)       OPEN    installer hits ``munmap_chunk():
+                                   invalid pointer`` early in init under
+                                   the live ISO env -- ROOT CAUSE NOT
+                                   FOUND
+  G3 (boot installed)      BLOCKED on G2 (no installed disk to boot)
+  G4 (DE smoke transcript) BLOCKED on G3
+  G5 (close-out)           this file
+
+EXECUTIVE SUMMARY
+=================
+
+The M9.R.37 chain landed three carry items: M9.R.37.6 boot-installed
+driver, M9.R.37.7 GRUB serial-console wiring, M9.R.37.8 vmlinuz path
+fix.  M9.R.38 was supposed to rebuild the ISO with those three fixes,
+re-run install/boot to capture the installed-system DE smoke
+transcript.
+
+G1 succeeded after a recipe-wiring fix: ``recipes/reproos-iso/``'s
+``extraInputs`` lists the installer BINARY (not source), so a fresh
+``installer_state.cpp`` doesn't trigger an installer rebuild via the
+ISO recipe.  M9.R.38.1 added an explicit
+``_m9r38_rebuild_installer.sh`` driver that invokes
+``repro build apps/reproos-installer`` directly, plus a verifier that
+greps the installer binary for the M9.R.37.7+8 GRUB-emit strings.
+Two clean rebuilds (00:11 + 00:51 + 00:57) produced bit-identical
+binaries with both fixes baked in.
+
+G2 hit a HARD WALL: the freshly-built installer aborts with
+``munmap_chunk(): invalid pointer`` very early in Qt init (right
+after the locale C->C.UTF-8 message, before Phase 1).  Same crash
+under both the clean driver (_m9r38_install.sh) and the diagnostic
+driver (_m9r37_install_diag.sh) -- the strace tail shows the
+launcher exec'd ``stdbuf -oL -eL /usr/bin/reproos-installer
+--automated /etc/reproos/auto-config.toml``, then strace's child
+waited on do_wait and the installer aborted before Phase 1.
+
+The crash is SPECIFIC to the live ISO env:
+
+  * On the host (eli-wsl, outside QEMU), the EXACT SAME binary at
+    ``apps/reproos-installer/.repro/output/install/usr/bin/reproos-installer``
+    runs cleanly under ``QT_QPA_PLATFORM=offscreen ... --automated``
+    -- gets to Phase 1, fails on ``spawn failed: ... execve: No such
+    file or directory`` because ``repro`` isn't on PATH in the host
+    nix-shell.  No munmap.
+
+  * On the host via the launcher (with a symlink at
+    ``/usr/bin/reproos-installer``), same thing -- Phase 1 reaches
+    repro spawn, no munmap.
+
+  * Inside the live ISO QEMU, immediate munmap_chunk + SIGABRT
+    (exit 134 = 128 + 6) before any Phase output.
+
+REGRESSION VS M9.R.37
+---------------------
+
+The M9.R.37 install at 18:47 on 2026-06-25 with the installer binary
+built at 21:28 the same day completed ALL 6 phases successfully (the
+disk got partitioned, formatted, kernel+initrd copied to /mnt/boot,
+GRUB installed, grub.cfg written -- the M9.R.37.6 boot of that disk
+showed GRUB loading grub.cfg and failing on ``/boot/vmlinuz not
+found`` which is exactly what M9.R.37.8 was meant to fix).
+
+Same git state (M9.R.37.7 cpp + minimal M9.R.37.8 cpp delta) built
+between 00:11 and 00:57 today produces a binary that crashes
+identically.  Even reverting M9.R.37.8's cpp delta locally and
+rebuilding fresh produces a 169928-byte binary that ALSO crashes
+identically.  The size went from 154496 (M9.R.37 working) to 169928
+(M9.R.38 broken) without a source change that explains it.
+
+ABI MISMATCH HYPOTHESIS (TESTED, FALSIFIED AS PRIMARY CAUSE)
+-------------------------------------------------------------
+
+The de-rootfs mirror contains TWO Qt6 versions:
+
+  * ``/nix/store/zp6r9bxds...-qtbase-6.10.1/`` -- Qt 6.10.1
+  * ``/opt/repro/.../qt6-base/.repro/output/install/usr/lib/`` -- 6.8.1
+
+Inspection showed the M9.R.36.1/M9.R.37.5 launcher walked
+``/nix/store/*/lib`` for any ``qt-6/plugins`` dir and added it to
+QT_PLUGIN_PATH / QT_QPA_PLATFORM_PLUGIN_PATH -- which would have
+matched qtbase-6.10.1 and caused Qt 6.8.1 binary to load 6.10.1
+plugins (C++ ABI mismatch -> heap corruption -> munmap_chunk).
+
+M9.R.38.3 fixed the launcher to:
+
+  1. SKIP all ``/nix/store/*-qt*-*/lib`` dirs in the qt-6/plugins +
+     qt-6/qml walk.
+  2. EXPLICITLY add ``/opt/repro/.../qt6-base|qt6-declarative|
+     qt6-quickcontrols2|qt6-tools/.repro/output/install/usr/lib/
+     qt-6/{plugins,qml}`` after the nix-store walk.
+
+ISO rebuild #4 (01:31) staged the M9.R.38.3 launcher.  G2 install
+attempt #4 (01:35) STILL CRASHED with the same munmap signature.
+That falsifies the launcher-qt-mix hypothesis as the PRIMARY cause
+-- since the launcher's plugin discovery now only includes 6.8.1
+paths and the crash happens BEFORE any Qt platform plugin loads
+(the locale C->C.UTF-8 message is QCoreApplication's init, plugin
+load happens later under QGuiApplication).
+
+Possible remaining causes (not yet diagnosed):
+
+  * libstdc++.so.6 mismatch -- the live ISO's Debian Trixie ships
+    libstdc++.so.6 from gcc-12; the installer was linked against
+    gcc-14.3.0-lib's libstdc++ via RPATH last entry.  If ld.so
+    resolves libstdc++ via the Debian path (system loader cache)
+    before the RPATH entry, the binary calls C++ runtime built for
+    14 against runtime version 12 -> ABI gap on any new vtable.
+    LD_DEBUG=libs would confirm.
+
+  * Qt6Core 6.8.1's QObject vtable layout vs the libraries it
+    transitively pulls in -- if libQt6Network or libQt6Concurrent
+    resolve to 6.10.1 nix-store paths (the launcher's skip pattern
+    covers qtbase-* but possibly not all transitive subpaths the
+    rpath isn't fully patched on).
+
+Confirming requires running ``LD_DEBUG=libs strace -e openat
+/usr/bin/reproos-installer --automated ...`` inside the live ISO
+to see EVERY shared-lib resolution decision the loader makes.  The
+M9.R.37.1 diag harness writes /tmp/installer.strace inside the
+ephemeral tmpfs that vanishes on poweroff; the next iteration needs
+to ``cp`` the trace to /mnt (post-Phase-3 mount) BEFORE poweroff so
+the trace survives.
+
+WHAT LANDED
+===========
+
+  M9.R.38.1   _m9r38_rebuild_installer.sh + verifier      (4825350d)
+  M9.R.38.2   _m9r38_install.sh clean-install driver      (291c83db)
+  M9.R.38.3   launcher skip nix-store Qt6 + prepend repro (27e1ec90)
+
+WHAT WAS ATTEMPTED + FAILED
+===========================
+
+  G1 ISO rebuild #1 (00:24)   RC=0, ISO good, but stage-de-rootfs
+                              picked up the STALE 21:28 installer
+                              binary because the recipe wiring doesn't
+                              chain installer-source -> installer-binary
+                              -> ISO.
+
+  G1 ISO rebuild #2 (00:26)   RC=0 after explicit installer rebuild;
+                              new binary has both M9.R.37.7 + .8 fixes.
+
+  G2 install attempt #1       INSTALLER_RC=134 (SIGABRT), munmap_chunk
+  (clean, 00:27)              before Phase 1.  qcow2 stays at 192 KiB
+                              (qcow2 metadata only, no data clusters).
+
+  G2 install attempt #2       Same crash signature.  Diag strace tail
+  (diag, 00:35)               shows execve to /usr/bin/reproos-
+                              installer + ``stdbuf -oL -eL`` wrapper +
+                              ``munmap_chunk(): invalid pointer`` +
+                              ``Aborted``.
+
+  G1 ISO rebuild #3 (01:09)   RC=0 with installer reverted locally to
+                              M9.R.37.7-only cpp (no M9.R.37.8 vmlinuz
+                              path fix) -- same 169928-byte binary
+                              produced, confirming source delta isn't
+                              the cause.
+
+  G2 install attempt #3       Same crash signature with the M9.R.37.7-
+                              only binary.  This RULES OUT M9.R.37.8
+                              as the regression source.
+
+  G1 ISO rebuild #4 (01:34)   RC=0 with M9.R.38.3 launcher fix that
+                              skips nix-store Qt6 dirs + explicitly
+                              wires repro-side Qt6 plugin paths.
+
+  G2 install attempt #4       Same munmap_chunk crash.  Falsifies the
+  (clean, M9.R.38.3, 01:35)   nix-store Qt-mix hypothesis as the
+                              PRIMARY cause; the crash now happens
+                              even with a launcher that can only
+                              point Qt at the build-time 6.8.1 plugin
+                              tree.
+
+NEXT STEPS (FOR M9.R.39 OR CARRY)
+==================================
+
+  1. Capture strace BEFORE poweroff: extend _m9r37_install_diag.sh
+     so it ``cp -f /tmp/installer.strace
+     /mnt-installed-disk-or-vendor/...`` before the FIFO sends
+     poweroff, so the trace survives the live-ISO tmpfs unmount.
+
+  2. Add ``LD_DEBUG=libs`` to the launcher's exec env in DIAG mode
+     so the loader dumps every library lookup decision to stderr,
+     which the launcher redirects to /tmp/installer.log.
+
+  3. Inspect every libQt6* path opened by ld.so on init -- if ANY
+     6.10.1 path is touched, the launcher's filter needs tightening.
+
+  4. If the libQt6 paths are all-6.8.1, look elsewhere:
+       * libstdc++ from gcc-14.3.0-lib (rpath last entry) vs Debian
+         Trixie's libstdc++ -- the C++ runtime mismatch can cause
+         heap corruption.
+       * QtQml's QML cache file format change between 6.8 and 6.10
+         can manifest as early-init heap weirdness.
+
+  5. Bisect by rebuilding qt6-base from scratch and verifying the
+     installer rebuild against the fresh qt6 doesn't crash.
+
+HONEST REMAINING GAP
+====================
+
+G2/G3/G4 are open.  The M9.R.38 milestone closed G1 (ISO rebuild with
+both M9.R.37.7+8 GRUB fixes baked into the installer binary) and
+characterized G2's blocker (live-ISO heap corruption on installer
+init that does NOT reproduce on the host).  Three install attempts
+across two binaries (M9.R.37.8 + M9.R.37.7-only) both crashed with
+the same signature.
+
+The M9.R.37 install at 18:47 yesterday (against the 21:28 binary
+that's now been overwritten by the M9.R.38 rebuilds) actually
+WORKED -- Phase 6 reached, install complete logged, the M9.R.37.6
+boot-installed driver saw GRUB load grub.cfg.  The regression is
+purely between 21:28 and 00:11 on the build side; nothing in the
+recipe layer or the live ISO layer was changed in that window.
+
+This gap is SMALLER than the M9.R.37 entry gap (silent installer
+wedge that took 8 sub-milestones to characterize) but the underlying
+regression-vector hunt requires a real bisect that exceeds the
+M9.R.38 wall budget.
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r38_rebuild_installer.sh         explicit installer rebuild
+  _m9r38_verify_installer_grub_fix.sh confirm M9.R.37.7+8 in binary
+  _m9r38_install.sh                   clean automated-install driver

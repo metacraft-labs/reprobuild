@@ -249,8 +249,13 @@ proc seedMetadataBranch(fx: M15Fixture; branch: string) =
     project = "lib-a", branch = branch)
 
 proc invokeCheckout(fx: M15Fixture; name: string): CmdResult =
+  # RA-9: ``checkout`` switches working trees, so it is a destructive
+  # multi-repo command and refuses in a non-interactive context (the
+  # natural state here) without ``--yes``. These cases exercise the
+  # post-confirmation switch outcomes, so they opt out with ``--yes``;
+  # the dedicated RA-9 suite covers the non-TTY refuse path.
   runShell(shellCommand(@[
-    fx.reproBin, "checkout", name,
+    fx.reproBin, "checkout", name, "--yes",
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
@@ -415,7 +420,12 @@ suite "M15 — repro checkout <branch> switches all repos":
       check recorded.isSome
       check recorded.get() == "main"
 
-  test "test_m15_checkout_refuses_when_any_repo_dirty":
+  test "test_m15_checkout_stashes_dirty_repo_and_switches":
+    # RA-29 reconciliation: ``repro checkout`` no longer REFUSES on a dirty
+    # repo. The dirty repo's WIP is stashed-on-leave (keyed by the branch
+    # being left) and the workspace switches; the clean siblings switch
+    # normally. The dedicated RA-29 round-trip test
+    # (``t_checkout_stashes_and_restores_per_repo_wip``) covers restore.
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -426,39 +436,43 @@ suite "M15 — repro checkout <branch> switches all repos":
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
 
-      # Every repo has the destination branch locally — the only
-      # blocker is lib-b being dirty.
+      # Every repo has the destination branch locally; lib-b is dirty.
       for name in ["lib-a", "lib-b", "lib-c"]:
         createLocalBranchAtHead(gitBin, fx.workspaceRoot / name,
           "feature-y")
       dirtyTheTree(fx.workspaceRoot / "lib-b")
 
       let res = invokeCheckout(fx, "feature-y")
-      check res.code == 2
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
 
       let report = readReport(fx)
-      check report["exitCode"].getInt() == 2
-      check report["recordedBranch"].getStr() == "main"
+      check report["exitCode"].getInt() == 0
+      check report["recordedBranch"].getStr() == "feature-y"
 
+      # The dirty repo was stashed-on-leave and switched.
       let entryB = repoEntryByName(report, "lib-b")
-      check entryB["outcome"].getStr() == "dirty_refused"
-      check entryB["dirtyReason"].getStr().len > 0
+      check entryB["outcome"].getStr() == "switched"
+      check entryB["stashedOnLeave"].getBool() == true
 
-      # Clean siblings report ``ready_local`` (nothing was scheduled).
+      # Clean siblings switched without a stash.
       let entryA = repoEntryByName(report, "lib-a")
       let entryC = repoEntryByName(report, "lib-c")
-      check entryA["outcome"].getStr() == "ready_local"
-      check entryC["outcome"].getStr() == "ready_local"
+      check entryA["outcome"].getStr() == "switched"
+      check entryC["outcome"].getStr() == "switched"
+      check entryA["stashedOnLeave"].getBool() == false
+      check entryC["stashedOnLeave"].getBool() == false
 
-      # No repo was switched: current branch is still ``main``
-      # everywhere, and the dirty file is intact in lib-b.
+      # Every repo is now on the new branch with a clean tree (the WIP
+      # was stashed, not left in place).
       for name in ["lib-a", "lib-b", "lib-c"]:
-        check currentBranch(gitBin, fx.workspaceRoot / name) == "main"
-      check fileExists(fx.workspaceRoot / "lib-b" / "dirty.txt")
+        check currentBranch(gitBin, fx.workspaceRoot / name) == "feature-y"
+      check not fileExists(fx.workspaceRoot / "lib-b" / "dirty.txt")
 
       let recorded = readWorkspaceBranch(fx.workspaceRoot)
       check recorded.isSome
-      check recorded.get() == "main"
+      check recorded.get() == "feature-y"
 
   test "test_m15_checkout_records_new_branch_in_metadata":
     let gitBin = findExe("git")

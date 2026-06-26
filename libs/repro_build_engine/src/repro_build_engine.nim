@@ -207,6 +207,22 @@ type
       ## value; the engine then mixes it into the canonical key
       ## bytes so two ``targetTriple`` resolutions produce two
       ## distinct entry-key hexes for the same recipe.
+    requiresElevation*: bool
+      ## Windows-System-Resources Phase E. Marks an action edge whose
+      ## execution must cross the privileged-operation broker. When
+      ## ``true`` AND the engine's
+      ## ``BuildEngineConfig.brokerSpawn`` hook is non-nil, the
+      ## scheduler's pre-launch decision point hands the action's
+      ## argv + env + cwd to the broker (via a ``pokInlineExecCall``
+      ## typed operation, built inside the wired closure) instead of
+      ## forking directly. ``false`` (the default) keeps the legacy
+      ## direct-fork path, so every pre-Phase-E action is byte-
+      ## identical to today. When ``true`` AND ``brokerSpawn`` is
+      ## ``nil`` the engine FAILS CLOSED inside ``runBuild`` with a
+      ## ``BuildEngineError`` — no silent fallback to a non-elevated
+      ## direct fork. The DSL's ``BuildActionDef.requiresElevation``
+      ## field propagates here through ``lowerGraphAction`` so the
+      ## engine consumes the same flag the build-graph author set.
 
   BuildPool* = object
     name*: string
@@ -239,6 +255,14 @@ type
     # preserves the legacy ``<monitorCliPath> --depfile …`` shape used by tests
     # and any caller that still points at a dedicated fs-snoop binary.
     monitorCliArgs*: seq[string]
+    # RA-13: the engine's parallelism knob is an ADVERTISED-FRONTIER bound, NOT
+    # an independent CPU-slot quota. It caps how many candidate actions the
+    # engine offers to / keeps in flight with RunQuota at once (it cannot offer
+    # an unbounded ready frontier); RunQuota then selects the fitting subset
+    # against the real host budget. When this value and RunQuota's grant
+    # disagree, RunQuota's grant is authoritative — this knob never throttles
+    # below what RunQuota grants, it only bounds the candidate set above it. See
+    # Build-Engine-And-Scheduler.md § "One executor, one resource authority".
     maxParallelism*: uint32
     stdoutLimit*: int
     stderrLimit*: int
@@ -320,6 +344,24 @@ type
       ## fixtures that construct a ``BuildEngineConfig`` via
       ## ``defaultBuildEngineConfig`` get a ``nil`` resolver, which
       ## is the desired pre-M9.R.7-equivalent behaviour.
+    brokerSpawn*: ElevatedExecSpawner
+      ## Windows-System-Resources Phase E. Optional broker-spawn
+      ## closure consulted at the pre-launch decision point when a
+      ## ``BuildAction.requiresElevation`` flag is set. When non-nil
+      ## the engine packages the action's argv + cwd + env into an
+      ## ``ElevatedExecRequest`` and delegates the fork to the
+      ## broker; the returned ``ElevatedExecResult`` is projected
+      ## back into the action's ``ActionResult`` so the cache layer
+      ## treats the elevated execution byte-identically to a direct
+      ## fork. When ``nil`` AND a ``requiresElevation = true`` edge
+      ## is encountered, ``runBuild`` FAILS CLOSED with a
+      ## ``BuildEngineError`` — the engine MUST NOT silently fall
+      ## back to a non-elevated direct fork. The CLI's
+      ## ``repro infra apply`` path wires a closure that funnels
+      ## the request through ``repro_elevation.dispatchOperation``;
+      ## the standalone ``repro build`` driver leaves the field
+      ## ``nil`` so an inadvertent elevated edge surfaces with the
+      ## spec-mandated diagnostic instead of running.
 
   PathSetEvidence* = object
     declaredInputs*: seq[string]
@@ -371,6 +413,15 @@ type
     trace*: seq[SchedulerTraceEvent]
     stats*: BuildStats
     traceEnabled: bool
+    runQuotaBypassed*: bool
+      ## RA-13: true when at least one action in this build launched without a
+      ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA``
+      ## bypass, or the unreachable-daemon fallback). In that state RunQuota is
+      ## NOT the resource authority for this run: host limits, cross-session
+      ## fairness, and named-pool capacity are enforced only by the engine's
+      ## LOCAL pool gate, which cannot make concurrent cross-invocation runs
+      ## safe. Surfaced in the build header + run report so the unsafe state is
+      ## never entered silently. Stays false when RunQuota gated every launch.
 
   BuildProgressEvent* = object
     kind*: BuildProgressKind
@@ -486,6 +537,76 @@ type
     ## standard-provider / CLI binding layer (reading the
     ## ``REPRO_BINARY_CACHE_*`` env vars + calling
     ## ``publishInProcess``).
+
+  ElevatedExecRequest* = object
+    ## Windows-System-Resources Phase E. Passed to the
+    ## ``brokerSpawn`` hook when the engine encounters a
+    ## ``requiresElevation = true`` build edge. Decoupled by a struct
+    ## value so the engine stays free of a hard ``repro_elevation``
+    ## dependency — the broker-spawning closure (wired by
+    ## ``repro_cli_support`` / ``repro infra apply``) constructs a
+    ## ``pokInlineExecCall`` ``PrivilegedOperation`` from this
+    ## request, dispatches it through the broker, and projects the
+    ## ``DispatchResult`` back into an ``ElevatedExecResult``.
+    ##
+    ## Fields (engine-populated, all verbatim from the build edge):
+    ##   * ``actionId`` — ``BuildAction.id`` for diagnostics and the
+    ##     ``PrivilegedOperation.address`` the hook stamps onto the
+    ##     constructed operation.
+    ##   * ``argv`` — argv[0] + argv[1..]. The literal
+    ##     ``@FILE:<path>`` tokens are preserved here (the broker side
+    ##     re-expands them under elevation, matching spec §2.1).
+    ##     ``argv[0]`` becomes ``iecExecutable``; the rest become
+    ##     ``iecArguments``.
+    ##   * ``cwd`` — ``BuildAction.cwd``; empty means "broker's cwd at
+    ##     fork time", same convention as ``pokInlineExecCall``.
+    ##   * ``env`` — the action's ``env`` list (``NAME=VALUE`` shape)
+    ##     passed straight through to ``iecEnvironment``.
+    actionId*: string
+    argv*: seq[string]
+    cwd*: string
+    env*: seq[string]
+
+  ElevatedExecResult* = object
+    ## Returned by the ``brokerSpawn`` hook. The engine projects this
+    ## into the action's ``ActionResult`` (exit code, stdout/stderr,
+    ## status) so the cache layer + downstream consumers see the same
+    ## shape they would see from a direct fork.
+    ##
+    ##   * ``ok``       — true when the broker reported the operation
+    ##                    as ``applied`` (or ``no-op``); false when the
+    ##                    broker reported drift or driver failure.
+    ##   * ``exitCode`` — the elevated process's exit code as captured
+    ##                    by ``runInlineExecCall``. ``0`` when the
+    ##                    operation succeeded inside the spec's
+    ##                    ``iecAcceptExitCodes`` set.
+    ##   * ``stdout`` / ``stderr`` — the captured tails; the broker
+    ##                    side merges stderr into stdout (see
+    ##                    ``runInlineExecCall``), so ``stderr`` is
+    ##                    typically empty and the operator reads
+    ##                    everything from ``stdout``.
+    ##   * ``diagnostic`` — empty on success; on failure the broker's
+    ##                    rendered ``DispatchResult.detail``.
+    ok*: bool
+    exitCode*: int
+    stdout*: string
+    stderr*: string
+    diagnostic*: string
+
+  ElevatedExecSpawner* = proc(req: ElevatedExecRequest):
+    ElevatedExecResult {.gcsafe, closure.}
+    ## Windows-System-Resources Phase E. The engine's seam to the
+    ## privileged-operation broker. When ``nil`` (the default) every
+    ## ``requiresElevation = true`` build edge FAILS CLOSED inside
+    ## ``runBuild`` with a ``BuildEngineError`` — the engine NEVER
+    ## silently spawns an elevation-required edge under the
+    ## non-elevated path. ``repro infra apply`` wires a non-nil
+    ## closure that constructs the matching ``pokInlineExecCall``
+    ## ``PrivilegedOperation`` and runs it through
+    ## ``repro_elevation.dispatchOperation``; the standalone
+    ## ``repro build`` driver leaves the field ``nil`` so an
+    ## inadvertent elevated edge on a non-infra-apply path surfaces
+    ## with the spec-mandated diagnostic instead of running.
 
   ResolvedToolIdentity* = object
     ## M9.N Batch B. Opaque engine-side view of the catalog's
@@ -738,7 +859,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
-             env: openArray[string] = []): BuildAction =
+             env: openArray[string] = [];
+             requiresElevation = false): BuildAction =
   let effectiveDependencyPolicy =
     if depfile.len > 0 and monitorDepfile.len == 0 and
         dependencyPolicy.kind == dgAutomaticMonitor:
@@ -766,7 +888,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
-    dependencyPolicy: effectiveDependencyPolicy)
+    dependencyPolicy: effectiveDependencyPolicy,
+    requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
                     deps: openArray[string] = [];
@@ -2154,6 +2277,41 @@ proc stripMonitorBanner*(captured: string): string =
     kept.add(line)
   kept.join("\n")
 
+proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
+  ## M9.R.36.3 — wrap an action's argv in a POSIX ``/bin/sh -c "umask 022
+  ## && <argv>"`` invocation so every spawned tool inherits the canonical
+  ## ``rw-r--r--`` (0644) / ``rwxr-xr-x`` (0755) file-creation mask.
+  ##
+  ## M9.R.35.1 lifted this pin into ``startBypassRunQuotaProcess`` (the
+  ## ``bypassRunQuota`` path used by direct ``--daemon=off`` invocations).
+  ## M9.R.36.3 extends the same pin to the runquota helper-spawn path AND
+  ## the inline-runquota batch path, both of which forward an action's
+  ## argv unchanged to ``launchProcess`` inside the runquotad helper —
+  ## meaning a daemon-mode build would otherwise still hit the umask
+  ## drift channel documented in ``startBypassRunQuotaProcess``.
+  ##
+  ## On Windows the umask concept does not apply and the wrapper would
+  ## introduce a ``/bin/sh`` dependency that the Windows build doesn't
+  ## have; on non-POSIX platforms this is the identity transform.
+  ##
+  ## Behaviour for an empty argv is the identity transform — callers can
+  ## blindly delegate without a pre-check, and downstream "empty argv"
+  ## guards keep their own error surface unchanged.
+  result = newSeqOfCap[string](argv.len)
+  when defined(posix):
+    if argv.len == 0:
+      for entry in argv: result.add(entry)
+      return result
+    var quoted = ""
+    for i, a in argv:
+      if i > 0: quoted.add(" ")
+      quoted.add(quoteShell(a))
+    result.add("/bin/sh")
+    result.add("-c")
+    result.add("umask 022 && " & quoted)
+  else:
+    for entry in argv: result.add(entry)
+
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig): Process =
   ## Path-mode escape hatch: spawn the action's argv directly via osproc,
@@ -2235,7 +2393,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   for i, a in action.argv:
     if i > 0: quotedArgv.add(" ")
     quotedArgv.add(quoteShell(a))
-  let wrapped =
+  let redirectedArgv =
     quotedArgv & " > " & quoteShell(stdoutLog) &
       " 2> " & quoteShell(stderrLog)
   when defined(windows):
@@ -2245,7 +2403,7 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     # for the real tool is delegated to ``cmd`` rather than ``startProcess``
     # because the wrapped command line itself contains the tool name.
     result = startProcess("cmd.exe",
-      args = @["/D", "/C", wrapped],
+      args = @["/D", "/C", redirectedArgv],
       env = env,
       workingDir = cwd,
       options = {poUsePath})
@@ -2275,6 +2433,36 @@ proc startBypassRunQuotaProcess(action: BuildAction;
             "drop-in bundle or provide a non-SIP sh on PATH). Refusing to run " &
             "under SIP /bin/sh, which would strip DYLD_INSERT_LIBRARIES and " &
             "produce incomplete, non-cacheable monitor evidence.")
+    # M9.R.35.1 — pin the action's umask to a deterministic 022 so every
+    # spawned tool creates files with the canonical ``rw-r--r--``
+    # (0644) / ``rwxr-xr-x`` (0755) permissions. Without this pin, the
+    # umask is inherited from whatever shell launched ``repro build``
+    # — and on WSL the inherited value can drift between invocations
+    # (observed: Qt6 ``qmlcachegen`` emitting ``qmlcache_loader.cpp``
+    # at modes ``0300`` / ``0254`` / ``0044`` / ``0204``, which then
+    # trips a downstream ``cc1plus: fatal error: <file>: Permission
+    # denied``).  qmlcachegen calls ``QSaveFile::open`` which delegates
+    # to ``QTemporaryFileEngine::initialize(0666)``, then commits via
+    # rename(); the kernel applies the calling process's umask at
+    # ``mkstemp`` time, so any process-state umask drift in the
+    # CMake → ninja → qmlcachegen fork chain bleeds into the final
+    # file's mode bits.  Pinning umask at the shell-wrap level closes
+    # the drift channel for every build action, not just qmlcachegen
+    # — the same protection benefits any tool that relies on the
+    # process umask for file-creation modes (mostly: every tool that
+    # uses libc's ``fopen`` / ``mkstemp`` / ``open(O_CREAT)`` without
+    # an explicit ``mode`` argument).
+    #
+    # Reconciliation note (merge of M9.R.35.1 umask-pin + the io-mon
+    # SIP-safe-launch work): the umask wrap and the non-SIP wrapper-shell
+    # selection are orthogonal and both required on macOS. We DELIBERATELY
+    # run ``umask 022 && …`` through ``wrapperShell`` (the non-SIP shell
+    # resolved above for monitored actions) rather than the SIP-protected
+    # ``/bin/sh`` — using ``/bin/sh`` here would re-introduce the
+    # DYLD_INSERT_LIBRARIES-stripping hazard for monitored macOS actions.
+    # For Linux / non-monitored actions ``wrapperShell`` is ``/bin/sh``, so
+    # the umask determinism is preserved unchanged on those paths.
+    let wrapped = "umask 022 && " & redirectedArgv
     result = startProcess(wrapperShell,
       args = @["-c", wrapped],
       env = env,
@@ -2303,8 +2491,14 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  # M9.R.36.3 — same umask-022 pin we apply on the bypass path. The
+  # runquota helper forwards ``command.argv`` straight through to its
+  # ``launchProcess`` call site, so without this wrap the daemon-mode
+  # build inherits whatever umask the runquotad daemon's parent shell
+  # had — recreating the qmlcachegen mode-corruption channel that
+  # M9.R.35.1 closed on the ``bypassRunQuota`` path.
   let command = ReproCommandSpec(
-    argv: action.argv,
+    argv: umaskWrappedArgv(action.argv),
     cwd: action.cwd,
     env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
@@ -2333,8 +2527,13 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
   threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
+  # M9.R.36.3 — apply the same umask-022 wrap the helper-spawn and
+  # bypass paths use. The inline-runquota path likewise forwards
+  # ``command.argv`` to ``launchProcess`` inside the helper / inline
+  # batch, so an unwrapped argv would resurrect the qmlcachegen mode
+  # drift.
   ReproCommandSpec(
-    argv: action.argv,
+    argv: umaskWrappedArgv(action.argv),
     cwd: action.cwd,
     env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
@@ -3208,6 +3407,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     finally:
       finishStat("repro runquota session open", sessionStart)
 
+  proc willBypassRunQuota(): bool =
+    ## RA-13: build-stable predicate mirroring the per-launch bypass decision
+    ## taken just before a process action is spawned (the ``inlineRunQuota`` /
+    ## ``launchBypassesRunQuota`` branch below). It is consulted by the ready
+    ## scan to decide whether the LOCAL named-pool gate must enforce capacity:
+    ##
+    ## - When RunQuota IS the authority (no bypass), the engine declares each
+    ##   action's pool membership + units in the lease request and lets
+    ##   RunQuota's grant gate the pool cross-session; the engine MUST NOT also
+    ##   gate locally (that would double-count the same pool — see
+    ##   Build-Engine-And-Scheduler.md § "One executor, one resource authority").
+    ## - On the bypass path there is NO lease and NO RunQuota to enforce a pool,
+    ##   so the local pool gate is the ONLY enforcement that keeps a declared
+    ##   pool (e.g. ``host/linker``) from running unbounded. There the gate is
+    ##   kept as the fallback.
+    ##
+    ## The decision is the same value the launch site computes for
+    ## ``bypassRunQuota``, so removing the double-gate cannot diverge from the
+    ## path that actually spawns the child. The probe / session-open it triggers
+    ## is cached and idempotent (same round trip the first launch would pay).
+    if config.inlineRunQuota and not effectiveBypassRunQuota:
+      not tryEnsureInlineRunQuotaSession()
+    else:
+      launchBypassesRunQuota()
+
   proc terminalCount(): int =
     for action in buildGraph.actions:
       if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
@@ -3521,7 +3745,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         let cap = poolCapacity.getOrDefault(poolName, maxParallel)
         let used = poolRunning.getOrDefault(poolName, 0'u32)
         let units = if action.poolUnits == 0'u32: 1'u32 else: action.poolUnits
-        if used + units > cap:
+        # RA-13: the local pool gate is authoritative ONLY for the default
+        # frontier pool ("") and for NAMED pools on the bypass path. When
+        # RunQuota is the authority for this launch, a NAMED pool's capacity is
+        # enforced by RunQuota's grant against the units declared in the lease
+        # request (``namedPool`` / ``namedPoolUnits``) — gating it again here
+        # would double-count the same cross-session pool down to this single
+        # invocation (Build-Engine-And-Scheduler.md § "One executor, one
+        # resource authority"). The default pool is the frontier/parallelism
+        # bound and stays local. ``poolRunning`` is still tracked for every
+        # pool, but for a RunQuota-gated named pool it is only a
+        # non-authoritative ordering hint, never a second gate.
+        let localPoolGateActive = poolName.len == 0 or willBypassRunQuota()
+        if localPoolGateActive and used + units > cap:
           inc i
           continue
 
@@ -3721,6 +3957,129 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           launchedAny = true
           continue
 
+        # Windows-System-Resources Phase E — the pre-launch broker-
+        # dispatch decision point. This branch sits BEFORE the
+        # ``monitoredAction`` / RunQuota launch sites because an
+        # elevated edge:
+        #   * is a one-shot side-effecting spawn (no monitor depfile);
+        #   * never goes through RunQuota (the broker is the resource
+        #     boundary, not runquotad);
+        #   * still flows through the cache layer above — an elevated
+        #     edge that hits the action cache returned earlier at
+        #     ``aclHit`` and never reaches this point.
+        # When ``brokerSpawn`` is nil we FAIL CLOSED here rather than
+        # silently fall through to the legacy direct-fork path: a
+        # ``requiresElevation`` edge that runs unelevated is a far
+        # worse outcome than a clear diagnostic that points the
+        # operator at ``repro infra apply``.
+        if action.requiresElevation:
+          if config.brokerSpawn == nil:
+            raiseEngine(
+              "requiresElevation set but brokerSpawn not configured: " &
+                action.id &
+                " (this build edge must be dispatched via " &
+                "`repro infra apply` so the privileged-operation " &
+                "broker can fork it; the standalone `repro build` " &
+                "driver leaves the broker hook unset by design)")
+          let elevatedStart = statStart()
+          let req = ElevatedExecRequest(
+            actionId: action.id,
+            argv: action.argv,
+            cwd: action.cwd,
+            env: action.env)
+          var brokerOutcome: ElevatedExecResult
+          var brokerFailure = ""
+          try:
+            brokerOutcome = config.brokerSpawn(req)
+          except CatchableError as err:
+            brokerFailure = err.msg
+          finishStat("repro broker dispatch", elevatedStart)
+          let idx = idToIndex.resultIndex(id)
+          let previousCacheDecision = runResult.results[idx].cacheDecision
+          if brokerFailure.len > 0:
+            runResult.results[idx] = ActionResult(
+              id: id,
+              status: asFailed,
+              exitCode: 1,
+              launched: true,
+              cacheDecision: previousCacheDecision,
+              dependencyPolicyKind: action.dependencyPolicy.kind,
+              stderr: "broker dispatch raised: " & brokerFailure,
+              runQuotaBackend: "broker")
+            statuses[id] = asFailed
+            runResult.trace(id, "failed", "broker dispatch raised")
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
+          let status =
+            if brokerOutcome.ok and brokerOutcome.exitCode == 0:
+              asSucceeded
+            else: asFailed
+          runResult.results[idx] = ActionResult(
+            id: id,
+            status: status,
+            exitCode: brokerOutcome.exitCode,
+            launched: true,
+            cacheDecision:
+              if action.cacheable and previousCacheDecision == cdNotCacheable:
+                cdMiss
+              else: previousCacheDecision,
+            dependencyPolicyKind: action.dependencyPolicy.kind,
+            stdout: brokerOutcome.stdout,
+            stderr:
+              if brokerOutcome.stderr.len > 0: brokerOutcome.stderr
+              else: brokerOutcome.diagnostic,
+            runQuotaBackend: "broker")
+          statuses[id] = status
+          if status == asSucceeded:
+            invalidateCachedOutputs(action)
+            let evidenceStart = statStart()
+            let evidence = collectEvidence(action, strict = true)
+            finishStat("repro evidence collect", evidenceStart)
+            runResult.results[idx].evidence = evidence.evidence
+            if not evidence.publishable:
+              runResult.results[idx].status = asFailed
+              runResult.results[idx].stderr =
+                evidence.evidence.diagnostics.join("\n")
+              statuses[id] = asFailed
+              runResult.trace(id, "failed", "dependency evidence invalid")
+              blockClosure(id, id)
+              emitProgress(bpkActionCompleted, id)
+              completed = terminalCount()
+              launchedAny = true
+              continue
+            invalidateCachedWrites(action, evidence.evidence)
+            if action.cacheable:
+              let recordStart = statStart()
+              let storeOutputBlobs = (not config.deferLocalOutputBlobs) or
+                config.peerCacheActionPublisher != nil or
+                (config.binaryCachePublisher != nil and
+                  action.publishToBinaryCache)
+              let record = cache.recordActionResult(cas,
+                action.weakFingerprint,
+                action.actionCachePolicy,
+                action.cacheInputPaths(evidence.evidence),
+                action.outputs, action.cwd,
+                storeOutputBlobs = storeOutputBlobs,
+                metadataCache = addr fileMetadataCache)
+              finishStat("repro cache record", recordStart)
+              writeActionResultRecordFile(
+                dependencyEvidencePath(cacheRoot, action.id), record)
+              publishPeerCacheBundle(action.weakFingerprint, record)
+              publishBinaryCacheBundle(action, record)
+            completeSuccess(id, asSucceeded,
+              runResult.results[idx].cacheDecision, true, "elevated")
+          else:
+            runResult.trace(id, "failed",
+              "exit=" & $brokerOutcome.exitCode)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+          inc completed
+          launchedAny = true
+          continue
+
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot)
         finishStat("repro monitor plan", monitorPlanStart)
@@ -3821,6 +4180,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           bypassRunQuota = not inlineRunQuota
         else:
           bypassRunQuota = launchBypassesRunQuota()
+        # RA-13: record that this run launched at least one action with no
+        # RunQuota lease so the build header + run report can surface the
+        # unsafe-for-concurrent state (it never makes concurrent cross-
+        # invocation runs safe). On the bypass path the local pool gate above
+        # was the sole capacity enforcement.
+        if bypassRunQuota:
+          runResult.runQuotaBypassed = true
         if inlineRunQuota:
           # Pipelined path: defer the actual offer round-trip and stage
           # this launch. After the launch wave we'll dispatch every

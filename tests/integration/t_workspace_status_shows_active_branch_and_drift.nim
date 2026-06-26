@@ -10,9 +10,10 @@
 ##      present). The single-project / M6 path is exercised here.
 ##   2. For every declared repo, gathers the live M4 evidence triple
 ##      (head-sha, is-clean, is-published).
-##   3. Loads the M11 lock-index (when present) and compares each
-##      live HEAD against the most-recently-locked SHA — ``at-lock``,
-##      ``drifted-from-lock``, or ``no-lock-recorded``.
+##   3. Resolves the latest lock via Git history over the per-repo lock
+##      subtree (RA-1; no index) and compares each live HEAD against the
+##      most-recently-locked SHA — ``at-lock``, ``drifted-from-lock``,
+##      or ``no-lock-recorded``.
 ##   4. Emits ``<workspaceRoot>/.repro/workspace/status-report.json``
 ##      plus a structured stdout summary; exits 0.
 ##
@@ -388,7 +389,7 @@ suite "M12 — repro workspace status (active branch + drift)":
       check report["summary"]["atLock"].getInt() == 0
 
       # Every repo must surface as no-lock-recorded — there was no
-      # M11 lock-index to compare against.
+      # lock under the per-repo subtree to compare against.
       for entry in report["repos"]:
         check entry["lockState"].getStr() == "no-lock-recorded"
         check entry["lockedRevision"].getStr().len == 0

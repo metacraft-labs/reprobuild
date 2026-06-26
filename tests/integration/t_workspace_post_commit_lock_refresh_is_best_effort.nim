@@ -11,8 +11,9 @@
 ##
 ## This suite exercises the five M19 invariants:
 ##
-##   1. Happy path — clean workspace → lock TOML + index written +
-##      JSON report carries ``outcome = "ok"`` + exit 0.
+##   1. Happy path — clean workspace → per-repo lock TOML written
+##      (RA-1: no index) + JSON report carries ``outcome = "ok"`` +
+##      exit 0.
 ##   2. Dirty workspace → strict M11 would have refused with exit 2;
 ##      post-commit downgrades to ``outcome = "skipped-dirty"`` + exit 0
 ##      and writes NO lock file.
@@ -244,14 +245,17 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       check report["triggerRepo"].getStr() == "lib-a"
       check report["triggerSha"].getStr() == fx.libA.sha
 
+      # RA-1: per-repo lock path ``locks/<project>/<repo>/<sha>.toml``,
+      # no index written.
       let lockPath = report["lockFilePath"].getStr()
       check lockPath.len > 0
       check fileExists(lockPath)
-      check lockPath.startsWith(
-        fx.workspaceRoot / ".repo" / "manifests" / "locks" / "lib-a" / "lib-a-")
+      check lockPath == fx.workspaceRoot / ".repo" / "manifests" /
+        "locks" / "lib-a" / "lib-a" / (fx.libA.sha & ".toml")
 
-      let indexPath = report["indexFilePath"].getStr()
-      check fileExists(indexPath)
+      check report["indexFilePath"].getStr() == ""
+      check not fileExists(fx.workspaceRoot / ".repo" / "manifests" /
+        "locks" / "lib-a" / "index.toml")
 
       # Log file has exactly one ``ok`` line.
       let logBody = readPostCommitLog(fx)
@@ -302,7 +306,15 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       let fx = setupFixture(gitBin, "no-workspace")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
-      # No seedWorkspaceToml call — the wrapper must skip silently.
+      # No seedWorkspaceToml call AND no resolved manifest checkout — the
+      # workspace is genuinely uninitialized (RA-10 canonical marker:
+      # a bare ``.repo/`` with no ``workspace.toml`` and no resolved
+      # ``projects/*.toml`` is NOT a workspace). The wrapper must skip
+      # silently. (``setupFixture`` seeds ``manifests/projects/lib-a.toml``;
+      # RA-10 treats a single resolvable project as an initialized
+      # workspace, so we strip it here to model the genuine non-workspace
+      # case this test is about.)
+      removeDir(fx.workspaceRoot / ".repo" / "manifests")
 
       let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check res.code == 0

@@ -374,8 +374,8 @@ suite "M25 — private manifest layering integrated end-to-end":
 
       # Drive M11 on the workspace the M25 init produced. The lock
       # writer composes the same layers, gathers per-repo HEAD SHAs,
-      # and writes both ``locks/<project>/<trigger>-<sha>.toml`` and
-      # the index file under the public manifest layer's checkout
+      # and writes ``locks/<project>/<repo>/<sha>.toml`` (RA-1 per-repo
+      # layout, no index) under the public manifest layer's checkout
       # (the first layer in workspace.toml).
       let lockRes = invokeLock(fx)
       if lockRes.code != 0:
@@ -392,6 +392,13 @@ suite "M25 — private manifest layering integrated end-to-end":
 
       let lockPath = lockReport["lockFilePath"].getStr()
       check fileExists(lockPath)
+      # RA-1: per-repo path keyed by the full trigger SHA; no index.
+      let trigRepo = lockReport["triggerRepo"].getStr()
+      let trigSha = lockReport["triggerSha"].getStr()
+      check lockPath.endsWith(
+        DirSep & trigRepo & DirSep & trigSha & ".toml")
+      check lockReport["indexFilePath"].getStr() == ""
+      check not fileExists(parentDir(parentDir(lockPath)) / "index.toml")
 
       # Round-trip the lock TOML through the M5 strict reader. The
       # parsed lock must carry every repo (public AND private) with

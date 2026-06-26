@@ -220,8 +220,14 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   if not observation.isClean:
     result.syncCase = scDirty
     result.action = saNone
+    # Principle 2 (Interactive-UX-And-Progress.md): name the offender AND a
+    # concrete remedy command. The offending checkout is ``resolved.path``;
+    # the remedy is to clear the working tree (commit or stash) then re-run
+    # sync, or to overwrite it deliberately with ``--force-sync``.
     result.refusalReason =
-      "working tree has uncommitted changes; refused (operator must commit, stash, or discard)"
+      "working tree has uncommitted changes; refused — run 'git -C " &
+      resolved.path & " stash' (or 'git -C " & resolved.path &
+      " commit -a') then 'repro sync', or 'repro sync --force-sync' to discard"
     result.message = "refusing to sync dirty checkout at '" & resolved.path & "'"
     return
 
@@ -232,8 +238,13 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   if observation.hasUnpublishedCommits:
     result.syncCase = scLocallyUnpublished
     result.action = saNone
+    # Principle 2: name the offending checkout AND the command that resolves
+    # it. Publishing (push) the local commits, then re-running sync, makes
+    # the workspace reproducible without surprising the operator.
     result.refusalReason =
-      "local commits are not present on any remote-tracking branch; refused (operator must push or rebase first)"
+      "local commits are not present on any remote-tracking branch; refused — " &
+      "run 'git -C " & resolved.path & " push' then 'repro sync' (or 'git -C " &
+      resolved.path & " pull --rebase' to integrate upstream first)"
     result.message = "refusing to sync unpublished checkout at '" & resolved.path & "'"
     return
 

@@ -322,6 +322,48 @@ proc cmake_package*(srcDir: string;
       effectiveCacheVars.add("CMAKE_EXE_LINKER_FLAGS=-Wl,--copy-dt-needed-entries")
     if not hasSharedLinkerFlags:
       effectiveCacheVars.add("CMAKE_SHARED_LINKER_FLAGS=-Wl,--copy-dt-needed-entries")
+    # M9.R.33.2 — auto-thread Qt6 FindXxx.cmake module dirs into
+    # CMAKE_MODULE_PATH and GLESv2 hints into cacheVars whenever any
+    # qt6-* dep is declared on the recipe.  Without this, a fresh
+    # ``rm -rf .repro/build && repro build <qt6-consumer>`` trips with
+    # "FindPlatformGraphics.cmake not in CMAKE_MODULE_PATH" + "Could
+    # NOT find GLESv2".  The M9.R.32.1.2 recipe-local fallback in
+    # plasma-workspace/repro.nim threaded the same dirs by hand; this
+    # constructor-level fix lifts the work so every qt6-* consumer
+    # gets it automatically.  Recipes that already set
+    # ``CMAKE_MODULE_PATH=...`` via cacheVars take precedence (last
+    # ``-D<var>=<value>`` wins under cmake; the explicit recipe-author
+    # entry stays last).
+    let qt6ModulePathDirs = m9r33Collect2Qt6CmakeModulePathDirs(
+      projectRoot, pkgName)
+    if qt6ModulePathDirs.len > 0:
+      var hasModulePath = false
+      for v in effectiveCacheVars:
+        if v.startsWith("CMAKE_MODULE_PATH="):
+          hasModulePath = true
+          break
+      if not hasModulePath:
+        let entry = m9r33Emit2CmakeModulePathCacheVar(qt6ModulePathDirs)
+        if entry.len > 0:
+          effectiveCacheVars.add(entry)
+    var hasGlesIncludeDir = false
+    var hasGlesLibrary = false
+    for v in effectiveCacheVars:
+      if v.startsWith("GLESv2_INCLUDE_DIR="):
+        hasGlesIncludeDir = true
+      if v.startsWith("GLESv2_LIBRARY="):
+        hasGlesLibrary = true
+    if not hasGlesIncludeDir or not hasGlesLibrary:
+      for entry in m9r33Emit2MesaGlesv2CacheVars(projectRoot, pkgName):
+        let dEq = entry.find('=')
+        if dEq <= 0:
+          continue
+        let key = entry[0 ..< dEq]
+        if key == "GLESv2_INCLUDE_DIR" and hasGlesIncludeDir:
+          continue
+        if key == "GLESv2_LIBRARY" and hasGlesLibrary:
+          continue
+        effectiveCacheVars.add(entry)
   let configureEdge = cmake.configure(
     srcDir = srcDir,
     buildDir = buildDir,

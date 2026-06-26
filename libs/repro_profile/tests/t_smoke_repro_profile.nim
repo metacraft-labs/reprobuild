@@ -231,6 +231,427 @@ suite "Resource constructors":
     check target[0].fields["startType"].s == "Automatic"
     check target[0].fields["state"].s == "Running"
 
+  test "windowsService Phase B: bare call omits the four new fields":
+    # Sentinel test: a stanza that DOESN'T set the Phase B fields
+    # produces an intent IDENTICAL to today's. A regression that emits
+    # an empty `displayName = ""` (or any of the other three) would
+    # break the back-compat invariant.
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running)
+    check "displayName" notin target[0].fields
+    check "binPath" notin target[0].fields
+    check "recoveryActions" notin target[0].fields
+    check "recoveryResetSeconds" notin target[0].fields
+    # The exact three-field shape stays the same.
+    check target[0].fields.len == 3
+
+  test "windowsService Phase B: displayName carries through":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      displayName = "OpenSSH SSH Server")
+    check target[0].fields["displayName"].s == "OpenSSH SSH Server"
+    # Only the displayName field is emitted; the other three Phase B
+    # fields stay absent (default = "leave unmanaged").
+    check "binPath" notin target[0].fields
+    check "recoveryActions" notin target[0].fields
+    check "recoveryResetSeconds" notin target[0].fields
+
+  test "windowsService Phase B: binPath carries through":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      binPath = "C:\\Windows\\System32\\OpenSSH\\sshd.exe")
+    check target[0].fields["binPath"].s ==
+      "C:\\Windows\\System32\\OpenSSH\\sshd.exe"
+    check "displayName" notin target[0].fields
+    check "recoveryActions" notin target[0].fields
+    check "recoveryResetSeconds" notin target[0].fields
+
+  test "windowsService Phase B: recoveryActions encode as action:delay tokens":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      recoveryActions = @[
+        (action: wsraRestart, delayMs: 5000),
+        (action: wsraRestart, delayMs: 10000),
+        (action: wsraReboot, delayMs: 60000)],
+      recoveryResetSeconds = 86400)
+    let tokens = target[0].fields["recoveryActions"].items
+    check tokens.len == 3
+    check tokens[0] == "restart:5000"
+    check tokens[1] == "restart:10000"
+    check tokens[2] == "reboot:60000"
+    check target[0].fields["recoveryResetSeconds"].i == 86400
+
+  test "windowsService Phase B: all four recovery action variants round-trip":
+    # Closed-set vocabulary check: every WindowsServiceRecoveryAction
+    # enum variant must encode to a known lower-case token AND decode
+    # back to the same enum value. A regression here would silently
+    # collapse one variant to another's wire form.
+    for variant in [wsraNone, wsraRestart, wsraRunCommand, wsraReboot]:
+      let tok = recoveryActionToken(variant)
+      check isKnownRecoveryActionToken(tok)
+      check recoveryActionFromToken(tok) == variant
+    # The four canonical tokens are the closed set.
+    check recoveryActionToken(wsraNone) == "none"
+    check recoveryActionToken(wsraRestart) == "restart"
+    check recoveryActionToken(wsraRunCommand) == "runcommand"
+    check recoveryActionToken(wsraReboot) == "reboot"
+
+  test "windowsService Phase B: decodeWindowsServiceRecovery rejects malformed":
+    # Both the empty action half and the negative-delay half must
+    # raise — the decoder is the front-end's closed-set guard.
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("")
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart")           # no `:`
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart:")          # empty delay
+    expect ValueError:
+      discard decodeWindowsServiceRecovery(":5000")             # empty action
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("Restart:5000")      # case-sensitive
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("nope:5000")         # unknown action
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart:nope")      # non-int
+    expect ValueError:
+      discard decodeWindowsServiceRecovery("restart:-1")        # negative
+    # Positive case (sanity check the same decoder accepts canonical).
+    let ok = decodeWindowsServiceRecovery("runcommand:7500")
+    check ok.action == wsraRunCommand
+    check ok.delayMs == 7500
+
+  test "windowsService Phase B: recoveryResetSeconds = 0 omitted":
+    # `0` is the "no reset" sentinel; the template MUST NOT emit the
+    # field when it stays at default, matching the back-compat
+    # invariant on a profile that doesn't manage the reset window.
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      recoveryResetSeconds = 0)
+    check "recoveryResetSeconds" notin target[0].fields
+
+  test "windowsService Phase B: empty recoveryActions seq omitted":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target, name = "sshd",
+      startType = Automatic, state = Running,
+      recoveryActions = @[])
+    check "recoveryActions" notin target[0].fields
+
+  test "windowsService Phase B: all four fields together":
+    var target: seq[ResourceIntent] = @[]
+    windowsService(target,
+      name = "actions.runner.metacraft-labs.windows-runner-001",
+      startType = Automatic, state = Running,
+      displayName = "GitHub Actions Runner (windows-runner-001)",
+      binPath = "C:\\actions-runner\\bin\\Runner.Listener.exe",
+      recoveryActions = @[
+        (action: wsraRestart, delayMs: 5000),
+        (action: wsraRestart, delayMs: 10000),
+        (action: wsraRunCommand, delayMs: 30000)],
+      recoveryResetSeconds = 86400,
+      address = "actionsRunnerService")
+    check target[0].address == "actionsRunnerService"
+    check target[0].fields["displayName"].s ==
+      "GitHub Actions Runner (windows-runner-001)"
+    check target[0].fields["binPath"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    check target[0].fields["recoveryActions"].items.len == 3
+    check target[0].fields["recoveryActions"].items[2] == "runcommand:30000"
+    check target[0].fields["recoveryResetSeconds"].i == 86400
+
+  # -----------------------------------------------------------------
+  # Windows-System-Resources Phase C: windows.scheduledTask template
+  # -----------------------------------------------------------------
+
+  test "windowsScheduledTask onBoot variant: defaults + canonical token":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\Reprobuild\\WindowsRunner-Env",
+      executable = "C:\\actions-runner\\bin\\Runner.Listener.exe",
+      schedule = scheduleOnBoot(delaySeconds = 30),
+      address = "wstOnBoot")
+    check target.len == 1
+    check target[0].kind == "windows.scheduledTask"
+    check target[0].address == "wstOnBoot"
+    check target[0].fields["taskName"].s ==
+      "\\Reprobuild\\WindowsRunner-Env"
+    check target[0].fields["executable"].s ==
+      "C:\\actions-runner\\bin\\Runner.Listener.exe"
+    # Default principal SYSTEM; `runWithHighestPrivileges` left at the
+    # `none(bool)` sentinel so the template does NOT push the field
+    # into the intent map. The text parser and the adapter
+    # independently apply the principal-dependent default (`true` for
+    # SYSTEM) downstream — exercised end-to-end further below.
+    check target[0].fields["runAsUser"].s == "SYSTEM"
+    check "runWithHighestPrivileges" notin target[0].fields
+    check target[0].fields["enabled"].b == true
+    let sched = target[0].fields["schedule"].items
+    check sched.len == 1
+    check sched[0] == "onBoot:30"
+    # Optional fields omitted when at defaults.
+    check "arguments" notin target[0].fields
+    check "workingDirectory" notin target[0].fields
+
+  test "windowsScheduledTask onLogon variant carries forUser":
+    var target: seq[ResourceIntent] = @[]
+    # `some(false)` is the explicit-override form: even though the
+    # principal-dependent default would already be `false` for a non-
+    # SYSTEM principal, passing `some(false)` proves the template emits
+    # the field verbatim when the operator opts in.
+    windowsScheduledTask(target,
+      taskName = "\\Reprobuild\\OnLogonHook",
+      executable = "C:\\bin\\hook.exe",
+      schedule = scheduleOnLogon(forUser = "DOMAIN\\runner"),
+      runAsUser = "DOMAIN\\runner",
+      runWithHighestPrivileges = some(false))
+    check target[0].fields["schedule"].items[0] ==
+      "onLogon:DOMAIN\\runner"
+    check target[0].fields["runAsUser"].s == "DOMAIN\\runner"
+    check target[0].fields["runWithHighestPrivileges"].b == false
+
+  test "windowsScheduledTask onLogon with empty forUser is allowed":
+    # Any-user logon trigger.
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\AnyUserLogon",
+      executable = "C:\\bin\\anyone.exe",
+      schedule = scheduleOnLogon())
+    check target[0].fields["schedule"].items[0] == "onLogon:"
+
+  test "windowsScheduledTask once variant carries ISO-8601 stamp":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\OneShot",
+      executable = "C:\\bin\\once.exe",
+      schedule = scheduleOnce(runAt = "2030-01-01T08:00:00Z"))
+    check target[0].fields["schedule"].items[0] ==
+      "once:2030-01-01T08:00:00Z"
+
+  test "windowsScheduledTask daily variant carries HH:MM":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\DailyJob",
+      executable = "C:\\bin\\daily.exe",
+      schedule = scheduleDaily(timeOfDay = "08:30"))
+    check target[0].fields["schedule"].items[0] == "daily:08:30"
+
+  test "windowsScheduledTask interval variant: required everyMinutes + optional startAt":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\Heartbeat",
+      executable = "C:\\bin\\hb.exe",
+      schedule = scheduleInterval(everyMinutes = 15,
+        startAt = "2030-01-01T00:00:00Z"))
+    check target[0].fields["schedule"].items[0] ==
+      "interval:15:2030-01-01T00:00:00Z"
+    # Empty startAt is legitimate (interval triggers can start
+    # immediately).
+    var target2: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target2,
+      taskName = "\\Heartbeat2",
+      executable = "C:\\bin\\hb.exe",
+      schedule = scheduleInterval(everyMinutes = 5))
+    check target2[0].fields["schedule"].items[0] == "interval:5:"
+
+  test "windowsScheduledTask: arguments + workingDirectory emit only when set":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\WithArgs",
+      executable = "C:\\bin\\app.exe",
+      schedule = scheduleOnBoot(),
+      arguments = @["--unattended", "--config", "C:\\config.toml"],
+      workingDirectory = "C:\\actions-runner")
+    check target[0].fields["arguments"].items.len == 3
+    check target[0].fields["arguments"].items[0] == "--unattended"
+    check target[0].fields["arguments"].items[1] == "--config"
+    check target[0].fields["arguments"].items[2] == "C:\\config.toml"
+    check target[0].fields["workingDirectory"].s ==
+      "C:\\actions-runner"
+
+  test "windowsScheduledTask address default = windows.scheduledTask:<taskName>":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\Reprobuild\\Foo",
+      executable = "C:\\bin\\foo.exe",
+      schedule = scheduleOnBoot())
+    check target[0].address ==
+      "windows.scheduledTask:\\Reprobuild\\Foo"
+
+  test "windowsScheduledTask: empty taskName rejected at template":
+    expect ValueError:
+      var target: seq[ResourceIntent] = @[]
+      windowsScheduledTask(target,
+        taskName = "",
+        executable = "C:\\bin\\foo.exe",
+        schedule = scheduleOnBoot())
+
+  test "windowsScheduledTask: empty executable rejected at template":
+    expect ValueError:
+      var target: seq[ResourceIntent] = @[]
+      windowsScheduledTask(target,
+        taskName = "\\Foo",
+        executable = "",
+        schedule = scheduleOnBoot())
+
+  # -----------------------------------------------------------------
+  # Spec §1.3 schema: `runWithHighestPrivileges` is sentinel-aware.
+  # The template's parameter is `Option[bool]`; when the operator
+  # leaves it at the `none(bool)` sentinel, the template does NOT
+  # emit the field — the text parser and the adapter each apply the
+  # principal-dependent default (`true` for SYSTEM, `false`
+  # otherwise) independently. The three tests below pin the three
+  # corners of that two-axis rule at the template surface; the
+  # adapter-side end-to-end paths are pinned in
+  # `t_smoke_repro_infra.nim`.
+  # -----------------------------------------------------------------
+
+  test "windowsScheduledTask: LOCAL_SERVICE without explicit highest-privileges omits the field (default-false applies downstream)":
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\Reprobuild\\LocalSvcTask",
+      executable = "C:\\bin\\svc.exe",
+      schedule = scheduleOnBoot(),
+      runAsUser = "LOCAL_SERVICE")
+    check target.len == 1
+    check target[0].fields["runAsUser"].s == "LOCAL_SERVICE"
+    # Field MUST be absent so the downstream principal-dependent
+    # default (`false` for a non-SYSTEM principal) applies — the
+    # template no longer pre-bakes `true` into the intent.
+    check "runWithHighestPrivileges" notin target[0].fields
+
+  test "windowsScheduledTask: SYSTEM without explicit highest-privileges omits the field (default-true applies downstream)":
+    # Back-compat sentinel — a bare SYSTEM stanza still ends up with
+    # `wstRunWithHighestPrivileges = true` at the apply layer, but the
+    # intent map does NOT carry the field; the principal-dependent
+    # default fires in the parser and the adapter.
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\Reprobuild\\SysTask",
+      executable = "C:\\bin\\sys.exe",
+      schedule = scheduleOnBoot(),
+      runAsUser = "SYSTEM")
+    check target.len == 1
+    check target[0].fields["runAsUser"].s == "SYSTEM"
+    check "runWithHighestPrivileges" notin target[0].fields
+
+  test "windowsScheduledTask: SYSTEM with explicit some(false) emits the field verbatim (operator override is captured)":
+    # When the operator explicitly disables highest-privileges on the
+    # SYSTEM principal the template MUST capture the override in the
+    # intent map — otherwise the principal-default would silently flip
+    # it back to `true` downstream. This proves the sentinel layer
+    # discriminates "explicit some(false)" from "unset".
+    var target: seq[ResourceIntent] = @[]
+    windowsScheduledTask(target,
+      taskName = "\\Reprobuild\\SysOverrideTask",
+      executable = "C:\\bin\\sys.exe",
+      schedule = scheduleOnBoot(),
+      runAsUser = "SYSTEM",
+      runWithHighestPrivileges = some(false))
+    check target.len == 1
+    check target[0].fields["runAsUser"].s == "SYSTEM"
+    check "runWithHighestPrivileges" in target[0].fields
+    check target[0].fields["runWithHighestPrivileges"].b == false
+
+  test "scheduleOnBoot rejects negative delay":
+    expect ValueError:
+      discard scheduleOnBoot(delaySeconds = -1)
+
+  test "scheduleOnce rejects malformed ISO-8601":
+    expect ValueError:
+      discard scheduleOnce(runAt = "not-a-date")
+    expect ValueError:
+      discard scheduleOnce(runAt = "")
+    # Conservative: a stray space in the charset is refused.
+    expect ValueError:
+      discard scheduleOnce(runAt = "2030-01-01 08:00:00")
+
+  test "scheduleDaily rejects malformed HH:MM":
+    expect ValueError:
+      discard scheduleDaily(timeOfDay = "25:00")
+    expect ValueError:
+      discard scheduleDaily(timeOfDay = "08:60")
+    expect ValueError:
+      discard scheduleDaily(timeOfDay = "8:30")           # missing leading 0
+    expect ValueError:
+      discard scheduleDaily(timeOfDay = "0830")           # no colon
+    expect ValueError:
+      discard scheduleDaily(timeOfDay = "")
+
+  test "scheduleInterval rejects non-positive everyMinutes + malformed startAt":
+    expect ValueError:
+      discard scheduleInterval(everyMinutes = 0)
+    expect ValueError:
+      discard scheduleInterval(everyMinutes = -5)
+    expect ValueError:
+      discard scheduleInterval(everyMinutes = 5,
+        startAt = "bad-stamp")
+
+  test "ScheduleSpec: all five kinds round-trip via encode/decode":
+    # Closed-set vocabulary check: every ScheduleKind variant must
+    # encode to a canonical wire token AND decode back to the same
+    # spec via structural equality.
+    let cases = @[
+      ScheduleSpec(kind: sskOnBoot, delaySeconds: 0),
+      ScheduleSpec(kind: sskOnBoot, delaySeconds: 60),
+      ScheduleSpec(kind: sskOnLogon, forUser: ""),
+      ScheduleSpec(kind: sskOnLogon, forUser: "DOMAIN\\runner"),
+      ScheduleSpec(kind: sskOnce, runAt: "2030-01-01T08:00:00Z"),
+      ScheduleSpec(kind: sskDaily, timeOfDay: "00:00"),
+      ScheduleSpec(kind: sskDaily, timeOfDay: "23:59"),
+      ScheduleSpec(kind: sskInterval, everyMinutes: 5,
+        startAt: ""),
+      ScheduleSpec(kind: sskInterval, everyMinutes: 60,
+        startAt: "2030-01-01T00:00:00Z")]
+    for s in cases:
+      let token = encodeScheduleSpec(s)
+      let round = decodeScheduleSpec(token)
+      check round == s
+
+  test "decodeScheduleSpec rejects every malformed shape":
+    # The decoder is the front-end's closed-set guard. Every refusal
+    # path must raise ValueError so a downstream surface that calls it
+    # gets a fail-closed signal.
+    expect ValueError:
+      discard decodeScheduleSpec("")                       # empty
+    expect ValueError:
+      discard decodeScheduleSpec("onBoot")                 # no separator
+    expect ValueError:
+      discard decodeScheduleSpec(":30")                    # empty kind
+    expect ValueError:
+      discard decodeScheduleSpec("unknown:30")             # unknown kind
+    expect ValueError:
+      discard decodeScheduleSpec("ONBOOT:30")              # case-sensitive
+    expect ValueError:
+      discard decodeScheduleSpec("onBoot:abc")             # non-int
+    expect ValueError:
+      discard decodeScheduleSpec("onBoot:-5")              # negative
+    expect ValueError:
+      discard decodeScheduleSpec("once:not-iso")           # bad iso
+    expect ValueError:
+      discard decodeScheduleSpec("once:")                  # empty iso
+    expect ValueError:
+      discard decodeScheduleSpec("daily:8:30")             # wrong shape
+    expect ValueError:
+      discard decodeScheduleSpec("daily:25:00")            # invalid hour
+    expect ValueError:
+      discard decodeScheduleSpec("interval:0:")            # non-positive
+    expect ValueError:
+      discard decodeScheduleSpec("interval:abc:")          # non-int
+    expect ValueError:
+      discard decodeScheduleSpec("interval:5")             # missing startAt sep
+    expect ValueError:
+      discard decodeScheduleSpec("interval:5:bad")         # bad startAt
+
+  test "isKnownScheduleKindToken: closed set":
+    for tok in ["onBoot", "onLogon", "once", "daily", "interval"]:
+      check isKnownScheduleKindToken(tok)
+    for bad in ["", "OnBoot", "onboot", "weekly", "monthly", "rest"]:
+      check not isKnownScheduleKindToken(bad)
+
   test "windowsFirewallRule records firewall rule fields":
     var target: seq[ResourceIntent] = @[]
     windowsFirewallRule(target,
@@ -775,6 +1196,79 @@ suite "Resource constructors":
       content = "127.0.0.1 dev")
     check target[0].kind == "fs.systemFile"
     check target[0].fields["mode"].s == "0644"
+    # The three external-source fields stay absent in the inline-
+    # content shape: this is the backward-compat guarantee.
+    check "sourceUrl" notin target[0].fields
+    check "sha256" notin target[0].fields
+    check "sourceLocal" notin target[0].fields
+
+  test "fsSystemFile sourceUrl + sha256":
+    var target: seq[ResourceIntent] = @[]
+    fsSystemFile(target,
+      path = "C:\\actions-runner-cache\\actions-runner-win-x64.zip",
+      sourceUrl = "https://github.com/actions/runner/releases/download/" &
+                  "v2.335.1/actions-runner-win-x64-2.335.1.zip",
+      sha256 = "0123456789abcdef0123456789abcdef" &
+               "0123456789abcdef0123456789abcdef",
+      address = "actionsRunnerZip")
+    check target.len == 1
+    check target[0].kind == "fs.systemFile"
+    check su.startsWith(target[0].fields["sourceUrl"].s, "https://")
+    check target[0].fields["sha256"].s.len == 64
+    check "sourceLocal" notin target[0].fields
+    # `content` is still emitted (carries the empty string — the
+    # template always pushes the inline-content field for stable
+    # codec shape); the load-bearing fact is that it is empty.
+    check target[0].fields["content"].s == ""
+
+  test "fsSystemFile sourceLocal":
+    var target: seq[ResourceIntent] = @[]
+    fsSystemFile(target,
+      path = "/etc/myapp/config.toml",
+      sourceLocal = "/home/zah/profiles/myapp.toml",
+      address = "myappConfig")
+    check target.len == 1
+    check target[0].fields["sourceLocal"].s == "/home/zah/profiles/myapp.toml"
+    check "sourceUrl" notin target[0].fields
+    check "sha256" notin target[0].fields
+    check target[0].fields["content"].s == ""
+
+  test "fsSystemFile rejects both content and sourceUrl":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        content = "x = 1",
+        sourceUrl = "https://example.com/c.toml",
+        sha256 = "0123456789abcdef0123456789abcdef" &
+                 "0123456789abcdef0123456789abcdef")
+    check target.len == 0
+
+  test "fsSystemFile rejects both content and sourceLocal":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        content = "x = 1",
+        sourceLocal = "/home/zah/profiles/myapp.toml")
+    check target.len == 0
+
+  test "fsSystemFile rejects sourceUrl without sha256":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        sourceUrl = "https://example.com/c.toml")
+    check target.len == 0
+
+  test "fsSystemFile rejects sha256 without sourceUrl":
+    var target: seq[ResourceIntent] = @[]
+    expect ValueError:
+      fsSystemFile(target,
+        path = "/etc/myapp/config.toml",
+        sha256 = "0123456789abcdef0123456789abcdef" &
+                 "0123456789abcdef0123456789abcdef")
+    check target.len == 0
 
   test "fsSystemDirectory without acl":
     var target: seq[ResourceIntent] = @[]
@@ -823,6 +1317,81 @@ suite "Resource constructors":
     let e = aclEntry(principal = "Guests", rights = Write,
                      `type` = Deny)
     check e == "Guests:(D,W)"
+
+  test "fsSystemDirectory with deny ACE rides through the field table":
+    # Windows-System-Resources Phase D: profile-side coverage of the
+    # Deny direction. The ACE string in `aclEntries` carries the
+    # `:(D,...)` marker the driver's pure splitter pivots on.
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target,
+      path = "C:\\actions-runner-tokens",
+      acl = ntfsAcl(
+        owner = "SYSTEM",
+        entries = [
+          aclEntry(principal = "SYSTEM", rights = FullControl),
+          aclEntry(principal = "Guests", rights = Write,
+                   `type` = Deny)],
+        inheritance = DisabledReplace),
+      address = "runnerTokenDirDeny")
+    check target.len == 1
+    check target[0].fields["aclOwner"].s == "SYSTEM"
+    check target[0].fields["aclInheritance"].s == "disabled-replace"
+    check target[0].fields["aclEntries"].items.len == 2
+    check target[0].fields["aclEntries"].items[0] == "SYSTEM:(F)"
+    check target[0].fields["aclEntries"].items[1] == "Guests:(D,W)"
+
+  test "fsSystemDirectory inheritance closed set exercises every variant":
+    # Windows-System-Resources Phase D: defence-in-depth — the
+    # template lowers each `AclInheritance` enum value to the exact
+    # string vocabulary the codec validator + the driver's
+    # `renderIcaclsInheritanceCommandArgs` switch on.
+    for (inheritance, expected) in @[
+      (Enabled, "enabled"),
+      (DisabledReplace, "disabled-replace"),
+      (DisabledConvert, "disabled-convert"),
+      (ProtectedClearInherited, "protected-clear-inherited")]:
+      var target: seq[ResourceIntent] = @[]
+      fsSystemDirectory(target,
+        path = "C:\\actions-runner-tokens",
+        acl = ntfsAcl(
+          owner = "SYSTEM",
+          entries = [aclEntry(principal = "SYSTEM",
+                              rights = FullControl)],
+          inheritance = inheritance),
+        address = "runnerTokenDirInh-" & $inheritance)
+      check target.len == 1
+      check target[0].fields["aclInheritance"].s == expected
+
+  test "fsSystemDirectory omits acl fields when acl.present == false":
+    # Back-compat assertion: a profile that uses the default acl
+    # parameter MUST NOT emit `aclOwner` / `aclEntries` /
+    # `aclInheritance` fields. The codec's back-compat sentinel
+    # depends on this — see the t_smoke_repro_infra round-trip.
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target, path = "/etc/myapp.d",
+      address = "myappBare")
+    check target.len == 1
+    check "aclOwner" notin target[0].fields
+    check "aclEntries" notin target[0].fields
+    check "aclInheritance" notin target[0].fields
+
+  test "ntfsAcl owner can be empty (leave ownership unchanged)":
+    # Production profiles can declare an ACL whose owner is unset —
+    # the driver skips the `takeown` + `icacls /setowner` calls and
+    # only applies the entries / inheritance. The template still
+    # emits an empty-string `aclOwner` field so the codec's
+    # `aclPresent` sentinel reflects "operator declared an ACL".
+    var target: seq[ResourceIntent] = @[]
+    fsSystemDirectory(target,
+      path = "C:\\actions-runner-tokens",
+      acl = ntfsAcl(
+        entries = [aclEntry(principal = "SYSTEM",
+                            rights = FullControl)],
+        inheritance = DisabledReplace),
+      address = "runnerTokenDirNoOwner")
+    check target[0].fields["aclOwner"].s == ""
+    check target[0].fields["aclInheritance"].s == "disabled-replace"
+    check target[0].fields["aclEntries"].items.len == 1
 
   test "envSystemVariable with isPathList":
     var target: seq[ResourceIntent] = @[]

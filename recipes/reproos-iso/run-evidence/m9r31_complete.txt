@@ -1,0 +1,222 @@
+M9.R.31 — DE binary RPATH closure (Phase A-D complete)
+======================================================
+
+Status as of 2026-06-24: live ISO UEFI DE smoke landed clean for all
+production DE binaries that exist in the corpus.
+
+EXECUTIVE SUMMARY
+=================
+
+Commits:
+  17f5351..049695d8  M9.R.31.1: gettext.buildDeps += libacl
+  049695d8..dd578edd M9.R.31.2: bootstrap M9.R.30 manifest walker in
+                                pre-M9.R.30 install trees
+
+Live ISO UEFI DE smoke transcript:
+  sway --version          → "sway version 1.11"        OK
+  kwin_wayland --version  → "kwin 6.2.5"               OK
+  mutter --version        → "mutter 47.10"             OK
+  plasmashell --version   → "plasmashell 6.2.5"        OK (with QT_QPA_PLATFORM=offscreen)
+  sddm-greeter-qt6 --help → "Usage: ... / SDDM greeter" OK (with QT_QPA_PLATFORM=offscreen)
+  sddm                    → daemon starts (X server up, attempts
+                            installer session — fails on missing
+                            reproos-installer-launcher binary,
+                            separate gap)
+
+PHASE A (LANDED IN M9.R.30)
+===========================
+
+`libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/package_result.nim`
+(commits 6632b49e + e132fec6) shipped the manifest walker that
+implements Nix-style propagatedBuildInputs semantics: every recipe's
+install-mirror writes `.m9r30_propagated_libdirs.txt` listing every
+absolute lib dir in its final RPATH, and each consumer's install-
+mirror reads each direct dep's manifest + folds every line into its
+own RPATH. Transitive closure happens through the filesystem without
+a Nim-time graph walk.
+
+The M9.R.30.3 NEEDED safety net (gated on `REPRO_M9R30_NEEDED_CHECK=1`)
+verifies every produced ELF's DT_NEEDED resolves under the embedded
+RPATH; an unresolved NEEDED hard-fails with a structured error.
+
+PHASE B (M9.R.31): BOTTLENECK + FIXES
+=====================================
+
+THE BOTTLENECK
+
+Phase A's walker only activates when each recipe's install-mirror
+re-runs. The pre-M9.R.30 build state had ~134 recipes' install dirs
+populated by the M9.R.14f mechanism but lacking the M9.R.30
+manifest. Until each recipe re-ran its install-mirror with the new
+walker, transitive RPATHs stayed non-propagated. Direct rebuild of
+every recipe was infeasible inside the 24h budget:
+
+  * `repro build` rebuilds the entire upstream compile chain even
+    when only install-mirror is stale.
+  * Many compile chains have unrelated breakage (M9.R.31.1's gettext
+    is one example).
+  * Full graph rebuild would take days, not hours.
+
+M9.R.31.1: gettext.buildDeps += libacl
+
+`recipes/packages/source/gettext/repro.nim` gained `libacl` as a
+direct buildDep so msgfmt's DT_NEEDED libacl.so.1 resolves under the
+new walker's RPATH. Root cause: gettext's autotools configure
+unconditionally probes for libacl + links it into libgettextlib;
+previous builds inherited the path via host nix-shell's ambient
+`LD_LIBRARY_PATH` which the M9.R.30 batch rebuild lacked.
+
+Symptom that surfaced this: mutter's meson i18n step fails at
+exit-127 ("msgfmt: error while loading shared libraries:
+libacl.so.1: cannot open shared object file").
+
+Adding libacl as a direct buildDep threads its nix-store lib dir
+onto LIBRARY_PATH + LD_LIBRARY_PATH at link time AND onto msgfmt's
+baked RPATH via M9.R.14f's walker. M9.R.30's manifest mechanism
+then propagates libacl through gettext's manifest to every
+downstream consumer.
+
+M9.R.31.2: bootstrap manifest walker for pre-M9.R.30 builds
+
+`_m9r31_propagate_v3.sh` applies the same RPATH transformation the
+M9.R.30 install-mirror script emits, in-place to existing install
+trees:
+
+  1. Synthesize each recipe's `.m9r30_propagated_libdirs.txt`
+     manifest from the union of its binaries' current RPATHs
+     (filtered to absolute paths, $ORIGIN family stripped).
+  2. For each recipe with deps declared in `repro.nim`'s
+     `buildDeps:`/`nativeBuildDeps:`, compute the extra RPATH
+     entries = union of (recipe's own manifest, each direct dep's
+     lib + lib64 dirs, each dep's manifest contents).
+  3. patchelf --set-rpath every ELF under `<install>/usr/` (lib,
+     lib64, bin, sbin, plugins, libexec, ...) with the merged
+     dedup-preserving RPATH.
+  4. Re-synthesize the recipe's manifest from the now-extended
+     RPATHs so downstream consumers can pick up the closure.
+
+The recipe-side mechanism (M9.R.14f + M9.R.30) remains the source
+of truth. Going forward, fresh builds via `repro build` produce
+the same result. The bootstrap script closes the gap for the pre-
+M9.R.30 build state.
+
+The script processed 134 of 134 recipes; 109 produced patches.
+Recipes with `patched=0` either had no binaries or all dep paths
+were already in their RPATH.
+
+PHASE C: ISO REBUILD
+====================
+
+Two ISO rebuild iterations:
+  Iteration 1 (post-v2 propagation): walked only usr/lib/lib64/bin/sbin.
+    Result: plasmashell crashed on libxkbcommon via Qt platform plugin
+    (libqxcb.so under usr/plugins/platforms/ wasn't propagated).
+  Iteration 2 (post-v3 propagation): walks ALL ELFs under usr/.
+    Result: all DE binaries succeed.
+
+Final ISO: `recipes/reproos-iso/build/reproos.iso`
+  Size: 1,675,626,496 bytes (1.67 GiB; ~24 MB larger than M9.R.29
+  due to extra nix-store paths from propagated RPATHs).
+
+PHASE D: LIVE ISO UEFI DE SMOKE
+===============================
+
+QEMU invocation: bash `_m9r31_qemu_de_smoke.sh`
+  (`nix-shell -p qemu OVMF`, q35, 4 GiB RAM, UEFI, -nographic,
+  serial mon:stdio, explicit `root` / `reproos` login over serial).
+
+DE VERSION PROBE OUTPUT (root@localhost:~#):
+
+  === M9R31_DE_SMOKE_BEGIN ===
+  sway --version 2>&1 || echo SWAY_RC=$?
+  sway version 1.11
+
+  kwin_wayland --version 2>&1 || echo KWIN_RC=$?
+  Detected locale "C" ... [Qt locale warning, harmless]
+  kwin 6.2.5
+
+  mutter --version 2>&1 || echo MUTTER_RC=$?
+  mutter 47.10
+
+  QT_QPA_PLATFORM=offscreen plasmashell --version 2>&1 || echo PLASMA_RC=$?
+  Detected locale "C" ... [Qt locale warning, harmless]
+  plasmashell 6.2.5
+
+  QT_QPA_PLATFORM=offscreen sddm-greeter-qt6 --help 2>&1 | head -3
+  Usage: sddm-greeter-qt6 [options]
+  SDDM greeter
+
+  === M9R31_DE_SMOKE_END ===
+
+Plasmashell + sddm-greeter-qt6 need `QT_QPA_PLATFORM=offscreen` for
+--version probing without a display — the Qt6 xcb platform plugin
+tries to connect to X before printing anything. This is a standard
+Qt6 behaviour, not a regression. sway / kwin_wayland / mutter print
+their version without a display because they use direct stdio
+emission paths instead of going through Qt's QGuiApplication.
+
+PHASE E (INSTALLED-SYSTEM SMOKE): NOT REACHED
+==============================================
+
+Phase D landed late in the wall-time budget; Phase E (--automated
+install + reboot + verify installed-system DEs) was deferred. The
+SDDM auto-launch of `/usr/bin/reproos-installer-launcher` failed
+with `execve: No such file or directory` — the installer-launcher
+binary isn't staged onto the ISO. That's a separate recipe gap
+outside M9.R.31 scope (the reproos-installer recipe doesn't
+produce a `reproos-installer-launcher` entry-point).
+
+PHASE F (CLEANUP): NO-OP
+========================
+
+The M9.R.29 evidence file flagged the possibility of apt-fallback
+entries in `build-base-rootfs.sh`. Review of the current
+`build-base-rootfs.sh` shows the apt-based packages are intentional
+(systemd, dbus, network drivers from the Debian base layer) — they
+are NOT RPATH-gap fallbacks. No removals needed.
+
+Likewise, the M9.R.29.19 closure walker shim in `stage-de-rootfs.sh`
+remains necessary: it mirrors nix-store prefixes referenced by the
+propagated RPATHs (the recipe install trees reference nix-store libs
+like libglvnd, libxcb-cursor, libsystemd — these are nix-stubs, not
+from-source). Removing the walker would break the live ISO.
+
+HONEST REMAINING GAPS
+=====================
+
+* `startplasma-wayland` binary not declared in plasma-workspace
+  recipe — Plasma session entry-point missing. The CMake target
+  exists in build/ but the recipe doesn't declare the executable
+  artifact so the install-mirror doesn't copy it.
+
+* `gnome-shell` recipe doesn't produce a binary at all — its
+  install-mirror is empty. GNOME session entry-point missing.
+
+* `/usr/bin/reproos-installer-launcher` not on disk — SDDM's
+  auto-launch session fails with execve ENOENT. The
+  reproos-installer recipe doesn't produce a launcher binary.
+
+* Phase E (installed-system smoke) not reached due to wall-time
+  budget. The next agent should:
+    1. Verify the installed system boots via `--automated`
+       install path with the new ISO.
+    2. Confirm DE binaries on the installed system carry the
+       propagated RPATHs (the install path copies from /run/live
+       so they should).
+
+* The M9.R.31.2 propagation script is a bootstrap, not a permanent
+  recipe-side mechanism. Once every recipe has been freshly rebuilt
+  via `repro build` with the M9.R.30 walker active, the bootstrap
+  is no longer needed. Future agents should:
+    - Treat the propagation script as a one-shot used during the
+      M9.R.30→M9.R.31 transition.
+    - When any recipe is rebuilt, the engine writes the manifest
+      via the install-mirror script (M9.R.30 mechanism).
+
+SCRIPTS / TOOLS LEFT IN REPO
+============================
+
+  _m9r31_propagate_v3.sh    — the bootstrap (one-shot per fresh tree)
+  _m9r31_de_ldd_survey.sh   — ldd survey across DE install dirs
+  _m9r31_iso_build.sh       — reproducible ISO rebuild driver
+  _m9r31_qemu_de_smoke.sh   — UEFI boot + DE smoke transcript

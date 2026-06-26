@@ -4,7 +4,9 @@
 ## pushed to its origin remote, the gate refuses with property
 ## ``unpublished`` and remediation ``run 'git push' in <repo> first``.
 ## The active-branch and dirty checks must have passed before this
-## stage runs.
+## stage runs. RA-21: the offending sibling must be in the pushed repo's
+## develop-set dependency closure, so lib-a declares
+## ``depends = ["lib-c"]`` here (a transitive edge would do as well).
 ##
 ## Skip rule: ``git`` missing on PATH.
 
@@ -100,6 +102,7 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 revision = "main"
+depends = ["lib-c"]
 """
 
 const libBFragmentToml = """

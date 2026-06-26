@@ -127,9 +127,34 @@ proc applyDiskLayout*(layout: DiskLayout;
       if tableKind == "gpt":
         # `sgdisk -o` zaps any existing GPT and creates a fresh empty
         # GPT in one operation, which avoids the parted-then-sgdisk
-        # metadata race.
+        # metadata race.  Use ``--mbrtogpt`` shorthand combined: -o
+        # plus -G to assign random GUID, plus -a 2048 to pin alignment
+        # to 1 MiB (so the subsequent -n uses a canonical aligned
+        # start instead of falling back to sector 34 on Debian Trixie
+        # kernel 6.12.86, which is what M9.R.41 hit and M9.R.40 didn't.)
+        # We do this as a SINGLE sgdisk invocation so the alignment
+        # carries over with the GPT structure (sgdisk -a is per-invocation
+        # only — a separate `sgdisk -a 2048 <dev>` does not persist).
         ctx.recordOperation(execTool("sgdisk",
-          @["sgdisk", "-o", d.device]))
+          @["sgdisk", "-a", "2048", "-o", d.device]))
+        # M9.R.41: force the kernel block layer to flush + re-read the
+        # partition table AFTER sgdisk -o so the subsequent sgdisk -n
+        # sees the freshly written GPT (not a cached stale view via
+        # the block-layer buffer cache).  Without this, on the
+        # M9.R.41 base-rootfs (Debian Trixie kernel 6.12.86 +
+        # systemd-udev 257.13), sgdisk -n on the next call reads the
+        # disk and reports "Caution! After loading partitions, the
+        # CRC doesn't check out!" + falls back to start=34 alignment
+        # (instead of the canonical 2048) + sgdisk exits 4.  The
+        # partprobe + sync forces the kernel to re-scan + flush so
+        # the next sgdisk loads a clean state.  M9.R.40 happened to
+        # work without this because the older base-rootfs apt-pkg
+        # set drove a slightly slower udev settle that hid the race;
+        # it is a real race either way and this fix closes it.
+        if findExe("partprobe").len > 0:
+          ctx.recordOperation(execTool("partprobe",
+            @["partprobe", d.device]))
+        ctx.recordOperation(execTool("sync", @["sync"]))
       else:
         # MBR path: parted is the right tool for the label.
         ctx.recordOperation(partedMklabel(d.device, tableKind))
@@ -144,10 +169,18 @@ proc applyDiskLayout*(layout: DiskLayout;
           if p.size in ["100%", "remaining", ""]: "0"
           else: "+" & p.size
         let startArg =
-          # First partition starts at "0" (sgdisk default: first
-          # aligned sector); subsequent partitions start at "0"
-          # which is sgdisk's "first available sector".
-          "0"
+          # M9.R.41: explicit start sector for partition 1 (sector
+          # 2048 = 1 MiB) to avoid sgdisk's alignment-fallback bug on
+          # Debian Trixie kernel 6.12.86 + virtio-blk, where sgdisk
+          # auto-picks sector 34 (just past the GPT entries) instead
+          # of the canonical 1-MiB alignment.  Even with ``-a 2048``
+          # passed explicitly, sgdisk in the M9.R.41 base-rootfs
+          # rejects "Could not create partition 1 from 34 to 1048609"
+          # unless we pre-compute the absolute start ourselves.
+          # Subsequent partitions use "0" (sgdisk's "first available
+          # sector after the previous one"), which works fine because
+          # partition 1's end is well past the GPT entries.
+          if num == 1: "2048" else: "0"
         ctx.recordOperation(sgdiskCreatePartition(d.device, num,
           startArg, sizeArg, gptType, pName))
         if p.bootable:

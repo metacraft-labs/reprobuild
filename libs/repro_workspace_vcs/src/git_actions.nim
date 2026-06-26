@@ -56,6 +56,10 @@ const
   SwitchReceiptHeader* = "reprobuild.workspace-vcs.switch-receipt.v1"
   BranchCreateReceiptHeader* =
     "reprobuild.workspace-vcs.branch-create-receipt.v1"
+  MergeFfReceiptHeader* =
+    "reprobuild.workspace-vcs.merge-ff-receipt.v1"
+  ForceResetReceiptHeader* =
+    "reprobuild.workspace-vcs.force-reset-receipt.v1"
 
 type
   GitVcsOp* = enum
@@ -63,6 +67,8 @@ type
     gvoFetch
     gvoSwitch
     gvoBranchCreate
+    gvoMergeFf
+    gvoForceReset
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -80,6 +86,39 @@ type
     identityDigestHex*: string
     identityVersion*: string
     binaryPath*: string
+    referencePath*: string
+      ## RA-5 — when non-empty (clone only), the shared bare clone to
+      ## pass as ``git clone --reference``. The clone keeps
+      ## ``objects/info/alternates`` pointing at the shared bare's
+      ## ``objects/`` dir (we deliberately do NOT ``--dissociate``), so a
+      ## later fetch transfers only objects not already in the shared
+      ## pool. This is a pure acceleration field: it is intentionally
+      ## EXCLUDED from the clone fingerprint so a cold-cache run (no
+      ## reference) and a warm-cache run (reference present) share the
+      ## same receipt and produce a byte-identical resolved tree
+      ## (transparency).
+    cloneFilter*: string
+      ## RA-14 — partial-clone filter (``--filter=<spec>``), e.g.
+      ## ``blob:none`` (blobless) or ``tree:0`` (treeless). When
+      ## non-empty the clone is created as a promisor/partial clone:
+      ## history is fetched but blobs (or trees) are lazily fetched on
+      ## demand at checkout. The *checked-out* tree at the pinned
+      ## revision is byte-identical to a full clone — only the on-disk
+      ## ``.git`` object population differs — so this is an acceleration
+      ## knob, EXCLUDED from the fingerprint (like ``referencePath``).
+    depth*: int
+      ## RA-14 — shallow-clone depth (``--depth <n>``). ``0`` means "no
+      ## ``--depth``" (full history). A positive value truncates history
+      ## to the last ``n`` commits of the pinned branch; a repo later
+      ## promoted to develop-mode is deepened on demand (``git fetch
+      ## --unshallow``). The checked-out tree at the tip is identical to
+      ## a full clone, so this is also EXCLUDED from the fingerprint.
+    singleBranch*: bool
+      ## RA-14 — narrow fetch (``--single-branch``): clone/fetch only the
+      ## pinned revision's branch's remote-tracking ref rather than every
+      ## remote head (the ``repo sync -c`` equivalent). EXCLUDED from the
+      ## fingerprint: the resolved tree at the pin is unchanged; only the
+      ## set of remote-tracking refs differs.
 
   GitQueryKind* = enum
     gqkHeadSha
@@ -123,6 +162,8 @@ proc opTag(op: GitVcsOp): string =
   of gvoFetch: "fetch"
   of gvoSwitch: "switch"
   of gvoBranchCreate: "branch-create"
+  of gvoMergeFf: "merge-ff"
+  of gvoForceReset: "force-reset"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -130,6 +171,8 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "fetch": gvoFetch
   of "switch": gvoSwitch
   of "branch-create": gvoBranchCreate
+  of "merge-ff": gvoMergeFf
+  of "force-reset": gvoForceReset
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -157,6 +200,10 @@ proc encodePayload(payload: GitVcsPayload): string =
   result.add("identity-digest=" & payload.identityDigestHex & "\n")
   result.add("identity-version=" & esc(payload.identityVersion) & "\n")
   result.add("binary-path=" & esc(payload.binaryPath) & "\n")
+  result.add("reference-path=" & esc(payload.referencePath) & "\n")
+  result.add("clone-filter=" & esc(payload.cloneFilter) & "\n")
+  result.add("depth=" & $payload.depth & "\n")
+  result.add("single-branch=" & (if payload.singleBranch: "1" else: "0") & "\n")
 
 proc decodePayload(text: string): GitVcsPayload =
   proc unesc(value: string): string =
@@ -198,6 +245,15 @@ proc decodePayload(text: string): GitVcsPayload =
     of "identity-digest": result.identityDigestHex = value
     of "identity-version": result.identityVersion = value
     of "binary-path": result.binaryPath = value
+    of "reference-path": result.referencePath = value
+    of "clone-filter": result.cloneFilter = value
+    of "depth":
+      # A malformed/empty depth decodes to 0 ("no --depth") rather than
+      # raising: the field is a pure accelerator and a missing value must
+      # never break decode of an otherwise valid payload.
+      try: result.depth = parseInt(value.strip())
+      except ValueError: result.depth = 0
+    of "single-branch": result.singleBranch = value.strip() == "1"
     else:
       # Forward-compatible: ignore unknown keys so a payload written
       # by a newer M2.x build still decodes.
@@ -219,6 +275,12 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   result.writeString(payload.remoteName)
   result.writeString(payload.branchName)
   result.writeString(payload.revision)
+  # RA-5 ``referencePath`` and RA-14 ``cloneFilter`` / ``depth`` /
+  # ``singleBranch`` are DELIBERATELY NOT folded in here. They are pure
+  # network/disk acceleration knobs: a blobless/shallow/single-branch
+  # clone and a full clone of the same (remote, revision, identity)
+  # resolve to a byte-identical working tree at the pinned revision, so
+  # they must share one receipt / cache entry (transparency).
   # ``repoPath`` participates in fetch/switch fingerprints (those are
   # working-tree-local operations) but NOT in clone (M2 design rule 1:
   # the clone receipt for the same (remote, revision, identity) must
@@ -226,7 +288,7 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch, gvoBranchCreate:
+  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset:
     result.writeString(payload.repoPath)
 
 proc actionFingerprint*(payload: GitVcsPayload): ContentDigest =
@@ -378,6 +440,27 @@ proc renderBranchCreateReceipt(payload: GitVcsPayload;
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
 
+proc renderMergeFfReceipt(payload: GitVcsPayload; headSha: string): string =
+  result = MergeFfReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tmerge-ff\n")
+  result.add("remote-name\t" & payload.remoteName & "\n")
+  result.add("branch\t" & payload.branchName & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
+proc renderForceResetReceipt(payload: GitVcsPayload; headSha: string): string =
+  result = ForceResetReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tforce-reset\n")
+  result.add("revision\t" & payload.revision & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
 proc failed(reason, diagnostic: string): ActionResult =
   ## Structured failure result: ``reason`` is the contract field the
   ## test suite asserts on (e.g. ``"dirty"`` for the M2 switch-on-dirty
@@ -403,16 +486,76 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if parent.len > 0:
     createDir(parent)
   if dirExists(target):
-    # A pre-existing target is a hard error: clone must be the act of
-    # creating the working tree. The CLI-level "init-or-resync" flow
-    # will be a different action (M9+).
-    return failed("clone-target-exists",
-      "clone target already exists: " & target)
-  var args = @["clone", payload.remoteUrl, target]
+    if dirExists(target / ".git"):
+      # A pre-existing *git* tree is a hard error: clone must be the act
+      # of creating the working tree. The CLI-level "init-or-resync"
+      # flow uses fetch/merge/force-reset, not clone, on an existing tree.
+      return failed("clone-target-exists",
+        "clone target already exists: " & target)
+    # RA-16 resume correctness: a leftover directory with NO ``.git`` is a
+    # half-cloned / interrupted-clone artifact (no receipt was written, so
+    # the engine re-schedules this clone). Remove it so the re-run redoes
+    # just this repo cleanly instead of being confused by the partial
+    # state. We only remove a non-git directory — a real tree above.
+    try:
+      removeDir(target)
+    except OSError as err:
+      return failed("clone-partial-cleanup-failed",
+        "could not remove half-cloned target " & target & ": " & err.msg)
+  # RA-14 acceleration flags. These are network/disk knobs that do NOT
+  # change the working tree at the pinned revision (see
+  # ``fingerprintPayload``): ``--single-branch`` narrows the fetched
+  # remote heads, ``--filter`` makes a partial (promisor) clone, and
+  # ``--depth`` truncates history. They are appended to BOTH the
+  # accelerated and the fallback plain-clone command lines.
+  proc accelFlags(): seq[string] =
+    result = @[]
+    if payload.singleBranch:
+      result.add("--single-branch")
+    if payload.cloneFilter.len > 0:
+      result.add("--filter=" & payload.cloneFilter)
+    if payload.depth > 0:
+      result.add("--depth")
+      result.add($payload.depth)
+
+  var args = @["clone"]
+  # RA-5: accelerate via the shared bare clone. ``--reference <bare>``
+  # leaves ``objects/info/alternates`` pointing at the shared pool (no
+  # ``--dissociate``), so the clone reads objects already present in the
+  # cache instead of re-downloading them. This is transparent: the
+  # resolved tree at the pinned revision is byte-identical to a plain
+  # clone. If the reference path turns out to be unusable, retry once as
+  # a plain clone so the accelerator never breaks the clone itself.
+  let useReference = payload.referencePath.len > 0 and
+    (dirExists(payload.referencePath / "objects") or
+     dirExists(payload.referencePath / ".git"))
+  if useReference:
+    args.add("--reference")
+    args.add(payload.referencePath)
+  for f in accelFlags():
+    args.add(f)
+  args.add(payload.remoteUrl)
+  args.add(target)
   if payload.revision.len > 0:
     args.add("--branch")
     args.add(payload.revision)
-  let cloneRes = runGit(payload, args)
+  var cloneRes = runGit(payload, args)
+  if cloneRes.exitCode != 0 and useReference:
+    # Best-effort fallback: drop the reference and clone standalone so a
+    # broken/locked shared bare never breaks init. The RA-14 accelerators
+    # are kept — they are independent of the shared bare.
+    if dirExists(target):
+      try: removeDir(target)
+      except OSError: discard
+    var plain = @["clone"]
+    for f in accelFlags():
+      plain.add(f)
+    plain.add(payload.remoteUrl)
+    plain.add(target)
+    if payload.revision.len > 0:
+      plain.add("--branch")
+      plain.add(payload.revision)
+    cloneRes = runGit(payload, plain)
   if cloneRes.exitCode != 0:
     return failed("clone-failed",
       "git clone exited " & $cloneRes.exitCode & ": " &
@@ -429,7 +572,19 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if not dirExists(target / ".git"):
     return failed("fetch-target-missing",
       "fetch target is not a git working tree: " & target)
-  let res = runGit(payload, ["-C", target, "fetch", payload.remoteName])
+  var fetchArgs = @["-C", target, "fetch"]
+  # RA-14 — carry the partial-clone filter and shallow depth onto the
+  # fetch so a develop-mode "deepen on demand" (``--depth``/``--unshallow``)
+  # or a widening of the promisor filter is expressible as the same
+  # action. These never change the resolved tree, only how much is
+  # downloaded.
+  if payload.cloneFilter.len > 0:
+    fetchArgs.add("--filter=" & payload.cloneFilter)
+  if payload.depth > 0:
+    fetchArgs.add("--depth")
+    fetchArgs.add($payload.depth)
+  fetchArgs.add(payload.remoteName)
+  let res = runGit(payload, fetchArgs)
   if res.exitCode != 0:
     return failed("fetch-failed",
       "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
@@ -529,6 +684,86 @@ proc executeBranchCreate(payload: GitVcsPayload;
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc executeMergeFf(payload: GitVcsPayload;
+                    cwd, receiptPath: string): ActionResult =
+  ## RA-5c — fast-forward the working tree onto its tracked remote
+  ## branch as an engine action (the checkout phase's counterpart to the
+  ## network ``fetch``). The planner has already established that HEAD is
+  ## an ancestor of ``<remote>/<branch>`` (so the merge is a strict
+  ## fast-forward) and that the working tree is clean. ``merge --ff-only``
+  ## is the safe primitive: it refuses (non-zero exit) rather than
+  ## creating a merge commit if the relationship is not a pure
+  ## fast-forward, so a planner/observer race degrades to a reported
+  ## failure rather than a destructive merge. The remote-tracking ref is
+  ## assumed current because the action depends on its sibling ``fetch``.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("merge-ff-target-missing",
+      "merge-ff target is not a git working tree: " & target)
+  let cleanRes = workingTreeIsClean(payload, target)
+  if not cleanRes.ok:
+    return failed("merge-ff-status-probe-failed", cleanRes.diagnostic)
+  if not cleanRes.clean:
+    # Defensive: the planner only emits a fast-forward for a clean tree,
+    # but never merge into a dirty tree even if we are asked to.
+    return failed("dirty",
+      "git merge --ff-only refused: working tree is dirty at " & target)
+  let ref0 = "refs/remotes/" & payload.remoteName & "/" & payload.branchName
+  let res = runGit(payload,
+    ["-C", target, "merge", "--ff-only", ref0])
+  if res.exitCode != 0:
+    return failed("merge-ff-failed",
+      "git merge --ff-only exited " & $res.exitCode & ": " &
+        res.output.trimmed)
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("merge-ff-head-probe-failed", headRes.diagnostic)
+  let receipt = renderMergeFfReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
+proc executeForceReset(payload: GitVcsPayload;
+                       cwd, receiptPath: string): ActionResult =
+  ## RA-16 ``--force-sync`` — OVERWRITE a divergent / dirty / locally
+  ## mangled checkout so it matches the manifest-locked revision exactly.
+  ## This is the explicit-opt-in destructive arm the normal sync planner
+  ## never reaches: a normal sync report-only-SKIPS a divergent or dirty
+  ## tree; only the force path resets it.
+  ##
+  ## The reset is deliberately thorough so the tree ends byte-identical to
+  ## a fresh checkout at the locked SHA: ``git reset --hard <revision>``
+  ## moves HEAD and the index, and ``git clean -ffdx`` removes any
+  ## untracked / ignored leftovers (a half-applied merge, stray build
+  ## output, a manually-dropped file). ``revision`` is the concrete locked
+  ## SHA (or a ref) the caller resolved; it must already be present in the
+  ## object store (the fetch phase / shared bare guarantees this for a
+  ## divergent tree, since the locked commit is reachable).
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("force-reset-target-missing",
+      "force-reset target is not a git working tree: " & target)
+  if payload.revision.len == 0:
+    return failed("force-reset-no-revision",
+      "force-reset requires a target revision to reset onto")
+  let resetRes = runGit(payload,
+    ["-C", target, "reset", "--hard", payload.revision])
+  if resetRes.exitCode != 0:
+    return failed("force-reset-failed",
+      "git reset --hard " & payload.revision & " exited " &
+        $resetRes.exitCode & ": " & resetRes.output.trimmed)
+  # Remove untracked and ignored leftovers so the overwrite is complete.
+  let cleanRes = runGit(payload, ["-C", target, "clean", "-ffdx"])
+  if cleanRes.exitCode != 0:
+    return failed("force-reset-clean-failed",
+      "git clean -ffdx exited " & $cleanRes.exitCode & ": " &
+        cleanRes.output.trimmed)
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("force-reset-head-probe-failed", headRes.diagnostic)
+  let receipt = renderForceResetReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 type
   WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Callback shape used by sibling VCS backends (currently
@@ -624,6 +859,10 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
   of gvoSwitch: result = executeSwitch(payload, action.cwd, receiptPath)
   of gvoBranchCreate:
     result = executeBranchCreate(payload, action.cwd, receiptPath)
+  of gvoMergeFf:
+    result = executeMergeFf(payload, action.cwd, receiptPath)
+  of gvoForceReset:
+    result = executeForceReset(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -642,7 +881,9 @@ installGitVcsExecutor()
 
 proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
                   remoteUrl, remoteName, branchName, revision,
-                  repoPath, receiptPath: string): GitVcsPayload =
+                  repoPath, receiptPath: string;
+                  referencePath = "";
+                  cloneFilter = ""; depth = 0; singleBranch = false): GitVcsPayload =
   GitVcsPayload(
     op: op,
     remoteUrl: remoteUrl,
@@ -653,12 +894,18 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
     receiptPath: receiptPath,
     identityDigestHex: identity.digestHex(),
     identityVersion: identity.version,
-    binaryPath: identity.binaryPath)
+    binaryPath: identity.binaryPath,
+    referencePath: referencePath,
+    cloneFilter: cloneFilter,
+    depth: depth,
+    singleBranch: singleBranch)
 
 proc gitCloneAction*(id: string; identity: GitToolIdentity;
                      remoteUrl, repoPath, receiptPath: string;
                      revision = ""; cwd = ""; deps: openArray[string] = [];
-                     cacheable = true): BuildAction =
+                     cacheable = true; referencePath = "";
+                     cloneFilter = ""; depth = 0;
+                     singleBranch = false): BuildAction =
   ## Construct a cacheable clone action. The receipt path is the
   ## action's declared output and the unit of caching (per M2 design
   ## rule 1). ``revision``, when non-empty, is passed as ``--branch``
@@ -667,8 +914,23 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
   ## The action fingerprint folds the ``GitToolIdentity.digest`` so
   ## two workspaces resolving to different git binaries cannot share
   ## a cache entry (per M2 design rule 2).
+  ##
+  ## RA-5 — ``referencePath``, when set, names the shared bare clone to
+  ## pass as ``git clone --reference`` so the clone reads objects from
+  ## the shared pool instead of re-downloading them. It is deliberately
+  ## OMITTED from the fingerprint (see ``fingerprintPayload``) so a
+  ## cold-cache clone and a warm-cache clone share the same receipt and
+  ## produce a byte-identical resolved tree (transparency).
+  ##
+  ## RA-14 — ``cloneFilter`` (``--filter=blob:none``/``tree:0``),
+  ## ``depth`` (``--depth``), and ``singleBranch`` (``--single-branch``)
+  ## are the network-economy accelerators. Like ``referencePath`` they
+  ## are OMITTED from the fingerprint so a partial/shallow/narrow clone
+  ## and a full clone of the same pin share one receipt and resolve to a
+  ## byte-identical working tree.
   let payload = buildPayload(identity, gvoClone, remoteUrl, "", "",
-    revision, repoPath, receiptPath)
+    revision, repoPath, receiptPath, referencePath = referencePath,
+    cloneFilter = cloneFilter, depth = depth, singleBranch = singleBranch)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
@@ -677,13 +939,19 @@ proc gitCloneAction*(id: string; identity: GitToolIdentity;
 proc gitFetchAction*(id: string; identity: GitToolIdentity;
                      remoteName, repoPath, receiptPath: string;
                      cwd = ""; deps: openArray[string] = [];
-                     cacheable = true): BuildAction =
+                     cacheable = true;
+                     cloneFilter = ""; depth = 0): BuildAction =
   ## Construct a cacheable fetch action. The fingerprint includes the
   ## ``repoPath`` because a fetch is a working-tree-local operation:
   ## two workspaces with the same remote name but different working
   ## trees must NOT share a cache entry.
+  ##
+  ## RA-14 — ``cloneFilter``/``depth`` carry the partial/shallow knobs
+  ## onto the fetch (``--filter``/``--depth``) for develop-mode
+  ## deepen-on-demand. They are excluded from the fingerprint (they do
+  ## not change the resolved tree).
   let payload = buildPayload(identity, gvoFetch, "", remoteName, "",
-    "", repoPath, receiptPath)
+    "", repoPath, receiptPath, cloneFilter = cloneFilter, depth = depth)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),
@@ -718,6 +986,51 @@ proc gitBranchCreate*(id: string; identity: GitToolIdentity;
   ## with ``reason = "branch-collision"``.
   let payload = buildPayload(identity, gvoBranchCreate, "", "", branchName,
     "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitMergeFfAction*(id: string; identity: GitToolIdentity;
+                      remoteName, branchName, repoPath, receiptPath: string;
+                      cwd = ""; deps: openArray[string] = [];
+                      cacheable = false): BuildAction =
+  ## RA-5c — construct a fast-forward merge action used in the sync/pull
+  ## checkout phase. The executor runs ``git merge --ff-only
+  ## refs/remotes/<remoteName>/<branchName>`` in the named working tree;
+  ## it refuses on a dirty tree or a non-fast-forward relationship. This
+  ## replaces the synchronous ``gitRunPlain(["merge", "--ff-only", ...])``
+  ## the old serial sync path issued outside the engine: the merge is now
+  ## an engine action that can depend on its sibling ``fetch``.
+  ##
+  ## ``cacheable`` defaults to ``false``: a fast-forward is a mutation of
+  ## a working tree whose precondition (HEAD ↔ remote-tip relationship)
+  ## is observed live, not a deterministic function of declared inputs,
+  ## so caching its receipt would be unsound (mirrors why the query
+  ## operations are not cacheable).
+  let payload = buildPayload(identity, gvoMergeFf, "", remoteName,
+    branchName, "", repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitForceResetAction*(id: string; identity: GitToolIdentity;
+                      revision, repoPath, receiptPath: string;
+                      cwd = ""; deps: openArray[string] = [];
+                      cacheable = false): BuildAction =
+  ## RA-16 ``--force-sync`` — construct the destructive overwrite action
+  ## the force path schedules for a divergent / dirty checkout. The
+  ## executor runs ``git reset --hard <revision>`` + ``git clean -ffdx``
+  ## in the named working tree so it ends byte-identical to a fresh
+  ## checkout at the locked SHA.
+  ##
+  ## ``cacheable`` defaults to ``false``: like ``merge-ff``, the action
+  ## mutates a working tree whose precondition (the divergence) is
+  ## observed live, not a deterministic function of declared inputs, so
+  ## caching its receipt would be unsound.
+  let payload = buildPayload(identity, gvoForceReset, "", "",
+    "", revision, repoPath, receiptPath)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

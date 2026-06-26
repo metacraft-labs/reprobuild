@@ -251,18 +251,19 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       check report["triggerSha"].getStr() == fx.libA.sha
       check report["repos"].len == 3
 
-      # Lock file lives at the canonical path under the manifest layer
-      # the dispatcher picks for single-project mode.
+      # RA-1: lock file lives at the per-repo path
+      # ``locks/<project>/<repo>/<full-sha>.toml`` under the manifest
+      # layer the dispatcher picks for single-project mode.
       let lockPath = report["lockFilePath"].getStr()
       check fileExists(lockPath)
-      check lockPath.startsWith(
-        fx.workspaceRoot / ".repo" / "manifests" / "locks" / "lib-a" / "lib-a-")
-      check lockPath.endsWith(".toml")
+      check lockPath == fx.workspaceRoot / ".repo" / "manifests" /
+        "locks" / "lib-a" / "lib-a" / (fx.libA.sha & ".toml")
 
-      let indexPath = report["indexFilePath"].getStr()
-      check fileExists(indexPath)
-      check indexPath == fx.workspaceRoot / ".repo" / "manifests" /
-        "locks" / "lib-a" / "index.toml"
+      # RA-1: no shared index is written. The report carries an empty
+      # indexFilePath and no index.toml is on disk.
+      check report["indexFilePath"].getStr() == ""
+      check not fileExists(fx.workspaceRoot / ".repo" / "manifests" /
+        "locks" / "lib-a" / "index.toml")
 
       # Round-trip the lock TOML through the M5 strict reader and
       # confirm it reproduces the same (name, path, remote, revision)
@@ -285,14 +286,10 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       check byName["lib-c"].remote == "lib-c-origin"
       check byName["lib-c"].revision == fx.libC.sha
 
-      # The index TOML must carry a single entry pointing at the lock
-      # file we just wrote.
-      let index = readLockIndex(indexPath)
-      check index.entry.len == 1
-      check index.entry[0].trigger_repo == "lib-a"
-      check index.entry[0].trigger_sha == fx.libA.sha
-      check index.entry[0].lock_file ==
-        "locks/lib-a/" & extractFilename(lockPath)
+      # RA-1: the lock filename is the full trigger SHA (no short-sha,
+      # no trigger-name prefix), under the trigger repo's subdirectory.
+      check extractFilename(lockPath) == fx.libA.sha & ".toml"
+      check parentDir(lockPath).endsWith(DirSep & "lib-a")
 
   test "test_m11_lock_idempotent_when_rerun_at_same_sha":
     let gitBin = findExe("git")
@@ -308,31 +305,26 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       check firstRes.code == 0
       let firstReport = readReport(fx)
       let lockPath = firstReport["lockFilePath"].getStr()
-      let indexPath = firstReport["indexFilePath"].getStr()
       check fileExists(lockPath)
       let firstLockBody = readFile(lockPath)
-      let firstIndexBody = readFile(indexPath)
 
-      # Re-run with no workspace mutation. The lock and index file
-      # paths must match (same trigger SHA → same filename), the
-      # index entry must be replaced rather than appended (still one
-      # entry), and the round-trip-stable repo tuples must remain.
+      # Re-run with no workspace mutation. RA-1: the per-repo lock path
+      # is keyed by the full trigger SHA, so re-locking the same SHA
+      # overwrites the same file; the report flags it as a replaced
+      # (already-existing) lock and writes no index.
       let secondRes = invokeLock(fx)
       check secondRes.code == 0
       let secondReport = readReport(fx)
       check secondReport["lockFilePath"].getStr() == lockPath
-      check secondReport["indexFilePath"].getStr() == indexPath
+      check secondReport["indexFilePath"].getStr() == ""
       check secondReport["replacedExistingEntry"].getBool() == true
 
-      # The lock body bytes are identical aside from the created_at
-      # timestamp (which the writer regenerates on every invocation).
-      # We verify the substantive content by checking the index still
-      # has exactly one entry and the round-tripped repo tuples are
-      # unchanged.
-      let index = readLockIndex(indexPath)
-      check index.entry.len == 1
-      check index.entry[0].trigger_repo == "lib-a"
-      check index.entry[0].trigger_sha == fx.libA.sha
+      # Exactly one lock file exists for the trigger repo after the
+      # re-lock (the same SHA overwrote in place).
+      var lockCount = 0
+      for _ in walkFiles(parentDir(lockPath) / "*.toml"):
+        inc lockCount
+      check lockCount == 1
 
       let parsed = readLock(lockPath)
       check parsed.repo.len == 3
@@ -344,7 +336,6 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
 
       # The lock body must still parse and emit non-empty bytes (sanity).
       check firstLockBody.len > 0
-      check firstIndexBody.len > 0
       check readFile(lockPath).len > 0
 
   test "test_m11_lock_dirty_workspace_refuses":
@@ -370,19 +361,22 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       # caller knows no file was written.
       check report["lockFilePath"].getStr().len == 0
 
-      # No lock file or index should be on disk for this run.
+      # No lock file should be on disk for this run (RA-1: per-repo
+      # subtree, no index).
       let locksDir = fx.workspaceRoot / ".repo" / "manifests" / "locks"
       if dirExists(locksDir):
         # Allow the directory to exist if some other code created it;
-        # what matters is that no lock_file or index_file was written
-        # by this refused invocation.
+        # what matters is that no lock file (and no legacy index) was
+        # written by this refused invocation.
         check not fileExists(locksDir / "lib-a" / "index.toml")
+        check not fileExists(locksDir / "lib-a" / "lib-a" /
+          (fx.libA.sha & ".toml"))
 
       # Dirty file must remain on disk — the lock command must not
       # have touched the working tree.
       check fileExists(fx.workspaceRoot / "lib-b" / "dirty.txt")
 
-  test "test_m11_lock_index_updated_for_new_sha":
+  test "test_m11_new_sha_writes_new_per_repo_lock_no_index":
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip()
@@ -420,15 +414,23 @@ suite "M11 — repro workspace lock (round-trips through resolver)":
       check fileExists(firstLockPath) # first lock still on disk
       check secondReport["replacedExistingEntry"].getBool() == false
       check secondReport["triggerSha"].getStr() == newSha
+      check secondReport["indexFilePath"].getStr() == ""
 
-      let indexPath = secondReport["indexFilePath"].getStr()
-      let index = readLockIndex(indexPath)
-      check index.entry.len == 2
-
-      var triggerShas: seq[string]
-      for e in index.entry: triggerShas.add(e.trigger_sha)
-      check fx.libA.sha in triggerShas
-      check newSha in triggerShas
+      # RA-1: a new SHA produces a NEW per-repo lock file alongside the
+      # old one (append-only by path); both live under the lib-a
+      # subtree and no index.toml is written.
+      let repoLockDir = fx.workspaceRoot / ".repo" / "manifests" /
+        "locks" / "lib-a" / "lib-a"
+      check firstLockPath == repoLockDir / (fx.libA.sha & ".toml")
+      check secondLockPath == repoLockDir / (newSha & ".toml")
+      check not fileExists(fx.workspaceRoot / ".repo" / "manifests" /
+        "locks" / "lib-a" / "index.toml")
+      var shaFiles: seq[string]
+      for f in walkFiles(repoLockDir / "*.toml"):
+        shaFiles.add(extractFilename(f))
+      check (fx.libA.sha & ".toml") in shaFiles
+      check (newSha & ".toml") in shaFiles
+      check shaFiles.len == 2
 
   test "test_m11_lock_report_json_well_formed":
     let gitBin = findExe("git")

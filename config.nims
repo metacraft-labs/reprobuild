@@ -38,84 +38,14 @@ for ctTestLib in [
   if dirExists(candidate):
     switch("path", candidate)
 
-# Incremental-Test-Runner M0b-2: ``ct_incremental_adapter`` imports codetracer's
-# CANONICAL incremental engine (``codetracer/src/ct_test/incremental/engine.nim``)
-# directly as a workspace SIBLING — the whole point of M0b is that reprobuild
-# consumes the canonical engine with NO vendored copy and NO drift. The engine's
-# transitive imports stay within codetracer's ``ct_test/incremental`` modules
-# plus codetracer-trace-format-nim's seekable CTFS reader; it pulls in NO
-# reprobuild, runquota, or io-mon module. This wiring MIRRORS the adapter repo's
-# own ``config.nims`` (``wireCodetracerEngine``) and codetracer's
-# ``src/ct_test/config.nims`` + ``nim.cfg`` — the only build configuration that
-# makes the engine compile: the engine module path, the codetracer-trace-format-nim
-# sibling path, the ``results >= 0.5`` pin its seekable reader needs, and the
-# zstd dev include for the trace-format-nim CTFS reader's ``#include <zstd.h>``.
-# Every path is defended with ``dirExists``/``fileExists`` so a checkout missing
-# the codetracer sibling fails LOUDLY at compile time rather than mis-resolving.
-proc wireCodetracerEngine() =
-  # 1. The canonical engine module directory. Resolved from
-  #    ``CODETRACER_CT_TEST_SRC`` (the dev shell / CI sets it) or the sibling
-  #    checkout next to this repo for local development.
-  let ctTestSrc =
-    if getEnv("CODETRACER_CT_TEST_SRC").len > 0:
-      getEnv("CODETRACER_CT_TEST_SRC")
-    else:
-      ".." / "codetracer" / "src" / "ct_test"
-  let engineDir = ctTestSrc / "incremental"
-  if fileExists(engineDir / "engine.nim"):
-    switch("path", engineDir)
-
-  # 2. codetracer-trace-format-nim — the package the engine's seekable
-  #    executed-function reader (``ctfs_seekable.nim``) links.
-  let traceFormatSrc =
-    if getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC").len > 0:
-      getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")
-    else:
-      ".." / "codetracer-trace-format-nim" / "src"
-  if fileExists(traceFormatSrc / "codetracer_ct_print_lib.nim"):
-    switch("path", traceFormatSrc)
-
-  # 3. ``results >= 0.5`` pin (env var, then the newest ``results-0.5*`` under
-  #    ``~/.nimble/pkgs2``). codetracer-trace-format-nim needs the ``.v`` field
-  #    the ``?`` operator expands to; the older vendored ``results`` lacks it.
-  block pinResults:
-    let envSrc = getEnv("CODETRACER_RESULTS_SRC")
-    if envSrc.len > 0 and dirExists(envSrc):
-      switch("path", envSrc)
-      break pinResults
-    let pkgs2 = getHomeDir() / ".nimble" / "pkgs2"
-    if dirExists(pkgs2):
-      var best = ""
-      for kind, p in walkDir(pkgs2):
-        if kind == pcDir and p.lastPathPart.startsWith("results-0.5"):
-          if p.lastPathPart > best.lastPathPart:
-            best = p
-      if best.len > 0:
-        switch("path", best)
-
-  # 4. zstd dev include for the trace-format-nim CTFS reader's
-  #    ``#include <zstd.h>`` — re-surfaced out of the nix cc-wrapper's
-  #    ``NIX_CFLAGS_COMPILE`` exactly as codetracer's ``config.nims`` does.
-  let nixCflags = getEnv("NIX_CFLAGS_COMPILE")
-  if nixCflags.len > 0:
-    let toks = nixCflags.splitWhitespace()
-    var i = 0
-    while i < toks.len:
-      if toks[i] == "-isystem" and i + 1 < toks.len:
-        let dir = toks[i + 1]
-        if "zstd" in dir:
-          switch("passC", "-isystem " & dir)
-        i += 2
-      else:
-        i += 1
-
-# NOTE: ``wireCodetracerEngine()`` is CALLED at the very END of this config
-# (after the vendored ``results`` ``--path`` below), not here. In NimScript the
-# LAST ``--path`` added is searched FIRST, so codetracer's ``results >= 0.5``
-# pin (which the canonical engine + codetracer-trace-format-nim require — their
-# ``?`` operator expands to the ``.v`` field that version introduced) must be
-# added AFTER reprobuild's vendored ``libs/results`` to take precedence for the
-# engine modules. The proc is defined here; the call is deferred to the bottom.
+# Incremental-Test-Runner: ``ct_incremental_adapter`` reaches codetracer's
+# CANONICAL incremental engine by EXECUTING the ``ct`` binary as a subprocess
+# (the ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol),
+# NOT by compiling the engine in-process. So reprobuild needs NO codetracer
+# engine source, codetracer-trace-format-nim, ``results >= 0.5`` pin, or zstd
+# include on its Nim path — the adapter compiles against std only. The codetracer
+# dependency is a one-way RUNTIME process dependency, resolved from ``$CT_BIN``
+# (CI builds ``ct`` in the codetracer sibling) or ``ct`` on ``PATH``.
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
 # ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
@@ -306,16 +236,6 @@ addPackagePath("STINT_SRC", [
   "libs" / "stint" / "src",
 ], "stint.nim")
 
-# Incremental-Test-Runner M0b-2: wire codetracer's canonical incremental engine
-# LAST, so its ``results >= 0.5`` pin is searched ahead of reprobuild's vendored
-# ``libs/results`` (NimScript: the last ``--path`` wins). The engine +
-# codetracer-trace-format-nim require the ``.v`` field the newer ``results``
-# introduces; the older vendored copy lacks it. Modules that only need the
-# vendored ``results`` still resolve it (it is still on the path) — only the
-# engine's seekable-reader chain needs the newer one, and it gets it by
-# precedence. See ``wireCodetracerEngine`` above.
-wireCodetracerEngine()
-
 # The monitor shim's hook chain is implemented on top of
 # ``metacraft-labs/nim-stackable-hooks`` (the framework portion that
 # the spec at MCR-OS-Interposition.status.org §M0 describes as the
@@ -338,6 +258,18 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 addPackagePath("VM_HARNESS_SRC", [
   ".." / "vm-harness" / "src",
 ], "vm_harness.nim")
+
+# Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
+# actually present. The R2/R9 boot integration tests guard their
+# ``import vm_harness`` on this symbol so they skip-compile when the sibling is
+# absent, instead of hard-failing the whole test-build. A missing optional
+# sibling must skip, not be fatal (Workspace-alignment RA-23;
+# Interactive-UX-And-Progress.md Principle 2).
+block:
+  let vmhEnv = getEnv("VM_HARNESS_SRC")
+  if (vmhEnv.len > 0 and fileExists(vmhEnv / "vm_harness.nim")) or
+     fileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
+    switch("define", "vmHarnessAvailable")
 
 let runquotaRoot = block:
   let fromEnv = getEnv("RUNQUOTA_SRC")

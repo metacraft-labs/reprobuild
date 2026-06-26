@@ -20,11 +20,73 @@
 
 import std/[strutils]
 
+import ./errors
 import ./os_system_parse
 import ./posix_system_parse
 import ./system_value
 
 type
+  WindowsServiceRecoveryActionKind* = enum
+    ## Windows-System-Resources Phase B: the four `sc.exe failure`
+    ## actions a service can declare for its 1st/2nd/3rd-failure slots.
+    ## The string values are the LOWER-CASE wire form used in the
+    ## profile text, the codec frame, and the broker dispatch — `sc.exe
+    ## failure ... actions=` consumes the same tokens (with the empty
+    ## argument `""` for `wsrakNone`). The enum is the apply-side
+    ## counterpart of `repro_profile.types.WindowsServiceRecoveryAction`;
+    ## the two share a string vocabulary so a profile-side
+    ## `WindowsServiceRecoveryAction.Restart` flows through the
+    ## adapter as `"restart"` and lands here as `wsrakRestart` without
+    ## a separate translation table.
+    wsrakNone = "none"
+    wsrakRestart = "restart"
+    wsrakRunCommand = "runcommand"
+    wsrakReboot = "reboot"
+
+  ScheduledTaskScheduleKind* = enum
+    ## Windows-System-Resources Phase C: apply-side counterpart of the
+    ## front-end `repro_profile.types.ScheduleKind`. Same lower-case wire
+    ## vocabulary so a profile-side `sskDaily` token flows through the
+    ## adapter as `"daily"` and lands here as `wstskDaily` without a
+    ## separate translation table. `repro_elevation` does NOT import
+    ## `repro_profile` (dep-inversion) — the two enums share a wire
+    ## vocabulary, not a Nim symbol.
+    wstskOnBoot = "onBoot"
+    wstskOnLogon = "onLogon"
+    wstskOnce = "once"
+    wstskDaily = "daily"
+    wstskInterval = "interval"
+
+  ScheduledTaskScheduleSpec* = object
+    ## Apply-side counterpart of the front-end `ScheduleSpec` (same
+    ## discriminated union, same wire vocabulary). The codec token form
+    ## is `<lower-case-kind>:<payload>` matching the front-end's
+    ## `encodeScheduleSpec` so a round-trip through ProfileIntent ->
+    ## SystemResource -> PrivilegedOperation -> RBEB frame stays
+    ## byte-stable.
+    case kind*: ScheduledTaskScheduleKind
+    of wstskOnBoot:
+      delaySeconds*: int
+    of wstskOnLogon:
+      forUser*: string
+    of wstskOnce:
+      runAt*: string
+    of wstskDaily:
+      timeOfDay*: string
+    of wstskInterval:
+      everyMinutes*: int
+      startAt*: string
+
+  WindowsServiceRecoverySpec* = object
+    ## One slot of `windows.service`'s `recoveryActions` field — an
+    ## (action, delayMs) pair the SCM invokes on a failure. The
+    ## sequence is positional inside the operation (1st-failure /
+    ## 2nd-failure / subsequent-failure slot); `sc.exe failure ...
+    ## actions=a1/d1/a2/d2/a3/d3` consumes up to three entries in
+    ## declaration order.
+    action*: WindowsServiceRecoveryActionKind
+    delayMs*: int
+
   PrivilegedOperationKind* = enum
     ## The variant tag for `PrivilegedOperation`. The string form is
     ## what the RBEB protocol serializes; an unknown tag on the wire
@@ -60,6 +122,14 @@ type
       ## The M69 `windows.service` operation: manage a Windows
       ## service's start-type and runtime state. Does NOT install or
       ## remove the service itself.
+    pokWindowsScheduledTask = "windows.scheduledTask"
+      ## The Windows-System-Resources Phase C `windows.scheduledTask`
+      ## operation: manage a Task Scheduler entry — schedule +
+      ## principal + executable + enabled flag are observable live
+      ## state. Apply registers the task via `Register-ScheduledTask`
+      ## (on create) or `Set-ScheduledTask` (on update); destroy uses
+      ## `Unregister-ScheduledTask`. Crosses the broker; per the spec
+      ## §1.3 destroy is gated by `--accept-destroy`.
     pokWindowsVsInstaller = "windows.vsInstaller"
       ## The M69 Phase-B `windows.vsInstaller` operation: install /
       ## modify / uninstall a Visual Studio product through the
@@ -261,6 +331,29 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokInlineExecCall = "reprobuild.inlineExecCall"
+      ## Windows-System-Resources Phase E: the cross-cutting privileged
+      ## execution of an `inlineExecCall(...)` build-graph edge tagged
+      ## `requiresElevation = true`. Unlike the per-resource typed kinds
+      ## above, this one carries the literal argv + tool refs + env the
+      ## build engine produced for the edge; the broker is asked to
+      ## spawn the process *as authored* (no per-resource convergence /
+      ## observe / drift). This is the build-engine's hand-off to the
+      ## broker for edges that mutate system state — the engine handles
+      ## input hashing / output caching as usual; the broker handles the
+      ## elevated fork only.
+      ##
+      ## Closed-set posture: `iecExecutable` is a closed string (no NUL
+      ## byte / control character); each `iecArguments` entry is also
+      ## NUL-free; `iecEnvironment` entries must match the
+      ## `NAME=VALUE` shape. The `@FILE:<path>` argv substitution is
+      ## applied AT EXEC TIME (the plan stores the literal token, the
+      ## audit log records `<arg redacted: read from <path>>` instead
+      ## of the substituted bytes). The closed-set guard fires on the
+      ## literal `@FILE:<path>` form — a malformed token (`@FILE:`
+      ## with no payload, or a relative path) is rejected at the
+      ## codec boundary; a missing / unreadable file at exec time
+      ## raises `EProtocol("@FILE: not found")`.
 
   PrivilegedOperation* = object
     ## A single typed operation the broker may execute. The
@@ -313,9 +406,50 @@ type
       ## `serviceName` is the service short name; `serviceStartType`
       ## is one of `Automatic` / `Manual` / `Disabled`;
       ## `serviceRunning` selects the desired runtime state.
+      ##
+      ## Windows-System-Resources Phase B: the four optional fields
+      ## below extend the operation with the service's descriptor
+      ## metadata + failure-recovery policy. Each is "default = leave
+      ## unmanaged"; the driver only emits the corresponding `sc.exe
+      ## config` / `sc.exe failure` call when the value is non-default.
+      ## A profile that doesn't set them applies byte-identically to
+      ## today.
       serviceName*: string
       serviceStartType*: string
       serviceRunning*: bool
+      serviceDisplayName*: string
+        ## Phase B: optional `DISPLAY_NAME` to converge. Empty means
+        ## "leave unmanaged" — the driver does NOT issue a
+        ## `sc.exe config <name> DisplayName= ...` call.
+      serviceBinPath*: string
+        ## Phase B: optional `BINARY_PATH_NAME` to converge. Empty
+        ## means "leave unmanaged" — the driver does NOT issue a
+        ## `sc.exe config <name> binPath= ...` call.
+      serviceRecoveryActions*: seq[WindowsServiceRecoverySpec]
+        ## Phase B: optional failure-recovery slots. Empty seq means
+        ## "leave the SCM's failure policy untouched". A non-empty
+        ## seq drives `sc.exe failure <name> actions= <a1>/<d1>/...`.
+      serviceRecoveryResetSeconds*: int
+        ## Phase B: optional failure-count reset window. `0` means
+        ## "do not emit `reset= ` to `sc.exe failure`".
+    of pokWindowsScheduledTask:
+      ## Windows-System-Resources Phase C: a Task Scheduler entry. The
+      ## `wst*` field prefix avoids collisions with the `serviceX` /
+      ## `vs*` / `fw*` families. `wstSchedule` is the discriminated
+      ## trigger union (the same shape as the front-end
+      ## `repro_profile.types.ScheduleSpec`); the codec serialises it
+      ## as ONE canonical-text token through the existing string-list
+      ## machinery. `wstDestroy` selects the rollback direction
+      ## (`Unregister-ScheduledTask`), gated by `--accept-destroy`.
+      wstTaskName*: string
+      wstExecutable*: string
+      wstArguments*: seq[string]
+      wstWorkingDirectory*: string
+      wstRunAsUser*: string
+      wstRunWithHighestPrivileges*: bool
+      wstSchedule*: ScheduledTaskScheduleSpec
+      wstEnabled*: bool
+      wstDestroy*: bool
     of pokWindowsVsInstaller:
       ## Converge a Visual Studio installation to the declared
       ## workload/component membership. `vsEdition` is the short
@@ -403,12 +537,31 @@ type
       sdaRunAtLoad*: bool
       sdaDestroy*: bool
     of pokFsSystemFile:
-      ## Write `sfContent` to `sfPath` — an absolute path that MUST
-      ## be under a recognized system directory (`/etc/`,
+      ## Write the file's content to `sfPath` — an absolute path that
+      ## MUST be under a recognized system directory (`/etc/`,
       ## `/usr/local/etc/`, `${PROGRAMDATA}`). `sfDestroy` selects the
       ## delete direction.
+      ##
+      ## The bytes written come from exactly ONE source, selected by
+      ## which of the three source fields the planner populated (the
+      ## validator enforces mutual exclusion):
+      ##
+      ##   * `sfContent`     — inline string (the historical default,
+      ##                       and the fallback when all three external-
+      ##                       source fields are empty).
+      ##   * `sfSourceUrl` + `sfSha256` — the controller GETs the URL,
+      ##                       checks the response's BLAKE3 digest
+      ##                       against `sfSha256`, raises `EProtocol`
+      ##                       on mismatch, and only then asks the
+      ##                       broker to write the verified bytes.
+      ##   * `sfSourceLocal` — controller-side path re-read on every
+      ##                       apply (so a between-step edit lands).
+      ##                       Missing / unreadable raises `EProtocol`.
       sfPath*: string
       sfContent*: string
+      sfSourceUrl*: string
+      sfSha256*: string
+      sfSourceLocal*: string
       sfDestroy*: bool
     of pokFsSystemDirectory:
       ## Create / converge / remove the managed directory `fsdPath`.
@@ -630,6 +783,42 @@ type
       fsbFhsTreeRoots*: seq[string]
       fsbArgv*: seq[string]
       fsbDestroy*: bool
+    of pokInlineExecCall:
+      ## Windows-System-Resources Phase E: the elevated execution of a
+      ## `requiresElevation = true` `inlineExecCall(...)` build edge.
+      ##
+      ## * `iecExecutable`        — argv[0]; the program the broker
+      ##                            spawns. NUL bytes are refused at the
+      ##                            codec boundary; empty is refused by
+      ##                            the validator.
+      ## * `iecArguments`         — argv[1..]; each entry passes through
+      ##                            the `@FILE:<path>` expander at the
+      ##                            moment of execution (the plan stores
+      ##                            the literal token).
+      ## * `iecWorkingDirectory`  — optional cwd; empty means "broker's
+      ##                            cwd at fork time."
+      ## * `iecEnvironment`       — list of `NAME=VALUE` strings the
+      ##                            broker prepends to the spawned
+      ##                            process's environment.
+      ## * `iecToolIdentityRefs`  — names of `uses:` tools the build
+      ##                            engine resolved on the apply side;
+      ##                            carried through to the broker so its
+      ##                            PATH-prepending hook (mirror of the
+      ##                            engine's `toolIdentityResolver`) can
+      ##                            still find the right binaries.
+      ## * `iecAcceptExitCodes`   — closed set of exit codes the broker
+      ##                            should treat as success. Default
+      ##                            `@[0]`; a longer list lets a profile
+      ##                            opt into e.g. `@[0, 3010]` (the
+      ##                            "operation succeeded; reboot
+      ##                            required" code Windows installers
+      ##                            return).
+      iecExecutable*: string
+      iecArguments*: seq[string]
+      iecWorkingDirectory*: string
+      iecEnvironment*: seq[string]
+      iecToolIdentityRefs*: seq[string]
+      iecAcceptExitCodes*: seq[int]
 
 # ---------------------------------------------------------------------------
 # linux.fhsSandbox — closed-set charset / shape helpers.
@@ -681,6 +870,153 @@ proc containsNul*(s: string): bool =
   return false
 
 # ---------------------------------------------------------------------------
+# Windows-System-Resources Phase E — `@FILE:<path>` argv preprocessor.
+#
+# Every `inlineExecCall(...)` argv entry is screened at execution time:
+# a token of the form `@FILE:<path>` is replaced by the trimmed
+# contents of `<path>`. The plan stores the literal `@FILE:...` (no
+# secret baked into the plan); the audit log records the substitution
+# as `<arg redacted: read from <path>>` so secrets never leak to logs.
+#
+# This helper lives in `repro_elevation` so both the broker dispatch
+# path (`pokInlineExecCall`) and the build engine's non-elevated exec
+# lowering (`reprobuild.builtin.exec`) call the same pure function —
+# the spec mandates identical semantics on both paths.
+# ---------------------------------------------------------------------------
+
+const ArgFilePrefix* = "@FILE:"
+  ## The literal prefix the argv preprocessor recognises. Spec-fixed.
+
+proc isArgFileToken*(arg: string): bool =
+  ## True when `arg` literally starts with the `@FILE:` prefix. Does
+  ## NOT validate the payload — that is the validator's / expander's
+  ## job; this is the cheap branch the lowering uses to skip ordinary
+  ## arguments. A bare `@FILE:` (no payload) IS classified as a token
+  ## here so the validator / expander catches it (it would otherwise
+  ## fall through unmolested as if it were an ordinary argument).
+  arg.len >= ArgFilePrefix.len and arg.startsWith(ArgFilePrefix)
+
+proc argFilePath*(arg: string): string =
+  ## Return the `<path>` portion of an `@FILE:<path>` token, or "" if
+  ## `arg` is not a well-formed token. Pure — used by the validator
+  ## and the expander.
+  if not isArgFileToken(arg):
+    return ""
+  result = arg[ArgFilePrefix.len .. ^1]
+
+proc isAbsoluteArgFilePath*(p: string): bool =
+  ## Closed-set defence-in-depth: the spec doesn't pin the syntactic
+  ## form, but the expander rejects RELATIVE `@FILE:<path>` tokens at
+  ## apply time. "Absolute" here is the cross-platform union: POSIX
+  ## leading `/` OR Windows drive-letter `X:\\...` / `X:/...`. The
+  ## helper is a documented decision (see the `@FILE:` validator
+  ## branch below) so a profile author who tries `@FILE:secret.tok`
+  ## from a non-deterministic cwd is refused at the codec boundary
+  ## with a clear diagnostic.
+  if p.len == 0:
+    return false
+  if p[0] == '/':
+    return true
+  if p.len >= 3 and p[1] == ':' and (p[2] == '\\' or p[2] == '/'):
+    return true
+  return false
+
+proc argFileTokenError*(arg: string): string =
+  ## Returns "" when the token is well-formed, otherwise a human
+  ## diagnostic the validator turns into `EProtocol`. Rejects:
+  ##
+  ##   * `@FILE:`              — empty payload, no path supplied.
+  ##   * `@FILE:rel/path`      — relative path; the broker's cwd is
+  ##                             not a guaranteed identity, so a
+  ##                             relative path is non-deterministic.
+  ##   * `@FILE:<…NUL…>`       — NUL byte in the path; `open` /
+  ##                             `readFile` would refuse it and the
+  ##                             ensuing error is inscrutable.
+  ##
+  ## Callers that hold a non-token argv entry MUST NOT call this —
+  ## use `isArgFileToken` to dispatch first.
+  if not isArgFileToken(arg):
+    return "argument '" & arg & "' is not an @FILE:<path> token"
+  let path = argFilePath(arg)
+  if path.len == 0:
+    return "@FILE: token has an empty path (expected @FILE:<path>)"
+  if containsNul(path):
+    return "@FILE: token path contains a NUL byte (refused — open(2) " &
+      "would reject it)"
+  if not isAbsoluteArgFilePath(path):
+    return "@FILE: token path '" & path & "' is not absolute — " &
+      "relative paths are refused because the broker's cwd is not a " &
+      "stable identity (use a POSIX absolute path or a Windows " &
+      "drive-letter form)"
+  return ""
+
+proc expandArgFileToken*(arg: string;
+                         readPath: proc (path: string): string): string =
+  ## Substitute a SINGLE `@FILE:<path>` token. Non-token args are
+  ## returned unchanged. The `readPath` injection lets the broker
+  ## thread its own filesystem-backed reader; tests inject a pure
+  ## table-backed reader so the substitution semantics are exercised
+  ## cross-platform without a real disk.
+  ##
+  ## Semantics:
+  ##   * the trailing `\r` / `\n` of the file contents is stripped
+  ##     (the spec calls for "trimmed contents"; trailing CR/LF is the
+  ##     common case for text-file secrets);
+  ##   * an empty file (after the trim) substitutes to an empty arg —
+  ##     the downstream command decides whether that is valid;
+  ##   * `readPath` failures and missing files raise `EProtocol(
+  ##     "@FILE: not found at <path>: <reason>")` — the spec is
+  ##     explicit on the diagnostic.
+  if not isArgFileToken(arg):
+    return arg
+  let path = argFilePath(arg)
+  # Well-formed token guard. The codec-time validator already rejects
+  # malformed tokens, but defence-in-depth: we re-check here so a
+  # call-site that bypassed the codec (in-process construction) still
+  # fails closed.
+  let tokenErr = argFileTokenError(arg)
+  if tokenErr.len > 0:
+    raiseProtocol("@FILE: " & tokenErr)
+  var contents: string
+  try:
+    contents = readPath(path)
+  except IOError as e:
+    raiseProtocol("@FILE: not found at '" & path & "': " & e.msg)
+  except OSError as e:
+    raiseProtocol("@FILE: not found at '" & path & "': " & e.msg)
+  # Strip a trailing newline (and CR) — the trimming the spec calls
+  # out. Leading whitespace is preserved (a leading space in a token
+  # file is presumably load-bearing).
+  while contents.len > 0 and
+        (contents[contents.high] == '\n' or contents[contents.high] == '\r'):
+    contents.setLen(contents.len - 1)
+  result = contents
+
+proc expandArgFiles*(argv: openArray[string];
+                     readPath: proc (path: string): string): seq[string] =
+  ## Run the `@FILE:` expander across an entire argv. The order of
+  ## entries is preserved; non-token args pass through unchanged.
+  ## Used by both the broker dispatch path (`pokInlineExecCall`) and
+  ## the engine's non-elevated `reprobuild.builtin.exec` lowering so
+  ## both run the SAME expansion semantics (spec §2.1).
+  result = newSeqOfCap[string](argv.len)
+  for arg in argv:
+    result.add(expandArgFileToken(arg, readPath))
+
+proc auditArgvWithRedaction*(argv: openArray[string]): seq[string] =
+  ## The audit-log rendering of an argv. Each `@FILE:<path>` token is
+  ## replaced by `<arg redacted: read from <path>>` so the substituted
+  ## contents (typically a secret) never reach the apply log. Non-
+  ## token args pass through verbatim. Spec §2.1.
+  result = newSeqOfCap[string](argv.len)
+  for arg in argv:
+    if isArgFileToken(arg):
+      let path = argFilePath(arg)
+      result.add("<arg redacted: read from " & path & ">")
+    else:
+      result.add(arg)
+
+# ---------------------------------------------------------------------------
 # requiresElevation predicate.
 # ---------------------------------------------------------------------------
 
@@ -703,6 +1039,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokWindowsOptionalFeature: true
   of pokWindowsCapability: true
   of pokWindowsService: true
+  of pokWindowsScheduledTask: true
   of pokWindowsVsInstaller: true
   of pokWindowsFirewallRule: true
   of pokWindowsAcl: true
@@ -727,6 +1064,7 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
 # Kind <-> string helpers (used by the RBEB codec).
@@ -743,6 +1081,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokWindowsOptionalFeature: pokWindowsOptionalFeature
   of $pokWindowsCapability: pokWindowsCapability
   of $pokWindowsService: pokWindowsService
+  of $pokWindowsScheduledTask: pokWindowsScheduledTask
   of $pokWindowsVsInstaller: pokWindowsVsInstaller
   of $pokWindowsFirewallRule: pokWindowsFirewallRule
   of $pokWindowsAcl: pokWindowsAcl
@@ -767,6 +1106,7 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
       "unknown privileged-operation kind tag: '" & s & "'")
@@ -859,6 +1199,487 @@ proc isSafeLaunchdLabel*(label: string): bool =
     if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
       return false
   return true
+
+# ---------------------------------------------------------------------------
+# windows.service — recovery-action token codec + sc.exe argv assembler.
+#
+# Windows-System-Resources Phase B extends the `windows.service`
+# operation with four optional fields (`displayName`, `binPath`,
+# `recoveryActions`, `recoveryResetSeconds`). The pure logic that
+# converts the typed `WindowsServiceRecoveryActionKind` enum to its
+# string token and assembles the `sc.exe failure / sc.exe config` argv
+# lives here so the cross-platform unit tests can exercise the formatter
+# without a Windows host. The driver in
+# `windows_system_driver.applyWindowsService` consumes these helpers
+# verbatim.
+# ---------------------------------------------------------------------------
+
+proc windowsServiceRecoveryActionToken*(
+    a: WindowsServiceRecoveryActionKind): string =
+  ## The lower-case wire token for a recovery action; also the form
+  ## `sc.exe failure ... actions=<a>/<d>/...` consumes. `wsrakNone`
+  ## renders as the literal `""` argument the SCM treats as "no
+  ## action".
+  $a
+
+proc windowsServiceRecoveryActionFromToken*(
+    raw: string): WindowsServiceRecoveryActionKind =
+  ## Strict parse of a recovery-action token. Accepts the canonical
+  ## lower-case forms only — mirrors the closed-set posture of every
+  ## other typed-field validator. Raises `ValueError` on a mismatch.
+  case raw
+  of "none": wsrakNone
+  of "restart": wsrakRestart
+  of "runcommand": wsrakRunCommand
+  of "reboot": wsrakReboot
+  else:
+    raise newException(ValueError,
+      "unknown windows.service recovery action token '" & raw &
+      "' (expected one of restart / runcommand / reboot / none)")
+
+proc isKnownWindowsServiceRecoveryActionToken*(raw: string): bool =
+  ## Non-raising form for the closed-set validator. Mirrors
+  ## `isKnownPrivilegedOperationKind` / `isSafeDefaultsTypeFlag`.
+  raw in ["none", "restart", "runcommand", "reboot"]
+
+proc scExeFailureActionToken*(
+    a: WindowsServiceRecoveryActionKind): string =
+  ## The `sc.exe failure ... actions=` token for a recovery action.
+  ## `wsrakNone` -> empty string (the SCM treats an empty slot as "no
+  ## action"); every other variant -> its lower-case token.
+  case a
+  of wsrakNone: ""
+  of wsrakRestart: "restart"
+  of wsrakRunCommand: "run"          # sc.exe's spelling of the cmdlet
+  of wsrakReboot: "reboot"
+
+proc renderScExeFailureActionsArg*(
+    actions: seq[WindowsServiceRecoverySpec]): string =
+  ## Build the `actions=` argument value `sc.exe failure` consumes:
+  ## `<a1>/<d1>/<a2>/<d2>/<a3>/<d3>`. Each `<a>` is the lower-case
+  ## token from `scExeFailureActionToken`; each `<d>` is the slot's
+  ## delay-in-milliseconds. An empty `actions` seq returns the empty
+  ## string — callers should test `actions.len > 0` and skip the
+  ## `sc.exe failure` invocation entirely in that case.
+  for i, e in actions:
+    if i > 0:
+      result.add('/')
+    result.add(scExeFailureActionToken(e.action))
+    result.add('/')
+    result.add($e.delayMs)
+
+proc renderScExeFailureCommand*(serviceName: string;
+                                 resetSeconds: int;
+                                 actions: seq[WindowsServiceRecoverySpec]):
+    seq[string] =
+  ## Build the argv `sc.exe failure <serviceName> reset= <secs>
+  ## actions= <a1>/<d1>/...` consumes. Returned as a `seq[string]` so
+  ## the driver can hand it directly to the spawning helper without a
+  ## shell pass. NOTE: `sc.exe` is finicky — the `=` MUST be at the END
+  ## of the option name and the value MUST be a separate argv entry, so
+  ## the assembly emits `reset=` / `<secs>` / `actions=` / `<value>`
+  ## as four separate argv tokens (NOT `"reset= <secs>"` jammed in one).
+  result = @["sc.exe", "failure", serviceName]
+  if resetSeconds > 0:
+    result.add("reset=")
+    result.add($resetSeconds)
+  if actions.len > 0:
+    result.add("actions=")
+    result.add(renderScExeFailureActionsArg(actions))
+
+proc renderScExeConfigBinPathCommand*(serviceName: string;
+                                       binPath: string): seq[string] =
+  ## Build the `sc.exe config <serviceName> binPath= "<binPath>"` argv.
+  ## Returned as separate tokens for the same finicky-sc.exe reason as
+  ## `renderScExeFailureCommand`.
+  @["sc.exe", "config", serviceName, "binPath=", binPath]
+
+proc renderScExeConfigDisplayNameCommand*(serviceName: string;
+                                           displayName: string): seq[string] =
+  ## Build the `sc.exe config <serviceName> DisplayName= "<displayName>"`
+  ## argv.
+  @["sc.exe", "config", serviceName, "DisplayName=", displayName]
+
+# ---------------------------------------------------------------------------
+# windows.scheduledTask — schedule token codec + argv assemblers.
+#
+# Windows-System-Resources Phase C: the `pokWindowsScheduledTask`
+# operation carries a `ScheduledTaskScheduleSpec`. The wire token is the
+# same `<kind>:<payload>` shape the front-end `repro_profile.types`
+# codec uses — sharing the vocabulary means the adapter does NOT have
+# to translate. The pure helpers below assemble:
+#
+#   * `Register-ScheduledTask` argv (creation path);
+#   * `Set-ScheduledTask` argv (update path);
+#   * `Unregister-ScheduledTask` argv (destroy path).
+#
+# Each is a `seq[string]` so the driver hands it directly to PowerShell
+# without a shell pass. The driver in `windows_system_driver.applyWindows
+# ScheduledTask` consumes these helpers verbatim.
+# ---------------------------------------------------------------------------
+
+proc scheduledTaskScheduleKindToken*(k: ScheduledTaskScheduleKind): string =
+  ## Lower-case wire token for a schedule kind. Centralised so the
+  ## codec, the validator and the canonical-text renderer all agree.
+  $k
+
+proc scheduledTaskScheduleKindFromToken*(
+    raw: string): ScheduledTaskScheduleKind =
+  ## Strict parse of a schedule-kind token. Raises `ValueError` on a
+  ## mismatch — mirrors the closed-set posture of every other typed
+  ## broker-side codec.
+  case raw
+  of "onBoot": wstskOnBoot
+  of "onLogon": wstskOnLogon
+  of "once": wstskOnce
+  of "daily": wstskDaily
+  of "interval": wstskInterval
+  else:
+    raise newException(ValueError,
+      "unknown windows.scheduledTask schedule kind token '" & raw &
+      "' (expected one of onBoot / onLogon / once / daily / interval)")
+
+proc isKnownScheduledTaskScheduleKindToken*(raw: string): bool =
+  ## Non-raising form for the closed-set validator.
+  raw in ["onBoot", "onLogon", "once", "daily", "interval"]
+
+proc isValidScheduledTaskTimeOfDay*(raw: string): bool =
+  ## True only for a 24-hour `HH:MM` string. Mirrors the front-end
+  ## `repro_profile.types.isValidScheduleTimeOfDay`; both surfaces need
+  ## the same closed-set check (defence-in-depth).
+  if raw.len != 5: return false
+  if raw[2] != ':': return false
+  for i in [0, 1, 3, 4]:
+    if raw[i] notin {'0'..'9'}:
+      return false
+  let h = parseInt(raw[0 ..< 2])
+  let m = parseInt(raw[3 ..< 5])
+  h in 0..23 and m in 0..59
+
+proc isValidScheduledTaskIso8601*(raw: string): bool =
+  ## True for a non-empty string in the conservative ISO-8601 charset
+  ## Task Scheduler accepts (digits + `-`, `:`, `T`, `Z`, `+`, `.`).
+  if raw.len == 0: return false
+  for ch in raw:
+    if ch notin {'0'..'9', '-', ':', 'T', 'Z', '+', '.'}:
+      return false
+  true
+
+proc encodeScheduledTaskScheduleSpec*(
+    s: ScheduledTaskScheduleSpec): string =
+  ## Encode a `ScheduledTaskScheduleSpec` to its canonical wire token.
+  ## REJECTS malformed shapes (negative delay, non-positive interval,
+  ## empty / malformed required-time fields) so a bypass through the
+  ## adapter still fails closed.
+  case s.kind
+  of wstskOnBoot:
+    if s.delaySeconds < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" &
+        $s.delaySeconds & "' is negative (must be >= 0)")
+    "onBoot:" & $s.delaySeconds
+  of wstskOnLogon:
+    "onLogon:" & s.forUser
+  of wstskOnce:
+    if not isValidScheduledTaskIso8601(s.runAt):
+      raise newException(ValueError,
+        "windows.scheduledTask once runAt '" & s.runAt &
+        "' is not a valid ISO-8601 timestamp")
+    "once:" & s.runAt
+  of wstskDaily:
+    if not isValidScheduledTaskTimeOfDay(s.timeOfDay):
+      raise newException(ValueError,
+        "windows.scheduledTask daily timeOfDay '" & s.timeOfDay &
+        "' is not a valid HH:MM 24-hour time")
+    "daily:" & s.timeOfDay
+  of wstskInterval:
+    if s.everyMinutes <= 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" &
+        $s.everyMinutes & "' must be > 0")
+    if s.startAt.len > 0 and not isValidScheduledTaskIso8601(s.startAt):
+      raise newException(ValueError,
+        "windows.scheduledTask interval startAt '" & s.startAt &
+        "' is not a valid ISO-8601 timestamp")
+    "interval:" & $s.everyMinutes & ":" & s.startAt
+
+proc decodeScheduledTaskScheduleToken*(
+    token: string): ScheduledTaskScheduleSpec =
+  ## Decode a canonical wire token into a `ScheduledTaskScheduleSpec`.
+  ## Rejects every malformed shape (unknown tag, missing required
+  ## field, non-integer numeric half, negative delay, non-positive
+  ## interval).
+  let sep = token.find(':')
+  if sep <= 0:
+    raise newException(ValueError,
+      "windows.scheduledTask schedule token '" & token &
+      "' is malformed (expected '<kind>:<payload>')")
+  let kindTok = token[0 ..< sep]
+  let payload = token[sep + 1 .. ^1]
+  if not isKnownScheduledTaskScheduleKindToken(kindTok):
+    raise newException(ValueError,
+      "windows.scheduledTask schedule token '" & token &
+      "' names an unknown kind '" & kindTok &
+      "' (expected one of onBoot / onLogon / once / daily / interval)")
+  let kind = scheduledTaskScheduleKindFromToken(kindTok)
+  case kind
+  of wstskOnBoot:
+    var delaySeconds: int
+    try:
+      delaySeconds = parseInt(payload)
+    except ValueError:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" & payload &
+        "' is not an integer")
+    if delaySeconds < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask onBoot delaySeconds '" & payload &
+        "' is negative (must be >= 0)")
+    ScheduledTaskScheduleSpec(kind: wstskOnBoot,
+      delaySeconds: delaySeconds)
+  of wstskOnLogon:
+    ScheduledTaskScheduleSpec(kind: wstskOnLogon, forUser: payload)
+  of wstskOnce:
+    if not isValidScheduledTaskIso8601(payload):
+      raise newException(ValueError,
+        "windows.scheduledTask once runAt '" & payload &
+        "' is not a valid ISO-8601 timestamp")
+    ScheduledTaskScheduleSpec(kind: wstskOnce, runAt: payload)
+  of wstskDaily:
+    if not isValidScheduledTaskTimeOfDay(payload):
+      raise newException(ValueError,
+        "windows.scheduledTask daily timeOfDay '" & payload &
+        "' is not a valid HH:MM 24-hour time")
+    ScheduledTaskScheduleSpec(kind: wstskDaily, timeOfDay: payload)
+  of wstskInterval:
+    let sep2 = payload.find(':')
+    if sep2 < 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval payload '" & payload &
+        "' is malformed (expected '<everyMinutes>:<startAt>')")
+    let everyStr = payload[0 ..< sep2]
+    let startAt = payload[sep2 + 1 .. ^1]
+    var everyMinutes: int
+    try:
+      everyMinutes = parseInt(everyStr)
+    except ValueError:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" & everyStr &
+        "' is not an integer")
+    if everyMinutes <= 0:
+      raise newException(ValueError,
+        "windows.scheduledTask interval everyMinutes '" & everyStr &
+        "' must be > 0")
+    if startAt.len > 0 and not isValidScheduledTaskIso8601(startAt):
+      raise newException(ValueError,
+        "windows.scheduledTask interval startAt '" & startAt &
+        "' is not a valid ISO-8601 timestamp")
+    ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: everyMinutes, startAt: startAt)
+
+proc `==`*(a, b: ScheduledTaskScheduleSpec): bool =
+  ## Structural equality for `ScheduledTaskScheduleSpec`. Used by the
+  ## drift comparator + the codec round-trip tests.
+  if a.kind != b.kind:
+    return false
+  case a.kind
+  of wstskOnBoot: a.delaySeconds == b.delaySeconds
+  of wstskOnLogon: a.forUser == b.forUser
+  of wstskOnce: a.runAt == b.runAt
+  of wstskDaily: a.timeOfDay == b.timeOfDay
+  of wstskInterval:
+    a.everyMinutes == b.everyMinutes and a.startAt == b.startAt
+
+const
+  ScheduledTaskAllowedPrincipals* = ["SYSTEM", "LOCAL_SERVICE",
+                                     "NETWORK_SERVICE"]
+    ## The three special-principal forms the driver maps to the
+    ## corresponding `New-ScheduledTaskPrincipal -UserId` value. A
+    ## non-special principal (`DOMAIN\user` or a SID) is accepted by
+    ## the validator via the `isSafeScheduledTaskPrincipal` charset
+    ## check.
+
+proc isSafeScheduledTaskTaskName*(name: string): bool =
+  ## True only for a non-empty fully-qualified Task Scheduler path that
+  ## stays in the conservative charset (letters, digits, `\`, `/`, `.`,
+  ## `-`, `_`, ` `). A `..` segment is refused as a sandbox-escape
+  ## guard; the leading `\` is allowed (Task Scheduler's root prefix);
+  ## quote / shell metacharacter / control character are refused so the
+  ## name cannot smuggle a PowerShell pipeline past `psQuote` at the
+  ## driver edge.
+  let n = name.strip()
+  if n.len == 0:
+    return false
+  for ch in n:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9',
+                 '\\', '/', '.', '-', '_', ' '}:
+      return false
+  for seg in n.multiReplace(("\\", "/")).split('/'):
+    if seg == "..":
+      return false
+  true
+
+proc isSafeScheduledTaskExecutable*(path: string): bool =
+  ## True for a non-empty path with no NUL byte / quote / control
+  ## character. The driver `psQuote`s this as defence-in-depth layer 2;
+  ## the closed-set check here is layer 1.
+  if path.len == 0: return false
+  for ch in path:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f:
+      return false
+    if ch in {'"', '\n', '\r', '\x00'}:
+      return false
+  true
+
+proc isSafeScheduledTaskPrincipal*(p: string): bool =
+  ## True for one of the special principals OR a `DOMAIN\user` /
+  ## SID-form string in the conservative charset (letters, digits,
+  ## `\`, `.`, `-`, `_`, `@`).
+  if p in ScheduledTaskAllowedPrincipals:
+    return true
+  let s = p.strip()
+  if s.len == 0: return false
+  for ch in s:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9',
+                 '\\', '.', '-', '_', '@'}:
+      return false
+  true
+
+proc renderScheduledTaskScheduleXml*(
+    s: ScheduledTaskScheduleSpec): string =
+  ## Build the Task Scheduler `<Triggers>` XML fragment for a single
+  ## trigger. Pure — the driver substitutes this into the full task
+  ## XML before handing it to `Register-ScheduledTask`. Each branch
+  ## emits the canonical Task Scheduler element shape; missing optional
+  ## fields collapse to the empty form Task Scheduler treats as "use
+  ## defaults".
+  case s.kind
+  of wstskOnBoot:
+    var xml = "<BootTrigger>"
+    if s.delaySeconds > 0:
+      xml.add("<Delay>PT" & $s.delaySeconds & "S</Delay>")
+    xml.add("</BootTrigger>")
+    xml
+  of wstskOnLogon:
+    var xml = "<LogonTrigger>"
+    if s.forUser.len > 0:
+      xml.add("<UserId>" & s.forUser & "</UserId>")
+    xml.add("</LogonTrigger>")
+    xml
+  of wstskOnce:
+    "<TimeTrigger><StartBoundary>" & s.runAt &
+      "</StartBoundary></TimeTrigger>"
+  of wstskDaily:
+    # Task Scheduler daily triggers require a full ISO-8601
+    # StartBoundary; the driver substitutes `1970-01-01T<HH:MM>:00` so
+    # the trigger fires at `HH:MM` every day from epoch. The non-XML
+    # canonical text keeps the operator-facing `HH:MM` shape; the
+    # driver compares observation against this canonical form.
+    "<CalendarTrigger><StartBoundary>1970-01-01T" & s.timeOfDay &
+      ":00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval>" &
+      "</ScheduleByDay></CalendarTrigger>"
+  of wstskInterval:
+    var xml = "<TimeTrigger>"
+    if s.startAt.len > 0:
+      xml.add("<StartBoundary>" & s.startAt & "</StartBoundary>")
+    xml.add("<Repetition><Interval>PT" & $s.everyMinutes &
+      "M</Interval></Repetition></TimeTrigger>")
+    xml
+
+proc renderScheduledTaskTriggerCmdletExpr*(
+    s: ScheduledTaskScheduleSpec): string =
+  ## Build a PowerShell expression that evaluates to the trigger
+  ## ``CimInstance[]`` expected by ``Register-ScheduledTask -Trigger``
+  ## and ``Set-ScheduledTask -Trigger``. The cmdlet binding rejects
+  ## an XML document there (``Cannot convert the System.Xml.XmlDocument
+  ## value ... to type Microsoft.Management.Infrastructure.CimInstance[]``)
+  ## — the raw XML body is only valid via the ``-Xml`` parameter set,
+  ## which we do not use because the other arguments (Action, Principal,
+  ## Settings) are passed as cmdlet objects.
+  ##
+  ## The mapping mirrors the Task Scheduler shape rendered by
+  ## ``renderScheduledTaskScheduleXml`` so the observe / desired
+  ## comparison still lines up.
+  case s.kind
+  of wstskOnBoot:
+    var expr = "New-ScheduledTaskTrigger -AtStartup"
+    if s.delaySeconds > 0:
+      expr.add(" -RandomDelay (New-TimeSpan -Seconds " &
+        $s.delaySeconds & ")")
+    expr
+  of wstskOnLogon:
+    var expr = "New-ScheduledTaskTrigger -AtLogOn"
+    if s.forUser.len > 0:
+      expr.add(" -User '" & s.forUser & "'")
+    expr
+  of wstskOnce:
+    "New-ScheduledTaskTrigger -Once -At '" & s.runAt & "'"
+  of wstskDaily:
+    # The cmdlet wants an absolute time-of-day; the renderer's
+    # epoch-anchored convention from the XML form keeps observe-side
+    # parity with the canonical text the driver compares against.
+    "New-ScheduledTaskTrigger -Daily -At '1970-01-01T" &
+      s.timeOfDay & ":00'"
+  of wstskInterval:
+    var expr = "New-ScheduledTaskTrigger -Once"
+    if s.startAt.len > 0:
+      expr.add(" -At '" & s.startAt & "'")
+    else:
+      # ``-Once -At`` is required; fall back to the epoch anchor so
+      # the cmdlet binding succeeds. The repetition is what matters.
+      expr.add(" -At '1970-01-01T00:00:00'")
+    expr.add(" -RepetitionInterval (New-TimeSpan -Minutes " &
+      $s.everyMinutes & ")")
+    expr
+
+proc renderRegisterScheduledTaskCommand*(taskName, executable: string;
+                                         arguments: seq[string];
+                                         workingDirectory: string;
+                                         runAsUser: string;
+                                         runWithHighestPrivileges: bool;
+                                         scheduleXml: string;
+                                         enabled: bool): seq[string] =
+  ## Assemble the argv for the `Register-ScheduledTask` PowerShell
+  ## invocation as a sequence of tokens. The driver hands this to
+  ## PowerShell verbatim. The token list is the canonical argv shape
+  ## the pure assembler builds; the driver's `psQuote` pass at fork
+  ## time covers the actual shell-level quoting.
+  result = @["Register-ScheduledTask",
+             "-TaskName", taskName,
+             "-Action", "New-ScheduledTaskAction -Execute " & executable]
+  if arguments.len > 0:
+    result.add("-ArgumentList")
+    var args = ""
+    for i, a in arguments:
+      if i > 0:
+        args.add(' ')
+      args.add(a)
+    result.add(args)
+  if workingDirectory.len > 0:
+    result.add("-WorkingDirectory")
+    result.add(workingDirectory)
+  result.add("-Trigger")
+  result.add(scheduleXml)
+  let principalToken =
+    if runAsUser in ScheduledTaskAllowedPrincipals: runAsUser
+    else: runAsUser
+  result.add("-Principal")
+  result.add(principalToken)
+  if runWithHighestPrivileges:
+    result.add("-RunLevel")
+    result.add("Highest")
+  if not enabled:
+    result.add("-Settings")
+    result.add("Disabled")
+
+proc renderUnregisterScheduledTaskCommand*(taskName: string): seq[string] =
+  ## Assemble the argv for the `Unregister-ScheduledTask` destroy path.
+  ## `-Confirm:$false` so the cmdlet does not prompt.
+  @["Unregister-ScheduledTask",
+    "-TaskName", taskName,
+    "-Confirm:$false"]
 
 # ---------------------------------------------------------------------------
 # windows.firewallRule — protocol/direction/action allowlists and
@@ -1281,6 +2102,82 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if op.serviceStartType notin ["Automatic", "Manual", "Disabled"]:
       return "windows.service start-type '" & op.serviceStartType &
         "' is not one of Automatic / Manual / Disabled"
+    # Windows-System-Resources Phase B: validate the four new fields.
+    # The action enum's closed-set check rides the typed variant itself
+    # (a frame decoder catches a bad token before this proc sees it), so
+    # we only sanity-check the delay/reset numerics + cap the slot count
+    # at 3 (sc.exe failure consumes at most three positional slots).
+    if op.serviceRecoveryResetSeconds < 0:
+      return "windows.service recoveryResetSeconds for '" &
+        op.serviceName & "' is negative (must be >= 0)"
+    if op.serviceRecoveryActions.len > 3:
+      return "windows.service recoveryActions for '" & op.serviceName &
+        "' has " & $op.serviceRecoveryActions.len &
+        " entries — sc.exe failure consumes at most 3 slots"
+    for idx, slot in op.serviceRecoveryActions:
+      if slot.delayMs < 0:
+        return "windows.service recoveryActions[" & $idx & "] for '" &
+          op.serviceName & "' has a negative delayMs (must be >= 0)"
+  of pokWindowsScheduledTask:
+    # Windows-System-Resources Phase C: the broker validator is the
+    # final closed-set guard before the typed driver dispatches. Every
+    # field the operation carries is sanity-checked; a frame that
+    # arrived through the wire codec already had its schedule token
+    # decoded (codec rejects unknown kind), but the broker re-checks
+    # the empty-name / executable / principal cases here as
+    # defence-in-depth.
+    if op.wstTaskName.strip().len == 0:
+      return "windows.scheduledTask operation has an empty taskName"
+    if not isSafeScheduledTaskTaskName(op.wstTaskName):
+      return "windows.scheduledTask taskName '" & op.wstTaskName &
+        "' contains characters outside the safe Task Scheduler path " &
+        "charset (letters, digits, '\\', '/', '.', '-', '_', ' '; no " &
+        "'..' segment, no quote / shell metacharacter / control character)"
+    if op.wstExecutable.strip().len == 0:
+      return "windows.scheduledTask '" & op.wstTaskName &
+        "' has an empty executable"
+    if not isSafeScheduledTaskExecutable(op.wstExecutable):
+      return "windows.scheduledTask '" & op.wstTaskName &
+        "' executable '" & op.wstExecutable &
+        "' contains a NUL byte / quote / control character"
+    if op.wstRunAsUser.len > 0 and
+       not isSafeScheduledTaskPrincipal(op.wstRunAsUser):
+      return "windows.scheduledTask runAsUser '" & op.wstRunAsUser &
+        "' is not one of " &
+        ScheduledTaskAllowedPrincipals.join(" / ") &
+        " and is not a safe `DOMAIN\\user` / SID-form principal " &
+        "(allowed charset: letters, digits, '\\', '.', '-', '_', '@')"
+    # Schedule kind-specific guards. Mirrors the codec's
+    # `decodeScheduledTaskScheduleToken` checks but on the typed value
+    # — a frame that bypassed the codec (in-process construction)
+    # still fails closed here.
+    case op.wstSchedule.kind
+    of wstskOnBoot:
+      if op.wstSchedule.delaySeconds < 0:
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' onBoot delaySeconds is negative (must be >= 0)"
+    of wstskOnLogon:
+      discard          # forUser may legitimately be empty (any-user)
+    of wstskOnce:
+      if not isValidScheduledTaskIso8601(op.wstSchedule.runAt):
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' once runAt '" & op.wstSchedule.runAt &
+          "' is not a valid ISO-8601 timestamp"
+    of wstskDaily:
+      if not isValidScheduledTaskTimeOfDay(op.wstSchedule.timeOfDay):
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' daily timeOfDay '" & op.wstSchedule.timeOfDay &
+          "' is not a valid HH:MM 24-hour time"
+    of wstskInterval:
+      if op.wstSchedule.everyMinutes <= 0:
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' interval everyMinutes '" &
+          $op.wstSchedule.everyMinutes & "' must be > 0"
+      if op.wstSchedule.startAt.len > 0 and
+         not isValidScheduledTaskIso8601(op.wstSchedule.startAt):
+        return "windows.scheduledTask '" & op.wstTaskName &
+          "' interval startAt '" & op.wstSchedule.startAt &
+          "' is not a valid ISO-8601 timestamp"
   of pokWindowsVsInstaller:
     if op.vsEdition.len == 0:
       return "windows.vsInstaller operation has an empty edition"
@@ -1385,6 +2282,37 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       return scopeErr
     if op.sfPath.strip().len == 0:
       return "fs.systemFile operation has an empty path"
+    # External-source mutual exclusion: defence-in-depth against a
+    # malformed plan reaching the broker. The template + validator on
+    # the profile side already reject this; we re-check here so the
+    # closed-set boundary stays self-contained.
+    let nonEmptySources = (if op.sfContent.len > 0: 1 else: 0) +
+                          (if op.sfSourceUrl.len > 0: 1 else: 0) +
+                          (if op.sfSourceLocal.len > 0: 1 else: 0)
+    if nonEmptySources > 1:
+      return "fs.systemFile '" & op.sfPath &
+        "' declares more than one content source — at most one of " &
+        "`sfContent`, `sfSourceUrl`, `sfSourceLocal` may be non-empty"
+    if op.sfSourceUrl.len > 0 and op.sfSha256.len == 0:
+      return "fs.systemFile '" & op.sfPath &
+        "' sets `sfSourceUrl` but no `sfSha256` — the URL fetch " &
+        "requires a digest to verify against"
+    if op.sfSha256.len > 0 and op.sfSourceUrl.len == 0:
+      return "fs.systemFile '" & op.sfPath &
+        "' sets `sfSha256` but no `sfSourceUrl` — the digest is only " &
+        "meaningful when paired with a URL fetch"
+    if op.sfSha256.len > 0:
+      # Lowercase 64-char hex check. Mirrors the format the BLAKE3
+      # driver emits for `posixDigestHexOfText`.
+      if op.sfSha256.len != 64:
+        return "fs.systemFile '" & op.sfPath &
+          "' sfSha256 must be a 64-character lowercase hex digest " &
+          "(got " & $op.sfSha256.len & " chars)"
+      for ch in op.sfSha256:
+        if ch notin {'0'..'9', 'a'..'f'}:
+          return "fs.systemFile '" & op.sfPath &
+            "' sfSha256 must be a 64-character lowercase hex digest " &
+            "(contains non-hex character '" & $ch & "')"
   of pokFsSystemDirectory:
     if op.fsdPath.strip().len == 0:
       return "fs.systemDirectory operation has an empty path"
@@ -1639,6 +2567,62 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       if containsNul(arg):
         return "linux.fhsSandbox argv entry contains a NUL byte " &
           "(refused — execve would reject the argv element)"
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: closed-set posture for the
+    # elevated build-engine inline-exec hand-off. The plan stores the
+    # LITERAL `@FILE:<path>` argv entries (no secret in the plan); the
+    # @FILE expander runs at apply time in the broker dispatch path.
+    # We refuse here:
+    #   * an empty executable                — argv[0] is required;
+    #   * NUL bytes in any closed field      — `execve` would reject
+    #                                          them, and a typed
+    #                                          parse error is a much
+    #                                          better diagnostic;
+    #   * a malformed `@FILE:` token         — the codec boundary is
+    #                                          the place to catch a
+    #                                          relative-path / empty-
+    #                                          payload mistake (the
+    #                                          apply-time expander
+    #                                          re-checks as defence-
+    #                                          in-depth);
+    #   * an environment entry missing `=`   — `NAME=VALUE` is the
+    #                                          only shape the spawn
+    #                                          primitive accepts.
+    if op.iecExecutable.strip().len == 0:
+      return "reprobuild.inlineExecCall operation has an empty executable"
+    if containsNul(op.iecExecutable):
+      return "reprobuild.inlineExecCall executable contains a NUL byte " &
+        "(refused — exec primitives reject NUL in argv)"
+    for idx, arg in op.iecArguments:
+      if containsNul(arg):
+        return "reprobuild.inlineExecCall arguments[" & $idx &
+          "] contains a NUL byte (refused — exec primitives reject " &
+          "NUL in argv)"
+      if isArgFileToken(arg):
+        let tokenErr = argFileTokenError(arg)
+        if tokenErr.len > 0:
+          return "reprobuild.inlineExecCall arguments[" & $idx & "] " &
+            tokenErr
+    if containsNul(op.iecWorkingDirectory):
+      return "reprobuild.inlineExecCall workingDirectory contains a " &
+        "NUL byte (refused)"
+    for idx, entry in op.iecEnvironment:
+      if containsNul(entry):
+        return "reprobuild.inlineExecCall environment[" & $idx &
+          "] contains a NUL byte (refused — exec primitives reject " &
+          "NUL in env)"
+      let eq = entry.find('=')
+      if eq <= 0:
+        return "reprobuild.inlineExecCall environment[" & $idx &
+          "] '" & entry & "' is not a NAME=VALUE entry (the broker " &
+          "spawn primitive requires the conventional shape)"
+    for idx, refName in op.iecToolIdentityRefs:
+      if containsNul(refName):
+        return "reprobuild.inlineExecCall toolIdentityRefs[" & $idx &
+          "] contains a NUL byte (refused)"
+      if refName.strip().len == 0:
+        return "reprobuild.inlineExecCall toolIdentityRefs[" & $idx &
+          "] is empty (each ref must name a `uses:` tool)"
   return ""
 
 # ---------------------------------------------------------------------------

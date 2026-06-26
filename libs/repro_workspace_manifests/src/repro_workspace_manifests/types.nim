@@ -78,9 +78,26 @@ const
   schemaSnapshotV1*         = "reprobuild.workspace.snapshot.v1"
   schemaWorkspaceLocalV1*   = "reprobuild.workspace.local.v1"
   schemaDevelopOverridesV1* = "reprobuild.workspace.develop-overrides.v1"
+  schemaWorkspaceBootstrapV1* = "reprobuild.workspace.bootstrap.v1"
 
 type
   # --- repos/<repo>.toml -----------------------------------------------------
+
+  CopyLinkFileEntry* = object
+    ## RA-18 — one copyfile / linkfile directive (the `repo`
+    ## `<copyfile>` / `<linkfile>` equivalent). `src` is interpreted
+    ## relative to the repo's own working tree; `dest` is interpreted
+    ## relative to the workspace root. Both required.
+    ##
+    ## Authored as an inline-table-array element under `[repo]`:
+    ##   copyfile = [{ src = "build/config.default.toml", dest = "config.toml" }]
+    ##   linkfile = [{ src = "scripts/dev.sh", dest = "dev.sh" }]
+    ## The pinned `nim-toml-serialization` (v0.2.18) does not support a
+    ## *nested* array-of-tables (`[[repo.copyfile]]`), so the inline-table
+    ## array is the supported surface syntax (Workspace-Manifests.md
+    ## §"copyfile / linkfile" "Syntax note").
+    src*: string
+    dest*: string
 
   RepoBody* = object
     name*: string
@@ -89,6 +106,30 @@ type
     revision*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
+    # RA-14 — optional fetch-acceleration hints (Workspace-Manifests.md
+    # §"Optional fetch-acceleration hints"). These never change the
+    # resolved tree at the pinned revision; they only change how much is
+    # downloaded.
+    clone_filter*: Option[string]  ## partial clone: "blob:none" / "tree:0"
+    depth*: Option[int]            ## shallow clone depth (deepened on demand)
+    single_branch*: Option[bool]   ## fetch only the pinned revision's branch
+    # RA-18 — post-sync file materialization + group membership
+    # (Workspace-Manifests.md §§"copyfile / linkfile", "Manifest Groups").
+    # A missing/empty `groups` means the repo belongs to the implicit
+    # `default` group only. `copyfile`/`linkfile` are applied after a
+    # successful checkout and re-applied on every sync (idempotent), so the
+    # materialized files track the checked-out revision.
+    copyfile*: seq[CopyLinkFileEntry]
+    linkfile*: seq[CopyLinkFileEntry]
+    groups*: seq[string]
+    # RA-21 — develop-set dependency edges. Names the OTHER repos in the
+    # same workspace that THIS repo depends on (a develop-mode sibling is
+    # a git-submodule replacement; see Workspace-And-Develop-Mode.md
+    # §"VCS Hook Integration"). The pre-push gate scopes its clean/published
+    # checks to the pushed repo plus the transitive closure of these edges,
+    # not the whole workspace. A missing/empty `depends` means the repo has
+    # no develop-set dependencies (it forms a singleton closure).
+    depends*: seq[string]
 
   RepoFragment* = object
     schema*: string
@@ -107,11 +148,66 @@ type
     name*: string
     fetch*: string
 
+  BinaryDependencyEntry* = object
+    ## RA-22 — a dependency added in BINARY mode: a pinned, published
+    ## artifact rather than a local develop-mode sibling checkout. Recorded
+    ## directly in the project manifest (NOT as an `includes` repo fragment)
+    ## so a binary dependency is never cloned, synced, or part of the
+    ## checkout garbage-collection graph (Workspace-And-Develop-Mode.md
+    ## §"Workspace Membership": binary = "no checkout"). Authored as an
+    ## inline-table-array element:
+    ##   binary_dependency = [{ name = "zlib", remote = "https://…", revision = "v1.3" }]
+    name*: string
+    remote*: string
+    revision*: Option[string]
+
+  CertificatesBody* = object
+    ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy
+    ## (Test-Certificates.md §"Per-project configuration"). Authored as a
+    ## top-level `[certificates]` table in `projects/<project>.toml`:
+    ##
+    ##   [certificates]
+    ##   gate_mode = "required"            # off (default) | advisory | required
+    ##   required_targets = ["t-unit"]    # targets a cert must cover
+    ##   required_platforms = ["linux/amd64", "macos/arm64"]
+    ##
+    ## Every field is OPTIONAL. A missing `[certificates]` table — or a table
+    ## that omits `gate_mode` — resolves to `off`, so a project that never
+    ## opts in is never cert-gated (the default-off onboarding guarantee:
+    ## RA-32). `gate_mode` ∈ {off, advisory, required}; `advisory` records
+    ## coverage without ever blocking the push; `required` refuses the push
+    ## unless the submitted certificates cover the pushed commit for the
+    ## required targets on each required platform.
+    ##
+    ## TC-4 — `ci_trust` controls whether CI fast-tracks (skips) targets a
+    ## valid certificate already covers, or treats the certificate as purely
+    ## informational and re-runs everything. `skip` is the high-trust
+    ## fast-track ("trust the certificate, don't re-run"); `advisory` (the
+    ## DEFAULT, the SAFER choice) re-runs everything but surfaces the
+    ## certificate as a signal. Trust is an EXPLICIT project decision: an
+    ## absent / omitted `ci_trust` never silently fast-tracks
+    ## (Test-Certificates.md §"CI integration — skipping certified work").
+    gate_mode*: Option[string]
+    required_targets*: seq[string]
+    required_platforms*: seq[string]
+    ci_trust*: Option[string]
+
   ProjectManifest* = object
     schema*: string
     project*: ProjectBody
     remote*: seq[RemoteEntry]
     includes*: seq[string]
+    binary_dependency*: seq[BinaryDependencyEntry]
+      ## RA-22 — binary-mode dependencies (see `BinaryDependencyEntry`). A
+      ## missing/empty array means the project declares no binary
+      ## dependencies; backward-compatible with manifests authored before
+      ## RA-22.
+    certificates*: CertificatesBody
+      ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy.
+      ## A missing `[certificates]` table leaves every field at its zero
+      ## value (`gate_mode` = none ⇒ resolved `off`), so enforcement is
+      ## strictly opt-in and backward-compatible with manifests authored
+      ## before this milestone.
     extensions*: Extensions
 
   # --- variants/<...>.toml ---------------------------------------------------
@@ -190,6 +286,14 @@ type
 
   WorkspaceBody* = object
     project*: string
+    projects*: seq[string]
+      ## RA-6 — the active PROJECT SET layered into this workspace. The
+      ## pilot's ``repro workspace projects add`` tracks a SET of project
+      ## names (not a single project); this array records that set. The
+      ## scalar ``project`` field remains the PRIMARY project (the first
+      ## entry of the set, kept non-empty for the M6/M8 single-project
+      ## resolver and every existing reader). An empty array means
+      ## "single-project workspace" — only ``project`` is meaningful.
     branch*: Option[string]
     feature_started*: Option[bool]
       ## M16 — when ``true``, the current ``branch`` value names a
@@ -224,6 +328,103 @@ type
   DevelopOverrides* = object
     schema*: string
     `override`*: seq[DevelopOverrideEntry]
+    extensions*: Extensions
+
+  # --- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
+  #
+  # Committed by the *host* product repo (canonical home `<org>/repro-workspace`)
+  # so a new user joins a workspace with a single `repro workspace init` and no
+  # `--manifest-url` flag. The `repro` binary ships NO org-specific default URL;
+  # this file is the org-config side of the generic-tool-vs-host-config split
+  # (Workspace-Manifests.md §"Host Bootstrap Config").
+
+  BootstrapManifestBody* = object
+    url*: string
+    branch*: Option[string]
+    private_url*: Option[string]
+      ## Optional private companion manifest URL. May also be supplied from a
+      ## sibling `.repro-workspace-private.toml` file (see `readWorkspaceBootstrap`)
+      ## that carries credentialed/SSH URLs the public config must not embed.
+    revision*: Option[string]
+      ## RA-17 — optional manifest-revision pin (a commit SHA or tag name). When
+      ## set, `init`/refresh verify the manifest source's HEAD resolves to this
+      ## exact revision so a moved branch can't silently swap the manifest out.
+      ## When signature verification is also required, the SIGNATURE is checked
+      ## against this pinned revision (a tag's signature, or the pinned commit's
+      ## signature) rather than whatever the branch currently points at.
+
+  BootstrapProjectsBody* = object
+    default*: seq[string]
+      ## Default project set auto-layered when the user hasn't chosen an
+      ## explicit project set (consumed by init / `projects add --default`).
+
+  BootstrapVerifyBody* = object
+    ## RA-17 — manifest provenance / trust anchor (Workspace-Manifests.md
+    ## §"Manifest Provenance and Verification"). Declared in the host
+    ## bootstrap config, NEVER hardcoded. When `require_signature` is true,
+    ## `init`/refresh verify that the manifest source's HEAD commit (or the
+    ## pinned `manifest_revision` tag) carries a VALID signature from a key in
+    ## the configured allowed-signers set, and FAIL CLOSED otherwise. When
+    ## `require_signature` is false/absent, no verification is performed and
+    ## behavior is unchanged.
+    ##
+    ## Verification uses git's SSH-signature path (`gpg.format=ssh` +
+    ## `gpg.ssh.allowedSignersFile`) so it is testable hermetically with a
+    ## generated ed25519 key — no system GPG keyring required, and it works on
+    ## every platform git ships SSH signing on.
+    require_signature*: bool
+      ## When true, an unsigned / wrong-key / tampered manifest source is a
+      ## hard error rather than a silent pass-through.
+    allowed_signers*: Option[string]
+      ## Path to a git `allowed_signers` file (the `gpg.ssh.allowedSignersFile`
+      ## format: `<principal> <key-type> <base64-key>` per line). Relative
+      ## paths are resolved against the bootstrap config's directory.
+    allowed_keys*: seq[string]
+      ## Inline allowed signer entries, each one line of the
+      ## `allowed_signers` format. Folded into a temporary allowed-signers file
+      ## together with `allowed_signers` when verification runs. Lets a config
+      ## pin trust keys without a sidecar file.
+    signer_identity*: Option[string]
+      ## Optional `--check-signatory`-style principal to match against the
+      ## allowed-signers `<principal>` column. Defaults to a wildcard
+      ## (`reprobuild@manifest`) the inline-key path uses when unset.
+
+  BootstrapDevelopBody* = object
+    ## RA-22 — host/workspace policy for `repro add`'s develop-vs-binary
+    ## default (Workspace-And-Develop-Mode.md §"`repro add` and develop-mode
+    ## policy"). A dependency whose fetch URL begins with one of the
+    ## `org_urls` prefixes is added in DEVELOP mode by default (a local
+    ## sibling checkout); every other dependency defaults to BINARY. The
+    ## policy is data, NEVER a hardcoded org name in the binary — an empty /
+    ## absent `org_urls` means "no org defaults to develop" and every `add`
+    ## defaults to binary unless `--develop` is passed. Per-`add` `--develop`
+    ## / `--binary` flags override the default each time.
+    org_urls*: seq[string]
+      ## Fetch-URL prefixes (e.g. `https://github.com/our-org/`) whose repos
+      ## default to develop mode. Matched as a literal string prefix against
+      ## the dependency's remote URL.
+
+  WorkspaceBootstrap* = object
+    schema*: string
+    manifest*: BootstrapManifestBody
+    projects*: BootstrapProjectsBody
+    verify*: BootstrapVerifyBody
+    develop*: BootstrapDevelopBody
+    extensions*: Extensions
+
+  # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----
+  #
+  # Sibling of the public bootstrap config. Carries credentialed/SSH manifest
+  # URLs so the committed public file never embeds a secret-bearing URL. Read
+  # only for its `[manifest] private_url`; intentionally not committed where the
+  # URL is credentialed.
+
+  BootstrapPrivateManifestBody* = object
+    private_url*: string
+
+  WorkspaceBootstrapPrivate* = object
+    schema*: string
+    manifest*: BootstrapPrivateManifestBody
     extensions*: Extensions
 
   # NOTE on the schema probe: the reader does NOT define a typed "probe"

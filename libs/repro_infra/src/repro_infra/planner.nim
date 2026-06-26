@@ -198,6 +198,7 @@ proc observeResource*(r: SystemResource): ResourceObservation =
       of srkWindowsOptionalFeature: observeWindowsOptionalFeature(op)
       of srkWindowsCapability: observeWindowsCapability(op)
       of srkWindowsService: observeWindowsService(op)
+      of srkWindowsScheduledTask: observeWindowsScheduledTask(op)
       of srkWindowsVsInstaller: observeWindowsVsInstaller(op)
       of srkWindowsFirewallRule: observeWindowsFirewallRule(op)
       of srkWindowsAcl: observeWindowsAcl(op)
@@ -289,6 +290,10 @@ proc summaryLine(r: SystemResource; action: string): string =
     action & " service " & r.serviceName & " startType=" &
       r.serviceStartType & " state=" &
       (if r.serviceRunning: "Running" else: "Stopped")
+  of srkWindowsScheduledTask:
+    action & " scheduled-task " & r.wstTaskName & " (" &
+      $r.wstSchedule.kind & ", runAs=" & r.wstRunAsUser &
+      (if r.wstEnabled: ", enabled" else: ", disabled") & ")"
   of srkWindowsVsInstaller:
     action & " vs-installer " & r.vsEdition & " (" &
       $r.vsWorkloads.len & " workload(s), " & $r.vsComponents.len &

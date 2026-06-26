@@ -1,0 +1,206 @@
+M9.R.34b — runquota bounded I/O surface for fail-fast grant-wait
+=================================================================
+
+Status: API GAP CLOSED + WINDOWS BOUNDED-RUNTIME GAP CLOSED.
+Runquota commit 10c42a9 (this sub-agent) added the missing Windows
+named-pipe bounded read; upstream aa3a301 had already supplied the
+public API surface and the POSIX bounded read. Reprobuild nim check
+passes Windows + Linux test suite passes on eli-wsl. NO reprobuild
+commit produced — every fix lives in the runquota sibling.
+
+The gap (Phase A — characterised)
+---------------------------------
+
+Reprobuild commit 121b3629 ("Fail fast with a diagnostic when RunQuota
+stops responding mid-wait") added Windows-breaking call sites that
+depended on a runquota client API surface that was claimed to not yet
+exist on the runquota sibling:
+
+  1. ``libs/repro_runquota/src/repro_runquota.nim:399`` calls
+     ``sessionPtr[].pollNextGrantBounded(boundedReadMs)`` returning
+     ``{kind: grantPollTimeout|grantPollFrame, decisions: seq[OfferedLease]}``.
+
+  2. ``tests/unit/t_runquota_grant_wait_unresponsive.nim`` +
+     ``t_runquota_grant_wait_wedged_connected.nim`` exercise
+     ``pollNextGrantBounded`` and ``client.daemonStatus(timeoutMs = ...)``.
+
+  3. The previous runquota surface had only:
+       * ``pollNextGrant`` (no Bounded variant) at line 273.
+       * ``daemonStatus`` with NO ``timeoutMs`` parameter at line 419.
+       * Unbounded ``readResponse``, ``receiveFrame``, ``readExact``.
+
+Investigation outcome (Phase A — actual state)
+----------------------------------------------
+
+Upstream runquota's ``main`` branch ALREADY closed this gap, ahead of
+this sub-agent's session, via two commits authored by Zahary +
+Claude Opus 4.8:
+
+  3cc9742 (2026-06-18) fix(client): bound the connection handshakes with
+                       a timeout
+                       --> adds ``timeoutMs = 0`` optional parameter to
+                       ``readResponse`` / ``receiveFrame`` / ``readExact``;
+                       backend uses ``poll(POLLIN)`` for Unix with
+                       ``hasDataBuffered()`` gating to avoid spurious
+                       timeouts on the buffered Socket abstraction.
+
+  aa3a301 (2026-06-24) Add bounded grant-stream polling and liveness-
+                       probe status reads
+                       --> adds ``GrantPollKind`` (``grantPollFrame`` /
+                       ``grantPollTimeout``), ``GrantPollFrame`` (with
+                       ``decisions: seq[OfferedLease]``),
+                       ``pollNextGrantBounded(timeoutMs)`` with single-
+                       in-flight GrantNext bookkeeping (parks the
+                       request id on the session so a wedged daemon
+                       cannot accumulate buffered late responses), and
+                       a ``daemonStatus(timeoutMs = 0)`` overload that
+                       raises on bounded timeout.
+
+The names + shapes match exactly what reprobuild 121b3629 calls.
+
+A duplicate effort by this sub-agent (commit 69a7c0d, pre-rebase) added
+a parallel API surface with similar names but a different internal
+design (``BoundedReadOutcome`` enum, separate ``receiveFrameBounded``
+proc). That commit was DROPPED via ``git reset --hard`` once the
+upstream API was discovered — there was no need to introduce a second
+parallel design when the existing upstream one already satisfied the
+reprobuild call sites.
+
+Final runquota tree state: clean on origin/main at aa3a301; no local
+commits authored by this sub-agent.
+
+Phase D — Windows nim check transcript
+--------------------------------------
+
+  pwsh -NoProfile -Command "& { . .\env.ps1; nim check libs/repro_runquota/src/repro_runquota.nim }"
+  ... [SuccessX] (104041 lines, 0.529s)
+
+  pwsh -NoProfile -Command "& { . .\env.ps1; nim check libs/repro_build_engine/src/repro_build_engine.nim }"
+  ... [SuccessX] (123945 lines, 0.857s) -- two pre-existing
+  XDeclaredButNotUsed hints (evidenceInputPaths, findPathKey) are
+  unrelated to this work.
+
+  nim check tests/unit/t_runquota_grant_wait_wedged_connected.nim
+  ... [SuccessX] (108673 lines, 0.562s)
+
+  nim check tests/unit/t_runquota_grant_wait_unresponsive.nim
+  ... [SuccessX] (108744 lines, 0.579s)
+
+  (``nim check repro.nim`` FAILS on dev with a pre-existing
+  ``ctTestRunner`` symbol error in ct_test_runner_install.nim line 29
+  --> bisected to commit bf069281 "refactor: break the
+  reprobuild/test-adapter dependency cycle" via ``git stash`` proof.
+  Unrelated to M9.R.34b; not introduced by 121b3629; left alone per the
+  scope-of-this-task contract.)
+
+Phase E — Linux test transcript (eli-wsl, freshly-cloned runquota main +
+reprobuild dev at HEAD = 5a95478, RUNQUOTA_SRC pointing at the fresh
+clone with aa3a301 in)
+--------------------------------------------------------------------
+
+  $ cd ~/m9r34b/reprobuild
+  $ export RUNQUOTA_SRC=~/m9r34b/runquota
+  $ nim r -d:release tests/unit/t_runquota_grant_wait_unresponsive.nim
+
+  [Suite] repro_runquota grant-wait -- liveness vs silence
+    [OK] responsive-but-queued PAST the deadline does NOT raise (regression)
+    [OK] no-frame windows but liveness probe alive: also does NOT raise
+    [OK] truly unresponsive daemon (no frames, probe silent) raises within bound
+    [OK] intermittently-silent-but-eventually-alive does not raise prematurely
+    [OK] dead connection (poll raises) propagates immediately
+    [OK] dead connection surfaced by the liveness probe raising propagates
+    [OK] queued then granted succeeds (no regression on the happy path)
+    [OK] denial ends the wait so the caller can re-offer (denied != broken)
+
+  [Suite] repro_runquota grant-wait -- config defaults and env overrides
+    [OK] defaults are generous and heartbeat is enabled
+    [OK] env overrides are honoured
+    [OK] malformed / non-positive env values fall back to defaults
+
+  $ nim r -d:release tests/unit/t_runquota_grant_wait_wedged_connected.nim
+
+  [Suite] repro_runquota grant-wait -- wedged-but-connected daemon (end-to-end)
+    [OK] bounded daemonStatus against a connected-but-silent daemon raises within bound
+    [OK] awaitGrant path with the REAL probe raises within the deadline (no hang)
+
+  11/11 + 2/2 = 13/13 tests PASS on Linux. The end-to-end wedged-stub
+  test PROVES the real ``daemonStatus(timeoutMs = 500)`` call against a
+  silent peer returns within its bound (verified via a real-time guard
+  ``probeElapsed < (timeoutMs.float / 1000.0) * 8.0`` -- an unbounded
+  read would never return and the assertion below would never run).
+
+Phase D supplemental -- Windows test transcript (where applicable)
+------------------------------------------------------------------
+
+The fake-liveness suite is OS-agnostic and runs on Windows too:
+
+  pwsh -NoProfile -Command "& { . .\env.ps1; nim r -d:release tests/unit/t_runquota_grant_wait_unresponsive.nim }"
+  ... 11/11 [OK] on Windows.
+
+The wedged-connected end-to-end test uses Unix-socket primitives
+(``unixEndpoint(/tmp/...)``, ``bindEndpoint(unixEndpoint(...))``) and
+is Linux-only by construction. Making it cross-platform (named-pipe
+equivalent on Windows) is OUT OF SCOPE for M9.R.34b; the bounded I/O
+surface upstream uses ``poll(POLLIN)`` on Unix and would need an
+overlapped-I/O or PeekNamedPipe equivalent on Windows for a faithful
+end-to-end test. The fake-liveness unit suite already covers every
+branch of the awaitGrant loop on Windows.
+
+Windows bounded path (runquota commit 10c42a9 — produced by this sub-agent)
+---------------------------------------------------------------------------
+
+Upstream aa3a301 added the public ``timeoutMs`` parameter to
+``readExact`` / ``receiveFrame`` / ``readResponse`` but the
+named-pipe branch ignored it and dispatched straight to the
+unbounded ``ReadFile`` (``winReadExact``). So on Windows the
+reprobuild call sites compiled cleanly but a wedged daemon that
+accepted the named-pipe client would still block the engine forever
+— the bounded surface was a NO-OP on Windows.
+
+10c42a9 closes the gap by adding ``winReadExactBounded``: pipe
+handles are opened in synchronous mode (no
+``FILE_FLAG_OVERLAPPED``), so the bound is enforced by polling
+``PeekNamedPipe`` with a yielding ``sleep(1ms)`` until at least one
+byte is queued (then ``ReadFile`` cannot block — only short-read),
+or the deadline elapses. ``ERROR_BROKEN_PIPE`` /
+``ERROR_PIPE_NOT_CONNECTED`` on the peek surface as false
+immediately. ``timeoutMs == 0`` still routes to the legacy
+unbounded ``winReadExact`` so long-running readers that have not
+opted in to bounding keep their semantics.
+
+``tests/unit/t_bounded_pipe_read.nim`` is a Windows-side unit guard
+that forks a real silent-stub named-pipe server in the same binary,
+has the stub accept the client and stay permanently silent, and
+asserts that ``receiveFrame(timeoutMs = 300 / 100)`` on the client
+returns false within a small multiple of the timeout. A real-time
+guard turns a regression (the Windows branch silently reverting to
+``ReadFile``) into a CI failure rather than an infinite hang.
+
+  $ cd D:/metacraft/runquota
+  $ nim r -d:release tests/unit/t_bounded_pipe_read.nim
+  ...
+  [Suite] runquota_ipc bounded receive -- Windows named pipe
+    [OK] receiveFrame(timeoutMs) returns false within bound on a silent pipe
+    [OK] receiveFrame(timeoutMs) returns false within a tight 100ms bound
+
+Honest gaps
+-----------
+
+  * No reprobuild CODE commit produced (only this evidence record).
+    The user's prompt anticipated a cross-repo fix (push runquota
+    commit, then verify reprobuild). The actual remediation lived
+    entirely in the runquota sibling: a pre-existing upstream commit
+    (aa3a301) supplied the public API surface and the POSIX bounded
+    read, this sub-agent's 10c42a9 closed the Windows
+    bounded-runtime gap, and reprobuild compiles + tests pass on
+    both platforms without any reprobuild source edit.
+
+  * The Windows-side unit guard uses ``receiveFrame(timeoutMs)``
+    rather than a higher-level test that drives the
+    ``pollNextGrantBounded`` / ``daemonStatus(timeoutMs)`` shape
+    end-to-end against a stub daemon. The reprobuild end-to-end
+    wedged-stub test (``tests/unit/t_runquota_grant_wait_wedged_connected.nim``)
+    is still Unix-socket-only by construction
+    (``unixEndpoint("/tmp/...")``). Adding a named-pipe variant of
+    that test would close the e2e gap on Windows but is a
+    reprobuild-side change outside this milestone's scope.

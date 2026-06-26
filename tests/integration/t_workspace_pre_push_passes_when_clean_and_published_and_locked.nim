@@ -216,10 +216,15 @@ suite "M18 — repro check --mode=pre-push (happy path)":
         checkpoint("workspace lock output: " & lockRes.output)
       check lockRes.code == 0
 
+      # RA-1: the lock lives at the per-repo path
+      # ``locks/<project>/<repo>/<sha>.toml`` and NO index.toml is
+      # written.
       let manifestsRoot = fx.workspaceRoot / ".repo" / "manifests"
-      let lockIndex = manifestsRoot / "locks" / "lib-a" / "index.toml"
-      check fileExists(lockIndex)
-      let lockIndexBefore = readFile(lockIndex)
+      let lockFile = manifestsRoot / "locks" / "lib-a" / "lib-a" /
+        (fx.libA.sha & ".toml")
+      check fileExists(lockFile)
+      check not fileExists(manifestsRoot / "locks" / "lib-a" / "index.toml")
+      let lockFileBefore = readFile(lockFile)
 
       let refsFile = fx.scratch / "pushed-refs.txt"
       writeRefsFile(refsFile, "refs/heads/main", fx.libA.sha)
@@ -238,9 +243,13 @@ suite "M18 — repro check --mode=pre-push (happy path)":
       check report["activeBranch"].getStr() == "main"
       let lockUpdate = report["lockUpdate"]
       check lockUpdate["kind"].getStr() == "already-current"
-      check lockUpdate["indexFilePath"].getStr() == lockIndex
+      # RA-1: the gate resolves the latest lock via the per-repo path,
+      # not an index; indexFilePath is empty.
+      check lockUpdate["indexFilePath"].getStr() == ""
+      check lockUpdate["lockFilePath"].getStr() == lockFile
       check lockUpdate["triggerRepo"].getStr() == "lib-a"
       check lockUpdate["triggerSha"].getStr() == fx.libA.sha
 
-      # The lock index file is byte-identical to its pre-pre-push state.
-      check readFile(lockIndex) == lockIndexBefore
+      # The lock file is byte-identical to its pre-pre-push state
+      # (the gate found it already-current and did not rewrite it).
+      check readFile(lockFile) == lockFileBefore

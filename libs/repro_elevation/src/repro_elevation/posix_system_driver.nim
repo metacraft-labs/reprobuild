@@ -59,6 +59,14 @@ when defined(linux) or defined(macosx):
   import std/[os, osproc, streams]
 elif defined(windows):
   import std/[os, osproc]
+  # Windows-System-Resources Phase D: re-observe the live NTFS ACL
+  # for an `fs.systemDirectory` whose `dirAclPresent == true`. The
+  # `parseIcaclsOutput` parser lives in `windows_system_parse.nim`
+  # (the platform-pure parsing module for the standalone
+  # `windows.acl` driver). It is reused here verbatim — both drivers
+  # consume the same `icacls <path>` invocation, so a single parser
+  # serves both observations.
+  import ./windows_system_parse
 
 # ---------------------------------------------------------------------------
 # Digest helpers — the canonical-bytes model shared with every other
@@ -164,6 +172,30 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
   of pokFsSystemFile:
     if op.sfDestroy:
       ZeroDigestHex
+    elif op.sfSourceUrl.len > 0:
+      # The profile pins the digest the controller would obtain by
+      # fetching `sfSourceUrl`. We can return it directly without a
+      # network round trip — the digest IS the canonical desired
+      # state, and the apply path verifies the fetched body against
+      # this same string before writing.
+      op.sfSha256
+    elif op.sfSourceLocal.len > 0:
+      # The desired bytes are the controller-side file's current
+      # contents. Read at observation time so the dispatcher's
+      # drift gate compares against the same bytes the apply path
+      # would write. Missing / unreadable is a hard error — same
+      # contract as `desiredFileContent`.
+      when defined(linux) or defined(macosx) or defined(windows):
+        if not fileExists(op.sfSourceLocal):
+          raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
+            " not found or unreadable")
+        try:
+          posixDigestHexOfText(readFile(op.sfSourceLocal))
+        except IOError, OSError:
+          raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
+            " not found or unreadable")
+      else:
+        raiseNotImplementedPlatform("fs.systemFile sourceLocal digest")
     else:
       posixDigestHexOfText(op.sfContent)
   of pokFsSystemDirectory:
@@ -633,6 +665,97 @@ when defined(windows):
 elif defined(linux) or defined(macosx):
   proc programDataRoot(): string = ""
 
+# ---------------------------------------------------------------------------
+# desiredFileContent — the external-source dispatch helper for
+# `fs.systemFile`. The driver branches on which of three mutually-
+# exclusive source fields is non-empty:
+#
+#   * `sfContent`     non-empty (or all three external-source fields
+#                     empty — the backward-compatible default for the
+#                     pre-Phase-A inline-content shape): the inline
+#                     bytes are the desired content.
+#   * `sfSourceLocal` non-empty: open the controller-side path and
+#                     read all bytes (re-read on every apply so a
+#                     between-step edit lands; we explicitly do NOT
+#                     cache the result on the op).
+#   * `sfSourceUrl`   non-empty: HTTP GET the URL via the synchronous
+#                     stdlib client; the BLAKE3 digest of the response
+#                     body is verified against `sfSha256` BEFORE the
+#                     bytes are returned — a mismatch raises
+#                     `EProtocol` so the caller never writes
+#                     unverified bytes.
+#
+# The mutual-exclusion invariant is upheld by the template, the
+# `parseSystemProfile` validator, the adapter, AND
+# `operationValidationError` — four redundant guards, so the helper's
+# precedence below would only matter if all four were bypassed. The
+# precedence is `sfSourceLocal` > `sfSourceUrl` > `sfContent` — picked
+# because the external-source modes are the ones the validator
+# protects (a programming error in the planner could populate
+# `sfContent` AND an external source; preferring the external source
+# matches the operator's apparent intent that the file come from
+# outside).
+# ---------------------------------------------------------------------------
+
+when defined(linux) or defined(macosx) or defined(windows):
+  import std/httpclient
+
+proc desiredFileContent*(op: PrivilegedOperation): string =
+  ## Resolve the bytes the driver should write to `op.sfPath`. Pure
+  ## except for the `sfSourceLocal` and `sfSourceUrl` arms, which
+  ## perform I/O (read a controller-side file / GET a URL). Returns
+  ## the bytes as a `string` (Nim's string is a length-prefixed byte
+  ## buffer; binary content is fine).
+  ##
+  ## Raises `EProtocol` on:
+  ##   * a missing / unreadable `sfSourceLocal` path
+  ##   * an HTTP error / non-2xx response on `sfSourceUrl`
+  ##   * a digest mismatch between the fetched body and `sfSha256`
+  ##
+  ## The caller then writes the returned bytes — the precise byte
+  ## stream the post-apply re-probe will compare back to.
+  when defined(linux) or defined(macosx) or defined(windows):
+    if op.sfSourceLocal.len > 0:
+      if not fileExists(op.sfSourceLocal):
+        raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
+          " not found or unreadable")
+      try:
+        return readFile(op.sfSourceLocal)
+      except IOError, OSError:
+        raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
+          " not found or unreadable")
+    if op.sfSourceUrl.len > 0:
+      # Synchronous fetch via stdlib `httpclient` — keeps the driver
+      # straight-line and avoids dragging chronos into the broker.
+      # The data: URI scheme is supported by the Nim httpclient so
+      # tests can exercise the path without a real network round
+      # trip.
+      var body: string
+      let client = newHttpClient(timeout = 30_000)
+      try:
+        let resp =
+          try:
+            client.get(op.sfSourceUrl)
+          except CatchableError as e:
+            raiseProtocol("fs.systemFile sourceUrl=" & op.sfSourceUrl &
+              " fetch failed: " & e.msg)
+        if resp.code.int >= 300:
+          raiseProtocol("fs.systemFile sourceUrl=" & op.sfSourceUrl &
+            " returned HTTP " & $resp.code.int)
+        body = resp.body
+      finally:
+        client.close()
+      let observedDigest = posixDigestHexOfText(body)
+      if observedDigest != op.sfSha256:
+        raiseProtocol("fs.systemFile sourceUrl=" & op.sfSourceUrl &
+          " digest mismatch: fetched bytes hash to " & observedDigest &
+          " but the profile pinned " & op.sfSha256)
+      return body
+    # Default + explicit-`content` arm: the inline string.
+    return op.sfContent
+  else:
+    raiseNotImplementedPlatform("fs.systemFile desiredFileContent")
+
 proc observeFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
   ## Re-observe a managed system file. The digest covers the file
   ## contents. The path's allowlist membership is re-validated as
@@ -656,6 +779,13 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
   ## The path is re-validated against the allowlist before any I/O —
   ## a path outside `/etc/`, `/usr/local/etc/`, `${PROGRAMDATA}` is
   ## refused with an out-of-scope protocol error.
+  ##
+  ## The bytes written come from `desiredFileContent(op)`, which
+  ## dispatches on the external-source fields (`sfSourceUrl`,
+  ## `sfSourceLocal`) and falls back to inline `sfContent` when none
+  ## is set. The digest verification for `sfSourceUrl` happens INSIDE
+  ## `desiredFileContent`, so by the time we reach the write the
+  ## bytes are already trusted.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
   ## plan-time-baseline drift gate is removed (per
@@ -682,6 +812,11 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
       result.present = false
       result.digestHex = ZeroDigestHex
       return
+    # Compute the desired bytes BEFORE opening the target file. This
+    # ordering matters: a `sourceLocal` read failure or a `sourceUrl`
+    # digest mismatch raises `EProtocol` here, so we never truncate
+    # the target with empty bytes when the source is bad.
+    let desired = desiredFileContent(op)
     let parent = parentDir(op.sfPath)
     if parent.len > 0:
       createDir(parent)
@@ -690,13 +825,13 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
       if not open(f, op.sfPath, fmWrite):
         raiseProtocol("fs.systemFile cannot open " & op.sfPath)
       try:
-        if op.sfContent.len > 0:
-          discard f.writeBuffer(unsafeAddr op.sfContent[0], op.sfContent.len)
+        if desired.len > 0:
+          discard f.writeBuffer(unsafeAddr desired[0], desired.len)
       finally:
         close(f)
     # Post-apply re-probe — see the contract comment above.
     let post = observeFsSystemFile(op)
-    let desiredHex = posixDigestHexOfText(op.sfContent)
+    let desiredHex = posixDigestHexOfText(desired)
     if not post.present or post.digestHex != desiredHex:
       raiseProtocol("fs.systemFile " & op.sfPath &
         " post-apply observation disagrees with desired state: " &
@@ -732,7 +867,31 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
 # `/etc/<x>` works on Linux unchanged.
 # ===========================================================================
 
+proc renderArgvAsShellCmd*(argv: openArray[string]): string =
+  ## Cross-platform pure helper: render a fully-shell-quoted command
+  ## from a pre-assembled argv. The driver's `execCmdEx` shell-out
+  ## takes a single command string, so an argv built by the pure
+  ## renderers (`renderIcaclsSetOwnerCommandArgs`, etc.) must be
+  ## joined with `quoteShell` applied to each token. Exposed for the
+  ## unit tests so they can assert the EXACT shell string each pure
+  ## argv lowers to without spawning a process.
+  var first = true
+  for tok in argv:
+    if not first:
+      result.add(' ')
+    first = false
+    result.add(quoteShell(tok))
+
 when defined(windows):
+  proc icaclsQueryDir(path: string): tuple[output: string; code: int] =
+    ## Run `icacls <path>` and return combined stdout+stderr + exit
+    ## code. Used by `observeFsSystemDirectory` to read the live ACL
+    ## when `op.fsdAclPresent == true`. Mirrors `icaclsQuery` in
+    ## `windows_system_driver.nim`'s `windows.acl` driver.
+    let cmd = renderArgvAsShellCmd(@["icacls", path])
+    let (output, code) = execCmdEx(cmd)
+    (output, code)
+
   proc icaclsSetOwnerDir(path, owner: string):
       tuple[output: string; code: int] =
     ## Mirror of `takeownOf` in `windows_system_driver.nim`: take
@@ -740,12 +899,14 @@ when defined(windows):
     ## `/A` flag still seizes to Administrators) then pin the owner
     ## via `icacls <path> /setowner <owner>`. The first call's
     ## failure is non-fatal (the directory may already be owned by
-    ## an Administrator account).
-    let takeownCmd = "takeown /F " & quoteShell(path) & " /A"
-    discard execCmdEx(takeownCmd)
-    let setownerCmd = "icacls " & quoteShell(path) &
-      " /setowner " & quoteShell(owner)
-    let (output, code) = execCmdEx(setownerCmd)
+    ## an Administrator account). Argv assembled by the pure
+    ## `renderTakeownDirCommandArgs` /
+    ## `renderIcaclsSetOwnerCommandArgs` helpers so the EXACT command
+    ## string is unit-testable cross-platform.
+    discard execCmdEx(renderArgvAsShellCmd(
+      renderTakeownDirCommandArgs(path)))
+    let (output, code) = execCmdEx(renderArgvAsShellCmd(
+      renderIcaclsSetOwnerCommandArgs(path, owner)))
     (output, code)
 
   proc icaclsInheritanceDir(path, mode: string):
@@ -756,16 +917,11 @@ when defined(windows):
     ## (same flag — icacls's "remove inherited" verb IS the SetAccess
     ## RuleProtection(true, false) form the
     ## `protected-clear-inherited` value names). `enabled` is a
-    ## no-op.
-    let flag =
-      case mode
-      of "disabled-replace", "protected-clear-inherited": "r"
-      of "disabled-convert": "d"
-      else: ""
-    if flag.len == 0:
+    ## no-op. Argv from the pure `renderIcaclsInheritanceCommandArgs`.
+    let argv = renderIcaclsInheritanceCommandArgs(path, mode)
+    if argv.len == 0:
       return ("", 0)
-    let cmd = "icacls " & quoteShell(path) & " /inheritance:" & flag
-    let (output, code) = execCmdEx(cmd)
+    let (output, code) = execCmdEx(renderArgvAsShellCmd(argv))
     (output, code)
 
   proc icaclsGrantDir(path, entry: string):
@@ -773,29 +929,34 @@ when defined(windows):
     ## `icacls /grant` an ACE on a directory. Deny entries (the
     ## `(D,...)` form `aclEntry(... type = Deny)` emits) are routed
     ## through `/deny` so the icacls verb matches the ACE direction;
-    ## an Allow entry uses the default `/grant`.
-    let isDeny = entry.find(":(D,") >= 0
-    let verb = if isDeny: " /deny " else: " /grant "
-    let normalizedEntry =
-      if isDeny:
-        # Strip the leading `D,` marker so the spec is the bare
-        # `(<flag>)` form `icacls /deny` consumes.
-        entry.replace(":(D,", ":(")
-      else:
-        entry
-    let cmd = "icacls " & quoteShell(path) & verb &
-      quoteShell(normalizedEntry)
-    let (output, code) = execCmdEx(cmd)
+    ## an Allow entry uses the default `/grant`. Argv from the pure
+    ## `renderIcaclsGrantCommandArgs` (which itself delegates to
+    ## `splitDirAclEntry` for the Allow/Deny pivot).
+    let (output, code) = execCmdEx(renderArgvAsShellCmd(
+      renderIcaclsGrantCommandArgs(path, entry)))
     (output, code)
 
 proc observeFsSystemDirectory*(op: PrivilegedOperation):
     ObservedOperationState =
-  ## Re-observe a managed system directory. The digest is a fixed
-  ## present-sentinel (created vs absent is the only meaningful
-  ## observation the driver can make — directory contents are NOT in
-  ## scope; the operator manages those via `fs.systemFile` etc.).
-  ## The path's allowlist membership is re-validated as defence in
-  ## depth.
+  ## Re-observe a managed system directory. The path's allowlist
+  ## membership is re-validated as defence in depth.
+  ##
+  ## Digest contract (Windows-System-Resources Phase D):
+  ##
+  ##   * `op.fsdAclPresent == false` -> the legacy back-compat digest
+  ##     `BLAKE3("fs.systemDirectory:present")` (BYTE-IDENTICAL to
+  ##     PR #7's pre-Phase-D shape). Directory contents are NOT in
+  ##     scope; the operator manages those via `fs.systemFile` etc.
+  ##   * `op.fsdAclPresent == true` -> the legacy payload is EXTENDED
+  ##     with the canonical ACL contribution
+  ##     (`canonicalDirAclObserved`), so a drifted live ACL flips the
+  ##     digest and the broker's cache-miss path re-runs
+  ##     `applyFsSystemDirectory`. On Windows the live ACL is read
+  ##     via `icacls <path>`; off-Windows (where no NTFS DACL exists)
+  ##     the ACL is treated as "matches desired" (the observation
+  ##     reflects the directory's existence — there's no actual ACL
+  ##     to drift), so the digest still compares equal to the
+  ##     cache-hit branch.
   when defined(linux) or defined(macosx) or defined(windows):
     let scopeErr = systemDirectoryScopeError(op.fsdPath, programDataRoot())
     if scopeErr.len > 0:
@@ -805,7 +966,31 @@ proc observeFsSystemDirectory*(op: PrivilegedOperation):
       result.digestHex = ZeroDigestHex
       return
     result.present = true
-    result.digestHex = posixDigestHexOfText("fs.systemDirectory:present")
+    when defined(windows):
+      # Windows: when the operator declared an ACL, fold the LIVE
+      # icacls observation into the digest. The projection is the
+      # SAME canonical shape `canonicalDirAclDesired` emits when every
+      # desired ACE is present + the inheritance constraint is
+      # satisfied, so an in-sync host hashes identically to the
+      # desired digest and the broker's cache-hit predicate fires.
+      if op.fsdAclPresent:
+        let (output, _) = icaclsQueryDir(op.fsdPath)
+        let obs = parseIcaclsOutput(output, op.fsdPath)
+        let observedPayload = "fs.systemDirectory:present|" &
+          canonicalDirAclObserved(obs.present, op.fsdAclOwner,
+            op.fsdAclEntries, obs.entries, obs.inheritanceDisabled,
+            op.fsdAclInheritance)
+        result.digestHex = posixDigestHexOfText(observedPayload)
+        return
+    # Off-Windows OR ACL unmanaged: emit either the legacy back-compat
+    # digest (`aclPresent == false`) or the in-sync managed-ACL digest
+    # (`aclPresent == true` on a non-Windows host — POSIX has no NTFS
+    # DACL to drift, so the observation matches desired by
+    # construction).
+    let payload = fsSystemDirectoryDigestPayload(true,
+      op.fsdAclPresent, op.fsdAclOwner, op.fsdAclEntries,
+      op.fsdAclInheritance)
+    result.digestHex = posixDigestHexOfText(payload)
   else:
     raiseNotImplementedPlatform("fs.systemDirectory observe")
 
@@ -876,6 +1061,30 @@ proc applyFsSystemDirectory*(op: PrivilegedOperation):
       raiseProtocol("fs.systemDirectory " & op.fsdPath &
         " post-apply observation disagrees with desired state: " &
         "the directory does not exist after `createDir`.")
+    when defined(windows):
+      # Windows-System-Resources Phase D: with `dirAclPresent == true`
+      # the post-apply re-probe must also confirm the LIVE ACL matches
+      # the operator's declaration. The icacls calls above returned
+      # exit 0 but the ACL could still differ if (e.g.) the icacls
+      # grant verb silently truncated a long ACE; the re-probe digest
+      # comparison closes that gap. Off-Windows the ACL fields are
+      # silently ignored so this branch does not apply.
+      if op.fsdAclPresent:
+        let desiredPayload = fsSystemDirectoryDigestPayload(true,
+          true, op.fsdAclOwner, op.fsdAclEntries, op.fsdAclInheritance)
+        let desiredHex = posixDigestHexOfText(desiredPayload)
+        if post.digestHex != desiredHex:
+          raiseProtocol("fs.systemDirectory " & op.fsdPath &
+            " post-apply observation disagrees with desired ACL: " &
+            "observed digest " &
+            (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+             else: post.digestHex) &
+            ", desired digest " &
+            (if desiredHex.len >= 12: desiredHex[0 ..< 12]
+             else: desiredHex) &
+            ". One or more declared ACEs are missing from the live " &
+            "DACL or the inheritance mode is not pinned — the driver " &
+            "fails closed rather than reporting a spurious success.")
     result = post
   else:
     raiseNotImplementedPlatform("fs.systemDirectory apply")

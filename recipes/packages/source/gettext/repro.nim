@@ -203,6 +203,20 @@ package gettextSource:
     ## emits XML-formatted message catalogs for the (deprecated)
     ## glade / qt-linguist consumers.
     "libxml2 >=2.9"
+    ## M9.R.31.1 — gettext's autotools configure unconditionally probes
+    ## for ``libacl`` and links it into ``libgettextlib`` when present
+    ## (used for ACL preservation in file-copy helpers + Mac-OS-X
+    ## resource-fork compat shims; gettext upstream provides no
+    ## ``--without-acl`` opt-out). The previous build inherited the
+    ## libacl link via the host nix-shell's ambient
+    ## ``LD_LIBRARY_PATH``; when M9.R.30's batch rebuild ran without
+    ## that path, msgfmt's ``DT_NEEDED libacl.so.1`` no longer
+    ## resolved at runtime. Declaring libacl as a direct buildDep
+    ## threads its lib dir onto LIBRARY_PATH + LD_LIBRARY_PATH at
+    ## link time AND onto msgfmt's baked RPATH via M9.R.14f's walker
+    ## — closing the DE-rebuild trip surfaced by M9.R.31 Phase B
+    ## (mutter's i18n step short-fails with msgfmt → libacl gap).
+    "libacl"
 
   config:
     ## No prefix lifted from `configureFlags:`; flags inlined in the `build:` block.

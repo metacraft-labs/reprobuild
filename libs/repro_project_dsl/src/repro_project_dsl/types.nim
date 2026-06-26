@@ -463,6 +463,44 @@ type
       ## the engine resolves them at fork time, and PATH is
       ## populated with the resolved store paths so the bare tool
       ## name finds the right binary.
+    requiresElevation*: bool
+      ## Windows-System-Resources Phase E: marks an action edge as
+      ## one whose execution must cross the privileged-operation
+      ## broker. The engine's ``reprobuild.builtin.exec`` lowering
+      ## consults this flag: ``false`` (the default) routes through
+      ## the standard build engine fork path; ``true`` packages the
+      ## action's argv + tool refs + env into a ``pokInlineExecCall``
+      ## ``PrivilegedOperation`` and dispatches via the broker.
+      ##
+      ## Payload codec v19+. v18-and-earlier payloads decode with
+      ## ``requiresElevation = false`` so legacy artefacts continue
+      ## to take the non-elevated fork path. Default ``false`` keeps
+      ## every existing build-graph edge byte-identical to today.
+    recipeRevisionFingerprint*: string
+      ## M9.R.34: BLAKE3-style digest of the recipe (``repro.nim`` /
+      ## ``reprobuild.nim``) file bytes the action was emitted from.
+      ## ``buildAction`` auto-populates this at registration time
+      ## from ``activeProviderProjectRoot()`` so per-recipe action
+      ## graphs (cmake_package / autotools_package / meson_package /
+      ## from-source-custom shell rows) capture recipe edits in their
+      ## local action-cache fingerprint. The engine-side lowering in
+      ## ``repro_cli_support.lowerGraphAction`` includes the encoded
+      ## ``node.payload`` in every ``fingerprintText`` it composes, so
+      ## any change here automatically buses the action's local
+      ## ``weakFingerprint``. The binary-cache key continues to be
+      ## composed via ``cacheEntryIdentity.providerRevision``
+      ## (which already hashes the same recipe file via
+      ## ``providerRevisionHex``), so this field affects only the
+      ## local action cache — binary-cache semantics are unchanged.
+      ##
+      ## Payload codec v20+. v19-and-earlier payloads decode with an
+      ## empty string so legacy artefacts continue to round-trip; the
+      ## first time a new provider re-emits actions the field is
+      ## populated and every previously-cached action gets a fresh
+      ## fingerprint (one-shot invalidation by construction — that
+      ## IS the milestone outcome). Outside provider mode (unit
+      ## tests, hand-rolled ``buildAction`` callers) the field stays
+      ## empty so existing fixtures see no behaviour change.
     sourceFile*: string
     sourceLine*: int
 

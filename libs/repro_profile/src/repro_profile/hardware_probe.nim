@@ -22,7 +22,7 @@
 ## raises ``ValueError``; the CLI handler turns that into the standard
 ## "platform not supported" diagnostic.
 
-import std/[algorithm, json, os, osproc, strutils]
+import std/[algorithm, json, os, osproc, streams, strtabs, strutils]
 
 import ./types
 import ./hardware_id
@@ -290,10 +290,82 @@ proc readAllOrEmpty(path: string): string =
   try: readFile(path)
   except CatchableError: ""
 
+proc childEnvWithoutLdLibPath*(): StringTableRef =
+  ## M9.R.40.2 — build a child-process env table with the loader-related
+  ## env vars stripped.  The installer launcher (M9.R.40.1) no longer
+  ## sets ``LD_LIBRARY_PATH`` on the installer's env (it invokes ld.so
+  ## with ``--library-path`` instead), so the parent's env is normally
+  ## clean.  This helper is defence-in-depth: if a future launcher
+  ## change reintroduces LD_LIBRARY_PATH propagation, our hardware-probe
+  ## subprocesses (``/bin/sh -c "lsblk ..."``, ``findmnt``, ``lspci``)
+  ## still get a clean env so Debian's ``/bin/sh`` doesn't try to load
+  ## nix-store's libc.so.6 and hit a GLIBC_PRIVATE symbol mismatch
+  ## (RC=127, M9.R.39.5 / M9.R.39.6 failure shape).  We also strip
+  ## ``LD_DEBUG`` / ``LD_DEBUG_OUTPUT`` so probe children don't pollute
+  ## a diagnostic ld-debug log file the parent set up.
+  result = newStringTable(modeCaseSensitive)
+  for k, v in envPairs():
+    case k
+    of "LD_LIBRARY_PATH", "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_PRELOAD",
+       "LD_AUDIT":
+      discard
+    else:
+      result[k] = v
+
+proc execShellCmdCleanEnv*(cmd: string): tuple[output: string; exitCode: int] =
+  ## Like ``execCmdEx(cmd)`` but spawns the child with
+  ## ``childEnvWithoutLdLibPath()``.  The child runs via ``/bin/sh -c``
+  ## so shell pipelines / quoting continue to work, matching the
+  ## ``execCmdEx`` semantics the original probe used.
+  result.output = ""
+  result.exitCode = -1
+  let env = childEnvWithoutLdLibPath()
+  var p: Process
+  try:
+    p = startProcess(
+      "/bin/sh",
+      args = @["-c", cmd],
+      env = env,
+      options = {poUsePath, poStdErrToStdOut})
+  except OSError:
+    return
+  let s = p.outputStream()
+  try:
+    result.output = s.readAll()
+  except IOError, OSError:
+    discard
+  try:
+    result.exitCode = p.waitForExit()
+  except OSError:
+    discard
+  p.close()
+
+proc lsblkRawLogPath(): string =
+  ## Optional dump-path for the raw lsblk JSON output, gated on the
+  ## ``REPRO_HARDWARE_PROBE_RAWLOG_DIR`` env var.  Set the dir from the
+  ## installer harness (e.g. /tmp) and the probe writes
+  ## ``<dir>/lsblk.raw.txt`` before parsing.  Empty if unset.
+  let dir = getEnv("REPRO_HARDWARE_PROBE_RAWLOG_DIR")
+  if dir.len == 0: return ""
+  return dir / "lsblk.raw.txt"
+
+proc dumpRawIfRequested(name, content: string; exitCode: int) =
+  let dir = getEnv("REPRO_HARDWARE_PROBE_RAWLOG_DIR")
+  if dir.len == 0: return
+  try:
+    if not dirExists(dir):
+      createDir(dir)
+    let payload = "exit=" & $exitCode & "\n" &
+                  "bytes=" & $content.len & "\n" &
+                  "---\n" & content
+    writeFile(dir / name, payload)
+  except CatchableError:
+    discard
+
 proc runOrEmpty(cmd: string): string =
   try:
-    let (output, _) = execCmdEx(cmd)
-    output
+    let r = execShellCmdCleanEnv(cmd)
+    r.output
   except CatchableError: ""
 
 proc probeCpu*(): ProbeCpuSpec =
@@ -310,10 +382,22 @@ proc probeBoot*(): ProbeBootSpec =
   probeBootFrom(modulesText, cmdline, loader)
 
 proc probeFilesystems*(): seq[ProbeFsEntry] =
-  let json = runOrEmpty(
-    "lsblk -f -J -o NAME,UUID,FSTYPE,MOUNTPOINT,SIZE")
-  if json.strip().len == 0: return @[]
-  probeFilesystemsFrom(json)
+  ## M9.R.40.1 — characterise lsblk's actual on-host output before
+  ## handing it to the JSON parser.  When
+  ## ``REPRO_HARDWARE_PROBE_RAWLOG_DIR`` is set, the raw bytes (plus
+  ## exit code + byte count) are written to ``<dir>/lsblk.raw.txt``
+  ## BEFORE the early-empty check or the parse step.  Lets the live-ISO
+  ## driver capture what lsblk actually emitted (or what /bin/sh said
+  ## when a symbol-lookup error replaced the command output).
+  var r: tuple[output: string; exitCode: int]
+  try:
+    r = execShellCmdCleanEnv(
+      "lsblk -f -J -o NAME,UUID,FSTYPE,MOUNTPOINT,SIZE")
+  except CatchableError:
+    r = (output: "", exitCode: -1)
+  dumpRawIfRequested("lsblk.raw.txt", r.output, r.exitCode)
+  if r.output.strip().len == 0: return @[]
+  probeFilesystemsFrom(r.output)
 
 proc probeGraphics*(): ProbeGraphicsSpec =
   probeGraphicsFrom(runOrEmpty("lspci -nn -d ::0300"))

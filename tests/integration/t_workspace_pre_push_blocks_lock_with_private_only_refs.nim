@@ -369,18 +369,12 @@ proc privateMixedLockToml(publicASha, publicBSha,
     "remote = \"priv-origin\"\n" &
     "revision = \"" & privateSha & "\"\n"
 
-proc lockIndexToml(triggerRepo, triggerSha, lockFile: string): string =
-  ## Minimal lock-index entry. The M18 stage 5 inspects this to decide
-  ## whether the lock is "already current". For the M26 tests we set
-  ## the triggerSha to one of the public repo HEADs so the gate finds
-  ## the lock current and proceeds to stage 6.
-  result =
-    "schema = \"reprobuild.workspace.lock-index.v1\"\n\n" &
-    "[[entry]]\n" &
-    "trigger_repo = \"" & triggerRepo & "\"\n" &
-    "trigger_sha = \"" & triggerSha & "\"\n" &
-    "lock_file = \"" & lockFile & "\"\n" &
-    "created_at = \"2026-06-04T00:00:00Z\"\n"
+proc perRepoLockRel(triggerRepo, triggerSha: string): string =
+  ## RA-1 per-repo lock path ``locks/<project>/<repo>/<sha>.toml``. The
+  ## M26 tests key the lock by ``lib-public-a`` at its HEAD so the gate
+  ## stage 5 finds the lock current (the public repos are the only ones
+  ## cloned + observed) and proceeds to stage 6.
+  "locks/myproject/" & triggerRepo & "/" & triggerSha & ".toml"
 
 proc writeRefsFile(path: string; localRef, localSha, remoteSha: string) =
   ## Build a git pre-push refs stream. ``remoteSha`` of all-zero means
@@ -433,15 +427,12 @@ suite "M26 — pre-push lock visibility check":
       # Write a lock referencing only ``lib-public-a`` / ``lib-public-b``
       # into the public layer's checkout, commit it, and point the
       # refs file at the new HEAD.
-      let lockRel = "locks/myproject/myproject-aaaaaaaa.toml"
-      let indexRel = "locks/myproject/index.toml"
+      let lockRel = perRepoLockRel("lib-public-a", fx.libPublicA.sha)
       let lockBody = publicOnlyLockToml(fx.libPublicA.sha,
                                         fx.libPublicB.sha)
       let lockAbs = fx.publicLayerPath / lockRel.replace('/', DirSep)
       createDir(parentDir(lockAbs))
       writeFile(lockAbs, lockBody)
-      writeFile(fx.publicLayerPath / indexRel.replace('/', DirSep),
-        lockIndexToml("myproject", fx.libPublicA.sha, lockRel))
       let newHead = commitInLayer(gitBin, fx.publicLayerPath,
         "add public-only lock")
 
@@ -461,8 +452,9 @@ suite "M26 — pre-push lock visibility check":
       let report = readReport(fx)
       check report["exitCode"].getInt() == 0
       check report["failures"].len == 0
-      # The lock is already current (we wrote both the lock and the
-      # index so stage 5 found a covering index entry).
+      # The lock is already current: RA-1 stage 5 resolves it via Git
+      # history over the per-repo lock subtree (no index), and its
+      # public-repo pins match the observed HEADs.
       check report["lockUpdate"]["kind"].getStr() == "already-current"
 
   test "test_m26_pre_push_blocks_when_public_lock_references_private_only_repo":
@@ -473,16 +465,13 @@ suite "M26 — pre-push lock visibility check":
       let fx = setupFixture(gitBin, "private-ref-block")
       defer: removeDir(fx.scratch)
 
-      let lockRel = "locks/myproject/myproject-bbbbbbbb.toml"
-      let indexRel = "locks/myproject/index.toml"
+      let lockRel = perRepoLockRel("lib-public-a", fx.libPublicA.sha)
       let lockBody = privateMixedLockToml(fx.libPublicA.sha,
                                           fx.libPublicB.sha,
                                           fx.libPrivate.sha)
       let lockAbs = fx.publicLayerPath / lockRel.replace('/', DirSep)
       createDir(parentDir(lockAbs))
       writeFile(lockAbs, lockBody)
-      writeFile(fx.publicLayerPath / indexRel.replace('/', DirSep),
-        lockIndexToml("myproject", fx.libPublicA.sha, lockRel))
       let newHead = commitInLayer(gitBin, fx.publicLayerPath,
         "add lock with private ref")
 
@@ -527,16 +516,13 @@ suite "M26 — pre-push lock visibility check":
 
       # Commit a lock referencing a private-only repo into the layer
       # AND push it to origin so it's part of the base history.
-      let lockRel = "locks/myproject/myproject-cccccccc.toml"
-      let indexRel = "locks/myproject/index.toml"
+      let lockRel = perRepoLockRel("lib-public-a", fx.libPublicA.sha)
       let lockBody = privateMixedLockToml(fx.libPublicA.sha,
                                           fx.libPublicB.sha,
                                           fx.libPrivate.sha)
       let lockAbs = fx.publicLayerPath / lockRel.replace('/', DirSep)
       createDir(parentDir(lockAbs))
       writeFile(lockAbs, lockBody)
-      writeFile(fx.publicLayerPath / indexRel.replace('/', DirSep),
-        lockIndexToml("myproject", fx.libPublicA.sha, lockRel))
       discard commitInLayer(gitBin, fx.publicLayerPath,
         "seed pre-existing lock")
       discard requireGit(q(gitBin) & " -C " &
@@ -583,16 +569,13 @@ suite "M26 — pre-push lock visibility check":
       discard requireGit(q(gitBin) & " -C " &
         q(fx.publicLayerPath) & " checkout -b feature-m26")
 
-      let lockRel = "locks/myproject/myproject-dddddddd.toml"
-      let indexRel = "locks/myproject/index.toml"
+      let lockRel = perRepoLockRel("lib-public-a", fx.libPublicA.sha)
       let lockBody = privateMixedLockToml(fx.libPublicA.sha,
                                           fx.libPublicB.sha,
                                           fx.libPrivate.sha)
       let lockAbs = fx.publicLayerPath / lockRel.replace('/', DirSep)
       createDir(parentDir(lockAbs))
       writeFile(lockAbs, lockBody)
-      writeFile(fx.publicLayerPath / indexRel.replace('/', DirSep),
-        lockIndexToml("myproject", fx.libPublicA.sha, lockRel))
       let newHead = commitInLayer(gitBin, fx.publicLayerPath,
         "add private-ref lock on feature branch")
 

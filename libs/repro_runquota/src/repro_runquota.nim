@@ -1,10 +1,11 @@
-import std/[json, os, strutils, tables]
+import std/[json, os, strutils, tables, times]
 from repro_core/paths import extendedPath
 
 # Windows: the sibling runquota repository now ships a Windows port
 # (named-pipe transport + Job-Object-based process spawning), so the real
 # runquota_* libraries link cleanly on every platform we target.
 import runquota_client
+export runquota_client.RunQuotaLease
 import runquota_codec
 import runquota_core
 import runquota_ipc except connectDefault
@@ -124,6 +125,198 @@ proc nextDenialBackoff(backoffMs: int): int =
   if backoffMs <= 0: denialBackoffStartMs
   else: min(backoffMs * 2, denialBackoffMaxMs)
 
+const
+  # Grant-wait observability + liveness (Interactive-UX-And-Progress.md
+  # Principle 1 "a silent multi-second hang is a defect" and Principle 2
+  # "every failure teaches the remedy"; Build-Engine-And-Scheduler.md
+  # "RunQuota Discovery": an unresponsive RunQuota MUST fail with a
+  # diagnostic, not hang).
+  #
+  # The crucial distinction the grant-wait draws is **liveness vs
+  # silence**, NOT "decision vs no-decision".  The real daemon protocol
+  # (runquota_daemon ``rqGrantNext`` handler) answers every GrantNext
+  # round-trip with a ``LeaseDecisionBatch`` whose ``decisions`` are
+  # *empty* while the candidate is still legitimately queued — it does
+  # NOT send any intermediate "queued"/"denied" decision during normal
+  # queueing.  So an empty batch is LIVENESS, not silence: a candidate
+  # may sit behind a long-running predecessor (realistic for the pinned
+  # llvm-project / mold / wild LTO builds) for far longer than any
+  # deadline while the daemon answers every poll promptly.  The
+  # unresponsive deadline must therefore measure *transport silence*
+  # (the daemon is answering NOTHING at all), never queue time.
+  #
+  # ``grantHeartbeatMsDefault`` — how often, while a candidate is
+  # legitimately queued and the daemon is still answering, we emit a
+  # progress line so the wait is never silent.  This NEVER fails a wait.
+  #
+  # ``grantUnresponsiveMsDefault`` — the bounded deadline applied ONLY to
+  # daemon *unresponsiveness*: the wall-clock time we may go with no proof
+  # of life at all before we conclude the daemon is wedged/mid-restart and
+  # raise an actionable ``ReproRunQuotaError``.  ANY proof the daemon is
+  # alive — a received GrantNext response (even an empty batch), a granted
+  # or denied decision, or a successful ``daemonStatus`` liveness probe —
+  # resets the clock.  Only genuine silence (the daemon answers neither
+  # the grant stream nor a status probe) accrues toward it.  The default
+  # is deliberately generous so heavy legitimate queueing under load is
+  # never mistaken for a wedged daemon.
+  #
+  # ``grantBoundedReadMsDefault`` — the small per-attempt read window for
+  # the grant stream.  Short enough that liveness is rechecked frequently
+  # (a queued-but-alive daemon's empty batch is observed within a couple
+  # of seconds) without busy-spinning.
+  grantHeartbeatMsDefault = 5_000
+  grantUnresponsiveMsDefault = 600_000  # 10 minutes of total silence.
+  grantBoundedReadMsDefault = 1_500
+
+proc envIntMs(name: string; fallback: int): int =
+  ## Read a millisecond override from ``name``.  Empty/invalid/<=0 values
+  ## fall back to ``fallback`` so a malformed env var can never silently
+  ## disable the heartbeat or shrink the deadline to zero.
+  let raw = getEnv(name, "")
+  if raw.len == 0:
+    return fallback
+  try:
+    let parsed = parseInt(raw.strip())
+    if parsed > 0: parsed else: fallback
+  except ValueError:
+    fallback
+
+proc grantHeartbeatMs*(): int =
+  envIntMs("REPRO_RUNQUOTA_GRANT_HEARTBEAT", grantHeartbeatMsDefault)
+
+proc grantUnresponsiveMs*(): int =
+  envIntMs("REPRO_RUNQUOTA_GRANT_TIMEOUT", grantUnresponsiveMsDefault)
+
+proc grantBoundedReadMs*(): int =
+  envIntMs("REPRO_RUNQUOTA_GRANT_READ_TIMEOUT", grantBoundedReadMsDefault)
+
+proc reportGrantHeartbeat*(label, statsId: string; waitedMs: int) =
+  ## Emit a ``runquota.waiting`` progress line so a legitimately-queued
+  ## candidate is never a silent hang (Interactive-UX Principle 1).  This
+  ## is informational only — it does not change the wait's outcome.
+  let id = if statsId.len > 0: statsId else: label
+  try:
+    stderr.writeLine "runquota.waiting " & id &
+      " still waiting for a RunQuota grant waitedMs=" & $waitedMs
+  except IOError, OSError:
+    discard
+
+type
+  GrantPollOutcome* = enum
+    ## Result of one bounded tick of the grant-await loop.  These mirror
+    ## the REAL daemon protocol, not an idealised one:
+    ##
+    ## * ``gpoAliveQueued`` — the daemon answered the outstanding GrantNext
+    ##   within the bounded read window with a batch that did NOT grant the
+    ##   candidate (in practice an *empty* batch — the daemon sends no
+    ##   intermediate "queued" decision).  This is the legitimately-queued
+    ##   case AND proof the daemon is alive: it RESETS the unresponsive
+    ##   clock and keeps waiting.
+    ## * ``gpoGranted`` — the candidate's lease was granted.
+    ## * ``gpoDenied`` — the candidate was denied; the caller re-offers
+    ##   with backoff (a denial MUST NOT break the build).
+    ## * ``gpoNoFrame`` — no complete frame arrived within the bounded read
+    ##   window.  This is AMBIGUOUS on its own (a merely-slow daemon vs a
+    ##   wedged one); the loop runs a liveness probe to disambiguate before
+    ##   deciding whether it counts as silence.
+    gpoAliveQueued
+    gpoGranted
+    gpoDenied
+    gpoNoFrame
+
+  GrantPollResult* = object
+    outcome*: GrantPollOutcome
+    lease*: RunQuotaLease       ## valid when ``outcome == gpoGranted``.
+    diagnostic*: string         ## denial text when ``outcome == gpoDenied``.
+
+  LivenessOutcome* = enum
+    ## Result of a liveness probe run after a ``gpoNoFrame`` tick.
+    livAlive       ## the daemon answered the probe — it is alive.
+    livSilent      ## the probe got no answer within its window (silence).
+
+  GrantAwaitResult* = object
+    granted*: bool
+    lease*: RunQuotaLease
+    denialMessage*: string
+
+proc awaitGrantLoop*(
+    candidateId: uint64;
+    label, statsId: string;
+    poll: proc(): GrantPollResult {.closure.};
+    liveness: proc(): LivenessOutcome {.closure.};
+    heartbeatMs, unresponsiveMs: int;
+    nowMs: proc(): int {.closure.};
+    napMs: proc(ms: int) {.closure.};
+    heartbeat: proc(label, statsId: string; waitedMs: int) {.closure.}):
+    GrantAwaitResult =
+  ## Testable core of the queued-grant wait.  Distinguishes a daemon that
+  ## is *alive but legitimately queueing the candidate* from one that is
+  ## *transport-silent*.  The deadline measures SILENCE, never queue time:
+  ##
+  ## * ``gpoGranted`` ends the wait with success; ``gpoDenied`` ends it so
+  ##   the caller re-offers with backoff.  A poll that *raises* (dead/closed
+  ##   connection, protocol error) propagates immediately.
+  ## * ``gpoAliveQueued`` — the daemon answered the GrantNext round-trip but
+  ##   the candidate is still queued (an empty decision batch on the real
+  ##   daemon).  A received frame is PROOF OF LIFE: it RESETS the
+  ##   unresponsive clock.  We keep waiting indefinitely, emitting a
+  ##   heartbeat every ``heartbeatMs`` so it is never silent.  This is the
+  ##   regression the previous implementation got wrong — it treated this
+  ##   case as accruing toward the deadline and so spuriously failed any
+  ##   candidate queued behind a long-running predecessor.
+  ## * ``gpoNoFrame`` — the bounded read saw no frame.  We do NOT
+  ##   immediately count this as silence: we run a ``liveness`` probe.  If
+  ##   the probe says ``livAlive`` the daemon is up (the candidate is just
+  ##   queued and the daemon had nothing to send this window) → reset the
+  ##   clock and keep waiting.  Only an unbroken run of ``livSilent``
+  ##   probes lasting longer than ``unresponsiveMs`` of wall-clock time
+  ##   trips the deadline and raises an actionable error.
+  let startMs = nowMs()
+  var lastProgressMs = startMs
+  var lastHeartbeatMs = startMs
+
+  proc maybeHeartbeat(now: int) =
+    if now - lastHeartbeatMs >= heartbeatMs:
+      heartbeat(label, statsId, now - startMs)
+      lastHeartbeatMs = now
+
+  while true:
+    let res = poll()
+    case res.outcome
+    of gpoGranted:
+      return GrantAwaitResult(granted: true, lease: res.lease)
+    of gpoDenied:
+      return GrantAwaitResult(granted: false, denialMessage: res.diagnostic)
+    of gpoAliveQueued:
+      # A received frame (even an empty batch) is liveness: reset the clock.
+      let now = nowMs()
+      lastProgressMs = now
+      maybeHeartbeat(now)
+      napMs(25)
+    of gpoNoFrame:
+      # Nothing arrived on the grant stream this window.  Disambiguate
+      # "alive but quiet (still queued)" from "transport silence" with a
+      # liveness probe BEFORE letting the deadline accrue.
+      case liveness()
+      of livAlive:
+        let now = nowMs()
+        lastProgressMs = now
+        maybeHeartbeat(now)
+        napMs(25)
+      of livSilent:
+        let now = nowMs()
+        if now - lastProgressMs >= unresponsiveMs:
+          raise newException(ReproRunQuotaError,
+            "runquota stopped responding while a lease for '" & label &
+            "' was queued: no grant-stream frame and no status reply for " &
+            $unresponsiveMs & "ms (the daemon may be wedged or mid-restart). " &
+            "Retry the build, restart runquotad (`runquota daemon restart`), " &
+            "or rerun with the unsafe single-process fallback `--runquota=off`. " &
+            "Raise REPRO_RUNQUOTA_GRANT_TIMEOUT if this build legitimately " &
+            "queues longer than " & $unresponsiveMs & "ms under load.")
+        maybeHeartbeat(now)
+        napMs(25)
+
 proc reportDenialRetry(label, statsId, diagnostic: string;
                        attempt: int; backoffMs: int) =
   ## Emit the canonical ``runquota.denied`` diagnostic so build operators
@@ -186,27 +379,86 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
       raise newException(ReproRunQuotaError,
         "runquota did not return a decision for the offered lease")
 
-    var queuedDenied = false
-    block awaitGrant:
-      while true:
-        for decision in session.pollNextGrant():
+    # Wait for the queued candidate to be granted.  The previous
+    # implementation polled here forever with no timeout and no output, so
+    # a wedged/mid-restart daemon that never delivered a grant froze the
+    # whole build silently (observed: a `just test` frozen for hours).
+    #
+    # ``awaitGrantLoop`` keeps waiting (with a heartbeat) for as long as
+    # the daemon proves it is alive — a received GrantNext frame (an empty
+    # batch while the candidate is legitimately queued IS liveness) or a
+    # successful ``daemonStatus`` probe — and raises an actionable
+    # ``ReproRunQuotaError`` only when the daemon goes genuinely silent
+    # (neither the grant stream nor a status probe answers for a generous
+    # bounded deadline) or the connection dies (``pollNextGrantBounded`` /
+    # the probe raises).
+    let sessionPtr = addr session
+    let boundedReadMs = grantBoundedReadMs()
+
+    proc poll(): GrantPollResult =
+      let polled = sessionPtr[].pollNextGrantBounded(boundedReadMs)
+      case polled.kind
+      of grantPollTimeout:
+        return GrantPollResult(outcome: gpoNoFrame)
+      of grantPollFrame:
+        for decision in polled.decisions:
           if decision.clientCandidateId != CandidateId:
             continue
           if decision.lease.active and not decision.queued:
-            reportGrantedAfterRetry(request.label, request.commandStatsId,
-              attempts)
-            return decision.lease
+            return GrantPollResult(outcome: gpoGranted, lease: decision.lease)
           if not decision.lease.active:
-            queuedDenied = true
-            denialMessage = decision.diagnostic.diagnosticText()
-            break awaitGrant
-        sleep(25)
-    if queuedDenied:
-      backoffMs = nextDenialBackoff(backoffMs)
-      reportDenialRetry(request.label, request.commandStatsId,
-        denialMessage, attempts, backoffMs)
-      sleep(backoffMs)
-      continue
+            return GrantPollResult(outcome: gpoDenied,
+              diagnostic: decision.diagnostic.diagnosticText())
+        # A frame arrived but it did not grant/deny our candidate (an empty
+        # batch, or an unrelated candidate's decision): the daemon is alive
+        # and the candidate is still queued.
+        return GrantPollResult(outcome: gpoAliveQueued)
+
+    proc livenessProbe(): LivenessOutcome =
+      # Disambiguate "alive but quiet" from "transport silence" after a
+      # bounded grant read returned no frame.  A successful status
+      # round-trip proves the daemon is alive even with no grant yet; a
+      # status probe that times out is silence.  A genuinely dead/closed
+      # connection raises ``RunQuotaClientError`` here and propagates as a
+      # hard failure (the dead-connection / daemon-restart case).
+      try:
+        # Bound the probe with the same per-tick read window the grant
+        # stream uses (~1.5s).  Passing no ``timeoutMs`` would default to
+        # ``0`` = an UNBOUNDED blocking read, so a daemon that accepts the
+        # connection but never answers (wedged / mid-restart) would block
+        # here forever in ``recv`` — making ``livSilent`` and the
+        # ``unresponsiveMs`` deadline unreachable and re-introducing the
+        # very silent hang this loop exists to prevent.  A bounded probe
+        # returns ``livSilent`` on a connected-but-silent daemon so the
+        # deadline can accrue and fire.
+        discard sessionPtr[].client[].daemonStatus(timeoutMs = boundedReadMs)
+        livAlive
+      except RunQuotaClientError:
+        # ``daemonStatus`` uses the bounded read window above; a wedged
+        # daemon that accepts the connection but never answers surfaces as
+        # this error.  Treat it as silence so the deadline can accrue.  A
+        # truly closed connection also lands here, but then the NEXT poll's
+        # ``pollNextGrantBounded`` (or this probe) keeps reporting silence
+        # and the bounded deadline fires — never an infinite hang.
+        livSilent
+
+    let awaited = awaitGrantLoop(
+      CandidateId, request.label, request.commandStatsId,
+      poll = poll,
+      liveness = livenessProbe,
+      heartbeatMs = grantHeartbeatMs(),
+      unresponsiveMs = grantUnresponsiveMs(),
+      nowMs = proc(): int = int(epochTime() * 1000.0),
+      napMs = proc(ms: int) = sleep(ms),
+      heartbeat = reportGrantHeartbeat)
+    if awaited.granted:
+      reportGrantedAfterRetry(request.label, request.commandStatsId, attempts)
+      return awaited.lease
+    backoffMs = nextDenialBackoff(backoffMs)
+    reportDenialRetry(request.label, request.commandStatsId,
+      awaited.denialMessage, attempts, backoffMs)
+    sleep(backoffMs)
+    continue
 
 proc finishOutcome(completion: ProcessCompletion): LeaseFinishOutcome =
   if completion.cancelled or completion.timedOut:

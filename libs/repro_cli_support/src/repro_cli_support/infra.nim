@@ -23,9 +23,12 @@ import std/[os, strutils, times]
 
 import repro_elevation
 import repro_infra
+import repro_profile
 import repro_profile_intent
 import repro_profile_compile
 import repro_cli_support/home as cli_home
+import repro_cli_support/disk as cli_disk
+import repro_cli_support/infra_install_root
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `system.nim` profiles.
@@ -40,7 +43,8 @@ import repro_cli_support/home as cli_home
 # ---------------------------------------------------------------------------
 
 proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
-    tuple[text: string; cached: bool; compileError: string] =
+    tuple[text: string; cached: bool; compileError: string;
+          buildActions: seq[ProfileBuildAction]] =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and render the adapted `SystemProfile` back
   ## into the canonical declarative text the M69 lib's APIs consume.
@@ -50,6 +54,15 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   ## failure: `result.text` is empty and `result.compileError`
   ## carries the diagnostic; apply-path callers propagate as a hard
   ## error via `formatProfileCompileError`.
+  ##
+  ## Windows-System-Resources Phase G + CLI-wiring: `result.buildActions`
+  ## carries the profile's action-edge intent items (decoded from the
+  ## RBPI envelope's ``ProfileIntent.buildActions`` seq). The apply
+  ## path threads these into ``ApplyOptions.buildActions`` so the
+  ## injected ``BuildActionDispatcher`` closure dispatches them through
+  ## ``runBuild`` + the elevation broker hook. Profiles that declare no
+  ## action edges leave this seq empty — the apply driver skips the
+  ## dispatcher entirely when empty (see ``dispatchBuildActions``).
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
     publicCliPath: getAppFilename(),
@@ -62,6 +75,7 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
     let intent = decodeRbpi(artifact.rbpiBytes)
     let sp = profileIntentToSystemProfile(intent)
     result.text = renderSystemProfileToText(sp)
+    result.buildActions = intent.buildActions
   except ProfileCompileError as err:
     result.compileError = err.msg
   except CatchableError as err:
@@ -71,7 +85,9 @@ proc resolveSystemProfileText*(profilePath: string;
                                originalText, stateDir,
                                commandName: string;
                                outText: var string;
-                               planCommand = ""): bool =
+                               planCommand = "";
+                               outBuildActions: ptr seq[ProfileBuildAction] = nil):
+    bool =
   ## Drive the Phase F3 compile path for a `system.nim`. Sets `outText`
   ## to the canonical text rendered from the adapted profile when the
   ## compile path succeeds.
@@ -81,15 +97,75 @@ proc resolveSystemProfileText*(profilePath: string;
   ## `originalText` argument is retained for compatibility (callers
   ## still read the source for non-compile uses like drift previews)
   ## but is no longer consulted on a compile failure.
+  ##
+  ## Windows-System-Resources Phase G + CLI-wiring: when
+  ## ``outBuildActions != nil`` the compiled profile's ``buildActions``
+  ## seq is copied into the caller-supplied target so the apply driver
+  ## can populate ``ApplyOptions.buildActions``. Callers that do not
+  ## drive an apply (e.g. ``repro infra plan``) leave the pointer nil
+  ## and the seq is discarded.
   discard originalText  # retained for caller compatibility; see docstring
   let outcome = compileAndAdaptSystemProfile(profilePath, stateDir)
   if outcome.text.len > 0:
     outText = outcome.text
+    if outBuildActions != nil:
+      outBuildActions[] = outcome.buildActions
     return true
   stderr.writeLine(cli_home.formatProfileCompileError(
     commandName, profilePath, outcome.compileError,
     planCommand = planCommand))
   false
+
+# ---------------------------------------------------------------------------
+# Windows-System-Resources Phase G + CLI-wiring: populate the apply
+# options with the action-edge intent items + a build-action dispatcher
+# closure that drives them through ``runBuild`` with the elevation
+# broker hook attached. This is the production seam that connects the
+# profile macro's action-edge output (Phase G) to ``runInfraApply``'s
+# build-action dispatch step (Phase G's ``dispatchBuildActions``).
+#
+# Without this wiring, production ``repro infra apply`` against a
+# profile that uses ``expandArchive.build(...)`` or bare
+# ``inlineExecCall(...)`` inside its ``resources:`` block would see an
+# empty ``opts.buildActions``, skip the dispatcher entirely, and
+# silently DROP the action edge — the spec's "no silent fallback"
+# posture explicitly forbids that.
+# ---------------------------------------------------------------------------
+
+proc attachBuildActionDispatcher*(opts: var ApplyOptions;
+                                  buildActions: seq[ProfileBuildAction];
+                                  stateDir: string) =
+  ## Wire the Phase G + Phase E closures into ``opts``:
+  ##
+  ##   * ``opts.buildActions`` is copied from the compiled profile so
+  ##     the apply driver's ``dispatchBuildActions`` step sees the
+  ##     declared action edges.
+  ##   * ``opts.buildActionDispatcher`` is constructed via
+  ##     ``mkBuildActionDispatcher(cacheRoot, ctx)`` so a non-empty
+  ##     ``buildActions`` seq actually flows through ``runBuild`` + the
+  ##     ``mkInfraApplyBrokerSpawn(ctx)`` broker hook.
+  ##
+  ## ``stateDir`` is the apply's per-user state directory; the engine's
+  ## action-cache + CAS for the action-edge half live under
+  ## ``<stateDir>/<ApplyBuildActionsCacheDirName>``. Distinct from the
+  ## profile-compile cache (``<stateDir>/profile-cache/``) so a cache
+  ## sweep for one half doesn't perturb the other.
+  ##
+  ## ``FixtureContext.filePrefix = stateDir``: the inline-exec dispatch
+  ## doesn't consume the context for ``pokInlineExecCall`` but the
+  ## parameter is kept so the same dispatcher interface scales to the
+  ## broker-subprocess path (which threads a populated context through
+  ## the dispatch loop). Mirroring the test seam's pattern in
+  ## ``libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim``.
+  opts.buildActions = buildActions
+  if buildActions.len == 0:
+    # Empty action-edge set: leave the dispatcher nil. The apply
+    # driver's ``dispatchBuildActions`` short-circuits on an empty seq
+    # and never consults the dispatcher field.
+    return
+  let cacheRoot = stateDir / ApplyBuildActionsCacheDirName
+  let ctx = FixtureContext(filePrefix: stateDir)
+  opts.buildActionDispatcher = mkBuildActionDispatcher(cacheRoot, ctx)
 
 # ---------------------------------------------------------------------------
 # Shared option parsing.
@@ -270,9 +346,11 @@ proc runInfraApply(args: openArray[string]): int =
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
   # failure exits non-zero with a uniform actionable error.
   var profileText: string
+  var profileBuildActions: seq[ProfileBuildAction]
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro infra apply", profileText,
-      planCommand = "repro infra plan"):
+      planCommand = "repro infra plan",
+      outBuildActions = addr profileBuildActions):
     return 1
   let host = hostIdentity(flags.host)
 
@@ -300,6 +378,13 @@ proc runInfraApply(args: openArray[string]): int =
   opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
   opts.noPreview = flags.noPreview
   opts.acceptPasswdDestroy = flags.acceptPasswdDestroy
+  # Windows-System-Resources Phase G + CLI-wiring: attach the action-
+  # edge dispatcher closure + the profile's ``buildActions`` seq. The
+  # apply driver's ``dispatchBuildActions`` step dispatches each entry
+  # through ``runBuild`` + the elevation broker hook
+  # (``mkInfraApplyBrokerSpawn``). A profile with no action edges
+  # leaves ``buildActions`` empty and the dispatcher is never consulted.
+  attachBuildActionDispatcher(opts, profileBuildActions, stateDir)
 
   var applyResult: ApplyResult
   try:
@@ -547,9 +632,11 @@ proc runSystemSync(args: openArray[string]): int =
   # M83 Phase F3: compile-then-adapt is the ONLY path; a compile
   # failure exits non-zero with a uniform actionable error.
   var profileText: string
+  var profileBuildActions: seq[ProfileBuildAction]
   if not resolveSystemProfileText(profilePath, originalText, stateDir,
       "repro system sync", profileText,
-      planCommand = "repro infra plan"):
+      planCommand = "repro infra plan",
+      outBuildActions = addr profileBuildActions):
     return 1
   let host = hostIdentity(flags.host)
   if not acquireApplyLock(stateDir):
@@ -577,6 +664,12 @@ proc runSystemSync(args: openArray[string]): int =
   opts.forceBroker = getEnv(ForceBrokerEnvVar).len > 0
   opts.noPreview = true
   opts.acceptPasswdDestroy = flags.acceptPasswdDestroy
+  # Windows-System-Resources Phase G + CLI-wiring: same action-edge
+  # attachment as ``repro infra apply``. ``repro system sync`` is the
+  # other CLI surface that drives ``runInfraApply``; both seams must
+  # populate ``opts.buildActions`` so a profile that mixes live-state
+  # and action-edge resources dispatches both halves correctly.
+  attachBuildActionDispatcher(opts, profileBuildActions, stateDir)
   var applyResult: ApplyResult
   try:
     applyResult = runInfraApply(profileText, opts)
@@ -698,10 +791,43 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
 # Dispatch.
 # ---------------------------------------------------------------------------
 
+proc runInfraInstallRootCli(args: seq[string]): int =
+  ## ``repro infra install-root --target /mnt --device /dev/vda``.
+  ##
+  ## M9.R.41: install-time root-mirror.  Distinct from ``repro infra
+  ## apply``: it does NOT reconcile a system profile in place — it
+  ## materialises a content-addressed REPLICA of the live root onto a
+  ## freshly-formatted target, then generates the target-side fstab +
+  ## installs GRUB.  Used by the M9.R.18 reproos-installer's Phase 5
+  ## driver to close the install -> boot loop.
+  let loader: DiskoLoader = proc(path: string): DiskPlanOutcome =
+    loadDiskoFromSource(path)
+  let outcome = runInstallRoot(args, loader)
+  if outcome.failure:
+    stderr.writeLine("repro infra install-root: " & outcome.failureMsg)
+    case outcome.failureKind
+    of irfBadFlag: return 2
+    of irfMissingTarget, irfMissingSource: return 2
+    of irfRsyncFailed, irfGrubInstallFailed,
+       irfFstabWriteFailed, irfGrubCfgWriteFailed,
+       irfDiskoLoadFailed: return 1
+  echo "repro infra install-root"
+  echo "  rsync exit       : " & $outcome.rsyncExitCode
+  echo "  mount entries    : " & $outcome.mountPlan.len
+  for (dev, mp) in outcome.mountPlan:
+    let shown = if mp.len == 0: "/" else: mp
+    echo "    " & dev & "  ->  " & shown
+  if outcome.fstabPath.len > 0:
+    echo "  fstab            : " & outcome.fstabPath
+  if outcome.grubCfgPath.len > 0:
+    echo "  grub.cfg         : " & outcome.grubCfgPath
+  echo "  grub-install exit: " & $outcome.grubInstallExit
+  return 0
+
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
-    stderr.writeLine("usage: repro infra {plan | apply} ...")
+    stderr.writeLine("usage: repro infra {plan | apply | install-root} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -709,6 +835,7 @@ proc runInfraCommand*(args: seq[string]): int =
     case sub
     of "plan": return runInfraPlan(rest)
     of "apply": return runInfraApply(rest)
+    of "install-root": return runInfraInstallRootCli(rest)
     else:
       stderr.writeLine("repro infra: unknown subcommand: " & sub)
       return 2

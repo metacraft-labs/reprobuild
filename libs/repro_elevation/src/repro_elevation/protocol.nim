@@ -272,6 +272,35 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.serviceName)
     body.writeString(op.serviceStartType)
     body.writeBool(op.serviceRunning)
+    # Windows-System-Resources Phase B: the four new fields. Empty
+    # strings / 0 / empty seq round-trip cleanly as their defaults so a
+    # pre-Phase-B frame (which doesn't set them) deserializes to a Phase
+    # B operation with all four at their "leave unmanaged" default.
+    body.writeString(op.serviceDisplayName)
+    body.writeString(op.serviceBinPath)
+    body.writeU32Le(uint32(op.serviceRecoveryActions.len))
+    for slot in op.serviceRecoveryActions:
+      body.writeString(windowsServiceRecoveryActionToken(slot.action))
+      body.writeU32Le(uint32(slot.delayMs))
+    body.writeU32Le(uint32(op.serviceRecoveryResetSeconds))
+  of pokWindowsScheduledTask:
+    # Windows-System-Resources Phase C: encode the new kind. Schedule is
+    # serialized via its canonical wire token (`<kind>:<payload>`) so
+    # the same closed-set decoder that runs at the protocol boundary
+    # validates the shape. `encodeScheduledTaskScheduleSpec` rejects a
+    # malformed in-process construction here as defence-in-depth on top
+    # of the broker validator.
+    body.writeString(op.wstTaskName)
+    body.writeString(op.wstExecutable)
+    body.writeU32Le(uint32(op.wstArguments.len))
+    for a in op.wstArguments:
+      body.writeString(a)
+    body.writeString(op.wstWorkingDirectory)
+    body.writeString(op.wstRunAsUser)
+    body.writeBool(op.wstRunWithHighestPrivileges)
+    body.writeString(encodeScheduledTaskScheduleSpec(op.wstSchedule))
+    body.writeBool(op.wstEnabled)
+    body.writeBool(op.wstDestroy)
   of pokWindowsVsInstaller:
     body.writeString(op.vsEdition)
     body.writeString(op.vsChannel)
@@ -323,6 +352,14 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
   of pokFsSystemFile:
     body.writeString(op.sfPath)
     body.writeString(op.sfContent)
+    # External-source fields (Windows-System-Resources Phase A). All
+    # three are written as strings; absent values encode as empty,
+    # which round-trips as empty on the decode side, matching the
+    # "all three external-source fields absent => inline content"
+    # backward-compat shape.
+    body.writeString(op.sfSourceUrl)
+    body.writeString(op.sfSha256)
+    body.writeString(op.sfSourceLocal)
     body.writeBool(op.sfDestroy)
   of pokFsSystemDirectory:
     body.writeString(op.fsdPath)
@@ -417,6 +454,30 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     for a in op.fsbArgv:
       body.writeString(a)
     body.writeBool(op.fsbDestroy)
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: the elevated build-edge
+    # hand-off. Strings written via the shared length-prefixed
+    # helpers; the integer exit-code list is written as u32 LE
+    # counts (the codec's standard shape).
+    body.writeString(op.iecExecutable)
+    body.writeU32Le(uint32(op.iecArguments.len))
+    for a in op.iecArguments:
+      body.writeString(a)
+    body.writeString(op.iecWorkingDirectory)
+    body.writeU32Le(uint32(op.iecEnvironment.len))
+    for e in op.iecEnvironment:
+      body.writeString(e)
+    body.writeU32Le(uint32(op.iecToolIdentityRefs.len))
+    for r in op.iecToolIdentityRefs:
+      body.writeString(r)
+    body.writeU32Le(uint32(op.iecAcceptExitCodes.len))
+    for c in op.iecAcceptExitCodes:
+      # The exit-code range is `int` in the type, but the wire
+      # format pins each entry as a 32-bit signed value
+      # (cast-through-uint32 keeps negative codes representable on
+      # platforms that have them — Windows surfaces e.g. -2147483648
+      # for STATUS_FATAL_APP_EXIT).
+      body.writeU32Le(uint32(c))
   encodeFrame(rmtOperation, body)
 
 proc decodeOperation*(body: openArray[byte]): WireOperation =
@@ -475,6 +536,51 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.serviceName = readString(body, pos)
     result.operation.serviceStartType = readString(body, pos)
     result.operation.serviceRunning = readBool(body, pos, "serviceRunning")
+    # Windows-System-Resources Phase B: read the four new fields. The
+    # action-token decoder enforces the closed-set vocabulary so a
+    # malformed frame fails closed at the codec boundary (mirrors the
+    # `windows.registryValue` kind tag check above).
+    result.operation.serviceDisplayName = readString(body, pos)
+    result.operation.serviceBinPath = readString(body, pos)
+    let recoveryCount = int(readU32Le(body, pos))
+    if recoveryCount < 0 or pos + recoveryCount > body.len:
+      raiseProtocol("windows.service frame: implausible recovery action count")
+    for _ in 0 ..< recoveryCount:
+      let actionToken = readString(body, pos)
+      if not isKnownWindowsServiceRecoveryActionToken(actionToken):
+        raiseProtocol("windows.service frame names an unrecognized " &
+          "recovery action '" & actionToken &
+          "'; the broker executes only the closed action set")
+      let delayMs = int(readU32Le(body, pos))
+      result.operation.serviceRecoveryActions.add(
+        WindowsServiceRecoverySpec(
+          action: windowsServiceRecoveryActionFromToken(actionToken),
+          delayMs: delayMs))
+    result.operation.serviceRecoveryResetSeconds =
+      int(readU32Le(body, pos))
+  of pokWindowsScheduledTask:
+    result.operation = PrivilegedOperation(kind: pokWindowsScheduledTask,
+      address: address)
+    result.operation.wstTaskName = readString(body, pos)
+    result.operation.wstExecutable = readString(body, pos)
+    let argCount = int(readU32Le(body, pos))
+    if argCount < 0 or pos + argCount > body.len:
+      raiseProtocol("windows.scheduledTask frame: implausible arguments count")
+    for _ in 0 ..< argCount:
+      result.operation.wstArguments.add(readString(body, pos))
+    result.operation.wstWorkingDirectory = readString(body, pos)
+    result.operation.wstRunAsUser = readString(body, pos)
+    result.operation.wstRunWithHighestPrivileges =
+      readBool(body, pos, "wstRunWithHighestPrivileges")
+    let scheduleToken = readString(body, pos)
+    try:
+      result.operation.wstSchedule =
+        decodeScheduledTaskScheduleToken(scheduleToken)
+    except ValueError as e:
+      raiseProtocol("windows.scheduledTask frame schedule token rejected " &
+        "by closed-set codec: " & e.msg)
+    result.operation.wstEnabled = readBool(body, pos, "wstEnabled")
+    result.operation.wstDestroy = readBool(body, pos, "wstDestroy")
   of pokWindowsVsInstaller:
     result.operation = PrivilegedOperation(kind: pokWindowsVsInstaller,
       address: address)
@@ -548,6 +654,12 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
       address: address)
     result.operation.sfPath = readString(body, pos)
     result.operation.sfContent = readString(body, pos)
+    # External-source fields (Windows-System-Resources Phase A) —
+    # read positionally in the same order they were written. Decoder
+    # ordering matches the encoder above.
+    result.operation.sfSourceUrl = readString(body, pos)
+    result.operation.sfSha256 = readString(body, pos)
+    result.operation.sfSourceLocal = readString(body, pos)
     result.operation.sfDestroy = readBool(body, pos, "sfDestroy")
   of pokFsSystemDirectory:
     result.operation = PrivilegedOperation(kind: pokFsSystemDirectory,
@@ -690,6 +802,39 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     for _ in 0 ..< argvCount:
       result.operation.fsbArgv.add(readString(body, pos))
     result.operation.fsbDestroy = readBool(body, pos, "fsbDestroy")
+  of pokInlineExecCall:
+    # Windows-System-Resources Phase E: counter-side of the encoder
+    # above. Each count is u32 LE; implausible counts (claiming more
+    # bytes than the remainder of the frame can supply) fail closed
+    # as `EProtocol` — matches the pattern every other variant uses.
+    result.operation = PrivilegedOperation(kind: pokInlineExecCall,
+      address: address)
+    result.operation.iecExecutable = readString(body, pos)
+    let argCount = int(readU32Le(body, pos))
+    if argCount < 0 or pos + argCount > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "arguments count")
+    for _ in 0 ..< argCount:
+      result.operation.iecArguments.add(readString(body, pos))
+    result.operation.iecWorkingDirectory = readString(body, pos)
+    let envCount = int(readU32Le(body, pos))
+    if envCount < 0 or pos + envCount > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "environment count")
+    for _ in 0 ..< envCount:
+      result.operation.iecEnvironment.add(readString(body, pos))
+    let refCount = int(readU32Le(body, pos))
+    if refCount < 0 or pos + refCount > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "toolIdentityRefs count")
+    for _ in 0 ..< refCount:
+      result.operation.iecToolIdentityRefs.add(readString(body, pos))
+    let exitCount = int(readU32Le(body, pos))
+    if exitCount < 0 or pos + exitCount * 4 > body.len:
+      raiseProtocol("reprobuild.inlineExecCall frame: implausible " &
+        "acceptExitCodes count")
+    for _ in 0 ..< exitCount:
+      result.operation.iecAcceptExitCodes.add(int(cast[int32](readU32Le(body, pos))))
 
 # ---- OperationResult -------------------------------------------------------
 
