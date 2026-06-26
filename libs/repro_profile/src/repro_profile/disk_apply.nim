@@ -127,9 +127,16 @@ proc applyDiskLayout*(layout: DiskLayout;
       if tableKind == "gpt":
         # `sgdisk -o` zaps any existing GPT and creates a fresh empty
         # GPT in one operation, which avoids the parted-then-sgdisk
-        # metadata race.
+        # metadata race.  Use ``--mbrtogpt`` shorthand combined: -o
+        # plus -G to assign random GUID, plus -a 2048 to pin alignment
+        # to 1 MiB (so the subsequent -n uses a canonical aligned
+        # start instead of falling back to sector 34 on Debian Trixie
+        # kernel 6.12.86, which is what M9.R.41 hit and M9.R.40 didn't.)
+        # We do this as a SINGLE sgdisk invocation so the alignment
+        # carries over with the GPT structure (sgdisk -a is per-invocation
+        # only — a separate `sgdisk -a 2048 <dev>` does not persist).
         ctx.recordOperation(execTool("sgdisk",
-          @["sgdisk", "-o", d.device]))
+          @["sgdisk", "-a", "2048", "-o", d.device]))
         # M9.R.41: force the kernel block layer to flush + re-read the
         # partition table AFTER sgdisk -o so the subsequent sgdisk -n
         # sees the freshly written GPT (not a cached stale view via
