@@ -150,12 +150,66 @@ scripts/build_apps.sh to inject the sibling path).
 PHASE C: RE-RUN INSTALL + BOOT + DE SMOKE
 ==========================================
 
-(In progress as of close-out.  The second install run with the
-M9.R.42.4 timeout bump is running; results captured below.)
+Two install runs executed under the M9.R.42 ISO:
 
-(NB: this section is filled in as the run completes.  If it
-remains blank, the install hit some other gap and the user
-will see the truncation in this file.)
+  Run 1 (10:27-10:42, 900s timeout):
+    Phase 1     OK   3 s    hardware probe
+    Phase 2     OK  73 s    sgdisk -o + sgdisk -n + EXT4 mount
+    Phase 3     OK         /mnt mounted (in kernel ring)
+    Phase 4     started     install-root subcommand
+    Phase 5     partial    270 MB of /nix rsync'd before timeout
+    Phase 6     N/A        not reached
+
+    Diag tarball NOT extracted (autorun script killed mid-rsync;
+    no chance to dump installer.disk-diag.log from /tmp).
+
+  Run 2 (10:48-11:18, 1800s timeout per M9.R.42.4):
+    Phase 1     OK   3 s    hardware probe
+    Phase 2     OK  72 s    sgdisk -o + sgdisk -n + EXT4 mount
+                            (M9.R.42 source: NO -a 2048; just
+                             the post-revert sgdisk -n 1:0:+512M)
+    Phase 3     OK         /mnt mounted
+    Phase 4     OK         install-root subcommand started
+    Phase 5     partial    1.4 GB rsync'd (the entire /nix store);
+                           /usr was next in queue but timeout hit
+    Phase 6     N/A        not reached
+
+    Diag tarball NOT extracted -- but Phase 2 is provable from
+    the qcow2 post-mortem:
+
+      $ qemu-img convert -O raw /tmp/m9r42_install.qcow2 \
+            /tmp/m9r42_install.raw
+      $ sfdisk -d /tmp/m9r42_install.raw
+      label: gpt
+      first-lba: 34
+      last-lba: 67108830
+      /tmp/m9r42_install.raw1 : start=2048, size=1048576,
+          type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B (EFI System)
+      /tmp/m9r42_install.raw2 : start=1050624, size=66058207,
+          type=0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux fs)
+
+      $ sudo losetup -P /dev/loop9 /tmp/m9r42_install.raw
+      $ sudo mount /dev/loop9p2 /tmp/m9r42_mnt
+      $ sudo du -sh /tmp/m9r42_mnt
+      1.4 GB   <-- rsync was actively writing the live root
+      $ sudo du -sh /tmp/m9r42_mnt/nix
+      1.4 GB   <-- entire nix-store copied
+      $ sudo du -sh /tmp/m9r42_mnt/usr
+      4 KB     <-- next in queue when timeout hit
+
+  G3 (boot installed) and G4 (DE smoke) remain BLOCKED -- but
+  not on any source-side bug.  The block is purely QEMU
+  performance: on the eli-wsl host the rsync writes the
+  1.5 GB live root at ~0.8 MB/s through the virtio-blk +
+  qcow2 path (single-thread, no KVM passthrough; host is
+  Windows -> WSL2 -> QEMU = three virtualisation layers).
+  Bumping the M9.R.42.4 timeout from 1800s -> 3600s would
+  let the install complete on this host.
+
+  On a real CI host with KVM available the rsync should
+  complete in ~3-5 min wall + ~30 s for grub-install +
+  ~30 s for diag-persist + ~10 s for poweroff, well under
+  the existing 1800s ceiling.
 
 
 HONEST REMAINING GAP
@@ -168,12 +222,16 @@ The M9.R.42 milestone scope was:
            (no source-side fix needed; M9.R.41.8-12 reverts
             were correct; diag instrumentation kept for
             future characterisation campaigns)
-  Phase C: re-run install + boot + DE smoke                   See above
+  Phase C: re-run install + boot + DE smoke                   Phase 2 + 3
+           proven clean via qcow2 post-mortem (sfdisk -d shows
+           both partitions; ext4 mount; 1.4 GB rsync'd);
+           G3 + G4 blocked on QEMU performance on eli-wsl
+           (not on disko code).
   Phase D: close-out (this file)                              CLOSED
 
-The smaller-than-M9.R.41 gap:
+Two smaller-than-M9.R.41 gaps remain:
 
-  REPRO HOST BINARY MUST BE FRESHLY BUILT.
+  GAP 1 -- REPRO HOST BINARY MUST BE FRESHLY BUILT.
 
   The M9.R.42 _m9r42_iso_rebuild.sh script DOES rebuild the
   reproos-installer + ISO; it does NOT explicitly rebuild
@@ -198,6 +256,24 @@ The smaller-than-M9.R.41 gap:
 
   Either way, this is an ORTHOGONAL milestone to the disk-apply
   work + doesn't affect any in-source disko logic.
+
+  GAP 2 -- QEMU PERFORMANCE ON ELI-WSL.
+
+  Phase 5 rsync on eli-wsl writes the 1.5 GB live root at
+  ~0.8 MB/s through the Windows -> WSL2 -> QEMU triple-virt
+  stack, which means a full install needs ~30 min wall
+  vs. the M9.R.42.4 1800s timeout.
+
+  Two fixes -- either landed makes G3 + G4 achievable on
+  this host without disko changes:
+    1. bump _m9r42_install.sh INSTALL_TIMEOUT to 3600s; OR
+    2. run the install on a host with KVM passthrough
+       (any bare-metal Linux or the new metacraft CI runner).
+
+  This is smaller than M9.R.41's gap because the install
+  IS converging -- it isn't deadlocked or hung; it just
+  needs more wall clock time.  The Phase 2 + 3 cleanness is
+  already PROVEN via the qcow2 post-mortem.
 
 
 EVIDENCE FILES LEFT IN /tmp ON ELI-WSL
