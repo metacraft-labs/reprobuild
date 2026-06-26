@@ -89,6 +89,28 @@ mkdir -p "$REPRO_STORE_STAGED"
 echo "[relocate-nix-to-repro] staged /nix/store has $(ls -1 "$NIX_STORE_STAGED" | wc -l) entries"
 
 # ---------------------------------------------------------------------------
+# Pre-Phase 1: make every directory writable.
+#
+# stage-de-rootfs.sh's Phase 2/3 used `cp -a` to mirror nix-store dirs;
+# nix-store packages have mode 555 on directories (read+execute, no
+# write).  ``mv`` of a child requires write permission on its PARENT
+# directory, so we need ``chmod -R u+w`` on:
+#   1. $STAGE_DIR/nix/store        (parent of the entries we mv-rename)
+#   2. each $STAGE_DIR/nix/store/<entry>/  (parent of nested files we
+#                                            patchelf later)
+#   3. $STAGE_DIR/opt              (the from-source install-mirrors;
+#                                    same Phase 2 behaviour applied
+#                                    cp -a-preserved 555 dirs on
+#                                    /opt/.../usr/lib too)
+# Idempotent + safe: u+w only, no group/other write.
+# ---------------------------------------------------------------------------
+
+echo "[relocate-nix-to-repro] chmod -R u+w on $NIX_STORE_STAGED + $STAGE_DIR/opt + $STAGE_DIR/usr"
+chmod -R u+w "$NIX_STORE_STAGED" 2>/dev/null || true
+[ -d "$STAGE_DIR/opt" ] && chmod -R u+w "$STAGE_DIR/opt" 2>/dev/null || true
+[ -d "$STAGE_DIR/usr" ] && chmod -R u+w "$STAGE_DIR/usr" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # Phase 1: enumerate every prefix dir directly under $STAGE_DIR/nix/store.
 #
 # We move EVERYTHING under nix/store, not just what the ELF walk discovers.
@@ -112,7 +134,10 @@ for entry in "${store_entries[@]}"; do
     # Idempotency: tolerate re-runs.
     continue
   fi
-  mv "$src" "$dst"
+  if ! mv "$src" "$dst" 2>/dev/null; then
+    echo "[relocate-nix-to-repro] FAILED to mv $src -> $dst" >&2
+    exit 75
+  fi
   moved=$((moved + 1))
 done
 echo "[relocate-nix-to-repro] moved $moved entries from $NIX_STORE_STAGED to $REPRO_STORE_STAGED"
@@ -142,6 +167,15 @@ if [ "${#scan_dirs[@]}" -eq 0 ]; then
   echo "[relocate-nix-to-repro] no scan dirs under $STAGE_DIR; aborting" >&2
   exit 65
 fi
+
+# Make every dir/file in the moved store + scan dirs writable so patchelf
+# can rewrite ELFs in-place.  nix-store packages have mode 555 directories
+# and r-x files; cp -a preserved that.  We need u+w on every parent dir +
+# every file we'll touch.
+echo "[relocate-nix-to-repro] chmod -R u+w on ${scan_dirs[*]}"
+for sd in "${scan_dirs[@]}"; do
+  chmod -R u+w "$sd" 2>/dev/null || true
+done
 
 echo "[relocate-nix-to-repro] rewriting ELFs in ${scan_dirs[*]}"
 
