@@ -171,11 +171,21 @@ proc sgdiskCreatePartition*(device: string; num: int;
         else:
           device & $num
       # Wait a tick + partprobe so the kernel sees the new partition.
-      discard execCmdEx("sync")
-      if findExe("partprobe").len > 0:
-        discard execCmdEx("partprobe " & quoteShell(device))
-      if fileExists(probeDev) or fileExists("/sys/class/block/" &
-          extractFilename(probeDev)):
+      # We retry the probe up to 10 times with a 200ms sleep between
+      # each so the kernel + udev have time to materialise the device
+      # node after sgdisk's write.
+      var found = false
+      for retry in 0 ..< 10:
+        discard execCmdEx("sync")
+        if findExe("partprobe").len > 0:
+          discard execCmdEx("partprobe " & quoteShell(device))
+        if fileExists(probeDev) or fileExists("/sys/class/block/" &
+            extractFilename(probeDev)):
+          found = true
+          break
+        # Sleep 200ms before re-probing.
+        discard execCmdEx("sleep 0.2")
+      if found:
         # The partition node exists — sgdisk's exit 4 was a false-
         # alarm.  Synthesize a success result so the disko driver
         # continues to mkfs + mount.
