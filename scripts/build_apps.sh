@@ -75,6 +75,30 @@ unset_clingo_searchpath() {
   unset NIX_LDFLAGS
 }
 
+# M9.R.47.4 — restore OpenSSL's link search dir for --define:ssl entrypoints.
+# unset_clingo_searchpath clears NIX_LDFLAGS for every ``nim c`` above, but
+# NIX_LDFLAGS is also the *only* carrier of OpenSSL's
+# ``-L/nix/store/<hash>-openssl-<ver>/lib`` in this dev shell (there is no
+# pkg-config ``openssl.pc`` here). An entrypoint compiled with --define:ssl
+# (e.g. repro-harvest-apt, which talks HTTPS to snapshot.debian.org) therefore
+# fails to link ``-lcrypto``/``-lssl`` once NIX_LDFLAGS is gone.
+#
+# Capture OpenSSL's -L from the original NIX_LDFLAGS *here*, while it is still
+# set in this parent shell (the unset only happens inside the per-entrypoint
+# subshells), and replay it via --passL only for ssl entrypoints. The store
+# hash is derived from NIX_LDFLAGS rather than hardcoded, and non-ssl
+# entrypoints are byte-identical (they never receive openssl_passl). The
+# NIX_LDFLAGS/LD_LIBRARY_PATH clearing for the .rodata-bake guard is preserved.
+openssl_passl=()
+for tok in ${NIX_LDFLAGS:-}; do
+  case "$tok" in
+    -L*openssl*)
+      openssl_passl=("--passL:${tok}" "--passL:-lssl" "--passL:-lcrypto")
+      break
+      ;;
+  esac
+done
+
 while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
@@ -84,11 +108,23 @@ while read -r name path extra_flags; do
   # forking the loop (e.g. -d:reproProviderMode for the direct provider).
   # shellcheck disable=SC2206
   extra_flag_array=(${extra_flags})
+  # Only ssl entrypoints get OpenSSL's captured -L back (see openssl_passl
+  # above); every other entrypoint's nim invocation is unchanged.
+  ssl_passl=()
+  for f in ${extra_flag_array[@]+"${extra_flag_array[@]}"}; do
+    case "$f" in
+      --define:ssl|-d:ssl)
+        ssl_passl=(${openssl_passl[@]+"${openssl_passl[@]}"})
+        break
+        ;;
+    esac
+  done
   (
     unset_clingo_searchpath
     nim c \
       ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
       ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
+      ${ssl_passl[@]+"${ssl_passl[@]}"} \
       --nimcache:"build/nimcache/${name}" \
       --out:"build/bin/${name}" \
       "${path}"
