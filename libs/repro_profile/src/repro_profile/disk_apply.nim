@@ -169,10 +169,18 @@ proc applyDiskLayout*(layout: DiskLayout;
           if p.size in ["100%", "remaining", ""]: "0"
           else: "+" & p.size
         let startArg =
-          # First partition starts at "0" (sgdisk default: first
-          # aligned sector); subsequent partitions start at "0"
-          # which is sgdisk's "first available sector".
-          "0"
+          # M9.R.41: explicit start sector for partition 1 (sector
+          # 2048 = 1 MiB) to avoid sgdisk's alignment-fallback bug on
+          # Debian Trixie kernel 6.12.86 + virtio-blk, where sgdisk
+          # auto-picks sector 34 (just past the GPT entries) instead
+          # of the canonical 1-MiB alignment.  Even with ``-a 2048``
+          # passed explicitly, sgdisk in the M9.R.41 base-rootfs
+          # rejects "Could not create partition 1 from 34 to 1048609"
+          # unless we pre-compute the absolute start ourselves.
+          # Subsequent partitions use "0" (sgdisk's "first available
+          # sector after the previous one"), which works fine because
+          # partition 1's end is well past the GPT entries.
+          if num == 1: "2048" else: "0"
         ctx.recordOperation(sgdiskCreatePartition(d.device, num,
           startArg, sizeArg, gptType, pName))
         if p.bootable:
