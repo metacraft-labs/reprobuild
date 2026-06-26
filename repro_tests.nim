@@ -5606,6 +5606,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim",
+    binary: "build/test-bin/t_nested_topology_full_pipeline_without_org_root_repo",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
     binary: "build/test-bin/t_clone_action_honors_partial_blobless_and_single_branch",
     defines: @[],

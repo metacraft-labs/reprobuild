@@ -10413,14 +10413,94 @@ proc committedLockRepoFacts(repoRoot: string):
   result.branch = run(["-C", repoRoot, "symbolic-ref", "--short", "-q", "HEAD"])
   result.originUrl = run(["-C", repoRoot, "remote", "get-url", "origin"])
 
+const nestedDevelopDirs* = ["deps", "vendor", "third-party", "develop"]
+  ## Workspace-Manifest-Optional MO-7 — the conventional project-local
+  ## subdirectories that may hold NESTED develop-mode dependency checkouts
+  ## (Workspace-And-Develop-Mode.md §"Checkout Topologies" → "Nested
+  ## topology": ``./deps/<dep>``, ``./vendor/<dep>``, ``./third-party/<dep>``,
+  ## ``./develop/<dep>``). A single project repo with its develop-mode deps
+  ## nested under it — and a committed solved-graph lock — is a complete,
+  ## manifest-free workspace; the org-root / star layout is OPTIONAL, not
+  ## required. The list is searched in declaration order and the discovered
+  ## set is path-sorted, so the derived participating set is deterministic
+  ## regardless of filesystem iteration order.
+
+proc discoverNestedDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
+  ## MO-7 — discover NESTED develop-mode dependency checkouts under
+  ## ``workspaceRoot`` and return them as participating ``ResolvedRepo``s.
+  ##
+  ## A nested dep is an immediate subdirectory of one of the conventional
+  ## ``nestedDevelopDirs`` that is BOTH a git checkout (carries ``.git``) AND
+  ## a reprobuild project (carries ``repro.nim`` / ``reprobuild.nim``). Those
+  ## two discriminators together mean the directory is a co-developed
+  ## reprobuild package — not an arbitrary vendored source tree — so folding
+  ## it into the workspace's participating set (where ``sync`` plans it and
+  ## the pre-push gate enforces its cleanliness/publication) is sound. The
+  ## ``path`` is workspace-relative (e.g. ``deps/<dep>``), the ``revision`` is
+  ## the nested repo's own ``HEAD``, and the ``fetchUrl`` is its ``origin``.
+  ##
+  ## Result is sorted by ``path`` so the participating set is DETERMINISTIC.
+  result = @[]
+  let root = absolutePath(workspaceRoot)
+  for sub in nestedDevelopDirs:
+    let containerAbs = root / sub
+    if not dirExists(extendedPath(containerAbs)):
+      continue
+    for kind, entry in walkDir(containerAbs):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      if not dirExists(extendedPath(entry / ".git")) and
+          not fileExists(extendedPath(entry / ".git")):
+        # Not a git checkout — a develop-mode participant must be a repo the
+        # gate can probe for cleanliness/publication. (A ``.git`` FILE is a
+        # worktree/submodule gitlink; accept it too.)
+        continue
+      var recipePath = ""
+      try:
+        recipePath = resolveProjectFile(entry).path
+      except CatchableError:
+        # Ambiguous (both repro.nim + reprobuild.nim) — not a discoverable
+        # single-recipe dep here; skip rather than guess.
+        continue
+      if recipePath.len == 0:
+        continue
+      let depName = extractFilename(entry.strip(
+        leading = false, trailing = true, chars = {'/', '\\'}))
+      if depName.len == 0:
+        continue
+      let facts = committedLockRepoFacts(entry)
+      let revision =
+        if facts.headSha.len > 0: facts.headSha
+        elif facts.branch.len > 0: facts.branch
+        else: "HEAD"
+      result.add(ResolvedRepo(
+        name: depName,
+        path: sub & "/" & depName,
+        remoteName: "origin",
+        fetchUrl: facts.originUrl,
+        revision: revision,
+        vcs: defaultRepoVcs,
+        stability: defaultRepoStability,
+        visibility: wvPublic))
+  result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
+
 proc committedLockDerivedProject(workspaceRoot: string):
     Option[ResolvedProject] =
-  ## MO-2 — derive a single-repo ``ResolvedProject`` for a committed-lock-
-  ## only workspace. Returns ``none`` when ``workspaceRoot`` carries no
-  ## committed ``repro.lock`` (so the caller keeps its existing manifest-
-  ## required behavior). The derived project's lone repo is the workspace
-  ## repo itself (``path = "."``), with its revision pinned to the repo's
-  ## own ``HEAD`` and its fetch URL taken from ``origin`` when present.
+  ## MO-2 — derive a ``ResolvedProject`` for a committed-lock-only workspace.
+  ## Returns ``none`` when ``workspaceRoot`` carries no committed
+  ## ``repro.lock`` (so the caller keeps its existing manifest-required
+  ## behavior). The base repo is the workspace repo itself (``path = "."``),
+  ## with its revision pinned to the repo's own ``HEAD`` and its fetch URL
+  ## taken from ``origin`` when present.
+  ##
+  ## MO-7 — the participating set ALSO folds in any NESTED develop-mode
+  ## dependency checkouts (under ``./deps``/``./vendor``/``./third-party``/
+  ## ``./develop``; see ``discoverNestedDevelopDeps``). The base repo gains a
+  ## ``depends`` edge onto each discovered nested dep, so the pre-push gate's
+  ## develop-set closure (``developSetClosure``) reaches them and ``sync``
+  ## plans them — a single project repo with nested deps is a complete,
+  ## star-free, manifest-free workspace. When no nested deps are present the
+  ## derived set is exactly the one repo (MO-2 behavior, unchanged).
   if not hasCommittedLockWorkspaceMarker(workspaceRoot):
     return none(ResolvedProject)
   let root = absolutePath(workspaceRoot)
@@ -10433,6 +10513,10 @@ proc committedLockDerivedProject(workspaceRoot: string):
     if facts.headSha.len > 0: facts.headSha
     elif facts.branch.len > 0: facts.branch
     else: "HEAD"
+  let nestedDeps = discoverNestedDevelopDeps(root)
+  var dependsOn: seq[string] = @[]
+  for dep in nestedDeps:
+    dependsOn.add(dep.name)
   let repo = ResolvedRepo(
     name: repoName,
     path: ".",
@@ -10441,12 +10525,13 @@ proc committedLockDerivedProject(workspaceRoot: string):
     revision: revision,
     vcs: defaultRepoVcs,
     stability: defaultRepoStability,
-    visibility: wvPublic)
+    visibility: wvPublic,
+    depends: dependsOn)
   some(ResolvedProject(
     projectName: repoName,
     defaultRevision: revision,
     trunk: trunk,
-    repos: @[repo],
+    repos: @[repo] & nestedDeps,
     projectFile: committedLockPath(root)))
 
 proc resolveProjectDirFromTarget(target: string): string =
@@ -11584,9 +11669,50 @@ proc parseProjectExtensionHead(recipeText, originalPackageName: string): string 
       return extName
   return ""
 
+proc projectExtensionCandidateDirs(projectRoot: string): seq[string] =
+  ## The directories searched for ``projectExtension`` recipes, covering
+  ## BOTH supported checkout topologies (Workspace-And-Develop-Mode.md
+  ## §"Checkout Topologies"):
+  ##
+  ##   * **Sibling topology** — every immediate subdirectory one level up
+  ##     from ``projectRoot`` (the original develop-workspace-sibling
+  ##     convention ``findSiblingProjectFile`` uses), EXCEPT ``projectRoot``
+  ##     itself.
+  ##   * **Nested topology** (MO-7) — every immediate subdirectory of the
+  ##     conventional project-local ``nestedDevelopDirs`` (``./deps/<dep>``,
+  ##     ``./vendor/<dep>``, ``./third-party/<dep>``, ``./develop/<dep>``).
+  ##     This is the nested-topology equivalent of the one-level-up sibling
+  ##     scan, so a nested develop-mode extension auto-activates by presence
+  ##     exactly like a sibling one does — no org-root / star layout needed.
+  ##
+  ## Order is deterministic (siblings first, then each nested container in
+  ## ``nestedDevelopDirs`` declaration order); the caller re-sorts the final
+  ## extension set by ``extName`` so merge order never depends on this.
+  result = @[]
+  let canonicalProject = absolutePath(projectRoot)
+  var seenDirs = initHashSet[string]()
+  var containers: seq[string] = @[]
+  let workspaceRoot = projectRoot.parentDir
+  if workspaceRoot.len > 0 and dirExists(extendedPath(workspaceRoot)):
+    containers.add(workspaceRoot)
+  for sub in nestedDevelopDirs:
+    let containerAbs = canonicalProject / sub
+    if dirExists(extendedPath(containerAbs)):
+      containers.add(containerAbs)
+  for container in containers:
+    for kind, path in walkDir(container):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      let abs = absolutePath(path)
+      if abs == canonicalProject or abs in seenDirs:
+        continue
+      seenDirs.incl(abs)
+      result.add(path)
+
 proc discoverProjectExtensionRecipes(projectRoot, originalPackageName: string):
     seq[tuple[extName: string; recipePath: string]] =
-  ## Scan the develop-workspace siblings (one level up from ``projectRoot``)
+  ## Scan the develop-workspace checkouts — sibling (one level up) AND nested
+  ## (under ``./deps``/``./vendor``/``./third-party``/``./develop``; MO-7) —
   ## for recipe files whose ``projectExtension`` head names
   ## ``originalPackageName``. Returns ``(extName, recipePath)`` pairs sorted
   ## by ``extName`` so the merge order is DETERMINISTIC (stable across
@@ -11594,22 +11720,14 @@ proc discoverProjectExtensionRecipes(projectRoot, originalPackageName: string):
   result = @[]
   if originalPackageName.len == 0:
     return
-  let workspaceRoot = projectRoot.parentDir
-  if workspaceRoot.len == 0 or not dirExists(extendedPath(workspaceRoot)):
-    return
-  let canonicalProject = absolutePath(projectRoot)
   var seenExtNames = initTable[string, string]()
-  for kind, path in walkDir(workspaceRoot):
-    if kind notin {pcDir, pcLinkToDir}:
-      continue
-    if absolutePath(path) == canonicalProject:
-      continue
+  for path in projectExtensionCandidateDirs(projectRoot):
     var recipePath = ""
     try:
       recipePath = resolveProjectFile(path).path
     except CatchableError:
       # Ambiguous (both repro.nim + reprobuild.nim) or unreadable — skip;
-      # a sibling that cannot present one canonical recipe is not a
+      # a checkout that cannot present one canonical recipe is not a
       # discoverable extension here.
       continue
     if recipePath.len == 0 or not fileExists(extendedPath(recipePath)):
