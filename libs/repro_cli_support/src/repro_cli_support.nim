@@ -90,6 +90,12 @@ import repro_solver
 # consumption serialize/load ``UnifiedSolution`` through this module.
 # Distinct from the manifest-repo SHA lock in repro_workspace_manifests.
 import repro_lock
+# Workspace-Manifest-Optional MO-3 — the abstract Lock/Manifest store
+# interface (``LockStore``) plus its portable backends. The git-checkout
+# backend (``GitCheckoutLockStore``) is defined HERE, in terms of the
+# byte-identical RA-1/RA-7 publish/read procs, and the load-bearing lock
+# publish/read call-sites are routed through the ``LockStore`` interface.
+import repro_lock_store
 # M9.L.4-refactor Step C: the off-the-shelf factory that returns a
 # ``BinaryCachePublisher`` closure ready to wire into
 # ``BuildEngineConfig.binaryCachePublisher``. The closure reads
@@ -18002,6 +18008,124 @@ proc latestLockShasViaGit(identity: GitToolIdentity;
     result.shas[repo.path] = repo.revision
   result.lockRelPath = candidates[0].relPath
 
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-3 — git-checkout LockStore backend
+# ---------------------------------------------------------------------------
+#
+# ``GitCheckoutLockStore`` is the ``LockStore`` (repro_lock_store) backend for
+# today's ``.repo/manifests`` ``locks/<project>/<repo>/<sha>.toml`` layout. It
+# is defined HERE rather than in repro_lock_store so it can DELEGATE to the
+# byte-identical RA-1/RA-7 procs that already implement the publish/read
+# semantics — ``publishWorkspaceLock`` (commit + push, RA-7/RA-21/RA-29),
+# ``latestLockShasViaGit`` / ``latestLockRelPathForRepoViaGit`` (RA-1 git
+# history "latest lock"). The read methods are placed next to those helpers;
+# ``publishPending`` is defined below ``publishWorkspaceLock`` (it needs that
+# proc in scope). The on-disk record is the verbatim lock body at
+# ``locks/<project>/<repo>/<sha>.toml`` — identical bytes to the existing lock
+# writer — with the identity tuple carried by the path, so no behavior of the
+# manifest-present path changes.
+
+type
+  GitCheckoutLockStore* = ref object of LockStore
+    identity*: GitToolIdentity
+    manifestRepoRoot*: string
+
+proc newGitCheckoutLockStore*(identity: GitToolIdentity;
+    manifestRepoRoot: string): GitCheckoutLockStore =
+  GitCheckoutLockStore(identity: identity,
+    manifestRepoRoot: absolutePath(manifestRepoRoot))
+
+method backendId*(s: GitCheckoutLockStore): string = "git-checkout"
+
+method putLock*(s: GitCheckoutLockStore;
+    rec: StoreLockRecord): StorePutResult =
+  ## Write the lock body to ``locks/<project>/<repo>/<sha>.toml`` (the RA-1
+  ## layout — identical bytes to the existing lock writer) and commit it, so
+  ## the git-history "latest lock" queries resolve it.
+  try:
+    let rel = "locks/" & rec.key.project & "/" & rec.key.repo & "/" &
+      rec.key.sha & ".toml"
+    let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
+    createDir(parentDir(abs))
+    writeFile(abs, rec.body)
+    let addRes = gitRunPlain(s.identity,
+      ["-C", s.manifestRepoRoot, "add", "--", rel])
+    if addRes.code != 0:
+      return failed("git add " & rel & " failed: " & addRes.output.strip())
+    let commitRes = gitRunPlain(s.identity,
+      ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
+       "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" &
+       rec.key.sha, "--", rel])
+    if commitRes.code != 0:
+      return failed("git commit failed: " & commitRes.output.strip())
+    ok()
+  except CatchableError as err:
+    failed(err.msg)
+
+method latestLock*(s: GitCheckoutLockStore; project, repo: string):
+    Option[StoreLockRecord] =
+  let rel = latestLockRelPathForRepoViaGit(
+    s.identity, s.manifestRepoRoot, project, repo)
+  if rel.len == 0: return none(StoreLockRecord)
+  let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
+  if not fileExists(abs): return none(StoreLockRecord)
+  let trig = parseTriggerFromLockRelPath(rel)
+  some(StoreLockRecord(
+    key: StoreLockKey(project: project, repo: trig.repo, sha: trig.sha),
+    body: readFile(abs)))
+
+method latestLockAny*(s: GitCheckoutLockStore; project: string):
+    Option[StoreLockRecord] =
+  # Newest lock across every repo of the project by Git history, read as the
+  # verbatim record BODY (no workspace-lock schema parse — the store records
+  # an arbitrary body, unlike ``latestLockShas`` which extracts path/revision
+  # from a real workspace lock).
+  let candidates = orderedLockCandidates(
+    s.identity, s.manifestRepoRoot, "locks/" & project & "/")
+  if candidates.len == 0: return none(StoreLockRecord)
+  let rel = candidates[0].relPath
+  let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
+  if not fileExists(abs): return none(StoreLockRecord)
+  let trig = parseTriggerFromLockRelPath(rel)
+  some(StoreLockRecord(
+    key: StoreLockKey(project: project, repo: trig.repo, sha: trig.sha),
+    body: readFile(abs)))
+
+method latestLockShas*(s: GitCheckoutLockStore; project: string):
+    tuple[shas: Table[string, string]; lockKey: StoreLockKey] =
+  let r = latestLockShasViaGit(s.identity, s.manifestRepoRoot, project)
+  var key: StoreLockKey
+  if r.lockRelPath.len > 0:
+    let trig = parseTriggerFromLockRelPath(r.lockRelPath)
+    key = StoreLockKey(project: project, repo: trig.repo, sha: trig.sha)
+  (shas: r.shas, lockKey: key)
+
+method manifestLayerRoots*(s: GitCheckoutLockStore): seq[string] =
+  @[s.manifestRepoRoot]
+
+method putEvidence*(s: GitCheckoutLockStore; project, repo: string;
+    ev: seq[WorkspaceVcsEvidence]): StorePutResult =
+  try:
+    let rel = "evidence/" & project & "/" & repo & ".ev"
+    let abs = s.manifestRepoRoot / rel.replace('/', DirSep)
+    createDir(parentDir(abs))
+    writeFile(abs, encodeEvidenceBlob(ev))
+    discard gitRunPlain(s.identity,
+      ["-C", s.manifestRepoRoot, "add", "--", rel])
+    discard gitRunPlain(s.identity,
+      ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
+       "lockstore evidence: " & project & "/" & repo, "--", rel])
+    ok()
+  except CatchableError as err:
+    failed(err.msg)
+
+method getEvidence*(s: GitCheckoutLockStore; project, repo: string):
+    seq[WorkspaceVcsEvidence] =
+  let abs = s.manifestRepoRoot /
+    ("evidence/" & project & "/" & repo & ".ev").replace('/', DirSep)
+  if not fileExists(abs): return @[]
+  decodeEvidenceBlob(readFile(abs))
+
 proc commitReachableLocally(identity: GitToolIdentity;
                             repoPath, sha: string): bool =
   ## RA-14 optimized-fetch predicate. Return ``true`` iff ``sha`` names a
@@ -20180,6 +20304,34 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     (if attempt > 0: " (after " & $attempt &
       " non-fast-forward re-apply attempt" &
       (if attempt == 1: "" else: "s") & ")" else: "")
+
+# MO-3: the store-level publish outcome (``StorePutOutcome``) and the RA-7
+# publish outcome (``LockPublishOutcome``) are a 1:1, lossless mapping, so the
+# git-checkout backend can route through ``publishWorkspaceLock`` and the
+# routed call-sites can recover the exact ``LockPublishResult`` they branch on.
+proc storePutFromLockPublish(o: LockPublishOutcome): StorePutOutcome =
+  case o
+  of lpoPublished: spoOk
+  of lpoNothingToPublish: spoNothing
+  of lpoRefusedDirty: spoRefusedDirty
+  of lpoNotPublishable: spoNotPublishable
+  of lpoFailed: spoFailed
+
+proc lockPublishFromStorePut(o: StorePutOutcome): LockPublishOutcome =
+  case o
+  of spoOk: lpoPublished
+  of spoNothing: lpoNothingToPublish
+  of spoRefusedDirty: lpoRefusedDirty
+  of spoNotPublishable: lpoNotPublishable
+  of spoFailed: lpoFailed
+
+method publishPending*(s: GitCheckoutLockStore): StorePutResult =
+  ## Route to the byte-identical RA-7 ``publishWorkspaceLock`` (commit + push,
+  ## non-ff retry, dirty-outside-``locks/`` refusal) and map its rich outcome
+  ## onto the store-level outcome.
+  let pub = publishWorkspaceLock(s.identity, s.manifestRepoRoot)
+  StorePutResult(outcome: storePutFromLockPublish(pub.outcome),
+    diagnostic: pub.diagnostic)
 
 proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
@@ -23290,12 +23442,15 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # (commit + push) the lock after the gate passes.
   result.manifestLayerRoot = manifestLayerRoot
   # RA-1: resolve the latest lock via Git history over the per-repo lock
-  # subtree (no shared index). ``latest.lockRelPath`` is "" when no lock
-  # exists yet.
-  let latest = latestLockShasViaGit(
-    identity, manifestLayerRoot, resolved.projectName)
+  # subtree (no shared index). MO-3: this gate read is routed through the
+  # ``LockStore`` interface — the git-checkout backend delegates to the
+  # byte-identical ``latestLockShasViaGit``. ``lockKey.sha`` is "" (no lock
+  # record) exactly when the underlying ``lockRelPath`` is "".
+  let gateStore: LockStore =
+    newGitCheckoutLockStore(identity, manifestLayerRoot)
+  let latest = gateStore.latestLockShas(resolved.projectName)
   let lockedShas = latest.shas
-  var lockMissing = latest.lockRelPath.len == 0
+  var lockMissing = latest.lockKey.sha.len == 0
   var lockStale = false
   if not lockMissing:
     if lockedShas.len == 0:
@@ -23313,14 +23468,16 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   if not lockMissing and not lockStale:
     result.lockUpdate.kind = cluAlreadyCurrent
     # Surface the most-recent lock file path so the operator can audit
-    # which lock backed the check. RA-1 derives the trigger (repo, sha)
-    # from the per-repo lock path itself — ``locks/<p>/<repo>/<sha>.toml``.
+    # which lock backed the check. MO-3: the store's ``lockKey`` carries the
+    # RA-1 identity tuple, from which the ``locks/<p>/<repo>/<sha>.toml`` path
+    # and trigger (repo, sha) reconstruct byte-identically.
+    let lockRel = "locks/" & latest.lockKey.project & "/" &
+      latest.lockKey.repo & "/" & latest.lockKey.sha & ".toml"
     result.lockUpdate.lockFilePath =
-      manifestLayerRoot / latest.lockRelPath.replace('/', DirSep)
+      manifestLayerRoot / lockRel.replace('/', DirSep)
     result.lockUpdate.indexFilePath = ""
-    let (trigRepo, trigSha) = parseTriggerFromLockRelPath(latest.lockRelPath)
-    result.lockUpdate.triggerRepo = trigRepo
-    result.lockUpdate.triggerSha = trigSha
+    result.lockUpdate.triggerRepo = latest.lockKey.repo
+    result.lockUpdate.triggerSha = latest.lockKey.sha
   else:
     # Create or refresh the lock via the M11 driver. The driver writes
     # the lock TOML, updates the index, and returns a structured report
@@ -24177,7 +24334,16 @@ proc executePush(args: PushArgs): PushReport =
     result.exitCode = 1
     return
   let manifestLayerRoot = lockOutcome.report.manifestLayerRoot
-  let pub = publishWorkspaceLock(identity, manifestLayerRoot)
+  # MO-3: route the RA-7 pre-push publish through the abstract ``LockStore``
+  # interface. The git-checkout backend's ``publishPending`` delegates to the
+  # byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping recovers
+  # the exact ``LockPublishResult`` the gate policy below branches on.
+  let publishStore: LockStore =
+    newGitCheckoutLockStore(identity, manifestLayerRoot)
+  let storePub = publishStore.publishPending()
+  let pub = LockPublishResult(
+    outcome: lockPublishFromStorePut(storePub.outcome),
+    diagnostic: storePub.diagnostic)
   case pub.outcome
   of lpoPublished:
     result.lockPublished = true

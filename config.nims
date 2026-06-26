@@ -145,6 +145,13 @@ for libName in [
   # lock consumption. Separate from the manifest-repo SHA lock
   # (``repro_workspace_manifests/lock_writer.nim``).
   "repro_lock",
+  # Workspace-Manifest-Optional MO-3: the abstract Lock/Manifest store
+  # interface (``LockStore``) + its portable backends (committed-file,
+  # git-notes, separate-branch, external-CLI). ``repro_cli_support``
+  # imports it via ``import repro_lock_store`` and defines the
+  # git-checkout backend (``GitCheckoutLockStore``) on top of the
+  # existing byte-identical publish/read procs.
+  "repro_lock_store",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

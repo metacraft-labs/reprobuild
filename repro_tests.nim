@@ -5630,6 +5630,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_lock_store_backend_roundtrip_each_backend.nim",
+    binary: "build/test-bin/t_lock_store_backend_roundtrip_each_backend",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_external_cli_store_contract_writes_and_reads.nim",
+    binary: "build/test-bin/t_external_cli_store_contract_writes_and_reads",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_buildnimunittest_resolves_in_path_mode",
     defines: @[],
