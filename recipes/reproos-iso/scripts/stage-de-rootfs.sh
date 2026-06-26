@@ -1352,6 +1352,7 @@ for glibc_etc in "$STAGE_DIR"/repro/store/*-glibc-*/etc; do
     ln -s /etc/ld.so.cache "$glibc_etc/ld.so.cache"
   fi
   echo "[stage-de-rootfs] linked $glibc_etc/ld.so.cache -> /etc/ld.so.cache"
+
 done
 
 chroot_ldconfig="$STAGE_DIR/sbin/ldconfig"
