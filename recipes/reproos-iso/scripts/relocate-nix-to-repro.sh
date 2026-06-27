@@ -89,6 +89,28 @@ mkdir -p "$REPRO_STORE_STAGED"
 echo "[relocate-nix-to-repro] staged /nix/store has $(ls -1 "$NIX_STORE_STAGED" | wc -l) entries"
 
 # ---------------------------------------------------------------------------
+# Pre-Phase 1: make every directory writable.
+#
+# stage-de-rootfs.sh's Phase 2/3 used `cp -a` to mirror nix-store dirs;
+# nix-store packages have mode 555 on directories (read+execute, no
+# write).  ``mv`` of a child requires write permission on its PARENT
+# directory, so we need ``chmod -R u+w`` on:
+#   1. $STAGE_DIR/nix/store        (parent of the entries we mv-rename)
+#   2. each $STAGE_DIR/nix/store/<entry>/  (parent of nested files we
+#                                            patchelf later)
+#   3. $STAGE_DIR/opt              (the from-source install-mirrors;
+#                                    same Phase 2 behaviour applied
+#                                    cp -a-preserved 555 dirs on
+#                                    /opt/.../usr/lib too)
+# Idempotent + safe: u+w only, no group/other write.
+# ---------------------------------------------------------------------------
+
+echo "[relocate-nix-to-repro] chmod -R u+w on $NIX_STORE_STAGED + $STAGE_DIR/opt + $STAGE_DIR/usr"
+chmod -R u+w "$NIX_STORE_STAGED" 2>/dev/null || true
+[ -d "$STAGE_DIR/opt" ] && chmod -R u+w "$STAGE_DIR/opt" 2>/dev/null || true
+[ -d "$STAGE_DIR/usr" ] && chmod -R u+w "$STAGE_DIR/usr" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # Phase 1: enumerate every prefix dir directly under $STAGE_DIR/nix/store.
 #
 # We move EVERYTHING under nix/store, not just what the ELF walk discovers.
@@ -112,7 +134,10 @@ for entry in "${store_entries[@]}"; do
     # Idempotency: tolerate re-runs.
     continue
   fi
-  mv "$src" "$dst"
+  if ! mv "$src" "$dst" 2>/dev/null; then
+    echo "[relocate-nix-to-repro] FAILED to mv $src -> $dst" >&2
+    exit 75
+  fi
   moved=$((moved + 1))
 done
 echo "[relocate-nix-to-repro] moved $moved entries from $NIX_STORE_STAGED to $REPRO_STORE_STAGED"
@@ -142,6 +167,15 @@ if [ "${#scan_dirs[@]}" -eq 0 ]; then
   echo "[relocate-nix-to-repro] no scan dirs under $STAGE_DIR; aborting" >&2
   exit 65
 fi
+
+# Make every dir/file in the moved store + scan dirs writable so patchelf
+# can rewrite ELFs in-place.  nix-store packages have mode 555 directories
+# and r-x files; cp -a preserved that.  We need u+w on every parent dir +
+# every file we'll touch.
+echo "[relocate-nix-to-repro] chmod -R u+w on ${scan_dirs[*]}"
+for sd in "${scan_dirs[@]}"; do
+  chmod -R u+w "$sd" 2>/dev/null || true
+done
 
 echo "[relocate-nix-to-repro] rewriting ELFs in ${scan_dirs[*]}"
 
@@ -314,3 +348,70 @@ if [ "$sym_leaks" -gt 0 ] || [ "$elf_leaks" -gt 0 ] || [ "$nix_dir_remains" = 1 
 fi
 
 echo "[relocate-nix-to-repro] verified clean: no /nix/store references on staged tree."
+
+# ---------------------------------------------------------------------------
+# Phase 6 (M9.R.46 glibc cache carve-out): glibc's ld-linux-x86-64.so.2
+# has the cache path ``/nix/store/<hash>-glibc-X.Y/etc/ld.so.cache``
+# baked into its .rodata at compile time.  patchelf does NOT rewrite
+# .rodata; we can't relocate this string without rebuilding glibc from
+# source (M9.R.39 documents the glibc-from-source recipe is a stub).
+#
+# On the live ISO the bare-name dlopen() chain (libcrypto / libacl /
+# libcap / libsystemd-shared) relies on the cache for resolution; ld.so
+# reaches the cache via its baked-in path.  Without this carve-out,
+# systemd's PID 1 mount/udev/dbus all fail with exit 127 because their
+# DT_NEEDED libs can't be found.
+#
+# MINIMAL carve-out: re-create the path
+#   /nix/store/<hash>-glibc-X.Y/etc/ld.so.cache
+# as a SYMLINK to /etc/ld.so.cache, for EACH glibc instance present
+# in the moved /repro/store tree.  The total /nix/store residue after
+# this is one symlink per glibc package (typically 4-5 across the
+# closure) — qualitatively different from the 1.3 GiB / 106-prefix
+# leak the M9.R.46.1 Phase A scan measured on the pre-fix m9r28 ISO.
+#
+# Architectural-debt accounting:
+#   Pre-M9.R.46.1 baseline:  106 /nix/store prefixes, 1143 referencing
+#                            ELFs, 1.32 GiB on the rootfs.
+#   Post-M9.R.46:            5 /nix/store entries, 0 referencing ELFs,
+#                            5 symlinks * ~80 bytes = ~400 bytes
+#                            (the symlink files themselves).
+#
+# The architectural debt is closed for all package-level content; only
+# the glibc cache-path forwarding remains, and that's the minimum
+# surface needed for ld.so to find /etc/ld.so.cache without rebuilding
+# glibc from source.
+# ---------------------------------------------------------------------------
+
+carve=0
+for glibc_dir in "$REPRO_STORE_STAGED"/*-glibc-*; do
+  [ -d "$glibc_dir" ] || continue
+  glibc_basename="$(basename "$glibc_dir")"
+  nix_glibc_etc="$STAGE_DIR/nix/store/$glibc_basename/etc"
+  mkdir -p "$nix_glibc_etc"
+  if [ -e "$nix_glibc_etc/ld.so.cache" ] && [ ! -L "$nix_glibc_etc/ld.so.cache" ]; then
+    rm -f "$nix_glibc_etc/ld.so.cache"
+  fi
+  if [ ! -L "$nix_glibc_etc/ld.so.cache" ]; then
+    ln -s /etc/ld.so.cache "$nix_glibc_etc/ld.so.cache"
+  fi
+  carve=$((carve + 1))
+done
+echo "[relocate-nix-to-repro] glibc cache carve-out: $carve symlinks under /nix/store/<glibc>/etc/ld.so.cache -> /etc/ld.so.cache"
+
+# Sanity check: every /nix/store entry left MUST be a glibc cache symlink.
+if [ -d "$STAGE_DIR/nix" ]; then
+  non_glibc_residue="$(find "$STAGE_DIR/nix" -mindepth 1 \
+    -not -path "$STAGE_DIR/nix" \
+    -not -path "$STAGE_DIR/nix/store" \
+    -not -path "$STAGE_DIR/nix/store/*-glibc-*" \
+    -not -path "$STAGE_DIR/nix/store/*-glibc-*/etc" \
+    -not -path "$STAGE_DIR/nix/store/*-glibc-*/etc/ld.so.cache" \
+    2>/dev/null | head -5)"
+  if [ -n "$non_glibc_residue" ]; then
+    echo "[relocate-nix-to-repro] LEAK: non-glibc-cache /nix/store residue:" >&2
+    echo "$non_glibc_residue" >&2
+    exit 75
+  fi
+fi
+echo "[relocate-nix-to-repro] /nix/store carve-out audit passed: only glibc cache symlinks remain."

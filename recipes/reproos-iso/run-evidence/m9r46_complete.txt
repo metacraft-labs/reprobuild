@@ -1,0 +1,302 @@
+M9.R.46 — relocate /nix/store -> /repro/store at stage time
+==============================================================
+
+Status as of 2026-06-26: PARTIAL.
+
+  Architectural debt closure (ELF / symlink layer)  CLOSED
+  Live-ISO boot health                              CLOSED on the systemd
+                                                    side; dbus.service
+                                                    failure unrelated to
+                                                    /nix/store leak.
+  Installer Phase 1 (hardware probe)                BLOCKED on a NEW
+                                                    surface: Nim's
+                                                    ``{.dynlib: const.}``
+                                                    bakes a /nix/store
+                                                    abs path into the
+                                                    ``repro`` binary's
+                                                    data section.
+  Installer Phase 5 install-root rsync              not reached.
+  Boot installed + DE smoke                         not reached.
+
+EXECUTIVE SUMMARY
+=================
+
+M9.R.25 spec said all content-addressed paths live at
+``/repro/store/<hash>-<name>/``.  The pre-fix ISO carried a 1.32 GiB
+/nix/store closure with 106 unique prefixes referenced by 1143
+from-source ELFs.  This file documents the M9.R.46 milestone:
+
+  * M9.R.46.1 measured the leak baseline.
+  * M9.R.46.2 implemented a stage-time relocate that moves every
+    /nix/store/<hash>-<pkg>/ to /repro/store/<hash>-<pkg>/ at the
+    SAME hash + rewrites every ELF's RPATH + PT_INTERP + every
+    cross-prefix symlink target + every #!/nix/store shebang.
+  * M9.R.46.4 closed two correctness bugs (cp -a-preserved 555
+    perms blocking mv + patchelf).
+  * M9.R.46.5 measured the post-fix Phase E leak audit at ZERO.
+  * M9.R.46.6 added the MINIMAL glibc cache carve-out — 5 symlinks
+    under /nix/store/<hash>-glibc-X.Y/etc/ld.so.cache that forward
+    to /etc/ld.so.cache — needed because glibc bakes the cache
+    path into ld.so's .rodata at compile time, and patchelf
+    cannot rewrite .rodata.
+
+The architectural debt is CLOSED at the package-level + ELF-level
++ symlink-level + shebang-level (M9.R.46.1 Phase A baseline shows
+106 prefixes / 1143 ELFs / 1.32 GiB; the post-fix audit shows 0
+prefixes / 0 ELFs / 0 bytes).
+
+The remaining gap is a NEW investigation surface: Nim's
+``{.dynlib: "libclingo.so".}`` pragma is resolved at compile time
+by the Nim toolchain walking the linker's search path inside
+``nix develop``; the absolute ``/nix/store/<hash>-clingo-5.8.0/lib/
+libclingo.so`` path lands in the binary's ``.rodata`` and is passed
+verbatim to ``dlopen()`` at runtime.  patchelf does not rewrite
+.rodata.  The relocated ISO's /repro/store/<hash>-clingo/lib/
+libclingo.so DOES exist (and the m9r28 path /nix/store/<hash>-
+clingo/lib/libclingo.so does not), so ``repro hardware probe``
+fails Phase 1 with ``could not load: libclingo.so``.  This is a
+NEW investigation surface — fixing it requires either rebuilding
+the Nim binaries to remove the compile-time path resolution
+(``dynlibOverride`` per the clingo_bindings.nim source comment),
+OR a second carve-out class (per-Nim-binary content-data-path
+forwarding symlinks under /nix/store).
+
+WHAT LANDED
+===========
+
+  M9.R.46.1   Phase A leak baseline characterised             (795aa09a)
+              against the existing reproos-m9r28.iso:
+                106 /nix/store prefixes
+                1143 ELFs referencing them
+                1.32 GiB on the rootfs
+
+              Top 6:
+                992  gcc-14.3.0-lib
+                811  glibc-2.40-66
+                353  shell
+                216  clingo-5.8.0
+                198  meson-1.9.1
+                110  python3-3.12.12-env
+
+              Reusable scanner left at _m9r46_phaseA_scan.sh.
+
+  M9.R.46.2   relocate-nix-to-repro.sh + wired into            (99c56ed4)
+              stage-de-rootfs.sh as new Phase 6b.  Five-phase
+              algorithm:
+                Phase 1: mv every $STAGE/nix/store/<entry> ->
+                         $STAGE/repro/store/<entry>
+                Phase 2: patchelf --set-rpath + --set-interpreter
+                         on every ELF in the staged tree
+                Phase 3: ln -sfn rewrite cross-prefix symlinks
+                Phase 4: sed-rewrite #!/nix/store shebangs
+                Phase 5: leak audit (exit 75 on any residue)
+              Also updated reproos-installer-launcher{.sh,} to
+              walk /repro/store at runtime (was /nix/store).
+
+  M9.R.46.3   _m9r46_iso_rebuild.sh + _m9r46_install.sh +      (dd3f531d)
+              _m9r46_boot_installed.sh run drivers.
+
+  M9.R.46.4   chmod -R u+w in relocate-nix-to-repro.sh before  (c6143687)
+              the mv loop + before patchelf.  Closed two
+              correctness bugs the first ISO build uncovered:
+              cp -a preserved nix-store's mode 555 directories,
+              which blocked both mv (needs write on parent)
+              and patchelf (needs write on file).
+
+  M9.R.46.5   Phase D + E evidence:                            (3e1effdf)
+                staged de-rootfs: /nix gone, /repro/store 457
+                                  entries, 2.4 GiB.
+                squashfs root:    /nix gone, /repro/store 457
+                                  entries, 2.7 GiB.
+                ELFs referencing /nix/store: 0.
+                ISO size: 1.59 GiB.
+
+  M9.R.46.6   minimal glibc cache carve-out — re-create        (c29d8360)
+                /nix/store/<hash>-glibc-X.Y/etc/ld.so.cache
+              as a SYMLINK to /etc/ld.so.cache for each glibc
+              instance.  5 symlinks total, ~400 bytes of
+              filesystem metadata.
+
+              Without this, ld.so silently loaded an empty
+              cache (its baked .rodata cache path ENOENT'd),
+              and bare-name DT_NEEDED resolution (libcrypto,
+              libacl, libcap, libsystemd-shared) failed on
+              every PID-1 systemd subprocess, breaking mount,
+              udev, dbus, tmpfiles before login.
+
+PHASE D + E NUMBERS
+====================
+
+Pre-M9.R.46 (m9r28 ISO baseline; M9.R.46.1 Phase A scan):
+
+  ELF candidates inspected         : 2448
+  ELFs referencing /nix/store      : 1143
+  unique /nix/store/<hash> prefixes: 106
+  bytes on rootfs across them      : 1.32 GiB
+
+Post-M9.R.46 (reproos.iso, M9.R.46.5 Phase E scan on staged + ISO):
+
+  ELF candidates inspected         : 2468
+  ELFs referencing /nix/store      : 0
+  unique /nix/store/<hash> prefixes: 0
+  bytes on rootfs across them      : 0
+  /nix/store directory residue     : 5 symlinks (glibc cache
+                                     carve-out, ~400 bytes total
+                                     of filesystem metadata)
+  /repro/store entries             : 457 (~2.7 GiB content)
+  ISO size                         : 1.59 GiB
+
+Architectural-debt closure: package-level content + ELF RPATH +
+ELF PT_INTERP + cross-prefix symlinks + shebangs ALL relocated.
+The only /nix/store residue is the glibc cache-path forwarding
+stub for ld.so, qualitatively different from a 1.3 GiB nix-store
+package closure.
+
+BOOT HEALTH (M9.R.46.6 install run, /tmp/m9r46_install.log)
+============================================================
+
+Pre-M9.R.46.6 (M9.R.46.5 ISO, glibc cache carve-out ABSENT):
+
+  dev-hugepages.mount: Mount process exited, code=exited, status=127
+  [FAILED] dev-hugepages.mount, dev-mqueue.mount, run-lock.mount,
+           sys-kernel-debug.mount, sys-kernel-tracing.mount,
+           tmp.mount, sys-fs-fuse-connections.mount
+  [FAILED] systemd-tmpfiles-setup-dev, systemd-udevd, dbus.service,
+           systemd-sysusers, systemd-journal-catalog-update
+  /sbin/poweroff: error while loading shared libraries:
+                  libcrypto.so.3: cannot open shared object file
+
+Post-M9.R.46.6 (M9.R.46.6 ISO with glibc cache carve-out):
+
+  [  OK  ] Mounted dev-hugepages.mount, dev-mqueue.mount,
+          run-lock.mount, sys-kernel-debug.mount,
+          sys-kernel-tracing.mount, tmp.mount,
+          sys-fs-fuse-connections.mount
+  [  OK  ] Finished systemd-udev-load-credentials,
+          systemd-udevd, systemd-tmpfiles-setup-dev,
+          systemd-tmpfiles-setup-dev-early
+  [  OK  ] Started systemd-journald, systemd-userdbd,
+          systemd-logind, console-getty, getty@tty1,
+          serial-getty@ttyS0
+  [  OK  ] Reached target multi-user.target
+
+  (dbus.service still fails — unrelated to /nix/store; from-source
+   dbus has a config issue.  reproos-installer-autorun ran to
+   completion; /sbin/poweroff worked.)
+
+INSTALLER PHASE 1 BLOCKER (handed off)
+=======================================
+
+Installer reached Phase 1 + ran ``repro hardware probe``.  The
+subprocess failed:
+
+  [2026-06-26 14:28:31] Phase 1: probing hardware...
+  [2026-06-26 14:28:31] $ /usr/bin/repro hardware probe ...
+  [2026-06-26 14:28:31]   could not load: libclingo.so
+  [2026-06-26 14:28:31] hardware probe failed
+
+strace shows the SPECIFIC failure:
+
+  636  1782484111.689633 openat(AT_FDCWD, "/nix/store/kgibywhn...
+       -clingo-5.8.0/lib/libclingo.so", O_RDONLY|O_CLOEXEC) = -1 ENOENT
+
+Root cause: ``libs/repro_solver/src/repro_solver/clingo_bindings.nim``
+declares ``const clingoLib* = "libclingo.so"`` and uses it via
+``{.push cdecl, importc, dynlib: clingoLib.}``.
+
+Nim's documentation + the comment block at lines 51-81 of that
+source file say explicitly: ``Nim resolves {.dynlib: const-string.}
+at compile time: the Nim compiler walks the linker's search path
+and bakes the resolved absolute library path into the generated
+C.``  At compile time inside ``nix develop``, the resolved path
+was ``/nix/store/kgibywhn-clingo-5.8.0/lib/libclingo.so``; that
+absolute string landed in the binary's ``.rodata`` section.
+
+patchelf does NOT rewrite .rodata.  The M9.R.46 relocate cannot
+fix this.  The fix shape is one of:
+
+  (a) Rebuild every Nim binary with ``dynlibOverride`` to make
+      ``{.dynlib: clingoLib.}`` truly bare-name (``dlopen
+      ("libclingo.so")`` → ld.so.cache lookup, which the M9.R.46.6
+      carve-out routes correctly).  Per the clingo_bindings.nim
+      source comment, an earlier attempt (37e3990) broke every
+      provider call site, so this needs careful re-design.
+
+  (b) Add a second carve-out class — per-Nim-binary content-data-
+      path forwarding symlinks under /nix/store.  For libclingo
+      specifically: ``ln -s /repro/store/<hash>-clingo-5.8.0/
+      lib/libclingo.so /nix/store/<hash>-clingo-5.8.0/lib/
+      libclingo.so``.  Doable but feels like the wrong shape:
+      it whitelists data-path leaks one at a time, and we need
+      to audit every binary's strings output.
+
+  (c) Rebuild the Nim binaries with ``--passC:-DCLINGO_LIB_PATH=
+      /repro/store/<hash>-clingo-5.8.0/lib/libclingo.so`` so the
+      const string is the new location.  Same shape as (a) but
+      keeps the eager-load semantics.
+
+(c) is probably the smallest delta given the existing
+architecture.  Recommended for the M9.R.47 follow-up milestone.
+
+OTHER /nix/store STRING REFERENCES IN THE repro BINARY
+=======================================================
+
+``strings build/de-rootfs/usr/bin/repro | grep '/nix/store' | sort -u`` yields
+a list dominated by:
+
+  * Nim's compile-time-resolved import paths (n1hnq2il...-nim-
+    unwrapped-2.2.4/nim/lib/...) — these are for compile-time
+    only, not runtime dlopen, so they're harmless data.
+  * The gcc-wrapper compile-time path
+    (kks0nbx2...-gcc-wrapper-14.3.0) — same; harmless.
+  * The clingo dlopen path (kgibywhn...-clingo-5.8.0) — this
+    IS the blocker described above.
+
+Only the clingo entry actually triggers a runtime open(); the
+other entries are dead-string data in the .rodata section.
+
+EVIDENCE FILES IN THE REPO
+==========================
+
+  recipes/reproos-iso/run-evidence/m9r46_complete.txt           this file.
+  recipes/reproos-iso/run-evidence/m9r46_phaseA_baseline.txt    pre-fix leak.
+  recipes/reproos-iso/run-evidence/m9r46_phaseE_staged_leak_audit.txt
+  recipes/reproos-iso/run-evidence/m9r46_phaseE_iso_leak_audit.txt
+  recipes/reproos-iso/scripts/relocate-nix-to-repro.sh          the fix.
+  recipes/reproos-iso/scripts/stage-de-rootfs.sh                (modified).
+  _m9r46_phaseA_scan.sh                                          baseline tool.
+  _m9r46_iso_rebuild.sh                                          rebuild driver.
+  _m9r46_install.sh                                              install driver.
+  _m9r46_boot_installed.sh                                       boot driver.
+
+HONEST REMAINING GAP
+====================
+
+M9.R.46's primary scope — close the M9.R.25 architectural debt
+that left 1.3 GiB of /nix/store on the live ISO — is CLOSED at
+the ELF/symlink/shebang layer.  The post-fix ISO has zero ELFs
+referencing /nix/store, no package content under /nix/store, and
+only a 5-symlink glibc-cache forwarding stub there.
+
+Two smaller gaps remain:
+
+  GAP 1 (smaller than M9.R.46 task brief envisioned): Nim's
+  ``{.dynlib: const-string.}`` pragma bakes /nix/store absolute
+  paths into binary .rodata at COMPILE time, before any patchelf
+  rewriting opportunity.  The most prominent victim is
+  libclingo.so referenced from libs/repro_solver/src/repro_solver/
+  clingo_bindings.nim, which blocks Phase 1 hardware probe and
+  thus the install-root rsync + DE smoke.  Fix shape (c) — rebuild
+  the Nim binaries with -DCLINGO_LIB_PATH=/repro/store/<hash>-
+  clingo-5.8.0/lib/libclingo.so — is a one-recipe-rebuild delta;
+  M9.R.47 follow-up.
+
+  GAP 2 (separate surface): from-source dbus.service still fails
+  on the live ISO.  Pre-M9.R.46 it also failed; M9.R.46 didn't
+  worsen this.  Unrelated to /nix/store; the from-source dbus
+  needs a runtime config audit.  Hand off to whoever next
+  investigates the from-source dbus recipe.
+
+The M9.R.46 milestone closes its OWN gap (the package-level /nix/
+store leak) and hands off a SMALLER follow-up gap (Nim-baked
+dlopen string forwarding) with full evidence.

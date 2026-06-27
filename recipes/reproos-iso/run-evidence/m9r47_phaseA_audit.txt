@@ -1,0 +1,123 @@
+M9.R.47 Phase A: Nim binary /nix/store leak audit
+==================================================
+
+Scope: identify every from-source Nim binary on the reproos-from-source ISO
+that carries an absolute /nix/store path in its .rodata section (so patchelf
+cannot rewrite it at stage time).
+
+Date: 2026-06-26.
+
+ROOT CAUSE (confirmed via nim source)
+======================================
+
+In ``/nix/store/n1hnq2il-nim-unwrapped-2.2.4/nim/lib/pure/dynlib.nim`` (the
+upstream Nim stdlib's dynlib helper), proc ``libCandidates`` has this branch:
+
+  when defined(nixbuild) and not defined(windows):
+    # ...load libraries using an absolute path if one can be derived from
+    # NIX_LDFLAGS.
+    var libDirs = split(getEnv("LD_LIBRARY_PATH"), ':')
+    for flag in split(replace(getEnv("NIX_LDFLAGS"), "\\ ", " ")):
+      if flag.startsWith("-L"):
+        libDirs.add(flag[2..flag.high])
+    for lib in dest:
+      for dir in libDirs:
+        let abs = dir / lib
+        if existsFile(abs):
+          dest = @[abs]
+          return
+
+And ``/nix/store/<hash>-nim-unwrapped-2.2.4/nim/config/nim.cfg`` line 365
+sets ``define:nixbuild`` for every nixpkgs-shipped Nim invocation.
+
+Sequence:
+  1. ``{.dynlib: "libclingo.so".}`` declares a const path.
+  2. Nim's ``cgen.loadDynamicLib`` calls ``libCandidates("libclingo.so")``
+     to expand soname variants.
+  3. With ``define:nixbuild`` active (true in every ``nix develop`` build),
+     ``libCandidates`` walks ``NIX_LDFLAGS`` ``-L`` directories and
+     ``LD_LIBRARY_PATH``; finds ``/nix/store/<hash>-clingo-5.8.0/lib/
+     libclingo.so``; replaces the bare-name candidate list with that
+     absolute path.
+  4. cgen emits the absolute path verbatim as a C string literal:
+       static const struct {...} ..._4 = { 73 | NIM_STRLIT_FLAG,
+         "/nix/store/kgibywhn2k14lr2mwwx2sp08p57pdizp-clingo-5.8.0/lib/libclingo.so" };
+  5. Module init calls ``nimLoadLibrary(<that-absolute-string>)`` →
+     ``dlopen(/nix/store/<hash>-clingo/lib/libclingo.so, RTLD_NOW)``.
+  6. At install time the /nix/store no longer exists; dlopen ENOENT;
+     ``repro hardware probe`` aborts with ``could not load: libclingo.so``.
+
+WHICH NIM BINARIES + LIBRARIES ARE AFFECTED
+============================================
+
+Grep of ``{.dynlib: <const>.}`` declarations (Linux-relevant, non-Windows):
+
+  libs/repro_solver/src/repro_solver/clingo_bindings.nim:82-88
+      const clingoLib* = "libclingo.so"   # Linux
+      {.push cdecl, importc, dynlib: clingoLib.}   # line 214
+      → BAKED PATH: /nix/store/<hash>-clingo-5.8.0/lib/libclingo.so
+
+  libs/repro_binary_cache_client/src/repro_binary_cache_client/decompress.nim:66-91
+      const ZstdDynLib = "libzstd.so.1"   # Linux
+      {.cdecl, importc, dynlib: ZstdDynLib.}   # 7 procs
+      → POTENTIALLY BAKED: /nix/store/<hash>-zstd-X.Y/lib/libzstd.so.1
+        (depends on whether zstd is in NIX_LDFLAGS at engine compile time)
+
+  libs/repro_local_store/src/repro_local_store/sqlite3_binding.nim:21,23,62
+      const SqliteLibName = "(...)"   # Windows + macOS only
+      → Linux uses {.passL: "-lsqlite3".} (static link)
+      NOT AFFECTED on Linux.
+
+Confirmed via ``strings -a build/bin/repro`` (binutils 2.44):
+
+  /nix/store/kgibywhn2k14lr2mwwx2sp08p57pdizp-clingo-5.8.0/lib/libclingo.so
+       — dlopen path baked at compile time (THIS IS THE BLOCKER)
+  /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/
+       ld-linux-x86-64.so.2
+       — PT_INTERP; patchelf rewrites at stage time. Not a leak.
+  /nix/store/.../sqlite-3.51.2/lib:.../shell/lib:.../glibc/lib:.../gcc-lib/lib
+       — DT_RUNPATH; patchelf rewrites at stage time. Not a leak.
+  /nix/store/.../nim-wrapper-2.2.4/bin/nim,
+  /nix/store/.../gcc-wrapper-14.3.0/bin/cc
+       — compile-time tool paths recorded by Nim's ``getCurrentCompilerExe``
+         metadata; never dlopened; harmless dead data in .rodata.
+  411× /nix/store/.../nim-unwrapped-2.2.4/nim/lib/*.nim
+       — Nim source-file paths embedded for stack-trace formatting;
+         dead data in .rodata, harmless.
+
+THE ONLY .rodata-baked PATH THAT MATTERS AT RUNTIME IS THE CLINGO ONE.
+
+The strings output also contains DT_RUNPATH (4 entries colon-joined) and
+PT_INTERP because ``strings -a`` walks the entire binary including the
+dynamic section's string table, but those entries are rewritten by patchelf
+in stage-de-rootfs.sh's M9.R.46 relocate-nix-to-repro phase.
+
+zstd is more subtle: it MAY or MAY NOT be baked depending on whether
+libzstd is in NIX_LDFLAGS at engine compile time.  The build's strings
+audit shows ``libzstd.so.1`` as a bare candidate but no absolute /nix/
+store path for libzstd, so currently zstd resolves via DT_NEEDED at
+runtime — patchelf-rewritable RUNPATH covers it.
+
+FIX SHAPE (Phase B)
+====================
+
+The root cause is the nixpkgs Nim's ``define:nixbuild`` triggering
+``libCandidates``'s NIX_LDFLAGS path resolution.  The minimum-delta fix
+is to add ``--undef:nixbuild`` to every ``nim c`` invocation.  This
+restores Nim's default behavior: ``libCandidates("libclingo.so")`` ->
+``@["libclingo.so"]`` -> cgen emits ``dlopen("libclingo.so", RTLD_NOW)``
+-> the loader resolves it via DT_RUNPATH + ld.so.cache.
+
+reprobuild does NOT use the ``nixbuild`` define anywhere, so undefining
+it globally is safe.
+
+VERIFICATION PLAN (Phase C)
+============================
+
+After patching ``config.nims`` to ``--undef:nixbuild``:
+
+  1. Rebuild ``build/bin/repro``.
+  2. ``strings -a build/bin/repro | grep -c '/nix/store/.*clingo'`` -> 0.
+  3. ``strings -a build/bin/repro | grep '@/nix/store'`` -> empty.
+  4. Repeat for ``reproos-installer``, ``repro-cmake-trycompile-provider``,
+     every from-source Nim binary that imports ``repro_solver``.

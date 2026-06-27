@@ -54,13 +54,29 @@
 import std/[algorithm, strutils, tables]
 
 import repro_solver
+import repro_multihash
 
 export UnifiedSolution
+export repro_multihash
 
 const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
-  ## The only schema this MO-1 reader/writer understands. The reader
-  ## rejects any other ``schema`` value so a forward-incompatible lock is
-  ## a loud failure rather than a silent mis-parse.
+  ## The historical MO-1 schema string. NO LONGER a valid committed-lock
+  ## schema: the reader REJECTS a v1-tagged lock loudly (regenerate with
+  ## ``repro lock refresh``). Retained only as the in-memory tag of the
+  ## solved-graph sub-part (``SolvedGraphLock``); never read from disk and
+  ## never written to a committed lock.
+
+const SolvedGraphLockSchemaV2* = "reprobuild.solved-graph-lock.v2"
+  ## Workspace-Manifest-Optional MO-8 — the self-describing committed lock and
+  ## the ONLY committed-lock schema the reader accepts. It preserves the
+  ## solved-graph payload (``variants`` / ``packages`` / ``optimal`` /
+  ## ``platform`` / ``inputs_digest``) as a sub-part AND adds the unified
+  ## ``deps`` set — each locked dependency with checkout COORDINATES (a sum
+  ## over VCS / repro-store / registry) and a self-describing INTEGRITY
+  ## multihash. This is what makes a lock-file-only workspace fully
+  ## self-describing (populated from the lock's content, not from live
+  ## ``git HEAD``). The reader is LOUD on any schema other than v2 (including
+  ## the old ``…v1``).
 
 type
   LockedVariant* = object
@@ -90,6 +106,62 @@ type
   SolvedGraphLockParseError* = object of CatchableError
     ## Raised by ``parseSolvedGraphLock`` on a missing/mismatched schema
     ## or a structurally malformed body.
+
+  CoordKind* = enum
+    ## The source kind a ``LockedDep``'s checkout coordinates address. The
+    ## ``vcs`` case is the primary one for workspace repos; ``store`` and
+    ## ``registry`` generalize the model to repro-store / package-registry
+    ## sources (carried so the format is future-proof).
+    ckVcs = "vcs"
+    ckStore = "store"
+    ckRegistry = "registry"
+
+  Coordinates* = object
+    ## What you hand the source to OBTAIN a dependency — a sum over source
+    ## kinds. Distinct from integrity (what the obtained content is verified
+    ## against); for a git dep the ``revision`` and the integrity often carry
+    ## the same object id, but they answer different questions.
+    case kind*: CoordKind
+    of ckVcs:
+      url*: string        ## fetch URL.
+      gitRef*: string     ## advisory ref (branch/tag); ``ref`` is reserved.
+      revision*: string   ## exact pinned revision (commit id).
+    of ckStore:
+      storeHash*: string  ## repro-store content hash.
+    of ckRegistry:
+      registryName*: string
+      registryVersion*: string
+
+  LockedDep* = object
+    ## One pinned dependency in the unified model. Workspace repos and solved
+    ## packages are both just dependencies with coordinates + integrity; the
+    ## "workspace repos vs solved graph" split is not a real boundary.
+    name*: string             ## identity.
+    path*: string             ## workspace-relative path (``.`` = the root
+                              ## repo) for a VCS workspace dep; empty otherwise.
+    coordinates*: Coordinates
+    integrity*: string        ## self-describing multihash (``<alg>:<digest>``).
+    version*: string          ## solved version/option assignment where
+                              ## applicable (empty for a plain workspace repo).
+    visibility*: string       ## ``public`` / ``org`` / ``team`` / ``personal``.
+    participation*: string    ## ``""`` (shared) / ``evidence-only``.
+    depends*: seq[string]     ## develop-set dependency edges (by name).
+    groups*: seq[string]      ## manifest-group membership.
+
+  LockedDependencies* = object
+    ## The unified locked-dependency model (MO-8). It SUBSUMES the
+    ## resolved-repo facts, the manifest-repo per-repo lock revisions, and
+    ## the committed solved-graph lock's package data: the v1 solved-graph
+    ## payload is preserved as a sub-part (``platform`` / ``optimal`` /
+    ## ``inputsDigest`` / ``variants`` / ``packages``) and ``deps`` is the
+    ## set of per-dependency coordinates + integrity.
+    schema*: string
+    platform*: string
+    optimal*: bool
+    inputsDigest*: string
+    variants*: seq[LockedVariant]
+    packages*: seq[LockedPackage]
+    deps*: seq[LockedDep]
 
 # ---------------------------------------------------------------------------
 # Provenance digest (dependency-free, deterministic)
@@ -326,7 +398,153 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
           version: fields.getOrDefault("version", ""),
           source: fields.getOrDefault("source", "")))
     else: discard
-  if not sawSchema or result.schema != SolvedGraphLockSchemaV1:
+  if not sawSchema or result.schema != SolvedGraphLockSchemaV2:
     raise newException(SolvedGraphLockParseError,
-      "not a " & SolvedGraphLockSchemaV1 & " lock (schema = '" &
-      result.schema & "')")
+      "unsupported lock schema '" & result.schema & "' (expected " &
+      SolvedGraphLockSchemaV2 & "); regenerate with `repro lock refresh`")
+
+# ---------------------------------------------------------------------------
+# MO-8 — the unified LockedDependencies model: v2 serialize / parse
+# ---------------------------------------------------------------------------
+
+proc joinNames(names: seq[string]): string =
+  ## ``depends`` / ``groups`` are stored as a comma-joined string because the
+  ## pinned ``nim-toml-serialization`` (and this module's inline-table reader)
+  ## carries only quoted-string values inside an inline table, not nested
+  ## arrays. The list semantics are identical; only the surface differs.
+  names.join(",")
+
+proc splitNames(s: string): seq[string] =
+  result = @[]
+  for raw in s.split(','):
+    let v = raw.strip()
+    if v.len > 0: result.add(v)
+
+proc lockedDepsFromSolved*(lock: SolvedGraphLock): LockedDependencies =
+  ## Lift a ``SolvedGraphLock`` view into the unified model with an empty
+  ## ``deps`` set (the solved-graph sub-part only).
+  LockedDependencies(
+    schema: lock.schema, platform: lock.platform, optimal: lock.optimal,
+    inputsDigest: lock.inputsDigest, variants: lock.variants,
+    packages: lock.packages, deps: @[])
+
+proc solvedPartOf*(ld: LockedDependencies): SolvedGraphLock =
+  ## Project the solved-graph sub-part out of a ``LockedDependencies`` (so the
+  ## existing solution<->lock helpers keep working unchanged).
+  SolvedGraphLock(
+    schema: SolvedGraphLockSchemaV1, platform: ld.platform,
+    optimal: ld.optimal, inputsDigest: ld.inputsDigest,
+    variants: ld.variants, packages: ld.packages)
+
+proc coordKindString(k: CoordKind): string =
+  case k
+  of ckVcs: "vcs"
+  of ckStore: "store"
+  of ckRegistry: "registry"
+
+proc serializeDepInline(d: LockedDep): string =
+  ## One ``{ ... }`` inline table for a ``LockedDep``. Key order is FIXED so
+  ## two writes of the same model are byte-identical.
+  result = "{ name = \"" & tomlEscape(d.name) & "\""
+  result.add(", path = \"" & tomlEscape(d.path) & "\"")
+  result.add(", coord_kind = \"" & coordKindString(d.coordinates.kind) & "\"")
+  case d.coordinates.kind
+  of ckVcs:
+    result.add(", url = \"" & tomlEscape(d.coordinates.url) & "\"")
+    result.add(", ref = \"" & tomlEscape(d.coordinates.gitRef) & "\"")
+    result.add(", revision = \"" & tomlEscape(d.coordinates.revision) & "\"")
+  of ckStore:
+    result.add(", store_hash = \"" & tomlEscape(d.coordinates.storeHash) & "\"")
+  of ckRegistry:
+    result.add(", reg_name = \"" & tomlEscape(d.coordinates.registryName) & "\"")
+    result.add(", reg_version = \"" &
+      tomlEscape(d.coordinates.registryVersion) & "\"")
+  result.add(", integrity = \"" & tomlEscape(d.integrity) & "\"")
+  result.add(", version = \"" & tomlEscape(d.version) & "\"")
+  result.add(", visibility = \"" & tomlEscape(d.visibility) & "\"")
+  result.add(", participation = \"" & tomlEscape(d.participation) & "\"")
+  result.add(", depends = \"" & tomlEscape(joinNames(d.depends)) & "\"")
+  result.add(", groups = \"" & tomlEscape(joinNames(d.groups)) & "\"")
+  result.add(" }")
+
+proc serializeLockedDependencies*(ld: LockedDependencies): string =
+  ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v2``
+  ## TOML. The v1 solved-graph payload is preserved verbatim as a sub-part;
+  ## the ``deps`` set (sorted by name then path) carries each dependency's
+  ## coordinates + self-describing integrity. Deterministic: a write -> read
+  ## -> write round-trip is byte-identical.
+  result = newStringOfCap(1024)
+  result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV2) & "\"\n\n")
+  result.add("[lock]\n")
+  result.add("platform = \"" & tomlEscape(ld.platform) & "\"\n")
+  result.add("optimal = " & (if ld.optimal: "true" else: "false") & "\n")
+  result.add("inputs_digest = \"" & tomlEscape(ld.inputsDigest) & "\"\n")
+  # variants — inline-table array (v1 sub-part).
+  result.add("variants = [")
+  for i, v in ld.variants:
+    if i > 0: result.add(", ")
+    result.add("{ name = \"" & tomlEscape(v.name) & "\", value = \"" &
+               tomlEscape(v.value) & "\" }")
+  result.add("]\n")
+  # packages — inline-table array (v1 sub-part).
+  result.add("packages = [")
+  for i, p in ld.packages:
+    if i > 0: result.add(", ")
+    result.add("{ name = \"" & tomlEscape(p.name) & "\", version = \"" &
+               tomlEscape(p.version) & "\", source = \"" &
+               tomlEscape(p.source) & "\" }")
+  result.add("]\n")
+  # deps — the MO-8 unified set (coordinates + integrity per dependency).
+  var sorted = ld.deps
+  sorted.sort(proc(a, b: LockedDep): int =
+    result = cmp(a.name, b.name)
+    if result == 0: result = cmp(a.path, b.path))
+  result.add("deps = [")
+  for i, d in sorted:
+    if i > 0: result.add(", ")
+    result.add(serializeDepInline(d))
+  result.add("]\n")
+
+proc parseLockedDependencies*(content: string): LockedDependencies =
+  ## Parse a committed lock into the unified model. Accepts ONLY the v2
+  ## schema; a v1-tagged (or any other) lock is rejected LOUDLY by
+  ## ``parseSolvedGraphLock`` (raises ``SolvedGraphLockParseError`` —
+  ## regenerate with ``repro lock refresh``). The solved-graph keys reuse
+  ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the v2 addition.
+  let solved = parseSolvedGraphLock(content)  # validates schema + solved part
+  result = lockedDepsFromSolved(solved)
+  # Pull the v2 ``deps`` array (empty when the lock carries no deps).
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or line.startsWith("["):
+      continue
+    let eq = line.find('=')
+    if eq <= 0: continue
+    if line[0 ..< eq].strip() != "deps": continue
+    let rhs = line[eq + 1 .. ^1].strip()
+    for f in inlineTables(rhs):
+      let kindRaw = f.getOrDefault("coord_kind", "vcs")
+      var coords: Coordinates
+      case kindRaw
+      of "store":
+        coords = Coordinates(kind: ckStore,
+          storeHash: f.getOrDefault("store_hash", ""))
+      of "registry":
+        coords = Coordinates(kind: ckRegistry,
+          registryName: f.getOrDefault("reg_name", ""),
+          registryVersion: f.getOrDefault("reg_version", ""))
+      else:
+        coords = Coordinates(kind: ckVcs,
+          url: f.getOrDefault("url", ""),
+          gitRef: f.getOrDefault("ref", ""),
+          revision: f.getOrDefault("revision", ""))
+      result.deps.add(LockedDep(
+        name: f.getOrDefault("name", ""),
+        path: f.getOrDefault("path", ""),
+        coordinates: coords,
+        integrity: f.getOrDefault("integrity", ""),
+        version: f.getOrDefault("version", ""),
+        visibility: f.getOrDefault("visibility", ""),
+        participation: f.getOrDefault("participation", ""),
+        depends: splitNames(f.getOrDefault("depends", "")),
+        groups: splitNames(f.getOrDefault("groups", ""))))

@@ -106,6 +106,16 @@ type
     revision*: Option[string]
     vcs*: Option[string]
     stability*: Option[string]
+    # MO-5 — evidence-only private participation marker
+    # (Workspace-And-Develop-Mode.md §"Evidence-only participation"). When set
+    # to ``"evidence-only"`` the repo participates in the build WITHOUT being
+    # shared: only its source-free ``WorkspaceVcsEvidence`` (head-sha / is-clean
+    # / is-published) is published to its assigned locking backend, never its
+    # source. A teammate who cannot clone it verifies the reproducibility
+    # boundary from that evidence + the lock. Any other value (or absent) means
+    # a normal SHARED repo whose source IS expected to be present (a missing
+    # checkout is then an actionable clone-required error, not evidence-only).
+    participation*: Option[string]
     # RA-14 — optional fetch-acceleration hints (Workspace-Manifests.md
     # §"Optional fetch-acceleration hints"). These never change the
     # resolved tree at the pinned revision; they only change how much is
@@ -404,12 +414,46 @@ type
       ## default to develop mode. Matched as a literal string prefix against
       ## the dependency's remote URL.
 
+  LockingRouteEntry* = object
+    ## MO-4 — one per-repo-set → store-backend route in the host bootstrap
+    ## config's `[locking]` table (Workspace-Manifests.md §"Routing repo-sets
+    ## to stores"; Workspace-And-Develop-Mode.md §"Locking backends per
+    ## repo-set"). Each entry maps a VISIBILITY tier (`wvPublic` / `wvOrg` /
+    ## `wvTeam` / `wvPersonal`) to the `LockStore` backend that records the
+    ## participation of every repo of that tier. Authored as an array of
+    ## tables (`[[locking.route]]`) so it mirrors the `[[manifest]]` layer
+    ## shape and decodes losslessly under the pinned toml-serialization.
+    visibility*: string
+      ## The tier this route applies to: `public` | `org` | `team` |
+      ## `personal` (the spec uses `personal` and `private` interchangeably;
+      ## both resolve to `wvPersonal`).
+    backend*: string
+      ## The backend kind: `committed-file` | `git-checkout` | `git-notes` |
+      ## `separate-branch` | `external-cli` (the five MO-3 backends).
+    path*: Option[string]
+      ## Backend location, resolved relative to the workspace root when not
+      ## absolute. For `git-checkout` it is the manifest-repo root (e.g.
+      ## `.repo/manifests-team`); for `committed-file` the records base dir;
+      ## for `git-notes` / `separate-branch` the git repo the records attach
+      ## to (defaults to each repo's own checkout when omitted).
+    program*: Option[string]
+      ## The `external-cli` backend program (the documented CLI/JSON
+      ## contract), resolved relative to the workspace root when not absolute.
+
+  BootstrapLockingBody* = object
+    ## MO-4 — the `[locking]` table: a list of visibility-keyed store routes.
+    ## An absent / empty `route` list is the all-public default — every repo
+    ## is covered by the committed solved-graph lock (`repro.lock`) and NO
+    ## store backend is constructed.
+    route*: seq[LockingRouteEntry]
+
   WorkspaceBootstrap* = object
     schema*: string
     manifest*: BootstrapManifestBody
     projects*: BootstrapProjectsBody
     verify*: BootstrapVerifyBody
     develop*: BootstrapDevelopBody
+    locking*: BootstrapLockingBody
     extensions*: Extensions
 
   # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----

@@ -1,0 +1,6 @@
+version = "0.1.0"
+author = "Metacraft Labs"
+description = "Reprobuild abstract Lock/Manifest store interface + pluggable backends"
+license = "MIT"
+srcDir = "src"
+requires "nim >= 2.2.0"

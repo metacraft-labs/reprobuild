@@ -53,6 +53,52 @@ IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
   bash "${io_mon_src}/scripts/build_shim.sh"
 
+# M9.R.47.3 — clear LD_LIBRARY_PATH and NIX_LDFLAGS for every ``nim c``
+# invocation in this loop so Nim's compile-time ``{.dynlib: <const>.}``
+# resolution (``stdlib.dynlib.libCandidates`` walking those vars when the
+# nixpkgs-shipped Nim was built with ``define:nixbuild``) cannot bake an
+# absolute ``/nix/store/<hash>-<pkg>/lib/<name>.so`` path into the
+# binary's .rodata.
+#
+# Background: the M9.R.46 stage-time /nix/store -> /repro/store relocation
+# rewrites every ELF's DT_RUNPATH, DT_NEEDED, and PT_INTERP, but it cannot
+# touch .rodata.  A baked dlopen path inside a Nim binding (e.g. clingo's
+# libclingo.so) therefore breaks ``repro hardware probe`` on the installed
+# system — the user's M9.R.46 task brief documented exactly this failure.
+#
+# Workaround scope: only the nim-compile path needs these vars cleared.
+# Runtime (re-)exporting LD_LIBRARY_PATH to point at clingo still works for
+# the engine's runtime dlopen lookup; the M9.R.46 relocate + the M9.R.46.6
+# glibc-cache carve-out cover the installed-system path.
+unset_clingo_searchpath() {
+  unset LD_LIBRARY_PATH
+  unset NIX_LDFLAGS
+}
+
+# M9.R.47.4 — restore OpenSSL's link search dir for --define:ssl entrypoints.
+# unset_clingo_searchpath clears NIX_LDFLAGS for every ``nim c`` above, but
+# NIX_LDFLAGS is also the *only* carrier of OpenSSL's
+# ``-L/nix/store/<hash>-openssl-<ver>/lib`` in this dev shell (there is no
+# pkg-config ``openssl.pc`` here). An entrypoint compiled with --define:ssl
+# (e.g. repro-harvest-apt, which talks HTTPS to snapshot.debian.org) therefore
+# fails to link ``-lcrypto``/``-lssl`` once NIX_LDFLAGS is gone.
+#
+# Capture OpenSSL's -L from the original NIX_LDFLAGS *here*, while it is still
+# set in this parent shell (the unset only happens inside the per-entrypoint
+# subshells), and replay it via --passL only for ssl entrypoints. The store
+# hash is derived from NIX_LDFLAGS rather than hardcoded, and non-ssl
+# entrypoints are byte-identical (they never receive openssl_passl). The
+# NIX_LDFLAGS/LD_LIBRARY_PATH clearing for the .rodata-bake guard is preserved.
+openssl_passl=()
+for tok in ${NIX_LDFLAGS:-}; do
+  case "$tok" in
+    -L*openssl*)
+      openssl_passl=("--passL:${tok}" "--passL:-lssl" "--passL:-lcrypto")
+      break
+      ;;
+  esac
+done
+
 while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
@@ -62,12 +108,27 @@ while read -r name path extra_flags; do
   # forking the loop (e.g. -d:reproProviderMode for the direct provider).
   # shellcheck disable=SC2206
   extra_flag_array=(${extra_flags})
-  nim c \
-    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
-    ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
-    --nimcache:"build/nimcache/${name}" \
-    --out:"build/bin/${name}" \
-    "${path}"
+  # Only ssl entrypoints get OpenSSL's captured -L back (see openssl_passl
+  # above); every other entrypoint's nim invocation is unchanged.
+  ssl_passl=()
+  for f in ${extra_flag_array[@]+"${extra_flag_array[@]}"}; do
+    case "$f" in
+      --define:ssl|-d:ssl)
+        ssl_passl=(${openssl_passl[@]+"${openssl_passl[@]}"})
+        break
+        ;;
+    esac
+  done
+  (
+    unset_clingo_searchpath
+    nim c \
+      ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+      ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
+      ${ssl_passl[@]+"${ssl_passl[@]}"} \
+      --nimcache:"build/nimcache/${name}" \
+      --out:"build/bin/${name}" \
+      "${path}"
+  )
 done < apps/entrypoints.txt
 
 # Build the shared DSL runtime DLL — the Tier 1 artifact described in
@@ -87,16 +148,20 @@ case "$(uname -s)" in
   *)
     dll_ext="so" ;;
 esac
-nim c \
-  ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
-  --app:lib \
-  --threads:on \
-  --mm:orc \
-  --define:reproProviderMode \
-  --define:reproProviderRuntimeDll \
-  --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
-  --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
-  libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
+(
+  # Same /nix/store .rodata-bake guard as the entrypoints loop above.
+  unset_clingo_searchpath
+  nim c \
+    ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+    --app:lib \
+    --threads:on \
+    --mm:orc \
+    --define:reproProviderMode \
+    --define:reproProviderRuntimeDll \
+    --nimcache:build/nimcache/repro-project-dsl-runtime-dll \
+    --out:"build/lib/librepro_project_dsl_runtime.${dll_ext}" \
+    libs/repro_project_dsl_runtime_dll/src/repro_project_dsl_runtime_entry.nim
+)
 
 # MR4 -- Windows self-containment: stage clingo.dll next to repro.exe
 # so the Nim ``{.dynlib: "clingo.dll".}`` FFI in

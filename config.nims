@@ -2,6 +2,37 @@ import std/[os, strutils]
 
 switch("styleCheck", "hint")
 
+# M9.R.47.2 — undefine ``nixbuild`` so Nim's ``{.dynlib: <const>.}`` pragma
+# does NOT bake an absolute ``/nix/store/<hash>-<pkg>/lib/<lib>.so`` path
+# into the binary's ``.rodata`` at compile time.
+#
+# Background: nixpkgs's Nim ships ``define:nixbuild`` in its ``nim.cfg``
+# (line 365 of ``<nim>/nim/config/nim.cfg``).  With ``nixbuild`` active,
+# ``stdlib.dynlib.libCandidates`` walks ``NIX_LDFLAGS`` ``-L`` entries +
+# ``LD_LIBRARY_PATH`` at COMPILE time and replaces a bare-name candidate
+# such as ``libclingo.so`` with its resolved absolute path.  Nim's
+# ``cgen.loadDynamicLib`` then emits that absolute path verbatim as a C
+# string literal, and ``nimLoadLibrary`` dlopens it at module init.
+#
+# Once the staged ReproOS rootfs relocates /nix/store -> /repro/store
+# (M9.R.46.2), the baked absolute path no longer exists; dlopen fails
+# with ENOENT and ``repro hardware probe`` aborts with
+# ``could not load: libclingo.so`` (and any other Nim-dynlib library).
+# patchelf cannot rewrite ``.rodata``.
+#
+# Undefining ``nixbuild`` restores Nim's default behaviour:
+# ``libCandidates("libclingo.so") -> @["libclingo.so"]`` and the codegen
+# emits ``dlopen("libclingo.so", RTLD_NOW)``.  The dynamic loader then
+# resolves the soname through DT_RUNPATH (which patchelf rewrites at
+# stage time) and ``ld.so.cache`` (M9.R.46.6 forwards its baked path
+# via the carve-out symlinks).  See
+# ``recipes/reproos-iso/run-evidence/m9r47_phaseA_audit.txt``.
+#
+# reprobuild does not use the ``nixbuild`` define anywhere else, so the
+# undef is a safe one-line guard for every ``nim c`` invocation that
+# config.nims governs (i.e. every reprobuild binary built from the repo).
+switch("undef", "nixbuild")
+
 # Project-DSL-Composition M6: ``repro.nim`` ``import``s the generated
 # ``repro_tests.nim`` (data table of declared test edges) that lives
 # alongside it at the repo root. Adding ``.`` to ``--path`` lets
@@ -145,6 +176,19 @@ for libName in [
   # lock consumption. Separate from the manifest-repo SHA lock
   # (``repro_workspace_manifests/lock_writer.nim``).
   "repro_lock",
+  # Workspace-Manifest-Optional MO-8: self-describing, algorithm-tagged
+  # content digests (``<alg>:<digest>`` multihash) + the BLAKE3 own-file
+  # NAR-style tree hash. ``repro_lock`` (the committed-lock integrity) and
+  # ``repro_cli_support`` (refresh/validate integrity computation) import it
+  # via ``import repro_multihash``.
+  "repro_multihash",
+  # Workspace-Manifest-Optional MO-3: the abstract Lock/Manifest store
+  # interface (``LockStore``) + its portable backends (committed-file,
+  # git-notes, separate-branch, external-CLI). ``repro_cli_support``
+  # imports it via ``import repro_lock_store`` and defines the
+  # git-checkout backend (``GitCheckoutLockStore``) on top of the
+  # existing byte-identical publish/read procs.
+  "repro_lock_store",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

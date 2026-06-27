@@ -1,0 +1,12 @@
+M9.R.46 Phase A leak baseline
+=============================
+rootfs scanned       : recipes/reproos-iso/build/de-rootfs
+scan dirs            : recipes/reproos-iso/build/de-rootfs/opt recipes/reproos-iso/build/de-rootfs/usr recipes/reproos-iso/build/de-rootfs/bin recipes/reproos-iso/build/de-rootfs/sbin recipes/reproos-iso/build/de-rootfs/lib recipes/reproos-iso/build/de-rootfs/lib64
+ELF candidates       : 2848
+ELFs inspected (true ELF magic): 2468
+ELFs referencing /nix/store    : 0
+unique /nix/store/<hash> prefixes: 0
+total bytes on rootfs across them: 0
+                                 : 0.00 MiB
+
+Per-prefix referenced-by-ELF count (sorted):
