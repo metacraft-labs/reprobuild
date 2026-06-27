@@ -5598,6 +5598,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_status_health_add_remove_use_unified_resolver.nim",
+    binary: "build/test-bin/t_status_health_add_remove_use_unified_resolver",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim",
+    binary: "build/test-bin/t_manifest_store_ops_routed_through_interface_not_literals",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_marker_accepts_committed_lock_only_repo.nim",
     binary: "build/test-bin/t_workspace_marker_accepts_committed_lock_only_repo",
     defines: @[],

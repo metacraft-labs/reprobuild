@@ -19808,8 +19808,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let manifestsRoot = args.workspaceRoot / ".repo" / "manifests"
     if dirExists(manifestsRoot) and resolved.projectName.len > 0:
       try:
-        lockedShasByPath = latestLockShasViaGit(
-          identity, manifestsRoot, resolved.projectName).shas
+        # MO-10: route the RA-14 optimized-fetch lock read through the abstract
+        # ``LockStore``. The git-checkout backend's ``latestLockShas`` delegates
+        # to the byte-identical ``latestLockShasViaGit``; we take its ``shas``
+        # exactly as before.
+        let fetchStore: LockStore =
+          newGitCheckoutLockStore(identity, manifestsRoot)
+        lockedShasByPath = fetchStore.latestLockShas(resolved.projectName).shas
       except CatchableError:
         lockedShasByPath = initTable[string, string]()
 
@@ -21482,7 +21487,16 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
       outcome.report.manifestLayerRoot.len > 0:
     let identity = ensureGitToolResolvable(
       parsed.toolProvisioning, getEnv("PATH"))
-    let pub = publishWorkspaceLock(identity, outcome.report.manifestLayerRoot)
+    # MO-10: route the RA-7 publish through the abstract ``LockStore``. The
+    # git-checkout backend's ``publishPending`` delegates to the byte-identical
+    # ``publishWorkspaceLock``; the 1:1 outcome mapping recovers the exact
+    # ``LockPublishResult`` the branch below acts on.
+    let publishStore: LockStore =
+      newGitCheckoutLockStore(identity, outcome.report.manifestLayerRoot)
+    let storePub = publishStore.publishPending()
+    let pub = LockPublishResult(
+      outcome: lockPublishFromStorePut(storePub.outcome),
+      diagnostic: storePub.diagnostic)
     case pub.outcome
     of lpoPublished:
       stdout.writeLine("workspace lock: " & pub.diagnostic)
@@ -24955,7 +24969,18 @@ proc runCheckCommand*(args: openArray[string]): int =
     if report.exitCode == 0 and report.manifestLayerRoot.len > 0:
       let identity = ensureGitToolResolvable(
         parsed.toolProvisioning, getEnv("PATH"))
-      let pub = publishWorkspaceLock(identity, report.manifestLayerRoot)
+      # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
+      # ``LockStore`` (mirroring the gate's already-routed lock READ and
+      # ``executePush``). The git-checkout backend's ``publishPending`` delegates
+      # to the byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping
+      # recovers the exact ``LockPublishResult`` the gate policy below branches
+      # on.
+      let publishStore: LockStore =
+        newGitCheckoutLockStore(identity, report.manifestLayerRoot)
+      let storePub = publishStore.publishPending()
+      let pub = LockPublishResult(
+        outcome: lockPublishFromStorePut(storePub.outcome),
+        diagnostic: storePub.diagnostic)
       case pub.outcome
       of lpoPublished:
         stderr.writeLine("repro check: " & pub.diagnostic)
@@ -24991,7 +25016,11 @@ proc runCheckCommand*(args: openArray[string]): int =
             autoRun = offerFixesOptIn(),
             isTty = isatty(stdin))
           if dec == odRun:
-            pub2 = publishWorkspaceLock(identity, report.manifestLayerRoot)
+            # MO-10: the offered re-publish also routes through the store.
+            let storePub2 = publishStore.publishPending()
+            pub2 = LockPublishResult(
+              outcome: lockPublishFromStorePut(storePub2.outcome),
+              diagnostic: storePub2.diagnostic)
             if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
               stderr.writeLine("repro check: lock re-publish succeeded: " &
                 pub2.diagnostic)
@@ -25945,46 +25974,17 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
 proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
     tuple[resolved: ResolvedProject;
           workspaceLocal: Option[WorkspaceLocal]] =
-  ## Same dispatch rule as M10 / M11: prefer ``.repo/workspace.toml``
-  ## when it declares at least one ``[[manifest]]`` layer (composer
-  ## mode), otherwise look up the named project / variant. A
-  ## metadata-only workspace.toml (M13) routes to single-project mode.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
-    return (resolved, some(workspaceLocal))
-  if parsed.projectName.len == 0:
-    # Allow a metadata-only workspace.toml to supply the project name.
-    if fileExists(workspaceToml):
-      try:
-        let recordedProject =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recordedProject.len > 0:
-          var withProject = parsed
-          withProject.projectName = recordedProject
-          return resolveWorkspaceStatusProject(withProject)
-      except WorkspaceManifestParseError:
-        discard
-    raise newException(ValueError,
-      "`repro workspace status` requires either `.repo/workspace.toml` " &
-        "or a <project> argument; neither was present at " &
-        parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" /
-    (parsed.projectName & ".toml")
-  let variantFile = manifestsRoot / "variants" /
-    (parsed.projectName & ".toml")
-  if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
-  if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
-  raise newException(ValueError,
-    "no project or variant named '" & parsed.projectName &
-      "' found under '" & manifestsRoot &
-      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+  ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
+  ## (collapsed from the former per-command copy). Same dispatch rule as M10 /
+  ## M11: prefer ``.repo/workspace.toml`` when it declares at least one
+  ## ``[[manifest]]`` layer (composer mode), otherwise look up the named
+  ## project / variant. A metadata-only workspace.toml (M13) routes to
+  ## single-project mode; a committed-lock-only workspace (no manifest data on
+  ## disk) now resolves its participating set through the unified
+  ## committed-lock source instead of raising — every manifest-present path is
+  ## byte-unchanged.
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro workspace status`")
 
 proc pickStatusManifestLayerRoot(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal]): string =
@@ -26495,37 +26495,17 @@ proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveHealthProject(parsed: HealthArgs): ResolvedProject =
-  ## Same dispatch rule the M12 status / list commands use: compositional
-  ## workspace.toml → composer; otherwise the named project / variant, or
-  ## the project recorded in a metadata-only workspace.toml. Raises on a
-  ## missing / unresolvable project so the caller can mark the manifest
-  ## check ``fail``.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
-  var projectName = parsed.projectName
-  if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
-  if projectName.len == 0:
-    raise newException(ValueError,
-      "no project resolved: pass a <project> argument or initialize " &
-        "`.repo/workspace.toml`")
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  if fileExists(variantFile):
-    return resolveVariant(variantFile)
-  raise newException(ValueError,
-    "no project or variant named '" & projectName & "' under '" &
-      manifestsRoot & "'")
+  ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
+  ## (collapsed from the former per-command copy). Compositional
+  ## workspace.toml → composer; otherwise the named project / variant, or the
+  ## project recorded in a metadata-only workspace.toml. A committed-lock-only
+  ## workspace (no manifest data on disk) now resolves through the unified
+  ## committed-lock source instead of raising, so ``repro health`` reports the
+  ## same manifest status the lock-handling commands do. Still raises on a
+  ## genuinely missing / unresolvable project so the caller can mark the
+  ## manifest check ``fail``.
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro health`").resolved
 
 proc reproSelfPath(): string =
   ## Best-effort absolute path to the running ``repro`` binary, used to
@@ -29235,37 +29215,22 @@ proc parseAddArgs*(args: openArray[string]): AddArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveAddProject(parsed: AddArgs): ResolvedProject =
-  ## Same single-project resolution rule as ``remove`` (RA-9): a
-  ## metadata-only ``.repo/workspace.toml`` (``[workspace].project``) or a
-  ## compositional one both resolve to a flat repo set. ``add`` only supports
-  ## the single-project (non-compositional) form because it MUTATES the
-  ## project file; a compositional workspace has no single owning file to
-  ## append the new include to.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  ## MO-10 — delegates the single-project resolution to the shared
+  ## ``resolveWorkspaceProjectShared`` ladder (collapsed from the former
+  ## per-command copy). ``add`` MUTATES the owning project file, so it keeps
+  ## its mutation-specific guard: a compositional (multi-layer) workspace has
+  ## no single owning file to append the new include to, so it is refused here
+  ## BEFORE delegating (the shared ladder would otherwise compose the layers).
+  ## For the non-compositional path the shared ladder resolves the named
+  ## project / variant (or the project recorded in a metadata-only
+  ## workspace.toml) identically to the old projects-only copy for every
+  ## manifest-present workspace.
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     raise newException(ValueError,
       "`repro add` is not supported in a compositional (multi-layer) " &
         "workspace; add the repo to the owning manifest layer directly")
-  var projectName = parsed.projectName
-  if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
-  if projectName.len == 0:
-    raise newException(ValueError,
-      "`repro add <repo>` requires either `.repo/workspace.toml` or a " &
-        "project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  raise newException(ValueError,
-    "no project named '" & projectName & "' found under '" & manifestsRoot & "'")
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro add <repo>`").resolved
 
 proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
   ## RA-22 develop-vs-binary POLICY DEFAULT. The decision is driven ENTIRELY
@@ -29664,38 +29629,15 @@ proc parseRemoveArgs*(args: openArray[string]): RemoveArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
-  ## Same single-project / composer dispatch rule as ``checkout``: a
-  ## metadata-only ``workspace.toml`` (``[workspace].project``) or a
-  ## compositional one both resolve to a flat repo set we can scan.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
-    return composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml)
-  var projectName = parsed.projectName
-  if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
-  if projectName.len == 0:
-    raise newException(ValueError,
-      "`repro remove <repo>` requires either `.repo/workspace.toml` or a " &
-        "project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  if fileExists(variantFile):
-    return resolveVariant(variantFile)
-  raise newException(ValueError,
-    "no project or variant named '" & projectName & "' found under '" &
-      manifestsRoot & "'")
+  ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
+  ## (collapsed from the former per-command copy). Same single-project /
+  ## composer dispatch rule as ``checkout``: a metadata-only ``workspace.toml``
+  ## (``[workspace].project``) or a compositional one both resolve to a flat
+  ## repo set we can scan; a committed-lock-only workspace (no manifest data on
+  ## disk) now resolves through the unified committed-lock source instead of
+  ## raising — every manifest-present path is byte-unchanged.
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro remove <repo>`").resolved
 
 proc dropFragmentInclude(projectFile, fragmentAbs: string): bool =
   ## Remove the ``includes`` entry that resolves to ``fragmentAbs`` from
