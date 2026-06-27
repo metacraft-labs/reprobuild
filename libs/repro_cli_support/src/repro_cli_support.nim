@@ -10541,6 +10541,87 @@ proc discoverNestedDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
         visibility: wvPublic))
   result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
 
+proc discoverSiblingDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
+  ## MO-12 — discover SIBLING develop-mode dependency checkouts (the RA-22
+  ## develop-override set, one level up from the workspace) recorded in
+  ## ``<workspaceRoot>/.repro/develop-overrides.toml`` and return them as
+  ## participating ``ResolvedRepo``s, mirroring ``discoverNestedDevelopDeps``
+  ## for the nested case so the committed-lock-derived workspace folds sibling
+  ## deps into BOTH its participating set and (via ``lockedDepsForWorkspace``)
+  ## the committed lock's ``deps``.
+  ##
+  ## Each override's ``local_path`` (e.g. ``../sibling``) is resolved relative
+  ## to the workspace root and folded in ONLY when that location is BOTH a git
+  ## checkout AND a reprobuild project — the same two discriminators the nested
+  ## scan uses — so an override pointing at a non-checked-out / non-reprobuild
+  ## path is skipped rather than enforced. ``path`` is the workspace-relative
+  ## location (``../sibling``), ``revision`` the sibling's own ``HEAD``,
+  ## ``fetchUrl`` its ``origin``. Sorted by ``path`` for a deterministic set.
+  result = @[]
+  let root = absolutePath(workspaceRoot)
+  let overridesOpt =
+    try: readDevelopOverridesFile(root)
+    except CatchableError: return result
+  if overridesOpt.isNone:
+    return result
+  var seenPaths: seq[string] = @[]
+  for entry in listOverrides(overridesOpt.get()):
+    if entry.package.len == 0 or entry.local_path.len == 0:
+      continue
+    let depAbs =
+      if entry.local_path.isAbsolute: os.normalizedPath(entry.local_path)
+      else: os.normalizedPath(root / entry.local_path)
+    if depAbs in seenPaths: continue
+    seenPaths.add(depAbs)
+    if not dirExists(extendedPath(depAbs)):
+      continue
+    if not dirExists(extendedPath(depAbs / ".git")) and
+        not fileExists(extendedPath(depAbs / ".git")):
+      # A develop-mode participant must be a repo the gate can probe for
+      # cleanliness/publication (a ``.git`` FILE is a worktree/submodule
+      # gitlink; accept it too).
+      continue
+    var recipePath = ""
+    try:
+      recipePath = resolveProjectFile(depAbs).path
+    except CatchableError:
+      continue
+    if recipePath.len == 0:
+      continue
+    let facts = committedLockRepoFacts(depAbs)
+    let revision =
+      if facts.headSha.len > 0: facts.headSha
+      elif facts.branch.len > 0: facts.branch
+      else: "HEAD"
+    let relPath = relativePath(depAbs, root).replace('\\', '/')
+    result.add(ResolvedRepo(
+      name: entry.package,
+      path: relPath,
+      remoteName: "origin",
+      fetchUrl: facts.originUrl,
+      revision: revision,
+      vcs: defaultRepoVcs,
+      stability: defaultRepoStability,
+      visibility: wvPublic))
+  result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
+
+proc discoverDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
+  ## MO-7/MO-12 — the full on-disk develop-mode participating set folded into a
+  ## committed-lock-only workspace: NESTED deps under ``deps/vendor/…`` (MO-7)
+  ## PLUS SIBLING deps from the RA-22 develop-override set one level up
+  ## (MO-12), deduped by workspace-relative ``path`` and path-sorted for a
+  ## deterministic set. When neither is present the result is empty and the
+  ## derived set is exactly the one workspace repo (MO-2 behaviour).
+  result = discoverNestedDevelopDeps(workspaceRoot)
+  var seen: seq[string] = @[]
+  for r in result:
+    seen.add(r.path)
+  for s in discoverSiblingDevelopDeps(workspaceRoot):
+    if s.path in seen: continue
+    seen.add(s.path)
+    result.add(s)
+  result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
+
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-8 — self-describing integrity computation.
 # ---------------------------------------------------------------------------
@@ -10589,14 +10670,15 @@ proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
-  ## repo (``path = "."``) is always recorded; any nested develop-mode deps
-  ## (``discoverNestedDevelopDeps``) follow. ``repro lock refresh`` serializes
-  ## these into the v2 committed lock so a lock-file-only workspace is fully
-  ## self-describing.
+  ## repo (``path = "."``) is always recorded; any develop-mode deps
+  ## (``discoverDevelopDeps`` — NESTED deps under ``deps/…`` AND SIBLING
+  ## develop-override deps one level up) follow. ``repro lock refresh``
+  ## serializes these into the v2 committed lock so a lock-file-only workspace
+  ## — including its sibling develop deps — is fully self-describing.
   result = @[]
   let root = absolutePath(workspaceRoot)
   let rootFacts = committedLockRepoFacts(root)
-  let nested = discoverNestedDevelopDeps(root)
+  let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
   let rootName = if bare.len > 0: bare else: "workspace"
@@ -10689,9 +10771,10 @@ proc committedLockDerivedProject(workspaceRoot: string):
         rootName = d.name
         rootRef = d.coordinates.gitRef
         rootRevision = d.coordinates.revision
-    # Fold in on-disk nested develop deps the lock does not (yet) carry.
+    # Fold in on-disk develop deps the lock does not (yet) carry — NESTED deps
+    # (MO-7) and SIBLING develop-override deps one level up (MO-12).
     var extraDepends: seq[string] = @[]
-    for nd in discoverNestedDevelopDeps(root):
+    for nd in discoverDevelopDeps(root):
       if nd.path in lockedPaths: continue
       repos.add(nd)
       extraDepends.add(nd.name)
@@ -10717,7 +10800,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
     if facts.headSha.len > 0: facts.headSha
     elif facts.branch.len > 0: facts.branch
     else: "HEAD"
-  let nestedDeps = discoverNestedDevelopDeps(root)
+  let nestedDeps = discoverDevelopDeps(root)
   var dependsOn: seq[string] = @[]
   for dep in nestedDeps:
     dependsOn.add(dep.name)
@@ -32874,31 +32957,160 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
   projectDir = absolutePath(projectDir)
   return 0
 
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-12 — provider-sourced solver inputs.
+#
+# ``repro lock refresh`` / ``validate`` obtain their solver inputs from the
+# COMPILED PROJECT PROVIDER (the same ``solve()`` the DSL runs via
+# ``finalizeVariants()``) rather than the hand-maintained ``repro.solver``
+# sidecar, so the lock reflects the REAL recipe. The provider is compiled and
+# run with ``REPRO_EMIT_SOLVER_INPUTS`` set; its module-init ``finalizeVariants``
+# writes the exact inputs it solved as M2e explain-fixture text, which we parse
+# back through the SAME ``parseExplainFixture`` reader the sidecar path uses —
+# so every downstream step (MO-11 ``source:`` provenance → store/registry
+# coordinates, ``solutionToLock``, the per-dep lift) is byte-identical to the
+# sidecar path; only the SOURCE of the text changes.
+#
+# The sidecar remains an OPTIONAL FALLBACK: a project with no recipe (or a
+# recipe declaring no solver-bound ``uses:``) yields no provider inputs and
+# falls straight back to ``repro.solver``. An explicit ``--inputs <file>``
+# always selects that sidecar verbatim (the provider is skipped). This keeps
+# MO-1/MO-7/MO-11 sidecar fixtures byte-unchanged while a recipe-bearing
+# workspace is sourced from its real provider.
+# ---------------------------------------------------------------------------
+
+const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
+  ## MUST match ``repro_dsl_stdlib/configurables/variants.SolverInputsEmitEnvVar``
+  ## — the env var the compiled provider's ``finalizeVariants()`` honours to
+  ## emit the solved inputs.
+
+proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
+    variants: seq[variant_encoder.VariantDecl];
+    packages: seq[PackageDecl]; text: string]] =
+  ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
+  ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
+  ## binary and runs it with ``REPRO_EMIT_SOLVER_INPUTS`` set so module-init's
+  ## ``finalizeVariants()`` writes the exact inputs it solved; the emitted
+  ## explain-fixture text is parsed back into the solver's input lists.
+  ##
+  ## Best-effort by design — ANY of {no recipe, no ``build:`` block, no
+  ## solver-bound ``uses:``, interface-extraction / provider-compile / run
+  ## failure, an empty solve} returns ``none`` so the caller falls back to the
+  ## ``repro.solver`` sidecar. All scratch lives under the system temp dir, so
+  ## refresh still writes NO build artifacts into the project tree.
+  result = none(tuple[variants: seq[variant_encoder.VariantDecl];
+    packages: seq[PackageDecl]; text: string])
+  let match =
+    try: resolveProjectFile(projectDir)
+    except CatchableError: return result
+  if match.path.len == 0:
+    return result
+  let modulePath = absolutePath(match.path)
+  if not moduleHasBuildBlock(modulePath):
+    return result
+  let scratchRoot = getTempDir() /
+    ("repro-lock-provider-" & $getCurrentProcessId())
+  try:
+    removeDir(extendedPath(scratchRoot))
+    createDir(extendedPath(scratchRoot))
+    defer:
+      try: removeDir(extendedPath(scratchRoot))
+      except CatchableError: discard
+    let compileWorkDir = reprobuildLibraryWorkDir()
+    let scratchDir = scratchRoot / "work"
+    # MR5 bootstrap toolchain (same provisioning the build path arranges before
+    # an interface extraction / provider compile).
+    ensureBootstrapToolchainEnv(tpmPathOnly, resolveStoreRoot() / "tool-store")
+    let interfacePath = scratchRoot / "project-interface.rbsz"
+    let stubPath = scratchRoot / "project-interface.nim"
+    let artifact = extractInterfaceFromModule(modulePath, interfacePath,
+      stubPath, compileWorkDir, scratchDir, requireStub = false)
+    # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
+    # skip the (more expensive) provider compile otherwise so a plain recipe
+    # falls straight back to the sidecar without paying for it.
+    if artifact.projectInterface.toolUses.len == 0:
+      return result
+    let providerBinaryPath = scratchRoot / "provider" / "project-provider"
+    let provider = compileProviderBinary(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
+    let emitPath = scratchRoot / "solver-inputs.explain"
+    let protocolRoot = scratchRoot / "protocol"
+    let cwd = if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
+    putEnv(SolverInputsEmitEnvVar, emitPath)
+    try:
+      # A bare manifest request is enough: ``finalizeVariants()`` runs at the
+      # provider's MODULE INITIALISATION (the variant decls + finalize call are
+      # emitted at top-level module scope), BEFORE any request is dispatched —
+      # so the emission happens regardless of the request kind, and a manifest
+      # request provisions no tools and builds nothing (no-build semantics).
+      discard runStableProviderProtocol(provider.outputBinaryPath, protocolRoot,
+        "solver-inputs", cwd, ProviderGraphRequest(
+          kind: prkManifest,
+          providerArtifactId: digestHex(provider.providerFingerprint),
+          reason: girExplicitUserRequest))
+    finally:
+      delEnv(SolverInputsEmitEnvVar)
+    if not fileExists(extendedPath(emitPath)):
+      return result
+    let text = readFile(extendedPath(emitPath))
+    let parsed = parseExplainFixture(text)
+    if parsed.packages.len == 0 and parsed.variants.len == 0:
+      return result
+    return some((variants: parsed.variants, packages: parsed.packages,
+                 text: text))
+  except CatchableError:
+    return result
+
+proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
+    found: bool; variants: seq[variant_encoder.VariantDecl];
+    packages: seq[PackageDecl]; text: string; source: string] =
+  ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
+  ## PREFERRING the compiled project provider (the real recipe's solve) and
+  ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
+  ## override always selects that sidecar file verbatim (provider skipped) so
+  ## the historical override semantics are preserved.
+  if inputsOverride.len == 0:
+    let fromProvider = solverInputsFromCompiledProvider(projectDir)
+    if fromProvider.isSome:
+      let p = fromProvider.get()
+      return (true, p.variants, p.packages, p.text, "provider")
+  let inputsP =
+    if inputsOverride.len > 0: absolutePath(inputsOverride)
+    else: solverInputsPath(projectDir)
+  if fileExists(extendedPath(inputsP)):
+    let loaded = loadSolverInputsFile(inputsP)
+    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar")
+  return (false, @[], @[], "", "")
+
 proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``repro lock refresh`` — re-solve the project's solver inputs and
   ## (re)write the committed lock WITHOUT building. No build artifacts are
   ## produced; only the lock file is written.
+  ##
+  ## MO-12 — the solver inputs come from the COMPILED PROJECT PROVIDER (the
+  ## real recipe's ``solve()``) when available, falling back to the
+  ## ``repro.solver`` sidecar otherwise (see ``resolveRefreshSolverInputs``).
   var projectDir, inputsOverride, lockOverride, platformOverride: string
   var asJson = false
   let rc = parseLockVerbArgs(rest, "refresh", projectDir, inputsOverride,
                              lockOverride, platformOverride, asJson)
   if rc != 0: return rc
-  let inputsP =
-    if inputsOverride.len > 0: absolutePath(inputsOverride)
-    else: solverInputsPath(projectDir)
-  if not fileExists(extendedPath(inputsP)):
-    stderr.writeLine("repro lock refresh: no solver inputs found at " &
-      inputsP & " (expected a `" & SolverInputsFileName &
-      "` sidecar, or pass --inputs <file>)")
-    return 1
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
-  let inputs =
-    try: loadSolverInputsFile(inputsP)
+  let resolved =
+    try: resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
       stderr.writeLine("repro lock refresh: failed to read inputs: " & e.msg)
       return 1
+  if not resolved.found:
+    stderr.writeLine("repro lock refresh: no solver inputs found for " &
+      projectDir & " (expected a compiled `" & CommittedLockFileName &
+      "`-adjacent recipe, a `" & SolverInputsFileName &
+      "` sidecar, or pass --inputs <file>)")
+    return 1
+  let inputs = (variants: resolved.variants, packages: resolved.packages,
+                text: resolved.text)
   var sol: UnifiedSolution
   try:
     sol = solve(inputs.variants, inputs.packages)
@@ -32994,17 +33206,26 @@ proc runReproLockValidate(rest: openArray[string]): int =
     problems.add("lock platform '" & lock.platform &
       "' is not resolvable on this host '" & host & "'")
   # (d) consistency with the current solver inputs (tamper/stale check).
-  let inputsP =
-    if inputsOverride.len > 0: absolutePath(inputsOverride)
-    else: solverInputsPath(projectDir)
-  if fileExists(extendedPath(inputsP)):
+  # MO-12 — source the inputs the SAME way refresh does (compiled provider
+  # preferred, sidecar fallback) so a provider-sourced lock validates against
+  # the provider's solve rather than mis-comparing it to a stale sidecar.
+  block staleCheck:
+    var resolved: tuple[found: bool;
+      variants: seq[variant_encoder.VariantDecl];
+      packages: seq[PackageDecl]; text: string; source: string]
     try:
-      let inputs = loadSolverInputsFile(inputsP)
-      let fresh = solve(inputs.variants, inputs.packages)
+      resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
+    except CatchableError as e:
+      stderr.writeLine("repro lock validate: failed to read inputs: " & e.msg)
+      return 1
+    if not resolved.found:
+      break staleCheck
+    try:
+      let fresh = solve(resolved.variants, resolved.packages)
       if not sameSolution(lockToSolution(lock), fresh):
         problems.add("lock does not match a fresh solve of the current " &
           "inputs (tampered or stale — run `repro lock refresh`)")
-      if lock.inputsDigest != inputsDigestOf(inputs.text):
+      if lock.inputsDigest != inputsDigestOf(resolved.text):
         problems.add("inputs_digest mismatch (the solver inputs changed " &
           "since the lock was written)")
     except EUnsatisfiable:

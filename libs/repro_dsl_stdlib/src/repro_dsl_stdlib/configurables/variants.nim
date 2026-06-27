@@ -473,6 +473,93 @@ proc applySolverAssignments(ctx: ConfigContext;
       continue
     node.resolved = true
 
+const SolverInputsEmitEnvVar* = "REPRO_EMIT_SOLVER_INPUTS"
+  ## Workspace-Manifest-Optional MO-12 — when this env var names a writable
+  ## file path, ``finalizeVariants()`` emits the EXACT solver inputs it just
+  ## solved (the variant + package decls) as M2e explain-fixture text to that
+  ## path. ``repro lock refresh`` sets it before running the compiled project
+  ## provider so the committed lock is sourced from the REAL recipe's
+  ## ``solve()`` rather than a hand-maintained ``repro.solver`` sidecar. When
+  ## unset (every ordinary build / dev-env run) the hook is a no-op, so the
+  ## provider's behaviour is byte-unchanged.
+
+proc solverPriorityKeyword(p: VariantPriority): string =
+  case p
+  of vpDefault: "default"
+  of vpSet: "set"
+  of vpOverride: "override"
+  of vpForce: "force"
+
+proc solverConstraintKeyword(k: VariantConstraintKind): string =
+  case k
+  of crkRequires: "requires"
+  of crkConflicts: "conflicts"
+  of crkPropagates: "propagates"
+
+proc renderSolverInputsFixture*(variants: openArray[VariantDecl];
+                                packages: openArray[PackageDecl]): string =
+  ## MO-12 — render the solver inputs the provider's ``finalizeVariants()``
+  ## consumed into the M2e explain-fixture text the CLI's
+  ## ``parseExplainFixture`` parses back. The round-trip is exact for the
+  ## fields the solver reads (variant kind/values/contributions/constraints;
+  ## package versions/depends/source), so re-parsing this text and re-solving
+  ## reproduces the provider's solution. ``source`` provenance (MO-11
+  ## ``store`` / ``registry:<name>``) is rendered back to its directive form
+  ## so a recipe that declares a non-VCS source still yields store/registry
+  ## coordinates on the provider path, exactly as the sidecar did.
+  var blocks: seq[string] = @[]
+  for v in variants:
+    var b = "variant " & v.name & "\n"
+    case v.kind
+    of vkBool:
+      b.add("kind: bool\n")
+    else:
+      b.add("kind: enum\n")
+      if v.allowedValues.len > 0:
+        b.add("values: " & v.allowedValues.join(", ") & "\n")
+    for c in v.contributions:
+      b.add(solverPriorityKeyword(c.priority) & ": " & c.value & "\n")
+    for con in v.constraints:
+      b.add(solverConstraintKeyword(con.kind) & ": " & con.sourceValue &
+        " -> " & con.target & " = " & con.targetValue & "\n")
+    blocks.add(b)
+  for p in packages:
+    var b = "package " & p.name & "\n"
+    if p.versions.len > 0:
+      b.add("versions: " & p.versions.join(", ") & "\n")
+    for d in p.depends:
+      var line = "depends: " & d.name
+      if d.range.len > 0:
+        line.add(" " & d.range)
+      if d.conditional.isSome:
+        let g = d.conditional.get()
+        line.add(" when " & g.variantName & "=" & g.triggerValue)
+      b.add(line & "\n")
+    if p.source.len > 0:
+      if p.source.startsWith("registry:"):
+        b.add("source: registry " & p.source["registry:".len .. ^1] & "\n")
+      elif p.source == "store":
+        b.add("source: store\n")
+      else:
+        b.add("source: " & p.source & "\n")
+    blocks.add(b)
+  result = blocks.join("\n")
+  if result.len > 0 and not result.endsWith("\n"):
+    result.add("\n")
+
+proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
+                                 packages: openArray[PackageDecl]) =
+  ## MO-12 — if ``REPRO_EMIT_SOLVER_INPUTS`` is set, write the just-solved
+  ## inputs as explain-fixture text. Best-effort: a write failure never
+  ## disturbs the build (the lock-refresh caller falls back to the sidecar).
+  let emitPath = getEnv(SolverInputsEmitEnvVar)
+  if emitPath.len == 0:
+    return
+  try:
+    writeFile(emitPath, renderSolverInputsFixture(variants, packages))
+  except CatchableError:
+    discard
+
 proc finalizeVariants*() =
   ## Spec-Implementation M2d: finalize the ambient variant context by
   ## driving the unified ASP solver from ``repro_solver``. M1's
@@ -520,6 +607,9 @@ proc finalizeVariants*() =
       let sol = solve(variants, packages)
       lastUnifiedSolution = sol
       hasUnifiedSolution = true
+      # MO-12 — surface the EXACT inputs this solve consumed to the lock-
+      # refresh caller when it asked for them (env-var gated; no-op otherwise).
+      emitSolverInputsIfRequested(variants, packages)
       if ctxPresent:
         applySolverAssignments(ambientVariantContext, sol.variants)
     except EUnsatisfiable:

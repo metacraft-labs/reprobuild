@@ -5686,6 +5686,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_committed_lock_folds_sibling_develop_deps.nim",
+    binary: "build/test-bin/t_committed_lock_folds_sibling_develop_deps",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
+    binary: "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
     binary: "build/test-bin/t_clone_action_honors_partial_blobless_and_single_branch",
     defines: @[],
