@@ -5670,6 +5670,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim",
+    binary: "build/test-bin/t_store_and_registry_deps_carry_coordinates_and_integrity",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_solved_packages_are_first_class_locked_deps.nim",
+    binary: "build/test-bin/t_solved_packages_are_first_class_locked_deps",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
     binary: "build/test-bin/t_clone_action_honors_partial_blobless_and_single_branch",
     defines: @[],

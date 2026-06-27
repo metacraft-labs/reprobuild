@@ -19251,10 +19251,32 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
             expected: d.integrity, observed: observed,
             diagnostic: "materialized content at '" & d.path &
               "' does not match the lock's recorded integrity"))
-    else:
-      # store / registry coordinates: integrity verification deferred (no
-      # fixture produces those coordinates yet — honest MO-8 boundary).
-      discard
+    of ckStore:
+      # MO-11 — a repro-store-realized solved package. The store address is the
+      # content hash of the package's solved identity (name + version +
+      # platform), so RECOMPUTE that address and require BOTH the ``storeHash``
+      # coordinate AND the recorded integrity to equal it. Tampering the
+      # coordinate, the integrity, or any identity field diverges -> mismatch.
+      let recomputed = solvedPackageStoreHash(d.name, d.version, ld.platform)
+      let observed = formatMultihash("blake3", recomputed)
+      if d.coordinates.storeHash != recomputed or observed != d.integrity:
+        result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+          expected: d.integrity, observed: observed,
+          diagnostic: "recomputed store integrity " & observed &
+            " at the locked store coordinates does not match the lock's " &
+            "recorded integrity " & d.integrity))
+    of ckRegistry:
+      # MO-11 — a registry-sourced solved package. RECOMPUTE the package
+      # checksum over the locked registry coordinate (registry + name +
+      # version) and compare to the recorded integrity.
+      let observed = solvedPackageRegistryIntegrity(
+        d.coordinates.registryName, d.name, d.coordinates.registryVersion)
+      if observed != d.integrity:
+        result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+          expected: d.integrity, observed: observed,
+          diagnostic: "recomputed registry integrity " & observed &
+            " at the locked registry coordinates does not match the lock's " &
+            "recorded integrity " & d.integrity))
 
 proc commitReachableLocally(identity: GitToolIdentity;
                             repoPath, sha: string): bool =
@@ -32504,6 +32526,7 @@ type
     vConstraints: seq[ConstraintExpr]
     pVersions: seq[string]
     pDepends: seq[DependencyDecl]
+    pSource: string
 
 proc flushFixtureBlock(s: var FixtureParserState) =
   if s.currentKind == "variant":
@@ -32515,7 +32538,7 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   elif s.currentKind == "package":
     s.packages.add(PackageDecl(
       name: s.currentName, versions: s.pVersions,
-      depends: s.pDepends, variants: @[]))
+      depends: s.pDepends, variants: @[], source: s.pSource))
   s.currentKind = ""
   s.currentName = ""
   s.vKind = vkEnum
@@ -32524,6 +32547,7 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   s.vConstraints = @[]
   s.pVersions = @[]
   s.pDepends = @[]
+  s.pSource = ""
 
 proc parseExplainFixture(text: string): tuple[
     variants: seq[variant_encoder.VariantDecl],
@@ -32548,12 +32572,14 @@ proc parseExplainFixture(text: string): tuple[
   ##   versions: 1.0.0, 1.1.0
   ##   depends: <name> <range>
   ##   depends: <name> <range> when <variant>=<value>
+  ##   source: store                  (MO-11 — a repro-store-realized artifact)
+  ##   source: registry <registry>    (MO-11 — a package-registry dependency)
   var s = FixtureParserState(
     variants: @[], packages: @[],
     currentKind: "", currentName: "",
     vKind: vkEnum, vValues: @[],
     vContribs: @[], vConstraints: @[],
-    pVersions: @[], pDepends: @[])
+    pVersions: @[], pDepends: @[], pSource: "")
 
   for rawLine in text.splitLines():
     let line = rawLine.strip()
@@ -32648,6 +32674,19 @@ proc parseExplainFixture(text: string): tuple[
               depName, depRange, gateVariant, gateValue))
           else:
             s.pDepends.add(newDependency(depName, depRange))
+      of "source":
+        # MO-11 — the package's source provenance. ``store`` marks a
+        # repro-store-realized artifact; ``registry <name>`` marks a
+        # package-registry dependency. Normalize to the canonical descriptor
+        # the lock writer's lift consumes (``store`` / ``registry:<name>``).
+        let parts = val.splitWhitespace()
+        if parts.len > 0:
+          if parts[0] == "registry" and parts.len >= 2:
+            s.pSource = "registry:" & parts[1]
+          elif parts[0] == "store":
+            s.pSource = "store"
+          else:
+            s.pSource = val.strip()
       else: discard
     else: discard
   if s.currentKind.len > 0:
@@ -32869,13 +32908,30 @@ proc runReproLockRefresh(rest: openArray[string]): int =
     return 3
   let platform =
     if platformOverride.len > 0: platformOverride else: currentPlatformId()
-  let solvedLock = solutionToLock(sol, platform, inputs.text)
+  var solvedLock = solutionToLock(sol, platform, inputs.text)
+  # MO-11 — overlay each package's DECLARED source provenance (the solver-inputs
+  # ``source:`` directive) onto the solved-graph ``source`` field, so the lift
+  # below can produce store / registry coordinates. The solver itself drops the
+  # directive (it only solves name -> version); we re-attach it here from the
+  # parsed package decls. A package with no declared source keeps its historical
+  # definition identity (``source = name``) and is NOT lifted.
+  var declaredSource = initTable[string, string]()
+  for decl in inputs.packages:
+    if decl.source.len > 0:
+      declaredSource[decl.name] = decl.source
+  for i in 0 ..< solvedLock.packages.len:
+    let s = declaredSource.getOrDefault(solvedLock.packages[i].name, "")
+    if s.len > 0:
+      solvedLock.packages[i].source = s
   # MO-8 — assemble the unified model: the v1 solved-graph payload (preserved
   # as a sub-part) PLUS the per-dependency coordinates + self-describing
   # integrity observed from the workspace's participating repos.
   var ld = lockedDepsFromSolved(solvedLock)
   ld.schema = SolvedGraphLockSchemaV2
   ld.deps = lockedDepsForWorkspace(projectDir)
+  # MO-11 — lift each store / registry solved package into a first-class
+  # ``LockedDep`` (coordinates + integrity) alongside the workspace repo deps.
+  ld.deps.add(lockedDepsFromPackages(ld.packages, platform))
   try:
     writeFile(extendedPath(lockP), serializeLockedDependencies(ld))
   except CatchableError as e:
@@ -32975,16 +33031,36 @@ proc runReproLockValidate(rest: openArray[string]): int =
         problems.add("dep '" & d.name &
           "' has a malformed/unrecognized integrity '" & d.integrity & "'")
         continue
-      let depAbs =
-        if d.path == "." or d.path.len == 0: absolutePath(projectDir)
-        else: absolutePath(projectDir) / d.path
-      if not dirExists(extendedPath(depAbs)):
-        continue  # not checked out here — cannot recompute (not a tamper).
-      let observed = committedLockRepoFacts(depAbs).headSha
-      let recomputed = computeDepIntegrity(depAbs, observed)
-      if recomputed != d.integrity:
-        problems.add("dep '" & d.name & "' integrity mismatch: locked '" &
-          d.integrity & "' but on-disk content hashes to '" & recomputed & "'")
+      case d.coordinates.kind
+      of ckVcs:
+        let depAbs =
+          if d.path == "." or d.path.len == 0: absolutePath(projectDir)
+          else: absolutePath(projectDir) / d.path
+        if not dirExists(extendedPath(depAbs)):
+          continue  # not checked out here — cannot recompute (not a tamper).
+        let observed = committedLockRepoFacts(depAbs).headSha
+        let recomputed = computeDepIntegrity(depAbs, observed)
+        if recomputed != d.integrity:
+          problems.add("dep '" & d.name & "' integrity mismatch: locked '" &
+            d.integrity & "' but on-disk content hashes to '" & recomputed & "'")
+      of ckStore:
+        # MO-11 — a store-realized solved package. Recompute the store address
+        # from the package's solved identity (name + version + platform) and
+        # require the coordinate AND the integrity to match it.
+        let recomputed = solvedPackageStoreHash(d.name, d.version, lock.platform)
+        if d.coordinates.storeHash != recomputed or
+            d.integrity != formatMultihash("blake3", recomputed):
+          problems.add("dep '" & d.name & "' store integrity mismatch: locked '" &
+            d.integrity & "' but recomputes to 'blake3:" & recomputed & "'")
+      of ckRegistry:
+        # MO-11 — a registry-sourced solved package. Recompute the package
+        # checksum over the locked registry coordinate.
+        let recomputed = solvedPackageRegistryIntegrity(
+          d.coordinates.registryName, d.name, d.coordinates.registryVersion)
+        if d.integrity != recomputed:
+          problems.add("dep '" & d.name &
+            "' registry integrity mismatch: locked '" & d.integrity &
+            "' but recomputes to '" & recomputed & "'")
   if asJson:
     let arr = newJArray()
     for p in problems: arr.add(%p)
