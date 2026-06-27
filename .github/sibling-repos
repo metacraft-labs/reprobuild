@@ -10,7 +10,7 @@
 # (src/ct_test/incremental) and the trace-format-nim CTFS reader it imports,
 # reached through ct_incremental_adapter (the engine-free seam). One-way
 # dependency: reprobuild -> codetracer.
-codetracer=dev
+codetracer=deps/retire-nim-result-fork
 codetracer-trace-format-nim=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
