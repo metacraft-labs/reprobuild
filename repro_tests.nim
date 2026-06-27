@@ -6518,6 +6518,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim",
+    binary: "build/test-bin/t_project_extension_target_rehomed_and_toggles_without_force_rebuild",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim",
+    binary: "build/test-bin/t_evidence_publish_verb_and_lock_flag_on_test_sharding",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_project_interface_artifact_import_modes.nim",
     binary: "build/test-bin/t_project_interface_artifact_import_modes",
     defines: @[],

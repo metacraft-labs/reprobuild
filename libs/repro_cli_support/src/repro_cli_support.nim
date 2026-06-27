@@ -3641,7 +3641,19 @@ proc providerGraphStoreRoot(base: string): string =
 proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode;
                           providerArtifactId, providerSnapshotPath,
-                          pathEnv: string): string =
+                          pathEnv: string;
+                          extensionSignature = ""): string =
+  ## ``extensionSignature`` (Workspace-Manifest-Optional MO-13, correcting
+  ## MO-6) folds the ACTIVE ``projectExtension`` set into the key. The disk
+  ## cache is otherwise keyed on the BASE snapshot's content digest, so an
+  ## extension toggled between two builds — whose fragments are merged into
+  ## ``refresh.snapshot`` in-memory AFTER the persisted snapshot is read —
+  ## would have left the key unchanged and forced a ``--force-rebuild`` to
+  ## re-lower. Including the signature makes toggling an extension on/off
+  ## invalidate the cache without ``--force-rebuild`` (and toggling back is a
+  ## cache hit, since the signature is deterministic for a given extension set).
+  ## Empty when no extension is active, so the legacy single-project key is
+  ## byte-identical.
   var payload = ""
   payload.addCacheField(LoweredGraphAlgorithmVersion)
   payload.addCacheField(mode.modeName)
@@ -3655,6 +3667,7 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(fileContentDigest(providerSnapshotPath))
   else:
     payload.addCacheField("")
+  payload.addCacheField(extensionSignature)
   if mode == tpmPathOnly:
     payload.addCacheField(pathEnv)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
@@ -4799,7 +4812,7 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string)
+                            publicCliPath, workRoot: string): string
   ## Workspace-Manifest-Optional MO-6 — forward declaration. Defined
   ## after ``prepareBuildGraphInspection`` (which it reuses to compile +
   ## evaluate each discovered extension recipe). ``executeBuildTarget``
@@ -5751,9 +5764,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # checked-out extension auto-activates without any explicit enable
     # step. When no sibling extension targets this project the snapshot is
     # left byte-identical and the legacy single-project build is preserved.
-    mergeProjectExtensions(refresh.snapshot, projectRoot,
-      artifact.projectInterface.packageName, effectiveMode, publicCliPath,
-      workRoot)
+    let extensionSignature = mergeProjectExtensions(refresh.snapshot,
+      projectRoot, artifact.projectInterface.packageName, effectiveMode,
+      publicCliPath, workRoot)
 
     var selectedActionId = parsedTarget.selectedActionId
     if selectDefaultAction and selectedActionId.len == 0:
@@ -5826,7 +5839,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           actionIds, explicitTargets, sel, collectionMembers))
 
     let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
-      providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
+      providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
+      extensionSignature)
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
@@ -10654,7 +10668,7 @@ proc collectTreeEntries(dirAbs: string): seq[tuple[path, content: string]] =
     except CatchableError: content = ""
     result.add((path: rel, content: content))
 
-proc computeDepIntegrity(repoAbsPath, headSha: string): string =
+proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
   ## The self-describing integrity multihash for a locked dependency:
   ##   * a git checkout with a resolved HEAD commit -> the VCS-native object
   ##     id (``git-sha1:`` / ``git-sha256:``); the commit IS the integrity, so
@@ -11850,8 +11864,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   # sibling's fragments into this project's snapshot (see the matching
   # call in ``executeBuildTarget``). Skipped when this proc is reused to
   # evaluate an extension recipe itself so extensions do not recurse.
+  var extensionSignature = ""
   if mergeExtensions:
-    mergeProjectExtensions(refresh.snapshot, projectRoot,
+    extensionSignature = mergeProjectExtensions(refresh.snapshot, projectRoot,
       artifact.projectInterface.packageName, effectiveMode, publicCliPath,
       workRoot)
   result.snapshot = refresh.snapshot
@@ -11866,7 +11881,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   let pathEnv = getEnv("PATH")
   let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
-    result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
+    result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
+    extensionSignature)
   let cachePath = loweredGraphCachePath(outDir, selectedActionId)
   result.loweredGraphCachePath = cachePath
   let cachedLowered =
@@ -12051,10 +12067,58 @@ proc fragmentTargetNames(frags: seq[StoredGraphFragment]): seq[string] =
         if target.name.len > 0 and result.find(target.name) < 0:
           result.add(target.name)
 
+proc rehomeExtensionFragment(frag: StoredGraphFragment;
+                             originalPackageName: string): StoredGraphFragment =
+  ## Workspace-Manifest-Optional MO-13 (correcting MO-6) — re-home an
+  ## extension fragment's exported targets under ``originalPackageName``.
+  ## MO-6 merged an extension's edges/targets into the original project's
+  ## GRAPH, but the target-export-table rows still carried the EXTENSION's
+  ## own ``owningPackage`` (e.g. ``extProj``), so a target was not reachable
+  ## under the original project's package name and
+  ## ``repro build <orig>:<ext-target>`` did not resolve. Rewriting the
+  ## ``owningPackage`` of every ``reprobuild.target-export-table.v1/v2``
+  ## entry to ``originalPackageName`` re-homes the target: it now appears
+  ## under the original project in ``--list-targets`` and resolves through
+  ## the qualified ``<originalProject>:<ext-target>`` selector path. The
+  ## action / build-target nodes (which carry no owning-package field) and
+  ## every other fragment byte are left untouched.
+  result = frag
+  for ni in 0 ..< result.nodes.len:
+    let node = result.nodes[ni]
+    if node.kind == gnkMetadata and
+        (node.stableName == "reprobuild.target-export-table.v1" or
+         node.stableName == "reprobuild.target-export-table.v2"):
+      var table = decodeTargetExportTablePayload(toBytes(node.payload))
+      var changed = false
+      for ei in 0 ..< table.entries.len:
+        if table.entries[ei].owningPackage != originalPackageName:
+          table.entries[ei].owningPackage = originalPackageName
+          changed = true
+      # Re-derive cross-package ambiguity over the re-homed owners so a
+      # qualified candidate string never references the extension package.
+      table.ambiguities = @[]
+      var packagesByName = initTable[string, seq[string]]()
+      for entry in table.entries:
+        if not packagesByName.hasKey(entry.name):
+          packagesByName[entry.name] = @[]
+        if packagesByName[entry.name].find(entry.owningPackage) < 0:
+          packagesByName[entry.name].add(entry.owningPackage)
+      for name, pkgs in packagesByName.pairs:
+        if pkgs.len >= 2:
+          var candidates: seq[string] = @[]
+          for pkg in pkgs:
+            candidates.add(pkg & ":" & name)
+          candidates.sort()
+          table.ambiguities.add(TargetExportAmbiguity(name: name,
+            candidates: candidates))
+      if changed or table.ambiguities.len > 0:
+        result.nodes[ni].payload = fromBytes(
+          encodeTargetExportTablePayload(table))
+
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string) =
+                            publicCliPath, workRoot: string): string =
   ## Fold every present ``projectExtension`` sibling's provider-graph
   ## fragments into ``snapshot`` (the target project's graph). Composition
   ## rules (Project-DSL-Composition.md §"Project extensions"):
@@ -12066,6 +12130,14 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   ##   * **Conflicts diagnosed, not silently resolved.** Two contributors
   ##     (an extension and the base, or two extensions) that define the
   ##     same target name raise a clear error naming BOTH.
+  ##
+  ## Returns the ACTIVE-extension SIGNATURE (MO-13): a deterministic digest
+  ## of the merged extension set (each extension's name + the digest of the
+  ## fragments it contributed), folded into the lowered-graph disk-cache key
+  ## so toggling an extension on/off invalidates the cache WITHOUT
+  ## ``--force-rebuild`` (and toggling back is a cache hit). Empty string when
+  ## no extension is active, so the legacy single-project key is unchanged.
+  result = ""
   if originalPackageName.len == 0:
     return
   let discovered = discoverProjectExtensionRecipes(projectRoot,
@@ -12078,6 +12150,7 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   for name in fragmentTargetNames(snapshot.fragments):
     if not targetOrigin.hasKey(name):
       targetOrigin[name] = "base project '" & originalPackageName & "'"
+  var signaturePayload = ""
   for ext in discovered:
     # Reuse the standard compile + provider-evaluate pipeline; the
     # extension is just another DSL recipe. ``mergeExtensions = false``
@@ -12094,8 +12167,23 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
           " and projectExtension '" & ext.extName & "' (" & ext.recipePath &
           "). Two contributors must not define the same target name.")
       targetOrigin[name] = "projectExtension '" & ext.extName & "'"
+    # Re-home the extension's exported targets under the original project,
+    # then merge the (re-homed) fragments into the base graph.
+    var fragDigestPayload = ""
     for f in extFrags:
-      snapshot.fragments.add(f)
+      let rehomed = rehomeExtensionFragment(f, originalPackageName)
+      snapshot.fragments.add(rehomed)
+      fragDigestPayload.add(rehomed.fragmentDigest)
+      for node in rehomed.nodes:
+        fragDigestPayload.add(node.stableName)
+        fragDigestPayload.add(node.payload)
+    signaturePayload.addCacheField(ext.extName)
+    signaturePayload.addCacheField(
+      digestHex(blake3DomainDigest(fragDigestPayload.bytesOf(),
+        hdMetadataEnvelope)))
+  if signaturePayload.len > 0:
+    result = digestHex(blake3DomainDigest(signaturePayload.bytesOf(),
+      hdMetadataEnvelope))
 
 proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
                            publicCliPath, workRoot: string;
@@ -19135,6 +19223,89 @@ proc lockedShaFromStore*(store: LockStore; project, repoName, repoPath: string):
   ""
 
 # ---------------------------------------------------------------------------
+# MO-13 (correcting MO-5) — the evidence-PUBLISH verb.
+#
+# MO-5 wired the gather (``gatherRepoEvidence``) + put (``store.putEvidence``)
+# building blocks and the gate-side CONSUME path, but left the dedicated owner
+# verb that PUBLISHES an evidence-only repo's ``WorkspaceVcsEvidence`` to its
+# store as follow-up. ``publishRoutedEvidence`` is that verb's worker: it
+# routes each evidence-only repo to its MO-4-assigned backend and publishes the
+# source-free triple. ``repro workspace publish-evidence`` dispatches to it.
+# ---------------------------------------------------------------------------
+
+type
+  EvidencePublishOutcome* = object
+    ## Result of publishing ONE evidence-only repo's source-free evidence.
+    repoName*: string
+    repoPath*: string
+    backendKind*: string
+    published*: bool
+    headSha*: string
+    diagnostic*: string
+
+proc publishRoutedEvidence*(workspaceRoot: string;
+    repos: seq[ResolvedRepo]; projectName: string;
+    identity: GitToolIdentity; observedAtUnixMs: int64):
+    seq[EvidencePublishOutcome] =
+  ## MO-13 (correcting MO-5) — the OWNER-side publish operation the
+  ## ``repro workspace publish-evidence`` verb performs. For EVERY repo marked
+  ## ``participation = "evidence-only"`` (``isEvidenceOnlyRepo``), gather its
+  ## source-free ``WorkspaceVcsEvidence`` triple from the local checkout
+  ## (``gatherRepoEvidence`` — NO source ever captured) and publish it through
+  ## the repo's MO-4-assigned backend (``store.putEvidence``). A no-op (empty
+  ## result) when the workspace declares no ``[[locking.route]]`` entries or no
+  ## repo is evidence-only, so the all-public default is unchanged. An
+  ## evidence-only repo with no assigned backend, or no local checkout to
+  ## observe, is reported as a clear non-published outcome (the owner must
+  ## publish from a real, clean, published checkout) — never silently skipped.
+  result = @[]
+  let locking = loadLockingRouting(workspaceRoot)
+  if locking.route.len == 0: return @[]
+  var anyEvidenceOnly = false
+  for repo in repos:
+    if isEvidenceOnlyRepo(repo):
+      anyEvidenceOnly = true
+      break
+  if not anyEvidenceOnly: return @[]
+  let assignments = resolveRepoBackends(
+    locking, repos, workspaceRoot, identity, identity.binaryPath)
+  var storeByName = initTable[string, LockStore]()
+  var kindByName = initTable[string, string]()
+  for asg in assignments:
+    storeByName[asg.repoName] = asg.store
+    kindByName[asg.repoName] = asg.backendKind
+  let toolDigest = digestHex(identity)
+  for repo in repos:
+    if not isEvidenceOnlyRepo(repo): continue
+    var outc = EvidencePublishOutcome(
+      repoName: repo.name, repoPath: repo.path,
+      backendKind: kindByName.getOrDefault(repo.name))
+    let store = storeByName.getOrDefault(repo.name)
+    if store.isNil:
+      outc.diagnostic = "evidence-only repo '" & repo.name &
+        "' has no assigned locking backend to publish evidence to (add a " &
+        "`[[locking.route]]` entry for its visibility tier)"
+      result.add(outc); continue
+    let repoAbs = workspaceRoot / repo.path
+    if not dirExists(extendedPath(repoAbs / ".git")):
+      outc.diagnostic = "evidence-only repo '" & repo.name &
+        "' has no local checkout at '" & repo.path & "' to gather evidence " &
+        "from — the OWNER publishes from a clean, published checkout at the " &
+        "locked revision"
+      result.add(outc); continue
+    let triple = gatherRepoEvidence(
+      identity, repoAbs, repo.path, toolDigest, observedAtUnixMs)
+    for rec in triple:
+      if rec.op == wvqHeadSha and rec.status == wvesResolved:
+        outc.headSha = rec.headSha
+    let put = store.putEvidence(projectName, repo.name, triple)
+    outc.published = put.outcome == spoOk
+    if not outc.published:
+      outc.diagnostic = "putEvidence failed for evidence-only repo '" &
+        repo.name & "': " & put.diagnostic
+    result.add(outc)
+
+# ---------------------------------------------------------------------------
 # MO-9 — populateLockedDeps bodies + the unified resolver + integrity verify.
 # ---------------------------------------------------------------------------
 
@@ -19297,13 +19468,42 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
     case d.coordinates.kind
     of ckVcs:
       if dirExists(extendedPath(repoAbs / ".git")):
+        if d.integrity.startsWith("blake3:"):
+          # MO-13 (correcting MO-9) — NON-CONSERVATIVE where SAFE. A lock
+          # refreshed BEFORE the repo's first commit records a ``blake3:``
+          # NAR-style tree hash (a transient content-address) rather than a
+          # git object id. MO-9 conservatively SKIPPED such a lock on a git
+          # checkout (the git branch only handled ``git-sha`` integrities), so
+          # a tampered pre-commit hash slipped through. It is SAFE to verify it
+          # non-conservatively: the tree hash is content-addressed and
+          # recomputable from the materialized working tree, regardless of the
+          # locked revision (empty or not). A tamper now FAILS with a clear
+          # diagnostic instead of being silently skipped.
+          let observed = narStyleTreeMultihash(collectTreeEntries(repoAbs))
+          if observed != d.integrity:
+            result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+              expected: d.integrity, observed: observed,
+              diagnostic: "recomputed tree hash " & observed & " at '" &
+                d.path & "' does not match the lock's recorded pre-commit " &
+                "integrity " & d.integrity & " (the lock predates the repo's " &
+                "first commit; regenerate it if the tree changed legitimately)"))
+          continue
         # Git checkout: the VCS-native integrity is the commit object at the
-        # locked revision. Verify ONLY when the lock pins a concrete git
-        # revision AND records a git-native integrity — a lock refreshed before
-        # the repo had any commit (empty revision / a transient blake3 tree
-        # hash) is NOT refused; there is no content-addressed coordinate to
-        # check against, and the cleanliness/publication stages already cover it.
-        if d.coordinates.revision.len == 0 or gitBin.len == 0: continue
+        # locked revision. A MISSING git binary is the one genuinely
+        # unverifiable case here (the host cannot recompute a git object id) —
+        # skip it rather than fail an environment without git.
+        if gitBin.len == 0: continue
+        if d.coordinates.revision.len == 0:
+          # MO-13 (correcting MO-9) — a git-native integrity with NO concrete
+          # revision genuinely cannot be verified (there is no coordinate to
+          # recompute the object id at). Surface a CLEAR diagnostic rather than
+          # skipping silently, so a stale/malformed lock is named, not ignored.
+          result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+            expected: d.integrity, observed: "",
+            diagnostic: "lock records a git-native integrity " & d.integrity &
+              " for '" & d.path & "' but pins no concrete revision to verify " &
+              "it at (regenerate the lock at the repo's current revision)"))
+          continue
         if not d.integrity.startsWith("git-sha"): continue
         # Observe the repo: the locked revision's commit object must be present.
         let rp = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoAbs) &
@@ -31730,13 +31930,20 @@ proc writeWorkspacePartitionFile(path: string;
 
 proc buildClosureForShard(assignedSelectors: seq[string];
                           publicCliPath: string;
-                          mode: ToolProvisioningMode = tpmUnspecified):
+                          mode: ToolProvisioningMode = tpmUnspecified;
+                          lockFlag = ""):
     tuple[code: int; output: string] =
   ## Builds the closure of the assigned test edges via ``runBuildCommand``.
   ## The strategy note in the milestone documents the trade-off: building
   ## the whole ``:test`` aggregate is simpler than computing the union of
   ## per-shard closures and lets the engine's existing dedup do its job;
   ## M3 will optimise this once the benchmark milestone is on the table.
+  ##
+  ## ``lockFlag`` (Workspace-Manifest-Optional MO-13, correcting MO-1) is the
+  ## ``--lock=<file>`` carry-through. When set, the sharded build PINS the
+  ## locked solved graph — the sharded run builds against the LOCKED
+  ## revisions, exactly like the verb-alias path already did — rather than
+  ## re-solving from live inputs.
   if assignedSelectors.len == 0:
     return (0, "")
   let bin =
@@ -31746,6 +31953,8 @@ proc buildClosureForShard(assignedSelectors: seq[string];
   var buildArgs = @["build", "test"]
   if mode != tpmUnspecified:
     buildArgs.add("--tool-provisioning=" & modeName(mode))
+  if lockFlag.len > 0:
+    buildArgs.add(lockFlag)
   let p = startProcess(bin,
     workingDir = getCurrentDir(),
     args = buildArgs,
@@ -31868,6 +32077,40 @@ proc summarizeTestResults(summary: JsonNode): tuple[passed, failed: int] =
     if s.hasKey("failed") and s["failed"].kind == JInt: s["failed"].getInt()
     else: 0
 
+proc shardLockProvenance(opts: ReproTestShardOpts):
+    tuple[lockPath, inputsDigest: string; packageCount: int; found: bool] =
+  ## Workspace-Manifest-Optional MO-13 (correcting MO-1) — resolve the
+  ## committed solved-graph lock the sharded run should honor, using the
+  ## SAME loader (``resolveSolvedGraphForBuild``) the real ``repro build``
+  ## uses. ``opts.lockFlag`` carries ``--lock=<file>``; absent, the canonical
+  ## ``<cwd>/repro.lock`` is used. The provenance (resolved path + the lock's
+  ## ``inputs_digest`` + pinned package count) is recorded in the shard report
+  ## so the sharded/fixture run is demonstrably tied to the LOCKED graph, not
+  ## a fresh re-solve. A no-op (``found = false``) when no lock is present, so
+  ## every pre-existing shard run (no ``repro.lock``) is byte-unchanged.
+  let lockOverride =
+    if opts.lockFlag.startsWith("--lock="):
+      opts.lockFlag["--lock=".len .. ^1]
+    else: ""
+  let resolved = resolveSolvedGraphForBuild(getCurrentDir(), lockOverride, "")
+  result.found = resolved.found and resolved.source == "lock"
+  if result.found:
+    result.lockPath = resolved.lockPath
+    result.packageCount = resolved.solution.packages.len
+    try:
+      result.inputsDigest =
+        parseSolvedGraphLock(readFile(extendedPath(resolved.lockPath))).inputsDigest
+    except CatchableError:
+      result.inputsDigest = ""
+
+proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts) =
+  ## Stamp the resolved lock provenance onto a shard report (MO-13).
+  let prov = shardLockProvenance(opts)
+  report["lock_flag"] = %opts.lockFlag
+  report["lock_file"] = %(if prov.found: prov.lockPath else: "")
+  report["locked_inputs_digest"] = %prov.inputsDigest
+  report["locked_package_count"] = %prov.packageCount
+
 proc runFixtureModeShard(opts: ReproTestShardOpts;
                          peer: PeerCacheSpecResult;
                          outcome: var TestRunOutcome): int =
@@ -31980,6 +32223,7 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
   report["strategy"] = %opts.strategy
   report["peer_cache"] = %peerCacheMode
   report["fixture_path"] = %opts.fixturePath
+  addShardLockProvenance(report, opts)
   var assignedNames = newJArray()
   for e in assignedEdges:
     assignedNames.add(%e.selector)
@@ -32087,7 +32331,7 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   let buildStart = epochTime()
   var buildFailed = false
   let buildRes = buildClosureForShard(assignedSelectors, publicCliPath,
-    opts.toolProvisioning)
+    opts.toolProvisioning, opts.lockFlag)
   if buildRes.code != 0:
     buildFailed = true
     stderr.writeLine("repro test: workspace build phase failed " &
@@ -32167,6 +32411,7 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   report["peer_cache"] = %peerCacheMode
   report["fixture_path"] = %""  # workspace mode — no fixture
   report["mode"] = %"workspace"
+  addShardLockProvenance(report, opts)
   report["runner_binary"] = %runnerBin
   report["runner_invoked"] = %runnerInvoked
   report["runner_exit_code"] = %runnerCode
@@ -34126,9 +34371,58 @@ const reproTopLevelCommands = [
   "hardware", "disk", "launch-plan",
 ]
 
+proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
+  ## Workspace-Manifest-Optional MO-13 (correcting MO-5) —
+  ## ``repro workspace publish-evidence``. Gather each evidence-only private
+  ## repo's source-free ``WorkspaceVcsEvidence`` triple and publish it to the
+  ## repo's MO-4-assigned backend (``publishRoutedEvidence``). The owner runs
+  ## this from a clean, published checkout at the locked revision; a teammate
+  ## who cannot clone the private source then verifies the boundary from the
+  ## published evidence (the MO-5 gate-side consume path).
+  var workspaceRoot = ""
+  var projectName = ""
+  var mode = tpmUnspecified
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--project" or arg.startsWith("--project="):
+      projectName = valueFromFlag(args, i, "--project")
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
+    elif not arg.startsWith("-") and projectName.len == 0:
+      projectName = arg
+    i.inc
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = absolutePath(workspaceRoot)
+  let (resolved, _) = resolveWorkspaceProjectShared(
+    workspaceRoot, projectName, "`repro workspace publish-evidence`")
+  let identity = ensureGitToolResolvable(mode, getEnv("PATH"))
+  let observedAt = getTime().toUnix * 1000
+  let outcomes = publishRoutedEvidence(
+    workspaceRoot, resolved.repos, resolved.projectName, identity, observedAt)
+  if outcomes.len == 0:
+    echo "repro workspace publish-evidence: no evidence-only repos to publish " &
+      "(none marked `participation = \"evidence-only\"`, or no locking routes " &
+      "declared)"
+    return 0
+  var failed = 0
+  for o in outcomes:
+    if o.published:
+      echo "repro workspace publish-evidence: published evidence for '" &
+        o.repoName & "' (" & o.backendKind & ") at " & o.headSha
+    else:
+      inc failed
+      stderr.writeLine("repro workspace publish-evidence: FAILED for '" &
+        o.repoName & "': " & o.diagnostic)
+  if failed > 0: 1 else: 0
+
 const reproWorkspaceSubcommands = [
   "init", "sync", "pull", "lock", "status", "list", "start", "manifests",
   "shared-clones", "forall", "bootstrap", "provision", "projects", "project",
+  "publish-evidence",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -35102,6 +35396,21 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceStartCommand(startArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace start: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "publish-evidence":
+    # Workspace-Manifest-Optional MO-13 (correcting MO-5) —
+    # `repro workspace publish-evidence`. Publish each evidence-only private
+    # repo's source-free WorkspaceVcsEvidence to its MO-4-assigned backend.
+    try:
+      let peArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspacePublishEvidenceCommand(peArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace publish-evidence: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "manifests":
