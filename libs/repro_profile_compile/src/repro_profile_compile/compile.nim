@@ -15,7 +15,7 @@
 ## and re-encode through `encodeRbpi` (Phase B). The JSON ->
 ## ProfileIntent -> RBPI round-trip is lossless by construction.
 
-import std/[os, osproc, parseutils, streams, strutils]
+import std/[os, osproc, parseutils, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
 
 import repro_profile
@@ -85,23 +85,69 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     stderr.writeLine("repro profile compile: " & compileCmd)
 
   try:
-    # Run nim from the reprobuild repo root so the upstream
-    # ``config.nims`` ``addPackagePath`` calls find their sibling
-    # libs via relative paths (``libs/nimcrypto``,
-    # ``../nimcrypto``, ...). Without this, the wrapper
-    # ``config.nims`` we staged at the profile dir kicks the include
-    # into the profile dir's CWD where ``libs/nimcrypto`` doesn't
-    # exist; the upstream's relative-path fallbacks all miss and
-    # the transitive ``import nimcrypto/sha2`` from
-    # ``repro_project_dsl`` blows up with "cannot open file".
+    # NimScript's relative path resolution from a config.nims runs in
+    # the PROJECT (profile) directory's CWD — not nim's process CWD.
+    # So even with ``workingDir = repoRoot`` (which sets the OS
+    # cwd), the upstream config.nims's ``addPackagePath`` calls like
     #
-    # ``$REPROBUILD_REPO_ROOT`` is honoured by ``reprobuildRepoRoot``
-    # in this same library, but the upstream ``config.nims``'s
-    # candidate paths are still relative — only the CWD shift gets
-    # the relative sibling clones onto the path.
+    #   addPackagePath("NIMCRYPTO_SRC", [
+    #     "libs" / "nimcrypto",
+    #     ".." / "codetracer" / "libs" / "nimcrypto",
+    #     ".." / "nimcrypto"], "nimcrypto" / "hash.nim")
+    #
+    # check ``fileExists(candidate / marker)`` relative to the profile
+    # dir — where none of the candidates exist — and the package path
+    # never gets added. The transitive ``import nimcrypto/sha2`` from
+    # ``repro_project_dsl`` then fails.
+    #
+    # Pass the env-var-keyed paths the upstream config.nims expects
+    # so its FIRST lookup (``getEnv(envName)``) hits before the
+    # relative-path candidates run.
+    var childEnv = newStringTable(modeStyleInsensitive)
+    for k, v in envPairs():
+      childEnv[k] = v
+    proc setSiblingEnv(envName, siblingDir: string) =
+      let abs = repoRoot / siblingDir
+      if dirExists(abs) and getEnv(envName).len == 0:
+        childEnv[envName] = abs
+    # Mirrors the addPackagePath calls in reprobuild's config.nims —
+    # absolute paths pointing at the operator's existing sibling
+    # checkouts under <repoRoot>'s parent. (install-reprobuild.ps1
+    # clones every sibling under <LOCALAPPDATA>/dev-deps/reprobuild/,
+    # so they are siblings of ``src/``.)
+    let dd = repoRoot.parentDir  # <dev-deps>/reprobuild
+    if dirExists(dd / "nimcrypto"):
+      if getEnv("NIMCRYPTO_SRC").len == 0:
+        childEnv["NIMCRYPTO_SRC"] = dd / "nimcrypto"
+    if dirExists(dd / "nim-bearssl"):
+      if getEnv("BEARSSL_SRC").len == 0:
+        childEnv["BEARSSL_SRC"] = dd / "nim-bearssl"
+    if dirExists(dd / "io-mon" / "src"):
+      if getEnv("IO_MON_SRC").len == 0:
+        childEnv["IO_MON_SRC"] = dd / "io-mon" / "src"
+    if dirExists(dd / "runquota"):
+      if getEnv("RUNQUOTA_SRC").len == 0:
+        childEnv["RUNQUOTA_SRC"] = dd / "runquota"
+    if dirExists(dd / "nim-stackable-hooks" / "src"):
+      if getEnv("STACKABLE_HOOKS_SRC").len == 0:
+        childEnv["STACKABLE_HOOKS_SRC"] = dd / "nim-stackable-hooks" / "src"
+    if dirExists(dd / "codetracer" / "src" / "ct_test"):
+      if getEnv("CODETRACER_CT_TEST_SRC").len == 0:
+        childEnv["CODETRACER_CT_TEST_SRC"] = dd / "codetracer" / "src" / "ct_test"
+    if dirExists(dd / "codetracer-trace-format-nim" / "src"):
+      if getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC").len == 0:
+        childEnv["CODETRACER_TRACE_FORMAT_NIM_SRC"] = dd / "codetracer-trace-format-nim" / "src"
+    if dirExists(dd / "reprobuild-ct-test-runner"):
+      if getEnv("REPRO_CT_TEST_RUNNER_SRC").len == 0:
+        childEnv["REPRO_CT_TEST_RUNNER_SRC"] = dd / "reprobuild-ct-test-runner"
+    if dirExists(dd / "reprobuild-test-adapters" / "src"):
+      if getEnv("REPRO_TEST_ADAPTERS_SRC").len == 0:
+        childEnv["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"
+
     let nimArgv = parseCmdLine(compileCmd)
     var p = startProcess(nimArgv[0], workingDir = repoRoot,
                          args = nimArgv[1 .. ^1],
+                         env = childEnv,
                          options = {poUsePath, poStdErrToStdOut})
     let output = p.outputStream.readAll()
     let exitCode = p.waitForExit()
