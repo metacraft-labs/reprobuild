@@ -39,5 +39,9 @@ reprobuild-test-adapters=main
 # ../nim-stackable-hooks siblings. Pinned by SHA to the same validated pair this
 # repo's flake locks (io-mon-src / stackable-hooks-src) so the ct engine compiles
 # against the same io-mon the monitor uses.
-io-mon=f1dcd43f989d7f5d407f3133c46e676828c5cd6f
-nim-stackable-hooks=13eeb0a11a7a0d769d44cfd5bbce3644f2b067b9
+# Pinned to the matched io-mon + nim-stackable-hooks mains codetracer dev's
+# engine tracks (io_mon_capture uses propagation.unrewriteSipPath, added in
+# recent stackable). io-mon main still carries the Linux monitor-completeness
+# fix; the reprobuild *monitor* itself stays on the validated flake pin.
+io-mon=d2c451d5e009cc6ccd74b5eb5388e2b525825651
+nim-stackable-hooks=abea72696dd9d8d24a1d65b0d3d6b24e1d391694
