@@ -10484,26 +10484,172 @@ proc discoverNestedDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
         visibility: wvPublic))
   result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
 
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-8 — self-describing integrity computation.
+# ---------------------------------------------------------------------------
+
+proc gitObjectFormatOf(repoRoot: string): string =
+  ## The git object format (``sha1`` / ``sha256``) of a checkout, used to tag
+  ## the VCS-native integrity multihash. Defaults to ``sha1`` when unknown.
+  let gitBin = findExe("git")
+  if gitBin.len == 0: return "sha1"
+  let r = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoRoot) &
+    " rev-parse --show-object-format", options = {poUsePath})
+  if r.exitCode == 0 and r.output.strip().len > 0: r.output.strip()
+  else: "sha1"
+
+proc collectTreeEntries(dirAbs: string): seq[tuple[path, content: string]] =
+  ## Gather (workspace-relative path, file content) for every regular file
+  ## under ``dirAbs``, EXCLUDING VCS metadata (``.git``), the CLI's own
+  ## ``.repro`` work tree, and the committed lock itself (Reprobuild output,
+  ## never part of a source's content identity). Feeds the NAR-style
+  ## own-file-hash for a source the VCS does not content-address.
+  result = @[]
+  for path in walkDirRec(dirAbs, yieldFilter = {pcFile}):
+    let rel = relativePath(path, dirAbs).replace('\\', '/')
+    if rel == ".git" or rel.startsWith(".git/") or
+        rel == ".repro" or rel.startsWith(".repro/") or
+        rel == CommittedLockFileName:
+      continue
+    var content = ""
+    try: content = readFile(extendedPath(path))
+    except CatchableError: content = ""
+    result.add((path: rel, content: content))
+
+proc computeDepIntegrity(repoAbsPath, headSha: string): string =
+  ## The self-describing integrity multihash for a locked dependency:
+  ##   * a git checkout with a resolved HEAD commit -> the VCS-native object
+  ##     id (``git-sha1:`` / ``git-sha256:``); the commit IS the integrity, so
+  ##     no recomputation over files is needed.
+  ##   * otherwise -> Reprobuild's OWN deterministic NAR-style tree hash over
+  ##     the checked-out files (``blake3:``), which genuinely hashes the file
+  ##     contents (changing any file changes the digest).
+  if headSha.len > 0:
+    return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
+  narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
+
+proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
+  ## MO-8 — observe the workspace's participating repos and produce a
+  ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
+  ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
+  ## repo (``path = "."``) is always recorded; any nested develop-mode deps
+  ## (``discoverNestedDevelopDeps``) follow. ``repro lock refresh`` serializes
+  ## these into the v2 committed lock so a lock-file-only workspace is fully
+  ## self-describing.
+  result = @[]
+  let root = absolutePath(workspaceRoot)
+  let rootFacts = committedLockRepoFacts(root)
+  let nested = discoverNestedDevelopDeps(root)
+  let bare = extractFilename(root.strip(
+    leading = false, trailing = true, chars = {'/', '\\'}))
+  let rootName = if bare.len > 0: bare else: "workspace"
+  var rootDepends: seq[string] = @[]
+  for d in nested: rootDepends.add(d.name)
+  result.add(LockedDep(
+    name: rootName, path: ".",
+    coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
+      gitRef: rootFacts.branch, revision: rootFacts.headSha),
+    integrity: computeDepIntegrity(root, rootFacts.headSha),
+    version: "", visibility: "public", participation: "",
+    depends: rootDepends, groups: @[]))
+  for d in nested:
+    let depAbs = root / d.path
+    let facts = committedLockRepoFacts(depAbs)
+    result.add(LockedDep(
+      name: d.name, path: d.path,
+      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+        gitRef: facts.branch, revision: facts.headSha),
+      integrity: computeDepIntegrity(depAbs, facts.headSha),
+      version: "", visibility: "public", participation: "",
+      depends: @[], groups: @[]))
+
+proc visibilityFromLockString(s: string): WorkspaceVisibility =
+  case s.strip().toLowerAscii()
+  of "org": wvOrg
+  of "team": wvTeam
+  of "personal", "private": wvPersonal
+  else: wvPublic
+
 proc committedLockDerivedProject(workspaceRoot: string):
     Option[ResolvedProject] =
-  ## MO-2 — derive a ``ResolvedProject`` for a committed-lock-only workspace.
-  ## Returns ``none`` when ``workspaceRoot`` carries no committed
-  ## ``repro.lock`` (so the caller keeps its existing manifest-required
-  ## behavior). The base repo is the workspace repo itself (``path = "."``),
-  ## with its revision pinned to the repo's own ``HEAD`` and its fetch URL
-  ## taken from ``origin`` when present.
+  ## MO-2/MO-7/MO-8 — derive a ``ResolvedProject`` for a committed-lock-only
+  ## workspace. Returns ``none`` when ``workspaceRoot`` carries no committed
+  ## ``repro.lock`` (so the caller keeps its manifest-required behavior).
   ##
-  ## MO-7 — the participating set ALSO folds in any NESTED develop-mode
-  ## dependency checkouts (under ``./deps``/``./vendor``/``./third-party``/
-  ## ``./develop``; see ``discoverNestedDevelopDeps``). The base repo gains a
-  ## ``depends`` edge onto each discovered nested dep, so the pre-push gate's
-  ## develop-set closure (``developSetClosure``) reaches them and ``sync``
-  ## plans them — a single project repo with nested deps is a complete,
-  ## star-free, manifest-free workspace. When no nested deps are present the
-  ## derived set is exactly the one repo (MO-2 behavior, unchanged).
+  ## MO-8 — POPULATE FROM THE LOCK CONTENT. When the v2 committed lock carries
+  ## a usable VCS root dependency, the participating set + per-repo revisions
+  ## come from the LOCK's coordinates (not live ``git HEAD``): the workspace is
+  ## *described by* the lock, so the resolved revisions reflect the LOCKED
+  ## state even if the checkout's HEAD has since moved. Any nested develop-mode
+  ## dep present on disk but NOT in the lock (a develop sibling checked out
+  ## after the lock was refreshed) is still folded in via discovery — the lock
+  ## pins what it pins; a local develop overlay augments it (mode-agnostic).
+  ##
+  ## FALLBACK (documented boundary): when the committed lock carries no usable
+  ## VCS workspace dep (or cannot be parsed as a v2 lock), the original
+  ## MO-2/MO-7 HEAD-derivation runs unchanged (root repo at its own HEAD +
+  ## nested-dep discovery), preserving behavior where v2 workspace data is
+  ## absent.
   if not hasCommittedLockWorkspaceMarker(workspaceRoot):
     return none(ResolvedProject)
   let root = absolutePath(workspaceRoot)
+  let lockP = committedLockPath(root)
+
+  # MO-8 — try the populate-from-lock-content path.
+  block fromLock:
+    var ld: LockedDependencies
+    try:
+      ld = parseLockedDependencies(readFile(extendedPath(lockP)))
+    except CatchableError:
+      break fromLock
+    var hasRootVcsDep = false
+    for d in ld.deps:
+      if d.path == "." and d.coordinates.kind == ckVcs and
+          d.coordinates.revision.len > 0:
+        hasRootVcsDep = true
+        break
+    if not hasRootVcsDep:
+      break fromLock
+    var repos: seq[ResolvedRepo] = @[]
+    var lockedPaths: seq[string] = @[]
+    var rootIdx = -1
+    var rootName = ""
+    var rootRef = ""
+    var rootRevision = ""
+    for d in ld.deps:
+      if d.coordinates.kind != ckVcs or d.coordinates.revision.len == 0:
+        continue
+      repos.add(ResolvedRepo(
+        name: d.name, path: d.path, remoteName: "origin",
+        fetchUrl: d.coordinates.url, revision: d.coordinates.revision,
+        vcs: defaultRepoVcs, stability: defaultRepoStability,
+        visibility: visibilityFromLockString(d.visibility),
+        participation: d.participation, depends: d.depends, groups: d.groups))
+      lockedPaths.add(d.path)
+      if d.path == ".":
+        rootIdx = repos.high
+        rootName = d.name
+        rootRef = d.coordinates.gitRef
+        rootRevision = d.coordinates.revision
+    # Fold in on-disk nested develop deps the lock does not (yet) carry.
+    var extraDepends: seq[string] = @[]
+    for nd in discoverNestedDevelopDeps(root):
+      if nd.path in lockedPaths: continue
+      repos.add(nd)
+      extraDepends.add(nd.name)
+    if rootIdx >= 0:
+      for n in extraDepends:
+        if n notin repos[rootIdx].depends:
+          repos[rootIdx].depends.add(n)
+    if rootName.len == 0: rootName = "workspace"
+    return some(ResolvedProject(
+      projectName: rootName,
+      defaultRevision: rootRevision,
+      trunk: (if rootRef.len > 0: rootRef else: "HEAD"),
+      repos: repos,
+      projectFile: lockP))
+
+  # MO-2/MO-7 HEAD-derivation fallback (no usable VCS workspace dep in lock).
   let facts = committedLockRepoFacts(root)
   let bareName = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
@@ -17766,6 +17912,10 @@ type
     path*: string
     fetchUrl*: string
     intendedAction*: string
+    revision*: string
+      ## MO-8 — the resolved (locked) revision for this repo. For a
+      ## committed-lock-only workspace this comes from the lock's CONTENT
+      ## (coordinates), so it reflects the LOCKED state, not live ``git HEAD``.
 
   WorkspaceSyncReport* = object
     ## Structured outcome of one ``repro workspace sync`` invocation.
@@ -17853,6 +18003,7 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["path"] = %entry.path
     obj["fetchUrl"] = %entry.fetchUrl
     obj["intendedAction"] = %entry.intendedAction
+    obj["revision"] = %entry.revision
     plan.add(obj)
   result["plan"] = plan
   var layers = newJArray()
@@ -17913,6 +18064,7 @@ proc renderSyncPlanLines*(report: WorkspaceSyncReport): seq[string] =
   for entry in report.plan:
     result.add(prefix & "  [" & entry.intendedAction & "] " & entry.path &
       " (" & entry.name & ")" &
+      (if entry.revision.len > 0: " @ " & entry.revision else: "") &
       (if entry.fetchUrl.len > 0: " <- " & entry.fetchUrl else: ""))
   if report.dryRun:
     result.add(
@@ -19325,7 +19477,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       else: "clone"
     report.plan.add(WorkspaceSyncPlanEntry(
       name: repo.name, path: repo.path, fetchUrl: repo.fetchUrl,
-      intendedAction: intended))
+      intendedAction: intended, revision: repo.revision))
 
   # RA-27 ``--dry-run``: the plan is the deliverable; STOP before any
   # mutating phase. No manifest-layer refresh has touched a working tree
@@ -32547,15 +32699,22 @@ proc runReproLockRefresh(rest: openArray[string]): int =
     return 3
   let platform =
     if platformOverride.len > 0: platformOverride else: currentPlatformId()
-  let lock = solutionToLock(sol, platform, inputs.text)
+  let solvedLock = solutionToLock(sol, platform, inputs.text)
+  # MO-8 — assemble the unified model: the v1 solved-graph payload (preserved
+  # as a sub-part) PLUS the per-dependency coordinates + self-describing
+  # integrity observed from the workspace's participating repos.
+  var ld = lockedDepsFromSolved(solvedLock)
+  ld.schema = SolvedGraphLockSchemaV2
+  ld.deps = lockedDepsForWorkspace(projectDir)
   try:
-    writeFile(extendedPath(lockP), serializeSolvedGraphLock(lock))
+    writeFile(extendedPath(lockP), serializeLockedDependencies(ld))
   except CatchableError as e:
     stderr.writeLine("repro lock refresh: failed to write lock: " & e.msg)
     return 1
   stdout.writeLine("repro lock refresh: wrote " & lockP & " (" &
-    $lock.variants.len & " variant(s), " & $lock.packages.len &
-    " package(s); platform " & platform & ")")
+    $ld.variants.len & " variant(s), " & $ld.packages.len &
+    " package(s), " & $ld.deps.len & " locked dep(s); platform " &
+    platform & ")")
   return 0
 
 proc runReproLockValidate(rest: openArray[string]): int =
@@ -32596,7 +32755,8 @@ proc runReproLockValidate(rest: openArray[string]): int =
       problems.add("variant entry missing name")
   # (b) loadable + round-trips deterministically.
   let reparsed =
-    try: parseSolvedGraphLock(serializeSolvedGraphLock(lock))
+    try: parseSolvedGraphLock(
+      serializeLockedDependencies(lockedDepsFromSolved(lock)))
     except CatchableError:
       problems.add("lock does not round-trip through the serializer")
       lock
@@ -32627,6 +32787,34 @@ proc runReproLockValidate(rest: openArray[string]): int =
       stderr.writeLine("repro lock validate: failed to re-solve inputs: " &
         e.msg)
       return 1
+  # (e) MO-8 — integrity verification. Recompute each locked dependency's
+  # self-describing integrity from the on-disk checkout and compare to the
+  # locked value; a malformed/unrecognized multihash or a content drift is a
+  # loud failure. Also assert the v2 model round-trips deterministically.
+  block integrity:
+    var ld: LockedDependencies
+    try:
+      ld = parseLockedDependencies(readFile(extendedPath(lockP)))
+    except CatchableError:
+      break integrity
+    let once = serializeLockedDependencies(ld)
+    if once != serializeLockedDependencies(parseLockedDependencies(once)):
+      problems.add("lock does not round-trip deterministically (v2 model)")
+    for d in ld.deps:
+      if not isWellFormedMultihash(d.integrity):
+        problems.add("dep '" & d.name &
+          "' has a malformed/unrecognized integrity '" & d.integrity & "'")
+        continue
+      let depAbs =
+        if d.path == "." or d.path.len == 0: absolutePath(projectDir)
+        else: absolutePath(projectDir) / d.path
+      if not dirExists(extendedPath(depAbs)):
+        continue  # not checked out here — cannot recompute (not a tamper).
+      let observed = committedLockRepoFacts(depAbs).headSha
+      let recomputed = computeDepIntegrity(depAbs, observed)
+      if recomputed != d.integrity:
+        problems.add("dep '" & d.name & "' integrity mismatch: locked '" &
+          d.integrity & "' but on-disk content hashes to '" & recomputed & "'")
   if asJson:
     let arr = newJArray()
     for p in problems: arr.add(%p)

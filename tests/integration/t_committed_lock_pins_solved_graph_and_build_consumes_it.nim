@@ -61,8 +61,10 @@ suite "MO-1: committed lock pins solved graph and build consumes it":
       check fileExists(lockPath)
       let lockBody = readFile(lockPath)
       # The lock pins the concrete version, the package source identity,
-      # and uses the v1 schema.
-      check "reprobuild.solved-graph-lock.v1" in lockBody
+      # and uses the v2 schema (MO-8: the self-describing committed lock that
+      # also carries per-dependency coordinates + integrity; the v1
+      # solved-graph payload is preserved as a sub-part).
+      check "reprobuild.solved-graph-lock.v2" in lockBody
       check "name = \"nim\"" in lockBody
       check "version = \"2.2.0\"" in lockBody
       check "source = \"nim\"" in lockBody

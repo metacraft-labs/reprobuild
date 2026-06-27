@@ -176,6 +176,12 @@ for libName in [
   # lock consumption. Separate from the manifest-repo SHA lock
   # (``repro_workspace_manifests/lock_writer.nim``).
   "repro_lock",
+  # Workspace-Manifest-Optional MO-8: self-describing, algorithm-tagged
+  # content digests (``<alg>:<digest>`` multihash) + the BLAKE3 own-file
+  # NAR-style tree hash. ``repro_lock`` (the committed-lock integrity) and
+  # ``repro_cli_support`` (refresh/validate integrity computation) import it
+  # via ``import repro_multihash``.
+  "repro_multihash",
   # Workspace-Manifest-Optional MO-3: the abstract Lock/Manifest store
   # interface (``LockStore``) + its portable backends (committed-file,
   # git-notes, separate-branch, external-CLI). ``repro_cli_support``
