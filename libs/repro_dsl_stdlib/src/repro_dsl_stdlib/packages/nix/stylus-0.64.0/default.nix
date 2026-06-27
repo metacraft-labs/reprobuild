@@ -1,5 +1,5 @@
 let
-  pkgs = import <nixpkgs> {};
+  pkgs = import ../nixpkgs.nix;
 in pkgs.buildNpmPackage {
   pname = "reprobuild-stylus-provisioning";
   version = "1.0.0";

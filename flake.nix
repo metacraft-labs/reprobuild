@@ -22,7 +22,11 @@
       # it; config.nims reads IO_MON_SRC (then falls back to a ``../io-mon``
       # sibling). Like the other source inputs, the sandboxed package build and
       # the override-free CI jobs have no sibling, so seed it from this input.
-      url = "github:metacraft-labs/io-mon";
+      #
+      # Pinned to the Linux monitor-completeness fix (f1dcd43): later main
+      # commits also rework writer/capabilities completeness logic and are not
+      # yet validated for the Linux LD_PRELOAD ct-build path. Unpin once they are.
+      url = "github:metacraft-labs/io-mon/f1dcd43f989d7f5d407f3133c46e676828c5cd6f";
       flake = false;
     };
     nimcrypto-src = {
