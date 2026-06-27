@@ -5638,6 +5638,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
+    binary: "build/test-bin/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim",
+    binary: "build/test-bin/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim",
     binary: "build/test-bin/t_clone_action_honors_partial_blobless_and_single_branch",
     defines: @[],
