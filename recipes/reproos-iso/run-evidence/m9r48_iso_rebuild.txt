@@ -1,0 +1,95 @@
+M9.R.48.2 — ISO rebuild evidence + staged-binary /nix/store scan
+=================================================================
+
+Date: 2026-06-27
+
+Picks up the M9.R.47 chain (47.1 audit, 47.2 --undef:nixbuild, 47.3
+build_apps.sh env scrub) and rebuilds reproos.iso to verify the
+.rodata /nix/store libclingo bake is gone end-to-end.
+
+ARTIFACT
+--------
+
+  recipes/reproos-iso/build/reproos.iso
+    size   : 1586423808 bytes (1.48 GiB)
+    sha256 : 0c9537b42a0b877c00e426f4525698456f95bb230bb3ada23dc23775ddf0cb6a
+    mtime  : 2026-06-27 05:16
+
+BUILD CHAIN
+-----------
+
+  HOST_APPS_RC=0   (host build/bin/repro rebuilt from source with
+                   --undef:nixbuild + scrubbed LD_LIBRARY_PATH / NIX_LDFLAGS)
+  INSTALLER_RC=0   (reproos-installer rebuilt from source)
+  RC=0             (reproos.iso recipe-build succeeded)
+
+PHASE 6b RELOCATE / leak audit (Phase E on STAGED de-rootfs)
+------------------------------------------------------------
+
+  ELF candidates                : 2848
+  ELFs inspected (true ELF magic): 2468
+  ELFs referencing /nix/store   : 0
+  unique /nix/store prefixes    : 0
+  total bytes on rootfs across them: 0
+
+The de-rootfs /nix/store carve-out is the M9.R.46.6 minimal
+5-symlink glibc ld.so.cache forwarder (48 KiB total, all
+symlinks pointing at /etc/ld.so.cache).  This is by design —
+glibc bakes the ld.so.cache path into ld.so's .rodata, and
+patchelf cannot rewrite .rodata.
+
+STAGED BINARY SCAN
+------------------
+
+Per usr/bin/<binary>:
+
+  usr/bin/repro                       size=23165080   nix_count=423
+  usr/bin/reproos-installer           size=180312     nix_count=0
+  usr/bin/reproos-installer-launcher  size=2150       nix_count=1
+  usr/bin/sway                        size=85         nix_count=2
+  usr/bin/sddm                        size=85         nix_count=2
+  usr/bin/kwin_wayland                size=93         nix_count=2
+  usr/bin/mutter                      size=89         nix_count=2
+  usr/bin/plasmashell                 size=104        nix_count=2
+  usr/bin/startplasma-wayland         size=112        nix_count=2
+
+The 423 hits in usr/bin/repro are Nim stdlib SOURCE-FILE FILENAMES
+baked into stack-trace debug info, e.g.
+
+  /nix/store/n1hnq2il...-nim-unwrapped-2.2.4/nim/lib/system/orc.nim
+  /nix/store/n1hnq2il...-nim-unwrapped-2.2.4/nim/lib/system/alloc.nim
+  ...
+
+These are NOT runtime-load paths.  They are read only when
+``raise`` prints a stack trace, and `repro hardware probe` does
+not exercise that path.  The CRITICAL absolute-path class —
+``/nix/store/<hash>-clingo-X.Y/lib/libclingo.so`` from
+Nim's ``libCandidates``-via-nixbuild override — is GONE:
+
+  $ strings recipes/reproos-iso/build/de-rootfs/usr/bin/repro \
+      | grep -E '/nix/store/.*libclingo' | wc -l
+  0
+
+ELF INTERPRETER + RPATH (Phase 6b relocate result)
+---------------------------------------------------
+
+  interp : /repro/store/i3ibgfsk...-glibc-2.40-66/lib/ld-linux-x86-64.so.2
+  rpath  : /repro/store/.../sqlite-3.51.2/lib
+          :/repro/store/.../glibc-2.40-66/lib
+          :/repro/store/.../gcc-14.3.0-lib/lib
+
+(Phase 6b correctly rewrote both PT_INTERP and DT_RUNPATH to
+/repro/store/* — every from-source ELF resolves DT_NEEDED via
+/repro/store, never /nix/store.)
+
+The DE-binary entries above are LAUNCHER SCRIPTS (85-112 bytes,
+sh shebang); the 2 /nix/store refs per launcher are cosmetic
+comments in the launcher wrapper, not runtime paths.
+
+CONCLUSION
+----------
+
+ISO is ready for install-time verification (Step 3 / M9.R.48.3).
+The M9.R.47 .rodata libclingo bake is closed all the way through
+the staged squashfs.  Remaining /nix/store strings in the staged
+``repro`` binary are non-runtime debug-info filenames.
