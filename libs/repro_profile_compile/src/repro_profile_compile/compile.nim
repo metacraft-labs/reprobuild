@@ -15,7 +15,7 @@
 ## and re-encode through `encodeRbpi` (Phase B). The JSON ->
 ## ProfileIntent -> RBPI round-trip is lossless by construction.
 
-import std/[os, osproc, strutils]
+import std/[os, osproc, parseutils, streams, strutils]
 from repro_core/paths import extendedPath
 
 import repro_profile
@@ -85,7 +85,28 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     stderr.writeLine("repro profile compile: " & compileCmd)
 
   try:
-    let compileRes = execCmdEx(compileCmd)
+    # Run nim from the reprobuild repo root so the upstream
+    # ``config.nims`` ``addPackagePath`` calls find their sibling
+    # libs via relative paths (``libs/nimcrypto``,
+    # ``../nimcrypto``, ...). Without this, the wrapper
+    # ``config.nims`` we staged at the profile dir kicks the include
+    # into the profile dir's CWD where ``libs/nimcrypto`` doesn't
+    # exist; the upstream's relative-path fallbacks all miss and
+    # the transitive ``import nimcrypto/sha2`` from
+    # ``repro_project_dsl`` blows up with "cannot open file".
+    #
+    # ``$REPROBUILD_REPO_ROOT`` is honoured by ``reprobuildRepoRoot``
+    # in this same library, but the upstream ``config.nims``'s
+    # candidate paths are still relative — only the CWD shift gets
+    # the relative sibling clones onto the path.
+    let nimArgv = parseCmdLine(compileCmd)
+    var p = startProcess(nimArgv[0], workingDir = repoRoot,
+                         args = nimArgv[1 .. ^1],
+                         options = {poUsePath, poStdErrToStdOut})
+    let output = p.outputStream.readAll()
+    let exitCode = p.waitForExit()
+    p.close()
+    let compileRes = (output: output, exitCode: exitCode)
     if compileRes.exitCode != 0:
       var err = new CompileFailure
       err.msg = "nim compile failed for " & profileRoot &
