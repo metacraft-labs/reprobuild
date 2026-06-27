@@ -32,3 +32,12 @@ nim-termctl=dev
 # recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
 # the --path as `../reprobuild-test-adapters/src`. Mainline branch is `main`.
 reprobuild-test-adapters=main
+
+# codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
+# etc.) imports `io_mon` and `stackable_hooks/propagation`; codetracer's .envrc
+# wires IO_MON_SRC / NIM_STACKABLE_HOOKS_SRC from the ../io-mon and
+# ../nim-stackable-hooks siblings. Pinned by SHA to the same validated pair this
+# repo's flake locks (io-mon-src / stackable-hooks-src) so the ct engine compiles
+# against the same io-mon the monitor uses.
+io-mon=f1dcd43f989d7f5d407f3133c46e676828c5cd6f
+nim-stackable-hooks=13eeb0a11a7a0d769d44cfd5bbce3644f2b067b9
