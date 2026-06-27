@@ -306,6 +306,13 @@
           };
 
           devShells.default = pkgs.mkShell {
+            # repro_solver's clingo bindings dlopen libclingo.so at module init.
+            # build_apps.sh clears NIX_LDFLAGS + LD_LIBRARY_PATH for every `nim c`
+            # (the .rodata-bake guard) so the binaries carry a bare
+            # `dlopen("libclingo.so")` with no rpath and rely on a runtime
+            # LD_LIBRARY_PATH (as build_apps.sh documents). Provide it so `repro`
+            # and the test binaries resolve clingo under `dev-exec`/CI `just test`.
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.clingo ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
