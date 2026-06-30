@@ -86,17 +86,29 @@ for tool in qemu-img qemu-nbd parted sgdisk mkfs.ext4 mkfs.vfat rsync grub-insta
   fi
 done
 
-# Locate the `repro` binary.  We use the locally-built one rather
-# than a PATH lookup so we exercise the same code the rest of the
-# campaign exercised.
-REPRO_BIN="$REPO_ROOT/apps/repro/.repro/output/install/usr/bin/repro"
-if [ ! -x "$REPRO_BIN" ]; then
-  # Fall back to PATH; the recipe orchestrator may have provisioned
-  # it via the dev shell.
+# Locate the `repro` binary.  Probe order:
+#   1. $REPRO_BIN env (caller override).
+#   2. $REPO_ROOT/build/bin/repro (build_apps.sh output -- the
+#      same binary the M9.R.46 driver scripts used).
+#   3. $REPO_ROOT/apps/repro/.repro/output/install/usr/bin/repro
+#      (per-recipe build output).
+#   4. PATH lookup (dev shell provisioned).
+REPRO_BIN="${REPRO_BIN:-}"
+if [ -z "$REPRO_BIN" ] || [ ! -x "$REPRO_BIN" ]; then
+  for cand in \
+    "$REPO_ROOT/build/bin/repro" \
+    "$REPO_ROOT/apps/repro/.repro/output/install/usr/bin/repro"; do
+    if [ -x "$cand" ]; then
+      REPRO_BIN="$cand"
+      break
+    fi
+  done
+fi
+if [ -z "$REPRO_BIN" ] || [ ! -x "$REPRO_BIN" ]; then
   REPRO_BIN="$(command -v repro 2>/dev/null || true)"
 fi
 if [ -z "$REPRO_BIN" ] || [ ! -x "$REPRO_BIN" ]; then
-  echo "[build-reproos-image] 'repro' binary not found" >&2
+  echo "[build-reproos-image] 'repro' binary not found; build via build_apps.sh first" >&2
   exit 65
 fi
 echo "[build-reproos-image] repro: $REPRO_BIN"
