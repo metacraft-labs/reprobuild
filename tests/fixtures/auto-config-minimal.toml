@@ -1,0 +1,38 @@
+# M9.R.50.3 -- minimal auto-config fixture for recipes/reproos-image.
+#
+# Spec: reprobuild-specs/ReproOS-Image-Recipe.md (M9.R.50.1) section 3.
+#
+# This is the smoke-fixture: the bare minimum the recipe needs to
+# produce a bootable qcow2.  Real installs (driven by the wizard
+# emitting a TOML) will have more fields; the recipe applies sane
+# defaults for any field omitted here.
+#
+# Password hash is the M9.R.46 fixture value ("reproos" hashed
+# with mkpasswd -m sha512crypt -S reproosMvpD1) -- same hash the
+# reproos-mvp-config.nim uses for the root account, so the smoke
+# fixture stays consistent across the campaign.
+
+hostname = "reproos-smoke"
+
+[user]
+name = "repro"
+# `mkpasswd -m sha512crypt -S reproosMvpD1 reproos`
+password_hash = "$6$reproosMvpD1$rrZAqlA3J4u9SLnxnaWWMcQAgVTXMplGNjmnt7yfZP3SyxEv.kE8Va8VbPVD0WBmlLhRrPYz3wO/U5O7Q1mvJ/"
+groups = ["wheel", "audio", "video"]
+shell = "/bin/bash"
+
+[disk]
+size_gb = 8
+
+[disk.layout]
+type = "uefi-ext4"
+esp_size_mib = 512
+
+[de]
+default = "sway"
+
+[network]
+ipv4 = "dhcp"
+
+[activities]
+enabled = []
