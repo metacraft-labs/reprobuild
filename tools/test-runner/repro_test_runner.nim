@@ -821,6 +821,42 @@ proc main() =
   for (k, v) in envPairs():
     baseEnv.add((k, v))
 
+  # Hermetic git/gpg environment for every test process. Tests run real
+  # ``git`` (init / commit / push to local remotes), and we must NOT let the
+  # host/runner's user or system git config or ``~/.gnupg`` leak in: a global
+  # ``commit.gpgsign = true`` (common on dev boxes / CI runners) makes an
+  # otherwise-plain test commit try to sign and fail with
+  # "gpg: signing failed: No secret key" — non-deterministic, depending on
+  # whatever the surrounding shell happens to carry. Point HOME, git's config
+  # discovery, and GNUPGHOME at a controlled sandbox so the suite is
+  # reproducible regardless of the invoking environment. Appended AFTER the
+  # ``envPairs`` snapshot so these win in the per-child ``childEnv[k] = v`` loop.
+  let hermeticHome = opts.resultsDir / "hermetic-home"
+  let hermeticGnupg = hermeticHome / ".gnupg"
+  createDir(hermeticHome)
+  createDir(hermeticGnupg)
+  when not defined(windows):
+    setFilePermissions(hermeticGnupg, {fpUserRead, fpUserWrite, fpUserExec})
+  writeFile(hermeticHome / ".gitconfig",
+    "[user]\n" &
+    "\tname = Reprobuild Test\n" &
+    "\temail = reprobuild-test@example.invalid\n" &
+    "[init]\n" &
+    "\tdefaultBranch = main\n" &
+    "[commit]\n" &
+    "\tgpgsign = false\n" &
+    "[tag]\n" &
+    "\tgpgsign = false\n" &
+    "[safe]\n" &
+    "\tdirectory = *\n")
+  for (k, v) in [
+      ("HOME", hermeticHome),
+      ("USERPROFILE", hermeticHome),
+      ("GIT_CONFIG_GLOBAL", hermeticHome / ".gitconfig"),
+      ("GIT_CONFIG_NOSYSTEM", "1"),
+      ("GNUPGHOME", hermeticGnupg)]:
+    baseEnv.add((k, v))
+
   let args = WorkerArgs(
     queue: addr queue,
     resultsLock: addr resultsLock,
