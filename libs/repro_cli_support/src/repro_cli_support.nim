@@ -3641,7 +3641,19 @@ proc providerGraphStoreRoot(base: string): string =
 proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode;
                           providerArtifactId, providerSnapshotPath,
-                          pathEnv: string): string =
+                          pathEnv: string;
+                          extensionSignature = ""): string =
+  ## ``extensionSignature`` (Workspace-Manifest-Optional MO-13, correcting
+  ## MO-6) folds the ACTIVE ``projectExtension`` set into the key. The disk
+  ## cache is otherwise keyed on the BASE snapshot's content digest, so an
+  ## extension toggled between two builds — whose fragments are merged into
+  ## ``refresh.snapshot`` in-memory AFTER the persisted snapshot is read —
+  ## would have left the key unchanged and forced a ``--force-rebuild`` to
+  ## re-lower. Including the signature makes toggling an extension on/off
+  ## invalidate the cache without ``--force-rebuild`` (and toggling back is a
+  ## cache hit, since the signature is deterministic for a given extension set).
+  ## Empty when no extension is active, so the legacy single-project key is
+  ## byte-identical.
   var payload = ""
   payload.addCacheField(LoweredGraphAlgorithmVersion)
   payload.addCacheField(mode.modeName)
@@ -3655,6 +3667,7 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(fileContentDigest(providerSnapshotPath))
   else:
     payload.addCacheField("")
+  payload.addCacheField(extensionSignature)
   if mode == tpmPathOnly:
     payload.addCacheField(pathEnv)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
@@ -4799,7 +4812,7 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string)
+                            publicCliPath, workRoot: string): string
   ## Workspace-Manifest-Optional MO-6 — forward declaration. Defined
   ## after ``prepareBuildGraphInspection`` (which it reuses to compile +
   ## evaluate each discovered extension recipe). ``executeBuildTarget``
@@ -5751,9 +5764,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # checked-out extension auto-activates without any explicit enable
     # step. When no sibling extension targets this project the snapshot is
     # left byte-identical and the legacy single-project build is preserved.
-    mergeProjectExtensions(refresh.snapshot, projectRoot,
-      artifact.projectInterface.packageName, effectiveMode, publicCliPath,
-      workRoot)
+    let extensionSignature = mergeProjectExtensions(refresh.snapshot,
+      projectRoot, artifact.projectInterface.packageName, effectiveMode,
+      publicCliPath, workRoot)
 
     var selectedActionId = parsedTarget.selectedActionId
     if selectDefaultAction and selectedActionId.len == 0:
@@ -5826,7 +5839,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           actionIds, explicitTargets, sel, collectionMembers))
 
     let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
-      providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
+      providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
+      extensionSignature)
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
@@ -10541,6 +10555,87 @@ proc discoverNestedDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
         visibility: wvPublic))
   result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
 
+proc discoverSiblingDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
+  ## MO-12 — discover SIBLING develop-mode dependency checkouts (the RA-22
+  ## develop-override set, one level up from the workspace) recorded in
+  ## ``<workspaceRoot>/.repro/develop-overrides.toml`` and return them as
+  ## participating ``ResolvedRepo``s, mirroring ``discoverNestedDevelopDeps``
+  ## for the nested case so the committed-lock-derived workspace folds sibling
+  ## deps into BOTH its participating set and (via ``lockedDepsForWorkspace``)
+  ## the committed lock's ``deps``.
+  ##
+  ## Each override's ``local_path`` (e.g. ``../sibling``) is resolved relative
+  ## to the workspace root and folded in ONLY when that location is BOTH a git
+  ## checkout AND a reprobuild project — the same two discriminators the nested
+  ## scan uses — so an override pointing at a non-checked-out / non-reprobuild
+  ## path is skipped rather than enforced. ``path`` is the workspace-relative
+  ## location (``../sibling``), ``revision`` the sibling's own ``HEAD``,
+  ## ``fetchUrl`` its ``origin``. Sorted by ``path`` for a deterministic set.
+  result = @[]
+  let root = absolutePath(workspaceRoot)
+  let overridesOpt =
+    try: readDevelopOverridesFile(root)
+    except CatchableError: return result
+  if overridesOpt.isNone:
+    return result
+  var seenPaths: seq[string] = @[]
+  for entry in listOverrides(overridesOpt.get()):
+    if entry.package.len == 0 or entry.local_path.len == 0:
+      continue
+    let depAbs =
+      if entry.local_path.isAbsolute: os.normalizedPath(entry.local_path)
+      else: os.normalizedPath(root / entry.local_path)
+    if depAbs in seenPaths: continue
+    seenPaths.add(depAbs)
+    if not dirExists(extendedPath(depAbs)):
+      continue
+    if not dirExists(extendedPath(depAbs / ".git")) and
+        not fileExists(extendedPath(depAbs / ".git")):
+      # A develop-mode participant must be a repo the gate can probe for
+      # cleanliness/publication (a ``.git`` FILE is a worktree/submodule
+      # gitlink; accept it too).
+      continue
+    var recipePath = ""
+    try:
+      recipePath = resolveProjectFile(depAbs).path
+    except CatchableError:
+      continue
+    if recipePath.len == 0:
+      continue
+    let facts = committedLockRepoFacts(depAbs)
+    let revision =
+      if facts.headSha.len > 0: facts.headSha
+      elif facts.branch.len > 0: facts.branch
+      else: "HEAD"
+    let relPath = relativePath(depAbs, root).replace('\\', '/')
+    result.add(ResolvedRepo(
+      name: entry.package,
+      path: relPath,
+      remoteName: "origin",
+      fetchUrl: facts.originUrl,
+      revision: revision,
+      vcs: defaultRepoVcs,
+      stability: defaultRepoStability,
+      visibility: wvPublic))
+  result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
+
+proc discoverDevelopDeps(workspaceRoot: string): seq[ResolvedRepo] =
+  ## MO-7/MO-12 — the full on-disk develop-mode participating set folded into a
+  ## committed-lock-only workspace: NESTED deps under ``deps/vendor/…`` (MO-7)
+  ## PLUS SIBLING deps from the RA-22 develop-override set one level up
+  ## (MO-12), deduped by workspace-relative ``path`` and path-sorted for a
+  ## deterministic set. When neither is present the result is empty and the
+  ## derived set is exactly the one workspace repo (MO-2 behaviour).
+  result = discoverNestedDevelopDeps(workspaceRoot)
+  var seen: seq[string] = @[]
+  for r in result:
+    seen.add(r.path)
+  for s in discoverSiblingDevelopDeps(workspaceRoot):
+    if s.path in seen: continue
+    seen.add(s.path)
+    result.add(s)
+  result.sort(proc(a, b: ResolvedRepo): int = cmp(a.path, b.path))
+
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-8 — self-describing integrity computation.
 # ---------------------------------------------------------------------------
@@ -10573,7 +10668,7 @@ proc collectTreeEntries(dirAbs: string): seq[tuple[path, content: string]] =
     except CatchableError: content = ""
     result.add((path: rel, content: content))
 
-proc computeDepIntegrity(repoAbsPath, headSha: string): string =
+proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
   ## The self-describing integrity multihash for a locked dependency:
   ##   * a git checkout with a resolved HEAD commit -> the VCS-native object
   ##     id (``git-sha1:`` / ``git-sha256:``); the commit IS the integrity, so
@@ -10589,14 +10684,15 @@ proc lockedDepsForWorkspace(workspaceRoot: string): seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
-  ## repo (``path = "."``) is always recorded; any nested develop-mode deps
-  ## (``discoverNestedDevelopDeps``) follow. ``repro lock refresh`` serializes
-  ## these into the v2 committed lock so a lock-file-only workspace is fully
-  ## self-describing.
+  ## repo (``path = "."``) is always recorded; any develop-mode deps
+  ## (``discoverDevelopDeps`` — NESTED deps under ``deps/…`` AND SIBLING
+  ## develop-override deps one level up) follow. ``repro lock refresh``
+  ## serializes these into the v2 committed lock so a lock-file-only workspace
+  ## — including its sibling develop deps — is fully self-describing.
   result = @[]
   let root = absolutePath(workspaceRoot)
   let rootFacts = committedLockRepoFacts(root)
-  let nested = discoverNestedDevelopDeps(root)
+  let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
   let rootName = if bare.len > 0: bare else: "workspace"
@@ -10689,9 +10785,10 @@ proc committedLockDerivedProject(workspaceRoot: string):
         rootName = d.name
         rootRef = d.coordinates.gitRef
         rootRevision = d.coordinates.revision
-    # Fold in on-disk nested develop deps the lock does not (yet) carry.
+    # Fold in on-disk develop deps the lock does not (yet) carry — NESTED deps
+    # (MO-7) and SIBLING develop-override deps one level up (MO-12).
     var extraDepends: seq[string] = @[]
-    for nd in discoverNestedDevelopDeps(root):
+    for nd in discoverDevelopDeps(root):
       if nd.path in lockedPaths: continue
       repos.add(nd)
       extraDepends.add(nd.name)
@@ -10717,7 +10814,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
     if facts.headSha.len > 0: facts.headSha
     elif facts.branch.len > 0: facts.branch
     else: "HEAD"
-  let nestedDeps = discoverNestedDevelopDeps(root)
+  let nestedDeps = discoverDevelopDeps(root)
   var dependsOn: seq[string] = @[]
   for dep in nestedDeps:
     dependsOn.add(dep.name)
@@ -11767,8 +11864,9 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   # sibling's fragments into this project's snapshot (see the matching
   # call in ``executeBuildTarget``). Skipped when this proc is reused to
   # evaluate an extension recipe itself so extensions do not recurse.
+  var extensionSignature = ""
   if mergeExtensions:
-    mergeProjectExtensions(refresh.snapshot, projectRoot,
+    extensionSignature = mergeProjectExtensions(refresh.snapshot, projectRoot,
       artifact.projectInterface.packageName, effectiveMode, publicCliPath,
       workRoot)
   result.snapshot = refresh.snapshot
@@ -11783,7 +11881,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   let pathEnv = getEnv("PATH")
   let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
-    result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv)
+    result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
+    extensionSignature)
   let cachePath = loweredGraphCachePath(outDir, selectedActionId)
   result.loweredGraphCachePath = cachePath
   let cachedLowered =
@@ -11968,10 +12067,58 @@ proc fragmentTargetNames(frags: seq[StoredGraphFragment]): seq[string] =
         if target.name.len > 0 and result.find(target.name) < 0:
           result.add(target.name)
 
+proc rehomeExtensionFragment(frag: StoredGraphFragment;
+                             originalPackageName: string): StoredGraphFragment =
+  ## Workspace-Manifest-Optional MO-13 (correcting MO-6) — re-home an
+  ## extension fragment's exported targets under ``originalPackageName``.
+  ## MO-6 merged an extension's edges/targets into the original project's
+  ## GRAPH, but the target-export-table rows still carried the EXTENSION's
+  ## own ``owningPackage`` (e.g. ``extProj``), so a target was not reachable
+  ## under the original project's package name and
+  ## ``repro build <orig>:<ext-target>`` did not resolve. Rewriting the
+  ## ``owningPackage`` of every ``reprobuild.target-export-table.v1/v2``
+  ## entry to ``originalPackageName`` re-homes the target: it now appears
+  ## under the original project in ``--list-targets`` and resolves through
+  ## the qualified ``<originalProject>:<ext-target>`` selector path. The
+  ## action / build-target nodes (which carry no owning-package field) and
+  ## every other fragment byte are left untouched.
+  result = frag
+  for ni in 0 ..< result.nodes.len:
+    let node = result.nodes[ni]
+    if node.kind == gnkMetadata and
+        (node.stableName == "reprobuild.target-export-table.v1" or
+         node.stableName == "reprobuild.target-export-table.v2"):
+      var table = decodeTargetExportTablePayload(toBytes(node.payload))
+      var changed = false
+      for ei in 0 ..< table.entries.len:
+        if table.entries[ei].owningPackage != originalPackageName:
+          table.entries[ei].owningPackage = originalPackageName
+          changed = true
+      # Re-derive cross-package ambiguity over the re-homed owners so a
+      # qualified candidate string never references the extension package.
+      table.ambiguities = @[]
+      var packagesByName = initTable[string, seq[string]]()
+      for entry in table.entries:
+        if not packagesByName.hasKey(entry.name):
+          packagesByName[entry.name] = @[]
+        if packagesByName[entry.name].find(entry.owningPackage) < 0:
+          packagesByName[entry.name].add(entry.owningPackage)
+      for name, pkgs in packagesByName.pairs:
+        if pkgs.len >= 2:
+          var candidates: seq[string] = @[]
+          for pkg in pkgs:
+            candidates.add(pkg & ":" & name)
+          candidates.sort()
+          table.ambiguities.add(TargetExportAmbiguity(name: name,
+            candidates: candidates))
+      if changed or table.ambiguities.len > 0:
+        result.nodes[ni].payload = fromBytes(
+          encodeTargetExportTablePayload(table))
+
 proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
                             projectRoot, originalPackageName: string;
                             mode: ToolProvisioningMode;
-                            publicCliPath, workRoot: string) =
+                            publicCliPath, workRoot: string): string =
   ## Fold every present ``projectExtension`` sibling's provider-graph
   ## fragments into ``snapshot`` (the target project's graph). Composition
   ## rules (Project-DSL-Composition.md §"Project extensions"):
@@ -11983,6 +12130,14 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   ##   * **Conflicts diagnosed, not silently resolved.** Two contributors
   ##     (an extension and the base, or two extensions) that define the
   ##     same target name raise a clear error naming BOTH.
+  ##
+  ## Returns the ACTIVE-extension SIGNATURE (MO-13): a deterministic digest
+  ## of the merged extension set (each extension's name + the digest of the
+  ## fragments it contributed), folded into the lowered-graph disk-cache key
+  ## so toggling an extension on/off invalidates the cache WITHOUT
+  ## ``--force-rebuild`` (and toggling back is a cache hit). Empty string when
+  ## no extension is active, so the legacy single-project key is unchanged.
+  result = ""
   if originalPackageName.len == 0:
     return
   let discovered = discoverProjectExtensionRecipes(projectRoot,
@@ -11995,6 +12150,7 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
   for name in fragmentTargetNames(snapshot.fragments):
     if not targetOrigin.hasKey(name):
       targetOrigin[name] = "base project '" & originalPackageName & "'"
+  var signaturePayload = ""
   for ext in discovered:
     # Reuse the standard compile + provider-evaluate pipeline; the
     # extension is just another DSL recipe. ``mergeExtensions = false``
@@ -12011,8 +12167,23 @@ proc mergeProjectExtensions(snapshot: var ProviderGraphSnapshot;
           " and projectExtension '" & ext.extName & "' (" & ext.recipePath &
           "). Two contributors must not define the same target name.")
       targetOrigin[name] = "projectExtension '" & ext.extName & "'"
+    # Re-home the extension's exported targets under the original project,
+    # then merge the (re-homed) fragments into the base graph.
+    var fragDigestPayload = ""
     for f in extFrags:
-      snapshot.fragments.add(f)
+      let rehomed = rehomeExtensionFragment(f, originalPackageName)
+      snapshot.fragments.add(rehomed)
+      fragDigestPayload.add(rehomed.fragmentDigest)
+      for node in rehomed.nodes:
+        fragDigestPayload.add(node.stableName)
+        fragDigestPayload.add(node.payload)
+    signaturePayload.addCacheField(ext.extName)
+    signaturePayload.addCacheField(
+      digestHex(blake3DomainDigest(fragDigestPayload.bytesOf(),
+        hdMetadataEnvelope)))
+  if signaturePayload.len > 0:
+    result = digestHex(blake3DomainDigest(signaturePayload.bytesOf(),
+      hdMetadataEnvelope))
 
 proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
                            publicCliPath, workRoot: string;
@@ -19052,6 +19223,89 @@ proc lockedShaFromStore*(store: LockStore; project, repoName, repoPath: string):
   ""
 
 # ---------------------------------------------------------------------------
+# MO-13 (correcting MO-5) — the evidence-PUBLISH verb.
+#
+# MO-5 wired the gather (``gatherRepoEvidence``) + put (``store.putEvidence``)
+# building blocks and the gate-side CONSUME path, but left the dedicated owner
+# verb that PUBLISHES an evidence-only repo's ``WorkspaceVcsEvidence`` to its
+# store as follow-up. ``publishRoutedEvidence`` is that verb's worker: it
+# routes each evidence-only repo to its MO-4-assigned backend and publishes the
+# source-free triple. ``repro workspace publish-evidence`` dispatches to it.
+# ---------------------------------------------------------------------------
+
+type
+  EvidencePublishOutcome* = object
+    ## Result of publishing ONE evidence-only repo's source-free evidence.
+    repoName*: string
+    repoPath*: string
+    backendKind*: string
+    published*: bool
+    headSha*: string
+    diagnostic*: string
+
+proc publishRoutedEvidence*(workspaceRoot: string;
+    repos: seq[ResolvedRepo]; projectName: string;
+    identity: GitToolIdentity; observedAtUnixMs: int64):
+    seq[EvidencePublishOutcome] =
+  ## MO-13 (correcting MO-5) — the OWNER-side publish operation the
+  ## ``repro workspace publish-evidence`` verb performs. For EVERY repo marked
+  ## ``participation = "evidence-only"`` (``isEvidenceOnlyRepo``), gather its
+  ## source-free ``WorkspaceVcsEvidence`` triple from the local checkout
+  ## (``gatherRepoEvidence`` — NO source ever captured) and publish it through
+  ## the repo's MO-4-assigned backend (``store.putEvidence``). A no-op (empty
+  ## result) when the workspace declares no ``[[locking.route]]`` entries or no
+  ## repo is evidence-only, so the all-public default is unchanged. An
+  ## evidence-only repo with no assigned backend, or no local checkout to
+  ## observe, is reported as a clear non-published outcome (the owner must
+  ## publish from a real, clean, published checkout) — never silently skipped.
+  result = @[]
+  let locking = loadLockingRouting(workspaceRoot)
+  if locking.route.len == 0: return @[]
+  var anyEvidenceOnly = false
+  for repo in repos:
+    if isEvidenceOnlyRepo(repo):
+      anyEvidenceOnly = true
+      break
+  if not anyEvidenceOnly: return @[]
+  let assignments = resolveRepoBackends(
+    locking, repos, workspaceRoot, identity, identity.binaryPath)
+  var storeByName = initTable[string, LockStore]()
+  var kindByName = initTable[string, string]()
+  for asg in assignments:
+    storeByName[asg.repoName] = asg.store
+    kindByName[asg.repoName] = asg.backendKind
+  let toolDigest = digestHex(identity)
+  for repo in repos:
+    if not isEvidenceOnlyRepo(repo): continue
+    var outc = EvidencePublishOutcome(
+      repoName: repo.name, repoPath: repo.path,
+      backendKind: kindByName.getOrDefault(repo.name))
+    let store = storeByName.getOrDefault(repo.name)
+    if store.isNil:
+      outc.diagnostic = "evidence-only repo '" & repo.name &
+        "' has no assigned locking backend to publish evidence to (add a " &
+        "`[[locking.route]]` entry for its visibility tier)"
+      result.add(outc); continue
+    let repoAbs = workspaceRoot / repo.path
+    if not dirExists(extendedPath(repoAbs / ".git")):
+      outc.diagnostic = "evidence-only repo '" & repo.name &
+        "' has no local checkout at '" & repo.path & "' to gather evidence " &
+        "from — the OWNER publishes from a clean, published checkout at the " &
+        "locked revision"
+      result.add(outc); continue
+    let triple = gatherRepoEvidence(
+      identity, repoAbs, repo.path, toolDigest, observedAtUnixMs)
+    for rec in triple:
+      if rec.op == wvqHeadSha and rec.status == wvesResolved:
+        outc.headSha = rec.headSha
+    let put = store.putEvidence(projectName, repo.name, triple)
+    outc.published = put.outcome == spoOk
+    if not outc.published:
+      outc.diagnostic = "putEvidence failed for evidence-only repo '" &
+        repo.name & "': " & put.diagnostic
+    result.add(outc)
+
+# ---------------------------------------------------------------------------
 # MO-9 — populateLockedDeps bodies + the unified resolver + integrity verify.
 # ---------------------------------------------------------------------------
 
@@ -19214,13 +19468,42 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
     case d.coordinates.kind
     of ckVcs:
       if dirExists(extendedPath(repoAbs / ".git")):
+        if d.integrity.startsWith("blake3:"):
+          # MO-13 (correcting MO-9) — NON-CONSERVATIVE where SAFE. A lock
+          # refreshed BEFORE the repo's first commit records a ``blake3:``
+          # NAR-style tree hash (a transient content-address) rather than a
+          # git object id. MO-9 conservatively SKIPPED such a lock on a git
+          # checkout (the git branch only handled ``git-sha`` integrities), so
+          # a tampered pre-commit hash slipped through. It is SAFE to verify it
+          # non-conservatively: the tree hash is content-addressed and
+          # recomputable from the materialized working tree, regardless of the
+          # locked revision (empty or not). A tamper now FAILS with a clear
+          # diagnostic instead of being silently skipped.
+          let observed = narStyleTreeMultihash(collectTreeEntries(repoAbs))
+          if observed != d.integrity:
+            result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+              expected: d.integrity, observed: observed,
+              diagnostic: "recomputed tree hash " & observed & " at '" &
+                d.path & "' does not match the lock's recorded pre-commit " &
+                "integrity " & d.integrity & " (the lock predates the repo's " &
+                "first commit; regenerate it if the tree changed legitimately)"))
+          continue
         # Git checkout: the VCS-native integrity is the commit object at the
-        # locked revision. Verify ONLY when the lock pins a concrete git
-        # revision AND records a git-native integrity — a lock refreshed before
-        # the repo had any commit (empty revision / a transient blake3 tree
-        # hash) is NOT refused; there is no content-addressed coordinate to
-        # check against, and the cleanliness/publication stages already cover it.
-        if d.coordinates.revision.len == 0 or gitBin.len == 0: continue
+        # locked revision. A MISSING git binary is the one genuinely
+        # unverifiable case here (the host cannot recompute a git object id) —
+        # skip it rather than fail an environment without git.
+        if gitBin.len == 0: continue
+        if d.coordinates.revision.len == 0:
+          # MO-13 (correcting MO-9) — a git-native integrity with NO concrete
+          # revision genuinely cannot be verified (there is no coordinate to
+          # recompute the object id at). Surface a CLEAR diagnostic rather than
+          # skipping silently, so a stale/malformed lock is named, not ignored.
+          result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+            expected: d.integrity, observed: "",
+            diagnostic: "lock records a git-native integrity " & d.integrity &
+              " for '" & d.path & "' but pins no concrete revision to verify " &
+              "it at (regenerate the lock at the repo's current revision)"))
+          continue
         if not d.integrity.startsWith("git-sha"): continue
         # Observe the repo: the locked revision's commit object must be present.
         let rp = execCmdEx(quoteShell(gitBin) & " -C " & quoteShell(repoAbs) &
@@ -19251,10 +19534,32 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
             expected: d.integrity, observed: observed,
             diagnostic: "materialized content at '" & d.path &
               "' does not match the lock's recorded integrity"))
-    else:
-      # store / registry coordinates: integrity verification deferred (no
-      # fixture produces those coordinates yet — honest MO-8 boundary).
-      discard
+    of ckStore:
+      # MO-11 — a repro-store-realized solved package. The store address is the
+      # content hash of the package's solved identity (name + version +
+      # platform), so RECOMPUTE that address and require BOTH the ``storeHash``
+      # coordinate AND the recorded integrity to equal it. Tampering the
+      # coordinate, the integrity, or any identity field diverges -> mismatch.
+      let recomputed = solvedPackageStoreHash(d.name, d.version, ld.platform)
+      let observed = formatMultihash("blake3", recomputed)
+      if d.coordinates.storeHash != recomputed or observed != d.integrity:
+        result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+          expected: d.integrity, observed: observed,
+          diagnostic: "recomputed store integrity " & observed &
+            " at the locked store coordinates does not match the lock's " &
+            "recorded integrity " & d.integrity))
+    of ckRegistry:
+      # MO-11 — a registry-sourced solved package. RECOMPUTE the package
+      # checksum over the locked registry coordinate (registry + name +
+      # version) and compare to the recorded integrity.
+      let observed = solvedPackageRegistryIntegrity(
+        d.coordinates.registryName, d.name, d.coordinates.registryVersion)
+      if observed != d.integrity:
+        result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+          expected: d.integrity, observed: observed,
+          diagnostic: "recomputed registry integrity " & observed &
+            " at the locked registry coordinates does not match the lock's " &
+            "recorded integrity " & d.integrity))
 
 proc commitReachableLocally(identity: GitToolIdentity;
                             repoPath, sha: string): bool =
@@ -19808,8 +20113,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let manifestsRoot = args.workspaceRoot / ".repo" / "manifests"
     if dirExists(manifestsRoot) and resolved.projectName.len > 0:
       try:
-        lockedShasByPath = latestLockShasViaGit(
-          identity, manifestsRoot, resolved.projectName).shas
+        # MO-10: route the RA-14 optimized-fetch lock read through the abstract
+        # ``LockStore``. The git-checkout backend's ``latestLockShas`` delegates
+        # to the byte-identical ``latestLockShasViaGit``; we take its ``shas``
+        # exactly as before.
+        let fetchStore: LockStore =
+          newGitCheckoutLockStore(identity, manifestsRoot)
+        lockedShasByPath = fetchStore.latestLockShas(resolved.projectName).shas
       except CatchableError:
         lockedShasByPath = initTable[string, string]()
 
@@ -21482,7 +21792,16 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
       outcome.report.manifestLayerRoot.len > 0:
     let identity = ensureGitToolResolvable(
       parsed.toolProvisioning, getEnv("PATH"))
-    let pub = publishWorkspaceLock(identity, outcome.report.manifestLayerRoot)
+    # MO-10: route the RA-7 publish through the abstract ``LockStore``. The
+    # git-checkout backend's ``publishPending`` delegates to the byte-identical
+    # ``publishWorkspaceLock``; the 1:1 outcome mapping recovers the exact
+    # ``LockPublishResult`` the branch below acts on.
+    let publishStore: LockStore =
+      newGitCheckoutLockStore(identity, outcome.report.manifestLayerRoot)
+    let storePub = publishStore.publishPending()
+    let pub = LockPublishResult(
+      outcome: lockPublishFromStorePut(storePub.outcome),
+      diagnostic: storePub.diagnostic)
     case pub.outcome
     of lpoPublished:
       stdout.writeLine("workspace lock: " & pub.diagnostic)
@@ -24955,7 +25274,18 @@ proc runCheckCommand*(args: openArray[string]): int =
     if report.exitCode == 0 and report.manifestLayerRoot.len > 0:
       let identity = ensureGitToolResolvable(
         parsed.toolProvisioning, getEnv("PATH"))
-      let pub = publishWorkspaceLock(identity, report.manifestLayerRoot)
+      # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
+      # ``LockStore`` (mirroring the gate's already-routed lock READ and
+      # ``executePush``). The git-checkout backend's ``publishPending`` delegates
+      # to the byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping
+      # recovers the exact ``LockPublishResult`` the gate policy below branches
+      # on.
+      let publishStore: LockStore =
+        newGitCheckoutLockStore(identity, report.manifestLayerRoot)
+      let storePub = publishStore.publishPending()
+      let pub = LockPublishResult(
+        outcome: lockPublishFromStorePut(storePub.outcome),
+        diagnostic: storePub.diagnostic)
       case pub.outcome
       of lpoPublished:
         stderr.writeLine("repro check: " & pub.diagnostic)
@@ -24991,7 +25321,11 @@ proc runCheckCommand*(args: openArray[string]): int =
             autoRun = offerFixesOptIn(),
             isTty = isatty(stdin))
           if dec == odRun:
-            pub2 = publishWorkspaceLock(identity, report.manifestLayerRoot)
+            # MO-10: the offered re-publish also routes through the store.
+            let storePub2 = publishStore.publishPending()
+            pub2 = LockPublishResult(
+              outcome: lockPublishFromStorePut(storePub2.outcome),
+              diagnostic: storePub2.diagnostic)
             if pub2.outcome in {lpoPublished, lpoNothingToPublish}:
               stderr.writeLine("repro check: lock re-publish succeeded: " &
                 pub2.diagnostic)
@@ -25945,46 +26279,17 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
 proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
     tuple[resolved: ResolvedProject;
           workspaceLocal: Option[WorkspaceLocal]] =
-  ## Same dispatch rule as M10 / M11: prefer ``.repo/workspace.toml``
-  ## when it declares at least one ``[[manifest]]`` layer (composer
-  ## mode), otherwise look up the named project / variant. A
-  ## metadata-only workspace.toml (M13) routes to single-project mode.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
-    let resolved = composeManifestLayers(
-      workspaceLocal, parsed.workspaceRoot, absToml)
-    return (resolved, some(workspaceLocal))
-  if parsed.projectName.len == 0:
-    # Allow a metadata-only workspace.toml to supply the project name.
-    if fileExists(workspaceToml):
-      try:
-        let recordedProject =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recordedProject.len > 0:
-          var withProject = parsed
-          withProject.projectName = recordedProject
-          return resolveWorkspaceStatusProject(withProject)
-      except WorkspaceManifestParseError:
-        discard
-    raise newException(ValueError,
-      "`repro workspace status` requires either `.repo/workspace.toml` " &
-        "or a <project> argument; neither was present at " &
-        parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" /
-    (parsed.projectName & ".toml")
-  let variantFile = manifestsRoot / "variants" /
-    (parsed.projectName & ".toml")
-  if fileExists(projectFile):
-    return (resolveProject(projectFile), none(WorkspaceLocal))
-  if fileExists(variantFile):
-    return (resolveVariant(variantFile), none(WorkspaceLocal))
-  raise newException(ValueError,
-    "no project or variant named '" & parsed.projectName &
-      "' found under '" & manifestsRoot &
-      "' (looked for '" & projectFile & "' and '" & variantFile & "')")
+  ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
+  ## (collapsed from the former per-command copy). Same dispatch rule as M10 /
+  ## M11: prefer ``.repo/workspace.toml`` when it declares at least one
+  ## ``[[manifest]]`` layer (composer mode), otherwise look up the named
+  ## project / variant. A metadata-only workspace.toml (M13) routes to
+  ## single-project mode; a committed-lock-only workspace (no manifest data on
+  ## disk) now resolves its participating set through the unified
+  ## committed-lock source instead of raising — every manifest-present path is
+  ## byte-unchanged.
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro workspace status`")
 
 proc pickStatusManifestLayerRoot(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal]): string =
@@ -26495,37 +26800,17 @@ proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveHealthProject(parsed: HealthArgs): ResolvedProject =
-  ## Same dispatch rule the M12 status / list commands use: compositional
-  ## workspace.toml → composer; otherwise the named project / variant, or
-  ## the project recorded in a metadata-only workspace.toml. Raises on a
-  ## missing / unresolvable project so the caller can mark the manifest
-  ## check ``fail``.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    return composeManifestLayersFromFile(workspaceToml)
-  var projectName = parsed.projectName
-  if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
-  if projectName.len == 0:
-    raise newException(ValueError,
-      "no project resolved: pass a <project> argument or initialize " &
-        "`.repo/workspace.toml`")
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  if fileExists(variantFile):
-    return resolveVariant(variantFile)
-  raise newException(ValueError,
-    "no project or variant named '" & projectName & "' under '" &
-      manifestsRoot & "'")
+  ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
+  ## (collapsed from the former per-command copy). Compositional
+  ## workspace.toml → composer; otherwise the named project / variant, or the
+  ## project recorded in a metadata-only workspace.toml. A committed-lock-only
+  ## workspace (no manifest data on disk) now resolves through the unified
+  ## committed-lock source instead of raising, so ``repro health`` reports the
+  ## same manifest status the lock-handling commands do. Still raises on a
+  ## genuinely missing / unresolvable project so the caller can mark the
+  ## manifest check ``fail``.
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro health`").resolved
 
 proc reproSelfPath(): string =
   ## Best-effort absolute path to the running ``repro`` binary, used to
@@ -29235,37 +29520,22 @@ proc parseAddArgs*(args: openArray[string]): AddArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveAddProject(parsed: AddArgs): ResolvedProject =
-  ## Same single-project resolution rule as ``remove`` (RA-9): a
-  ## metadata-only ``.repo/workspace.toml`` (``[workspace].project``) or a
-  ## compositional one both resolve to a flat repo set. ``add`` only supports
-  ## the single-project (non-compositional) form because it MUTATES the
-  ## project file; a compositional workspace has no single owning file to
-  ## append the new include to.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
+  ## MO-10 — delegates the single-project resolution to the shared
+  ## ``resolveWorkspaceProjectShared`` ladder (collapsed from the former
+  ## per-command copy). ``add`` MUTATES the owning project file, so it keeps
+  ## its mutation-specific guard: a compositional (multi-layer) workspace has
+  ## no single owning file to append the new include to, so it is refused here
+  ## BEFORE delegating (the shared ladder would otherwise compose the layers).
+  ## For the non-compositional path the shared ladder resolves the named
+  ## project / variant (or the project recorded in a metadata-only
+  ## workspace.toml) identically to the old projects-only copy for every
+  ## manifest-present workspace.
   if isCompositionalWorkspaceToml(parsed.workspaceRoot):
     raise newException(ValueError,
       "`repro add` is not supported in a compositional (multi-layer) " &
         "workspace; add the repo to the owning manifest layer directly")
-  var projectName = parsed.projectName
-  if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
-  if projectName.len == 0:
-    raise newException(ValueError,
-      "`repro add <repo>` requires either `.repo/workspace.toml` or a " &
-        "project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  raise newException(ValueError,
-    "no project named '" & projectName & "' found under '" & manifestsRoot & "'")
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro add <repo>`").resolved
 
 proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
   ## RA-22 develop-vs-binary POLICY DEFAULT. The decision is driven ENTIRELY
@@ -29664,38 +29934,15 @@ proc parseRemoveArgs*(args: openArray[string]): RemoveArgs =
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
-  ## Same single-project / composer dispatch rule as ``checkout``: a
-  ## metadata-only ``workspace.toml`` (``[workspace].project``) or a
-  ## compositional one both resolve to a flat repo set we can scan.
-  let workspaceToml = parsed.workspaceRoot / ".repo" / "workspace.toml"
-  if isCompositionalWorkspaceToml(parsed.workspaceRoot):
-    let absToml = absolutePath(workspaceToml)
-    let workspaceLocal = readWorkspaceLocal(absToml)
-    return composeManifestLayers(workspaceLocal, parsed.workspaceRoot, absToml)
-  var projectName = parsed.projectName
-  if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
-  if projectName.len == 0:
-    raise newException(ValueError,
-      "`repro remove <repo>` requires either `.repo/workspace.toml` or a " &
-        "project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
-  let manifestsRoot = parsed.workspaceRoot / ".repo" / "manifests"
-  let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-  let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  if fileExists(variantFile):
-    return resolveVariant(variantFile)
-  raise newException(ValueError,
-    "no project or variant named '" & projectName & "' found under '" &
-      manifestsRoot & "'")
+  ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
+  ## (collapsed from the former per-command copy). Same single-project /
+  ## composer dispatch rule as ``checkout``: a metadata-only ``workspace.toml``
+  ## (``[workspace].project``) or a compositional one both resolve to a flat
+  ## repo set we can scan; a committed-lock-only workspace (no manifest data on
+  ## disk) now resolves through the unified committed-lock source instead of
+  ## raising — every manifest-present path is byte-unchanged.
+  resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
+    "`repro remove <repo>`").resolved
 
 proc dropFragmentInclude(projectFile, fragmentAbs: string): bool =
   ## Remove the ``includes`` entry that resolves to ``fragmentAbs`` from
@@ -31683,13 +31930,20 @@ proc writeWorkspacePartitionFile(path: string;
 
 proc buildClosureForShard(assignedSelectors: seq[string];
                           publicCliPath: string;
-                          mode: ToolProvisioningMode = tpmUnspecified):
+                          mode: ToolProvisioningMode = tpmUnspecified;
+                          lockFlag = ""):
     tuple[code: int; output: string] =
   ## Builds the closure of the assigned test edges via ``runBuildCommand``.
   ## The strategy note in the milestone documents the trade-off: building
   ## the whole ``:test`` aggregate is simpler than computing the union of
   ## per-shard closures and lets the engine's existing dedup do its job;
   ## M3 will optimise this once the benchmark milestone is on the table.
+  ##
+  ## ``lockFlag`` (Workspace-Manifest-Optional MO-13, correcting MO-1) is the
+  ## ``--lock=<file>`` carry-through. When set, the sharded build PINS the
+  ## locked solved graph — the sharded run builds against the LOCKED
+  ## revisions, exactly like the verb-alias path already did — rather than
+  ## re-solving from live inputs.
   if assignedSelectors.len == 0:
     return (0, "")
   let bin =
@@ -31699,6 +31953,8 @@ proc buildClosureForShard(assignedSelectors: seq[string];
   var buildArgs = @["build", "test"]
   if mode != tpmUnspecified:
     buildArgs.add("--tool-provisioning=" & modeName(mode))
+  if lockFlag.len > 0:
+    buildArgs.add(lockFlag)
   let p = startProcess(bin,
     workingDir = getCurrentDir(),
     args = buildArgs,
@@ -31821,6 +32077,40 @@ proc summarizeTestResults(summary: JsonNode): tuple[passed, failed: int] =
     if s.hasKey("failed") and s["failed"].kind == JInt: s["failed"].getInt()
     else: 0
 
+proc shardLockProvenance(opts: ReproTestShardOpts):
+    tuple[lockPath, inputsDigest: string; packageCount: int; found: bool] =
+  ## Workspace-Manifest-Optional MO-13 (correcting MO-1) — resolve the
+  ## committed solved-graph lock the sharded run should honor, using the
+  ## SAME loader (``resolveSolvedGraphForBuild``) the real ``repro build``
+  ## uses. ``opts.lockFlag`` carries ``--lock=<file>``; absent, the canonical
+  ## ``<cwd>/repro.lock`` is used. The provenance (resolved path + the lock's
+  ## ``inputs_digest`` + pinned package count) is recorded in the shard report
+  ## so the sharded/fixture run is demonstrably tied to the LOCKED graph, not
+  ## a fresh re-solve. A no-op (``found = false``) when no lock is present, so
+  ## every pre-existing shard run (no ``repro.lock``) is byte-unchanged.
+  let lockOverride =
+    if opts.lockFlag.startsWith("--lock="):
+      opts.lockFlag["--lock=".len .. ^1]
+    else: ""
+  let resolved = resolveSolvedGraphForBuild(getCurrentDir(), lockOverride, "")
+  result.found = resolved.found and resolved.source == "lock"
+  if result.found:
+    result.lockPath = resolved.lockPath
+    result.packageCount = resolved.solution.packages.len
+    try:
+      result.inputsDigest =
+        parseSolvedGraphLock(readFile(extendedPath(resolved.lockPath))).inputsDigest
+    except CatchableError:
+      result.inputsDigest = ""
+
+proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts) =
+  ## Stamp the resolved lock provenance onto a shard report (MO-13).
+  let prov = shardLockProvenance(opts)
+  report["lock_flag"] = %opts.lockFlag
+  report["lock_file"] = %(if prov.found: prov.lockPath else: "")
+  report["locked_inputs_digest"] = %prov.inputsDigest
+  report["locked_package_count"] = %prov.packageCount
+
 proc runFixtureModeShard(opts: ReproTestShardOpts;
                          peer: PeerCacheSpecResult;
                          outcome: var TestRunOutcome): int =
@@ -31933,6 +32223,7 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
   report["strategy"] = %opts.strategy
   report["peer_cache"] = %peerCacheMode
   report["fixture_path"] = %opts.fixturePath
+  addShardLockProvenance(report, opts)
   var assignedNames = newJArray()
   for e in assignedEdges:
     assignedNames.add(%e.selector)
@@ -32040,7 +32331,7 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   let buildStart = epochTime()
   var buildFailed = false
   let buildRes = buildClosureForShard(assignedSelectors, publicCliPath,
-    opts.toolProvisioning)
+    opts.toolProvisioning, opts.lockFlag)
   if buildRes.code != 0:
     buildFailed = true
     stderr.writeLine("repro test: workspace build phase failed " &
@@ -32120,6 +32411,7 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   report["peer_cache"] = %peerCacheMode
   report["fixture_path"] = %""  # workspace mode — no fixture
   report["mode"] = %"workspace"
+  addShardLockProvenance(report, opts)
   report["runner_binary"] = %runnerBin
   report["runner_invoked"] = %runnerInvoked
   report["runner_exit_code"] = %runnerCode
@@ -32562,6 +32854,7 @@ type
     vConstraints: seq[ConstraintExpr]
     pVersions: seq[string]
     pDepends: seq[DependencyDecl]
+    pSource: string
 
 proc flushFixtureBlock(s: var FixtureParserState) =
   if s.currentKind == "variant":
@@ -32573,7 +32866,7 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   elif s.currentKind == "package":
     s.packages.add(PackageDecl(
       name: s.currentName, versions: s.pVersions,
-      depends: s.pDepends, variants: @[]))
+      depends: s.pDepends, variants: @[], source: s.pSource))
   s.currentKind = ""
   s.currentName = ""
   s.vKind = vkEnum
@@ -32582,6 +32875,7 @@ proc flushFixtureBlock(s: var FixtureParserState) =
   s.vConstraints = @[]
   s.pVersions = @[]
   s.pDepends = @[]
+  s.pSource = ""
 
 proc parseExplainFixture(text: string): tuple[
     variants: seq[variant_encoder.VariantDecl],
@@ -32606,12 +32900,14 @@ proc parseExplainFixture(text: string): tuple[
   ##   versions: 1.0.0, 1.1.0
   ##   depends: <name> <range>
   ##   depends: <name> <range> when <variant>=<value>
+  ##   source: store                  (MO-11 — a repro-store-realized artifact)
+  ##   source: registry <registry>    (MO-11 — a package-registry dependency)
   var s = FixtureParserState(
     variants: @[], packages: @[],
     currentKind: "", currentName: "",
     vKind: vkEnum, vValues: @[],
     vContribs: @[], vConstraints: @[],
-    pVersions: @[], pDepends: @[])
+    pVersions: @[], pDepends: @[], pSource: "")
 
   for rawLine in text.splitLines():
     let line = rawLine.strip()
@@ -32706,6 +33002,19 @@ proc parseExplainFixture(text: string): tuple[
               depName, depRange, gateVariant, gateValue))
           else:
             s.pDepends.add(newDependency(depName, depRange))
+      of "source":
+        # MO-11 — the package's source provenance. ``store`` marks a
+        # repro-store-realized artifact; ``registry <name>`` marks a
+        # package-registry dependency. Normalize to the canonical descriptor
+        # the lock writer's lift consumes (``store`` / ``registry:<name>``).
+        let parts = val.splitWhitespace()
+        if parts.len > 0:
+          if parts[0] == "registry" and parts.len >= 2:
+            s.pSource = "registry:" & parts[1]
+          elif parts[0] == "store":
+            s.pSource = "store"
+          else:
+            s.pSource = val.strip()
       else: discard
     else: discard
   if s.currentKind.len > 0:
@@ -32893,31 +33202,160 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
   projectDir = absolutePath(projectDir)
   return 0
 
+# ---------------------------------------------------------------------------
+# Workspace-Manifest-Optional MO-12 — provider-sourced solver inputs.
+#
+# ``repro lock refresh`` / ``validate`` obtain their solver inputs from the
+# COMPILED PROJECT PROVIDER (the same ``solve()`` the DSL runs via
+# ``finalizeVariants()``) rather than the hand-maintained ``repro.solver``
+# sidecar, so the lock reflects the REAL recipe. The provider is compiled and
+# run with ``REPRO_EMIT_SOLVER_INPUTS`` set; its module-init ``finalizeVariants``
+# writes the exact inputs it solved as M2e explain-fixture text, which we parse
+# back through the SAME ``parseExplainFixture`` reader the sidecar path uses —
+# so every downstream step (MO-11 ``source:`` provenance → store/registry
+# coordinates, ``solutionToLock``, the per-dep lift) is byte-identical to the
+# sidecar path; only the SOURCE of the text changes.
+#
+# The sidecar remains an OPTIONAL FALLBACK: a project with no recipe (or a
+# recipe declaring no solver-bound ``uses:``) yields no provider inputs and
+# falls straight back to ``repro.solver``. An explicit ``--inputs <file>``
+# always selects that sidecar verbatim (the provider is skipped). This keeps
+# MO-1/MO-7/MO-11 sidecar fixtures byte-unchanged while a recipe-bearing
+# workspace is sourced from its real provider.
+# ---------------------------------------------------------------------------
+
+const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
+  ## MUST match ``repro_dsl_stdlib/configurables/variants.SolverInputsEmitEnvVar``
+  ## — the env var the compiled provider's ``finalizeVariants()`` honours to
+  ## emit the solved inputs.
+
+proc solverInputsFromCompiledProvider(projectDir: string): Option[tuple[
+    variants: seq[variant_encoder.VariantDecl];
+    packages: seq[PackageDecl]; text: string]] =
+  ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
+  ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
+  ## binary and runs it with ``REPRO_EMIT_SOLVER_INPUTS`` set so module-init's
+  ## ``finalizeVariants()`` writes the exact inputs it solved; the emitted
+  ## explain-fixture text is parsed back into the solver's input lists.
+  ##
+  ## Best-effort by design — ANY of {no recipe, no ``build:`` block, no
+  ## solver-bound ``uses:``, interface-extraction / provider-compile / run
+  ## failure, an empty solve} returns ``none`` so the caller falls back to the
+  ## ``repro.solver`` sidecar. All scratch lives under the system temp dir, so
+  ## refresh still writes NO build artifacts into the project tree.
+  result = none(tuple[variants: seq[variant_encoder.VariantDecl];
+    packages: seq[PackageDecl]; text: string])
+  let match =
+    try: resolveProjectFile(projectDir)
+    except CatchableError: return result
+  if match.path.len == 0:
+    return result
+  let modulePath = absolutePath(match.path)
+  if not moduleHasBuildBlock(modulePath):
+    return result
+  let scratchRoot = getTempDir() /
+    ("repro-lock-provider-" & $getCurrentProcessId())
+  try:
+    removeDir(extendedPath(scratchRoot))
+    createDir(extendedPath(scratchRoot))
+    defer:
+      try: removeDir(extendedPath(scratchRoot))
+      except CatchableError: discard
+    let compileWorkDir = reprobuildLibraryWorkDir()
+    let scratchDir = scratchRoot / "work"
+    # MR5 bootstrap toolchain (same provisioning the build path arranges before
+    # an interface extraction / provider compile).
+    ensureBootstrapToolchainEnv(tpmPathOnly, resolveStoreRoot() / "tool-store")
+    let interfacePath = scratchRoot / "project-interface.rbsz"
+    let stubPath = scratchRoot / "project-interface.nim"
+    let artifact = extractInterfaceFromModule(modulePath, interfacePath,
+      stubPath, compileWorkDir, scratchDir, requireStub = false)
+    # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
+    # skip the (more expensive) provider compile otherwise so a plain recipe
+    # falls straight back to the sidecar without paying for it.
+    if artifact.projectInterface.toolUses.len == 0:
+      return result
+    let providerBinaryPath = scratchRoot / "provider" / "project-provider"
+    let provider = compileProviderBinary(modulePath, providerBinaryPath,
+      artifact.interfaceFingerprint, "", compileWorkDir, scratchDir)
+    let emitPath = scratchRoot / "solver-inputs.explain"
+    let protocolRoot = scratchRoot / "protocol"
+    let cwd = if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
+    putEnv(SolverInputsEmitEnvVar, emitPath)
+    try:
+      # A bare manifest request is enough: ``finalizeVariants()`` runs at the
+      # provider's MODULE INITIALISATION (the variant decls + finalize call are
+      # emitted at top-level module scope), BEFORE any request is dispatched —
+      # so the emission happens regardless of the request kind, and a manifest
+      # request provisions no tools and builds nothing (no-build semantics).
+      discard runStableProviderProtocol(provider.outputBinaryPath, protocolRoot,
+        "solver-inputs", cwd, ProviderGraphRequest(
+          kind: prkManifest,
+          providerArtifactId: digestHex(provider.providerFingerprint),
+          reason: girExplicitUserRequest))
+    finally:
+      delEnv(SolverInputsEmitEnvVar)
+    if not fileExists(extendedPath(emitPath)):
+      return result
+    let text = readFile(extendedPath(emitPath))
+    let parsed = parseExplainFixture(text)
+    if parsed.packages.len == 0 and parsed.variants.len == 0:
+      return result
+    return some((variants: parsed.variants, packages: parsed.packages,
+                 text: text))
+  except CatchableError:
+    return result
+
+proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
+    found: bool; variants: seq[variant_encoder.VariantDecl];
+    packages: seq[PackageDecl]; text: string; source: string] =
+  ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
+  ## PREFERRING the compiled project provider (the real recipe's solve) and
+  ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
+  ## override always selects that sidecar file verbatim (provider skipped) so
+  ## the historical override semantics are preserved.
+  if inputsOverride.len == 0:
+    let fromProvider = solverInputsFromCompiledProvider(projectDir)
+    if fromProvider.isSome:
+      let p = fromProvider.get()
+      return (true, p.variants, p.packages, p.text, "provider")
+  let inputsP =
+    if inputsOverride.len > 0: absolutePath(inputsOverride)
+    else: solverInputsPath(projectDir)
+  if fileExists(extendedPath(inputsP)):
+    let loaded = loadSolverInputsFile(inputsP)
+    return (true, loaded.variants, loaded.packages, loaded.text, "sidecar")
+  return (false, @[], @[], "", "")
+
 proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``repro lock refresh`` — re-solve the project's solver inputs and
   ## (re)write the committed lock WITHOUT building. No build artifacts are
   ## produced; only the lock file is written.
+  ##
+  ## MO-12 — the solver inputs come from the COMPILED PROJECT PROVIDER (the
+  ## real recipe's ``solve()``) when available, falling back to the
+  ## ``repro.solver`` sidecar otherwise (see ``resolveRefreshSolverInputs``).
   var projectDir, inputsOverride, lockOverride, platformOverride: string
   var asJson = false
   let rc = parseLockVerbArgs(rest, "refresh", projectDir, inputsOverride,
                              lockOverride, platformOverride, asJson)
   if rc != 0: return rc
-  let inputsP =
-    if inputsOverride.len > 0: absolutePath(inputsOverride)
-    else: solverInputsPath(projectDir)
-  if not fileExists(extendedPath(inputsP)):
-    stderr.writeLine("repro lock refresh: no solver inputs found at " &
-      inputsP & " (expected a `" & SolverInputsFileName &
-      "` sidecar, or pass --inputs <file>)")
-    return 1
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
-  let inputs =
-    try: loadSolverInputsFile(inputsP)
+  let resolved =
+    try: resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
       stderr.writeLine("repro lock refresh: failed to read inputs: " & e.msg)
       return 1
+  if not resolved.found:
+    stderr.writeLine("repro lock refresh: no solver inputs found for " &
+      projectDir & " (expected a compiled `" & CommittedLockFileName &
+      "`-adjacent recipe, a `" & SolverInputsFileName &
+      "` sidecar, or pass --inputs <file>)")
+    return 1
+  let inputs = (variants: resolved.variants, packages: resolved.packages,
+                text: resolved.text)
   var sol: UnifiedSolution
   try:
     sol = solve(inputs.variants, inputs.packages)
@@ -32927,13 +33365,30 @@ proc runReproLockRefresh(rest: openArray[string]): int =
     return 3
   let platform =
     if platformOverride.len > 0: platformOverride else: currentPlatformId()
-  let solvedLock = solutionToLock(sol, platform, inputs.text)
+  var solvedLock = solutionToLock(sol, platform, inputs.text)
+  # MO-11 — overlay each package's DECLARED source provenance (the solver-inputs
+  # ``source:`` directive) onto the solved-graph ``source`` field, so the lift
+  # below can produce store / registry coordinates. The solver itself drops the
+  # directive (it only solves name -> version); we re-attach it here from the
+  # parsed package decls. A package with no declared source keeps its historical
+  # definition identity (``source = name``) and is NOT lifted.
+  var declaredSource = initTable[string, string]()
+  for decl in inputs.packages:
+    if decl.source.len > 0:
+      declaredSource[decl.name] = decl.source
+  for i in 0 ..< solvedLock.packages.len:
+    let s = declaredSource.getOrDefault(solvedLock.packages[i].name, "")
+    if s.len > 0:
+      solvedLock.packages[i].source = s
   # MO-8 — assemble the unified model: the v1 solved-graph payload (preserved
   # as a sub-part) PLUS the per-dependency coordinates + self-describing
   # integrity observed from the workspace's participating repos.
   var ld = lockedDepsFromSolved(solvedLock)
   ld.schema = SolvedGraphLockSchemaV2
   ld.deps = lockedDepsForWorkspace(projectDir)
+  # MO-11 — lift each store / registry solved package into a first-class
+  # ``LockedDep`` (coordinates + integrity) alongside the workspace repo deps.
+  ld.deps.add(lockedDepsFromPackages(ld.packages, platform))
   try:
     writeFile(extendedPath(lockP), serializeLockedDependencies(ld))
   except CatchableError as e:
@@ -32996,17 +33451,26 @@ proc runReproLockValidate(rest: openArray[string]): int =
     problems.add("lock platform '" & lock.platform &
       "' is not resolvable on this host '" & host & "'")
   # (d) consistency with the current solver inputs (tamper/stale check).
-  let inputsP =
-    if inputsOverride.len > 0: absolutePath(inputsOverride)
-    else: solverInputsPath(projectDir)
-  if fileExists(extendedPath(inputsP)):
+  # MO-12 — source the inputs the SAME way refresh does (compiled provider
+  # preferred, sidecar fallback) so a provider-sourced lock validates against
+  # the provider's solve rather than mis-comparing it to a stale sidecar.
+  block staleCheck:
+    var resolved: tuple[found: bool;
+      variants: seq[variant_encoder.VariantDecl];
+      packages: seq[PackageDecl]; text: string; source: string]
     try:
-      let inputs = loadSolverInputsFile(inputsP)
-      let fresh = solve(inputs.variants, inputs.packages)
+      resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
+    except CatchableError as e:
+      stderr.writeLine("repro lock validate: failed to read inputs: " & e.msg)
+      return 1
+    if not resolved.found:
+      break staleCheck
+    try:
+      let fresh = solve(resolved.variants, resolved.packages)
       if not sameSolution(lockToSolution(lock), fresh):
         problems.add("lock does not match a fresh solve of the current " &
           "inputs (tampered or stale — run `repro lock refresh`)")
-      if lock.inputsDigest != inputsDigestOf(inputs.text):
+      if lock.inputsDigest != inputsDigestOf(resolved.text):
         problems.add("inputs_digest mismatch (the solver inputs changed " &
           "since the lock was written)")
     except EUnsatisfiable:
@@ -33033,16 +33497,36 @@ proc runReproLockValidate(rest: openArray[string]): int =
         problems.add("dep '" & d.name &
           "' has a malformed/unrecognized integrity '" & d.integrity & "'")
         continue
-      let depAbs =
-        if d.path == "." or d.path.len == 0: absolutePath(projectDir)
-        else: absolutePath(projectDir) / d.path
-      if not dirExists(extendedPath(depAbs)):
-        continue  # not checked out here — cannot recompute (not a tamper).
-      let observed = committedLockRepoFacts(depAbs).headSha
-      let recomputed = computeDepIntegrity(depAbs, observed)
-      if recomputed != d.integrity:
-        problems.add("dep '" & d.name & "' integrity mismatch: locked '" &
-          d.integrity & "' but on-disk content hashes to '" & recomputed & "'")
+      case d.coordinates.kind
+      of ckVcs:
+        let depAbs =
+          if d.path == "." or d.path.len == 0: absolutePath(projectDir)
+          else: absolutePath(projectDir) / d.path
+        if not dirExists(extendedPath(depAbs)):
+          continue  # not checked out here — cannot recompute (not a tamper).
+        let observed = committedLockRepoFacts(depAbs).headSha
+        let recomputed = computeDepIntegrity(depAbs, observed)
+        if recomputed != d.integrity:
+          problems.add("dep '" & d.name & "' integrity mismatch: locked '" &
+            d.integrity & "' but on-disk content hashes to '" & recomputed & "'")
+      of ckStore:
+        # MO-11 — a store-realized solved package. Recompute the store address
+        # from the package's solved identity (name + version + platform) and
+        # require the coordinate AND the integrity to match it.
+        let recomputed = solvedPackageStoreHash(d.name, d.version, lock.platform)
+        if d.coordinates.storeHash != recomputed or
+            d.integrity != formatMultihash("blake3", recomputed):
+          problems.add("dep '" & d.name & "' store integrity mismatch: locked '" &
+            d.integrity & "' but recomputes to 'blake3:" & recomputed & "'")
+      of ckRegistry:
+        # MO-11 — a registry-sourced solved package. Recompute the package
+        # checksum over the locked registry coordinate.
+        let recomputed = solvedPackageRegistryIntegrity(
+          d.coordinates.registryName, d.name, d.coordinates.registryVersion)
+        if d.integrity != recomputed:
+          problems.add("dep '" & d.name &
+            "' registry integrity mismatch: locked '" & d.integrity &
+            "' but recomputes to '" & recomputed & "'")
   if asJson:
     let arr = newJArray()
     for p in problems: arr.add(%p)
@@ -33887,9 +34371,58 @@ const reproTopLevelCommands = [
   "hardware", "disk", "launch-plan",
 ]
 
+proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
+  ## Workspace-Manifest-Optional MO-13 (correcting MO-5) —
+  ## ``repro workspace publish-evidence``. Gather each evidence-only private
+  ## repo's source-free ``WorkspaceVcsEvidence`` triple and publish it to the
+  ## repo's MO-4-assigned backend (``publishRoutedEvidence``). The owner runs
+  ## this from a clean, published checkout at the locked revision; a teammate
+  ## who cannot clone the private source then verifies the boundary from the
+  ## published evidence (the MO-5 gate-side consume path).
+  var workspaceRoot = ""
+  var projectName = ""
+  var mode = tpmUnspecified
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--project" or arg.startsWith("--project="):
+      projectName = valueFromFlag(args, i, "--project")
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
+    elif not arg.startsWith("-") and projectName.len == 0:
+      projectName = arg
+    i.inc
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = absolutePath(workspaceRoot)
+  let (resolved, _) = resolveWorkspaceProjectShared(
+    workspaceRoot, projectName, "`repro workspace publish-evidence`")
+  let identity = ensureGitToolResolvable(mode, getEnv("PATH"))
+  let observedAt = getTime().toUnix * 1000
+  let outcomes = publishRoutedEvidence(
+    workspaceRoot, resolved.repos, resolved.projectName, identity, observedAt)
+  if outcomes.len == 0:
+    echo "repro workspace publish-evidence: no evidence-only repos to publish " &
+      "(none marked `participation = \"evidence-only\"`, or no locking routes " &
+      "declared)"
+    return 0
+  var failed = 0
+  for o in outcomes:
+    if o.published:
+      echo "repro workspace publish-evidence: published evidence for '" &
+        o.repoName & "' (" & o.backendKind & ") at " & o.headSha
+    else:
+      inc failed
+      stderr.writeLine("repro workspace publish-evidence: FAILED for '" &
+        o.repoName & "': " & o.diagnostic)
+  if failed > 0: 1 else: 0
+
 const reproWorkspaceSubcommands = [
   "init", "sync", "pull", "lock", "status", "list", "start", "manifests",
   "shared-clones", "forall", "bootstrap", "provision", "projects", "project",
+  "publish-evidence",
 ]
 
 proc renderCompletionSnippet(shell, reproBin: string): string =
@@ -34863,6 +35396,21 @@ proc runThinApp*(programName: string): int =
       return runWorkspaceStartCommand(startArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace start: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "publish-evidence":
+    # Workspace-Manifest-Optional MO-13 (correcting MO-5) —
+    # `repro workspace publish-evidence`. Publish each evidence-only private
+    # repo's source-free WorkspaceVcsEvidence to its MO-4-assigned backend.
+    try:
+      let peArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspacePublishEvidenceCommand(peArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace publish-evidence: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "manifests":

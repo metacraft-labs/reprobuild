@@ -22,7 +22,11 @@
       # it; config.nims reads IO_MON_SRC (then falls back to a ``../io-mon``
       # sibling). Like the other source inputs, the sandboxed package build and
       # the override-free CI jobs have no sibling, so seed it from this input.
-      url = "github:metacraft-labs/io-mon";
+      #
+      # Pinned to the Linux monitor-completeness fix (f1dcd43): later main
+      # commits also rework writer/capabilities completeness logic and are not
+      # yet validated for the Linux LD_PRELOAD ct-build path. Unpin once they are.
+      url = "github:metacraft-labs/io-mon/f1dcd43f989d7f5d407f3133c46e676828c5cd6f";
       flake = false;
     };
     nimcrypto-src = {
@@ -302,6 +306,13 @@
           };
 
           devShells.default = pkgs.mkShell {
+            # repro_solver's clingo bindings dlopen libclingo.so at module init.
+            # build_apps.sh clears NIX_LDFLAGS + LD_LIBRARY_PATH for every `nim c`
+            # (the .rodata-bake guard) so the binaries carry a bare
+            # `dlopen("libclingo.so")` with no rpath and rely on a runtime
+            # LD_LIBRARY_PATH (as build_apps.sh documents). Provide it so `repro`
+            # and the test binaries resolve clingo under `dev-exec`/CI `just test`.
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.clingo ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;

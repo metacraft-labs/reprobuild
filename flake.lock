@@ -1103,6 +1103,7 @@
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
+        "rev": "f1dcd43f989d7f5d407f3133c46e676828c5cd6f",
         "type": "github"
       }
     },

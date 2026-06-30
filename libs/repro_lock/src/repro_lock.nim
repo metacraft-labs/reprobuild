@@ -436,6 +436,136 @@ proc solvedPartOf*(ld: LockedDependencies): SolvedGraphLock =
     optimal: ld.optimal, inputsDigest: ld.inputsDigest,
     variants: ld.variants, packages: ld.packages)
 
+# ---------------------------------------------------------------------------
+# MO-11 — non-VCS coordinates + integrity for solved packages, and the lift of
+# the solved package graph into first-class ``LockedDep``s.
+#
+# A solved package carries a SOURCE PROVENANCE (``LockedPackage.source``):
+#   * ``"store"``            — a repro-store-realized artifact. Reprobuild
+#     realizes the package into its content-addressed local store; the store
+#     ADDRESS is a BLAKE3 digest over the inputs that determine the realized
+#     bytes. Grounded in the solved graph, that address is derived from the
+#     package's canonical solved identity (name + version + target platform).
+#     For a content-addressed store the address IS the content hash, so the
+#     ``ckStore.storeHash`` coordinate and the integrity digest are the SAME
+#     value — exactly as a git commit id is both the VCS coordinate and the
+#     VCS-native integrity.
+#   * ``"registry:<name>"``  — a package-registry dependency from registry
+#     ``<name>``. Its coordinate is ``ckRegistry{registryName, registryVersion}``
+#     and its integrity is the package checksum: a BLAKE3 digest over the
+#     canonical registry coordinate (registry + name + version). (MO-12's
+#     provider-sourced refresh will swap this recompute body for the
+#     provider-supplied artifact checksum; the coordinate/integrity SHAPE and
+#     the tamper-detection path are identical.)
+#   * anything else (a bare definition name / empty) — the historical MO-1
+#     definition identity, which has NO external coordinate to pin honestly and
+#     is therefore NOT lifted (it remains recorded only in the ``packages``
+#     sub-part). Lifting it would require fabricating a coordinate, which the
+#     model forbids.
+#
+# THE [lock]/packages SUB-PART IS KEPT AS A DERIVED VIEW. The lift ADDS each
+# store/registry package to ``deps`` as a first-class ``LockedDep``; the
+# ``packages`` sub-part is preserved verbatim so ``lockToSolution`` /
+# ``solutionToLock`` (which read the sub-part, not ``deps``) keep reconstructing
+# the same ``Solution`` and every existing v2 lock still round-trips byte-for-
+# byte. The authoritative per-package locked entry — with coordinates +
+# integrity — now lives in ``deps``; ``packages`` is the redundant derived view.
+# ---------------------------------------------------------------------------
+
+type
+  PackageSourceKind* = enum
+    ## How a solved package's ``source`` descriptor resolves.
+    pskDefinition   ## bare definition identity (no external coordinate).
+    pskStore        ## a repro-store-realized artifact (``ckStore``).
+    pskRegistry     ## a package-registry dependency (``ckRegistry``).
+
+  PackageSource* = object
+    case kind*: PackageSourceKind
+    of pskDefinition, pskStore: discard
+    of pskRegistry:
+      registryName*: string
+
+proc parsePackageSource*(source: string): PackageSource =
+  ## Interpret a ``LockedPackage.source`` descriptor. ``"store"`` -> a
+  ## repro-store-realized artifact; ``"registry:<name>"`` -> a registry
+  ## dependency from ``<name>``; anything else (a bare definition name, or
+  ## empty) -> the historical definition identity (no external coordinate).
+  if source == "store":
+    PackageSource(kind: pskStore)
+  elif source.startsWith("registry:") and source.len > "registry:".len:
+    PackageSource(kind: pskRegistry,
+      registryName: source["registry:".len .. ^1])
+  else:
+    PackageSource(kind: pskDefinition)
+
+proc solvedPackageStoreHash*(name, version, platform: string): string =
+  ## The content-addressed store hash Reprobuild assigns a store-realized
+  ## solved package: the lowercase-hex BLAKE3 digest over the package's
+  ## canonical solved identity (name + version + target platform), framed
+  ## through the module's NAR-style canonical serialization so no field
+  ## concatenation is ambiguous. This is the store ADDRESS — a genuine
+  ## recompute over the solved-graph state, not a fabricated constant; changing
+  ## any of name / version / platform changes the digest.
+  parseMultihash(narStyleTreeMultihash(@[
+    (path: "package", content: name),
+    (path: "platform", content: platform),
+    (path: "version", content: version)])).digest
+
+proc solvedPackageStoreIntegrity*(name, version, platform: string): string =
+  ## The self-describing integrity of a store-realized solved package: the
+  ## store hash re-tagged as ``blake3:<hex>``. Address == integrity for a
+  ## content-addressed store (mirrors the VCS commit-id case).
+  formatMultihash("blake3", solvedPackageStoreHash(name, version, platform))
+
+proc solvedPackageRegistryChecksum*(registryName, name, version: string): string =
+  ## The package checksum for a registry-sourced solved package: the
+  ## lowercase-hex BLAKE3 digest over its canonical registry coordinate
+  ## (registry + name + version). A genuine recompute; tampering any field
+  ## changes the digest.
+  parseMultihash(narStyleTreeMultihash(@[
+    (path: "name", content: name),
+    (path: "registry", content: registryName),
+    (path: "version", content: version)])).digest
+
+proc solvedPackageRegistryIntegrity*(registryName, name, version: string): string =
+  ## The self-describing integrity of a registry-sourced solved package: the
+  ## package checksum tagged as ``blake3:<hex>``.
+  formatMultihash("blake3",
+    solvedPackageRegistryChecksum(registryName, name, version))
+
+proc lockedDepsFromPackages*(packages: seq[LockedPackage];
+                             platform: string): seq[LockedDep] =
+  ## MO-11 — lift each solved package carrying a STORE or REGISTRY source
+  ## provenance into a first-class ``LockedDep`` with non-VCS coordinates + a
+  ## self-describing integrity, both produced from the solved-graph state. A
+  ## bare definition-identity package (no external source) is NOT lifted — it
+  ## has no honest external coordinate — and stays recorded only in the
+  ## ``packages`` sub-part. The ``path`` is empty (a solved package is not a
+  ## workspace checkout); ``version`` carries the resolved version.
+  result = @[]
+  for p in packages:
+    let src = parsePackageSource(p.source)
+    case src.kind
+    of pskDefinition:
+      discard
+    of pskStore:
+      let storeHash = solvedPackageStoreHash(p.name, p.version, platform)
+      result.add(LockedDep(
+        name: p.name, path: "",
+        coordinates: Coordinates(kind: ckStore, storeHash: storeHash),
+        integrity: formatMultihash("blake3", storeHash),
+        version: p.version, visibility: "public", participation: "",
+        depends: @[], groups: @[]))
+    of pskRegistry:
+      result.add(LockedDep(
+        name: p.name, path: "",
+        coordinates: Coordinates(kind: ckRegistry,
+          registryName: src.registryName, registryVersion: p.version),
+        integrity: solvedPackageRegistryIntegrity(
+          src.registryName, p.name, p.version),
+        version: p.version, visibility: "public", participation: "",
+        depends: @[], groups: @[]))
+
 proc coordKindString(k: CoordKind): string =
   case k
   of ckVcs: "vcs"

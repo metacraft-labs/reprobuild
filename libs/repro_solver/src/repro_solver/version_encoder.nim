@@ -99,6 +99,16 @@ type
     versions*: seq[string]
     depends*: seq[DependencyDecl]
     variants*: seq[VariantDecl]
+    source*: string
+      ## Workspace-Manifest-Optional MO-11 — the declared SOURCE PROVENANCE
+      ## of the package, threaded from the solver-inputs ``source:`` directive.
+      ## Empty = a bare definition identity (the historical default; the solver
+      ## ignores this field — it only reads ``name`` / ``versions`` / ``depends``
+      ## / ``variants``). A non-empty value names where the realized package
+      ## comes from: ``"store"`` (a repro-store-realized artifact) or
+      ## ``"registry:<registry-name>"`` (a package-registry dependency). The
+      ## committed-lock writer reads it to LIFT the solved package into a
+      ## first-class ``LockedDep`` with store/registry coordinates + integrity.
 
 # ---------------------------------------------------------------------------
 # Constructors (terse construction for tests / lib code)

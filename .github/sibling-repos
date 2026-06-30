@@ -12,3 +12,36 @@
 # dependency: reprobuild -> codetracer.
 codetracer=dev
 codetracer-trace-format-nim=dev
+
+# codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
+# ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
+# stack and the shared Nim agent libs, so its Nim compile needs these adjacent on
+# the --path. Pinned to mainline; reprobuild only ever execs the resulting `ct`.
+isonim=dev
+isonim-gpui=dev
+isonim-tui=dev
+nim-acp=dev
+nim-agent-harbor=dev
+nim-agents=dev
+nim-everywhere=dev
+nim-pty=dev
+nim-termctl=dev
+
+# The TestRunner cross-cutting contract (Nim package `repro_test_adapters`)
+# lives in this standalone repo; `repro_dsl_stdlib` re-exports it, so the
+# recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
+# the --path as `../reprobuild-test-adapters/src`. Mainline branch is `main`.
+reprobuild-test-adapters=main
+
+# codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
+# etc.) imports `io_mon` and `stackable_hooks/propagation`; codetracer's .envrc
+# wires IO_MON_SRC / NIM_STACKABLE_HOOKS_SRC from the ../io-mon and
+# ../nim-stackable-hooks siblings. Pinned by SHA to the same validated pair this
+# repo's flake locks (io-mon-src / stackable-hooks-src) so the ct engine compiles
+# against the same io-mon the monitor uses.
+# Pinned to the matched io-mon + nim-stackable-hooks mains codetracer dev's
+# engine tracks (io_mon_capture uses propagation.unrewriteSipPath, added in
+# recent stackable). io-mon main still carries the Linux monitor-completeness
+# fix; the reprobuild *monitor* itself stays on the validated flake pin.
+io-mon=d2c451d5e009cc6ccd74b5eb5388e2b525825651
+nim-stackable-hooks=abea72696dd9d8d24a1d65b0d3d6b24e1d391694
