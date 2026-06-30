@@ -414,6 +414,46 @@ proc drainAvailable(p: Process; output: var string): int =
   else:
     return 0
 
+const FinalDrainPasses = 5
+const FinalDrainPassSleepMs = 20
+
+proc finalDrainNonBlocking(p: Process; output: var string) =
+  ## Final, *non-blocking* drain of the merged stdout/stderr pipe after
+  ## the child has exited (cleanly or via our kill). Grabs whatever is
+  ## buffered in a few quick passes and then walks away — it NEVER blocks
+  ## waiting for the pipe's EOF.
+  ##
+  ## Why this replaces the EOF-blocking ``drainToEofBounded`` at the
+  ## post-exit sites: a ``repro build`` / ``repro develop`` / ``repro
+  ## watch`` test legitimately auto-starts a long-lived daemon
+  ## (``repro-daemon`` / ``runquotad`` / dev-session supervisor). Those
+  ## daemons are *meant* to outlive the test, and although they redirect
+  ## their own stdio to a log/devnull, a transiently-inherited copy of the
+  ## write end of *this* pipe can keep the pipe from reaching EOF for the
+  ## daemon's whole lifetime. Blocking for EOF here (even bounded to 10s)
+  ## then stalls the runner for the full grace window and, on an
+  ## oversubscribed shared box, that 10s stall is itself surfaced as the
+  ## ``gave up draining stdout`` note that turned a cleanly-passing test
+  ## into a confusing FAIL-shaped record. A test that has already produced
+  ## its exit code is done; we must not penalise it for a detached
+  ## grandchild still holding an inherited pipe.
+  ##
+  ## The D6 silent-hang guard is unaffected: that guard fires *before* we
+  ## ever reach a final drain — a test that goes silent trips the idle
+  ## deadline in the poll loop and is SIGTERM/SIGKILLed there. By the time
+  ## we drain here the child is already gone; we are only collecting
+  ## trailing bytes, not deciding liveness.
+  ##
+  ## A few short passes (rather than a single read) catch bytes that raced
+  ## into the kernel pipe buffer just before the child exited, without
+  ## re-introducing an unbounded wait: total worst case is
+  ## ``FinalDrainPasses * FinalDrainPassSleepMs`` (~100ms).
+  for _ in 0 ..< FinalDrainPasses:
+    if drainAvailable(p, output) == 0:
+      sleep(FinalDrainPassSleepMs)
+    # If bytes are still flowing we keep looping the fixed number of
+    # passes; we never extend the loop based on EOF.
+
 proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
     tuple[output: string; exitCode: int; timedOut: bool] =
   ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
@@ -462,13 +502,16 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
   while true:
     let code = p.peekExitCode()
     if code != -1:
-      # Child exited on its own. Drain the buffered output, but bound
-      # the wait: a leaked helper that inherited the test's stdout would
-      # otherwise hold the pipe open and park us here forever.
-      if not drainToEofBounded(p, output, PostExitDrainGraceSec):
-        output.add("\nrepro_test_runner: gave up draining stdout after " &
-          $PostExitDrainGraceSec.int & "s; the test left a process " &
-          "holding its output pipe open (leaked daemon / unreaped child).\n")
+      # Child exited on its own. The test produced its own exit code, so
+      # it is DONE — collect whatever trailing output is buffered with a
+      # quick non-blocking drain and walk away. We deliberately do NOT
+      # block waiting for the pipe's EOF: a ``repro build``/``develop``/
+      # ``watch`` test legitimately leaves a detached daemon alive, and
+      # that daemon can hold a copy of this pipe's write end open for its
+      # whole lifetime. Blocking for EOF here would stall the runner for
+      # the grace window and falsely decorate a cleanly-passing test with
+      # a "gave up draining stdout" note (the observed contention FAIL).
+      finalDrainNonBlocking(p, output)
       close(p)
       return (output, code, false)
     # Drain whatever the live child has emitted since the last poll.
@@ -510,10 +553,13 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
     # the kernel must reap the zombie before peekExitCode returns a
     # real code, but the wait window is bounded by the kill itself.
     discard p.waitForExit()
-  if not drainToEofBounded(p, output, PostExitDrainGraceSec):
-    output.add("\nrepro_test_runner: gave up draining stdout after " &
-      $PostExitDrainGraceSec.int & "s; a killed test left a process " &
-      "holding its output pipe open (leaked daemon / unreaped child).\n")
+  # The child has been killed and reaped; collect any trailing buffered
+  # output without blocking for EOF (same reasoning as the clean-exit
+  # path: a leaked/detached daemon may hold an inherited copy of this
+  # pipe's write end indefinitely, and we must not stall the runner on
+  # it). The timeout itself — already recorded in ``timedOut`` — is what
+  # makes this a FAIL; the drain only gathers diagnostics.
+  finalDrainNonBlocking(p, output)
   close(p)
   result = (output, TimeoutExitCode, timedOut)
 

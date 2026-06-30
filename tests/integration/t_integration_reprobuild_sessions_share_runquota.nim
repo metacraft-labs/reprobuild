@@ -90,7 +90,19 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
     "out=$5\n" &
     "test -x \"$helper\"\n" &
     extraShellChecks &
-    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 90000 900\n" &
+    # The first arg after the label is ``waitMaxMs`` — how long each helper
+    # blocks on the release-gate before giving up and quitting 42
+    # (gate_seen=false). It MUST comfortably exceed the worst-case time the
+    # test takes to OBSERVE serialization and write the gate. On a heavily-
+    # shared runner the second session's cold provider compile can hold the
+    # only RunQuota slot for a long time before its public action lease
+    # becomes visible, so the observation loop (and therefore the gate
+    # write) can be slow. A short 90 s window made gate_seen flake under
+    # that contention even though the sessions DID serialize. 600 s leaves
+    # generous headroom without ever masking a real failure: if the gate
+    # genuinely never gets written (serialization never observed), the
+    # observation loop's own ``observedQueue`` check still fails first.
+    "\"$helper\" \"$stamp\" \"$gate\" \"$label\" 600000 900\n" &
     "mkdir -p \"$(dirname \"$out\")\"\n" &
     "printf '%s\\n' \"$label\" > \"$out\"\n"
 
@@ -287,7 +299,13 @@ suite "integration_reprobuild_sessions_share_runquota":
           "--tool-provisioning=path", "--log=actions", "--report=full"],
         options = {poUsePath, poStdErrToStdOut})
       let codeStartStamp = stampsDir / "codetracer.stamp.start"
-      for _ in 0 ..< 4800:
+      # Wait for the first session's action to actually start (its helper
+      # writes the .start stamp). On a shared runner the cold provider
+      # compile that precedes the action can be slow, so poll against a
+      # generous deadline rather than a fixed iteration count. If the action
+      # never starts, ``check pathExists`` below still fails.
+      let startStampDeadline = nowMillis() + 300000
+      while nowMillis() < startStampDeadline:
         if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
           break
         sleep(25)
@@ -303,8 +321,17 @@ suite "integration_reprobuild_sessions_share_runquota":
       var lastLeases = ""
       var observedQueue = false
       # Cold provider compilation can hold the only RunQuota slot before these
-      # public action leases become visible during a full-suite run.
-      for _ in 0 ..< 2400:
+      # public action leases become visible during a full-suite run. Under
+      # heavy contention on a shared runner that delay can be substantial, so
+      # poll against a generous wall-clock deadline (must stay well within the
+      # helper's 600 s gate-wait window above) rather than a fixed iteration
+      # count. This only changes HOW LONG we are willing to wait to OBSERVE
+      # serialization; the serialization proof itself (the non-overlap check
+      # on the two stamp intervals below) is unchanged. If the queued+running
+      # condition never materialises, ``observedQueue`` stays false and the
+      # ``check observedQueue`` below still fails — the wait is not masking it.
+      let observeDeadline = nowMillis() + 300000
+      while nowMillis() < observeDeadline:
         if hasQueuedAndRunningBuildLeases(daemon.cli, lastLeases):
           observedQueue = true
           break

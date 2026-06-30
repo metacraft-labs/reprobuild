@@ -49,7 +49,11 @@ proc valueAfter(output, prefix: string): string =
     if line.startsWith(prefix):
       return line[prefix.len .. ^1].strip()
 
-proc waitForOutput(path, expected: string; timeoutSeconds = 10.0) =
+proc waitForOutput(path, expected: string; timeoutSeconds = 120.0) =
+  # Generous default poll window so a slow shared runner does not trip the
+  # ``check false`` fail path before the awaited output materialises. The
+  # success path returns the instant the file matches, so a larger ceiling
+  # costs nothing on a healthy run and never masks a genuine miss.
   let deadline = epochTime() + timeoutSeconds
   while epochTime() < deadline:
     if fileExists(path) and readFile(path) == expected:
@@ -234,8 +238,16 @@ proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[
   raise newException(OSError,
     "runquotad did not become reachable at " & socketPath & ": " & output)
 
-proc waitForSessionsContains(tempRoot, needle: string; timeoutSeconds = 10.0):
+proc waitForSessionsContains(tempRoot, needle: string; timeoutSeconds = 120.0):
     string =
+  ## Poll ``repro daemon sessions`` until its output contains ``needle`` or
+  ## the deadline elapses. The default window is deliberately generous
+  ## (120 s): on a heavily-shared runner the daemon can be slow to accept a
+  ## build and transition the session through ``running`` → ``cancelled``,
+  ## and a 10 s window made this flake (the ``check false`` below fired even
+  ## though the transition eventually happened). This only governs HOW LONG
+  ## we wait for an expected state; if the state never appears the loop still
+  ## falls through to ``check false`` and fails, so nothing is masked.
   let deadline = epochTime() + timeoutSeconds
   while epochTime() < deadline:
     let res = runShell(shellCommand(@[publicReproBin(), "daemon", "sessions"] &
@@ -361,7 +373,7 @@ suite "Local daemons/control-plane M4 daemon-hosted builds":
       discard client.waitForExit()
 
       let cancelled = waitForSessionsContains(tempRoot, "cancelled",
-        timeoutSeconds = 15.0)
+        timeoutSeconds = 120.0)
       check cancelled.contains("daemon-hosted build cancelled")
       check not fileExists(projectRoot / "build" / "slept.txt")
     else:

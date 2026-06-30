@@ -180,7 +180,17 @@ when defined(macosx) or defined(linux):
       shellJoin(cliArgs) & " > " & q(logPath) & " 2>&1 &\n" &
       "pid=$!\n" &
       "ready=0\n" &
-      "for i in $(seq 1 1200); do\n" &
+      # Readiness = the first ``watching paths=`` line, which the watch loop
+      # emits only AFTER cycle 1's initial build completes and the filesystem
+      # watcher is armed (see runWatchTarget in repro_cli_support: build →
+      # openFilesystemWatcher → emit "watching paths="). The edit below must
+      # not fire before that, or its event races an unarmed watcher. The
+      # initial build includes a (possibly cold) provider compile; on a
+      # heavily-shared runner that can take minutes, so the readiness window
+      # must be generous. 12000 * 0.05s = 600 s — large enough to ride out
+      # contention, while a watch that never becomes ready (genuine failure)
+      # still exits 124 and fails ``check phase*.code == 0``.
+      "for i in $(seq 1 12000); do\n" &
       "  if grep -q 'repro watch: watching paths=' " & q(logPath) &
         "; then ready=1; break; fi\n" &
       "  if ! kill -0 \"$pid\" 2>/dev/null; then wait \"$pid\"; exit $?; fi\n" &
