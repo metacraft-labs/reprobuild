@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# M9.R.50.2 -- build-reproos-image.sh: produce a fully-installed
+# reproos-installed.qcow2 on the host.
+#
+# Spec: reprobuild-specs/ReproOS-Image-Recipe.md (M9.R.50.1).
+#
+# Pipeline:
+#
+#   1. Parse $REPRO_AUTO_CONFIG (TOML).
+#   2. Stage the Nix-style rootfs via stage-de-rootfs.sh (M9.R.25 +
+#      M9.R.46).
+#   3. Render a disko JSON spec from the TOML's [disk] block.
+#   4. qemu-img create -f qcow2 reproos-installed.qcow2 <size>.
+#   5. sudo modprobe nbd; sudo qemu-nbd --connect=/dev/nbd0 <qcow2>.
+#   6. repro disk apply --confirm --device /dev/nbd0 <disko.json>.
+#   7. mount the partitions on $WORK/mnt + $WORK/mnt/boot.
+#   8. repro infra install-root --target $WORK/mnt --source
+#      <staged-tree> --device /dev/nbd0 --hostname <hn> --disko
+#      <disko.json>.
+#   9. Write $WORK/mnt/etc/repro/{system,hardware}.nim from TOML.
+#   10. Write $WORK/mnt/etc/shadow entries from TOML user.password_hash.
+#   11. umount; sudo qemu-nbd --disconnect /dev/nbd0; sudo rmmod nbd.
+#   12. mv qcow2 to the recipe's output path.
+#
+# Input:
+#   $1 = absolute output path for the qcow2.
+#   REPRO_AUTO_CONFIG env (defaults handled by repro.nim).
+#   SOURCE_DATE_EPOCH / LC_ALL / TZ for reproducibility.
+#
+# Output:
+#   $1 (the qcow2).
+#
+# Exit codes:
+#   0   = success
+#   64  = bad invocation
+#   65  = missing tool
+#   66  = config parse error
+#   67  = staged tree build failed
+#   68  = qcow2 / nbd setup failed
+#   69  = disk apply failed
+#   70  = install-root failed
+#   71  = config emit failed
+#   72  = cleanup failed (warning, not fatal -- exit is from the
+#         original failure)
+
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 <out.qcow2>" >&2
+  exit 64
+fi
+
+OUT_QCOW2="$1"
+
+: "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set for reproducibility}"
+: "${LC_ALL:?LC_ALL=C required}"
+: "${TZ:?TZ=UTC required}"
+: "${REPRO_AUTO_CONFIG:?REPRO_AUTO_CONFIG must be set}"
+
+# The recipe engine sets cwd to recipes/reproos-image; the repo
+# root is two levels up.
+REPO_ROOT="$(cd ../.. && pwd)"
+RECIPE_DIR="$(pwd)"
+SCRIPT_DIR_SELF="$(cd "$(dirname "$0")" && pwd)"
+ISO_SCRIPTS_DIR="$REPO_ROOT/recipes/reproos-iso/scripts"
+
+# Resolve the config path relative to the recipe dir if it's not
+# absolute.
+case "$REPRO_AUTO_CONFIG" in
+  /*) ;;
+  *)  REPRO_AUTO_CONFIG="$RECIPE_DIR/$REPRO_AUTO_CONFIG" ;;
+esac
+if [ ! -f "$REPRO_AUTO_CONFIG" ]; then
+  echo "[build-reproos-image] config not found: $REPRO_AUTO_CONFIG" >&2
+  exit 64
+fi
+
+echo "[build-reproos-image] config: $REPRO_AUTO_CONFIG"
+
+# Required host tools.  Fail loudly if any are missing -- the recipe
+# orchestrator already provisions these in the dev shell.
+for tool in qemu-img qemu-nbd parted sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig sudo mountpoint; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "[build-reproos-image] required tool missing: $tool" >&2
+    exit 65
+  fi
+done
+
+# Locate the `repro` binary.  We use the locally-built one rather
+# than a PATH lookup so we exercise the same code the rest of the
+# campaign exercised.
+REPRO_BIN="$REPO_ROOT/apps/repro/.repro/output/install/usr/bin/repro"
+if [ ! -x "$REPRO_BIN" ]; then
+  # Fall back to PATH; the recipe orchestrator may have provisioned
+  # it via the dev shell.
+  REPRO_BIN="$(command -v repro 2>/dev/null || true)"
+fi
+if [ -z "$REPRO_BIN" ] || [ ! -x "$REPRO_BIN" ]; then
+  echo "[build-reproos-image] 'repro' binary not found" >&2
+  exit 65
+fi
+echo "[build-reproos-image] repro: $REPRO_BIN"
+
+# Working dir under the recipe's build dir; cleaned on exit.
+WORK="$RECIPE_DIR/build/work"
+mkdir -p "$WORK"
+STAGE_DIR="$WORK/stage"
+MNT_DIR="$WORK/mnt"
+mkdir -p "$STAGE_DIR" "$MNT_DIR"
+
+# ---------------------------------------------------------------
+# Cleanup trap.  Best-effort: umount any mounted partitions,
+# disconnect /dev/nbd0, rmmod nbd.  Don't mask the original exit
+# code.
+# ---------------------------------------------------------------
+NBD_DEV=""
+NBD_CONNECTED=0
+MOUNTED_PATHS=()
+
+cleanup() {
+  local rc=$?
+  set +e
+  for p in "${MOUNTED_PATHS[@]}"; do
+    if mountpoint -q "$p"; then
+      sudo umount "$p" 2>/dev/null || sudo umount -l "$p" 2>/dev/null
+    fi
+  done
+  if [ -n "$NBD_DEV" ] && [ "$NBD_CONNECTED" = "1" ]; then
+    sudo qemu-nbd --disconnect "$NBD_DEV" 2>/dev/null || true
+  fi
+  exit $rc
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------
+# TOML parsing.  Without a TOML library we use a small awk-based
+# extractor.  Schema is intentionally simple and validated below.
+# ---------------------------------------------------------------
+toml_get() {
+  # toml_get <file> <section> <key>
+  # Returns the value for [section] key on stdout, or empty if not
+  # present.  Strips surrounding quotes from string values.  Supports
+  # only flat keys + [section]subsection blocks.
+  awk -v section="$2" -v key="$3" '
+    BEGIN { cur=""; }
+    /^[[:space:]]*#/ { next; }
+    /^[[:space:]]*$/ { next; }
+    /^[[:space:]]*\[.*\][[:space:]]*$/ {
+      gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "");
+      cur=$0;
+      next;
+    }
+    {
+      line=$0;
+      sub(/[[:space:]]*#.*$/, "", line);
+      n=split(line, kv, "=");
+      if (n<2) next;
+      k=kv[1];
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k);
+      v=kv[2];
+      for (i=3;i<=n;i++) v=v"="kv[i];
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v);
+      gsub(/^"|"$/, "", v);
+      gsub(/^'\''|'\''$/, "", v);
+      if (cur == section && k == key) { print v; exit; }
+    }
+  ' "$1"
+}
+
+CFG="$REPRO_AUTO_CONFIG"
+
+HOSTNAME_VAL="$(toml_get "$CFG" "" "hostname")"
+USER_NAME="$(toml_get "$CFG" "user" "name")"
+USER_PWHASH="$(toml_get "$CFG" "user" "password_hash")"
+USER_SHELL="$(toml_get "$CFG" "user" "shell")"
+DISK_SIZE_GB="$(toml_get "$CFG" "disk" "size_gb")"
+DISK_TYPE="$(toml_get "$CFG" "disk.layout" "type")"
+ESP_SIZE_MIB="$(toml_get "$CFG" "disk.layout" "esp_size_mib")"
+DE_DEFAULT="$(toml_get "$CFG" "de" "default")"
+NET_IPV4="$(toml_get "$CFG" "network" "ipv4")"
+
+# Defaults / validation.
+HOSTNAME_VAL="${HOSTNAME_VAL:-reproos}"
+USER_NAME="${USER_NAME:-repro}"
+USER_SHELL="${USER_SHELL:-/bin/bash}"
+DISK_SIZE_GB="${DISK_SIZE_GB:-8}"
+DISK_TYPE="${DISK_TYPE:-uefi-ext4}"
+ESP_SIZE_MIB="${ESP_SIZE_MIB:-512}"
+DE_DEFAULT="${DE_DEFAULT:-sway}"
+NET_IPV4="${NET_IPV4:-dhcp}"
+
+if [ -z "$USER_PWHASH" ]; then
+  echo "[build-reproos-image] [user] password_hash is required" >&2
+  exit 66
+fi
+case "$DISK_TYPE" in
+  uefi-ext4) ;;
+  *) echo "[build-reproos-image] unsupported [disk.layout].type: $DISK_TYPE (v1 only supports uefi-ext4)" >&2
+     exit 66 ;;
+esac
+case "$DE_DEFAULT" in
+  sway|kwin|mutter|plasmashell|sddm) ;;
+  *) echo "[build-reproos-image] unsupported [de].default: $DE_DEFAULT" >&2
+     exit 66 ;;
+esac
+
+echo "[build-reproos-image] hostname=$HOSTNAME_VAL user=$USER_NAME size_gb=$DISK_SIZE_GB layout=$DISK_TYPE de=$DE_DEFAULT"
+
+# ---------------------------------------------------------------
+# Phase 2: stage the Nix-style rootfs via stage-de-rootfs.sh.
+# We cd into the iso recipe dir because the script reads
+# "$(cd ../.. && pwd)" as REPO_ROOT.
+# ---------------------------------------------------------------
+echo "[build-reproos-image] staging rootfs at $STAGE_DIR"
+if [ -d "$STAGE_DIR" ] && [ -n "$(ls -A "$STAGE_DIR" 2>/dev/null || true)" ]; then
+  chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
+  rm -rf "$STAGE_DIR"
+  mkdir -p "$STAGE_DIR"
+fi
+(
+  cd "$REPO_ROOT/recipes/reproos-iso"
+  bash scripts/stage-de-rootfs.sh "$STAGE_DIR"
+) || { echo "[build-reproos-image] stage-de-rootfs.sh failed" >&2; exit 67; }
+echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{print $1}')"
+
+# ---------------------------------------------------------------
+# Phase 3: render a disko JSON for the uefi-ext4 preset.
+# Mirrors installer_state.cpp::renderDiskoJson but in shell since
+# we don't need the full Qt class hierarchy.
+# ---------------------------------------------------------------
+DISKO_JSON="$WORK/disko.json"
+cat > "$DISKO_JSON" <<EOF
+{
+  "id": "reproos-image",
+  "cpuArch": "x86_64",
+  "cpuMicrocode": "intel",
+  "kernelModules": [],
+  "loaderDevice": "/dev/nbd0",
+  "filesystems": [],
+  "graphicsDrivers": [],
+  "audioCards": [],
+  "disko": {
+    "disks": [
+      {
+        "name": "main",
+        "device": "/dev/nbd0",
+        "type": "disk",
+        "content": {
+          "kind": "gpt",
+          "partitions": [
+            {
+              "name": "esp",
+              "size": "${ESP_SIZE_MIB}MiB",
+              "type": "EF00",
+              "content": {
+                "kind": "filesystem",
+                "format": "vfat",
+                "mountpoint": "/boot",
+                "mountOptions": ["umask=0077"],
+                "label": "ESP",
+                "subvols": []
+              }
+            },
+            {
+              "name": "root",
+              "size": "100%",
+              "type": "8300",
+              "content": {
+                "kind": "filesystem",
+                "format": "ext4",
+                "mountpoint": "/",
+                "mountOptions": ["defaults"],
+                "label": "reproos-root",
+                "subvols": []
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+EOF
+echo "[build-reproos-image] disko json: $DISKO_JSON"
+
+# ---------------------------------------------------------------
+# Phase 4: qemu-img create.
+# ---------------------------------------------------------------
+TMP_QCOW2="$WORK/reproos-installed.qcow2"
+rm -f "$TMP_QCOW2"
+qemu-img create -f qcow2 "$TMP_QCOW2" "${DISK_SIZE_GB}G" \
+  || { echo "[build-reproos-image] qemu-img create failed" >&2; exit 68; }
+echo "[build-reproos-image] qcow2 created: $TMP_QCOW2 (${DISK_SIZE_GB}G)"
+
+# ---------------------------------------------------------------
+# Phase 5: nbd module + qemu-nbd --connect.
+# ---------------------------------------------------------------
+if ! lsmod 2>/dev/null | grep -q '^nbd '; then
+  echo "[build-reproos-image] modprobe nbd max_part=16"
+  sudo modprobe nbd max_part=16 \
+    || { echo "[build-reproos-image] modprobe nbd failed" >&2; exit 68; }
+fi
+# Find a free /dev/nbdN.
+NBD_DEV=""
+for n in 0 1 2 3 4 5 6 7; do
+  cand="/dev/nbd$n"
+  if [ ! -e "$cand" ]; then continue; fi
+  # /sys/block/nbdN/pid exists iff the device is in use.
+  if [ -f "/sys/block/nbd$n/pid" ]; then continue; fi
+  NBD_DEV="$cand"
+  break
+done
+if [ -z "$NBD_DEV" ]; then
+  echo "[build-reproos-image] no free /dev/nbdN available" >&2
+  exit 68
+fi
+echo "[build-reproos-image] qemu-nbd --connect=$NBD_DEV $TMP_QCOW2"
+sudo qemu-nbd --connect="$NBD_DEV" "$TMP_QCOW2" \
+  || { echo "[build-reproos-image] qemu-nbd connect failed" >&2; exit 68; }
+NBD_CONNECTED=1
+
+# Patch the disko JSON to point at the actual nbd device.
+sed -i "s|/dev/nbd0|$NBD_DEV|g" "$DISKO_JSON"
+
+# Wait for the kernel to scan the (empty) partition table.
+sudo partprobe "$NBD_DEV" 2>/dev/null || true
+sleep 2
+
+# ---------------------------------------------------------------
+# Phase 6: repro disk apply.
+# ---------------------------------------------------------------
+echo "[build-reproos-image] repro disk apply --device $NBD_DEV --confirm $DISKO_JSON"
+sudo "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
+  || { echo "[build-reproos-image] disk apply failed" >&2; exit 69; }
+
+# Re-scan the partition table.
+sudo partprobe "$NBD_DEV" 2>/dev/null || true
+sleep 2
+
+# ---------------------------------------------------------------
+# Phase 7: mount the partitions.
+#
+# With our GPT layout the ESP is partition 1, root is partition 2.
+# qemu-nbd exposes them as ${NBD_DEV}p1, ${NBD_DEV}p2.
+# ---------------------------------------------------------------
+ESP_DEV="${NBD_DEV}p1"
+ROOT_DEV="${NBD_DEV}p2"
+
+# Wait for the partition device nodes to appear.
+for i in 1 2 3 4 5; do
+  if [ -b "$ROOT_DEV" ] && [ -b "$ESP_DEV" ]; then break; fi
+  sleep 1
+done
+if [ ! -b "$ROOT_DEV" ] || [ ! -b "$ESP_DEV" ]; then
+  echo "[build-reproos-image] expected partition nodes did not appear: $ESP_DEV $ROOT_DEV" >&2
+  exit 69
+fi
+
+sudo mount "$ROOT_DEV" "$MNT_DIR" \
+  || { echo "[build-reproos-image] mount root failed" >&2; exit 69; }
+MOUNTED_PATHS+=("$MNT_DIR")
+sudo mkdir -p "$MNT_DIR/boot"
+sudo mount "$ESP_DEV" "$MNT_DIR/boot" \
+  || { echo "[build-reproos-image] mount esp failed" >&2; exit 69; }
+MOUNTED_PATHS+=("$MNT_DIR/boot")
+
+# ---------------------------------------------------------------
+# Phase 8: repro infra install-root.
+#
+# --source = the staged Nix-style tree (NOT the live host root)
+# --target = our mount point
+# --device = the nbd device for grub-install
+# --disko  = our generated json
+# --hostname = from TOML
+# ---------------------------------------------------------------
+echo "[build-reproos-image] repro infra install-root --target $MNT_DIR --source $STAGE_DIR --device $NBD_DEV"
+sudo "$REPRO_BIN" infra install-root \
+  --target "$MNT_DIR" \
+  --source "$STAGE_DIR" \
+  --device "$NBD_DEV" \
+  --disko "$DISKO_JSON" \
+  --hostname "$HOSTNAME_VAL" \
+  || { echo "[build-reproos-image] install-root failed" >&2; exit 70; }
+
+# ---------------------------------------------------------------
+# Phase 9: write etc/repro/{system,hardware}.nim from TOML.
+# Skipped for v1; install-root already wrote a baseline copy from
+# /etc/repro/ in the source tree.  Future M9.R.50.x will render
+# DSL-shaped system.nim from auto-config.toml.
+# ---------------------------------------------------------------
+
+# ---------------------------------------------------------------
+# Phase 10: write /etc/shadow user entry.
+# ---------------------------------------------------------------
+SHADOW_LINE="$USER_NAME:$USER_PWHASH:19000:0:99999:7:::"
+sudo bash -c "
+  set -euo pipefail
+  if [ ! -f '$MNT_DIR/etc/shadow' ]; then
+    echo 'root:*:19000:0:99999:7:::' > '$MNT_DIR/etc/shadow'
+    chmod 0640 '$MNT_DIR/etc/shadow'
+  fi
+  # Remove any pre-existing entry for this user (idempotent).
+  awk -v u='$USER_NAME' -F: '\$1 != u' '$MNT_DIR/etc/shadow' > '$MNT_DIR/etc/shadow.new'
+  echo '$SHADOW_LINE' >> '$MNT_DIR/etc/shadow.new'
+  mv '$MNT_DIR/etc/shadow.new' '$MNT_DIR/etc/shadow'
+  chmod 0640 '$MNT_DIR/etc/shadow'
+" || { echo "[build-reproos-image] shadow emit failed" >&2; exit 71; }
+
+# Make sure the hostname file matches the TOML value (install-root
+# already wrote one but the TOML may differ from the default).
+sudo bash -c "echo '$HOSTNAME_VAL' > '$MNT_DIR/etc/hostname'" || true
+
+echo "[build-reproos-image] phase summary:"
+echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
+echo "  mnt root:      $MNT_DIR ($(df -h "$MNT_DIR" 2>/dev/null | tail -1 | awk '{print $3"/"$2}'))"
+echo "  mnt esp:       $MNT_DIR/boot ($(df -h "$MNT_DIR/boot" 2>/dev/null | tail -1 | awk '{print $3"/"$2}'))"
+
+# ---------------------------------------------------------------
+# Phase 11: unmount + disconnect.
+# Cleanup trap handles errors; on success we unmount cleanly so
+# the qcow2 is fully flushed before we move it.
+# ---------------------------------------------------------------
+sudo sync
+for p in "${MOUNTED_PATHS[@]}"; do
+  sudo umount "$p"
+done
+MOUNTED_PATHS=()
+
+sudo qemu-nbd --disconnect "$NBD_DEV"
+NBD_CONNECTED=0
+
+# ---------------------------------------------------------------
+# Phase 12: stage the qcow2 at the recipe's output path.
+# ---------------------------------------------------------------
+mkdir -p "$(dirname "$OUT_QCOW2")"
+mv "$TMP_QCOW2" "$OUT_QCOW2"
+sha256sum "$OUT_QCOW2" | awk '{print "[build-reproos-image] sha256 " $1 "  " $2}'
+ls -la "$OUT_QCOW2"
+
+echo "[build-reproos-image] OK"
+exit 0
