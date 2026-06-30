@@ -245,6 +245,53 @@ fi
 echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{print $1}')"
 
 # ---------------------------------------------------------------
+# Phase 2.5: seed /boot in the staged tree with kernel + initrd.
+#
+# The stage-de-rootfs tree carries no kernel (the live ISO ships a
+# vendored Debian netinst kernel + a live-init initramfs from the
+# iso recipe).  For a build-time image we need the same vmlinuz +
+# a boot-from-disk initramfs in the staged tree so install-root's
+# copyLiveKernelAndInitrd finds them in candidate path
+# "<source>/boot/vmlinuz" / "<source>/boot/initrd.img".
+#
+# Source vmlinuz: extracted on-the-fly from the linux-image deb
+# that build-initramfs.sh already downloaded + cached at
+# /var/cache/reprobuild/initramfs/.
+#
+# Source initrd: re-use the iso recipe's vendored
+# initrd.img-live (live-boot initramfs from build-initramfs.sh).
+# It probes for /live/filesystem.squashfs; on the installed disk
+# it won't find one and falls through to a rescue shell -- which
+# means the boot smoke can SSH-style verify the kernel reached
+# userspace + the rootfs is intact, even if the system doesn't
+# auto-progress to multi-user.target.  A follow-up M9.R.50.x
+# milestone will replace this with a real "boot-from-disk"
+# initramfs (initramfs-tools / dracut) that pivots into
+# /dev/disk/by-label/reproos-root.
+VENDORED_KERNEL="$REPO_ROOT/recipes/reproos-iso/vendor/vmlinuz-debian-netinst"
+LIVE_INITRD="$REPO_ROOT/recipes/reproos-iso/vendor/initrd.img-live"
+STAGE_BOOT_MARKER="$STAGE_DIR/.repro-boot-seeded"
+if [ ! -f "$STAGE_BOOT_MARKER" ]; then
+  echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + initrd"
+  mkdir -p "$STAGE_DIR/boot"
+  if [ -f "$VENDORED_KERNEL" ]; then
+    cp "$VENDORED_KERNEL" "$STAGE_DIR/boot/vmlinuz"
+    echo "[build-reproos-image] vmlinuz: $(ls -la "$STAGE_DIR/boot/vmlinuz" | awk '{print $5}') bytes (from iso recipe vendor)"
+  else
+    echo "[build-reproos-image] WARNING: $VENDORED_KERNEL missing; run \`pwsh recipes/reproos-iso/vendor/fetch.ps1\` first" >&2
+  fi
+  if [ -f "$LIVE_INITRD" ]; then
+    cp "$LIVE_INITRD" "$STAGE_DIR/boot/initrd.img"
+    echo "[build-reproos-image] initrd.img (live-boot placeholder): $(ls -la "$STAGE_DIR/boot/initrd.img" | awk '{print $5}') bytes"
+  else
+    echo "[build-reproos-image] WARNING: $LIVE_INITRD missing (build the iso recipe once to populate)" >&2
+  fi
+  touch "$STAGE_BOOT_MARKER"
+else
+  echo "[build-reproos-image] /boot already seeded (marker present)"
+fi
+
+# ---------------------------------------------------------------
 # Phase 3: render a disko JSON for the uefi-ext4 preset.
 # Mirrors installer_state.cpp::renderDiskoJson but in shell since
 # we don't need the full Qt class hierarchy.
