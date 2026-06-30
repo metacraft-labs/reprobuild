@@ -224,15 +224,24 @@ echo "[build-reproos-image] hostname=$HOSTNAME_VAL user=$USER_NAME size_gb=$DISK
 # "$(cd ../.. && pwd)" as REPO_ROOT.
 # ---------------------------------------------------------------
 echo "[build-reproos-image] staging rootfs at $STAGE_DIR"
-if [ -d "$STAGE_DIR" ] && [ -n "$(ls -A "$STAGE_DIR" 2>/dev/null || true)" ]; then
-  chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
-  rm -rf "$STAGE_DIR"
-  mkdir -p "$STAGE_DIR"
+# The stage-de-rootfs.sh + relocate-nix-to-repro.sh chain costs
+# ~5 min cold.  Reuse a healthy existing stage when the marker file
+# is present (set REPRO_FORCE_RESTAGE=1 to bypass).
+STAGE_MARKER="$STAGE_DIR/.repro-stage-complete"
+if [ "${REPRO_FORCE_RESTAGE:-0}" = "1" ] || [ ! -f "$STAGE_MARKER" ]; then
+  if [ -d "$STAGE_DIR" ] && [ -n "$(ls -A "$STAGE_DIR" 2>/dev/null || true)" ]; then
+    chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
+    rm -rf "$STAGE_DIR"
+    mkdir -p "$STAGE_DIR"
+  fi
+  (
+    cd "$REPO_ROOT/recipes/reproos-iso"
+    bash scripts/stage-de-rootfs.sh "$STAGE_DIR"
+  ) || { echo "[build-reproos-image] stage-de-rootfs.sh failed" >&2; exit 67; }
+  touch "$STAGE_MARKER"
+else
+  echo "[build-reproos-image] stage cache HIT (use REPRO_FORCE_RESTAGE=1 to bypass)"
 fi
-(
-  cd "$REPO_ROOT/recipes/reproos-iso"
-  bash scripts/stage-de-rootfs.sh "$STAGE_DIR"
-) || { echo "[build-reproos-image] stage-de-rootfs.sh failed" >&2; exit 67; }
 echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{print $1}')"
 
 # ---------------------------------------------------------------
@@ -340,9 +349,16 @@ sleep 2
 
 # ---------------------------------------------------------------
 # Phase 6: repro disk apply.
+#
+# Pass LD_LIBRARY_PATH explicitly through sudo because the repro
+# binary dlopen()s libclingo.so via the env (the M9.R.46 clingo
+# .rodata-bake issue) and sudo strips LD_LIBRARY_PATH by default
+# under secure_path policy.  `sudo -E` would propagate the entire
+# env but env_keep blocks LD_*; `env VAR=... sudo ...` propagates
+# only the var we ask for.
 # ---------------------------------------------------------------
 echo "[build-reproos-image] repro disk apply --device $NBD_DEV --confirm $DISKO_JSON"
-sudo "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
+sudo LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
   || { echo "[build-reproos-image] disk apply failed" >&2; exit 69; }
 
 # Re-scan the partition table.
@@ -386,7 +402,7 @@ MOUNTED_PATHS+=("$MNT_DIR/boot")
 # --hostname = from TOML
 # ---------------------------------------------------------------
 echo "[build-reproos-image] repro infra install-root --target $MNT_DIR --source $STAGE_DIR --device $NBD_DEV"
-sudo "$REPRO_BIN" infra install-root \
+sudo LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" infra install-root \
   --target "$MNT_DIR" \
   --source "$STAGE_DIR" \
   --device "$NBD_DEV" \
