@@ -249,6 +249,16 @@ echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{prin
 # Mirrors installer_state.cpp::renderDiskoJson but in shell since
 # we don't need the full Qt class hierarchy.
 # ---------------------------------------------------------------
+# Format mirrors apps/reproos-installer/src/installer_state.cpp's
+# renderDiskoJson "simple" preset (validated by M9.R.41's installer
+# Phase 5 against the same parseSystemHardwareJson code path).
+# Notes:
+#   - disks/partitions are JObjects (keyed by name), NOT arrays.
+#   - DiskSpec.type = "gpt" (not "disk").
+#   - PartitionSpec.type = "esp" / "linux" (not GPT GUID strings).
+#   - ContentSpec.kind = "filesystem" (no "gpt" content kind).
+#   - bootable is required on every PartitionSpec.
+#   - "pools":[] is required at the disko level.
 DISKO_JSON="$WORK/disko.json"
 cat > "$DISKO_JSON" <<EOF
 {
@@ -261,44 +271,41 @@ cat > "$DISKO_JSON" <<EOF
   "graphicsDrivers": [],
   "audioCards": [],
   "disko": {
-    "disks": [
-      {
-        "name": "main",
+    "disks": {
+      "main": {
         "device": "/dev/nbd0",
-        "type": "disk",
-        "content": {
-          "kind": "gpt",
-          "partitions": [
-            {
-              "name": "esp",
-              "size": "${ESP_SIZE_MIB}MiB",
-              "type": "EF00",
-              "content": {
-                "kind": "filesystem",
-                "format": "vfat",
-                "mountpoint": "/boot",
-                "mountOptions": ["umask=0077"],
-                "label": "ESP",
-                "subvols": []
-              }
-            },
-            {
-              "name": "root",
-              "size": "100%",
-              "type": "8300",
-              "content": {
-                "kind": "filesystem",
-                "format": "ext4",
-                "mountpoint": "/",
-                "mountOptions": ["defaults"],
-                "label": "reproos-root",
-                "subvols": []
-              }
+        "type": "gpt",
+        "partitions": {
+          "esp": {
+            "type": "esp",
+            "size": "${ESP_SIZE_MIB}M",
+            "bootable": true,
+            "content": {
+              "kind": "filesystem",
+              "format": "vfat",
+              "mountpoint": "/boot",
+              "mountOptions": ["umask=0077"],
+              "label": "ESP",
+              "subvols": []
             }
-          ]
+          },
+          "root": {
+            "type": "linux",
+            "size": "100%",
+            "bootable": false,
+            "content": {
+              "kind": "filesystem",
+              "format": "ext4",
+              "mountpoint": "/",
+              "mountOptions": ["defaults"],
+              "label": "reproos-root",
+              "subvols": []
+            }
+          }
         }
       }
-    ]
+    },
+    "pools": []
   }
 }
 EOF
