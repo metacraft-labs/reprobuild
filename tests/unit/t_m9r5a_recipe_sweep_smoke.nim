@@ -60,15 +60,16 @@ suite "DSL-port M9.R.5a — 84-recipe sweep smoke":
 
   test "dbus-broker (meson recipe) populates the new dep registries":
     # ``dbus-broker`` v36 declares meson / ninja / gcc under the
-    # new ``nativeBuildDeps:`` block; no library deps so
-    # ``buildDeps`` is empty.
+    # new ``nativeBuildDeps:`` block.
     let native = registeredNativeBuildDeps("dbusBrokerSource")
     check "meson >=1.3" in native
     check "ninja >=1.10" in native
     check "gcc >=11" in native
-    # buildDeps is empty for this recipe (no HOST library entries
-    # in the original uses: block).
-    check registeredBuildDeps("dbusBrokerSource").len == 0
+    # M9.R.15r.6 — dbus-broker's ``src/meson.build:75`` declares
+    # ``dependency('expat')`` (the bus-configuration XML parser), so the
+    # recipe carries a single library ``buildDeps`` entry on the sibling
+    # expat from-source recipe.
+    check registeredBuildDeps("dbusBrokerSource") == @["expat"]
 
   test "cmake (from-source-custom recipe) populates nativeBuildDeps for toolchain":
     # cmake's uses: was just gcc + make — both classified as

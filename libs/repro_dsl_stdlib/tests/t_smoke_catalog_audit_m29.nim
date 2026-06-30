@@ -96,6 +96,21 @@ const AuditExemptions = [
   "kf6_qt6_modules",
 ]
 
+const CanonicalPinExemptions = [
+  # M9.R.16.1/16.2: ``accountsservice`` is deliberately pinned to
+  # nixpkgs release-24.11 tip (``5ab036a8...``) instead of the canonical
+  # rolling rev (``addf7cf...``). The rolling rev ships accountsservice
+  # built against glib 2.84+, which exports ``g_variant_builder_init_static``;
+  # the ``glib2Source`` from-source recipe is pinned at 2.82.5 and does NOT
+  # provide that symbol, so linking ``daemon/gdm-session-worker`` against the
+  # rolling-rev accountsservice fails with ``undefined reference to
+  # 'g_variant_builder_init_static'``. This is the "graduate to per-package
+  # pins by carving an exception in this gate" path the suite header
+  # anticipates: a single coherent snapshot for the rest of the catalog,
+  # with this one ABI-driven divergence documented + exempted explicitly.
+  "accountsservice",
+]
+
 iterator catalogFiles(): tuple[name, path: string] =
   for kind, path in walkDir(packagesDir()):
     if kind == pcFile and path.endsWith(".nim"):
@@ -152,6 +167,10 @@ suite "M29 Part B — catalog audit":
       let body = readCatalog(entry.path)
       if "\"nixpkgs#" notin body:
         # Local expression (stylus-style) — skip the rev pin check.
+        continue
+      if entry.name in CanonicalPinExemptions:
+        # Graduated per-package pin (see CanonicalPinExemptions) — a
+        # documented, ABI-driven divergence from the coherent snapshot.
         continue
       checkpoint "entry: " & entry.name & " (" & entry.path & ")"
       check "nixpkgsRev = \"" & CanonicalNixpkgsRev & "\"" in body

@@ -138,6 +138,25 @@ suite "MO-7: nested-topology full pipeline without an org-root repo":
       let repo = host.work
       writeFile(repo / "repro.nim", hostRecipe)
       writeFile(repo / "repro.solver", solverInputs)
+      # `deps/` carries the nested dep's own git checkout; gitignore it (and
+      # the `.repro/` work/report tree the CLI writes) so the workspace tree
+      # stays clean and the nested repo is a nested checkout, not tracked
+      # content.
+      writeFile(repo / ".gitignore", "/deps/\n.repro/\n")
+
+      # Commit the base tree FIRST, then refresh the lock. `lock refresh`
+      # records a stable VCS-native (`git-sha`) integrity over the COMMITTED
+      # tree once HEAD exists. Refreshing on a still-uncommitted repo (no
+      # HEAD) instead records a transient pre-commit `blake3:` NAR tree hash
+      # (computeDepIntegrity's headSha-empty branch); any later edit to the
+      # working tree — adding `.gitignore`, the nested `deps/` checkout, or
+      # committing `repro.lock` — then changes the recomputed tree hash and
+      # the MO-13 `check` integrity verification fails with
+      # `locked-integrity-mismatch`. Committing before refreshing keeps the
+      # integrity pinned to a stable object id.
+      check git(gitBin, repo,
+        "add repro.nim repro.solver .gitignore").code == 0
+      check git(gitBin, repo, "commit -m host-base").code == 0
       let refresh = run(reproBinary & " lock refresh " & q(repo))
       check refresh.code == 0
       check fileExists(repo / "repro.lock")
@@ -152,14 +171,9 @@ suite "MO-7: nested-topology full pipeline without an org-root repo":
       check git(gitBin, nestedDir, "commit -m nested-ext").code == 0
       check git(gitBin, nestedDir, "push origin main").code == 0
 
-      # Commit + publish the workspace repo. `deps/` carries the nested dep's
-      # own git checkout; gitignore it (and the `.repro/` work/report tree the
-      # CLI writes) so the workspace tree stays clean and the nested repo is a
-      # nested checkout, not tracked content.
-      writeFile(repo / ".gitignore", "/deps/\n.repro/\n")
-      check git(gitBin, repo,
-        "add repro.nim repro.solver repro.lock .gitignore").code == 0
-      check git(gitBin, repo, "commit -m host").code == 0
+      # Commit + publish the refreshed lock.
+      check git(gitBin, repo, "add repro.lock").code == 0
+      check git(gitBin, repo, "commit -m host-lock").code == 0
       check git(gitBin, repo, "push origin main").code == 0
 
       # Sanity: genuinely manifest-less AND star-free — no `.repo`, and the

@@ -201,12 +201,44 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # the body never runs twice (the legacy ``runPackageProvider`` chain
   # also calls ``buildXxxPackage`` later via ``buildPackageFragment``;
   # without the guard, ``shell(...)`` rows would accumulate twice).
+  #
+  # The init call's ONLY needed side effect is populating the shell +
+  # fetch registries. Running the build body, however, also re-runs
+  # every typed-tool wrapper, which registers target-export rows via
+  # ``registerImplicitTargetExports``. At module-init time there is no
+  # active ``buildPackageFragment`` owning-package override (that is set
+  # only during a real provider run), so those rows would be attributed
+  # to the macro-baked owner (the tool's package) instead of THIS
+  # package. Multiple typed-tool fixtures that each emit the same
+  # implicit name (e.g. ``cli``) would then all register under one owner
+  # and trip the within-package same-name collision check, raising at
+  # module-init time and crashing the binary before any test runs.
+  #
+  # To keep the init call's reach scoped to the shell/fetch registries
+  # we mirror ``buildPackageFragment``'s registry hygiene around it:
+  #   * reset the target-export registry before AND after the body runs
+  #     so init-time rows never accumulate across packages, and
+  #   * set the per-package owning override for the duration so any rows
+  #     that ARE produced are attributed to this package — exactly as
+  #     the subsequent real provider run will attribute them.
+  # The target-export rows produced here are transient (the real run
+  # via ``buildPackageFragment`` resets the registry again and rebuilds
+  # them), but ``dslPortShellActions`` is NOT reset by
+  # ``resetTargetExportRegistry``, so the shell registry the
+  # from-source-custom ``recognise`` consults survives — preserving the
+  # original fix.
   let providerModeInitCall =
     if buildBody.len > 0:
       quote do:
         when defined(reproProviderMode):
           if registeredShellActions(`pkgNameLit`).len == 0:
-            `procName`()
+            resetTargetExportRegistry()
+            setCurrentOwningPackageOverride(`pkgNameLit`)
+            try:
+              `procName`()
+            finally:
+              clearCurrentOwningPackageOverride()
+              resetTargetExportRegistry()
     else:
       newStmtList()
   # M9.R.15q.2.1 — translate shell-action rows into BuildActionDef rows.

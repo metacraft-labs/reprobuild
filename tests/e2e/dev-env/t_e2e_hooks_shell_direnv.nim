@@ -189,7 +189,12 @@ proc requireVcsHooksInstalled(c: M5Case): tuple[prePush: string; postCommit: str
     check readFile(dispatcher).contains(hookName & ".repro-local")
     check readFile(dispatcher).contains(hookName & ".repro-managed")
     check readFile(managed).contains("reprobuild managed " & hookName & " hook")
-    check readFile(managed).contains("__hook " & hookName)
+    # The managed body dispatches to the hook via the M17 dispatch path
+    # (``repro hooks dispatch <name>``). The earlier ``__hook <name>``
+    # token was the pre-M17 invocation shape and no longer appears in the
+    # canonical managed-hook body (see ``managedHookBody`` in
+    # repro_cli_support.nim).
+    check readFile(managed).contains("hooks dispatch " & hookName)
   result.prePush = readFile(dir / "pre-push")
   result.postCommit = readFile(dir / "post-commit")
 

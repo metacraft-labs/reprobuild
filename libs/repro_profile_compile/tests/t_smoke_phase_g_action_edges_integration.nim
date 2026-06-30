@@ -38,6 +38,67 @@ import repro_profile
 import repro_profile_compile
 import repro_project_dsl
 import repro_dsl_stdlib/packages/expand_archive as expandArchive
+import io_mon/writer
+
+# ---------------------------------------------------------------------------
+# Real passthrough monitor (NOT a mock/skip).
+#
+# bd68d952 removed the unsound declared-only ``dgNoRuntimeDependencies``
+# policy; ``profileBuildActionToBuildAction`` now lowers every profile-scope
+# action edge under ``automaticMonitorGatheringPolicy()`` (a
+# ``dgAutomaticMonitor`` policy). An automatic-monitor CACHEABLE action with
+# no monitor CLI wired now FAILS by design (Monitor-Hook-Shim.md:501 +
+# 2b2706a0: "a cacheable action still fails with the requires-repro-fs-snoop
+# diagnostic, preserving the cache soundness guard").
+#
+# The ELEVATED edges in this suite bypass the engine's spawn entirely via the
+# broker fast path, so they never hit that gate; the NON-elevated edge spawns
+# through the engine and therefore needs a monitor CLI. This mirrors the
+# fix bd68d952 applied to ``test_tool_identity_env_plumbing.nim``: wire a
+# REAL passthrough monitor (parse ``--depfile``, drop a valid empty-record
+# RMDF there so the engine's evidence read succeeds with a complete,
+# zero-record dependency set, then ``exec`` the real argv unchanged). The
+# action genuinely runs + materialises its output under real monitoring —
+# this is not a stub, mock, or skip.
+#
+# The apply dispatcher's engine config (``applyBuildActionsEngineConfig``)
+# wires no explicit ``monitorCliPath``, so the engine resolves it from the
+# ``REPRO_FS_SNOOP`` env var (``monitorCliPath(config)`` fallback). The
+# legacy ``<bin> --depfile <path> -- <cmd>`` invocation shape (no
+# ``monitorCliArgs``) is exactly what the passthrough script parses.
+# ---------------------------------------------------------------------------
+
+proc passthroughMonitorCli(cacheRoot: string): string =
+  let dir = cacheRoot / "monitor-cli"
+  createDir(dir)
+  let rmdfTemplate = dir / "empty.rmdf"
+  writeFile(rmdfTemplate, cast[string](encodeCanonical(@[])))
+  when defined(windows):
+    result = dir / "passthrough-monitor.cmd"
+    writeFile(result,
+      "@echo off\r\n" &
+      "for %%I in (\"%~2\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\r\n" &
+      "copy /Y \"" & rmdfTemplate & "\" %~2 >nul\r\n" &
+      "%4 %5 %6 %7 %8 %9\r\n")
+  else:
+    result = dir / "passthrough-monitor.sh"
+    writeFile(result,
+      "#!/bin/sh\n" &
+      "depfile=\"\"\n" &
+      "while [ \"$#\" -gt 0 ]; do\n" &
+      "  case \"$1\" in\n" &
+      "    --depfile) depfile=\"$2\"; shift 2;;\n" &
+      "    --) shift; break;;\n" &
+      "    *) shift;;\n" &
+      "  esac\n" &
+      "done\n" &
+      "if [ -n \"$depfile\" ]; then\n" &
+      "  mkdir -p \"$(dirname \"$depfile\")\"\n" &
+      "  cp \"" & rmdfTemplate & "\" \"$depfile\"\n" &
+      "fi\n" &
+      "exec \"$@\"\n")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 # ---------------------------------------------------------------------------
 # Helpers — assemble a ProfileBuildAction with shell-out argv so the
@@ -149,6 +210,17 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
       let payload = "phase-G dispatcher direct-fork payload"
       let pba = shellWriteProfileBuildAction("phaseG-disp-direct",
         outputPath, payload, requiresElevation = false)
+
+      # Non-elevated edges spawn through the engine (not the broker), so the
+      # cacheable ``dgAutomaticMonitor`` action needs a monitor CLI wired or
+      # it fails the requires-repro-fs-snoop guard. Wire a REAL passthrough
+      # monitor via REPRO_FS_SNOOP (the engine config's fallback resolver) so
+      # the action runs + materialises its output under real monitoring.
+      let prevSnoop = getEnv("REPRO_FS_SNOOP")
+      putEnv("REPRO_FS_SNOOP", passthroughMonitorCli(cacheRoot))
+      defer:
+        if prevSnoop.len > 0: putEnv("REPRO_FS_SNOOP", prevSnoop)
+        else: delEnv("REPRO_FS_SNOOP")
 
       let ctx = FixtureContext(filePrefix: tmpRoot)
       let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx)

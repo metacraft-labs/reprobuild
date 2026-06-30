@@ -266,8 +266,16 @@ when isNixSupported:
       check ExpectedNimCompiler.len > 0
       check provider1.compilerCommand[0] == ExpectedNimCompiler
       check provider1.compilerCommand.contains("c")
+      # The provider compile uses a dedicated provider nimcache directory.
+      # As of `fix(provider-compile): share provider nimcache across recipes
+      # on Linux too` the nimcache root is anchored under a stable system-temp
+      # directory on EVERY platform (``<temp>/repro-nimcache-provider/<key>``),
+      # independent of the per-recipe scratch tree, so cross-recipe object-file
+      # reuse (M9.R.13a) materialises. The shared key already scopes by
+      # workDir + toolchain + library set + session token.
       check provider1.compilerCommand.anyIt(
-        it.startsWith("--nimcache:" & (scratchDir / "nimcache-provider")))
+        it.startsWith("--nimcache:" &
+          (getTempDir() / "repro-nimcache-provider")))
       check provider1.compileEdge.actionSpec.process.kind == ckDirect
       check provider1.compileEdge.actionSpec.process.executable.value ==
         ExpectedNimCompiler

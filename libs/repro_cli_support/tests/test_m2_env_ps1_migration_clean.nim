@@ -45,18 +45,31 @@ import repro_cli_support/migrate_from_env_scripts
 
 proc resolveRealEnvFilePath(): string =
   ## Precedence: explicit $METACRAFT_ROOT (set by env.ps1 on Windows
-  ## hosts) → Windows fallback path → walk up from this test source
-  ## to discover the workspace root. The walk-up branch covers
-  ## Linux/macOS dev shells, where no env script auto-exports
-  ## METACRAFT_ROOT — the test repo lives at <workspace>/reprobuild,
-  ## so we ascend until we hit a directory carrying the canonical
-  ## windows/toolchain-versions.env file.
+  ## hosts) → $METACRAFT_WORKSPACE_ROOT (set by the workspace's .envrc on
+  ## Linux/macOS dev shells) → walk up from this test source to discover
+  ## the canonical ``windows/toolchain-versions.env`` → Windows fallback.
+  ##
+  ## The walk-up ascends until it hits a directory carrying the canonical
+  ## file. In a nested dev shell (<workspace>/reprobuild/...) it resolves
+  ## the workspace-level file. When reprobuild is checked out STANDALONE —
+  ## as it is in CI, where no metacraft workspace parent and no
+  ## METACRAFT_* env var exist — the walk-up resolves the repo-local
+  ## reference copy committed at ``<reprobuild>/windows/toolchain-versions.env``
+  ## (kept byte-identical with the workspace original so the catalog
+  ## reconciliation gate runs self-contained). Without this committed copy
+  ## the CI checkout had nothing to resolve and the gate aborted in
+  ## ``setup`` with ``cannot open: `` before any test body ran.
   let root = getEnv("METACRAFT_ROOT")
   if root.len > 0:
-    return root / "windows" / "toolchain-versions.env"
-  when defined(windows):
-    return "D:/metacraft/windows/toolchain-versions.env"
-  else:
+    let candidate = root / "windows" / "toolchain-versions.env"
+    if fileExists(candidate):
+      return candidate
+  let workspaceRoot = getEnv("METACRAFT_WORKSPACE_ROOT")
+  if workspaceRoot.len > 0:
+    let candidate = workspaceRoot / "windows" / "toolchain-versions.env"
+    if fileExists(candidate):
+      return candidate
+  block walkUp:
     var dir = currentSourcePath().parentDir
     while dir.len > 0 and dir != "/":
       let candidate = dir / "windows" / "toolchain-versions.env"
@@ -66,6 +79,9 @@ proc resolveRealEnvFilePath(): string =
       if parent == dir:
         break
       dir = parent
+  when defined(windows):
+    return "D:/metacraft/windows/toolchain-versions.env"
+  else:
     return ""
 
 const ExpectedIgnoredSet = [

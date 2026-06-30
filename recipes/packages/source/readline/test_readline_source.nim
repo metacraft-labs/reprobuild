@@ -36,7 +36,7 @@ const ExpectedUrl =
   "https://ftp.gnu.org/gnu/readline/readline-8.2.tar.gz"
 
 const ExpectedHash =
-  "3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a5f6d5fd58b2f2c5f4ec"
+  "3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a053331d7d1095007c35"
 
 const ExpectedConfigureFlags = @[
   "--disable-static",

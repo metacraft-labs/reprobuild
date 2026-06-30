@@ -351,6 +351,17 @@
               # libclingo.so shared library + <clingo/clingo.h> headers
               # the Nim bindings dlopen and pass to the compiler.
               pkgs.clingo
+              # Test-suite runtime tools: the M6 native-shell-hook gate
+              # (tests/e2e/dev-env/t_e2e_native_shell_hooks.nim) requires real
+              # zsh + fish binaries on PATH (their `nix build nixpkgs#…`
+              # fallback can't resolve the registry in the pure-flake CI shell),
+              # and the codetracer-subset build gate
+              # (tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim)
+              # shells out to node. (Safe now that the test runner isolates git
+              # config — adding shells no longer perturbs the gpg-signing tests.)
+              pkgs.nodejs
+              pkgs.zsh
+              pkgs.fish
             ]
             # libbpf for the codetracer-subset `ct` build: CodeTracer's
             # native monitor under src/ct/bpf_monitor_native.nim and

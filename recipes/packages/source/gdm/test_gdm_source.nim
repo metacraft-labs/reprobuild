@@ -81,31 +81,35 @@ suite "gdmSource — from-source recipe smoke test":
   test "configureFlags does not leak into the cmake channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "artifacts register two executables under the same package":
-    # M3 artifact registry: both ``gdm`` and ``gdmGreeterSession``
-    # must be present and tagged ``dakExecutable``. gdm's autotools
-    # build emits two binaries: the daemon (``gdm``) and the greeter
-    # session UI (``gdm-greeter-session``). A regression that lost
-    # either binary would mis-route the M9.L install path (the
-    # corresponding binary would never get harvested into the
-    # package output); a regression that mis-tagged the kind would
-    # route the binary to ``lib/`` instead of ``bin/`` /
+    # M3 artifact registry: both ``gdm`` and ``gdmSessionWorker``
+    # must be present and tagged ``dakExecutable``. gdm 47.x's meson
+    # build emits two binaries: the daemon (``gdm``) and the
+    # PAM-authenticated session worker
+    # (``/usr/libexec/gdm-session-worker``). M9.R.16.5: the legacy
+    # ``gdm-greeter-session`` binary no longer exists in gdm 47.x (the
+    # greeter is now gnome-shell run in ``--gdm-mode``); the
+    # session-worker is the load-bearing libexec binary for the v1
+    # login path. A regression that lost either binary would mis-route
+    # the M9.L install path (the corresponding binary would never get
+    # harvested into the package output); a regression that mis-tagged
+    # the kind would route the binary to ``lib/`` instead of ``bin/`` /
     # ``libexec/``.
     let arts = registeredArtifacts("gdmSource")
     check arts.len == 2
     var seenGdm = false
-    var seenGreeter = false
+    var seenWorker = false
     for art in arts:
       check art.packageName == "gdmSource"
       check art.kind == dakExecutable
       case art.artifactName
       of "gdm":
         seenGdm = true
-      of "gdmGreeterSession":
-        seenGreeter = true
+      of "gdmSessionWorker":
+        seenWorker = true
       else:
         discard
     check seenGdm
-    check seenGreeter
+    check seenWorker
 
   test "versions block records the upstream tag + URL + repository":
     # M2 versions registry: the upstream download.gnome.org release

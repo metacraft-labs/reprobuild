@@ -29,6 +29,20 @@ import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
 
+# TC-5 daemon-signing helpers (``genEd25519Key`` / ``daemonKeyEnv``).
+# Issuance signs the certificate with the daemon key supplied via
+# ``REPRO_DAEMON_SIGNING_KEY`` / ``REPRO_DAEMON_KEY_ID``; without it
+# ``certify`` issues NOTHING (the attestation is withheld because the
+# daemon signing key is absent) and the certificate file is never
+# written. The earlier revision of this test omitted the key, so the
+# first certify silently produced no cert and the subsequent
+# ``readFile(certOut)`` raised IOError. Provision a real ed25519 key
+# the same way the TC-1/TC-5 issuance tests do so the cert is actually
+# signed + written.
+include tc5_cert_signing_helpers
+
+const tc1nKeyId = "tc1n-daemon-key"
+
 proc q(value: string): string = quoteShell(value)
 
 proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
@@ -103,10 +117,16 @@ type
     libAOrigin: string
     libASeed: string
     libASha: string
+    daemonKey: string   ## ed25519 private key issuance signs the cert with
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1n-" & slug & "-", "")
   result.reproBin = reproBinary()
+  # TC-5: issuance signs the certificate with the daemon key; provide a
+  # real ed25519 key (and register it via the env overlay below) so the
+  # cert is signed + written rather than withheld.
+  let key = genEd25519Key(result.scratch / "daemon-keys", "tc1n-key", tc1nKeyId)
+  result.daemonKey = key.priv
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASeed = result.scratch / "seed-lib-a"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin, result.libASeed)
@@ -167,7 +187,8 @@ proc runCertify(fx: Fixture; fixtureJson: string): CmdResult =
     "--fixture-from=" & fixtureJson,
     "--shard=1/1",
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & (fx.workspaceRoot / "lib-a")]),
+    "--current-repo=" & (fx.workspaceRoot / "lib-a")],
+    daemonKeyEnv(fx.daemonKey, tc1nKeyId)),
     fx.workspaceRoot)
 
 suite "TC-1 — re-certify is a no-op when no executed function changed":

@@ -17718,7 +17718,16 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # checkout already exists.
   resolveBootstrapConfig(args)
   let manifestsDir = args.workspaceRoot / ".repo" / "manifests"
-  if not dirExists(manifestsDir) and args.manifestUrl.len == 0:
+  # A compositional ``.repo/workspace.toml`` (one or more ``[[manifest]]``
+  # layers, M8/M25 semantics) IS the manifest configuration: the composer
+  # (``resolveWorkspaceInitProject`` → ``composeManifestLayersFromFile*``)
+  # clones each layer URL itself, so such a workspace has no on-disk
+  # ``.repo/manifests`` checkout and needs no ``--manifest-url``. The
+  # "no manifest configured" guard (added by the host-bootstrap-config
+  # change AFTER M25) must not fire for it, or compositional init aborts
+  # before the composer ever runs.
+  if not dirExists(manifestsDir) and args.manifestUrl.len == 0 and
+      not isCompositionalWorkspaceToml(args.workspaceRoot):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & bootstrapConfigFileName &

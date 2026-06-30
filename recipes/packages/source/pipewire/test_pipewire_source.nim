@@ -13,10 +13,13 @@
 ##   * ``mesonOptions:`` block round-trip (M9.I) — exact-order
 ##     sequence equality on the production flag set + channel-isolation
 ##     spot-check (cmake + configure channels MUST be empty).
-##   * MIXED artifact registration (M3) — two executables
+##   * MIXED artifact registration (M3) — one executable
 ##     (``dakExecutable``) + one library (``dakLibrary``) attributed
 ##     to ``pipewireSource`` with kind discriminators preserved
-##     per-artifact.
+##     per-artifact. (M9.R.15q.12.6 dropped the ``pwCat`` audio-CLI
+##     artifact: ``pw-cat`` builds only when libsndfile is reachable,
+##     which is not a from-source sibling, and the v1 Plasma DE path
+##     consumes only the daemon + ``libpipewire-0.3.so``.)
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
@@ -25,7 +28,7 @@ import std/[unittest]
 import repro_project_dsl
 
 # Side-effect import: triggers the package macro which registers
-# fetch spec + meson options + two executables + one library artifact
+# fetch spec + meson options + one executable + one library artifact
 # under ``pipewireSource`` at module init time.
 import ./repro
 
@@ -77,18 +80,21 @@ suite "pipewireSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "mesonOptions does not leak into the configure channel":
     check true  # M9.R.6.1: registry retired — assertion gutted
-  test "artifacts register two executables + one library mixed-kind":
-    # M3 artifact registry: ``pipewireDaemon`` + ``pwCat`` are tagged
+  test "artifacts register an executable + a library mixed-kind":
+    # M3 artifact registry: ``pipewireDaemon`` is tagged
     # ``dakExecutable`` while ``libPipewire`` is tagged ``dakLibrary``.
     # The unique coverage of THIS recipe is the MIXED meson shape
-    # where a single ``meson setup`` + ``ninja`` emits two binaries
-    # AND a shared library — a regression that flattened the kind
+    # where a single ``meson setup`` + ``ninja`` emits a binary AND a
+    # shared library — a regression that flattened the kind
     # discriminator at the meson convention layer would mis-route the
-    # M9.L install path (``lib/`` vs ``bin/``) for one of the three.
+    # M9.L install path (``lib/`` vs ``bin/``) for one of the two.
+    # M9.R.15q.12.6 dropped the ``pwCat`` audio-CLI artifact (pw-cat
+    # builds only when libsndfile is reachable, which is not a
+    # from-source sibling); the v1 Plasma DE path consumes only the
+    # daemon + ``libpipewire-0.3.so``.
     let arts = registeredArtifacts("pipewireSource")
-    check arts.len == 3
+    check arts.len == 2
     var seenDaemon = false
-    var seenPwCat = false
     var seenLib = false
     for art in arts:
       check art.packageName == "pipewireSource"
@@ -96,16 +102,12 @@ suite "pipewireSource — from-source recipe smoke test":
       of "pipewireDaemon":
         seenDaemon = true
         check art.kind == dakExecutable
-      of "pwCat":
-        seenPwCat = true
-        check art.kind == dakExecutable
       of "libPipewire":
         seenLib = true
         check art.kind == dakLibrary
       else:
         discard
     check seenDaemon
-    check seenPwCat
     check seenLib
 
   test "versions block records the upstream tag + URL + repository":

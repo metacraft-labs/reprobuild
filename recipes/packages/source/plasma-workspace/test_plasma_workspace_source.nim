@@ -20,8 +20,12 @@
 ##     sequence equality on the production flag set + channel-isolation
 ##     spot-check (meson + configure channels MUST be empty).
 ##   * Library + executable artifact registration (M3) —
-##     ``libPlasmaWorkspace`` tagged ``dakLibrary`` and ``plasmashell``
+##     ``libkworkspace6`` tagged ``dakLibrary`` and ``plasmashell``
 ##     tagged ``dakExecutable`` within the same package's artifact set.
+##     (M9.R.36.2 verified the upstream CMake target installs
+##     ``libkworkspace6.so`` via an explicit ``OUTPUT_NAME kworkspace6``;
+##     the speculative ``libPlasmaWorkspace`` name never existed in the
+##     install-mirror.)
 ##   * ``versions:`` block round-trip (M2) — upstream tag + URL +
 ##     repository for ``repro update-source``.
 
@@ -81,17 +85,17 @@ suite "plasmaWorkspaceSource — from-source recipe smoke test":
     check true  # M9.R.6.1: registry retired — assertion gutted
   test "artifacts register an executable + a library with correct kinds":
     # M3 artifact registry: ``plasmashell`` is tagged ``dakExecutable``
-    # while ``libPlasmaWorkspace`` is tagged ``dakLibrary``. The
+    # while ``libkworkspace6`` is tagged ``dakLibrary``. The
     # unique coverage of THIS recipe is that it's the first CMake
     # recipe combining a multi-word-kebab package name
     # (``plasma-workspace`` -> ``plasmaWorkspaceSource``) AND a
     # mixed-kind artifact set. A regression that flattened the kind
     # discriminator would mis-route the M9.L install path
-    # (``lib/`` vs ``bin/``); a regression that fumbled the
-    # kebab-to-camel translation on the library name would produce
-    # ``libplasma_workspace`` / ``libplasmaworkspace`` /
-    # ``libPlasma_workspace`` variants none of which match the
-    # assertion below.
+    # (``lib/`` vs ``bin/``). M9.R.36.2 verified the upstream CMake
+    # target installs ``libkworkspace6.so`` (explicit
+    # ``OUTPUT_NAME kworkspace6`` + KF6 ``6`` ABI suffix); the
+    # speculative ``libPlasmaWorkspace`` name never existed in the
+    # install-mirror.
     let arts = registeredArtifacts("plasmaWorkspaceSource")
     # M9.R.32.1 added ``startplasmaWayland`` so the artifact count went
     # from 2 (plasmashell + libPlasmaWorkspace) to 3.  The session
@@ -107,7 +111,7 @@ suite "plasmaWorkspaceSource — from-source recipe smoke test":
       of "plasmashell":
         seenBin = true
         check art.kind == dakExecutable
-      of "libPlasmaWorkspace":
+      of "libkworkspace6":
         seenLib = true
         check art.kind == dakLibrary
       of "startplasmaWayland":
