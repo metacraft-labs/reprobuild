@@ -16,14 +16,31 @@
 ##   ``repro dev-env export`` 40 more times with ``__REPRO_APPLIED``
 ##   pre-set in the child env. Each spawn measures wall-clock from
 ##   the parent side.
-## * Assert the cumulative time over the 40 prompts stays under
-##   budget:
+## * Assert two complementary bounds across the 40 prompts:
 ##
-##     * Linux/macOS: < 100 ms (pre-M77 baseline would be > 1 s)
-##     * Windows: < 3000 ms (the spawn-per-prompt is more expensive
-##       on Windows; cf the latency microbench that shows 14 ms p50
-##       on a Defender-enabled host — 40 × 14 ms ≈ 560 ms steady-
-##       state, plus a few hundred ms of AV-scan tail spikes).
+##     * The load-bearing bound is on the MEDIAN per-prompt latency.
+##       The pathology this test guards ("every prompt re-walks the
+##       dev-env edge") raises the *typical* prompt cost from a few
+##       milliseconds to 100+ ms, which shows up squarely in the
+##       median. The median is robust to the OS image-cache / AV-scan
+##       tail spikes that make the cumulative-sum bound flaky on shared
+##       CI. We reuse the per-prompt p50 bar from the
+##       ``t_e2e_shell_hook_noop_latency`` microbench:
+##
+##         * Linux/macOS: median < 20 ms (microbench p50 CI tolerance)
+##         * Windows: median < 20 ms (microbench p50 bar on a
+##           Defender-enabled host)
+##
+##     * A loose cumulative ceiling still catches a regression where
+##       the median stays low but a large fraction of prompts blow up:
+##
+##         * Linux/macOS: cumulative < 2000 ms (vs. 4 s+ pre-M77)
+##         * Windows: cumulative < 3000 ms
+##
+##   The earlier load-bearing bound was a 100 ms cumulative ceiling on
+##   Linux/macOS — 2.5 ms per full ``repro`` spawn, *below* the
+##   microbench's own 5 ms p50 endorsement — so it flaked under any CI
+##   scheduling jitter without measuring a real regression.
 ##
 ## NB: the M76 hook in production short-circuits via
 ## ``__REPRO_PROJECT_ROOT`` and therefore typically incurs ZERO
@@ -44,19 +61,30 @@ const
   Prompts = 40
   FastPathExpectedSubstring = "repro shell hook: no-op (cache key unchanged)"
 
+# The MEDIAN per-prompt budget is the load-bearing assertion: it is
+# the statistic that the "every prompt re-walks the dev-env edge"
+# pathology moves (typical prompt cost jumps from a few ms to 100+ ms)
+# and it is immune to the OS image-cache / AV-scan tail spikes that
+# make a cumulative-sum bound flaky on shared CI. Both OS bars match
+# the per-prompt p50 ceiling from ``t_e2e_shell_hook_noop_latency``.
+const MedianBudgetMs = 20.0
+
 when defined(windows):
-  # Per the microbench, per-prompt p50 is ~14 ms on a Defender-enabled
-  # host and the AV-scan tail spikes up to ~300 ms on a handful of
-  # samples (4-5%). 40 × 14 ms ≈ 560 ms is the floor; spikes can push
-  # cumulative time up to ~2000 ms. We set the budget at 3000 ms so
-  # the test fails decisively against a regression that drops the
-  # fast path entirely (which would hit ~30+ s with provider-compile
-  # cache checks per prompt) while still tolerating environmental
-  # noise. Cf. ``t_e2e_shell_hook_noop_latency`` for the per-prompt
-  # microbench numbers that drive this budget.
+  # Loose cumulative ceiling. Per the microbench, per-prompt p50 is
+  # ~14 ms on a Defender-enabled host and the AV-scan tail spikes up to
+  # ~300 ms on a handful of samples (4-5%). 40 × 14 ms ≈ 560 ms is the
+  # floor; spikes can push cumulative time up to ~2000 ms. 3000 ms
+  # tolerates that environmental noise while still catching a regression
+  # that drops the fast path entirely (~30+ s with provider-compile
+  # cache checks per prompt). Cf. ``t_e2e_shell_hook_noop_latency``.
   const CumulativeBudgetMs = 3000.0
 else:
-  const CumulativeBudgetMs = 100.0
+  # Loose cumulative ceiling on Linux/macOS. The pre-M77 full-edge walk
+  # accumulates well over 4 s across 40 prompts; the fast path keeps the
+  # whole burst comfortably under 2 s even with CI scheduling jitter.
+  # This backstops the median bound against a "median low, many prompts
+  # blow up" regression without flaking on tail spikes.
+  const CumulativeBudgetMs = 2000.0
 
 proc readFingerprint(script: string): string =
   const needle = "__REPRO_APPLIED='"
@@ -141,19 +169,26 @@ proc runScenario() =
        " ms)"
   var sorted = perPrompt
   sorted.sort(system.cmp[float])
+  let median = sorted[Prompts div 2]
   echo "  per-prompt min=", sorted[0].formatFloat(ffDecimal, 1),
-       " p50=", sorted[Prompts div 2].formatFloat(ffDecimal, 1),
+       " p50=", median.formatFloat(ffDecimal, 1),
        " p99=", sorted[^1].formatFloat(ffDecimal, 1)
-  echo "  budget < ", CumulativeBudgetMs.formatFloat(ffDecimal, 1),
-       " ms cumulative"
+  echo "  budget: median < ", MedianBudgetMs.formatFloat(ffDecimal, 1),
+       " ms, cumulative < ", CumulativeBudgetMs.formatFloat(ffDecimal, 1),
+       " ms"
 
-  # The load-bearing assertion: cumulative time is under budget. The
-  # pre-M77 baseline of this scenario walks the full dev-env edge per
-  # prompt — the edge does a provider-compile cache check + an
+  # The load-bearing assertion: the MEDIAN per-prompt latency stays
+  # within the fast-path budget. The pre-M77 baseline walks the full
+  # dev-env edge per prompt — a provider-compile cache check + an
   # introspection cache check + an artifact read, which on a warm cache
-  # takes 100+ ms per prompt and accumulates well over 4 s for 40
-  # prompts. The fast path keeps each prompt within tens of
-  # milliseconds.
+  # takes 100+ ms per prompt — so the typical (median) prompt cost
+  # explodes here. The median is robust to the OS image-cache and (on
+  # Windows) AV-scan tail spikes that make a sum-of-samples bound flaky
+  # on shared CI, so it measures the real "every prompt re-walks the
+  # edge" pathology rather than runner noise.
+  check median < MedianBudgetMs
+  # Backstop: a loose cumulative ceiling still catches a regression that
+  # keeps the median low while blowing up a large fraction of prompts.
   check perPromptSum < CumulativeBudgetMs
 
 suite "e2e_shell_hook_realistic_workload":

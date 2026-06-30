@@ -279,6 +279,17 @@ const TimeoutExitCode = -42
 const TimeoutPollIntervalMs = 100
 const TimeoutKillGraceSec = 5
 
+const AbsoluteTimeoutMultiplier = 4
+  ## The per-test ``--test-timeout`` is interpreted as an *idle*
+  ## deadline (no output produced for that long ⇒ kill), not a fixed
+  ## wall-clock budget. ``AbsoluteTimeoutMultiplier × testTimeoutSec`` is
+  ## the hard ceiling: a test that keeps emitting output but never
+  ## finishes is still killed once total wall time crosses it, so a
+  ## chatty-but-genuinely-stuck test (e.g. a busy spin that logs every
+  ## iteration) cannot run forever. With the default 600 s idle deadline
+  ## this caps any single test at 40 min, well inside the 4 h runner-
+  ## phase backstop.
+
 proc drainAndWait(p: Process): tuple[output: string; exitCode: int] =
   ## Drain the merged stdout/stderr stream to EOF, then collect the
   ## child's exit code and free its handles. Reading the stream to EOF
@@ -366,42 +377,87 @@ proc drainToEofBounded(p: Process; output: var string;
     drainToEof(p, output)
     return true
 
+proc drainAvailable(p: Process; output: var string): int =
+  ## Non-blocking read of whatever is currently buffered in the merged
+  ## stdout/stderr pipe of a *live* child. Returns the number of bytes
+  ## appended (0 if the pipe is momentarily empty). POSIX only — the fd
+  ## is put in ``O_NONBLOCK`` so the call never parks the poll loop on a
+  ## test that isn't emitting output right now. Used to (a) keep the
+  ## pipe drained so a verbose test can't fill the 64 KB kernel buffer
+  ## and self-block, and (b) detect forward progress for the idle-
+  ## deadline heuristic in ``drainAndWaitWithTimeout``.
+  when defined(posix):
+    let fd = cint(p.outputHandle)
+    let flags = fcntl(fd, F_GETFL, cint(0))
+    if flags != -1:
+      discard fcntl(fd, F_SETFL, flags or O_NONBLOCK)
+    var total = 0
+    var buf: array[4096, char]
+    while true:
+      let n = read(fd, addr buf[0], buf.len)
+      if n > 0:
+        var chunk = newString(int(n))
+        copyMem(addr chunk[0], addr buf[0], int(n))
+        output.add(chunk)
+        total += int(n)
+        if int(n) < buf.len:
+          break          # drained what was available; don't block
+      elif n == 0:
+        break            # writer closed; EOF handled by peekExitCode path
+      else:
+        let e = errno
+        if e == EAGAIN or e == EWOULDBLOCK or e == EINTR:
+          break          # nothing more available right now
+        else:
+          break
+    return total
+  else:
+    return 0
+
 proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
     tuple[output: string; exitCode: int; timedOut: bool] =
   ## Deadline-aware variant of ``drainAndWait``. When ``timeoutSec <= 0``
   ## the call delegates to ``drainAndWait`` (preserving M3 behaviour).
-  ## Otherwise a polling loop checks ``peekExitCode`` every
-  ## ~``TimeoutPollIntervalMs`` until either the child exits cleanly
-  ## or the deadline expires; on expiry the child is SIGTERM'd, given
-  ## ``TimeoutKillGraceSec`` to exit gracefully, then SIGKILL'd. The
-  ## output pipe is drained only after the child has exited (or been
-  ## killed) — Nim's ``readLine`` is blocking, so trying to pump the
-  ## pipe mid-flight would itself stall the polling loop on any test
-  ## that doesn't emit periodic output (the very class of failure D6
-  ## is meant to defeat).
   ##
-  ## Why this matters: a self-hosted CI runner stalled 2h42m at M3
-  ## because ``t_local_daemons_control_plane_m11`` left ``repro-daemon``
-  ## / ``fake_protocol_daemon_helper`` / ``repro`` children alive after
-  ## the test exec returned. ``drainAndWait``'s ``readLine`` then
-  ## blocked indefinitely waiting for the orphans' inherited pipe FDs
-  ## to close. D6 makes the runner kill such a test (visible as a clear
-  ## TIMEOUT signature in the build report) so the suite continues
-  ## instead of starving every queue slot behind it.
+  ## ``timeoutSec`` is interpreted as an **idle** deadline, not a fixed
+  ## wall-clock budget: the test is killed only after it has produced no
+  ## new output for ``timeoutSec`` seconds. A polling loop drains the
+  ## pipe non-blockingly every ~``TimeoutPollIntervalMs`` and resets the
+  ## idle clock whenever bytes arrive. A genuinely-slow-but-alive heavy
+  ## e2e test under shared-runner contention keeps emitting progress
+  ## output, so it is *not* killed; a truly hung test (silent on its
+  ## output stream — exactly the D6 ``sleep(60_000)`` shape, and the
+  ## real ``t_local_daemons_control_plane_m11`` leaked-daemon stall)
+  ## produces nothing and is killed once the idle window elapses.
   ##
-  ## Pipe-buffer note: with no concurrent drain, a verbose test that
-  ## writes more than the kernel pipe buffer (64KB on Linux) before
-  ## exiting will block its own ``write``. That manifests as a
-  ## timeout — which is the correct shape: a test that fills its
-  ## output pipe and never reads from the parent isn't completing
-  ## within the deadline anyway, and killing it produces the same
-  ## FAIL+TIMEOUT signal the user needs to investigate.
+  ## An absolute ceiling of ``AbsoluteTimeoutMultiplier × timeoutSec``
+  ## still applies so a chatty-but-stuck test (keeps logging, never
+  ## finishes) cannot run forever — this is the "sane upper bound" that
+  ## keeps the progress heuristic from masking a real hang.
+  ##
+  ## On expiry (idle or absolute) the child is SIGTERM'd, given
+  ## ``TimeoutKillGraceSec`` to exit, then SIGKILL'd.
+  ##
+  ## Why the idle semantics matter: the M3 fixed-budget timeout false-
+  ## killed live heavy e2e tests (``t_e2e_local_reprobuild_project_build``
+  ## et al.) when the shared box was oversubscribed — they were making
+  ## progress, just slowly. The original D6 hang it was built to defeat
+  ## (a test that left ``repro-daemon`` children holding the inherited
+  ## pipe open after exec returned) is *silent*, so the idle deadline
+  ## still catches it without masking it.
+  ##
+  ## On non-POSIX hosts ``drainAvailable`` is a no-op, so the loop
+  ## degrades to the original fixed-budget behaviour (no mid-flight
+  ## drain, idle clock never resets) — acceptable since Windows is not a
+  ## supported runner host today.
   if timeoutSec <= 0:
     let (output, exitCode) = drainAndWait(p)
     return (output, exitCode, false)
 
   var output = ""
   let start = epochTime()
+  var lastProgress = start
+  let absoluteDeadlineSec = timeoutSec.float * AbsoluteTimeoutMultiplier.float
   var timedOut = false
   while true:
     let code = p.peekExitCode()
@@ -415,7 +471,22 @@ proc drainAndWaitWithTimeout(p: Process; timeoutSec: int):
           "holding its output pipe open (leaked daemon / unreaped child).\n")
       close(p)
       return (output, code, false)
-    if (epochTime() - start) > timeoutSec.float:
+    # Drain whatever the live child has emitted since the last poll.
+    # Non-blocking, so this never parks on a silent test. Any new bytes
+    # are forward progress and reset the idle clock.
+    if drainAvailable(p, output) > 0:
+      lastProgress = epochTime()
+    let now = epochTime()
+    if (now - lastProgress) > timeoutSec.float:
+      output.add("\nrepro_test_runner: no output for " & $timeoutSec &
+        "s (idle deadline); treating as hung.\n")
+      timedOut = true
+      break
+    if (now - start) > absoluteDeadlineSec:
+      output.add("\nrepro_test_runner: exceeded absolute ceiling of " &
+        $absoluteDeadlineSec.int & "s (" & $AbsoluteTimeoutMultiplier &
+        "x the idle deadline) while still producing output; treating " &
+        "as stuck.\n")
       timedOut = true
       break
     sleep(TimeoutPollIntervalMs)
