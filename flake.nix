@@ -346,13 +346,6 @@
               pkgs.shellcheck
               pkgs.shfmt
               pkgs.typos
-              # Test-suite runtime tools: the native-shell-hook e2e gates
-              # require real zsh + fish binaries on PATH (their `nix build
-              # nixpkgs#…` fallback can't resolve the registry in the pure-flake
-              # CI shell), and the codetracer-subset build e2e needs node.
-              pkgs.nodejs
-              pkgs.zsh
-              pkgs.fish
               # Spec-Implementation M2a: clingo for the repro_solver
               # ASP bindings. Ships the `clingo` CLI tool and the
               # libclingo.so shared library + <clingo/clingo.h> headers
