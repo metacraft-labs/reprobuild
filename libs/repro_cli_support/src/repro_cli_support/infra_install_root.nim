@@ -348,13 +348,22 @@ proc copyLiveKernelAndInitrd(opts: InstallRootOptions;
   if opts.dryRun: return
   let bootDir = opts.target / "boot"
   createDir(bootDir)
+  # M9.R.50.3.5: when --source is set to a staged tree (build-time
+  # image path), the live-medium absolute paths are wrong; prepend
+  # opts.source for those.  When --source = "/" (live-ISO path) the
+  # prepend is a no-op (/ + /foo == /foo via the normalised /).
+  let srcPrefix =
+    if opts.source == "/" or opts.source.len == 0: ""
+    else: opts.source
   let kernelCandidates = [
+    srcPrefix & "/boot/vmlinuz",
     "/run/live/medium/live/vmlinuz",
     "/vmlinuz",
     "/run/live/medium/vmlinuz",
     "/boot/vmlinuz",
   ]
   let initrdCandidates = [
+    srcPrefix & "/boot/initrd.img",
     "/run/live/medium/live/initrd.img",
     "/initrd.img",
     "/run/live/medium/initrd.img",

@@ -503,9 +503,18 @@ echo "  mnt esp:       $MNT_DIR/boot ($(df -h "$MNT_DIR/boot" 2>/dev/null | tail
 # the qcow2 is fully flushed before we move it.
 # ---------------------------------------------------------------
 sudo sync
-for p in "${MOUNTED_PATHS[@]}"; do
-  sudo umount "$p"
+sleep 2
+# Unmount in reverse order (esp before root) so we don't try to
+# unmount the parent while a child is still mounted.  Use lazy
+# umount as fallback for stubbornly-busy mounts.
+for ((i=${#MOUNTED_PATHS[@]}-1; i>=0; i--)); do
+  p="${MOUNTED_PATHS[$i]}"
+  sudo umount "$p" 2>/dev/null \
+    || sudo umount -l "$p" 2>/dev/null \
+    || { echo "[build-reproos-image] WARNING: failed to unmount $p" >&2; }
 done
+sudo sync
+sleep 1
 MOUNTED_PATHS=()
 
 sudo qemu-nbd --disconnect "$NBD_DEV"
