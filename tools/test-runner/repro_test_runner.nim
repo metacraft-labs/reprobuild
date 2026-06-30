@@ -813,31 +813,32 @@ proc main() =
   var activeCount: int = 0
   let failFast = getEnv("REPRO_TEST_FAIL_FAST") == "1"
 
-  # Hermetic git/gpg environment for every test process. Tests run real
-  # ``git`` (init / commit / push to local remotes), and we must NOT let the
-  # host/runner's user or system git config or ``~/.gnupg`` leak in: a global
-  # ``commit.gpgsign = true`` + ``user.signingkey`` (common on dev boxes / CI
-  # runners) makes an otherwise-plain test commit try to sign and fail with
-  # "gpg: signing failed: No secret key" — non-deterministic, depending on
-  # whatever the surrounding shell happens to carry. Point HOME, git's config
-  # discovery, and GNUPGHOME at a controlled sandbox so the suite is
-  # reproducible regardless of the invoking environment.
+  # Hermetic git config for every test process. Tests run real ``git`` (init /
+  # commit / push to local remotes), and the host/runner's user or system git
+  # config must NOT leak in: a global ``commit.gpgsign = true`` +
+  # ``user.signingkey`` (common on dev boxes / CI runners) makes an otherwise-
+  # plain test commit try to sign and fail non-deterministically with "gpg:
+  # signing failed: No secret key" — depending on whatever the surrounding shell
+  # carries. Pin git's config discovery to a controlled file (identity,
+  # init.defaultBranch=main, commit/tag gpgsign=false) and ignore the system
+  # config, so plain test commits never sign and the suite is reproducible.
   #
-  # This is done with ``putEnv`` on the main thread BEFORE the env snapshot and
-  # before any worker spawns — so it is captured by both spawn paths: the
-  # protocol path (which clones the snapshot into a per-child env table) AND the
-  # whole-binary path (which spawns with ``env = nil``, inheriting this live
-  # process environment). Mutating the global env here is safe — it is the
-  # single-threaded setup phase; the "no ``putEnv`` after snapshot" rule that
-  # the worker pool follows still holds.
-  block hermeticGitEnv:
-    let hermeticHome = opts.resultsDir / "hermetic-home"
-    let hermeticGnupg = hermeticHome / ".gnupg"
-    createDir(hermeticHome)
-    createDir(hermeticGnupg)
-    when not defined(windows):
-      setFilePermissions(hermeticGnupg, {fpUserRead, fpUserWrite, fpUserExec})
-    writeFile(hermeticHome / ".gitconfig",
+  # NOTE: deliberately do NOT override HOME/GNUPGHOME. Pointing GNUPGHOME at an
+  # empty dir makes any gpg invocation (a test that explicitly opts into signing)
+  # start gpg-agent and block on pinentry — hanging the whole run until the 4h
+  # overall timeout. Neutralizing ``commit.gpgsign`` at the git layer fixes the
+  # leak without inviting that hang; tests that genuinely sign manage their own
+  # keys.
+  #
+  # Applied with ``putEnv`` on the main thread BEFORE the env snapshot and before
+  # any worker spawns, so it is captured by BOTH spawn paths: the protocol path
+  # (which clones the snapshot into a per-child env table) AND the whole-binary
+  # path (which spawns with ``env = nil``, inheriting this live process env).
+  # Mutating the global env here is safe — single-threaded setup phase; the
+  # "no ``putEnv`` after snapshot" rule the worker pool follows still holds.
+  block hermeticGitConfig:
+    let hermeticGitConfigFile = opts.resultsDir / "hermetic-gitconfig"
+    writeFile(hermeticGitConfigFile,
       "[user]\n" &
       "\tname = Reprobuild Test\n" &
       "\temail = reprobuild-test@example.invalid\n" &
@@ -849,11 +850,8 @@ proc main() =
       "\tgpgsign = false\n" &
       "[safe]\n" &
       "\tdirectory = *\n")
-    putEnv("HOME", hermeticHome)
-    putEnv("USERPROFILE", hermeticHome)
-    putEnv("GIT_CONFIG_GLOBAL", hermeticHome / ".gitconfig")
+    putEnv("GIT_CONFIG_GLOBAL", hermeticGitConfigFile)
     putEnv("GIT_CONFIG_NOSYSTEM", "1")
-    putEnv("GNUPGHOME", hermeticGnupg)
 
   # Snapshot the process environment exactly once, on the main thread,
   # before any worker is created. From this point on no code in this
