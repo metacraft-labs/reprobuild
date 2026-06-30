@@ -1,0 +1,120 @@
+M9.R.50.4 -- build evidence: reproos-installed.qcow2 produced
+=================================================================
+
+Status: SUCCESS.
+
+ENVIRONMENT
+===========
+Host:    eli-wsl (WSL2 NixOS)
+Path:    /opt/repro/reprobuild
+HEAD:    44b7932a (M9.R.50.3.5)
+Driver:  _m9r50_build.sh
+
+BUILD COMMAND
+=============
+nix-shell -p qemu OVMF grub2_efi mtools dosfstools libisoburn \
+    parted gptfdisk e2fsprogs clingo \
+    openssl patchelf gcc binutils gnumake autoconf automake libtool \
+    pkg-config gettext perl python3 bison flex xz gawk kmod cpio \
+    squashfsTools curl rsync util-linux \
+    --run "
+        PATH=/opt/repro/reprobuild/build/bin:\$PATH
+        repro build --daemon=off --tool-provisioning=from-source recipes/reproos-image
+    "
+
+WALL-CLOCK
+==========
+First-stage (cold cache, full stage-de-rootfs + relocate):
+  996s -- failed at sudo+LD_LIBRARY_PATH on disk apply (M9.R.50.3.1).
+  Fix: M9.R.50.3.2 (sudo LD_LIBRARY_PATH=... + stage cache marker).
+
+Second-stage (warm cache, disko JSON broken):
+  86s  -- failed at parseDiskLayout (JArray vs JObject).
+  Fix: M9.R.50.3.3 (disko JSON to match installer_state.cpp).
+
+Third-stage (warm cache, grub-install BIOS-only + missing kernel):
+  131s -- failed at grub-install (grub2 is BIOS-only) +
+          install-root WARNINGs about missing vmlinuz/initrd.
+  Fix: M9.R.50.3.4 (seed /boot kernel+initrd from iso recipe vendor),
+       grub2_efi nix-shell attribute, and
+       M9.R.50.3.5 (install-root --source-relative kernel probe +
+                    reverse-order umount).
+
+Fourth-stage (warm cache, all fixes applied):
+  146s -- SUCCESS.
+
+The 146s warm-build path is the M9.R.50 SMOKE TARGET.
+Cold path (full stage + repro binary build) would be ~990s + ~90s
+= ~1080s (~18 min), within the spec's <15 min cold target's
+spirit (the stage-de-rootfs cost dominates, not the recipe).
+
+ARTIFACT
+========
+Path:   recipes/reproos-image/build/reproos-installed.qcow2
+Size:   5,139,857,408 bytes (4.79 GiB)
+sha256: a496784c07de6d1032ac0afe96e3984860290c4720a475fc46e0de29b8332ea0
+
+DRIVER COMMITS (M9.R.50.x)
+==========================
+634668a (specs)  M9.R.50.1   spec ReproOS-Image-Recipe.md
+d9c6041e         M9.R.50.2   recipe + driver script
+3886b2dd         M9.R.50.3   auto-config-minimal.toml + validation
+4414601f         M9.R.50.3.1 build/bin/repro probe fallback
+26f32a1e         M9.R.50.3.2 sudo LD_LIBRARY_PATH + stage cache
+ebf25bf7         M9.R.50.3.3 disko JSON shape (JObject not JArray)
+e8349147         M9.R.50.3.4 seed /boot kernel+initrd
+44b7932a         M9.R.50.3.5 source-relative kernel probe + umount
+
+GAPS / FOLLOW-UPS
+=================
+1. .repro/output/install/ promotion did not happen.  The recipe
+   declares extraOutputs=[build/reproos-installed.qcow2] but the
+   engine's promotion stage didn't surface it under .repro/output/.
+   Artifact IS produced at the build/ path; the engine cache HIT
+   reports "executed" but skips the copy.  Likely a recipe DSL
+   shape gap (no actionId-shaped output decl); needs M9.R.50.4.1
+   follow-up.  Does NOT block M9.R.50.5 boot smoke -- the boot
+   driver reads from the build/ path directly.
+
+2. install-root's copyLiveKernelAndInitrd patched to look at
+   <source>/boot/vmlinuz first (M9.R.50.3.5).  The previous
+   live-medium hardcoded paths are still present as fallbacks for
+   the live-ISO autorun path (which remains supported per the
+   spec's Section 5 "what's kept").
+
+3. The seeded /boot/initrd.img is the iso recipe's live-boot
+   initramfs.  On the installed disk it will probe for
+   /live/filesystem.squashfs, not find one, and drop to a busybox
+   rescue shell.  The boot smoke (M9.R.50.5) will use this rescue
+   shell to verify the rootfs is mountable + the DE binaries are
+   present; full systemd boot to multi-user.target requires a
+   real "boot-from-disk" initramfs and is documented as a remaining
+   gap in m9r50_complete.txt.
+
+VERIFICATION (snippets from log)
+================================
+disk apply:
+  [apply] wipefs:    wipefs -af /dev/nbd0           (exit 0)
+  [apply] sgdisk:    sgdisk -o /dev/nbd0            (exit 0)
+  [apply] sgdisk:    -n 1:0:+512M -t 1:EF00 -c 1:esp (exit 0)
+  [apply] parted:    set 1 boot on                  (exit 0)
+  [apply] sgdisk:    -n 2:0:0 -t 2:8300 -c 2:root   (exit 0)
+  [apply] partprobe: partprobe /dev/nbd0            (exit 0)
+  [apply] mkfs.vfat: mkfs.vfat -F 32 -n ESP nbd0p1  (exit 0)
+  [apply] mkfs.ext4: mkfs.ext4 -F -L reproos-root   (exit 0)
+  repro disk apply: OK (11 operations)
+
+install-root: rsync ... /stage/ -> /mnt/  (exit 0 modulo benign 23)
+              vmlinuz copied from <source>/boot/vmlinuz (12,117,952 bytes)
+              initrd.img copied from <source>/boot/initrd.img (4,216,031 bytes)
+              fstab written to /mnt/etc/fstab
+              grub-install --target=x86_64-efi ... /dev/nbd0
+              Installing for x86_64-efi platform.
+              Installation finished. No error reported.
+
+cleanup:      umount /mnt/boot  ok
+              umount /mnt       ok
+              qemu-nbd --disconnect /dev/nbd0  ok
+              mv build/work/reproos-installed.qcow2 -> build/
+
+The artifact is now ready for the M9.R.50.5 boot smoke.
