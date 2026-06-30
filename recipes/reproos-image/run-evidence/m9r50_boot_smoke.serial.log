@@ -1,0 +1,992 @@
+Tue Jun 30 09:27:51 PM EEST 2026
+=== M9.R.50.5 boot smoke (timeout 180s) ===
+DISK=/opt/repro/reprobuild/recipes/reproos-image/build/reproos-installed.qcow2 (4.8G)
+sha256=a496784c07de6d1032ac0afe96e3984860290c4720a475fc46e0de29b8332ea0
+OVMF=/nix/store/7cad50aij6n2j8g1dlkzi81in3fc3p1m-OVMF-202411-fd/FV/OVMF_CODE.fd
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0)
+BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0)
+[H[J[1;1H[H[J[1;1HEFI stub: Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path
+[    0.000000] Linux version 6.12.86+deb13-amd64 (debian-kernel@lists.debian.org) (x86_64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP PREEMPT_DYNAMIC Debian 6.12.86-1 (2026-05-08)
+[    0.000000] Command line: BOOT_IMAGE=/vmlinuz root=/dev/nbd0p2 ro console=tty1 console=ttyS0,115200
+[    0.000000] BIOS-provided physical RAM map:
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000002ffff] usable
+[    0.000000] BIOS-e820: [mem 0x0000000000030000-0x000000000004ffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000050000-0x000000000009dfff] usable
+[    0.000000] BIOS-e820: [mem 0x000000000009e000-0x000000000009ffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x00000000007fffff] usable
+[    0.000000] BIOS-e820: [mem 0x0000000000800000-0x0000000000805fff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x0000000000806000-0x0000000000806fff] usable
+[    0.000000] BIOS-e820: [mem 0x0000000000807000-0x0000000000807fff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x0000000000808000-0x000000000080afff] usable
+[    0.000000] BIOS-e820: [mem 0x000000000080b000-0x000000000080bfff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x000000000080c000-0x0000000000810fff] usable
+[    0.000000] BIOS-e820: [mem 0x0000000000811000-0x0000000001a0ffff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x0000000001a10000-0x000000007e4ecfff] usable
+[    0.000000] BIOS-e820: [mem 0x000000007e4ed000-0x000000007e76cfff] reserved
+[    0.000000] BIOS-e820: [mem 0x000000007e76d000-0x000000007e77efff] ACPI data
+[    0.000000] BIOS-e820: [mem 0x000000007e77f000-0x000000007e7fefff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x000000007e7ff000-0x000000007ef30fff] usable
+[    0.000000] BIOS-e820: [mem 0x000000007ef31000-0x000000007ef34fff] reserved
+[    0.000000] BIOS-e820: [mem 0x000000007ef35000-0x000000007ef36fff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x000000007ef37000-0x000000007ef6ffff] usable
+[    0.000000] BIOS-e820: [mem 0x000000007ef70000-0x000000007effffff] ACPI NVS
+[    0.000000] BIOS-e820: [mem 0x000000007f000000-0x000000007fffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000e0000000-0x00000000efffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x000000fd00000000-0x000000ffffffffff] reserved
+[    0.000000] NX (Execute Disable) protection: active
+[    0.000000] APIC: Static calls initialized
+[    0.000000] extended physical RAM map:
+[    0.000000] reserve setup_data: [mem 0x0000000000000000-0x000000000002ffff] usable
+[    0.000000] reserve setup_data: [mem 0x0000000000030000-0x000000000004ffff] reserved
+[    0.000000] reserve setup_data: [mem 0x0000000000050000-0x000000000009dfff] usable
+[    0.000000] reserve setup_data: [mem 0x000000000009e000-0x000000000009ffff] reserved
+[    0.000000] reserve setup_data: [mem 0x0000000000100000-0x00000000007fffff] usable
+[    0.000000] reserve setup_data: [mem 0x0000000000800000-0x0000000000805fff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x0000000000806000-0x0000000000806fff] usable
+[    0.000000] reserve setup_data: [mem 0x0000000000807000-0x0000000000807fff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x0000000000808000-0x000000000080afff] usable
+[    0.000000] reserve setup_data: [mem 0x000000000080b000-0x000000000080bfff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x000000000080c000-0x0000000000810fff] usable
+[    0.000000] reserve setup_data: [mem 0x0000000000811000-0x0000000001a0ffff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x0000000001a10000-0x000000007b180017] usable
+[    0.000000] reserve setup_data: [mem 0x000000007b180018-0x000000007b1a6e57] usable
+[    0.000000] reserve setup_data: [mem 0x000000007b1a6e58-0x000000007cd64017] usable
+[    0.000000] reserve setup_data: [mem 0x000000007cd64018-0x000000007cd6da57] usable
+[    0.000000] reserve setup_data: [mem 0x000000007cd6da58-0x000000007e4ecfff] usable
+[    0.000000] reserve setup_data: [mem 0x000000007e4ed000-0x000000007e76cfff] reserved
+[    0.000000] reserve setup_data: [mem 0x000000007e76d000-0x000000007e77efff] ACPI data
+[    0.000000] reserve setup_data: [mem 0x000000007e77f000-0x000000007e7fefff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x000000007e7ff000-0x000000007ef30fff] usable
+[    0.000000] reserve setup_data: [mem 0x000000007ef31000-0x000000007ef34fff] reserved
+[    0.000000] reserve setup_data: [mem 0x000000007ef35000-0x000000007ef36fff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x000000007ef37000-0x000000007ef6ffff] usable
+[    0.000000] reserve setup_data: [mem 0x000000007ef70000-0x000000007effffff] ACPI NVS
+[    0.000000] reserve setup_data: [mem 0x000000007f000000-0x000000007fffffff] reserved
+[    0.000000] reserve setup_data: [mem 0x00000000e0000000-0x00000000efffffff] reserved
+[    0.000000] reserve setup_data: [mem 0x000000fd00000000-0x000000ffffffffff] reserved
+[    0.000000] efi: EFI v2.7 by EDK II
+[    0.000000] efi: SMBIOS=0x7e5d5000 ACPI=0x7e77e000 ACPI 2.0=0x7e77e014 MEMATTR=0x7cd83298 INITRD=0x7cd6ee18 
+[    0.000000] secureboot: Secure boot disabled
+[    0.000000] SMBIOS 2.8 present.
+[    0.000000] DMI: QEMU Standard PC (Q35 + ICH9, 2009), BIOS unknown 02/02/2022
+[    0.000000] DMI: Memory slots populated: 1/1
+[    0.000000] tsc: Fast TSC calibration using PIT
+[    0.000000] tsc: Detected 4768.634 MHz processor
+[    0.001663] AGP: No AGP bridge found
+[    0.001829] last_pfn = 0x7ef70 max_arch_pfn = 0x400000000
+[    0.002220] MTRR map: 4 entries (2 fixed + 2 variable; max 18), built from 8 variable MTRRs
+[    0.002310] x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+[    0.024549] RAMDISK: [mem 0x7b1a7000-0x7b5acfff]
+[    0.024860] ACPI: Early table checksum verification disabled
+[    0.025081] ACPI: RSDP 0x000000007E77E014 000024 (v02 BOCHS )
+[    0.025250] ACPI: XSDT 0x000000007E77D0E8 000054 (v01 BOCHS  BXPC     00000001      01000013)
+[    0.025574] ACPI: FACP 0x000000007E779000 0000F4 (v03 BOCHS  BXPC     00000001 BXPC 00000001)
+[    0.025902] ACPI: DSDT 0x000000007E77A000 0021B3 (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+[    0.025942] ACPI: FACS 0x000000007E7CD000 000040
+[    0.025970] ACPI: APIC 0x000000007E778000 000080 (v03 BOCHS  BXPC     00000001 BXPC 00000001)
+[    0.025981] ACPI: HPET 0x000000007E777000 000038 (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+[    0.025991] ACPI: MCFG 0x000000007E776000 00003C (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+[    0.026001] ACPI: WAET 0x000000007E775000 000028 (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+[    0.026011] ACPI: BGRT 0x000000007E774000 000038 (v01 INTEL  EDK2     00000002      01000013)
+[    0.026050] ACPI: Reserving FACP table memory at [mem 0x7e779000-0x7e7790f3]
+[    0.026064] ACPI: Reserving DSDT table memory at [mem 0x7e77a000-0x7e77c1b2]
+[    0.026068] ACPI: Reserving FACS table memory at [mem 0x7e7cd000-0x7e7cd03f]
+[    0.026071] ACPI: Reserving APIC table memory at [mem 0x7e778000-0x7e77807f]
+[    0.026074] ACPI: Reserving HPET table memory at [mem 0x7e777000-0x7e777037]
+[    0.026077] ACPI: Reserving MCFG table memory at [mem 0x7e776000-0x7e77603b]
+[    0.026080] ACPI: Reserving WAET table memory at [mem 0x7e775000-0x7e775027]
+[    0.026083] ACPI: Reserving BGRT table memory at [mem 0x7e774000-0x7e774037]
+[    0.027559] No NUMA configuration found
+[    0.027574] Faking a node at [mem 0x0000000000000000-0x000000007ef6ffff]
+[    0.028502] NODE_DATA(0) allocated [mem 0x7eeb3680-0x7eeddfff]
+[    0.030836] Zone ranges:
+[    0.030854]   DMA      [mem 0x0000000000001000-0x0000000000ffffff]
+[    0.030902]   DMA32    [mem 0x0000000001000000-0x000000007ef6ffff]
+[    0.030908]   Normal   empty
+[    0.030916]   Device   empty
+[    0.030922] Movable zone start for each node
+[    0.030939] Early memory node ranges
+[    0.030954]   node   0: [mem 0x0000000000001000-0x000000000002ffff]
+[    0.031802]   node   0: [mem 0x0000000000050000-0x000000000009dfff]
+[    0.031814]   node   0: [mem 0x0000000000100000-0x00000000007fffff]
+[    0.031818]   node   0: [mem 0x0000000000806000-0x0000000000806fff]
+[    0.031821]   node   0: [mem 0x0000000000808000-0x000000000080afff]
+[    0.031823]   node   0: [mem 0x000000000080c000-0x0000000000810fff]
+[    0.031826]   node   0: [mem 0x0000000001a10000-0x000000007e4ecfff]
+[    0.031846]   node   0: [mem 0x000000007e7ff000-0x000000007ef30fff]
+[    0.031849]   node   0: [mem 0x000000007ef37000-0x000000007ef6ffff]
+[    0.031941] Initmem setup node 0 [mem 0x0000000000001000-0x000000007ef6ffff]
+[    0.032636] On node 0, zone DMA: 1 pages in unavailable ranges
+[    0.032669] On node 0, zone DMA: 32 pages in unavailable ranges
+[    0.032766] On node 0, zone DMA: 98 pages in unavailable ranges
+[    0.032770] On node 0, zone DMA: 6 pages in unavailable ranges
+[    0.032774] On node 0, zone DMA: 1 pages in unavailable ranges
+[    0.032776] On node 0, zone DMA: 1 pages in unavailable ranges
+[    0.034521] On node 0, zone DMA32: 4607 pages in unavailable ranges
+[    0.034563] On node 0, zone DMA32: 786 pages in unavailable ranges
+[    0.034572] On node 0, zone DMA32: 6 pages in unavailable ranges
+[    0.035566] On node 0, zone DMA32: 4240 pages in unavailable ranges
+[    0.035849] ACPI: PM-Timer IO Port: 0x608
+[    0.036165] ACPI: LAPIC_NMI (acpi_id[0xff] dfl dfl lint[0x1])
+[    0.036403] IOAPIC[0]: apic_id 0, version 32, address 0xfec00000, GSI 0-23
+[    0.036469] ACPI: INT_SRC_OVR (bus 0 bus_irq 0 global_irq 2 dfl dfl)
+[    0.036652] ACPI: INT_SRC_OVR (bus 0 bus_irq 5 global_irq 5 high level)
+[    0.036682] ACPI: INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)
+[    0.036748] ACPI: INT_SRC_OVR (bus 0 bus_irq 10 global_irq 10 high level)
+[    0.036753] ACPI: INT_SRC_OVR (bus 0 bus_irq 11 global_irq 11 high level)
+[    0.036854] ACPI: Using ACPI (MADT) for SMP configuration information
+[    0.036879] ACPI: HPET id: 0x8086a201 base: 0xfed00000
+[    0.037570] CPU topo: Max. logical packages:   1
+[    0.037576] CPU topo: Max. logical dies:       1
+[    0.037581] CPU topo: Max. dies per package:   1
+[    0.037607] CPU topo: Max. threads per core:   1
+[    0.037668] CPU topo: Num. cores per package:     2
+[    0.037676] CPU topo: Num. threads per package:   2
+[    0.037681] CPU topo: Allowing 2 present CPUs plus 0 hotplug CPUs
+[    0.038281] PM: hibernation: Registered nosave memory: [mem 0x00000000-0x00000fff]
+[    0.038303] PM: hibernation: Registered nosave memory: [mem 0x00030000-0x0004ffff]
+[    0.038310] PM: hibernation: Registered nosave memory: [mem 0x0009e000-0x000fffff]
+[    0.038329] PM: hibernation: Registered nosave memory: [mem 0x00800000-0x00805fff]
+[    0.038340] PM: hibernation: Registered nosave memory: [mem 0x00807000-0x00807fff]
+[    0.038347] PM: hibernation: Registered nosave memory: [mem 0x0080b000-0x0080bfff]
+[    0.038353] PM: hibernation: Registered nosave memory: [mem 0x00811000-0x01a0ffff]
+[    0.038359] PM: hibernation: Registered nosave memory: [mem 0x7cd7a000-0x7cd82fff]
+[    0.038365] PM: hibernation: Registered nosave memory: [mem 0x7e4ed000-0x7e7fefff]
+[    0.038371] PM: hibernation: Registered nosave memory: [mem 0x7ef31000-0x7ef36fff]
+[    0.038466] [mem 0x80000000-0xdfffffff] available for PCI devices
+[    0.038509] Booting paravirtualized kernel on bare hardware
+[    0.038689] clocksource: refined-jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645519600211568 ns
+[    0.044947] setup_percpu: NR_CPUS:8192 nr_cpumask_bits:2 nr_cpu_ids:2 nr_node_ids:1
+[    0.046169] percpu: Embedded 66 pages/cpu s233472 r8192 d28672 u1048576
+[    0.047039] Kernel command line: BOOT_IMAGE=/vmlinuz root=/dev/nbd0p2 ro console=tty1 console=ttyS0,115200
+[    0.048061] Dentry cache hash table entries: 262144 (order: 9, 2097152 bytes, linear)
+[    0.048426] Inode-cache hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[    0.050160] Fallback order for Node 0: 0 
+[    0.050341] Built 1 zonelists, mobility grouping on.  Total pages: 514510
+[    0.050351] Policy zone: DMA32
+[    0.050633] mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+[    0.050716] AGP: Checking aperture...
+[    0.051263] AGP: No AGP bridge found
+[    0.083846] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=2, Nodes=1
+[    0.087122] ftrace: allocating 45755 entries in 179 pages
+[    0.106382] ftrace: allocated 179 pages with 5 groups
+[    0.112094] Dynamic Preempt: voluntary
+[    0.115748] rcu: Preemptible hierarchical RCU implementation.
+[    0.115775] rcu: 	RCU restricting CPUs from NR_CPUS=8192 to nr_cpu_ids=2.
+[    0.115854] 	Trampoline variant of Tasks RCU enabled.
+[    0.115859] 	Rude variant of Tasks RCU enabled.
+[    0.115863] 	Tracing variant of Tasks RCU enabled.
+[    0.115917] rcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+[    0.115934] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=2
+[    0.116638] RCU Tasks: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    0.116657] RCU Tasks Rude: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    0.116662] RCU Tasks Trace: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.
+[    0.136023] NR_IRQS: 524544, nr_irqs: 440, preallocated irqs: 16
+[    0.142355] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.145324] Console: colour dummy device 80x25
+[    0.145574] printk: legacy console [tty1] enabled
+[    0.148575] printk: legacy console [ttyS0] enabled
+[    0.166355] ACPI: Core revision 20240827
+[    0.170009] clocksource: hpet: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 19112604467 ns
+[    0.172859] APIC: Switch to symmetric I/O mode setup
+[    0.175818] ..TIMER: vector=0x30 apic1=0 pin1=2 apic2=-1 pin2=-1
+[    0.195923] clocksource: tsc-early: mask: 0xffffffffffffffff max_cycles: 0x44bcb0d816d, max_idle_ns: 440795415189 ns
+[    0.196530] Calibrating delay loop (skipped), value calculated using timer frequency.. 9537.26 BogoMIPS (lpj=19074536)
+[    0.198800] Last level iTLB entries: 4KB 512, 2MB 255, 4MB 127
+[    0.200355] Last level dTLB entries: 4KB 512, 2MB 255, 4MB 127, 1GB 0
+[    0.200691] Spectre V1 : Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+[    0.201018] Spectre V2 : Mitigation: Retpolines
+[    0.201103] Spectre V2 : Spectre v2 / SpectreRSB: Filling RSB on context switch and VMEXIT
+[    0.201790] x86/fpu: x87 FPU will use FXSAVE
+[    0.290031] Freeing SMP alternatives memory: 40K
+[    0.290719] pid_max: default: 32768 minimum: 301
+[    0.305676] LSM: initializing lsm=lockdown,capability,landlock,yama,apparmor,tomoyo,bpf,ipe,ima,evm
+[    0.307641] landlock: Up and running.
+[    0.307726] Yama: disabled by default; enable with sysctl kernel.yama.*
+[    0.309779] AppArmor: AppArmor initialized
+[    0.309924] TOMOYO Linux initialized
+[    0.310766] LSM support for eBPF active
+[    0.313303] Mount-cache hash table entries: 4096 (order: 3, 32768 bytes, linear)
+[    0.313463] Mountpoint-cache hash table entries: 4096 (order: 3, 32768 bytes, linear)
+[    0.440238] smpboot: CPU0: AMD QEMU Virtual CPU version 2.5+ (family: 0xf, model: 0x6b, stepping: 0x1)
+[    0.444759] Performance Events: PMU not available due to virtualization, using software events only.
+[    0.445574] signal: max sigframe size: 1440
+[    0.446364] rcu: Hierarchical SRCU implementation.
+[    0.446493] rcu: 	Max phase no-delay instances is 1000.
+[    0.447339] Timer migration: 1 hierarchy levels; 8 children per group; 1 crossnode level
+[    0.451403] NMI watchdog: Perf NMI watchdog permanently disabled
+[    0.453024] smp: Bringing up secondary CPUs ...
+[    0.455903] smpboot: x86: Booting SMP configuration:
+[    0.456004] .... node  #0, CPUs:      #1
+[    0.541868] smp: Brought up 1 node, 2 CPUs
+[    0.544444] smpboot: Total of 2 processors activated (19054.40 BogoMIPS)
+[    0.558096] node 0 deferred pages initialised in 8ms
+[    0.558096] Memory: 1942308K/2058040K available (16384K kernel code, 2497K rwdata, 11808K rodata, 4168K init, 4916K bss, 111512K reserved, 0K cma-reserved)
+[    0.565239] devtmpfs: initialized
+[    0.566271] x86/mm: Memory block size: 128MB
+[    0.572464] ACPI: PM: Registering ACPI NVS region [mem 0x00800000-0x00805fff] (24576 bytes)
+[    0.572690] ACPI: PM: Registering ACPI NVS region [mem 0x00807000-0x00807fff] (4096 bytes)
+[    0.572841] ACPI: PM: Registering ACPI NVS region [mem 0x0080b000-0x0080bfff] (4096 bytes)
+[    0.572955] ACPI: PM: Registering ACPI NVS region [mem 0x00811000-0x01a0ffff] (18870272 bytes)
+[    0.573887] ACPI: PM: Registering ACPI NVS region [mem 0x7e77f000-0x7e7fefff] (524288 bytes)
+[    0.574038] ACPI: PM: Registering ACPI NVS region [mem 0x7ef35000-0x7ef36fff] (8192 bytes)
+[    0.574146] ACPI: PM: Registering ACPI NVS region [mem 0x7ef70000-0x7effffff] (589824 bytes)
+[    0.574894] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+[    0.575233] futex hash table entries: 512 (order: 3, 32768 bytes, linear)
+[    0.578350] pinctrl core: initialized pinctrl subsystem
+[    0.589184] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.592042] DMA: preallocated 256 KiB GFP_KERNEL pool for atomic allocations
+[    0.592623] DMA: preallocated 256 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[    0.593101] DMA: preallocated 256 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[    0.593323] audit: initializing netlink subsys (disabled)
+[    0.593506] audit: type=2000 audit(1782844085.424:1): state=initialized audit_enabled=0 res=1
+[    0.596487] thermal_sys: Registered thermal governor 'fair_share'
+[    0.596513] thermal_sys: Registered thermal governor 'bang_bang'
+[    0.596613] thermal_sys: Registered thermal governor 'step_wise'
+[    0.596693] thermal_sys: Registered thermal governor 'user_space'
+[    0.596776] thermal_sys: Registered thermal governor 'power_allocator'
+[    0.597124] cpuidle: using governor ladder
+[    0.597124] cpuidle: using governor menu
+[    0.600851] efi: Freeing EFI boot services memory: 24948K
+[    0.601075] acpiphp: ACPI Hot Plug PCI Controller Driver version: 0.5
+[    0.603104] PCI: ECAM [mem 0xe0000000-0xefffffff] (base 0xe0000000) for domain 0000 [bus 00-ff]
+[    0.604520] PCI: Using configuration type 1 for base access
+[    0.604886] mtrr: your CPUs had inconsistent fixed MTRR settings
+[    0.605004] mtrr: your CPUs had inconsistent variable MTRR settings
+[    0.605098] mtrr: your CPUs had inconsistent MTRRdefType settings
+[    0.605203] mtrr: probably your BIOS does not setup all CPUs.
+[    0.605282] mtrr: corrected configuration.
+[    0.605796] kprobes: kprobe jump-optimization is enabled. All kprobes are optimized if possible.
+[    0.641135] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.641292] HugeTLB: 28 KiB vmemmap can be freed for a 2.00 MiB page
+[    0.654950] ACPI: Added _OSI(Module Device)
+[    0.655078] ACPI: Added _OSI(Processor Device)
+[    0.655141] ACPI: Added _OSI(Processor Aggregator Device)
+[    0.663041] ACPI: 1 ACPI AML tables successfully acquired and loaded
+[    0.672655] ACPI: Interpreter enabled
+[    0.674038] ACPI: PM: (supports S0 S3 S4 S5)
+[    0.674135] ACPI: Using IOAPIC for interrupt routing
+[    0.675526] PCI: Using host bridge windows from ACPI; if necessary, use "pci=nocrs" and report a bug
+[    0.675713] PCI: Using E820 reservations for host bridge windows
+[    0.678968] ACPI: Enabled 2 GPEs in block 00 to 3F
+[    0.691675] ACPI: PCI Root Bridge [PCI0] (domain 0000 [bus 00-ff])
+[    0.692176] acpi PNP0A08:00: _OSC: OS supports [ExtendedConfig ASPM ClockPM Segments MSI HPX-Type3]
+[    0.692915] acpi PNP0A08:00: _OSC: platform does not support [PCIeHotplug LTR]
+[    0.693268] acpi PNP0A08:00: _OSC: OS now controls [SHPCHotplug PME AER PCIeCapability]
+[    0.695778] PCI host bridge to bus 0000:00
+[    0.695990] pci_bus 0000:00: root bus resource [io  0x0000-0x0cf7 window]
+[    0.696133] pci_bus 0000:00: root bus resource [io  0x0d00-0xffff window]
+[    0.696265] pci_bus 0000:00: root bus resource [mem 0x000a0000-0x000bffff window]
+[    0.696405] pci_bus 0000:00: root bus resource [mem 0x80000000-0xdfffffff window]
+[    0.696507] pci_bus 0000:00: root bus resource [mem 0xf0000000-0xfebfffff window]
+[    0.696606] pci_bus 0000:00: root bus resource [mem 0xc000000000-0xc7ffffffff window]
+[    0.696924] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    0.697769] pci 0000:00:00.0: [8086:29c0] type 00 class 0x060000 conventional PCI endpoint
+[    0.700160] pci 0000:00:01.0: [1234:1111] type 00 class 0x030000 conventional PCI endpoint
+[    0.701168] pci 0000:00:01.0: BAR 0 [mem 0x80000000-0x80ffffff pref]
+[    0.702640] pci 0000:00:01.0: BAR 2 [mem 0x81086000-0x81086fff]
+[    0.705980] pci 0000:00:01.0: ROM [mem 0xffff0000-0xffffffff pref]
+[    0.706406] pci 0000:00:01.0: Video device with shadowed ROM at [mem 0x000c0000-0x000dffff]
+[    0.707202] pci 0000:00:02.0: [8086:10d3] type 00 class 0x020000 PCIe Root Complex Integrated Endpoint
+[    0.708992] pci 0000:00:02.0: BAR 0 [mem 0x81060000-0x8107ffff]
+[    0.711556] pci 0000:00:02.0: BAR 1 [mem 0x81040000-0x8105ffff]
+[    0.712893] pci 0000:00:02.0: BAR 2 [io  0x60e0-0x60ff]
+[    0.713884] pci 0000:00:02.0: BAR 3 [mem 0x81080000-0x81083fff]
+[    0.716908] pci 0000:00:02.0: ROM [mem 0xfffc0000-0xffffffff pref]
+[    0.717357] pci 0000:00:02.0: enabling Extended Tags
+[    0.719106] pci 0000:00:03.0: [1af4:1001] type 00 class 0x010000 conventional PCI endpoint
+[    0.720238] pci 0000:00:03.0: BAR 0 [io  0x6000-0x607f]
+[    0.720995] pci 0000:00:03.0: BAR 1 [mem 0x81085000-0x81085fff]
+[    0.722697] pci 0000:00:03.0: BAR 4 [mem 0xc000000000-0xc000003fff 64bit pref]
+[    0.725251] pci 0000:00:1f.0: [8086:2918] type 00 class 0x060100 conventional PCI endpoint
+[    0.725650] pci 0000:00:1f.0: quirk: [io  0x0600-0x067f] claimed by ICH6 ACPI/GPIO/TCO
+[    0.726150] pci 0000:00:1f.2: [8086:2922] type 00 class 0x010601 conventional PCI endpoint
+[    0.728238] pci 0000:00:1f.2: BAR 4 [io  0x60c0-0x60df]
+[    0.728848] pci 0000:00:1f.2: BAR 5 [mem 0x81084000-0x81084fff]
+[    0.730076] pci 0000:00:1f.3: [8086:2930] type 00 class 0x0c0500 conventional PCI endpoint
+[    0.732277] pci 0000:00:1f.3: BAR 4 [io  0x6080-0x60bf]
+[    0.736986] ACPI: PCI: Interrupt link LNKA configured for IRQ 10
+[    0.737334] ACPI: PCI: Interrupt link LNKB configured for IRQ 10
+[    0.737525] ACPI: PCI: Interrupt link LNKC configured for IRQ 11
+[    0.737795] ACPI: PCI: Interrupt link LNKD configured for IRQ 11
+[    0.738021] ACPI: PCI: Interrupt link LNKE configured for IRQ 10
+[    0.738276] ACPI: PCI: Interrupt link LNKF configured for IRQ 10
+[    0.738683] ACPI: PCI: Interrupt link LNKG configured for IRQ 11
+[    0.739051] ACPI: PCI: Interrupt link LNKH configured for IRQ 11
+[    0.739209] ACPI: PCI: Interrupt link GSIA configured for IRQ 16
+[    0.739320] ACPI: PCI: Interrupt link GSIB configured for IRQ 17
+[    0.739416] ACPI: PCI: Interrupt link GSIC configured for IRQ 18
+[    0.739512] ACPI: PCI: Interrupt link GSID configured for IRQ 19
+[    0.739657] ACPI: PCI: Interrupt link GSIE configured for IRQ 20
+[    0.739763] ACPI: PCI: Interrupt link GSIF configured for IRQ 21
+[    0.739925] ACPI: PCI: Interrupt link GSIG configured for IRQ 22
+[    0.740030] ACPI: PCI: Interrupt link GSIH configured for IRQ 23
+[    0.742246] iommu: Default domain type: Translated
+[    0.742246] iommu: DMA domain TLB invalidation policy: lazy mode
+[    0.742246] pps_core: LinuxPPS API ver. 1 registered
+[    0.742246] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    0.742246] PTP clock support registered
+[    0.744395] EDAC MC: Ver: 3.0.0
+[    0.745110] efivars: Registered efivars operations
+[    0.752594] NetLabel: Initializing
+[    0.752674] NetLabel:  domain hash size = 128
+[    0.752743] NetLabel:  protocols = UNLABELED CIPSOv4 CALIPSO
+[    0.753991] NetLabel:  unlabeled traffic allowed by default
+[    0.754106] PCI: Using ACPI for IRQ routing
+[    0.758712] pci 0000:00:01.0: vgaarb: setting as boot VGA device
+[    0.758712] pci 0000:00:01.0: vgaarb: bridge control possible
+[    0.758712] pci 0000:00:01.0: vgaarb: VGA device added: decodes=io+mem,owns=io+mem,locks=none
+[    0.758712] vgaarb: loaded
+[    0.760727] hpet: 3 channels of 0 reserved for per-cpu timers
+[    0.760982] hpet0: at MMIO 0xfed00000, IRQs 2, 8, 0
+[    0.761097] hpet0: 3 comparators, 64-bit 100.000000 MHz counter
+[    0.765139] clocksource: Switched to clocksource tsc-early
+[    0.769462] VFS: Disk quotas dquot_6.6.0
+[    0.769668] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[    0.772806] AppArmor: AppArmor Filesystem Enabled
+[    0.773102] pnp: PnP ACPI init
+[    0.774957] system 00:05: [mem 0xe0000000-0xefffffff window] has been reserved
+[    0.775969] pnp: PnP ACPI: found 6 devices
+[    0.803624] clocksource: acpi_pm: mask: 0xffffff max_cycles: 0xffffff, max_idle_ns: 2085701024 ns
+[    0.804657] NET: Registered PF_INET protocol family
+[    0.805452] IP idents hash table entries: 32768 (order: 6, 262144 bytes, linear)
+[    0.831752] tcp_listen_portaddr_hash hash table entries: 1024 (order: 2, 16384 bytes, linear)
+[    0.832041] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.832211] TCP established hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.832494] TCP bind hash table entries: 16384 (order: 7, 524288 bytes, linear)
+[    0.832771] TCP: Hash tables configured (established 16384 bind 16384)
+[    0.833710] MPTCP token hash table entries: 2048 (order: 4, 49152 bytes, linear)
+[    0.834030] UDP hash table entries: 1024 (order: 3, 32768 bytes, linear)
+[    0.834243] UDP-Lite hash table entries: 1024 (order: 3, 32768 bytes, linear)
+[    0.835529] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.835980] NET: Registered PF_XDP protocol family
+[    0.836139] pci 0000:00:02.0: ROM [mem 0xfffc0000-0xffffffff pref]: can't claim; no compatible bridge window
+[    0.837471] pci 0000:00:02.0: ROM [mem 0x81000000-0x8103ffff pref]: assigned
+[    0.838028] pci_bus 0000:00: resource 4 [io  0x0000-0x0cf7 window]
+[    0.838126] pci_bus 0000:00: resource 5 [io  0x0d00-0xffff window]
+[    0.838211] pci_bus 0000:00: resource 6 [mem 0x000a0000-0x000bffff window]
+[    0.838303] pci_bus 0000:00: resource 7 [mem 0x80000000-0xdfffffff window]
+[    0.838395] pci_bus 0000:00: resource 8 [mem 0xf0000000-0xfebfffff window]
+[    0.838487] pci_bus 0000:00: resource 9 [mem 0xc000000000-0xc7ffffffff window]
+[    0.839493] PCI: CLS 0 bytes, default 64
+[    0.842794] Trying to unpack rootfs image as initramfs...
+[    0.843316] Initialise system trusted keyrings
+[    0.844430] Key type blacklist registered
+[    0.848378] workingset: timestamp_bits=36 max_order=19 bucket_order=0
+[    0.848597] zbud: loaded
+[    0.850669] fuse: init (API version 7.41)
+[    0.854353] integrity: Platform Keyring initialized
+[    0.854593] integrity: Machine keyring initialized
+[    0.898064] Key type asymmetric registered
+[    0.898316] Asymmetric key parser 'x509' registered
+[    1.005169] Freeing initrd memory: 4120K
+[    1.013101] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 246)
+[    1.013861] io scheduler mq-deadline registered
+[    1.021228] ledtrig-cpu: registered to indicate activity on CPUs
+[    1.021797] shpchp: Standard Hot Plug PCI Controller Driver version: 0.4
+[    1.027145] ACPI: \_SB_.GSIH: Enabled at IRQ 23
+[    1.030398] Serial: 8250/16550 driver, 4 ports, IRQ sharing enabled
+[    1.032760] 00:03: ttyS0 at I/O 0x3f8 (irq = 4, base_baud = 115200) is a 16550A
+[    1.037705] Linux agpgart interface v0.103
+[    1.041613] i8042: PNP: PS/2 Controller [PNP0303:KBD,PNP0f13:MOU] at 0x60,0x64 irq 1,12
+[    1.044600] serio: i8042 KBD port at 0x60,0x64 irq 1
+[    1.044784] serio: i8042 AUX port at 0x60,0x64 irq 12
+[    1.045731] mousedev: PS/2 mouse device common for all mice
+[    1.047404] input: AT Translated Set 2 keyboard as /devices/platform/i8042/serio0/input/input0
+[    1.047509] rtc_cmos 00:04: RTC can wake from S4
+[    1.049683] rtc_cmos 00:04: registered as rtc0
+[    1.050008] rtc_cmos 00:04: setting system clock to 2026-06-30T18:28:06 UTC (1782844086)
+[    1.051096] rtc_cmos 00:04: alarms up to one day, y3k, 242 bytes nvram
+[    1.051370] amd_pstate: the _CPC object is not present in SBIOS or ACPI disabled
+[    1.053067] efifb: probing for efifb
+[    1.053444] efifb: framebuffer at 0x80000000, using 4000k, total 4000k
+[    1.053543] efifb: mode is 1280x800x32, linelength=5120, pages=1
+[    1.053631] efifb: scrolling: redraw
+[    1.053708] efifb: Truecolor: size=8:8:8:8, shift=24:16:8:0
+[    1.060466] Console: switching to colour frame buffer device 160x50
+[    1.063752] fb0: EFI VGA frame buffer device
+[    1.065201] NET: Registered PF_INET6 protocol family
+[    1.076545] Segment Routing with IPv6
+[    1.076798] In-situ OAM (IOAM) with IPv6
+[    1.077186] mip6: Mobile IPv6
+[    1.077383] NET: Registered PF_PACKET protocol family
+[    1.077870] mpls_gso: MPLS GSO support
+[    1.079513] IPI shorthand broadcast: enabled
+[    1.086260] sched_clock: Marking stable (1057480629, 25505872)->(1087322403, -4335902)
+[    1.088572] registered taskstats version 1
+[    1.089824] Loading compiled-in X.509 certificates
+[    1.147342] Loaded X.509 cert 'Build time autogenerated kernel key: c0465b454d7244ca794594a976706ef7873df5fb'
+[    1.156013] Demotion targets for Node 0: null
+[    1.157253] Key type .fscrypt registered
+[    1.157384] Key type fscrypt-provisioning registered
+[    1.169250] Key type encrypted registered
+[    1.169402] AppArmor: AppArmor sha256 policy hashing enabled
+[    1.170764] ima: No TPM chip found, activating TPM-bypass!
+[    1.170930] ima: Allocated hash algorithm: sha256
+[    1.172057] ima: No architecture policies found
+[    1.172546] evm: Initialising EVM extended attributes:
+[    1.172687] evm: security.selinux
+[    1.172769] evm: security.SMACK64 (disabled)
+[    1.172847] evm: security.SMACK64EXEC (disabled)
+[    1.172927] evm: security.SMACK64TRANSMUTE (disabled)
+[    1.174475] evm: security.SMACK64MMAP (disabled)
+[    1.176079] evm: security.apparmor
+[    1.177162] evm: security.ima
+[    1.178147] evm: security.capability
+[    1.179316] evm: HMAC attrs: 0x1
+[    1.238530] RAS: Correctable Errors collector initialized.
+[    1.254331] clk: Disabling unused clocks
+[    1.255598] PM: genpd: Disabling unused power domains
+[    1.264335] Freeing unused decrypted memory: 2028K
+[    1.307317] Freeing unused kernel image (initmem) memory: 4168K
+[    1.308910] Write protecting the kernel read-only data: 28672k
+[    1.311410] Freeing unused kernel image (rodata/data gap) memory: 480K
+[    1.389206] x86/mm: Checked W+X mappings: passed, no W+X pages found.
+[    1.391158] Run /init as init process
+[    1.462958] [live-init] live.image=/live/filesystem.squashfs live.fstype=iso9660
+[    1.464738] [live-init] loading kernel modules
+[    1.476816] [live-init] modprobe virtio missing/failed (ok)
+[    1.481303] [live-init] modprobe virtio_ring missing/failed (ok)
+[    1.486826] [live-init] modprobe virtio_pci missing/failed (ok)
+[    1.490832] [live-init] modprobe virtio_pci_modern_dev missing/failed (ok)
+[    1.494373] [live-init] modprobe virtio_pci_legacy_dev missing/failed (ok)
+[    1.521212] virtio_blk virtio0: 2/0/0 default/read/poll queues
+[    1.530358] virtio_blk virtio0: [vda] 16777216 512-byte logical blocks (8.59 GB/8.00 GiB)
+[    1.541600]  vda: vda1 vda2
+[    1.547885] [live-init] modprobe virtio_blk ok
+[    1.595522] SCSI subsystem initialized
+[    1.611691] [live-init] modprobe virtio_scsi ok
+[    1.616540] [live-init] modprobe scsi_mod ok
+[    1.635750] [live-init] modprobe sd_mod ok
+[    1.666510] [live-init] modprobe sr_mod ok
+[    1.671321] [live-init] modprobe cdrom ok
+[    1.748787] [live-init] modprobe ata_piix ok
+[    1.781410] ACPI: \_SB_.GSIA: Enabled at IRQ 16
+[    1.785765] ahci 0000:00:1f.2: AHCI vers 0001.0000, 32 command slots, 1.5 Gbps, SATA mode
+[    1.786877] ahci 0000:00:1f.2: 6/6 ports implemented (port mask 0x3f)
+[    1.787943] ahci 0000:00:1f.2: flags: 64bit ncq only 
+[    1.793536] scsi host0: ahci
+[    1.796412] scsi host1: ahci
+[    1.798476] scsi host2: ahci
+[    1.800276] scsi host3: ahci
+[    1.802427] scsi host4: ahci
+[    1.804207] scsi host5: ahci
+[    1.805445] ata1: SATA max UDMA/133 abar m4096@0x81084000 port 0x81084100 irq 27 lpm-pol 1
+[    1.806601] ata2: SATA max UDMA/133 abar m4096@0x81084000 port 0x81084180 irq 27 lpm-pol 1
+[    1.807605] ata3: SATA max UDMA/133 abar m4096@0x81084000 port 0x81084200 irq 27 lpm-pol 1
+[    1.808538] ata4: SATA max UDMA/133 abar m4096@0x81084000 port 0x81084280 irq 27 lpm-pol 1
+[    1.809504] ata5: SATA max UDMA/133 abar m4096@0x81084000 port 0x81084300 irq 27 lpm-pol 1
+[    1.810517] ata6: SATA max UDMA/133 abar m4096@0x81084000 port 0x81084380 irq 27 lpm-pol 1
+[    1.866512] tsc: Refined TSC clocksource calibration: 4768.714 MHz
+[    1.868087] clocksource: tsc: mask: 0xffffffffffffffff max_cycles: 0x44bcfbd2d94, max_idle_ns: 440795290903 ns
+[    1.869462] clocksource: Switched to clocksource tsc
+[    2.123307] ata1: SATA link down (SStatus 0 SControl 300)
+[    2.125473] ata4: SATA link down (SStatus 0 SControl 300)
+[    2.126910] ata3: SATA link up 1.5 Gbps (SStatus 113 SControl 300)
+[    2.129183] ata2: SATA link down (SStatus 0 SControl 300)
+[    2.130895] ata6: SATA link down (SStatus 0 SControl 300)
+[    2.132126] ata5: SATA link down (SStatus 0 SControl 300)
+[    2.133411] ata3.00: LPM support broken, forcing max_power
+[    2.135010] ata3.00: ATAPI: QEMU DVD-ROM, 2.5+, max UDMA/100
+[    2.135920] ata3.00: applying bridge limits
+[    2.137976] ata3.00: LPM support broken, forcing max_power
+[    2.138912] ata3.00: configured for UDMA/100
+[    2.144223] scsi 2:0:0:0: CD-ROM            QEMU     QEMU DVD-ROM     2.5+ PQ: 0 ANSI: 5
+[    2.242796] sr 2:0:0:0: [sr0] scsi3-mmc drive: 4x/4x cd/rw xa/form2 tray
+[    2.243953] cdrom: Uniform CD-ROM driver Revision: 3.20
+[    2.287359] [live-init] modprobe ahci ok
+[    2.343357] ACPI: bus type USB registered
+[    2.344869] usbcore: registered new interface driver usbfs
+[    2.346333] usbcore: registered new interface driver hub
+[    2.347335] usbcore: registered new device driver usb
+[    2.350016] [live-init] modprobe usbcore ok
+[    2.380478] [live-init] modprobe ohci-pci ok
+[    2.399900] Warning! ehci_hcd should always be loaded before uhci_hcd and ohci_hcd, not after
+[    2.412745] [live-init] modprobe ehci-pci ok
+[    2.482677] [live-init] modprobe xhci-pci ok
+[    2.501864] usbcore: registered new interface driver usb-storage
+[    2.503729] [live-init] modprobe usb-storage ok
+[    2.518986] usbcore: registered new interface driver uas
+[    2.521017] [live-init] modprobe uas ok
+[    2.543613] loop: module loaded
+[    2.545207] [live-init] modprobe loop ok
+[    2.559705] [live-init] modprobe crc32c_generic ok
+[    2.680842] [live-init] modprobe crc32c-intel missing/failed (ok)
+[    2.715900] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Duplicate IMA measurements will not be recorded in the IMA log.
+[    2.717520] device-mapper: uevent: version 1.0.3
+[    2.719898] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@lists.linux.dev
+[    2.722779] [live-init] modprobe dm_mod ok
+[    2.741411] [live-init] modprobe dm_crypt ok
+[    2.761910] [live-init] modprobe isofs ok
+[    2.780384] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    2.782482] [live-init] modprobe squashfs ok
+[    2.808381] [live-init] modprobe overlay ok
+[    3.042195] [live-init] modprobe ext4 ok
+[    3.077107] [live-init] modprobe vfat ok
+[    3.092621] [live-init] modprobe nls_cp437 ok
+[    3.108564] [live-init] modprobe nls_utf8 ok
+[    3.124622] [live-init] modprobe nls_ascii ok
+[    3.207650] ACPI: bus type drm_connector registered
+[    3.211201] [live-init] modprobe drm ok
+[    3.244737] [live-init] modprobe drm_kms_helper ok
+[    3.294733] [live-init] modprobe virtio-gpu ok
+[    3.347682] [live-init] modprobe qxl ok
+[    3.377398] Console: switching to colour dummy device 80x25
+[    3.378594] bochs-drm 0000:00:01.0: vgaarb: deactivate vga console
+[    3.379778] [drm] Found bochs VGA, ID 0xb0c5.
+[    3.379870] [drm] Framebuffer size 16384 kB @ 0x80000000, mmio @ 0x81086000.
+[    3.382384] [drm] Found EDID data blob.
+[    3.386088] [drm] Initialized bochs-drm 1.0.0 for 0000:00:01.0 on minor 0
+[    3.393793] fbcon: bochs-drmdrmfb (fb0) is primary device
+[    3.400996] Console: switching to colour frame buffer device 160x50
+[    3.405973] bochs-drm 0000:00:01.0: [drm] fb0: bochs-drmdrmfb frame buffer device
+[    3.427635] [live-init] modprobe bochs ok
+[    4.442338] [live-init] probing /dev/sr0
+[    4.578546] /dev/sr0: Can't open blockdev
+[    4.690238] /dev/sr0: Can't open blockdev
+[    4.794149] /dev/sr0: Can't open blockdev
+[    4.898328] /dev/sr0: Can't open blockdev
+[    5.002427] /dev/sr0: Can't open blockdev
+[    5.009871] [live-init] probing /dev/vda
+[    5.060111] [live-init] probing /dev/vda1
+[    5.117507] [live-init] probing /dev/vda2
+[    5.274584] EXT4-fs (vda2): orphan cleanup on readonly fs
+[    5.275978] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[    5.283265] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[    6.298617] [live-init] probing /dev/sr0
+[    6.410362] /dev/sr0: Can't open blockdev
+[    6.522210] /dev/sr0: Can't open blockdev
+[    6.635559] /dev/sr0: Can't open blockdev
+[    6.738393] /dev/sr0: Can't open blockdev
+[    6.842160] /dev/sr0: Can't open blockdev
+[    6.848321] [live-init] probing /dev/vda
+[    6.892818] [live-init] probing /dev/vda1
+[    6.940493] [live-init] probing /dev/vda2
+[    7.064355] EXT4-fs (vda2): orphan cleanup on readonly fs
+[    7.067800] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[    7.075125] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[    8.091124] [live-init] probing /dev/sr0
+[    8.214262] /dev/sr0: Can't open blockdev
+[    8.318251] /dev/sr0: Can't open blockdev
+[    8.442403] /dev/sr0: Can't open blockdev
+[    8.546244] /dev/sr0: Can't open blockdev
+[    8.658439] /dev/sr0: Can't open blockdev
+[    8.666839] [live-init] probing /dev/vda
+[    8.711071] [live-init] probing /dev/vda1
+[    8.765004] [live-init] probing /dev/vda2
+[    8.888864] EXT4-fs (vda2): orphan cleanup on readonly fs
+[    8.892674] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[    8.901185] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[    9.917478] [live-init] probing /dev/sr0
+[   10.022471] /dev/sr0: Can't open blockdev
+[   10.166289] /dev/sr0: Can't open blockdev
+[   10.270371] /dev/sr0: Can't open blockdev
+[   10.378430] /dev/sr0: Can't open blockdev
+[   10.498294] /dev/sr0: Can't open blockdev
+[   10.506752] [live-init] probing /dev/vda
+[   10.548796] [live-init] probing /dev/vda1
+[   10.594146] [live-init] probing /dev/vda2
+[   10.723479] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   10.726069] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   10.732551] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   11.749224] [live-init] probing /dev/sr0
+[   11.862360] /dev/sr0: Can't open blockdev
+[   11.986195] /dev/sr0: Can't open blockdev
+[   12.094293] /dev/sr0: Can't open blockdev
+[   12.210350] /dev/sr0: Can't open blockdev
+[   12.318230] /dev/sr0: Can't open blockdev
+[   12.325478] [live-init] probing /dev/vda
+[   12.370785] [live-init] probing /dev/vda1
+[   12.420869] [live-init] probing /dev/vda2
+[   12.546387] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   12.548492] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   12.556651] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   13.572310] [live-init] probing /dev/sr0
+[   13.674018] /dev/sr0: Can't open blockdev
+[   13.782327] /dev/sr0: Can't open blockdev
+[   13.894105] /dev/sr0: Can't open blockdev
+[   13.994204] /dev/sr0: Can't open blockdev
+[   14.098310] /dev/sr0: Can't open blockdev
+[   14.106868] [live-init] probing /dev/vda
+[   14.147429] [live-init] probing /dev/vda1
+[   14.199346] [live-init] probing /dev/vda2
+[   14.332278] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   14.336116] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   14.343274] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   15.361442] [live-init] probing /dev/sr0
+[   15.462538] /dev/sr0: Can't open blockdev
+[   15.570632] /dev/sr0: Can't open blockdev
+[   15.674354] /dev/sr0: Can't open blockdev
+[   15.782472] /dev/sr0: Can't open blockdev
+[   15.886463] /dev/sr0: Can't open blockdev
+[   15.894640] [live-init] probing /dev/vda
+[   15.940269] [live-init] probing /dev/vda1
+[   15.996353] [live-init] probing /dev/vda2
+[   16.126596] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   16.130051] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   16.136483] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   17.153119] [live-init] probing /dev/sr0
+[   17.266400] /dev/sr0: Can't open blockdev
+[   17.390515] /dev/sr0: Can't open blockdev
+[   17.506468] /dev/sr0: Can't open blockdev
+[   17.610407] /dev/sr0: Can't open blockdev
+[   17.722287] /dev/sr0: Can't open blockdev
+[   17.730692] [live-init] probing /dev/vda
+[   17.772427] [live-init] probing /dev/vda1
+[   17.830514] [live-init] probing /dev/vda2
+[   17.957702] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   17.959710] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   17.967009] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   18.984192] [live-init] probing /dev/sr0
+[   19.078462] /dev/sr0: Can't open blockdev
+[   19.194380] /dev/sr0: Can't open blockdev
+[   19.302607] /dev/sr0: Can't open blockdev
+[   19.426352] /dev/sr0: Can't open blockdev
+[   19.534403] /dev/sr0: Can't open blockdev
+[   19.541852] [live-init] probing /dev/vda
+[   19.582601] [live-init] probing /dev/vda1
+[   19.639274] [live-init] probing /dev/vda2
+[   19.767691] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   19.771203] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   19.777629] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   20.793984] [live-init] probing /dev/sr0
+[   20.898441] /dev/sr0: Can't open blockdev
+[   21.010453] /dev/sr0: Can't open blockdev
+[   21.118330] /dev/sr0: Can't open blockdev
+[   21.234321] /dev/sr0: Can't open blockdev
+[   21.338523] /dev/sr0: Can't open blockdev
+[   21.346371] [live-init] probing /dev/vda
+[   21.390036] [live-init] probing /dev/vda1
+[   21.447655] [live-init] probing /dev/vda2
+[   21.574339] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   21.577849] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   21.585087] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   22.604161] [live-init] probing /dev/sr0
+[   22.718354] /dev/sr0: Can't open blockdev
+[   22.826362] /dev/sr0: Can't open blockdev
+[   22.942373] /dev/sr0: Can't open blockdev
+[   23.058299] /dev/sr0: Can't open blockdev
+[   23.162771] /dev/sr0: Can't open blockdev
+[   23.171106] [live-init] probing /dev/vda
+[   23.212366] [live-init] probing /dev/vda1
+[   23.268520] [live-init] probing /dev/vda2
+[   23.392101] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   23.395473] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   23.402791] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   24.420120] [live-init] probing /dev/sr0
+[   24.514417] /dev/sr0: Can't open blockdev
+[   24.618653] /dev/sr0: Can't open blockdev
+[   24.722285] /dev/sr0: Can't open blockdev
+[   24.838454] /dev/sr0: Can't open blockdev
+[   24.946217] /dev/sr0: Can't open blockdev
+[   24.953952] [live-init] probing /dev/vda
+[   24.997466] [live-init] probing /dev/vda1
+[   25.049714] [live-init] probing /dev/vda2
+[   25.179002] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   25.180939] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   25.189002] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   26.204513] [live-init] probing /dev/sr0
+[   26.322303] /dev/sr0: Can't open blockdev
+[   26.430360] /dev/sr0: Can't open blockdev
+[   26.538303] /dev/sr0: Can't open blockdev
+[   26.642378] /dev/sr0: Can't open blockdev
+[   26.758341] /dev/sr0: Can't open blockdev
+[   26.765958] [live-init] probing /dev/vda
+[   26.811930] [live-init] probing /dev/vda1
+[   26.866916] [live-init] probing /dev/vda2
+[   27.001238] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   27.004811] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   27.013838] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   28.034400] [live-init] probing /dev/sr0
+[   28.142384] /dev/sr0: Can't open blockdev
+[   28.266506] /dev/sr0: Can't open blockdev
+[   28.370295] /dev/sr0: Can't open blockdev
+[   28.478390] /dev/sr0: Can't open blockdev
+[   28.590345] /dev/sr0: Can't open blockdev
+[   28.598363] [live-init] probing /dev/vda
+[   28.646234] [live-init] probing /dev/vda1
+[   28.701500] [live-init] probing /dev/vda2
+[   28.838766] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   28.840685] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   28.848351] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   29.864120] [live-init] probing /dev/sr0
+[   29.966334] /dev/sr0: Can't open blockdev
+[   30.074700] /dev/sr0: Can't open blockdev
+[   30.190372] /dev/sr0: Can't open blockdev
+[   30.310417] /dev/sr0: Can't open blockdev
+[   30.418460] /dev/sr0: Can't open blockdev
+[   30.425996] [live-init] probing /dev/vda
+[   30.470518] [live-init] probing /dev/vda1
+[   30.522423] [live-init] probing /dev/vda2
+[   30.645131] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   30.647081] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   30.654763] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   31.674854] [live-init] probing /dev/sr0
+[   31.782182] /dev/sr0: Can't open blockdev
+[   31.898484] /dev/sr0: Can't open blockdev
+[   32.006168] /dev/sr0: Can't open blockdev
+[   32.122143] /dev/sr0: Can't open blockdev
+[   32.226200] /dev/sr0: Can't open blockdev
+[   32.233316] [live-init] probing /dev/vda
+[   32.272594] [live-init] probing /dev/vda1
+[   32.324710] [live-init] probing /dev/vda2
+[   32.453872] random: crng init done
+[   32.458023] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   32.459749] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   32.466517] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   33.483496] [live-init] probing /dev/sr0
+[   33.578315] /dev/sr0: Can't open blockdev
+[   33.698215] /dev/sr0: Can't open blockdev
+[   33.822299] /dev/sr0: Can't open blockdev
+[   33.938177] /dev/sr0: Can't open blockdev
+[   34.046409] /dev/sr0: Can't open blockdev
+[   34.054617] [live-init] probing /dev/vda
+[   34.098036] [live-init] probing /dev/vda1
+[   34.147498] [live-init] probing /dev/vda2
+[   34.274519] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   34.276404] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   34.284226] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   35.301208] [live-init] probing /dev/sr0
+[   35.406268] /dev/sr0: Can't open blockdev
+[   35.526268] /dev/sr0: Can't open blockdev
+[   35.630466] /dev/sr0: Can't open blockdev
+[   35.734335] /dev/sr0: Can't open blockdev
+[   35.850628] /dev/sr0: Can't open blockdev
+[   35.858185] [live-init] probing /dev/vda
+[   35.899856] [live-init] probing /dev/vda1
+[   35.952248] [live-init] probing /dev/vda2
+[   36.081399] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   36.084972] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   36.091653] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   37.109400] [live-init] probing /dev/sr0
+[   37.214182] /dev/sr0: Can't open blockdev
+[   37.318244] /dev/sr0: Can't open blockdev
+[   37.418333] /dev/sr0: Can't open blockdev
+[   37.530319] /dev/sr0: Can't open blockdev
+[   37.658224] /dev/sr0: Can't open blockdev
+[   37.665079] [live-init] probing /dev/vda
+[   37.708415] [live-init] probing /dev/vda1
+[   37.759276] [live-init] probing /dev/vda2
+[   37.888248] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   37.891667] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   37.897949] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   38.913878] [live-init] probing /dev/sr0
+[   39.026109] /dev/sr0: Can't open blockdev
+[   39.134403] /dev/sr0: Can't open blockdev
+[   39.254208] /dev/sr0: Can't open blockdev
+[   39.366286] /dev/sr0: Can't open blockdev
+[   39.486151] /dev/sr0: Can't open blockdev
+[   39.493098] [live-init] probing /dev/vda
+[   39.536013] [live-init] probing /dev/vda1
+[   39.589378] [live-init] probing /dev/vda2
+[   39.717442] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   39.721055] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   39.728381] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   40.743604] [live-init] probing /dev/sr0
+[   40.838284] /dev/sr0: Can't open blockdev
+[   40.954273] /dev/sr0: Can't open blockdev
+[   41.062279] /dev/sr0: Can't open blockdev
+[   41.178106] /dev/sr0: Can't open blockdev
+[   41.290038] /dev/sr0: Can't open blockdev
+[   41.297226] [live-init] probing /dev/vda
+[   41.337263] [live-init] probing /dev/vda1
+[   41.390626] [live-init] probing /dev/vda2
+[   41.520402] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   41.524291] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   41.532221] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   42.547788] [live-init] probing /dev/sr0
+[   42.662293] /dev/sr0: Can't open blockdev
+[   42.782219] /dev/sr0: Can't open blockdev
+[   42.890269] /dev/sr0: Can't open blockdev
+[   43.002448] /dev/sr0: Can't open blockdev
+[   43.110254] /dev/sr0: Can't open blockdev
+[   43.117522] [live-init] probing /dev/vda
+[   43.159218] [live-init] probing /dev/vda1
+[   43.207643] [live-init] probing /dev/vda2
+[   43.336718] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   43.340187] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   43.347991] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   44.364900] [live-init] probing /dev/sr0
+[   44.474113] /dev/sr0: Can't open blockdev
+[   44.586234] /dev/sr0: Can't open blockdev
+[   44.706147] /dev/sr0: Can't open blockdev
+[   44.810187] /dev/sr0: Can't open blockdev
+[   44.938167] /dev/sr0: Can't open blockdev
+[   44.945168] [live-init] probing /dev/vda
+[   44.987783] [live-init] probing /dev/vda1
+[   45.035259] [live-init] probing /dev/vda2
+[   45.167333] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   45.169274] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   45.178625] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   46.194295] [live-init] probing /dev/sr0
+[   46.302376] /dev/sr0: Can't open blockdev
+[   46.406002] /dev/sr0: Can't open blockdev
+[   46.518165] /dev/sr0: Can't open blockdev
+[   46.622212] /dev/sr0: Can't open blockdev
+[   46.746378] /dev/sr0: Can't open blockdev
+[   46.753232] [live-init] probing /dev/vda
+[   46.795622] [live-init] probing /dev/vda1
+[   46.845695] [live-init] probing /dev/vda2
+[   46.979043] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   46.981415] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   46.990120] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   48.008093] [live-init] probing /dev/sr0
+[   48.102154] /dev/sr0: Can't open blockdev
+[   48.206078] /dev/sr0: Can't open blockdev
+[   48.306254] /dev/sr0: Can't open blockdev
+[   48.422154] /dev/sr0: Can't open blockdev
+[   48.530093] /dev/sr0: Can't open blockdev
+[   48.537514] [live-init] probing /dev/vda
+[   48.578946] [live-init] probing /dev/vda1
+[   48.626591] [live-init] probing /dev/vda2
+[   48.749216] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   48.752491] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   48.759680] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   49.773835] [live-init] probing /dev/sr0
+[   49.874134] /dev/sr0: Can't open blockdev
+[   49.978247] /dev/sr0: Can't open blockdev
+[   50.106370] /dev/sr0: Can't open blockdev
+[   50.210410] /dev/sr0: Can't open blockdev
+[   50.314222] /dev/sr0: Can't open blockdev
+[   50.321292] [live-init] probing /dev/vda
+[   50.362365] [live-init] probing /dev/vda1
+[   50.410486] [live-init] probing /dev/vda2
+[   50.538664] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   50.541942] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   50.548930] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   51.565881] [live-init] probing /dev/sr0
+[   51.678323] /dev/sr0: Can't open blockdev
+[   51.802144] /dev/sr0: Can't open blockdev
+[   51.906138] /dev/sr0: Can't open blockdev
+[   52.018106] /dev/sr0: Can't open blockdev
+[   52.130394] /dev/sr0: Can't open blockdev
+[   52.137780] [live-init] probing /dev/vda
+[   52.179131] [live-init] probing /dev/vda1
+[   52.231469] [live-init] probing /dev/vda2
+[   52.360286] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   52.364169] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   52.371791] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   53.387126] [live-init] probing /dev/sr0
+[   53.494185] /dev/sr0: Can't open blockdev
+[   53.598324] /dev/sr0: Can't open blockdev
+[   53.714243] /dev/sr0: Can't open blockdev
+[   53.826310] /dev/sr0: Can't open blockdev
+[   53.938153] /dev/sr0: Can't open blockdev
+[   53.946016] [live-init] probing /dev/vda
+[   53.984049] [live-init] probing /dev/vda1
+[   54.032694] [live-init] probing /dev/vda2
+[   54.160205] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   54.163817] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   54.170812] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+echo === M9R50_INSTALLED_RESCUE_BEGIN ===
+[   55.187752] [live-init] probing /dev/sr0
+[   55.294243] /dev/sr0: Can't open blockdev
+[   55.410238] /dev/sr0: Can't open blockdev
+[   55.530196] /dev/sr0: Can't open blockdev
+uname -a
+[   55.638473] /dev/sr0: Can't open blockdev
+[   55.746206] /dev/sr0: Can't open blockdev
+[   55.753776] [live-init] probing /dev/vda
+[   55.793159] [live-init] probing /dev/vda1
+[   55.841463] [live-init] probing /dev/vda2
+[   55.964562] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   55.968256] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   55.976968] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   56.992352] [live-init] probing /dev/sr0
+[   57.130154] /dev/sr0: Can't open blockdev
+[   57.258196] /dev/sr0: Can't open blockdev
+[   57.370179] /dev/sr0: Can't open blockdev
+[   57.494154] /dev/sr0: Can't open blockdev
+ls /dev/vda /dev/vda1 /dev/vda2 2>&1
+[   57.618364] /dev/sr0: Can't open blockdev
+[   57.625333] [live-init] probing /dev/vda
+[   57.664793] [live-init] probing /dev/vda1
+[   57.716023] [live-init] probing /dev/vda2
+[   57.847166] EXT4-fs (vda2): orphan cleanup on readonly fs
+[   57.850046] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f ro with ordered data mode. Quota mode: none.
+[   57.856842] EXT4-fs (vda2): unmounting filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f.
+[   57.866323] [live-init] no medium found after 30s; available block devices:
+[   57.873968] loop0
+[   57.875010] loop1
+[   57.875010] loop2
+[   57.875010] loop3
+[   57.875010] loop4
+[   57.875010] loop5
+[   57.875010] loop6
+[   57.875010] loop7
+[   57.875010] sr0
+[   57.875010] vda
+[   57.875010] vda1
+[   57.875010] vda2
+[   57.883667] [live-init] FATAL: no live medium found
+[   57.884484] [live-init] dropping to busybox shell - use 'exit' to panic
+/bin/sh: can't access tty; job control turned off
+/ # echo === M9R50_INSTALLED_RESCUE_BEGIN ===
+=== M9R50_INSTALLED_RESCUE_BEGIN ===
+/ # uname -a
+Linux (none) 6.12.86+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.86-1 (2026-05-08) x86_64 GNU/Linux
+/ # ls /dev/vda /dev/vda1 /dev/vda2 2>&1
+/dev/vda   /dev/vda1  /dev/vda2
+/ # [6nmkdir -p /mnt/inst && mount /dev/vda2 /mnt/inst 2>&1 || echo MOUNT_RC=$?
+[   58.734773] EXT4-fs (vda2): mounted filesystem 58a534f6-aa9e-4499-b880-7f02e6b3d16f r/w with ordered data mode. Quota mode: none.
+/ # [6nls -la /mnt/inst/usr/bin/sway /mnt/inst/usr/bin/kwin_wayland /mnt/inst/usr/b
+in/mutter /mnt/inst/usr/bin/plasmashell /mnt/inst/usr/bin/sddm 2>&1 | head -10
+lrwxrwxrwx    1 1000     100             93 Jun 30 17:44 /mnt/inst/usr/bin/kwin_wayland -> /opt/repro/reprobuild/recipes/packages/source/kwin/.repro/output/install/usr/bin/kwin_wayland
+lrwxrwxrwx    1 1000     100             89 Jun 30 17:44 /mnt/inst/usr/bin/mutter -> /opt/repro/reprobuild/recipes/packages/source/mutter/.repro/output/install/usr/bin/mutter
+lrwxrwxrwx    1 1000     100            104 Jun 30 17:44 /mnt/inst/usr/bin/plasmashell -> /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/plasmashell
+lrwxrwxrwx    1 1000     100             85 Jun 30 17:44 /mnt/inst/usr/bin/sddm -> /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm
+lrwxrwxrwx    1 1000     100             85 Jun 30 17:44 /mnt/inst/usr/bin/sway -> /opt/repro/reprobuild/recipes/packages/source/sway/.repro/output/install/usr/bin/sway
+/ # [6nls -la /mnt/inst/boot/vmlinuz /mnt/inst/boot/initrd.img /mnt/inst/boot/grub/
+grub.cfg 2>&1 | head -5
+ls: /mnt/inst/boot/vmlinuz: No such file or directory
+ls: /mnt/inst/boot/initrd.img: No such file or directory
+ls: /mnt/inst/boot/grub/grub.cfg: No such file or directory
+/ # [6ncat /mnt/inst/etc/hostname 2>&1
+reproos-smoke
+/ # [6ncat /mnt/inst/etc/fstab 2>&1 | head -5
+# /etc/fstab — generated by `repro infra install-root` (M9.R.41).
+# <device>	<mountpoint>	<type>	<options>	<dump> <pass>
+/dev/nbd0p2	/	ext4	defaults	0 1
+/dev/nbd0p1	/boot	vfat	defaults,umask=0077	0 2
+/ # [6necho --- DE binary sizes (proxy for present + non-empty) ---
+/bin/sh: syntax error: unexpected "("
+/ # [6necho --- sway ---
+--- sway ---
+/ # ls -la /mnt/inst/usr/bin/sway 2>&1
+lrwxrwxrwx    1 1000     100             85 Jun 30 17:44 /mnt/inst/usr/bin/sway -> /opt/repro/reprobuild/recipes/packages/source/sway/.repro/output/install/usr/bin/sway
+/ # file /mnt/inst/usr/bin/sway 2>&1 | head -1 || true
+/bin/sh: file: not found
+/ # [6necho --- kwin_wayland ---
+--- kwin_wayland ---
+/ # ls -la /mnt/inst/usr/bin/kwin_wayland 2>&1
+lrwxrwxrwx    1 1000     100             93 Jun 30 17:44 /mnt/inst/usr/bin/kwin_wayland -> /opt/repro/reprobuild/recipes/packages/source/kwin/.repro/output/install/usr/bin/kwin_wayland
+/ # file /mnt/inst/usr/bin/kwin_wayland 2>&1 | head -1 || true
+/bin/sh: file: not found
+/ # [6necho --- mutter ---
+--- mutter ---
+/ # ls -la /mnt/inst/usr/bin/mutter 2>&1
+lrwxrwxrwx    1 1000     100             89 Jun 30 17:44 /mnt/inst/usr/bin/mutter -> /opt/repro/reprobuild/recipes/packages/source/mutter/.repro/output/install/usr/bin/mutter
+/ # file /mnt/inst/usr/bin/mutter 2>&1 | head -1 || true
+/bin/sh: file: not found
+/ # [6necho --- plasmashell ---
+--- plasmashell ---
+/ # ls -la /mnt/inst/usr/bin/plasmashell 2>&1
+lrwxrwxrwx    1 1000     100            104 Jun 30 17:44 /mnt/inst/usr/bin/plasmashell -> /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/plasmashell
+/ # file /mnt/inst/usr/bin/plasmashell 2>&1 | head -1 || true
+/bin/sh: file: not found
+/ # [6necho --- sddm ---
+--- sddm ---
+/ # ls -la /mnt/inst/usr/bin/sddm 2>&1
+lrwxrwxrwx    1 1000     100             85 Jun 30 17:44 /mnt/inst/usr/bin/sddm -> /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm
+/ # file /mnt/inst/usr/bin/sddm 2>&1 | head -1 || true
+/bin/sh: file: not found
+/ # [6necho === M9R50_INSTALLED_RESCUE_END ===
+=== M9R50_INSTALLED_RESCUE_END ===
+/ # [6npoweroff -f 2>/dev/null || halt -f 2>/dev/null || echo MANUAL_HALT
+[   75.646789] ACPI: PM: Preparing to enter system sleep state S5
+[   75.650503] reboot: Power down
+
+=== M9.R.50.5 transcript tail (ANSI stripped) ===
+
+=== M9.R.50.5 markers ===
+Tue Jun 30 09:29:39 PM EEST 2026
