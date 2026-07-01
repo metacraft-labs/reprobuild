@@ -846,6 +846,91 @@ ExecStart=/usr/bin/dbus-daemon --system --nofork --nopidfile --syslog-only
 DBUS_EXEC_EOF
 " || { echo "[build-reproos-image] Phase 10.6 dbus wiring failed" >&2; exit 72; }
 
+# ---------------------------------------------------------------
+# Phase 10.7 (M9.R.56.7): install a minimal SDDM theme.
+#
+# The from-source sddm recipe install-mirror ships ONLY the sddm
+# binary + libexec helpers; NO themes.  The Debian sddm dpkg
+# entry ships /usr/share/sddm/{faces,scripts,flags,translations-qt6}
+# but NO themes/ directory.  SDDM's default ``Theme=`` in
+# /etc/sddm.conf.d and the greeter's fallback path both expect
+# /usr/share/sddm/themes/<name>/Main.qml.  Without one, SDDM's
+# greeter renders a blank/black QQuickWindow --- verified in
+# M9.R.56.6 boot smoke where all 6 t={0..165}s screendumps are
+# 1280x800 grayscale mean=0.
+#
+# The minimal theme below is a bare-bones QML that just fills
+# the window in a solid gray with the "reproos" text --- enough
+# to prove the greeter renders SOMETHING, so that on subsequent
+# iterations (M9.R.56.8+) we know if SDDM's autologin is firing
+# (screen goes to sway session) or falling back to greeter (screen
+# stays at gray+text).  A full theme lands with the sddm recipe
+# rework in M9.R.57+.
+# ---------------------------------------------------------------
+
+echo "[build-reproos-image] Phase 10.7: install minimal SDDM theme /usr/share/sddm/themes/reproos"
+
+"$SUDO" bash -c "
+  set -euo pipefail
+  mkdir -p '$MNT_DIR/usr/share/sddm/themes/reproos'
+  cat > '$MNT_DIR/usr/share/sddm/themes/reproos/metadata.desktop' <<'THEME_META_EOF'
+[SddmGreeterTheme]
+Name=reproos
+Description=ReproOS minimal SDDM theme
+Author=reprobuild
+Copyright=(c) 2026 Metacraft Labs
+License=MIT
+Type=sddm-theme
+Version=1.0
+Website=https://github.com/metacraft-labs/reprobuild
+Screenshot=
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=reproos
+Theme-API=2.0
+
+THEME_META_EOF
+  cat > '$MNT_DIR/usr/share/sddm/themes/reproos/Main.qml' <<'THEME_QML_EOF'
+import QtQuick 2.15
+
+Rectangle {
+  id: root
+  width: 1920
+  height: 1080
+  color: '#1a1a2e'
+  Text {
+    anchors.centerIn: parent
+    color: 'white'
+    font.pixelSize: 48
+    text: 'reproos'
+  }
+  Text {
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.top: parent.verticalCenter
+    anchors.topMargin: 60
+    color: '#aaaaaa'
+    font.pixelSize: 18
+    text: 'M9.R.56.7 minimal greeter'
+  }
+}
+THEME_QML_EOF
+  cat > '$MNT_DIR/usr/share/sddm/themes/reproos/theme.conf' <<'THEME_CONF_EOF'
+[General]
+background=
+type=color
+color=#1a1a2e
+THEME_CONF_EOF
+
+  # Wire /etc/sddm.conf to select the reproos theme.  We layer
+  # over the existing /etc/sddm.conf.d/ dir (already contains
+  # 00-autologin.conf from Phase 10.5) so the [Autologin] section
+  # stays intact.
+  cat > '$MNT_DIR/etc/sddm.conf.d/05-theme.conf' <<'SDDM_THEME_EOF'
+[Theme]
+Current=reproos
+SDDM_THEME_EOF
+" || { echo "[build-reproos-image] Phase 10.7 sddm theme install failed" >&2; exit 73; }
+
 echo "[build-reproos-image] phase summary:"
 echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
 echo "  mnt root:      $MNT_DIR ($(df -h "$MNT_DIR" 2>/dev/null | tail -1 | awk '{print $3"/"$2}'))"

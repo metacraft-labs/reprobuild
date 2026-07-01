@@ -1,0 +1,189 @@
+M9.R.56 — SDDM greeter cascade-peel close-out (continuation sub-agent)
+====================================================================
+Date: 2026-07-01
+Branch: dev
+HEAD after final push: caf2013b (M9.R.56.6)
+
+## Milestones landed in this session
+
+  M9.R.56.4 (f85ffecd)  Dbus runtime dir + gdm.conf strip + libexec symlink
+  M9.R.56.5 (215c54a2)  Work around from-source dbus lacking systemd support
+  M9.R.56.6 (caf2013b)  Strip UID-1000 collision + tty1 autologin drop-in
+
+Total commits M9.R.56.1 .. .6: 6.  Previous 3 (.1/.2/.3) landed by prior
+agent; this session added .4/.5/.6.
+
+## Blocker enumeration (cascade-peel iterations)
+
+### Iteration 1 --- boot to system state
+M9.R.56.3 was staged and rebuilt into the qcow2 during this session.
+The initial boot smoke (M9.R.56.3 baseline) showed:
+  * dbus.service FAILED
+  * systemd-logind FAILED (dep on dbus)
+  * sddm.service Started but no greeter
+  * graphical.target reached (unit-ordering-wise)
+
+Root-cause analysis via injected dbus-diag oneshot unit (drops
+/root/dbus-diag.log with systemctl status + tests of dbus-daemon flags):
+
+  Blocker 1: dbus.service unit had no RuntimeDirectory=; /run/dbus
+             didn't exist at ExecStart; socket bind failed.
+  Blocker 2: /etc/dbus-1/system.d/gdm.conf from Debian base referenced
+             an undefined ``gdm`` user; dbus-daemon rejects the whole
+             config file on unknown user, exits.
+  Blocker 3: /usr/libexec/dbus-daemon-launch-helper not shadow-linked
+             from the from-source install-mirror; the from-source
+             dbus recipe ships it at
+             .repro/output/install/usr/libexec/ but stage-de-rootfs.sh
+             only shadow-links usr/{bin,sbin}.
+
+### Iteration 2 --- M9.R.56.4 applies fixes 1/2/3, still fails
+Injected dbus-diag showed the drop-in was loaded (Drop-In line in
+systemctl cat) but dbus-daemon still exits with status 1.  Enhanced
+diag ran the exact ExecStart line manually AND without
+``--systemd-activation``.  The variant WITHOUT --systemd-activation
+worked; the variant WITH --systemd-activation printed:
+
+    Failed to start message bus: dbus was compiled without systemd
+    support
+
+  Blocker 4: from-source dbus 1.16.0 was built without the meson
+             ``systemd`` option enabled, so libsystemd is not linked
+             and --systemd-activation fails.  Confirmed via readelf:
+             from-source libdbus-1.so.3.38.3 has no NEEDED entry for
+             libsystemd.so.0.
+
+  Also falsified: the ``version LIBDBUS_PRIVATE_1.16.0 not found``
+  warning is NON-FATAL --- traced via LD_DEBUG=libs in chroot:
+  ld.so probes /etc/ld.so.cache first (which points at Debian's
+  older /lib/x86_64-linux-gnu/libdbus-1.so.3) and emits the warning
+  before falling through to dbus-daemon's RUNPATH-resolved
+  /opt/repro/reprobuild/.../install/usr/lib/libdbus-1.so.3.  Load
+  succeeds; warning is a v2 cleanup only.
+
+### Iteration 3 --- M9.R.56.5 drops --systemd-activation
+Injected drop-in 20-no-systemd-activation.conf with Type=simple +
+ExecStart= (reset) + ExecStart=/usr/bin/dbus-daemon --system --nofork
+--nopidfile --syslog-only.  Re-boot showed:
+
+  * Started D-Bus System Message Bus (no FAILED)
+  * Started User Login Management (systemd-logind, no FAILED)
+  * Started Simple Desktop Display Manager (no FAILED)
+  * Reached target Graphical Interface (no FAILED)
+
+But screendump analysis (all 6 t={0,33,66,99,132,165}s frames) shows
+1280x800 Grayscale 1-bit depth mean=0 --- pure black.  SDDM is running
+(PID 555, Xorg on vt2) but no session is launching on screen.
+
+### Iteration 4 --- injected sddm-diag characterizes greeter/session gap
+The sddm.service systemctl status confirms sddm main is running with
+Xorg on vt2 as child, Tasks: 4 (main + Xorg + 2 helper threads).  No
+sddm-helper for user session launch.  autologin config reads
+User=repro Session=sway.  But /etc/passwd contains BOTH:
+
+    live:x:1000:1001::/home/live:/bin/bash
+    repro:x:1000:1000::/home/repro:/bin/bash
+
+  Blocker 5: UID collision at 1000.  Downstream nss lookups for uid
+             1000 are non-deterministic; SDDM autologin needs uid
+             resolution for pam session setup, gets ``live`` instead
+             of ``repro``, session-launch fails silently, greeter
+             remains up but has no theme installed (from-source sddm
+             ships only usr/bin + usr/libexec; /usr/share/sddm/themes
+             is empty on the Debian base rootfs since no
+             sddm-theme-* package is installed), renders black.
+
+  Blocker 6: /etc/systemd/system/getty@tty1.service.d/autologin.conf
+             from stage-de-rootfs.sh's live-ISO baseline stays on the
+             installed disk; tty1 auto-login-as-root races with SDDM
+             for vt1 --- SDDM claims vt2 because vt1 is taken.  Not
+             the cause of the black screen but a security bug and a
+             latent VT-ownership race.
+
+### Iteration 5 --- M9.R.56.6 strips UID collision + tty1 autologin
+Phase 10 awk filter extended to drop the ``live`` row from
+/etc/passwd AND /etc/shadow.  Phase 10.5 rm -rf's
+/etc/systemd/system/getty@tty1.service.d.  Post-rebuild verification
+confirms /etc/passwd has only ``repro:x:1000:1000::/home/repro:/bin/bash``
+at uid=1000.
+
+Boot smoke #6 still shows:
+  * dbus / logind / sddm all Started, no FAILED units
+  * screen still black (mean=0 grayscale)
+  * `who` (via re-injected sddm-diag) is empty --- no user session
+
+Follow-up sddm-diag with the fixed qcow2 confirms:
+  * SDDM still just runs sddm + Xorg (4 tasks)
+  * autologin config /etc/sddm.conf.d/00-autologin.conf CORRECT
+    (Session=sway, User=repro was replaced but Session=sway line
+    shown in diag was from an earlier interleaved read that hit
+    a filter)
+  * /usr/share/sddm/themes empty
+  * sddm --test-mode emits only a locale warning
+
+## Falsified alternative for M9.R.56.5
+
+Rebuilding from-source dbus with -Dsystemd=enabled and re-linking
+Qt/GLib downstream --- requires a from-source libsystemd headers +
+static library that the systemd recipe ships only inside its usr/lib64
+install-mirror.  Cost/schedule prohibitive for a single milestone;
+deferred to M9.R.57 as a proper recipe channel edit.
+
+## Chosen fix for M9.R.56.5
+
+Image-assembly drop-in
+/etc/systemd/system/dbus.service.d/20-no-systemd-activation.conf
+that replaces the Debian ExecStart with a plain (non-systemd) dbus
+invocation.  Type=simple + reset ExecStart= + new ExecStart=.  The
+Debian dbus.socket ListenStream=/run/dbus/system_bus_socket matches
+the default dbus-daemon socket path so downstream clients bind
+correctly.
+
+## Remaining gap (honest)
+
+  M9.R.56.6 landed the M9.R.56 taxonomy through UID collision but the
+  SDDM greeter still renders black.  Since autologin config is right
+  and the UID collision is fixed, and no unit failures show up on the
+  serial console, the next-blocker is one of:
+
+    (a) SDDM greeter's fallback theme QML crashes silently on the
+        from-source sddm because no theme directory exists at
+        /usr/share/sddm/themes.
+    (b) SDDM autologin skips greeter and tries to launch sway, but
+        the sway session launcher (sddm-helper-start-wayland) crashes
+        because /run/user/1000 is not yet set up by pam_systemd, or
+        DRM device (/dev/dri/card0) permissions block sway's launch.
+    (c) sddm-helper-start-wayland runs but can't find sway's
+        dependencies (wlroots session-provided libs, XKB, etc.)
+
+  A login-diag injection was attempted (dumps loginctl + Xorg log +
+  /run/sddm state + strace of sddm-helper), but even with
+  BOOT_TIMEOUT=180s the diag oneshot didn't fire before qemu was
+  killed --- ordering with graphical.target may be blocking the
+  oneshot from ever activating.  Diag script /root/login-diag.sh
+  is on the qcow2 for future iterations.
+
+## Phase C verdict (per task brief)
+
+  SDDM greeter rendered: NO (black screen persists)
+  Screendump filename: recipes/reproos-image/run-evidence/m9r56/m9r56_last_screen_black.ppm
+  Serial log: recipes/reproos-image/run-evidence/m9r56/m9r56_boot6_serial.log
+
+## Push discipline
+
+  All 6 commits pushed to origin/dev with --no-gpg-sign per
+  feedback_reprobuild_unsigned_commits.md.
+
+## Successors
+
+  M9.R.56.7: peel next blocker toward SDDM greeter render.  Prime
+             candidate is (a) --- inject a minimal SDDM theme dir at
+             /usr/share/sddm/themes/reproos/{metadata.desktop,Main.qml}
+             from image-assembly phase, since Debian base has no
+             theme installed and from-source sddm has none either.
+
+  M9.R.57:   rebuild the from-source dbus recipe with the meson
+             ``systemd`` option enabled so
+             /etc/systemd/system/dbus.service.d/20-no-systemd-activation.conf
+             can be dropped and the canonical Debian ExecStart line
+             works unchanged.
