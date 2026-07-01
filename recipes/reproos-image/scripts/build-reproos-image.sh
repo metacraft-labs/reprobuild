@@ -1146,6 +1146,12 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
 # M9.R.56.8.5 minimal PAM stack for sddm autologin.
 # Bypasses the common-* @include chain that fails config parse
 # silently on the from-source pam recipe.
+# M9.R.56.8.6 adds pam_systemd.so (Debian binary; ABI-compatible
+# with the from-source libpam.so.0) to create /run/user/<uid>
+# and set XDG_RUNTIME_DIR --- without this, sway aborts at
+# startup with ``XDG_RUNTIME_DIR is not set in the environment.
+# Aborting.`` (verified in /home/repro/.local/share/sddm/
+# wayland-session.log from the M9.R.56.8.5 boot smoke).
 auth       required   pam_permit.so
 account    required   pam_permit.so
 password   required   pam_permit.so
@@ -1154,6 +1160,7 @@ session    optional   pam_keyinit.so force revoke
 session    optional   pam_limits.so
 session    optional   pam_loginuid.so
 session    optional   pam_env.so
+session    optional   /usr/lib/x86_64-linux-gnu/security/pam_systemd.so
 PAM_AUTOLOGIN_EOF
   cat > '$MNT_DIR/etc/pam.d/sddm-greeter' <<'PAM_GREETER_EOF'
 #%PAM-1.0
@@ -1168,6 +1175,7 @@ session    optional   pam_keyinit.so force revoke
 session    optional   pam_limits.so
 session    optional   pam_loginuid.so
 session    optional   pam_env.so
+session    optional   /usr/lib/x86_64-linux-gnu/security/pam_systemd.so
 PAM_GREETER_EOF
 
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
