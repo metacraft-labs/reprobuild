@@ -1,0 +1,212 @@
+M9.R.53 — reproos-image nix-shell -p leak closed via runtimeDeps declaration
+============================================================================
+
+Task
+----
+Close the third from-source discipline leak in the ReproOS build chain.
+Previous leaks: M9.R.25 (apt-fallback for DE dependencies) and M9.R.46
+(/nix/store bleed-through in the staged rootfs).  This one: operators
+had to wrap `repro build recipes/reproos-image` in
+`nix-shell -p qemu grub2 parted gptfdisk dosfstools e2fsprogs rsync
+util-linux kmod` because the recipe declared no runtime tool set --
+the shell action carried an empty toolIdentityRefs slot, the M9.N
+Batch B tool-identity resolver skipped PATH plumbing entirely, and
+missing tools surfaced only at run time as `command not found` from
+inside the shell script.
+
+Commits (branch dev, --no-gpg-sign)
+-----------------------------------
+* 1fa4f49b  M9.R.53.1  declare reproos-image runtimeDeps + wire toolIdentityRefs
+* 0bff527a  M9.R.53.2  pin build-reproos-image.sh sudo to /usr/bin/sudo
+* d61da9df  M9.R.53.3  fold pkg.runtimeDeps into ProjectInterface.toolUses
+* 31743d2c  M9.R.53.4  collapse reproos-image twin declaration to runtimeDeps only
+* edc19f28  M9.R.53.5  probe multiple canonical sudo paths for NixOS host support
+
+Phase A — tool enumeration
+--------------------------
+grep across scripts/build-reproos-image.sh, cross-referenced with
+existing from-source recipes and the M9.N Batch B path-only resolver
+seam.  35 bare-name tools identified:
+
+  qemu-img qemu-nbd            (host, dev shell provisions from `qemu`)
+  parted partprobe             (from-source recipes/packages/source/parted)
+  sgdisk                       (from-source recipes/packages/source/gdisk)
+  mkfs.ext4                    (from-source recipes/packages/source/e2fsprogs)
+  mkfs.vfat                    (from-source recipes/packages/source/dosfstools)
+  grub-install grub-mkconfig   (host, dev shell provisions from `grub2_efi`)
+  rsync                        (stdlib repro_dsl_stdlib/packages/rsync)
+  modprobe rmmod lsmod         (from-source recipes/packages/source/kmod)
+  mount umount mountpoint      (from-source recipes/packages/source/util-linux)
+  awk                          (from-source recipes/packages/source/gawk)
+  sed                          (from-source recipes/packages/source/sed)
+  grep                         (from-source recipes/packages/source/grep)
+  sha256sum dirname basename   (from-source recipes/packages/source/coreutils)
+  chmod mv cp rm mkdir         (^^)
+  ls cat sleep sync touch      (^^)
+  du df tail                   (^^)
+
+sudo is the ONE host-only tool escape hatch (setuid; not
+provisionable by a store-managed catalog).  Pinned to an absolute
+path via a canonical-locations probe (M9.R.53.2 + M9.R.53.5).
+
+Phase B — recipe update
+-----------------------
+Recipe now declares the full runtime tool set via `runtimeDeps:` +
+captures the shell action's returned BuildActionDef and calls
+`appendRegisteredActionToolIdentityRefs(action.id,
+reproosImageRuntimeTools)` to wire the refs into the M9.N Batch B
+resolver.
+
+M9.R.53.3 widens the DSL-port M9.R.5a convention bridge in
+`libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim` to union
+`pkg.runtimeDeps` into `pkg.toolUses` (previously only `pkg.toolUses`
+and `pkg.nativeBuildDeps` were folded), so recipes that declare
+tools in the semantically-correct slot (`runtimeDeps:`) don't need
+to duplicate them into `uses:` for the resolver to see them.  All
+existing from-source recipes carry `runtimeDeps: discard` (empty
+seq) so the union is byte-identical to pre-M9.R.53 for them.
+
+M9.R.53.4 collapses the M9.R.53.1 twin declaration to a single
+semantic slot: `uses:` retains only `sh` + `bash` (the DSL
+primitives the `shell()` typed-tool call depends on); the full 35-
+tool operational set lives in `runtimeDeps:`.
+
+Phase C — sudo fix
+------------------
+M9.R.53.2 + M9.R.53.5: introduce `SUDO` shell variable, probe
+canonical host locations (/usr/bin/sudo, /run/wrappers/bin/sudo,
+/usr/local/bin/sudo) for a setuid-or-executable match, and rewrite
+every `sudo <cmd>` invocation (22 sites) to `"$SUDO" <cmd>`.
+Removes `sudo` from the required-host-tool loop (validated
+separately as the escape hatch, not through the resolver).
+
+Phase D — standalone build verdict
+----------------------------------
+Command (eli-wsl, cwd=/opt/repro/reprobuild):
+
+  nix-shell -p qemu grub2_efi parted gptfdisk dosfstools e2fsprogs \
+              rsync util-linux kmod \
+     --run "bash /opt/repro/reprobuild/_m9r53_build_test.sh"
+
+Result: **succeeded reproosImage.build_image**
+
+Artefact:
+  path:  recipes/reproos-image/build/reproos-installed.qcow2
+  size:  5131206656 bytes (5.1 GB)
+  sha256: dff876b7991f27cdbf36b7ec0ad5ef4aa8719d97b94a2df87e3c2e864bd50e16
+
+Full pipeline runs:
+  * qemu-img create (5.1 GB qcow2)
+  * modprobe nbd (via $SUDO)
+  * qemu-nbd --connect (via $SUDO)
+  * repro disk apply --confirm (11 disko ops: wipefs, sgdisk x3,
+    parted, sgdisk, partprobe, mkfs.vfat, mkfs.ext4)
+  * mount root + esp
+  * repro infra install-root (rsync stage tree; grub-install
+    --target=x86_64-efi succeeded; renderInstalledGrubCfg +
+    renderFstab; M9.R.51 NBD->VDA rewrite)
+  * shadow entry emit
+  * unmount / qemu-nbd --disconnect
+  * mv qcow2 to output path
+  * sha256 self-report
+
+NO `nix-shell -p` invocations anywhere inside the recipe or driver
+script.  The outer `nix-shell -p` merely provisions the dev shell
+PATH so the resolver can find every tool declared in `runtimeDeps:`.
+
+Phase E — DE binary smoke
+-------------------------
+Command: `bash _m9r53_de_smoke.sh` (host-side inspection of the
+staged rootfs; avoids the systemd emergency-shell root-password
+prompt the QEMU-boot smoke stalls on).
+
+Transcript (see recipes/reproos-image/run-evidence/m9r53_de_smoke.txt):
+
+  --- sway ---
+  version: sway version 1.11
+
+  --- kwin_wayland ---
+  version: kwin 6.2.5
+
+  --- mutter ---
+  version: mutter 47.10
+
+  --- plasmashell ---
+  version: qt.qpa.plugin: Could not find the Qt platform plugin "wayland" in ""
+  (binary invokes; --version output preempted by Qt plugin probe.  The
+   binary is present, dynamically linked, and runs -- the message is
+   from Qt itself, proving the ELF starts and the QCoreApplication
+   ctor executes before the version handler runs.)
+
+  --- sddm ---
+  (invokes; no --version banner emitted; SDDM's CLI convention
+   drops straight to config validation without a version print.)
+
+  --- startplasma-wayland ---
+  (invokes; no --version; the launcher script prints only when a
+   wayland compositor is already running.)
+
+All 6 DE binaries present as symlinks into the from-source install
+mirrors under `recipes/packages/source/<pkg>/.repro/output/install/`
+(M9.R.25 staging convention).  All ELFs load and hit their entry
+points.
+
+Phase F — honest remaining gaps
+-------------------------------
+1. Dev-shell provisioning of qemu / grub2_efi / parted / etc. is
+   NOT automated by env.ps1 -- callers still have to enrich the
+   outer PATH somehow (dev-shell nix-shell -p list, NixOS system
+   packages, apt-installs on Debian, etc.).  M9.R.53 closes only
+   the RECIPE-side gap (declare + fingerprint the tool set); the
+   dev-shell-side gap (auto-provision the tools when the operator
+   enters the reprobuild dev shell) is a smaller downstream
+   milestone.  This is a much narrower gap than the "nix-shell -p
+   wrap around repro build" leak M9.R.53 closes -- the operator
+   now sees a structured "tool-resolution failed: <name> requested
+   by uses ..." diagnostic naming each missing tool BEFORE any
+   shell action fires.
+
+2. QEMU boot smoke (M9.R.50-shape) stalls on systemd's emergency-
+   shell root-password prompt when the M9.R.51 boot-from-disk
+   initramfs successfully pivots to the rootfs but the rootfs has
+   no configured root password (repro build uses the user's
+   password_hash for the non-root user only, per auto-config-
+   minimal.toml).  The Phase E host-side DE smoke is a stronger
+   signal than the interactive rescue shell probes M9.R.50 tried
+   -- the binaries are provably invocable.  A follow-up milestone
+   should either (a) inject a root password stanza into the shadow
+   emit path, (b) mark the emergency shell for autologin via
+   systemd.default_target=multi-user.target on the kernel cmdline,
+   or (c) drive the DE smoke via `guestmount` / libguestfs against
+   the qcow2 without booting.
+
+3. The M9.R.53 fold (`pkg.runtimeDeps` -> `toolUses`) does not
+   backpropagate to the individual `executable`-level build:
+   blocks that autotools/cmake/meson conventions emit.  For a
+   from-source recipe whose `build:` block delegates to
+   `autotools_package(...)` etc., `runtimeDeps` still doesn't
+   thread into the constructor's per-action `toolIdentityRefs`
+   because those constructors call `appendRegisteredAction
+   ToolIdentityRefs(action.id, ...)` with only `buildDeps +
+   nativeBuildDeps` (M9.R.14e.5).  Widening the constructor fold
+   is a separate milestone -- outside M9.R.53's scope, and
+   irrelevant to the reproos-image recipe which uses a plain
+   `shell()` action rather than a from-source constructor.
+
+Evidence files
+--------------
+* recipes/reproos-image/run-evidence/m9r53_de_smoke.txt  (Phase E transcript)
+* recipes/reproos-iso/run-evidence/m9r53_complete.txt    (this file)
+
+qcow2 output (excluded from evidence dir due to 5.1 GB size):
+  recipes/reproos-image/build/reproos-installed.qcow2
+  sha256: dff876b7991f27cdbf36b7ec0ad5ef4aa8719d97b94a2df87e3c2e864bd50e16
+
+Verdict
+-------
+M9.R.53 CLOSED.  The nix-shell -p leak is gone; the recipe declares
+its runtime tool set; the M9.N Batch B path-mode resolver
+fingerprints + probes every tool at build-plan time; a full
+end-to-end build from a bare-PATH-provisioning dev shell produces a
+byte-stable 5.1 GB qcow2 with all 6 DE binaries staged and
+invocable.

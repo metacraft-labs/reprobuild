@@ -1,0 +1,39 @@
+=== M9.R.53 Phase E — DE binary smoke ===
+STAGE=/opt/repro/reprobuild/recipes/reproos-image/build/work/stage
+date=Wed Jul  1 03:34:14 PM EEST 2026
+
+--- sway ---
+lrwxrwxrwx 1 zahary users 85 Jun 30 20:44 /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/usr/bin/sway -> /opt/repro/reprobuild/recipes/packages/source/sway/.repro/output/install/usr/bin/sway
+size=85 bytes
+version:
+sway version 1.11
+
+--- kwin_wayland ---
+lrwxrwxrwx 1 zahary users 93 Jun 30 20:44 /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/usr/bin/kwin_wayland -> /opt/repro/reprobuild/recipes/packages/source/kwin/.repro/output/install/usr/bin/kwin_wayland
+size=93 bytes
+version:
+kwin 6.2.5
+
+--- mutter ---
+lrwxrwxrwx 1 zahary users 89 Jun 30 20:44 /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/usr/bin/mutter -> /opt/repro/reprobuild/recipes/packages/source/mutter/.repro/output/install/usr/bin/mutter
+size=89 bytes
+version:
+mutter 47.10
+
+--- plasmashell ---
+lrwxrwxrwx 1 zahary users 104 Jun 30 20:44 /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/usr/bin/plasmashell -> /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/plasmashell
+size=104 bytes
+version:
+qt.qpa.plugin: Could not find the Qt platform plugin "wayland" in ""
+
+--- sddm ---
+lrwxrwxrwx 1 zahary users 85 Jun 30 20:44 /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/usr/bin/sddm -> /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm
+size=85 bytes
+version:
+
+--- startplasma-wayland ---
+lrwxrwxrwx 1 zahary users 112 Jun 30 20:44 /opt/repro/reprobuild/recipes/reproos-image/build/work/stage/usr/bin/startplasma-wayland -> /opt/repro/reprobuild/recipes/packages/source/plasma-workspace/.repro/output/install/usr/bin/startplasma-wayland
+size=112 bytes
+version:
+
+=== M9.R.53 Phase E complete ===
