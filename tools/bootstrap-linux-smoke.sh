@@ -254,12 +254,6 @@ step_2_checkouts() {
   checkout_sibling_rev "https://github.com/metacraft-labs/runquota" "runquota" \
                        "87524764128109d433d0c3356d9b1edb5a60cbc6" 0
 
-  # metacraft-labs/reprobuild-ct-test-runner: rev from flake.lock's
-  # ``reprobuild-ct-test-runner-src`` node.
-  checkout_sibling_rev "https://github.com/metacraft-labs/reprobuild-ct-test-runner" \
-                       "reprobuild-ct-test-runner" \
-                       "1a2fceae68cf7ac4f3352c8eb9897b2646dbcf08" 0
-
   # metacraft-labs/reprobuild-test-adapters: rev from flake.lock's
   # ``reprobuild-test-adapters-src`` node.
   checkout_sibling_rev "https://github.com/metacraft-labs/reprobuild-test-adapters" \

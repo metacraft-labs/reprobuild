@@ -1742,15 +1742,13 @@ proc resolveBootstrapPackagePath*(envName: string;
       return candidate
   ""
 
-proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
-  let envRoot = getEnv("REPRO_CT_TEST_RUNNER_SRC")
-  if envRoot.len > 0:
-    let candidate = envRoot / "libs" / "ct_test_runner_adapter" / "src"
-    if fileExists(extendedPath(candidate / "ct_test_runner_adapter.nim")):
-      return candidate
+proc resolveCodeTracerAdapterPath(anchorRoot: string): string =
+  let envRoot = getEnv("CODETRACER_SRC")
+  if envRoot.len > 0 and
+      fileExists(extendedPath(envRoot / "ct_test_runner_adapter.nim")):
+    return envRoot
   if anchorRoot.len > 0:
-    let candidate = anchorRoot.parentDir / "reprobuild-ct-test-runner" /
-      "libs" / "ct_test_runner_adapter" / "src"
+    let candidate = anchorRoot.parentDir / "codetracer" / "src"
     if fileExists(extendedPath(candidate / "ct_test_runner_adapter.nim")):
       return candidate
   ""
@@ -1854,9 +1852,6 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
     ("VM_HARNESS_SRC", anchored([
       ".." / "vm-harness" / "src",
     ]), "vm_harness.nim"),
-    ("CT_TEST_SRC", anchored([
-      ".." / "ct-test" / "libs" / "ct_test_interface" / "src",
-    ]), "ct_test_interface.nim"),
     ("REPRO_TEST_ADAPTERS_SRC", anchored([
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),
@@ -1866,9 +1861,9 @@ proc bootstrapSiblingPackagePathFlags(reprobuildRoot: string): seq[string] =
                                                spec.marker)
     if resolved.len > 0:
       result.add("--path:" & resolved)
-  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(reprobuildRoot)
-  if ctRunnerAdapter.len > 0:
-    result.add("--path:" & ctRunnerAdapter)
+  let codeTracerAdapters = resolveCodeTracerAdapterPath(reprobuildRoot)
+  if codeTracerAdapters.len > 0:
+    result.add("--path:" & codeTracerAdapters)
 
 proc reproLibPathFlags(workDir: string): seq[string] =
   ## Build the ``--path:`` flags the engine passes to ``nim c`` when
@@ -2406,9 +2401,9 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   ## ``reproLibPathFlags``; this helper covers only the out-of-tree packages.)
   if workDir.len == 0:
     return
-  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
-  if ctRunnerAdapter.len > 0:
-    result.add("--path:" & ctRunnerAdapter)
+  let codeTracerAdapters = resolveCodeTracerAdapterPath(workDir)
+  if codeTracerAdapters.len > 0:
+    result.add("--path:" & codeTracerAdapters)
   result.addExternalPackagePath(workDir, "FASTSTREAMS_SRC", [
     "libs" / "nim-faststreams" / "src",
     ".." / "codetracer" / "libs" / "nim-faststreams",

@@ -6,8 +6,7 @@
 ##
 ## * the M3 internal runner at
 ##   ``../reprobuild/build/bin/repro_test_runner``, and
-## * the new M4 external runner at
-##   ``../ct-test/build/bin/ct-test-runner``,
+## * the new M4 external runner from ``CT_TEST_RUNNER`` or ``PATH``,
 ##
 ## and asserts the pass/fail/skip totals match exactly. This is the
 ## load-bearing equivalence assertion for the M4 cut-over.
@@ -23,13 +22,12 @@ const FixtureSrc = currentSourcePath().parentDir() /
 proc shimSrcDir(): string =
   currentSourcePath().parentDir().parentDir() / "src"
 
-proc workspaceRoot(): string =
-  ## Walk up from ct-test/libs/ct_test_unittest_parallel/tests/ until
-  ## we find a directory containing both ``ct-test`` and ``reprobuild``
-  ## children — that's the metacraft workspace root.
+proc repoRoot(): string =
+  ## Walk up from libs/ct_test_unittest_parallel/tests/ until we find the
+  ## reprobuild repo root.
   var dir = currentSourcePath().parentDir
   while dir.len > 0:
-    if dirExists(dir / "ct-test") and dirExists(dir / "reprobuild"):
+    if fileExists(dir / "repro.nim") and fileExists(dir / "repro_tests.nim"):
       return dir
     let parent = dir.parentDir
     if parent == dir:
@@ -79,19 +77,20 @@ proc runWithRunner(runner, binDir, summary, resultsDir: string):
 
 proc runParityCase(): bool =
   ## Returns false if prerequisites are missing — caller should skip.
-  let ws = workspaceRoot()
-  if ws.len == 0:
-    checkpoint("skipped — could not locate workspace root")
+  let root = repoRoot()
+  if root.len == 0:
+    checkpoint("skipped — could not locate reprobuild repo root")
     return false
-  let m3Runner = ws / "reprobuild" / "build" / "bin" /
+  let m3Runner = root / "build" / "bin" /
     addFileExt("repro_test_runner", ExeExt)
-  let m4Runner = ws / "ct-test" / "build" / "bin" /
-    addFileExt("ct-test-runner", ExeExt)
+  let m4Runner = block:
+    let fromEnv = getEnv("CT_TEST_RUNNER")
+    if fromEnv.len > 0: fromEnv else: findExe(addFileExt("ct-test-runner", ExeExt))
   if not fileExists(m3Runner):
     checkpoint("skipped — M3 runner not built at " & m3Runner)
     return false
-  if not fileExists(m4Runner):
-    checkpoint("skipped — ct-test-runner not built at " & m4Runner)
+  if m4Runner.len == 0 or not fileExists(m4Runner):
+    checkpoint("skipped — ct-test-runner not available via CT_TEST_RUNNER/PATH")
     return false
 
   let tempRoot = createTempDir("ct-test-m4-parity-", "")

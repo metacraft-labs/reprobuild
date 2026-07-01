@@ -49,16 +49,6 @@
       url = "github:metacraft-labs/nim-stackable-hooks";
       flake = false;
     };
-    reprobuild-ct-test-runner-src = {
-      # The run-side ``ct_test_runner_adapter`` — the in-process
-      # ``TestRunner`` adapter reprobuild installs (it depends only on the
-      # ``repro_test_adapters`` contract, not the engine). config.nims
-      # reads REPRO_CT_TEST_RUNNER_SRC to thread it onto Nim's --path.
-      # (The build-side typed-tool — ct_test_interface / ct_test_nim_unittest
-      # / ct_test_unittest_parallel — now lives in-tree under libs/.)
-      url = "github:metacraft-labs/reprobuild-ct-test-runner";
-      flake = false;
-    };
     reprobuild-test-adapters-src = {
       # The ``TestRunner`` cross-cutting contract (Nim package
       # ``repro_test_adapters``). config.nims reads
@@ -90,7 +80,6 @@
       nimcrypto-src,
       bearssl-src,
       stackable-hooks-src,
-      reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
       codetracer-native-recorder,
       runquota-src,
@@ -186,7 +175,6 @@
                 export BEARSSL_SRC=${bearssl-src}
                 export STACKABLE_HOOKS_SRC=${stackable-hooks-src}/src
                 export IO_MON_SRC=${io-mon-src}/src
-                export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export CT_INTERPOSE_SRC=${ctInterposeSrc}
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
@@ -238,10 +226,6 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
-            REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
-            # CODETRACER_SRC is intentionally not pinned as a flake input yet:
-            # the adapter source lands in the paired CodeTracer change first.
-            # CI/dev shells resolve it from the sibling checkout via config.nims.
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
@@ -320,10 +304,6 @@
             BEARSSL_SRC = bearssl-src;
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
-            REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
-            # CODETRACER_SRC is intentionally not pinned as a flake input yet:
-            # the adapter source lands in the paired CodeTracer change first.
-            # CI/dev shells resolve it from the sibling checkout via config.nims.
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";

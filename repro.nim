@@ -74,9 +74,8 @@ import repro_dsl_stdlib/packages/python_unittest_runner
 # ``config.nims`` adds ``libs/ct_test_nim_unittest/src`` to the Nim path.
 import ct_test_nim_unittest
 
-# Spec-Implementation M4: install the in-process ct-test ``TestRunner``
-# adapter (from the ``reprobuild-ct-test-runner`` repo) onto
-# the active build context so ``repro test`` RUN/LIST/ENUMERATE route
+# Spec-Implementation M4: install the CodeTracer-hosted ct-test ``TestRunner``
+# adapter onto the active build context so ``repro test`` RUN/LIST/ENUMERATE route
 # through the test binary's protocol instead of the stdlib default. The
 # engine-coupled ``setTestRunner`` wiring lives in this reprobuild-side
 # helper (see ``ct_test_runner_install.nim``); the install call fires from

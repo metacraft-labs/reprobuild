@@ -4,14 +4,6 @@
 #
 # Gap 1 closure (over M9.R.42):
 #
-#   * Pull reprobuild-ct-test-runner sibling so the M0b-3 subprocess seam
-#     (commit 03c1acd) is on disk before any nim compile fires.  M9.R.42's
-#     install attempts ran against the stale e9c9e37 in-process adapter
-#     (`import engine`), which forced the local /tmp engine.nim stub
-#     workaround.  With the sibling at M0b-3 the adapter compiles std-only
-#     and the stub is unnecessary; this driver verifies the sibling commit
-#     before continuing.
-#
 #   * Explicitly invoke ``bash scripts/build_apps.sh`` so the host
 #     ``build/bin/repro`` is rebuilt from current source BEFORE
 #     ``recipes/reproos-iso`` runs (which stages the same host binary
@@ -28,25 +20,6 @@ echo "=== M9.R.43 ISO rebuild (REPRO_INSTALLER_AUTORUN=1) ===" >> "$LOG"
 pkill -KILL -f 'moc$' 2>/dev/null || true
 pkill -KILL -9 -f 'cmake.*reproos' 2>/dev/null || true
 pkill -KILL -9 -f 'ninja.*reproos' 2>/dev/null || true
-
-# ---------------------------------------------------------------------
-# Step 0 - sibling refresh.  M0b-3 (reprobuild-ct-test-runner@03c1acd)
-# is the engine-free subprocess seam reprobuild builds against; without
-# it the adapter still has ``import engine`` and the apps build fails.
-# Pull origin/main + verify.
-# ---------------------------------------------------------------------
-echo "=== step 0: refresh reprobuild-ct-test-runner sibling ===" >> "$LOG"
-SIBLING=/opt/repro/reprobuild-ct-test-runner
-sudo git -c safe.directory="$SIBLING" -C "$SIBLING" fetch origin >> "$LOG" 2>&1
-sudo git -c safe.directory="$SIBLING" -C "$SIBLING" reset --hard origin/main >> "$LOG" 2>&1
-SIBLING_HEAD="$(sudo git -c safe.directory="$SIBLING" -C "$SIBLING" rev-parse HEAD)"
-echo "SIBLING_HEAD=$SIBLING_HEAD" >> "$LOG"
-# Guard: the adapter source MUST NOT carry the old in-process ``import engine``.
-if sudo grep -E '^import engine$' "$SIBLING/libs/ct_incremental_adapter/src/ct_incremental_adapter.nim" >/dev/null; then
-  echo "FAIL: ct_incremental_adapter still has in-process 'import engine' — sibling is pre-M0b-3" >> "$LOG"
-  exit 2
-fi
-echo "SIBLING ADAPTER IS M0b-3 (subprocess)" >> "$LOG"
 
 # Nuke the staged de-rootfs + ISO so build phase re-fires.
 chmod -R u+w recipes/reproos-iso/build/de-rootfs 2>/dev/null || true

@@ -2,9 +2,9 @@
 ## ct-test ``TestRunner`` adapter.
 ##
 ## This is the *consumer-side* half of the M3/M4 adapter split. The
-## adapter library (``ct_test_runner_adapter``, in the
-## ``reprobuild-ct-test-runner`` repo) depends only on the engine-free
-## ``repro_test_adapters`` contract and *constructs* a ``TestRunner``;
+## adapter library (``ct_test_runner_adapter``, hosted by CodeTracer)
+## depends only on the engine-free ``repro_test_adapters`` contract and
+## *constructs* a ``TestRunner``;
 ## installing that value into the active build context needs
 ## ``setTestRunner`` from the reprobuild engine, so the engine-coupled
 ## install lives here rather than in the adapter — that is what keeps the

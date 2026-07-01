@@ -1722,7 +1722,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # ``ct_test_nim_unittest.buildNimUnittest`` had no real backing binary
   # — every action was conceptually a ``nim c`` invocation. M4 reshapes
   # the typed-tool wrapper at
-  # ``ct-test/libs/ct_test_nim_unittest/src/ct_test_nim_unittest.nim``
+  # ``libs/ct_test_nim_unittest/src/ct_test_nim_unittest.nim``
   # so it records a ``PublicCliCall`` against the ``nim`` profile
   # directly (``executableName = "nim"``, ``subcommand = "c"``) with the
   # same flag aliases the ``nim.c`` typed-tool exposes (``--out:``,
@@ -1732,15 +1732,15 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # byte-for-byte the same argv shape the shim was synthesising — the
   # 500+ reprobuild test edges flow through the standard path. The
   # ``TestRunner`` cross-cutting interface from M3, satisfied by the
-  # new ``ct_test_runner_adapter`` package at
-  # ``ct-test/libs/ct_test_runner_adapter/``, handles RUN/LIST/ENUMERATE
+  # CodeTracer-hosted ``ct_test_runner_adapter`` package handles
+  # RUN/LIST/ENUMERATE
   # at engine execution time so recipes that need to dispatch back to
   # ct-test-runner do so through ``currentBuildContext().testRunner``.
 
   # Deferred-Item D1: ``ct_test_nim_unittest.buildNimUnittest.{run,
   # runTest, list}`` execute-edge passthrough. The
   # ``NimUnittestBinary`` UFCS dispatch procs at
-  # ``ct-test/libs/ct_test_nim_unittest/src/ct_test_nim_unittest.nim``
+  # ``libs/ct_test_nim_unittest/src/ct_test_nim_unittest.nim``
   # record their call against the ``NimUnittestToolId`` typed-tool
   # identifier (``ct_test_nim_unittest.buildNimUnittest``) — there is
   # NO backing executable for that identifier on PATH because the
@@ -9299,8 +9299,8 @@ const
     # references/mold/, which is gitignored and so missing in CI checkouts.
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX",
-    "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC", "CT_TEST_SRC",
-    "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
+    "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC",
+    "REPRO_TEST_ADAPTERS_SRC", "CODETRACER_SRC",
     # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
     # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
     # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs
@@ -32311,15 +32311,17 @@ proc buildClosureForShard(assignedSelectors: seq[string];
         return (code, buf)
 
 proc locateCtTestRunner(): string =
-  ## Mirrors ``scripts/run_tests.sh``'s Test-Edges M4 cut-over rule:
-  ## prefer ``../ct-test/build/bin/ct-test-runner`` when present,
-  ## otherwise fall back to ``tools/test-runner/repro_test_runner`` (the
-  ## M3 internal protocol-level runner).  Returns ``""`` when neither is
-  ## available — the caller surfaces a diagnostic.
+  ## Prefer an explicitly installed ``ct-test-runner`` binary and otherwise
+  ## fall back to ``tools/test-runner/repro_test_runner`` (the M3 internal
+  ## protocol-level runner). Returns ``""`` when neither is available — the
+  ## caller surfaces a diagnostic.
   let exeExt = when defined(windows): ".exe" else: ""
-  let primary = ".." / "ct-test" / "build" / "bin" / "ct-test-runner" & exeExt
-  if fileExists(primary):
-    return absolutePath(primary)
+  let fromEnv = getEnv("CT_TEST_RUNNER")
+  if fromEnv.len > 0 and fileExists(fromEnv):
+    return absolutePath(fromEnv)
+  let fromPath = findExe("ct-test-runner" & exeExt)
+  if fromPath.len > 0:
+    return fromPath
   let fallback = "build" / "bin" / "repro_test_runner" & exeExt
   if fileExists(fallback):
     return absolutePath(fallback)
@@ -32684,7 +32686,7 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
       $opts.shardCount & ".txt")
   writeWorkspacePartitionFile(partitionFilePath, assignedBinaryPaths)
 
-  # ----- Test phase: locate ct-test-runner (preferring the sibling),
+  # ----- Test phase: locate ct-test-runner (or the internal fallback),
   # invoke with the assigned binary set.
   let summaryJson =
     "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
@@ -32703,8 +32705,8 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
     discard
   elif runnerBin.len == 0:
     stderr.writeLine("repro test: no ct-test-runner located " &
-      "(checked ../ct-test/build/bin/ct-test-runner, " &
-      "build/bin/repro_test_runner, tools/test-runner/repro_test_runner). " &
+      "(checked CT_TEST_RUNNER, PATH, build/bin/repro_test_runner, " &
+      "tools/test-runner/repro_test_runner). " &
       "Build a runner before sharding.")
     runnerCode = 1
   elif assignedBinaryPaths.len == 0:

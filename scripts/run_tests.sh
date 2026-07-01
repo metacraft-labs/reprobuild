@@ -170,14 +170,14 @@ repro_build_collection ".#test-helpers" || exit 1
 repro_build_collection ".#test-fixtures" || exit 1
 repro_build_collection ".#test-builds" || exit 1
 
-# Step 4 (B5): Python tests + test-binary execution. The Python loop
-# runs before the Nim suite so a Python regression surfaces fast and
-# doesn't get buried in the Nim output. The Nim suite is driven by
-# ct-test-runner (Tier-1 Standard --list-json/--run protocol) with the
-# M3 internal runner as the documented fallback. Execution stays
-# shell-shaped until the engine's typed-tool resolver grows profiles
-# for ``buildNimUnittest`` / ``python_unittest_runner`` — once that
-# lands, ``repro test`` replaces both halves of this step.
+# Step 4 (B5): Python tests + test-binary execution. The Python loop runs
+# before the Nim suite so a Python regression surfaces fast and doesn't get
+# buried in the Nim output. The Nim suite is driven by ct-test-runner (Tier-1
+# Standard --list-json/--run protocol) when installed, with the M3 internal
+# runner as the documented fallback. Execution stays shell-shaped until the
+# engine's typed-tool resolver grows profiles for ``buildNimUnittest`` /
+# ``python_unittest_runner`` — once that lands, ``repro test`` replaces both
+# halves of this step.
 while IFS= read -r -d '' test_file; do
   python3 "${test_file}"
 done < <(
@@ -202,8 +202,11 @@ done < <(
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
 TEST_TIMEOUT="${REPROBUILD_TEST_TIMEOUT:-600}"
 
-ct_test_runner="../ct-test/build/bin/ct-test-runner${exe_ext}"
-if [[ -x "${ct_test_runner}" ]]; then
+ct_test_runner="${CT_TEST_RUNNER:-}"
+if [[ -z "${ct_test_runner}" ]]; then
+  ct_test_runner="$(command -v "ct-test-runner${exe_ext}" 2>/dev/null || true)"
+fi
+if [[ -n "${ct_test_runner}" && -x "${ct_test_runner}" ]]; then
   printf 'Using ct-test-runner: %s (overall timeout %s)\n' \
     "${ct_test_runner}" "${RUNNER_TIMEOUT}" >&2
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${ct_test_runner}" run \

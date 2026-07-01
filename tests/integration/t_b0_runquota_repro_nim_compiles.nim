@@ -42,9 +42,8 @@ proc runquotaRepoPath(reprobuildRoot: string): string =
 
 proc nimCheckPathFlags(reprobuildRoot: string): seq[string] =
   ## Mirror the import paths that the runquota ``repro.nim`` needs to
-  ## resolve: ``repro_project_dsl`` + ``repro_dsl_stdlib`` live under
-  ## the reprobuild repo; ``ct_test_*`` adapters live in the
-  ## ``ct-test`` sibling.
+  ## resolve: ``repro_project_dsl`` + ``repro_dsl_stdlib`` and the
+  ## build-side ``ct_test_*`` adapters live under the reprobuild repo.
   result = @[]
   for lib in [
     "repro_project_dsl",
@@ -53,17 +52,11 @@ proc nimCheckPathFlags(reprobuildRoot: string): seq[string] =
     let candidate = reprobuildRoot / "libs" / lib / "src"
     if dirExists(candidate):
       result.add("--path:" & candidate)
-  let ctTestRoot = block:
-    let fromEnv = getEnv("CT_TEST_SRC")
-    if fromEnv.len > 0:
-      fromEnv
-    else:
-      reprobuildRoot.parentDir / "ct-test"
   for ctLib in [
     "ct_test_interface",
     "ct_test_nim_unittest",
   ]:
-    let candidate = ctTestRoot / "libs" / ctLib / "src"
+    let candidate = reprobuildRoot / "libs" / ctLib / "src"
     if dirExists(candidate):
       result.add("--path:" & candidate)
 

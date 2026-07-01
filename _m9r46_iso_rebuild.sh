@@ -20,11 +20,6 @@ pkill -KILL -f 'moc$' 2>/dev/null || true
 pkill -KILL -9 -f 'cmake.*reproos' 2>/dev/null || true
 pkill -KILL -9 -f 'ninja.*reproos' 2>/dev/null || true
 
-# Sibling refresh (same shape as M9.R.43).
-SIBLING=/opt/repro/reprobuild-ct-test-runner
-sudo git -c safe.directory="$SIBLING" -C "$SIBLING" fetch origin >> "$LOG" 2>&1 || true
-sudo git -c safe.directory="$SIBLING" -C "$SIBLING" reset --hard origin/main >> "$LOG" 2>&1 || true
-
 # Nuke previous stage so Phase 6b fires.
 chmod -R u+w recipes/reproos-iso/build/de-rootfs 2>/dev/null || true
 rm -rf recipes/reproos-iso/build/de-rootfs

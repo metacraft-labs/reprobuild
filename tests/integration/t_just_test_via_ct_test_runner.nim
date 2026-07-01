@@ -3,10 +3,9 @@
 ## ``just_test_via_ct_test_runner`` entry in the milestone
 ## deliverables).
 ##
-## End-to-end run of the full reprobuild suite through ``just test``,
-## with the ct-test-runner binary present at
-## ``../ct-test/build/bin/ct-test-runner`` so the run-tests script
-## prefers it over the M3 internal fallback.
+## End-to-end run of the full reprobuild suite through ``just test``, with the
+## ct-test-runner binary available via ``CT_TEST_RUNNER`` or ``PATH`` so the
+## run-tests script prefers it over the M3 internal fallback.
 ##
 ## Gated on ``REPRO_M1_LONG_TEST=1`` like the M3 long-test verifier — a
 ## full-suite run takes several minutes wall time and is only
@@ -21,7 +20,7 @@ proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
   while dir.len > 0:
     if fileExists(dir / RepoRootMarker) and
-        fileExists(dir / "repro.tests.nim"):
+        fileExists(dir / "repro_tests.nim"):
       return dir
     let parent = dir.parentDir
     if parent == dir:
@@ -30,11 +29,11 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc ctTestRunnerPath(repoRoot: string): string =
-  ## Workspace-relative location of the ct-test-runner binary built by
-  ## ``ct-test/Justfile``'s ``build`` recipe.
-  repoRoot.parentDir / "ct-test" / "build" / "bin" /
-    addFileExt("ct-test-runner", ExeExt)
+proc ctTestRunnerPath(): string =
+  let fromEnv = getEnv("CT_TEST_RUNNER")
+  if fromEnv.len > 0:
+    return fromEnv
+  findExe(addFileExt("ct-test-runner", ExeExt))
 
 proc runEndToEnd() =
   let repoRoot = findRepoRoot()
@@ -43,11 +42,10 @@ proc runEndToEnd() =
   if just.len == 0:
     return
 
-  let runner = ctTestRunnerPath(repoRoot)
-  check fileExists(runner)
-  if not fileExists(runner):
-    checkpoint("ct-test-runner not built at " & runner &
-      " — run `just build` in ct-test first")
+  let runner = ctTestRunnerPath()
+  check runner.len > 0 and fileExists(runner)
+  if runner.len == 0 or not fileExists(runner):
+    checkpoint("ct-test-runner not available via CT_TEST_RUNNER/PATH")
     return
 
   let t0 = epochTime()

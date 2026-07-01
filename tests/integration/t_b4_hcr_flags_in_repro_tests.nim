@@ -117,15 +117,8 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
     check "extraPassC =" in reproNimText
     check "extraPassL =" in reproNimText
 
-    # --- ct-test's adapter exposes the slots ---
-    # Look up the ct-test source via CT_TEST_SRC (set by the verification
-    # harness) or via the standard sibling layout.
-    let ctTestSrc =
-      if getEnv("CT_TEST_SRC").len > 0:
-        getEnv("CT_TEST_SRC")
-      else:
-        repoRoot.parentDir / "ct-test"
-    let adapter = ctTestSrc / "libs" / "ct_test_nim_unittest" /
+    # --- in-tree ct-test adapter exposes the slots ---
+    let adapter = repoRoot / "libs" / "ct_test_nim_unittest" /
       "src" / "ct_test_nim_unittest.nim"
     if fileExists(adapter):
       let adapterText = readFile(adapter)
@@ -134,8 +127,8 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
       check "--passC:" in adapterText
       check "--passL:" in adapterText
     else:
-      checkpoint("ct-test adapter not found at " & adapter &
-        "; skipping that arm (CT_TEST_SRC=" & getEnv("CT_TEST_SRC") & ")")
+      checkpoint("in-tree ct-test adapter not found at " & adapter &
+        "; skipping that arm")
 
     checkpoint("B4 HCR-flag structural assertion: OK")
 

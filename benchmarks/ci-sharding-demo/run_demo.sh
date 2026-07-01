@@ -96,19 +96,12 @@ if [[ -d "${REPO}/../runquota/libs/runquota_partition" && \
 fi
 
 # ---------------------------------------------------------------------------
-# Build prerequisites: ct-test (siblings) + reprobuild apps.
+# Build prerequisites: reprobuild apps. ct-test-runner is optional and is
+# resolved from CT_TEST_RUNNER/PATH by the normal runner path.
 # ---------------------------------------------------------------------------
 if [[ ! -x "${REPO}/build/bin/repro" ]]; then
   echo "demo: building reprobuild apps (just build)..." >&2
   just build
-fi
-
-if [[ ! -x "${REPO}/../ct-test/build/bin/ct-test-runner" ]]; then
-  if [[ -d "${REPO}/../ct-test" ]]; then
-    echo "demo: building ct-test sibling..." >&2
-    (cd "${REPO}/../ct-test" && just build) || \
-      echo "demo: warning — ct-test build failed, will fall back to internal runner" >&2
-  fi
 fi
 
 # Compile demo helpers.
