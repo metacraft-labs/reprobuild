@@ -725,7 +725,7 @@ SDDM_EOF
 
 # ---------------------------------------------------------------
 # Phase 10.6: close dbus.service boot-blockers so the D-Bus system
-# bus can start (M9.R.56.4).
+# bus can start (M9.R.56.4 + M9.R.56.5).
 #
 # Post-M9.R.56.3 the from-source dbus binary + libdbus + system.conf
 # are present at the expected FHS paths, but three latent bugs from
@@ -768,7 +768,7 @@ SDDM_EOF
 # succeeds after the warning; the warning is a v2 cleanup.
 # ---------------------------------------------------------------
 
-echo "[build-reproos-image] Phase 10.6: wire dbus RuntimeDirectory + strip gdm.conf + shadow-link libexec helper"
+echo "[build-reproos-image] Phase 10.6: wire dbus RuntimeDirectory + strip gdm.conf + shadow-link libexec helper + replace ExecStart"
 
 "$SUDO" bash -c "
   set -euo pipefail
@@ -790,6 +790,34 @@ DBUS_DROPIN_EOF
   mkdir -p '$MNT_DIR/usr/libexec'
   ln -sfn /opt/repro/reprobuild/recipes/packages/source/dbus/.repro/output/install/usr/libexec/dbus-daemon-launch-helper \\
     '$MNT_DIR/usr/libexec/dbus-daemon-launch-helper'
+
+  # Blocker 5 (M9.R.56.5) --- the from-source dbus 1.16.0 recipe does
+  # NOT enable the meson systemd option (\`\`-Dsystemd=enabled\`\`), so
+  # dbus-daemon is compiled without libsystemd support and rejects
+  # \`\`--systemd-activation\`\` with \`\`Failed to start message bus: dbus
+  # was compiled without systemd support\`\`.  Falsified by injecting a
+  # diag unit that runs dbus-daemon manually: variant without
+  # \`\`--systemd-activation\`\` runs fine (test1=RUNNING); variant with
+  # \`\`--systemd-activation\`\` exits with the compile-support error
+  # (test3 stderr).  Also confirmed via readelf: from-source
+  # \`\`libdbus-1.so.3.38.3\`\` has NO NEEDED entry for libsystemd.so.0.
+  #
+  # Fix at v1: override the ExecStart to drop \`\`--systemd-activation\`\`
+  # + \`\`--address=systemd:\`\` and switch Type=notify -> Type=simple so
+  # systemd doesn't wait for a sd_notify() dbus-daemon can't emit.
+  # dbus-daemon then listens on the default /run/dbus/system_bus_socket
+  # (which matches dbus.socket's ListenStream anyway).  Type=simple
+  # means the unit is Active as soon as the process is running; the
+  # Debian unit's TriggeredBy=dbus.socket already gives the correct
+  # ordering.  Once the from-source dbus recipe is rebuilt with
+  # \`\`-Dsystemd=enabled\`\` we can drop the ExecStart override; the
+  # RuntimeDirectory drop-in stays.
+  cat > '$MNT_DIR/etc/systemd/system/dbus.service.d/20-no-systemd-activation.conf' <<'DBUS_EXEC_EOF'
+[Service]
+Type=simple
+ExecStart=
+ExecStart=/usr/bin/dbus-daemon --system --nofork --nopidfile --syslog-only
+DBUS_EXEC_EOF
 " || { echo "[build-reproos-image] Phase 10.6 dbus wiring failed" >&2; exit 72; }
 
 echo "[build-reproos-image] phase summary:"
