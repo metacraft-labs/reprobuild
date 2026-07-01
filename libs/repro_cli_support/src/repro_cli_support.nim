@@ -18877,6 +18877,18 @@ method getEvidence*(s: GitCheckoutLockStore; project, repo: string):
 #     tier share a single backend object.
 
 type
+  ConfigLayerKind* = enum
+    ## HL-1 (Unified-Locking-And-Hooks §4.1) — the configuration layers, in
+    ## increasing precedence. A repo's TIER is determined by which layer
+    ## DECLARES it (tier-by-layer), never by a per-repo ``visibility`` field;
+    ## within a single tier the most-specific (highest-precedence) layer wins
+    ## the backend.
+    clkBuiltinDefault    ## layer 1 — a bare public repo ⇒ the in-repo committed lock
+    clkSystem            ## layer 2 — IT/system config (e.g. /etc/reprobuild)
+    clkUserDotfiles      ## layer 3 — user dotfiles (~/.config/reprobuild)
+    clkParentWorkspace   ## layer 4 — parent ``.repro-workspace.toml`` [locking]
+    clkVcsPrivate        ## layer 5 — VCS-private dir (<git-common-dir>/repro)
+
   RepoBackendAssignment* = object
     ## One repo's resolved store assignment. ``store`` is ``nil`` exactly for
     ## the ``committed-lock`` kind (a public repo covered by ``repro.lock``);
@@ -18886,6 +18898,14 @@ type
     visibility*: WorkspaceVisibility
     backendKind*: string
     store*: LockStore
+    declaringLayer*: ConfigLayerKind
+      ## HL-1 — which configuration LAYER fixed this repo's ``(tier, backend)``.
+      ## ``clkBuiltinDefault`` for a repo no explicit layer claimed (the public
+      ## committed-lock default). Surfaced by ``repro locking explain``.
+    layerSource*: string
+      ## HL-1 — a human-readable provenance of the declaring layer (the config
+      ## file path, or ``"built-in default"``). Empty for the legacy
+      ## visibility-keyed ``resolveRepoBackends(BootstrapLockingBody, …)`` path.
 
   ParticipationOutcome* = object
     ## Result of recording one repo's participation through its assigned
@@ -19059,19 +19079,328 @@ proc loadLockingRouting*(workspaceRoot: string): BootstrapLockingBody =
   let cfg = readWorkspaceBootstrap(configPath)
   cfg.locking
 
+# ---------------------------------------------------------------------------
+# HL-1 (Unified-Locking-And-Hooks §4) — the layered configuration plane
+# ---------------------------------------------------------------------------
+#
+# A repo's ``(tier, backend)`` is produced by COMPOSING the configuration
+# layers (§4.1) in increasing precedence, NOT by a per-repo ``visibility``
+# field:
+#
+#   1. built-in default  — a bare public repo ⇒ the in-repo committed lock.
+#   2. system config     — IT-maintained (REPROBUILD_SYSTEM_CONFIG / /etc/…).
+#   3. user dotfiles     — REPROBUILD_USER_CONFIG / ~/.config/reprobuild/.
+#   4. parent workspace  — the ``.repro-workspace.toml`` ``[locking]`` table.
+#   5. VCS-private dir   — ``<git-common-dir>/repro/config.toml`` (never pushed).
+#
+# Each non-built-in layer is a ``reprobuild.config.v1`` file that may carry
+# ``[locking] route`` entries inline AND ``apply_if`` path-scoped bindings
+# (both authored as inline-table arrays) whose referenced file contributes
+# routes into the SAME layer. A
+# route may NAME repos (``repos = [...]``): a named repo's tier is fixed by the
+# DECLARING LAYER (tier-by-layer), so a repo named only in a private/system
+# layer can never fall to the public committed lock. A route that names no
+# repos keeps the legacy MO-4 visibility-keyed match, so a single ``[locking]``
+# table resolves byte-identically to before HL-1.
+#
+# Conflict precedence (§4.4, owner-decided — disjoint composition): layers that
+# name different repos union; a higher-precedence layer MAY refine the BACKEND
+# within the SAME tier (most-specific wins); any attempt to move a repo ACROSS
+# a tier between layers is a loud ``StoreRoutingError`` naming both sources.
+
+proc layerLabel*(k: ConfigLayerKind): string =
+  ## Stable human/JSON label for a configuration layer (used by
+  ## ``repro locking explain`` and the cross-tier diagnostic).
+  case k
+  of clkBuiltinDefault: "built-in"
+  of clkSystem: "system"
+  of clkUserDotfiles: "dotfiles"
+  of clkParentWorkspace: "parent-workspace-repo"
+  of clkVcsPrivate: "vcs-private"
+
+type
+  ComposedRoute* = object
+    ## One route contributed by one configuration layer, after apply_if
+    ## resolution. ``repos`` empty ⇒ legacy visibility-keyed match.
+    tier*: WorkspaceVisibility
+    entry*: LockingRouteEntry
+    layer*: ConfigLayerKind
+    source*: string            ## provenance: the config file path
+    repos*: seq[string]        ## explicitly named repos (name or path)
+
+  ComposedRouting* = object
+    ## The folded configuration plane: every layer's routes in INCREASING
+    ## precedence order (lowest-precedence first), so ``claims[^1]`` is the
+    ## most-specific claim.
+    routes*: seq[ComposedRoute]
+
+proc hasExplicitRoutes*(c: ComposedRouting): bool =
+  ## True when at least one non-built-in layer declared a route. False keeps
+  ## the all-public no-op (``recordRoutedParticipation`` returns ``@[]``),
+  ## byte-identical to the pre-HL-1 ``locking.route.len == 0`` short-circuit.
+  c.routes.len > 0
+
+proc tierFromLabel(label: string): WorkspaceVisibility =
+  ## Parse a route's ``visibility`` string into a tier. Loud on an unknown
+  ## label so a typo never silently routes a repo to the wrong tier.
+  case label.strip().toLowerAscii()
+  of "public": wvPublic
+  of "org": wvOrg
+  of "team": wvTeam
+  of "personal", "private": wvPersonal
+  else:
+    raise newException(StoreRoutingError,
+      "unknown locking tier/visibility '" & label & "' (expected: public | " &
+      "org | team | personal)")
+
+proc vcsPrivateMetadataDir*(repoRoot: string; gitBin = ""): string =
+  ## HL-1 (§4.3) — the absolute path of the repo's never-tracked, never-pushed
+  ## VCS-private metadata dir, where the layer-5 reprobuild config lives. This
+  ## is VCS-AGNOSTIC, never a hardcoded ``.git``:
+  ##   * git → ``<git-common-dir>/repro`` resolved via
+  ##     ``git rev-parse --git-common-dir`` so it is correct inside a LINKED
+  ##     WORKTREE (whose ``.git`` is a file and whose private dir is the COMMON
+  ##     dir, not the per-worktree dir);
+  ##   * Mercurial → ``<repoRoot>/.hg/repro``;
+  ##   * otherwise → a never-tracked ``<repoRoot>/.repro-private`` dir.
+  ## The directory is NOT created; callers test for the config file's
+  ## existence. Prior art: ``.git/info/exclude`` / ``.git/config`` are git's
+  ## established local-only, never-pushed configuration locations.
+  let root = absolutePath(repoRoot)
+  let dotGit = root / ".git"
+  if dirExists(dotGit) or fileExists(dotGit):
+    let git = if gitBin.len > 0: gitBin else: findExe("git")
+    if git.len > 0:
+      let res = execCmdEx(quoteShell(git) & " -C " & quoteShell(root) &
+        " rev-parse --git-common-dir",
+        options = {poStdErrToStdOut, poUsePath})
+      if res.exitCode == 0:
+        var common = res.output.strip()
+        if common.len > 0:
+          if not isAbsolute(common): common = root / common
+          return os.normalizedPath(absolutePath(common)) / "repro"
+    # No git on PATH: fall back to the literal .git dir when it is a real
+    # directory (a non-worktree checkout). A worktree's ``.git`` is a file, so
+    # this fallback is only reached for a plain checkout.
+    if dirExists(dotGit):
+      return dotGit / "repro"
+    return root / ".repro-private"
+  if dirExists(root / ".hg"):
+    return root / ".hg" / "repro"
+  root / ".repro-private"
+
+proc systemConfigPath(): string =
+  ## Layer-2 config path: ``REPROBUILD_SYSTEM_CONFIG`` override, else the
+  ## platform system-config location.
+  let o = getEnv("REPROBUILD_SYSTEM_CONFIG")
+  if o.len > 0: return o
+  when defined(windows):
+    getEnv("PROGRAMDATA", "C:\\ProgramData") / "reprobuild" / "config.toml"
+  else:
+    "/etc/reprobuild/config.toml"
+
+proc userConfigPath(): string =
+  ## Layer-3 config path: ``REPROBUILD_USER_CONFIG`` override, else
+  ## ``~/.config/reprobuild/config.toml`` (XDG via ``getConfigDir``).
+  let o = getEnv("REPROBUILD_USER_CONFIG")
+  if o.len > 0: return o
+  getConfigDir() / "reprobuild" / "config.toml"
+
+proc vcsPrivateConfigPath(repoRoot, gitBin: string): string =
+  ## Layer-5 config path: ``REPROBUILD_VCS_PRIVATE_CONFIG`` override, else
+  ## ``vcsPrivateMetadataDir(repoRoot)/config.toml``.
+  let o = getEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
+  if o.len > 0: return o
+  vcsPrivateMetadataDir(repoRoot, gitBin) / "config.toml"
+
+proc normalizeScopePath(p: string): string =
+  ## Q-B normalization: expand ``~``, make absolute, symlink-resolve when the
+  ## path exists, then normalize lexically. Used to compare an ``apply_if``
+  ## ``under`` scope against a workspace path.
+  var s = expandTilde(p)
+  s = absolutePath(s)
+  try:
+    if fileExists(s) or dirExists(s): s = expandFilename(s)
+  except OSError, CatchableError:
+    discard
+  os.normalizedPath(s)
+
+proc workspaceUnderApplyIfScope(workspaceRoot, under: string): bool =
+  ## Q-B matching: the workspace activates an ``apply_if`` when its normalized
+  ## path EQUALS the scope or is nested under ``scope/`` (path-prefix after
+  ## normalization). Models Git's ``includeIf "gitdir:…"``.
+  if under.len == 0: return false
+  let ws = normalizeScopePath(workspaceRoot)
+  let scope = normalizeScopePath(under)
+  ws == scope or ws.startsWith(scope & $DirSep)
+
+proc toComposedRoute(entry: LockingRouteEntry; layer: ConfigLayerKind;
+    source: string): ComposedRoute =
+  ComposedRoute(
+    tier: tierFromLabel(entry.visibility), entry: entry,
+    layer: layer, source: source, repos: entry.repos)
+
+proc readConfigLayerRoutes(configFile: string; layer: ConfigLayerKind;
+    workspaceRoot: string; acc: var seq[ComposedRoute]) =
+  ## Read one ``reprobuild.config.v1`` file and fold its inline
+  ## ``[[locking.route]]`` entries plus every in-scope ``[[apply_if]]``-
+  ## referenced file's routes into ``acc``, all attributed to ``layer``. A
+  ## missing file is a no-op (the layer is simply absent).
+  if configFile.len == 0 or not fileExists(configFile): return
+  let cfg = readReprobuildConfig(configFile)
+  for entry in cfg.locking.route:
+    acc.add(toComposedRoute(entry, layer, configFile))
+  for ai in cfg.apply_if:
+    if ai.under.len == 0 or ai.config.len == 0: continue
+    if not workspaceUnderApplyIfScope(workspaceRoot, ai.under): continue
+    let referenced =
+      if isAbsolute(ai.config): ai.config
+      else: configFile.parentDir / ai.config
+    if not fileExists(referenced): continue
+    # One level of inclusion (like Git's includeIf): the referenced file's own
+    # apply_if is not followed, only its routes are contributed.
+    let refCfg = readReprobuildConfig(referenced)
+    for entry in refCfg.locking.route:
+      acc.add(toComposedRoute(entry, layer, referenced))
+
+proc composeLockingRouting*(workspaceRoot: string; gitBin = ""):
+    ComposedRouting =
+  ## HL-1 — fold the configuration layers (§4.1) into one composed routing
+  ## table, in INCREASING precedence order. The parent-workspace layer (4) is
+  ## the existing single-file ``.repro-workspace.toml`` ``[locking]`` read, so
+  ## a workspace with only that table composes to exactly those routes and
+  ## resolves identically to the pre-HL-1 behavior.
+  result = ComposedRouting(routes: @[])
+  let root = absolutePath(workspaceRoot)
+  # Layer 2 — system config.
+  readConfigLayerRoutes(systemConfigPath(), clkSystem, root, result.routes)
+  # Layer 3 — user dotfiles.
+  readConfigLayerRoutes(userConfigPath(), clkUserDotfiles, root, result.routes)
+  # Layer 4 — parent ``.repro-workspace.toml`` ``[locking]`` table.
+  let bootstrap = loadLockingRouting(root)
+  if bootstrap.route.len > 0:
+    let bootstrapSource = findBootstrapConfigPath(root)
+    for entry in bootstrap.route:
+      result.routes.add(toComposedRoute(entry, clkParentWorkspace,
+        (if bootstrapSource.len > 0: bootstrapSource else: "parent workspace")))
+  # Layer 5 — VCS-private dir.
+  readConfigLayerRoutes(vcsPrivateConfigPath(root, gitBin), clkVcsPrivate,
+    root, result.routes)
+
+proc resolveRepoBackends*(composed: ComposedRouting;
+    repos: seq[ResolvedRepo]; workspaceRoot: string;
+    identity: GitToolIdentity; gitBin: string): seq[RepoBackendAssignment] =
+  ## HL-1 — resolve each repo to exactly one ``(tier, backend)`` by composing
+  ## the configuration layers. Keeps the ``RepoBackendAssignment`` shape and
+  ## the five-backend construction of the legacy overload; only the SOURCE of
+  ## the ``(tier, backend)`` decision changes (tier-by-layer, not
+  ## ``ResolvedRepo.visibility``).
+  ##
+  ## Per repo: NAMED claims (routes whose ``repos`` names it) take precedence
+  ## over VISIBILITY-KEYED claims (legacy routes whose tier matches
+  ## ``visibility``), so a repo named in a private layer is never also pulled
+  ## into a visibility-keyed public route. All surviving claims MUST agree on
+  ## the tier (else a loud cross-tier ``StoreRoutingError`` naming both
+  ## sources); within that tier the most-specific (highest-precedence) layer
+  ## wins the backend. An unclaimed PUBLIC repo is the built-in committed-lock
+  ## default; an unclaimed non-public repo is a loud ``StoreRoutingError``
+  ## (identical to the legacy overload).
+  result = @[]
+  var cache = initTable[string, LockStore]()
+  for repo in repos:
+    var namedClaims: seq[ComposedRoute] = @[]
+    var visClaims: seq[ComposedRoute] = @[]
+    for r in composed.routes:
+      if r.repos.len > 0:
+        if repo.name in r.repos or repo.path in r.repos:
+          namedClaims.add(r)
+      elif visibilityMatchesRouteLabel(repo.visibility, r.entry.visibility):
+        visClaims.add(r)
+    let claims = if namedClaims.len > 0: namedClaims else: visClaims
+    var asg = RepoBackendAssignment(
+      repoName: repo.name, repoPath: repo.path, visibility: repo.visibility)
+    if claims.len == 0:
+      if repo.visibility == wvPublic:
+        asg.backendKind = "committed-lock"
+        asg.store = nil
+        asg.declaringLayer = clkBuiltinDefault
+        asg.layerSource = "built-in default"
+      else:
+        raise newException(StoreRoutingError,
+          "no locking backend configured for " &
+          lockingTierLabel(repo.visibility) & " repo '" & repo.name &
+          "': a " & lockingTierLabel(repo.visibility) & " repo's " &
+          "participation cannot be recorded in the public committed lock. " &
+          "Add a `[locking] route` entry with visibility=\"" &
+          lockingTierLabel(repo.visibility) & "\" (e.g. backend=" &
+          "\"git-checkout\" or backend=\"external-cli\") to a configuration " &
+          "layer (e.g. " & bootstrapConfigFileName & ", a system/dotfiles " &
+          "reprobuild config, or an `apply_if`-referenced routes file).")
+    else:
+      let tier = claims[0].tier
+      let tierSource = claims[0]
+      for c in claims[1 .. ^1]:
+        if c.tier != tier:
+          raise newException(StoreRoutingError,
+            "repo '" & repo.name & "' is declared at CONFLICTING TIERS by " &
+            "different configuration layers: " & lockingTierLabel(tier) &
+            " (declared by the " & layerLabel(tierSource.layer) &
+            " layer — " & tierSource.source & ") vs " & lockingTierLabel(c.tier) &
+            " (declared by the " & layerLabel(c.layer) & " layer — " &
+            c.source & "). A cross-tier move between layers is REFUSED: each " &
+            "repo resolves to exactly one (tier, backend). Reconcile the two " &
+            "layers so they agree on the tier for this repo.")
+      # Same tier across all claims — most-specific (highest-precedence,
+      # last-appended) claim wins the backend.
+      let winner = claims[^1]
+      asg.visibility = tier
+      asg.declaringLayer = winner.layer
+      asg.layerSource = winner.source
+      let entry = winner.entry
+      let kind = entry.backend.strip().toLowerAscii()
+      let locKey =
+        if kind in ["git-notes", "separate-branch"] and
+            (entry.path.isNone or entry.path.get().len == 0): repo.path
+        else: (if entry.path.isSome: entry.path.get() else: "")
+      let cacheKey = kind & "\0" & locKey & "\0" &
+        (if entry.program.isSome: entry.program.get() else: "")
+      if cache.hasKey(cacheKey):
+        asg.store = cache[cacheKey]
+      else:
+        asg.store = constructRoutedBackend(
+          entry, workspaceRoot, repo.path, identity, gitBin)
+        cache[cacheKey] = asg.store
+      asg.backendKind = asg.store.backendId()
+    result.add(asg)
+
+proc resolveWorkspaceRepoBackends*(workspaceRoot: string;
+    repos: seq[ResolvedRepo]; identity: GitToolIdentity):
+    tuple[assignments: seq[RepoBackendAssignment]; composed: ComposedRouting] =
+  ## Convenience: compose the configuration layers for ``workspaceRoot`` and
+  ## resolve every repo's ``(tier, backend, layer)``. The shared entry point
+  ## for the routed write path and ``repro locking explain``.
+  let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
+  let assignments = resolveRepoBackends(
+    composed, repos, workspaceRoot, identity, identity.binaryPath)
+  (assignments: assignments, composed: composed)
+
 proc recordRoutedParticipation*(workspaceRoot: string;
     repos: seq[ResolvedRepo]; repoShas: Table[string, string];
     projectName: string; identity: GitToolIdentity):
     seq[ParticipationOutcome] =
-  ## MO-4 — the shared step the lock / publish operations call. A no-op
-  ## (empty result) when the workspace declares NO ``[locking]`` routes, so
-  ## the all-public default + every manifest-present operation is unchanged.
-  ## When routes ARE declared, resolve each repo to its backend and record
-  ## participation; an unrouted private repo raises ``StoreRoutingError``.
-  let locking = loadLockingRouting(workspaceRoot)
-  if locking.route.len == 0: return @[]
+  ## MO-4 / HL-1 — the shared step the lock / publish operations call. A no-op
+  ## (empty result) when NO configuration layer declares a route, so the
+  ## all-public default + every manifest-present operation is unchanged. When
+  ## routes ARE declared, the COMPOSED configuration plane (HL-1: built-in →
+  ## system → dotfiles → parent workspace → VCS-private) resolves each repo to
+  ## its ``(tier, backend)`` and records participation; an unrouted private
+  ## repo raises ``StoreRoutingError``. A workspace whose only routes are the
+  ## ``.repro-workspace.toml`` ``[locking]`` table composes to exactly those
+  ## routes, so its result is byte-identical to the pre-HL-1 single-table read.
+  let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
+  if not composed.hasExplicitRoutes: return @[]
   let assignments = resolveRepoBackends(
-    locking, repos, workspaceRoot, identity, identity.binaryPath)
+    composed, repos, workspaceRoot, identity, identity.binaryPath)
   recordWorkspaceParticipation(assignments, projectName, repoShas)
 
 # ---------------------------------------------------------------------------
@@ -34377,8 +34706,93 @@ const reproTopLevelCommands = [
   "branch",
   "checkout", "hooks", "check", "workspace", "prompt", "completion", "store",
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
-  "hardware", "disk", "launch-plan",
+  "hardware", "disk", "launch-plan", "locking",
 ]
+
+const reproLockingSubcommands = [
+  "explain",
+]
+
+proc runReproLockingExplain(args: openArray[string]): int =
+  ## HL-1 (Unified-Locking-And-Hooks §4) — ``repro locking explain``. For the
+  ## current workspace, resolve each repo's ``(tier, backend)`` by composing
+  ## the configuration LAYERS (built-in → system → dotfiles → parent workspace
+  ## → VCS-private) and report, per repo, the resolved tier, backend, AND which
+  ## LAYER declared it (with the declaring file's path). ``--json`` emits the
+  ## machine-readable form the tests consume. This is the introspection verb a
+  ## user runs to debug a layered config without guessing.
+  var workspaceRoot = ""
+  var projectName = ""
+  var mode = tpmUnspecified
+  var asJson = false
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--json":
+      asJson = true
+    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--project" or arg.startsWith("--project="):
+      projectName = valueFromFlag(args, i, "--project")
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro locking explain: unknown flag " & arg)
+      return 2
+    elif projectName.len == 0:
+      projectName = arg
+    inc i
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = absolutePath(workspaceRoot)
+  let (resolved, _) = resolveWorkspaceProjectShared(
+    workspaceRoot, projectName, "`repro locking explain`")
+  # ``explain`` is read-only introspection; default to PATH-only git
+  # resolution (no provisioning) when the caller did not select a mode, the
+  # same default the other read-only workspace verbs use.
+  let effectiveMode = if mode == tpmUnspecified: tpmPathOnly else: mode
+  let identity = ensureGitToolResolvable(effectiveMode, getEnv("PATH"))
+  let (assignments, _) =
+    resolveWorkspaceRepoBackends(workspaceRoot, resolved.repos, identity)
+  if asJson:
+    var arr = newJArray()
+    for a in assignments:
+      arr.add(%*{
+        "repo": a.repoName,
+        "path": a.repoPath,
+        "tier": lockingTierLabel(a.visibility),
+        "backend": a.backendKind,
+        "layer": layerLabel(a.declaringLayer),
+        "source": a.layerSource})
+    echo (%*{"schema": "reprobuild.locking-explain.v1",
+             "workspaceRoot": workspaceRoot,
+             "repos": arr}).pretty
+  else:
+    if assignments.len == 0:
+      echo "repro locking explain: no repos resolved for this workspace"
+      return 0
+    echo "repro locking explain — resolved (tier, backend) per repo:"
+    for a in assignments:
+      echo "  " & a.repoName & " (" & a.repoPath & "): tier=" &
+        lockingTierLabel(a.visibility) & " backend=" & a.backendKind &
+        " layer=" & layerLabel(a.declaringLayer) &
+        (if a.layerSource.len > 0: " [" & a.layerSource & "]" else: "")
+  return 0
+
+proc runReproLockingCommand*(args: openArray[string]): int =
+  ## Top-level dispatcher for ``repro locking <verb> ...``. HL-1 ships
+  ## ``explain``; later milestones (HL-2 ``adopt-manifest``) extend this family.
+  if args.len == 0:
+    stderr.writeLine("repro locking: error: missing verb (one of: explain)")
+    return 2
+  let rest = if args.len > 1: args[1 .. ^1] else: @[]
+  case args[0]
+  of "explain":
+    return runReproLockingExplain(rest)
+  else:
+    stderr.writeLine("repro locking: error: unknown verb '" & args[0] &
+      "' (one of: explain)")
+    return 2
 
 proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
   ## Workspace-Manifest-Optional MO-13 (correcting MO-5) —
@@ -34443,6 +34857,7 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
   ## ``repro`` subprocess.
   let topCmds = reproTopLevelCommands.join(" ")
   let wsSubs = reproWorkspaceSubcommands.join(" ")
+  let lockingSubs = reproLockingSubcommands.join(" ")
   case shell
   of "bash":
     "# repro bash completion — add to ~/.bashrc:  source <(repro completion bash)\n" &
@@ -34458,18 +34873,25 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "    COMPREPLY=( $(compgen -W \"" & wsSubs & "\" -- \"$cur\") )\n" &
     "    return\n" &
     "  fi\n" &
+    "  if [[ ${COMP_WORDS[1]} == locking && $COMP_CWORD -eq 2 ]]; then\n" &
+    "    COMPREPLY=( $(compgen -W \"" & lockingSubs & "\" -- \"$cur\") )\n" &
+    "    return\n" &
+    "  fi\n" &
     "}\n" &
     "complete -F _repro_complete repro\n"
   of "zsh":
     "# repro zsh completion — add to ~/.zshrc:  source <(repro completion zsh)\n" &
     "_repro() {\n" &
-    "  local -a cmds wscmds\n" &
+    "  local -a cmds wscmds lockingcmds\n" &
     "  cmds=(" & topCmds & ")\n" &
     "  wscmds=(" & wsSubs & ")\n" &
+    "  lockingcmds=(" & lockingSubs & ")\n" &
     "  if (( CURRENT == 2 )); then\n" &
     "    compadd -- $cmds\n" &
     "  elif [[ ${words[2]} == workspace && CURRENT == 3 ]]; then\n" &
     "    compadd -- $wscmds\n" &
+    "  elif [[ ${words[2]} == locking && CURRENT == 3 ]]; then\n" &
+    "    compadd -- $lockingcmds\n" &
     "  fi\n" &
     "}\n" &
     "compdef _repro repro\n"
@@ -34479,7 +34901,9 @@ proc renderCompletionSnippet(shell, reproBin: string): string =
     "complete -c repro -f\n" &
     "complete -c repro -n \"__fish_use_subcommand\" -a \"" & topCmds & "\"\n" &
     "complete -c repro -n \"__fish_seen_subcommand_from workspace\" -a \"" &
-      wsSubs & "\"\n"
+      wsSubs & "\"\n" &
+    "complete -c repro -n \"__fish_seen_subcommand_from locking\" -a \"" &
+      lockingSubs & "\"\n"
   else:
     ""
 
@@ -35214,6 +35638,20 @@ proc runThinApp*(programName: string): int =
       return runReproLockCommand(lockArgs)
     except CatchableError as err:
       stderr.writeLine("repro lock: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "locking":
+    # HL-1 (Unified-Locking-And-Hooks §4) — ``repro locking <verb>``. Ships the
+    # ``explain`` introspection verb that reports each repo's resolved
+    # ``(tier, backend)`` and the configuration LAYER that declared it.
+    try:
+      let lockingArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runReproLockingCommand(lockingArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro locking: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "check":
     # M18 — top-level `repro check` subcommand per CLI/check.md. The

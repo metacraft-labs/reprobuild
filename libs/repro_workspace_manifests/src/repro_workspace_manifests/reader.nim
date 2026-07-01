@@ -303,6 +303,30 @@ proc readWorkspaceBootstrapPrivate*(path: string): WorkspaceBootstrapPrivate =
   requireNonEmpty(path, schemaWorkspaceBootstrapV1, "manifest.private_url",
                   result.manifest.private_url)
 
+proc readReprobuildConfig*(path: string): ReprobuildConfig =
+  ## HL-1 (Unified-Locking-And-Hooks) — read a `reprobuild.config.v1` layered
+  ## configuration file (system layer / user dotfiles / VCS-private dir, or an
+  ## `apply_if`-referenced routes file). The file may carry `apply_if` bindings
+  ## and/or `[locking]` routes; both are optional, so a file carrying only
+  ## `schema = "reprobuild.config.v1"` is a valid (empty) layer.
+  ##
+  ## Q-A / Q-B (spec §11) — on-disk form: a `schema = "reprobuild.config.v1"`
+  ## TOML file. To stay within the pinned toml-serialization (which rejects the
+  ## `[[array.of.tables]]` double-bracket form for nested arrays), both the
+  ## `apply_if` bindings and the `[locking] route` entries are authored as
+  ## INLINE-table arrays (the SAME convention `.repro-workspace.toml`'s
+  ## `[locking] route = [{ … }]` already uses), e.g.:
+  ##
+  ##   schema = "reprobuild.config.v1"
+  ##   apply_if = [{ under = "~/work/acme/", config = "team-routes.toml" }]
+  ##   [locking]
+  ##   route = [{ visibility = "team", backend = "git-checkout",
+  ##              path = "manifests-team", repos = ["core"] }]
+  let content = slurpManifest(path, schemaReprobuildConfigV1)
+  validateSchema(path, content, schemaReprobuildConfigV1)
+  result = decodeStrict(path, content, schemaReprobuildConfigV1,
+                        ReprobuildConfig)
+
 proc readWorkspaceBootstrap*(path: string): WorkspaceBootstrap =
   ## Read a host bootstrap config (`.repro-workspace.toml`). The only
   ## load-bearing required key is `[manifest] url` — without a manifest URL the

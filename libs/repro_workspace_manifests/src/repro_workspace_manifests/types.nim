@@ -79,6 +79,12 @@ const
   schemaWorkspaceLocalV1*   = "reprobuild.workspace.local.v1"
   schemaDevelopOverridesV1* = "reprobuild.workspace.develop-overrides.v1"
   schemaWorkspaceBootstrapV1* = "reprobuild.workspace.bootstrap.v1"
+  schemaReprobuildConfigV1* = "reprobuild.config.v1"
+    ## HL-1 (Unified-Locking-And-Hooks) — the layered configuration file read
+    ## by the system-config (layer 2), user-dotfiles (layer 3), and
+    ## VCS-private (layer 5) layers, plus every file an `apply_if`
+    ## directive references. A `reprobuild.config.v1` file may carry `apply_if`
+    ## path-scoped bindings (inline-table array) and/or `[locking]` routes.
 
 type
   # --- repos/<repo>.toml -----------------------------------------------------
@@ -439,6 +445,17 @@ type
     program*: Option[string]
       ## The `external-cli` backend program (the documented CLI/JSON
       ## contract), resolved relative to the workspace root when not absolute.
+    repos*: seq[string]
+      ## HL-1 (Unified-Locking-And-Hooks §4) — the repos this route's TIER
+      ## governs, named by `ResolvedRepo.name` or `ResolvedRepo.path`. When a
+      ## route NAMES repos, the tier is determined by the DECLARING LAYER
+      ## (tier-by-layer): those repos belong to this route's `visibility` tier
+      ## regardless of their per-repo `ResolvedRepo.visibility` field, so a
+      ## repo named only in a private layer can never appear in the public
+      ## committed lock. An EMPTY `repos` list keeps the legacy MO-4
+      ## visibility-keyed match (a route applies to every repo whose
+      ## `ResolvedRepo.visibility` matches `visibility`), so a single
+      ## `[locking]` table resolves byte-identically to before HL-1.
 
   BootstrapLockingBody* = object
     ## MO-4 — the `[locking]` table: a list of visibility-keyed store routes.
@@ -453,6 +470,61 @@ type
     projects*: BootstrapProjectsBody
     verify*: BootstrapVerifyBody
     develop*: BootstrapDevelopBody
+    locking*: BootstrapLockingBody
+    extensions*: Extensions
+
+  # --- reprobuild.config.v1 (HL-1 layered configuration file) -----------------
+  #
+  # The file the system-config (layer 2), user-dotfiles (layer 3), and
+  # VCS-private (layer 5) layers read, and the file every `apply_if`
+  # directive references. It carries the two HL-1 directives:
+  #   * `apply_if` — a path-scoped binding (modeled on Git's
+  #     `includeIf "gitdir:…"`). When a workspace is checked out UNDER `under`,
+  #     the referenced `config` file's `[locking]` routes are folded into the
+  #     SAME layer that declared the `apply_if`. "Team via IT system config" and
+  #     "personal via dotfiles" are the same mechanism at different scopes.
+  #   * `[locking] route` — the existing route shape (now able to NAME repos),
+  #     declared inline in this layer's file.
+  #
+  # Q-A resolution (VCS-private config file name/format): layer 5 reads
+  # `vcsPrivateMetadataDir(repoRoot)/config.toml` (`<git-common-dir>/repro/config.toml`
+  # for git). It is the SAME `reprobuild.config.v1` format as every other layer.
+  #
+  # Q-B resolution (`under` matching semantics): `under` is matched as a
+  # PATH-PREFIX after normalization — both `under` (with `~` expanded) and the
+  # workspace path are made absolute and symlink-resolved, then the workspace
+  # matches when it equals `under` or is nested under `under/`. Multiple
+  # overlapping `apply_if` scopes all contribute; their routes compose within
+  # the declaring layer in file order (a later same-tier route refines the
+  # backend, a cross-tier collision is a loud error).
+  #
+  # On-disk form (Q-A/Q-B, DECIDED): to stay within the pinned
+  # toml-serialization (no `[[array.of.tables]]` for nested arrays), BOTH
+  # `apply_if` and `[locking] route` are authored as INLINE-table arrays — the
+  # same convention `.repro-workspace.toml`'s `[locking] route = [{ … }]` uses:
+  #
+  #   schema = "reprobuild.config.v1"
+  #   apply_if = [{ under = "~/work/acme/", config = "team-routes.toml" }]
+  #   [locking]
+  #   route = [{ visibility = "team", backend = "git-checkout",
+  #              path = "manifests-team", repos = ["core"] }]
+
+  ApplyIfEntry* = object
+    ## HL-1 — one `[[apply_if]]` path-scoped binding.
+    under*: string
+      ## The directory under which a workspace checkout activates this
+      ## binding. `~` is expanded; the value is normalized to an absolute,
+      ## symlink-resolved path before the prefix comparison.
+    config*: string
+      ## Path to a `reprobuild.config.v1` file whose `[locking]` routes are
+      ## contributed when the workspace is under `under`. Relative paths are
+      ## resolved against the directory of the file declaring the `apply_if`.
+
+  ReprobuildConfig* = object
+    ## HL-1 — a `reprobuild.config.v1` configuration file (system / dotfiles /
+    ## VCS-private layer, or an `apply_if`-referenced routes file).
+    schema*: string
+    apply_if*: seq[ApplyIfEntry]
     locking*: BootstrapLockingBody
     extensions*: Extensions
 
