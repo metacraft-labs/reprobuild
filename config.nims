@@ -78,6 +78,18 @@ let codeTracerSrc = block:
     ".." / "codetracer" / "src"
 if fileExists(codeTracerSrc / "ct_incremental_adapter.nim"):
   switch("path", codeTracerSrc)
+else:
+  # Sandboxed / no-sibling builds (the Nix ``reprobuild`` package build, whose
+  # pure environment has no ``../codetracer`` checkout) still need the seam to
+  # compile ``repro_cli_support``. Fall back to the copy in the pinned
+  # ``reprobuild-ct-test-runner`` source input — the same std-only adapter the
+  # package build compiled before the seam was rehomed to CodeTracer, byte-for-
+  # byte on the pinned revision. CodeTracer stays canonical wherever its
+  # checkout is present (dev shell, the Test job).
+  let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
+    "ct_incremental_adapter" / "src"
+  if dirExists(ctIncrementalFallbackSrc):
+    switch("path", ctIncrementalFallbackSrc)
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
 # ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
