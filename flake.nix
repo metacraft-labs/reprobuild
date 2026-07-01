@@ -23,10 +23,9 @@
       # sibling). Like the other source inputs, the sandboxed package build and
       # the override-free CI jobs have no sibling, so seed it from this input.
       #
-      # Pinned to the Linux monitor-completeness fix (f1dcd43): later main
-      # commits also rework writer/capabilities completeness logic and are not
-      # yet validated for the Linux LD_PRELOAD ct-build path. Unpin once they are.
-      url = "github:metacraft-labs/io-mon/f1dcd43f989d7f5d407f3133c46e676828c5cd6f";
+      # Pinned to the hardened io-mon revision validated for this retirement
+      # campaign.
+      url = "github:metacraft-labs/io-mon/7ef0553";
       flake = false;
     };
     nimcrypto-src = {
@@ -240,6 +239,9 @@
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
+            # CODETRACER_SRC is intentionally not pinned as a flake input yet:
+            # the adapter source lands in the paired CodeTracer change first.
+            # CI/dev shells resolve it from the sibling checkout via config.nims.
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
@@ -319,6 +321,9 @@
             STACKABLE_HOOKS_SRC = "${stackable-hooks-src}/src";
             IO_MON_SRC = "${io-mon-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
+            # CODETRACER_SRC is intentionally not pinned as a flake input yet:
+            # the adapter source lands in the paired CodeTracer change first.
+            # CI/dev shells resolve it from the sibling checkout via config.nims.
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             CT_INTERPOSE_SRC = ctInterposeSrc;
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";

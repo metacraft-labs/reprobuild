@@ -232,7 +232,7 @@ step_2_checkouts() {
   # private codetracer-native-recorder input that 404s without auth and
   # blocks every Linux build (see step 4 comment). The Linux engine build
   # doesn't import any ct_interpose / stackable_hooks symbols, so the
-  # five sibling sources below are sufficient.
+  # source-only sibling sources below are sufficient.
   #
   # Revisions are pinned from ``flake.lock`` so the bootstrap matches what
   # CI sees byte-for-byte. Update both places when bumping any input.

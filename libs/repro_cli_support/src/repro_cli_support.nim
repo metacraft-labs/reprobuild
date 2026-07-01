@@ -72,8 +72,8 @@ import repro_home_resources/drivers/managed_block
 import repro_peer_cache
 # Incremental-Test-Runner: the skip/re-run seam (``watchTestEdgeDecision``) the
 # ``--ct-incremental`` watch hook calls on each filesystem-change cycle, and the
-# post-run cache refresh (``recordWatchTestEdge``), are provided by the engine-
-# free ``reprobuild-ct-test-runner`` ADAPTER (Nim module ``ct_incremental_adapter``).
+# post-run cache refresh (``recordWatchTestEdge``), are provided by CodeTracer's
+# std-only process adapter (Nim module ``ct_incremental_adapter``).
 # The adapter reaches codetracer's CANONICAL incremental engine
 # (``codetracer/src/ct_test/incremental``) by EXECUTING the ``ct`` binary as a
 # subprocess (``ct test --incremental --watch-decide`` / ``--watch-record``) —

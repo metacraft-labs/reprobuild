@@ -77,18 +77,10 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
-      # Sibling clones: scripts/run_tests.sh builds ../runquota and
-      # ct_test_nim_unittest resolves the ct-test source via the
-      # `CT_TEST_SRC` env var. Both come from local clones so changes
-      # in either sibling are picked up immediately without waiting
-      # for a flake.lock bump.
-      - name: Clone ct-test sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@main
-        with:
-          repo: metacraft-labs/ct-test
-          ref: main
-          path: ${{ github.workspace }}/../ct-test
-          gh-token: ${{ steps.ci_token.outputs.token }}
+      # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
+      # .github/sibling-repos, and scripts/run_tests.sh builds ../runquota.
+      # Local clones let CI pick up sibling changes without waiting for a
+      # flake.lock bump.
       - name: Clone runquota sibling
         uses: metacraft-labs/metacraft-github-actions/clone-repo@main
         with:
@@ -155,7 +147,6 @@ jobs:
           env-flavor: nix
           gh-token: ${{ steps.ci_token.outputs.token }}
           flake-override-inputs: |
-            ct-test-src=../ct-test
             runquota-src=../runquota
 
       # Build codetracer's `ct` binary that the ct_incremental_adapter execs

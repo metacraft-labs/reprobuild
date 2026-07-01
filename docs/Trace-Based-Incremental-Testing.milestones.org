@@ -41,9 +41,9 @@
     engine moved to **codetracer** (`src/ct_test/incremental`); reprobuild's
     vendored `libs/repro_ct_incremental` was DELETED and `repro watch
     --ct-incremental` now consumes the engine through the engine-free
-    `reprobuild-ct-test-runner` adapter (`libs/ct_incremental_adapter`). Only the
-    watch integration in `libs/repro_cli_support` still lives here. See M21's
-    SUPERSEDED note below.
+    CodeTracer process adapter (`codetracer/src/ct_incremental_adapter.nim`).
+    Only the watch integration in `libs/repro_cli_support` still lives here.
+    See M21's SUPERSEDED note below.
   - *Trace source:* CodeTracer traces. The prototype reads the **JSON trace
     form** (`trace.json` + `trace_paths.json` + `trace_metadata.json`) with
     `std/json` only — no CTFS binary parsing or `codetracer-trace-format-nim`
@@ -1751,8 +1751,8 @@
   `tools/sync_ct_test_vendor` generator, and the `t_ct_test_vendor_sync` drift
   test described below) has been DELETED. `repro watch --ct-incremental` now
   reaches the canonical engine through the engine-free
-  `reprobuild-ct-test-runner` adapter (`libs/ct_incremental_adapter`), a one-way
-  dependency (reprobuild → codetracer, never the reverse). The text below is
+  CodeTracer process adapter (`codetracer/src/ct_incremental_adapter.nim`), a
+  one-way dependency (reprobuild -> codetracer, never the reverse). The text below is
   retained as the historical record of the vendoring approach; it no longer
   describes the live layout.
 

@@ -114,8 +114,8 @@ can prove the executed functions are unchanged.
 - The canonical incremental engine now lives in CodeTracer at
   `codetracer/src/ct_test/incremental` (the single source of truth). Reprobuild
   no longer vendors a copy: `repro watch --ct-incremental` reaches the engine
-  through the engine-free `reprobuild-ct-test-runner` adapter
-  (`libs/ct_incremental_adapter`), a one-way dependency (reprobuild → codetracer,
+  through CodeTracer's std-only process adapter
+  (`codetracer/src/ct_incremental_adapter.nim`), a one-way dependency (reprobuild -> codetracer,
   never the reverse). See the Incremental-Test-Runner campaign milestones in
   the `codetracer-specs` repo.
 - Design and milestones:

@@ -1,7 +1,7 @@
 ## t_e2e_watch_via_adapter — Incremental-Test-Runner verification:
-## ``repro watch --ct-incremental`` decides skip/re-run THROUGH the engine-free
-## ``reprobuild-ct-test-runner`` adapter, which reaches codetracer's CANONICAL
-## engine by EXECUTING the ``ct`` binary (``ct test --incremental
+## ``repro watch --ct-incremental`` decides skip/re-run THROUGH CodeTracer's
+## std-only process adapter, which reaches codetracer's CANONICAL engine by
+## EXECUTING the ``ct`` binary (``ct test --incremental
 ## --watch-decide`` / ``--watch-record``) — reprobuild's former vendored engine
 ## copy (``libs/repro_ct_incremental``) is DELETED and reprobuild no longer
 ## compiles codetracer's engine at all.

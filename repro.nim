@@ -66,17 +66,16 @@ import repro_dsl_stdlib/packages/python_unittest_runner
 # repro_dsl_stdlib/packages/nim`` would shadow the const with the
 # module name and break ``nim.c(...)`` method-call resolution).
 
-# Test-Edges-And-Parallel-Runner M1: ``ct_test_nim_unittest`` is the
-# codetracer-side Nim-unittest framework adapter that supplies the
+# Test-Edges-And-Parallel-Runner M1: ``ct_test_nim_unittest`` is the in-tree
+# Nim-unittest framework adapter that supplies the
 # ``buildNimUnittest.build(...)`` typed-tool used by every entry in
 # the generated ``repro_tests.nim``. The module re-exports
 # ``repro_project_dsl`` so the import order is fine either way.
-# ``config.nims`` adds ``../ct-test/libs/ct_test_nim_unittest/src`` to
-# the Nim path.
+# ``config.nims`` adds ``libs/ct_test_nim_unittest/src`` to the Nim path.
 import ct_test_nim_unittest
 
 # Spec-Implementation M4: install the in-process ct-test ``TestRunner``
-# adapter (engine-free, from the ``reprobuild-ct-test-runner`` repo) onto
+# adapter (from the ``reprobuild-ct-test-runner`` repo) onto
 # the active build context so ``repro test`` RUN/LIST/ENUMERATE route
 # through the test binary's protocol instead of the stdlib default. The
 # engine-coupled ``setTestRunner`` wiring lives in this reprobuild-side

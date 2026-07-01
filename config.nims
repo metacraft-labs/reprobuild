@@ -48,7 +48,7 @@ switch("path", ".")
 # it depends only on ``repro_project_dsl`` and is the half ``repro.nim``
 # imports, so hosting it in-tree removes the reprobuild↔adapter
 # dependency cycle that the previous external import closed. Only the
-# execution-time ``TestRunner`` adapter (``ct_test_runner_adapter`` — the
+# execution-time ``TestRunner`` adapter (``ct_test_runner_adapter`` - the
 # in-process bridge in the ``reprobuild-ct-test-runner`` repo) stays
 # external and is resolved from the sibling checkout below.
 let ctTestRunnerRoot = block:
@@ -57,26 +57,27 @@ let ctTestRunnerRoot = block:
     fromEnv
   else:
     ".." / "reprobuild-ct-test-runner"
-for ctTestLib in [
-  "ct_test_runner_adapter",
-  # Incremental-Test-Runner M0b-2: the watch-integration incremental-decision
-  # seam (``ct_incremental_adapter`` — ``watchTestEdgeDecision`` /
-  # ``WatchEdgeDecision``), backed by codetracer's canonical engine. Replaces
-  # reprobuild's former vendored ``repro_ct_incremental`` copy.
-  "ct_incremental_adapter",
-]:
-  let candidate = ctTestRunnerRoot / "libs" / ctTestLib / "src"
-  if dirExists(candidate):
-    switch("path", candidate)
+let ctTestRunnerAdapterSrc = ctTestRunnerRoot / "libs" /
+  "ct_test_runner_adapter" / "src"
+if dirExists(ctTestRunnerAdapterSrc):
+  switch("path", ctTestRunnerAdapterSrc)
 
-# Incremental-Test-Runner: ``ct_incremental_adapter`` reaches codetracer's
-# CANONICAL incremental engine by EXECUTING the ``ct`` binary as a subprocess
-# (the ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol),
-# NOT by compiling the engine in-process. So reprobuild needs NO codetracer
-# engine source, codetracer-trace-format-nim, ``results >= 0.5`` pin, or zstd
-# include on its Nim path — the adapter compiles against std only. The codetracer
-# dependency is a one-way RUNTIME process dependency, resolved from ``$CT_BIN``
-# (CI builds ``ct`` in the codetracer sibling) or ``ct`` on ``PATH``.
+# Incremental-Test-Runner: ``ct_incremental_adapter`` is hosted by CodeTracer
+# as the std-only process seam for codetracer's canonical incremental engine.
+# It reaches the engine by EXECUTING the ``ct`` binary as a subprocess (the
+# ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol), NOT
+# by compiling the engine in-process. Resolve it from ``$CODETRACER_SRC`` or
+# the normal sibling checkout, never from the retiring standalone adapter repo.
+# A sandboxed flake input should be added only after the paired CodeTracer
+# commit containing ``src/ct_incremental_adapter.nim`` has been pushed.
+let codeTracerSrc = block:
+  let fromEnv = getEnv("CODETRACER_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "codetracer" / "src"
+if fileExists(codeTracerSrc / "ct_incremental_adapter.nim"):
+  switch("path", codeTracerSrc)
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
 # ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
@@ -192,8 +193,8 @@ for libName in [
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from
-  # the ``reprobuild-ct-test-runner`` sibling above) onto codetracer's canonical
-  # engine. No reprobuild-side engine library remains.
+  # CodeTracer's ``src`` above) onto codetracer's canonical engine. No
+  # reprobuild-side engine library remains.
 ]:
   switch("path", "libs" / libName / "src")
 
