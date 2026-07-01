@@ -77,9 +77,31 @@ fi
 
 echo "[build-reproos-image] config: $REPRO_AUTO_CONFIG"
 
+# M9.R.53: sudo is the sole HOST-only tool escape hatch (it needs
+# setuid so it can't be provisioned by a store-managed catalog).
+# Pin to the absolute path /usr/bin/sudo so PATH shadowing (e.g. a
+# scoop-style user-writable shim) can't quietly swap in a non-setuid
+# copy that fails with "sudo: must be setuid".  Every other tool the
+# script invokes is declared in the recipe's runtimeDeps: block
+# (recipes/reproos-image/repro.nim) and resolved via M9.N Batch B
+# path-mode probing at build-plan time -- if a tool goes missing from
+# the dev shell PATH, the resolver raises a structured
+# "tool-resolution failed" diagnostic BEFORE the script fires.
+SUDO=/usr/bin/sudo
+if [ ! -x "$SUDO" ]; then
+  echo "[build-reproos-image] required host tool missing: $SUDO" \
+       "(sudo must be host-installed with setuid; declare-and-provision" \
+       "does not apply to setuid binaries)" >&2
+  exit 65
+fi
+
 # Required host tools.  Fail loudly if any are missing -- the recipe
-# orchestrator already provisions these in the dev shell.
-for tool in qemu-img qemu-nbd parted sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig sudo mountpoint; do
+# orchestrator already provisions these in the dev shell via the
+# runtimeDeps: declaration on reproos-image (M9.R.53).  This local
+# defence-in-depth loop catches any resolver bypass (e.g. direct
+# invocation of build-reproos-image.sh outside the repro build
+# harness) with the same clear diagnostic.
+for tool in qemu-img qemu-nbd parted sgdisk mkfs.ext4 mkfs.vfat rsync grub-install grub-mkconfig mountpoint; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "[build-reproos-image] required tool missing: $tool" >&2
     exit 65
@@ -134,11 +156,11 @@ cleanup() {
   set +e
   for p in "${MOUNTED_PATHS[@]}"; do
     if mountpoint -q "$p"; then
-      sudo umount "$p" 2>/dev/null || sudo umount -l "$p" 2>/dev/null
+      "$SUDO" umount "$p" 2>/dev/null || "$SUDO" umount -l "$p" 2>/dev/null
     fi
   done
   if [ -n "$NBD_DEV" ] && [ "$NBD_CONNECTED" = "1" ]; then
-    sudo qemu-nbd --disconnect "$NBD_DEV" 2>/dev/null || true
+    "$SUDO" qemu-nbd --disconnect "$NBD_DEV" 2>/dev/null || true
   fi
   exit $rc
 }
@@ -382,7 +404,7 @@ echo "[build-reproos-image] qcow2 created: $TMP_QCOW2 (${DISK_SIZE_GB}G)"
 # ---------------------------------------------------------------
 if ! lsmod 2>/dev/null | grep -q '^nbd '; then
   echo "[build-reproos-image] modprobe nbd max_part=16"
-  sudo modprobe nbd max_part=16 \
+  "$SUDO" modprobe nbd max_part=16 \
     || { echo "[build-reproos-image] modprobe nbd failed" >&2; exit 68; }
 fi
 # Find a free /dev/nbdN.
@@ -400,7 +422,7 @@ if [ -z "$NBD_DEV" ]; then
   exit 68
 fi
 echo "[build-reproos-image] qemu-nbd --connect=$NBD_DEV $TMP_QCOW2"
-sudo qemu-nbd --connect="$NBD_DEV" "$TMP_QCOW2" \
+"$SUDO" qemu-nbd --connect="$NBD_DEV" "$TMP_QCOW2" \
   || { echo "[build-reproos-image] qemu-nbd connect failed" >&2; exit 68; }
 NBD_CONNECTED=1
 
@@ -408,7 +430,7 @@ NBD_CONNECTED=1
 sed -i "s|/dev/nbd0|$NBD_DEV|g" "$DISKO_JSON"
 
 # Wait for the kernel to scan the (empty) partition table.
-sudo partprobe "$NBD_DEV" 2>/dev/null || true
+"$SUDO" partprobe "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -422,11 +444,11 @@ sleep 2
 # only the var we ask for.
 # ---------------------------------------------------------------
 echo "[build-reproos-image] repro disk apply --device $NBD_DEV --confirm $DISKO_JSON"
-sudo LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
+"$SUDO" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" disk apply --device "$NBD_DEV" --confirm "$DISKO_JSON" \
   || { echo "[build-reproos-image] disk apply failed" >&2; exit 69; }
 
 # Re-scan the partition table.
-sudo partprobe "$NBD_DEV" 2>/dev/null || true
+"$SUDO" partprobe "$NBD_DEV" 2>/dev/null || true
 sleep 2
 
 # ---------------------------------------------------------------
@@ -448,11 +470,11 @@ if [ ! -b "$ROOT_DEV" ] || [ ! -b "$ESP_DEV" ]; then
   exit 69
 fi
 
-sudo mount "$ROOT_DEV" "$MNT_DIR" \
+"$SUDO" mount "$ROOT_DEV" "$MNT_DIR" \
   || { echo "[build-reproos-image] mount root failed" >&2; exit 69; }
 MOUNTED_PATHS+=("$MNT_DIR")
-sudo mkdir -p "$MNT_DIR/boot"
-sudo mount "$ESP_DEV" "$MNT_DIR/boot" \
+"$SUDO" mkdir -p "$MNT_DIR/boot"
+"$SUDO" mount "$ESP_DEV" "$MNT_DIR/boot" \
   || { echo "[build-reproos-image] mount esp failed" >&2; exit 69; }
 MOUNTED_PATHS+=("$MNT_DIR/boot")
 
@@ -466,7 +488,7 @@ MOUNTED_PATHS+=("$MNT_DIR/boot")
 # --hostname = from TOML
 # ---------------------------------------------------------------
 echo "[build-reproos-image] repro infra install-root --target $MNT_DIR --source $STAGE_DIR --device $NBD_DEV"
-sudo LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" infra install-root \
+"$SUDO" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" infra install-root \
   --target "$MNT_DIR" \
   --source "$STAGE_DIR" \
   --device "$NBD_DEV" \
@@ -486,7 +508,7 @@ BOOT_DEV_BASE="vda"
 echo "[build-reproos-image] rewriting $NBD_BASE -> $BOOT_DEV_BASE in grub.cfg + fstab"
 for f in "$MNT_DIR/boot/grub/grub.cfg" "$MNT_DIR/etc/fstab"; do
   if [ -f "$f" ]; then
-    sudo sed -i -E "s|/dev/${NBD_BASE}p([0-9]+)|/dev/${BOOT_DEV_BASE}\\1|g; s|/dev/${NBD_BASE}|/dev/${BOOT_DEV_BASE}|g" "$f"
+    "$SUDO" sed -i -E "s|/dev/${NBD_BASE}p([0-9]+)|/dev/${BOOT_DEV_BASE}\\1|g; s|/dev/${NBD_BASE}|/dev/${BOOT_DEV_BASE}|g" "$f"
   fi
 done
 
@@ -501,7 +523,7 @@ done
 # Phase 10: write /etc/shadow user entry.
 # ---------------------------------------------------------------
 SHADOW_LINE="$USER_NAME:$USER_PWHASH:19000:0:99999:7:::"
-sudo bash -c "
+"$SUDO" bash -c "
   set -euo pipefail
   if [ ! -f '$MNT_DIR/etc/shadow' ]; then
     echo 'root:*:19000:0:99999:7:::' > '$MNT_DIR/etc/shadow'
@@ -516,7 +538,7 @@ sudo bash -c "
 
 # Make sure the hostname file matches the TOML value (install-root
 # already wrote one but the TOML may differ from the default).
-sudo bash -c "echo '$HOSTNAME_VAL' > '$MNT_DIR/etc/hostname'" || true
+"$SUDO" bash -c "echo '$HOSTNAME_VAL' > '$MNT_DIR/etc/hostname'" || true
 
 echo "[build-reproos-image] phase summary:"
 echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
@@ -528,22 +550,22 @@ echo "  mnt esp:       $MNT_DIR/boot ($(df -h "$MNT_DIR/boot" 2>/dev/null | tail
 # Cleanup trap handles errors; on success we unmount cleanly so
 # the qcow2 is fully flushed before we move it.
 # ---------------------------------------------------------------
-sudo sync
+"$SUDO" sync
 sleep 2
 # Unmount in reverse order (esp before root) so we don't try to
 # unmount the parent while a child is still mounted.  Use lazy
 # umount as fallback for stubbornly-busy mounts.
 for ((i=${#MOUNTED_PATHS[@]}-1; i>=0; i--)); do
   p="${MOUNTED_PATHS[$i]}"
-  sudo umount "$p" 2>/dev/null \
-    || sudo umount -l "$p" 2>/dev/null \
+  "$SUDO" umount "$p" 2>/dev/null \
+    || "$SUDO" umount -l "$p" 2>/dev/null \
     || { echo "[build-reproos-image] WARNING: failed to unmount $p" >&2; }
 done
-sudo sync
+"$SUDO" sync
 sleep 1
 MOUNTED_PATHS=()
 
-sudo qemu-nbd --disconnect "$NBD_DEV"
+"$SUDO" qemu-nbd --disconnect "$NBD_DEV"
 NBD_CONNECTED=0
 
 # ---------------------------------------------------------------
