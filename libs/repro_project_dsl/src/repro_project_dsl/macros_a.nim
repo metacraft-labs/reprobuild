@@ -1565,7 +1565,20 @@ proc packageLiteral(pkg: PackageDef): string =
     # ``nativeBuildDeps:`` slot below still emits the kind-tagged
     # seq so any downstream consumer that needs the BUILD-platform
     # subset can read it directly.
-    ", toolUses: " & packageUseSeqLiteral(pkg.toolUses & pkg.nativeBuildDeps) &
+    #
+    # M9.R.53: the same fold widens to include ``runtimeDeps``.
+    # Recipes that shell out to a build-time driver script (e.g.
+    # ``recipes/reproos-image``) declare the tools the script invokes
+    # in ``runtimeDeps:`` — semantically correct for a shell action
+    # since the tools are the SCRIPT's runtime — but that slot didn't
+    # reach the resolver until now, so callers had to duplicate every
+    # entry into ``uses:`` to get M9.N Batch B path-mode resolution
+    # to fire.  Widening the fold to include ``pkg.runtimeDeps``
+    # collapses the twin declaration.  Backward-compatible: existing
+    # from-source recipes use ``runtimeDeps: discard`` (empty seq)
+    # so the union is byte-identical to pre-M9.R.53 for them.
+    ", toolUses: " &
+      packageUseSeqLiteral(pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps) &
     # DSL-port M9.R.1: emit the two new package-level dep slots.
     # Empty seqs serialize as ``@[]`` so legacy recipes that don't
     # declare either block round-trip byte-identically to their
