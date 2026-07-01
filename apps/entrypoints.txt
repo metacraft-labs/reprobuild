@@ -1,5 +1,13 @@
 # name path [extra-nim-flags...]
 repro apps/repro/repro.nim
+# ReproOS-Generations-And-Foreign-Packages A2 / Windows-Runner-Binary-Cache-Deploy M1:
+# the long-lived binary-cache HTTP daemon. Serves GET /healthz, GET /cache-info,
+# GET /manifests/<hex>, GET /payloads/<hex>, POST /publish on 0.0.0.0:7878 by
+# default (see apps/repro-binary-cache/repro_binary_cache.nim). Building it here
+# means `just build` / scripts/build_apps.sh produce build/bin/repro-binary-cache,
+# which the reprobuild Nix package installs so the nixos-modules
+# `services.mcl-repro-binary-cache` systemd unit can run it.
+repro-binary-cache apps/repro-binary-cache/repro_binary_cache.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim

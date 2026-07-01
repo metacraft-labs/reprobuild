@@ -294,13 +294,33 @@
             type = "app";
             program = "${reprobuild}/bin/repro";
           };
+          # Windows-Runner-Binary-Cache-Deploy M1 — expose the binary-cache
+          # HTTP daemon as its own package so the nixos-modules
+          # `services.mcl-repro-binary-cache` systemd unit has a runnable
+          # artifact to reference. It is the same `just build` closure as
+          # `reprobuild` (which installs every build/bin/* entrypoint,
+          # including the newly-added build/bin/repro-binary-cache); we only
+          # retarget `meta.mainProgram` so `lib.getExe` resolves the daemon.
+          reproBinaryCache = reprobuild.overrideAttrs (old: {
+            pname = "repro-binary-cache";
+            meta = (old.meta or { }) // {
+              description = "Reprobuild binary-cache HTTP server daemon";
+              mainProgram = "repro-binary-cache";
+            };
+          });
+          reproBinaryCacheApp = {
+            type = "app";
+            program = "${reproBinaryCache}/bin/repro-binary-cache";
+          };
         in
         {
           apps.default = reproApp;
           apps.repro = reproApp;
+          apps.repro-binary-cache = reproBinaryCacheApp;
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
+          packages.repro-binary-cache = reproBinaryCache;
 
           checks = {
             inherit pre-commit-check;
