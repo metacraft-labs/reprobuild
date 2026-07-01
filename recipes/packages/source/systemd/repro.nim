@@ -294,6 +294,33 @@ package systemdSource:
         "importd=false",
         "portabled=false",
         "polkit=false",
+        # M9.R.56.1 — explicitly pin the runtime paths systemd bakes
+        # into libsystemd-core-257.so for its .mount / .automount /
+        # .service unit machinery.  Without these, meson's
+        # ``find_program(prog[0], '/usr/sbin/'+prog[0], '/sbin/'+prog[0])``
+        # loop walks the ``nix develop`` shell's PATH and prefers the
+        # util-linux / kbd / kmod / kexec-tools build-mirrors under
+        # ``/opt/repro/reprobuild/recipes/packages/source/*/build/out/bin/``.
+        # Those paths only exist on the BUILD host; on the installed
+        # rootfs, systemd-managed API-filesystem mounts (dev-mqueue,
+        # tmp, run-lock, sys-kernel-debug, sys-kernel-tracing, /boot,
+        # sys-fs-fuse-connections) fail with
+        # ``Unable to locate executable '/opt/repro/reprobuild/.../
+        # build/out/bin/mount': No such file or directory (203/EXEC)``,
+        # triggering ``local-fs.target`` dependency failure and
+        # emergency-mode boot.  All FHS locations here are guaranteed
+        # to exist on the installed rootfs via the DE / util-linux /
+        # kmod install-mirror ``/usr/bin/*`` symlink overlay.
+        "mount-path=/usr/bin/mount",
+        "umount-path=/usr/bin/umount",
+        "kmod-path=/usr/bin/kmod",
+        "kexec-path=/usr/sbin/kexec",
+        "sulogin-path=/usr/sbin/sulogin",
+        "loadkeys-path=/usr/bin/loadkeys",
+        "setfont-path=/usr/bin/setfont",
+        "nologin-path=/usr/sbin/nologin",
+        "quotaon-path=/usr/sbin/quotaon",
+        "quotacheck-path=/usr/sbin/quotacheck",
       ]
       # M9.R.15q.12.3 — patch systemd's vendored
       # ``src/basic/linux/input-event-codes.h`` to add KEY_LINK_PHONE.
