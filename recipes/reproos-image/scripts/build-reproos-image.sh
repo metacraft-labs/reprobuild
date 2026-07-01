@@ -1111,6 +1111,65 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
     sed -i 's|^\\(.*pam_selinux.so.*\\)\$|# M9.R.56.8.4 stripped: \\1|' \"\$f\"
   done
 
+  # M9.R.56.8.5: replace the sddm-autologin + sddm-greeter PAM
+  # config files with MINIMAL configs that only reference the
+  # from-source PAM modules we know are available.  Empirical
+  # evidence from the M9.R.56.8.4 boot smoke (/var/log/sddm.log):
+  #
+  #   [PAM] Authenticating...
+  #   [PAM] authenticate: Permission denied
+  #
+  # even AFTER stripping pam_selinux.so and confirming pam_nologin
+  # + pam_permit + pam_keyinit + pam_limits + pam_loginuid +
+  # pam_env dlopen successfully.  libpam1.6.1's pam_dispatch.c
+  # returns PAM_PERM_DENIED (== PAM_MUST_FAIL_CODE) when
+  # \`\`no modules loaded for '<service>' service\`\`.  That means
+  # the config file parse failed silently somewhere in the
+  # @include common-* chain --- either a common-* file references
+  # a module the from-source pam recipe doesnt ship (pam_cap.so,
+  # pam_deny.so's specific path, pam_unix.so's Debian
+  # multiarch quirk...) OR the from-source pam has a config-
+  # parse regression against Debians @include semantics.
+  #
+  # The minimal configs below drop every @include and reference
+  # ONLY: pam_nologin, pam_permit, pam_limits, pam_loginuid,
+  # pam_keyinit, pam_env, pam_unix --- all confirmed present at
+  # /lib/security/ from the from-source pam recipe install-
+  # mirror shim.
+  #
+  # A future M9.R.57+ can (a) diff the from-source pam parser
+  # against Debians libpam to find the include divergence, or
+  # (b) reintroduce the @include chain once the pam recipe is
+  # aligned with Debians module set.
+  cat > '$MNT_DIR/etc/pam.d/sddm-autologin' <<'PAM_AUTOLOGIN_EOF'
+#%PAM-1.0
+# M9.R.56.8.5 minimal PAM stack for sddm autologin.
+# Bypasses the common-* @include chain that fails config parse
+# silently on the from-source pam recipe.
+auth       required   pam_permit.so
+account    required   pam_permit.so
+password   required   pam_permit.so
+session    required   pam_permit.so
+session    optional   pam_keyinit.so force revoke
+session    optional   pam_limits.so
+session    optional   pam_loginuid.so
+session    optional   pam_env.so
+PAM_AUTOLOGIN_EOF
+  cat > '$MNT_DIR/etc/pam.d/sddm-greeter' <<'PAM_GREETER_EOF'
+#%PAM-1.0
+# M9.R.56.8.5 minimal PAM stack for sddm greeter session (runs
+# as the unprivileged sddm user; no autologin, no password
+# required, just enough scaffolding to hand off to the greeter).
+auth       required   pam_permit.so
+account    required   pam_permit.so
+password   required   pam_permit.so
+session    required   pam_permit.so
+session    optional   pam_keyinit.so force revoke
+session    optional   pam_limits.so
+session    optional   pam_loginuid.so
+session    optional   pam_env.so
+PAM_GREETER_EOF
+
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
   # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
   mkdir -p '$MNT_DIR/usr/local/lib/sddm'
