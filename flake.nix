@@ -355,6 +355,30 @@
             # it into the dev shell there.
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               pkgs.libbpf
+              # M9.R.54: the reproos-image recipe's ``runtimeDeps`` list
+              # (recipes/reproos-image/repro.nim) enumerates 35 host
+              # tools the build-reproos-image.sh driver invokes.  Under
+              # ``defaultToolProvisioning "path"`` the M9.N Batch B
+              # resolver probes each name against the host PATH at
+              # build-plan time and hard-fails on the first miss with
+              # ``tool-resolution failed: <name> requested by uses ...``.
+              # A typical NixOS interactive PATH already carries
+              # coreutils / util-linux / rsync / mkfs.* etc., but is
+              # missing qemu-{img,nbd}, grub-install / grub-mkconfig
+              # (grub2), and modprobe / rmmod / lsmod (kmod).  Wiring
+              # them into the dev shell makes ``nix develop`` /
+              # ``.envrc``-loaded shells sufficient for
+              # ``./build/bin/repro build recipes/reproos-image`` with
+              # no ad-hoc ``nix-shell -p qemu grub2 kmod`` wrap.
+              #
+              # These are Linux-only: qemu-nbd is a Linux kernel-module
+              # bridge, grub-install writes MBR/EFI blocks, and modprobe
+              # /rmmod /lsmod talk to the Linux kmod interface.  macOS
+              # /Windows operators don't build reproos-image so the
+              # cost of pulling these in there wouldn't buy anything.
+              pkgs.qemu
+              pkgs.grub2
+              pkgs.kmod
             ];
             shellHook = pre-commit-check.shellHook;
           };
