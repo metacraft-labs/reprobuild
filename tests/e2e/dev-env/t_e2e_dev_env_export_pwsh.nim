@@ -33,7 +33,7 @@ suite "e2e_dev_env_export_pwsh":
     let emitted = formatExportPlan(plan, skPwsh)
     check emitted == "$env:MSG = 'it''s a test'\n"
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_dev_env_export_pwsh_against_fixture":
       let c = prepareCase("repro-m74-export-pwsh")
       defer: removeDir(c.tempRoot)

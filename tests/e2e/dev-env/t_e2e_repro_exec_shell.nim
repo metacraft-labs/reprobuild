@@ -48,7 +48,7 @@ type
     projectRoot: string
     repoRoot: string
     reproBin: string
-    fsSnoop: string
+    monitorCliPath: string
     shim: string
 
 proc prepareCase(prefix: string): M4Case =
@@ -62,9 +62,9 @@ proc prepareCase(prefix: string): M4Case =
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = reproBinary()
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m4-exec-shell")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
     result.shim = monitor.shim
 
 proc envFor(c: M4Case): StringTableRef =
@@ -73,7 +73,6 @@ proc envFor(c: M4Case): StringTableRef =
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  result["REPRO_FS_SNOOP"] = c.fsSnoop
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
                 env: StringTableRef = nil): tuple[exitCode: int; output: string] =
@@ -197,7 +196,7 @@ when isNixSupported:
         "and `nix build nixpkgs#fish` did not provide one")
 
 suite "e2e_repro_exec_shell_artifact_consumers":
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_exec_uses_cached_dev_env_artifact":
       let c = prepareCase("repro-m4-exec-cache")
       defer: removeDir(c.tempRoot)

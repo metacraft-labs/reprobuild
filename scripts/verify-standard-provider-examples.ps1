@@ -3519,7 +3519,7 @@ foreach ($rel in $PopulatedExamples) {
   $env:REPRO_STATS_DIR = $statsDir
 
   # M11 (2026-05-27): REPRO_MONITOR_BYPASS retired across all examples.
-  # The cargo std::process::Command panic was traced to the FS-snoop shim
+  # The cargo std::process::Command panic was traced to the io-monitor shim
   # clobbering thread-local LastError; the fix lives in
   # libs/repro_monitor_shim/src/repro_monitor_shim/windows_interpose.nim
   # (Save/Restore LastError around each hook body). The bypass is no

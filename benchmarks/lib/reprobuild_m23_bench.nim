@@ -281,20 +281,20 @@ proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
     result.advisory = %*{
       "suite": "monitor-overhead",
       "status": "unsupported",
-      "reason": "repro-fs-snoop hooks backend is currently macOS-only",
+      "reason": "io-monitor hooks backend is currently macOS-only",
       "platform": hostOS,
       "metricsRecorded": false
     }
   else:
-    let fsSnoop = repoRoot / "build" / "bin" / "repro-fs-snoop"
+    let ioMonitor = repoRoot / "build" / "bin" / "repro"
     let shim = repoRoot / "build" / "lib" / "librepro_monitor_shim.dylib"
-    if not fileExists(fsSnoop) or not fileExists(shim):
+    if not fileExists(ioMonitor) or not fileExists(shim):
       result.advisory = %*{
         "suite": "monitor-overhead",
         "status": "unsupported",
-        "reason": "repro-fs-snoop or librepro_monitor_shim.dylib is missing",
+        "reason": "repro io-monitor or librepro_monitor_shim.dylib is missing",
         "metricsRecorded": false,
-        "expectedFsSnoop": fsSnoop,
+        "expectedIoMonitor": ioMonitor,
         "expectedShim": shim
       }
       return
@@ -312,7 +312,7 @@ proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
     let baselineMs = requireProcess([app, "fixture-action", "probe", inputPath,
       outDir, baselineOutput], repoRoot)
     let monitoredMs = requireProcess([
-      fsSnoop,
+      ioMonitor, "internal", "io", "monitor",
       "--depfile", depfile,
       "--events", "jsonl",
       "--event-stream", eventStream,
@@ -330,18 +330,18 @@ proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
       "ms", baselineMs, tdLessOrEqual, 10_000.0,
       "direct generated fixture, no monitor",
       ["generated fixture process"])
-    result.metrics.addMetric("monitor-overhead", "repro-fs-snoop wall time",
+    result.metrics.addMetric("monitor-overhead", "io-monitor wall time",
       "ms", monitoredMs, tdLessOrEqual, 60_000.0,
-      "actual repro-fs-snoop executable with macOS shim",
-      ["repro-fs-snoop", "repro_monitor_shim", "RMDF reader"])
+      "actual repro internal io monitor with macOS shim",
+      ["io-monitor", "repro_monitor_shim", "RMDF reader"])
     result.metrics.addMetric("monitor-overhead", "monitor overhead",
       "percent", max(overheadPct, 0.0), tdLessOrEqual, 1_000_000.0,
       "validation threshold only; tightened after stable baseline",
-      ["repro-fs-snoop", "repro_monitor_shim", "RMDF reader"])
+      ["io-monitor", "repro_monitor_shim", "RMDF reader"])
     result.metrics.addMetric("monitor-overhead", "monitor records captured",
       "count", float(dep.records.len), tdGreaterOrEqual, 1.0,
       "RMDF records decoded from real monitor depfile",
-      ["repro-fs-snoop", "repro_monitor_shim", "RMDF reader"])
+      ["io-monitor", "repro_monitor_shim", "RMDF reader"])
     result.advisory = %*{
       "suite": "monitor-overhead",
       "status": "measured",

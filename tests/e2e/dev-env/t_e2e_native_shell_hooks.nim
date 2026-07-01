@@ -56,7 +56,7 @@ type
     projectB: string
     repoRoot: string
     reproBin: string
-    fsSnoop: string
+    monitorCliPath: string
     shim: string
 
 proc prepareCase(prefix: string): M6Case =
@@ -76,14 +76,14 @@ proc prepareCase(prefix: string): M6Case =
   # depends on ct_interpose sources that ``prepareMonitorTools`` here
   # doesn't know how to wire; the Windows PowerShell hook test path itself is
   # gated below via ``when defined(windows):`` so it never reaches the
-  # shim fields. Setting up ``fsSnoop`` / ``shim`` is therefore only
-  # meaningful on platforms where the full fs-snoop integration is
-  # also available — gate via ``isFsSnoopSupported`` like the rest
+  # shim fields. Setting up monitor/shim paths is therefore only
+  # meaningful on platforms where the full io-monitor integration is
+  # also available — gate via ``isIoMonitorSupported`` like the rest
   # of the dev-env suite.
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot,
       "m6-native-shell-hooks")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
     result.shim = monitor.shim
 
 proc envFor(c: M6Case): StringTableRef =
@@ -99,7 +99,6 @@ proc envFor(c: M6Case): StringTableRef =
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPROBUILD_REPRO"] = c.reproBin
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  result["REPRO_FS_SNOOP"] = c.fsSnoop
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;

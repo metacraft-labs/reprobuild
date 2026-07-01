@@ -124,11 +124,15 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process),
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
+  var daemonBin = getEnv("RUNQUOTAD_BIN")
+  if daemonBin.len == 0:
+    daemonBin = findExe("runquotad")
+  if daemonBin.len == 0:
+    daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
     raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+      "runquotad binary missing at " & daemonBin &
+      "; set RUNQUOTAD_BIN or use direnv exec so runquotad is on PATH")
   let socketPath = "/tmp/repro-m17-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -152,33 +156,19 @@ proc writeFixture(path, content: string) =
 proc compileFixture(sourcePath, outputPath: string) =
   discard requireSuccess(shellCommand(["cc", sourcePath, "-o", outputPath]))
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath,
-    sourcePath
-  ]), repoRoot)
-
 when defined(macosx) or defined(linux):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
-      shim: string] =
-    let binDir = tempRoot / "monitor-bin"
-    let libDir = tempRoot / "monitor-lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
+  proc policyMonitorTools(repoRoot, tempRoot: string): MonitorTools =
+    discard tempRoot
+    result.monitorCliPath = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
+    result.monitorCliArgs = ioMonitorCliArgs
     # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
     # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
     # per test. The host-native single-arch shim is correct: the test process is
     # host-arch.
     result.shim = requireBinary(monitorShimPath(repoRoot),
       "reprobuild.test_fixtures.monitor_shim")
-    # Executable-Consolidation M1: apps/repro-fs-snoop was deleted; compile the
-    # synthesized standalone fs-snoop wrapper instead (same runFsSnoopCli path).
-    compileNim(repoRoot,
-      fsSnoopWrapperSource(repoRoot, "m17-repro-fs-snoop"),
-      result.fsSnoop, "m17-repro-fs-snoop")
 
 proc converterMain(args: seq[string]) =
   if args.len != 3:
@@ -251,11 +241,12 @@ proc converterPolicy(app, cwd, customPath, convertedPath: string;
     ])
 
 proc runOne(action: BuildAction; cacheRoot, app: string;
-            monitorCli = ""): BuildRunResult =
+            monitorCli = ""; monitorCliArgs: seq[string] = @[]): BuildRunResult =
   runBuild(graph([action]), BuildEngineConfig(
     cacheRoot: cacheRoot,
     runQuotaCliPath: app,
     monitorCliPath: monitorCli,
+    monitorCliArgs: monitorCliArgs,
     maxParallelism: 4'u32,
     stdoutLimit: 512 * 1024,
     stderrLimit: 512 * 1024))
@@ -287,7 +278,8 @@ proc evidenceInputs(evidence: PathSetEvidence): seq[string] =
 
 proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
                        declaredHidden: bool; cacheRoot, workRoot, fixtureBin,
-                       app: string; monitorCli = ""; shim = "") =
+                       app: string; monitorCli = "";
+                       monitorCliArgs: seq[string] = @[]; shim = "") =
   let caseDir = workRoot / name
   createDir(caseDir)
   let visible = caseDir / "visible.txt"
@@ -328,7 +320,8 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
       env = env)
 
   let before = cacheRecordsSize(cacheRoot)
-  let firstRun = runOne(makeAction(), cacheRoot, app, monitorCli)
+  let firstRun = runOne(makeAction(), cacheRoot, app, monitorCli,
+    monitorCliArgs)
   let first = firstRun.singleResult()
   if first.status != asSucceeded:
     checkpoint(first.stderr)
@@ -347,7 +340,8 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
   let outputV1 = readFile(output)
   let markerV1 = readFile(marker)
 
-  let second = runOne(makeAction(), cacheRoot, app, monitorCli).singleResult()
+  let second = runOne(makeAction(), cacheRoot, app, monitorCli,
+    monitorCliArgs).singleResult()
   check second.status in {asCacheHit, asUpToDate}
   check not second.launched
   check second.dependencyPolicyKind == policy.kind
@@ -357,7 +351,8 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
   check cacheRecordsSize(cacheRoot) == afterFirst
 
   writeFixture(hidden, "hidden v2\n")
-  let thirdRun = runOne(makeAction(), cacheRoot, app, monitorCli)
+  let thirdRun = runOne(makeAction(), cacheRoot, app, monitorCli,
+    monitorCliArgs)
   let third = thirdRun.singleResult()
   if third.status != asSucceeded:
     checkpoint(third.stderr)
@@ -371,9 +366,11 @@ proc requirePolicyCase(name, mode: string; policy: DependencyGatheringPolicy;
   check cacheRecordsSize(cacheRoot) > afterFirst
 
 proc requireFailureNoPublish(action: BuildAction; cacheRoot, app: string;
-                             expected: string; monitorCli = "") =
+                             expected: string; monitorCli = "";
+                             monitorCliArgs: seq[string] = @[]) =
   let before = cacheRecordsSize(cacheRoot)
-  let result = runOne(action, cacheRoot, app, monitorCli).singleResult()
+  let result = runOne(action, cacheRoot, app, monitorCli,
+    monitorCliArgs).singleResult()
   check result.status == asFailed
   check result.cacheDecision == cdMiss
   if expected.len > 0:
@@ -484,7 +481,7 @@ suite "integration_scheduler_dependency_gathering_policies":
         "converted dependency report invalid")
 
     when defined(macosx) or defined(linux):
-      test "automatic and hybrid monitor policies use real fs-snoop evidence":
+      test "automatic and hybrid monitor policies use real io-monitor evidence":
         let repoRoot = getCurrentDir()
         let tempRoot = createTempDir("repro-m17-policy-monitor", "")
         defer: removeDir(tempRoot)
@@ -502,7 +499,7 @@ suite "integration_scheduler_dependency_gathering_policies":
         let fixtureBin = tempRoot / "policy-fixture"
         writeFile(fixtureSource, FixtureSource)
         compileFixture(fixtureSource, fixtureBin)
-        let monitorTools = prepareMonitorTools(repoRoot, tempRoot)
+        let monitorTools = policyMonitorTools(repoRoot, tempRoot)
 
         let workRoot = tempRoot / "work"
         let cacheRoot = tempRoot / ".repro-cache"
@@ -513,19 +510,22 @@ suite "integration_scheduler_dependency_gathering_policies":
             kind: dgAutomaticMonitor,
             completeness: decComplete),
           declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
-          monitorTools.fsSnoop, monitorTools.shim)
+          monitorTools.monitorCliPath, monitorTools.monitorCliArgs,
+          monitorTools.shim)
 
         requirePolicyCase("recognized-validated-by-monitor", "depfile",
           reportPolicy(dgRecognizedFormatValidatedByMonitor, "deps.d"),
           declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
-          monitorTools.fsSnoop, monitorTools.shim)
+          monitorTools.monitorCliPath, monitorTools.monitorCliArgs,
+          monitorTools.shim)
 
         requirePolicyCase("converter-validated-by-monitor", "custom-ok",
           converterPolicy(app, workRoot / "converter-validated-by-monitor",
             "deps.custom", "deps.rpset",
             dgPostBuildConverterValidatedByMonitor),
           declaredHidden = false, cacheRoot, workRoot, fixtureBin, app,
-          monitorTools.fsSnoop, monitorTools.shim)
+          monitorTools.monitorCliPath, monitorTools.monitorCliArgs,
+          monitorTools.shim)
 
         let failRoot = tempRoot / ".repro-monitor-fail-cache"
         let failDir = workRoot / "monitor-failures"
@@ -549,7 +549,7 @@ suite "integration_scheduler_dependency_gathering_policies":
             completeness: decComplete),
           env = ["REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim],
           commandStatsId = "m17-corrupt-monitor"), failRoot, app,
-          "", monitorTools.fsSnoop)
+          "", monitorTools.monitorCliPath, monitorTools.monitorCliArgs)
     else:
       test "automatic monitor policies are unsupported on this platform":
         skip()

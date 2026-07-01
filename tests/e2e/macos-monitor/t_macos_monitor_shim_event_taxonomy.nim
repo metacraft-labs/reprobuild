@@ -210,11 +210,11 @@ int main(int argc, char **argv) {
       # one per test; ``prepareMonitorTools`` resolves the identical path.
       let shimDylib = requireBinary(monitorShimPath(repoRoot),
         "reprobuild.test_fixtures.monitor_shim")
-      # Test-Fixtures-In-Build-Graph M3: the standalone fs-snoop driver is now
+      # Test-Fixtures-In-Build-Graph M3: the standalone io-monitor driver is now
       # the graph-built ``build/bin/repro`` reached via ``internal io monitor``
       # (Executable-Consolidation M1). Assert the artifact exists instead of
       # compiling a wrapper; the invocation prepends ``internal io monitor``.
-      let fsSnoopBin = requireBinary(
+      let ioMonitorBin = requireBinary(
         repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
         "reprobuild.apps.repro")
       let fixtureSource = tempRoot / "macos_monitor_fixture.c"
@@ -231,7 +231,7 @@ int main(int argc, char **argv) {
       compileFixture(fixtureSource, fixtureBin)
 
       discard requireSuccess(shellCommand([
-        fsSnoopBin, "internal", "io", "monitor",
+        ioMonitorBin, "internal", "io", "monitor",
         "--depfile", depfile,
         "--events", "jsonl",
         "--event-stream", eventsPath,

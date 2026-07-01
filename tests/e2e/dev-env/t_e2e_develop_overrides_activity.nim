@@ -70,7 +70,7 @@ type
     libRoot: string
     repoRoot: string
     reproBin: string
-    fsSnoop: string
+    monitorCliPath: string
     shim: string
 
 proc prepareCase(prefix: string): M7Case =
@@ -81,9 +81,9 @@ proc prepareCase(prefix: string): M7Case =
   writeAppFixture(result.appRoot)
   writeLibFixture(result.libRoot)
   result.reproBin = reproBinary(result.repoRoot)
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m5-develop-overrides")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
     result.shim = monitor.shim
 
 proc envFor(c: M7Case): StringTableRef =
@@ -92,7 +92,6 @@ proc envFor(c: M7Case): StringTableRef =
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  result["REPRO_FS_SNOOP"] = c.fsSnoop
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
                 env: StringTableRef = nil): tuple[exitCode: int; output: string] =
@@ -148,7 +147,7 @@ proc posixSourceValue(path, cwd: string): string =
   res.output.firstNonEmptyLine()
 
 suite "e2e_develop_overrides_activity":
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_develop_override_rebinds_dev_env":
       let c = prepareCase("repro-m7-develop-override")
       defer: removeDir(c.tempRoot)

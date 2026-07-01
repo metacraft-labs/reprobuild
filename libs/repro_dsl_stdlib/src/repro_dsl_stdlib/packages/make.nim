@@ -19,7 +19,7 @@ package make:
     # WinLibs gcc distribution which BUNDLES a 64-bit ``mingw32-make.exe``
     # at ``bin/mingw32-make.exe``. The previous M9.R.13b.2 attempt
     # (scoop ``main/make``) shipped the ezwinports 32-bit make.exe,
-    # and the M9.R.12 fs-snoop shim DLL (loaded via CreateRemoteThread +
+    # and the M9.R.12 io-monitor shim DLL (loaded via CreateRemoteThread +
     # LoadLibraryW) is x86_64 -- LoadLibraryW returns NULL in the
     # 32-bit child process and ``makebin`` actions fail with
     # ``LoadLibraryW in child returned NULL — the shim DLL did not

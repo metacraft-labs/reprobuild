@@ -30,7 +30,7 @@ suite "e2e_dev_env_export_nushell":
     let emitted = formatExportPlan(plan, skNushell)
     check emitted == "load-env {\n  MSG: \"it's a test\"\n}\n"
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_dev_env_export_nushell_against_fixture":
       let c = prepareCase("repro-m74-export-nushell")
       defer: removeDir(c.tempRoot)

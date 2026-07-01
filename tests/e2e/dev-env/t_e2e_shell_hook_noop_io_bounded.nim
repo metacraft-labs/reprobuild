@@ -7,7 +7,7 @@
 ## deterministic.
 ##
 ## Strategy: wrap ``repro dev-env export bash`` under
-## ``repro-fs-snoop`` (which uses the monitor shim's IAT detours on
+## ``repro internal io monitor`` (which uses the monitor shim's IAT detours on
 ## Windows / the LD_PRELOAD path on POSIX to record every file/path
 ## access). Read back the depfile and inspect the
 ## ``mrFileRead`` records.
@@ -25,9 +25,9 @@
 ## no ``build-engine-cache/`` paths. If any of those leak through
 ## we've regressed back to the slow path.
 ##
-## ``repro-fs-snoop`` AND the monitor shim are pulled in via the same
+## ``repro``'s io-monitor role AND the monitor shim are pulled in via the same
 ## ``prepareMonitorTools`` helper the M76 suite uses. When the test
-## host can't build them (i.e. ``isFsSnoopSupported == false``) the
+## host can't build them (i.e. ``isIoMonitorSupported == false``) the
 ## test SKIPs — the build engine has no Linux/macOS slot for this
 ## environment.
 
@@ -79,9 +79,9 @@ proc runExport(c: ShellHookCase; extraEnv: openArray[(string, string)] = []):
   p.close()
   (stdout: outText, exitCode: code)
 
-proc runExportUnderSnoop(c: ShellHookCase; fingerprint, depfilePath: string):
+proc runExportUnderMonitor(c: ShellHookCase; fingerprint, depfilePath: string):
     tuple[stdout: string; exitCode: int] =
-  ## Wrap the export call under ``repro-fs-snoop`` so the monitor shim
+  ## Wrap the export call under ``repro internal io monitor`` so the monitor shim
   ## records every file read into ``depfilePath`` (RMDF format).
   var env = newStringTable(modeCaseSensitive)
   for k, v in envPairs():
@@ -92,8 +92,8 @@ proc runExportUnderSnoop(c: ShellHookCase; fingerprint, depfilePath: string):
   env["HOME"] = c.tempRoot
   env["REPRO_MONITOR_SHIM_LIB"] = c.monitorShim
   env["__REPRO_APPLIED"] = fingerprint
-  var p = startProcess(c.fsSnoop,
-    args = @[
+  var p = startProcess(c.monitorCliPath,
+    args = c.monitorCliArgs & @[
       "--depfile", depfilePath,
       "--",
       c.reproBin, "dev-env", "export", "bash",
@@ -111,14 +111,14 @@ proc runExportUnderSnoop(c: ShellHookCase; fingerprint, depfilePath: string):
 suite "e2e_shell_hook_noop_io_bounded":
 
   test "noop_fast_path_does_not_open_build_engine_artifacts":
-    if not isFsSnoopSupported:
+    if not isIoMonitorSupported:
       skip()
     else:
       let c = prepareShellHookCase("repro-m77-noop-io")
       defer:
         try: removeDir(c.tempRoot)
         except CatchableError: discard
-      if c.fsSnoop.len == 0 or c.monitorShim.len == 0:
+      if c.monitorCliPath.len == 0 or c.monitorShim.len == 0:
         skip()
       else:
         # Warm: do ONE activation to obtain the fingerprint we want
@@ -132,14 +132,14 @@ suite "e2e_shell_hook_noop_io_bounded":
         # Measured run: same command, but with the fingerprint in env
         # so the fast path engages.
         let depfilePath = c.tempRoot / "noop-io.rdep"
-        let snoop = runExportUnderSnoop(c, fingerprint, depfilePath)
-        if snoop.exitCode != 0 or
-            not snoop.stdout.contains(
+        let monitored = runExportUnderMonitor(c, fingerprint, depfilePath)
+        if monitored.exitCode != 0 or
+            not monitored.stdout.contains(
               "repro shell hook: no-op (cache key unchanged)"):
-          echo "=== snoop exit=", snoop.exitCode, " stdout ==="
-          echo snoop.stdout
-        check snoop.exitCode == 0
-        check snoop.stdout.contains(
+          echo "=== monitor exit=", monitored.exitCode, " stdout ==="
+          echo monitored.stdout
+        check monitored.exitCode == 0
+        check monitored.stdout.contains(
           "repro shell hook: no-op (cache key unchanged)")
 
         let dep = readMonitorDepFile(depfilePath)

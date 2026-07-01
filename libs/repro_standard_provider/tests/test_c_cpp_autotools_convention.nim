@@ -567,7 +567,7 @@ suite "c-cpp-autotools convention — Mode B (crude fallback)":
       check ("stage" in output) or ("Stage" in output)
 
   test "emitFragment: Mode B actions are monitored (real dep capture)":
-    # Spec line 135: "FS-snoop extends." Each Mode-B action runs under
+    # Spec line 135: "io-monitor extends." Each Mode-B action runs under
     # the engine monitor (automatic-monitor policy) so the real
     # dependency set is captured rather than degraded to declared-only.
     let scratch = getTempDir() / "test_c_cpp_autotools_modeb_monitor"

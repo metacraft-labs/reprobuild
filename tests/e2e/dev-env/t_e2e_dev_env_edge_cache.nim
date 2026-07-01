@@ -7,9 +7,7 @@ import repro_provider_runtime
 import repro_test_support
 
 # prepareMonitorTools moved to libs/repro_test_support so the Windows
-# shim build (which needs ct_interpose source on the path) lives in
-# one place. cacheKey "m3-dev-env" matches the per-suite nimcache the
-# in-test copy used.
+# monitor fixture resolution lives in one place.
 
 # Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
 # (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
@@ -43,15 +41,17 @@ proc writeFixture(dir: string; modeValue = "dev";
   writeFile(dir / "fixture_provider.nim", providerText(modeValue,
     taskCommand))
 
-proc configFor(projectRoot, outDir, reproBin, fsSnoop, shim,
-               repoRoot: string): DevEnvEdgeConfig =
+proc configFor(projectRoot, outDir, reproBin, monitorCliPath: string,
+               monitorCliArgs: seq[string], shim, repoRoot: string):
+               DevEnvEdgeConfig =
   DevEnvEdgeConfig(
     modulePath: projectRoot / "fixture_provider.nim",
     projectRoot: projectRoot,
     outDir: outDir,
     workDir: repoRoot,
     publicCliPath: reproBin,
-    monitorCliPath: fsSnoop,
+    monitorCliPath: monitorCliPath,
+    monitorCliArgs: monitorCliArgs,
     monitorShimLibPath: shim,
     activity: "default",
     lockSliceId: "lock-m3",
@@ -89,7 +89,7 @@ proc dumpIntrospectionEvidence(edge: DevEnvEdgeResult) =
   echo "monitorProbes=", edge.introspectionAction.evidence.monitorProbes.join("|")
 
 proc prepareCase(prefix: string): tuple[tempRoot, projectRoot, outDir,
-    reproBin, fsSnoop, shim, repoRoot: string] =
+    reproBin, monitorCliPath, shim, repoRoot: string, monitorCliArgs: seq[string]] =
   result.repoRoot = getCurrentDir()
   result.tempRoot = createTempDir(prefix, "")
   result.projectRoot = result.tempRoot / "project"
@@ -97,19 +97,20 @@ proc prepareCase(prefix: string): tuple[tempRoot, projectRoot, outDir,
   writeFixture(result.projectRoot)
   createDir(result.outDir)
   result.reproBin = reproBinary(result.repoRoot)
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
       result.tempRoot / "monitor", "m3-dev-env")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
+    result.monitorCliArgs = monitor.monitorCliArgs
     result.shim = monitor.shim
 
 suite "e2e_dev_env_edge_cache":
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_dev_env_edge_noop_reuses_cached_artifact":
       let c = prepareCase("repro-m3-dev-env-noop")
       defer: removeDir(c.tempRoot)
-      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
-        c.shim, c.repoRoot)
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin,
+        c.monitorCliPath, c.monitorCliArgs, c.shim, c.repoRoot)
 
       let first = computeDevEnvEdge(cfg)
       let firstBytes = first.artifactPath.readBytes()
@@ -139,8 +140,8 @@ suite "e2e_dev_env_edge_cache":
     test "e2e_dev_env_edge_reruns_on_observed_input_change":
       let c = prepareCase("repro-m3-dev-env-observed")
       defer: removeDir(c.tempRoot)
-      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
-        c.shim, c.repoRoot)
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin,
+        c.monitorCliPath, c.monitorCliArgs, c.shim, c.repoRoot)
 
       let first = computeDevEnvEdge(cfg)
       let firstBytes = first.artifactPath.readBytes()
@@ -158,8 +159,8 @@ suite "e2e_dev_env_edge_cache":
     test "e2e_dev_env_edge_rebuilds_provider_on_project_change":
       let c = prepareCase("repro-m3-dev-env-provider")
       defer: removeDir(c.tempRoot)
-      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin, c.fsSnoop,
-        c.shim, c.repoRoot)
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin,
+        c.monitorCliPath, c.monitorCliArgs, c.shim, c.repoRoot)
 
       let first = computeDevEnvEdge(cfg)
       let firstProviderArtifactId = first.providerArtifactId

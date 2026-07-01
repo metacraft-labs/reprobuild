@@ -1,4 +1,4 @@
-## DSL-port M9.R.15c.1 — fs-snoop fragment-log open-once + crash-recoverable.
+## DSL-port M9.R.15c.1 — io-monitor fragment-log open-once + crash-recoverable.
 ##
 ## ## Context
 ##
@@ -39,10 +39,11 @@
 ##    fragment dirs and assert the byte content is identical (the
 ##    fragment-frame format is deterministic and the per-thread
 ##    handle does not introduce nondeterminism).
-## 3. **Crash recovery** — write N complete frames + truncate a final
+## 3. **Crash recovery** — write N complete file-open frames + truncate a final
 ##    partial frame, then assert ``readFragmentRecordsTolerant``
-##    returns exactly the N complete records and ``mergeFragments``
-##    parses the directory without raising.
+##    returns the N complete file-open records plus only the writer's
+##    read-tail marker frames, and ``mergeFragments`` parses the directory
+##    without raising.
 
 import std/[os, strutils, unittest]
 
@@ -65,7 +66,34 @@ proc sampleRecord(seq: uint64; osPid, threadId: uint64;
     path: path,
     detail: "")
 
-suite "DSL-port M9.R.15c.1 — fs-snoop fragment-log perf & crash recovery":
+proc checkFileOpenSequence(records: openArray[MonitorRecord]; n: int;
+                           pathPrefix: string; pathSuffix = "") =
+  var matched = 0
+  var pendingMarkers = 0
+  var committedMarkers = 0
+  for record in records:
+    if record.kind == mrFileOpen and record.path.startsWith(pathPrefix):
+      inc matched
+      check record.seq == uint64(matched)
+      check record.path == pathPrefix & $matched & pathSuffix
+    elif record.kind == mrEventLoss:
+      if record.detail.startsWith(ReadTailPendingDetail):
+        inc pendingMarkers
+      elif record.detail.startsWith(ReadTailCommittedDetail):
+        inc committedMarkers
+      else:
+        checkpoint("unexpected event-loss marker detail=" & record.detail)
+        check false
+    else:
+      checkpoint("unexpected fragment record kind=" & $record.kind &
+        " path=" & record.path & " detail=" & record.detail)
+      check false
+
+  check matched == n
+  check pendingMarkers >= 1
+  check pendingMarkers == committedMarkers
+
+suite "DSL-port M9.R.15c.1 — io-monitor fragment-log perf & crash recovery":
 
   test "1000 emits share a single open() call":
     # Start each scenario from a clean threadvar slot so the open-count
@@ -96,10 +124,7 @@ suite "DSL-port M9.R.15c.1 — fs-snoop fragment-log perf & crash recovery":
     closeFragmentSlot()
     let fragmentFile = fragmentPath(fragmentDir, osPid, threadId)
     let records = readFragmentRecords(fragmentFile)
-    check records.len == N
-    for i in 0 ..< N:
-      check records[i].seq == uint64(i + 1)
-      check records[i].path == "/usr/include/header-" & $(i + 1) & ".h"
+    checkFileOpenSequence(records, N, "/usr/include/header-", ".h")
 
   test "determinism — same input produces byte-identical fragment file":
     closeFragmentSlot()
@@ -165,10 +190,7 @@ suite "DSL-port M9.R.15c.1 — fs-snoop fragment-log perf & crash recovery":
     writeFile(fragmentFile, raw & truncatedTail)
 
     let recovered = readFragmentRecordsTolerant(fragmentFile)
-    check recovered.len == N
-    for i in 0 ..< N:
-      check recovered[i].seq == uint64(i + 1)
-      check recovered[i].path == "/crash/path-" & $(i + 1)
+    checkFileOpenSequence(recovered, N, "/crash/path-")
 
     # mergeFragments uses the tolerant reader, so the entire directory
     # parses without raising and the canonical depfile contains every

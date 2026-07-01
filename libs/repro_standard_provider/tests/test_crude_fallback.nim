@@ -110,7 +110,7 @@ suite "crude fallback M6":
     # cwd argument matches the project root verbatim.
     check inlineCwdOf(action) == scratch
 
-    # M6 contract: dependencyPolicy is automaticMonitor (FS-snoop
+    # M6 contract: dependencyPolicy is automaticMonitor (io-monitor
     # captures the real deps at runtime).
     check action.dependencyPolicy.kind == bdpAutomaticMonitor
 

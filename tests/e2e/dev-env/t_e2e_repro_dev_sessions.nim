@@ -110,7 +110,7 @@ type
     projectRoot: string
     repoRoot: string
     reproBin: string
-    fsSnoop: string
+    monitorCliPath: string
     shim: string
 
 proc prepareCase(prefix: string; dev = false): M8Case =
@@ -122,9 +122,9 @@ proc prepareCase(prefix: string; dev = false): M8Case =
   else:
     writeUpDownFixture(result.projectRoot)
   result.reproBin = reproBinary()
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m8-dev-sessions")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
     result.shim = monitor.shim
 
 proc envFor(c: M8Case): StringTableRef =
@@ -133,7 +133,6 @@ proc envFor(c: M8Case): StringTableRef =
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  result["REPRO_FS_SNOOP"] = c.fsSnoop
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
                 env: StringTableRef = nil): tuple[exitCode: int; output: string] =
@@ -236,7 +235,7 @@ proc requirePidGone(pid: int) =
   raise newException(OSError, "supervised service pid still alive: " & $pid)
 
 suite "e2e_repro_dev_sessions":
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_up_down_supervises_real_services":
       let c = prepareCase("repro-m8-up-down")
       defer: removeDir(c.tempRoot)

@@ -284,13 +284,13 @@ unit_ndem2_generation_log:
         libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim \
         2>&1 | tee test-logs/unit_ndem2_generation_log.log
 
-e2e-debug-fs-snoop:
+e2e-debug-io-monitor:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
-        --nimcache:build/nimcache/e2e-debug-fs-snoop \
-        --out:build/test-bin/e2e_debug_fs_snoop_reads_monitor_depfile \
-        tests/e2e/fs-snoop/t_debug_fs_snoop_reads_monitor_depfile.nim \
-        2>&1 | tee test-logs/e2e-debug-fs-snoop.log
+        --nimcache:build/nimcache/e2e-debug-io-monitor \
+        --out:build/test-bin/e2e_debug_io_monitor_reads_monitor_depfile \
+        tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim \
+        2>&1 | tee test-logs/e2e-debug-io-monitor.log
 
 e2e-macos-monitor-shim-event-taxonomy:
     mkdir -p test-logs build/test-bin build/nimcache

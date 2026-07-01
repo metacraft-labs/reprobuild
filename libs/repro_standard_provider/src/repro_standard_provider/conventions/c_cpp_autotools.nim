@@ -86,7 +86,7 @@
 ##     make DESTDIR=<stage> install
 ##
 ## Each action runs under the engine's monitor (Phase-1 SIP-safe launch
-## on macOS) so the real dependency set is captured by FS-snoop rather
+## on macOS) so the real dependency set is captured by io-monitor rather
 ## than declared per-source. Artifacts are lifted from
 ## ``<stage>/{bin,lib,include,share}/`` and declared as the package's
 ## outputs (spec §137). The build is out-of-tree
@@ -834,7 +834,7 @@ proc emitConfigureAction(projectRoot, shExe: string;
     # M28 note: automaticMonitorPolicy() rather than
     # automaticMonitorPolicy() because the configure compound
     # (autoreconf + ./configure) spawns a fan-out of perl/m4/sh
-    # subprocesses that FS-snoop's DLL-interpose handles unreliably
+    # subprocesses that io-monitor's DLL-interpose handles unreliably
     # on Windows (the second-level child of MSYS2's sh.exe deadlocks
     # waiting on a pipe that never drains). The configure action's
     # inputs list explicitly enumerates configure.ac + configure.in +
@@ -1065,7 +1065,7 @@ proc emitModeBConfigureAction(projectRoot, shExe: string;
                               extraInputs: seq[string]): BuildActionDef =
   ## Mode-B configure action. Inputs are declared as the full package
   ## source tree (spec line 135 "Inputs declared as the full package
-  ## source tree; FS-snoop extends") plus any fetch-stamp dep; the
+  ## source tree; io-monitor extends") plus any fetch-stamp dep; the
   ## monitor captures the rest. Output is the generated build-dir
   ## Makefile so downstream make actions sequence after it.
   let buildDir = modeBBuildDir(projectRoot)
@@ -1076,7 +1076,7 @@ proc emitModeBConfigureAction(projectRoot, shExe: string;
   # Declare the full source tree as inputs (spec line 135). For a fetched
   # tarball the tree is materialised by the fetch action; we still list
   # the configure-relevant scaffolding so per-file invalidation works
-  # before the first monitored run, and FS-snoop extends the set.
+  # before the first monitored run, and io-monitor extends the set.
   var inputs = collectAutotoolsSources(modeBConfigureScriptDir(projectRoot))
   for ei in extraInputs:
     if ei notin inputs:
@@ -1089,7 +1089,7 @@ proc emitModeBConfigureAction(projectRoot, shExe: string;
     inputs = inputs,
     outputs = outputs,
     pool = "compile",
-    # Monitored: FS-snoop captures the real dependency set the
+    # Monitored: io-monitor captures the real dependency set the
     # autoconf/m4 cascade + compiler probes read (spec line 135 + the
     # Phase-1 SIP-safe launch). Not degraded to declared-only.
     dependencyPolicy = automaticMonitorPolicy(),

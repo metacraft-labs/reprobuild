@@ -38,5 +38,5 @@ reprobuild-test-adapters=main
 # wires IO_MON_SRC / NIM_STACKABLE_HOOKS_SRC from the ../io-mon and
 # ../nim-stackable-hooks siblings. io-mon is pinned to the hardened revision
 # used by this retirement campaign.
-io-mon=7ef0553277fe8aac8f39a50afe796193b112735d
+io-mon=451eb2d664eb996b5a66815fd6decf7dae34be32
 nim-stackable-hooks=c6cf6ad1ac95201288825970b6ca53f630ea8996

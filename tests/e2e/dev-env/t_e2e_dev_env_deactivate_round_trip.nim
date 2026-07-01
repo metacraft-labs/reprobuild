@@ -349,7 +349,7 @@ suite "e2e_dev_env_deactivate_round_trip_bash":
     check parsed.table["EMPTY"] == ""
     removeFile(tmp)
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_dev_env_round_trip_against_fixture":
       ## End-to-end: spawn ``repro dev-env export bash`` with a
       ## pre-activation env file, capture stdout, write the

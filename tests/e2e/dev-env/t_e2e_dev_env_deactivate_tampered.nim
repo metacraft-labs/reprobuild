@@ -100,7 +100,7 @@ suite "e2e_dev_env_deactivate_tampered":
       check not s.contains("$env:")
       check not s.contains("hide-env")
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_tampered_manifest_hash_exits_3":
       let c = prepareCase("repro-m75-deact-tampered-manifest")
       defer: removeDir(c.tempRoot)

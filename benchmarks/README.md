@@ -8,7 +8,7 @@ Run `just bench_reprobuild_core_mvp_performance` for the M23 production
 benchmark gate. This gate uses generated workloads, but the measured paths are
 real Reprobuild and RunQuota components: the build-engine scheduler, local
 action cache, sibling RunQuota daemon and process helper, and the macOS
-`repro-fs-snoop` monitor path when available. Unsupported monitor platforms
+`repro internal io monitor` path when available. Unsupported monitor platforms
 emit structured advisory metadata instead of synthetic monitor measurements.
 
 Run `just bench_cmake_reprobuild_vs_ninja` to compare the forked CMake

@@ -1025,7 +1025,7 @@ proc emitNpmCiAction(projectRoot, npmExe: string): BuildActionDef =
   ## the project root. The engine treats directory outputs opaquely —
   ## the action's success condition is "directory exists after the
   ## command runs"; individual file enumeration happens via
-  ## ``automaticMonitorPolicy()`` (the FS-snoop attaches the actually-
+  ## ``automaticMonitorPolicy()`` (the io-monitor attaches the actually-
   ## read/written file set after the fact). Consumer actions (tsc,
   ## esbuild) reference the action's id in their ``deps``.
   let nodeModulesDir = projectRoot / "node_modules"
@@ -1294,7 +1294,7 @@ proc jsTsCrudeFallback(projectRoot: string;
   ## non-empty ``workspaces`` field). Delegates to either
   ## ``npm ci && npm run build`` (when a ``package-lock.json`` is
   ## present) or ``npm install && npm run build`` (otherwise) under
-  ## FS-snoop monitoring per the M6 spec.
+  ## io-monitor monitoring per the M6 spec.
   ##
   ## **Design decision — npm ci vs npm install**:
   ##
@@ -1322,7 +1322,7 @@ proc jsTsCrudeFallback(projectRoot: string;
   ##
   ## Outputs declared opaquely: ``dist`` (vite/webpack/rollup default),
   ## ``build`` (next/parcel/CRA default), ``.next`` (Next.js prod
-  ## output), ``.nuxt`` (Nuxt prod output). The FS-snoop monitor
+  ## output), ``.nuxt`` (Nuxt prod output). The io-monitor monitor
   ## promotes whichever subset the build actually writes to.
   {.cast(gcsafe).}:
     let npmExe = npmExecutable()

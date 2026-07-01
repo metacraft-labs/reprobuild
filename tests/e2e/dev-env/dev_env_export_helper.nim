@@ -1,7 +1,7 @@
 ## Shared fixture + helpers for ``t_e2e_dev_env_export_<shell>.nim``.
 ##
 ## All five M74 tests follow the same shape:
-##   1. Build ``repro.exe`` and the monitor shim/snoop.
+##   1. Build ``repro.exe`` and the monitor shim.
 ##   2. Write a small ``fixture_provider.nim`` declaring a devEnv
 ##      block (FIXTURE_MODE / AUX_VALUE / prependPath PATH tools/bin).
 ##   3. Run ``repro dev-env export <shell> --project-root <fixture>``.
@@ -26,7 +26,8 @@ type
     projectRoot*: string
     repoRoot*: string
     reproBin*: string
-    fsSnoop*: string
+    monitorCliPath*: string
+    monitorCliArgs*: seq[string]
     shim*: string
 
   CommandOutcome* = object
@@ -78,10 +79,11 @@ proc prepareCase*(prefix: string): M74Case =
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = reproBinary(result.repoRoot)
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
       result.tempRoot, "m74-dev-env-export")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
+    result.monitorCliArgs = monitor.monitorCliArgs
     result.shim = monitor.shim
 
 proc envFor*(c: M74Case): StringTableRef =
@@ -91,8 +93,6 @@ proc envFor*(c: M74Case): StringTableRef =
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   if c.shim.len > 0:
     result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  if c.fsSnoop.len > 0:
-    result["REPRO_FS_SNOOP"] = c.fsSnoop
 
 proc runReproExport*(c: M74Case; shell: string): CommandOutcome =
   ## Spawn ``repro dev-env export <shell> --project-root <fixture>``

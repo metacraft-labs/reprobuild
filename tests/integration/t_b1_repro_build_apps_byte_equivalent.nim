@@ -84,7 +84,7 @@ suite "Bootstrap-And-Self-Build B1: engine-built apps stay functionally equivale
     # ``>= 11``, matching the pre-B1 stub count plus 3 peer-cache
     # binaries B1 added). Upstream commits since then dropped a
     # number of placeholder binaries (``repro-controller``,
-    # ``repro-worker``, ``repro-fs-snoop``, ``repro-hcr-link``,
+    # ``repro-worker``, ``repro-hcr-link``,
     # ``repro-provider-host`` were retired into ``repro internal``
     # subcommands; ``repro-daemon``/``reprostored`` were dropped
     # too as part of the ``repro {daemon,store} serve`` consolidation)

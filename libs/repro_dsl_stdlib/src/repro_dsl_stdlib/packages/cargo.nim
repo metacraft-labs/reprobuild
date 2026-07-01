@@ -117,7 +117,7 @@ package cargo:
       # opt-out (which bypassed dependency evidence entirely) with
       # first-class evidence collection driven by cargo's own ``.d``
       # outputs. The recognized-format gathering kind does NOT wrap
-      # subprocesses with the IAT-patching fs-snoop shim, so the
+      # subprocesses with the IAT-patching io-monitor shim, so the
       # rustc-on-Windows monitor-shim crash class that motivated the
       # original ``declaredOnly`` opt-out is still avoided.
 

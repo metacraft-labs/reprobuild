@@ -49,7 +49,7 @@ type
     projectRoot: string
     repoRoot: string
     reproBin: string
-    fsSnoop: string
+    monitorCliPath: string
     shim: string
 
 proc prepareCase(prefix: string): M9Case =
@@ -58,9 +58,9 @@ proc prepareCase(prefix: string): M9Case =
   result.projectRoot = result.tempRoot / "project"
   writeFixture(result.projectRoot)
   result.reproBin = reproBinary(result.repoRoot)
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m9-performance-gates")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
     result.shim = monitor.shim
 
 proc envFor(c: M9Case): StringTableRef =
@@ -69,7 +69,6 @@ proc envFor(c: M9Case): StringTableRef =
     result[key] = value
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  result["REPRO_FS_SNOOP"] = c.fsSnoop
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
@@ -163,7 +162,7 @@ proc requireProviderSourceRerunStats(stats: JsonNode) =
   check perf["providerIntrospection"]["declaredInputCount"].getInt() >= 2
 
 suite "e2e_dev_env_performance_gates":
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "benchmark_dev_env_activation_noop":
       let c = prepareCase("repro-m9-dev-env-perf")
       defer: removeDir(c.tempRoot)

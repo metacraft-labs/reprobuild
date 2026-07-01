@@ -77,7 +77,7 @@
 ##   * Multi-config backends (``vs*`` / ``xcode``).
 ##   * Shared libraries (``library('foo', ..., type: 'shared')``).
 ##   * ``subproject()`` / ``wrap`` files — these can hit the network at
-##     configure time. The M39 convention accepts the FS snoop but
+##     configure time. The M39 convention accepts the io-monitor but
 ##     doesn't try to sandbox the network fetch.
 ##   * ``test()`` discovery via ``meson test`` (M22-style test target
 ##     deferred — the crude fallback still covers it).

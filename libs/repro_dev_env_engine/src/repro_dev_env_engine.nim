@@ -29,8 +29,8 @@ type
     monitorCliPath*: string
     # Argument vector prepended to ``monitorCliPath`` for monitored actions
     # (Executable-Consolidation M1). When ``monitorCliPath`` is the ``repro``
-    # executable itself, this carries ``internal fs-snoop`` so the dev-env
-    # monitor self-spawns instead of locating a standalone ``repro-fs-snoop``.
+    # executable itself, this carries ``internal io monitor`` so the dev-env
+    # monitor self-spawns instead of locating a standalone monitor binary.
     monitorCliArgs*: seq[string]
     monitorShimLibPath*: string
     entryPointId*: string
@@ -188,7 +188,7 @@ proc fileFingerprintPart(path: string): string =
 #   to the lock file invalidates the fast path)
 # * the small subset of env vars the dev-env edge consumes:
 #   ``REPRO_DEVELOP_OVERRIDES_FILE``, ``REPRO_MONITOR_SHIM_LIB``,
-#   ``REPRO_FS_SNOOP``
+#   monitor CLI selection
 #
 # The implementation deliberately walks NO build graph and spawns NO
 # subprocess. It reads at most three small files (the project file, the
@@ -258,10 +258,10 @@ proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
     # ``REPRO_DEVELOP_OVERRIDES_FILE`` is the only edge-consumed env
     # variable that materially changes the activation — overriding the
     # overrides file path swaps the develop-overrides resolution. The
-    # rest (``REPRO_MONITOR_SHIM_LIB``, ``REPRO_FS_SNOOP``) are
+    # rest (``REPRO_MONITOR_SHIM_LIB`` and monitor CLI selection) are
     # infrastructure for the build engine and do not change the
     # dev-env contract; including them would burn cache-key matches
-    # whenever the user wraps ``repro`` under fs-snoop or runs from a
+    # whenever the user wraps ``repro`` under a custom monitor or runs from a
     # different host with a different shim path.
     envVarPart("REPRO_DEVELOP_OVERRIDES_FILE")
   ]

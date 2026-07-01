@@ -28,7 +28,7 @@ suite "e2e_dev_env_export_fish":
     let emitted = formatExportPlan(plan, skFish)
     check emitted == "set -gx MSG 'it\\'s \\\\ a test'\n"
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_dev_env_export_fish_against_fixture":
       let c = prepareCase("repro-m74-export-fish")
       defer: removeDir(c.tempRoot)

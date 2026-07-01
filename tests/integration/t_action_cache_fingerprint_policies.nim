@@ -49,6 +49,13 @@ proc readU32Le(raw: string; offset: int): uint32 =
     (uint32(ord(raw[offset + 2])) shl 16) or
     (uint32(ord(raw[offset + 3])) shl 24)
 
+proc writeU32Le(value: uint32): string =
+  result = newString(4)
+  result[0] = char(value and 0xff'u32)
+  result[1] = char((value shr 8) and 0xff'u32)
+  result[2] = char((value shr 16) and 0xff'u32)
+  result[3] = char((value shr 24) and 0xff'u32)
+
 proc checkActionRecordsFrame(recordsPath: string) =
   check fileExists(recordsPath)
   let raw = readFile(recordsPath)
@@ -263,7 +270,7 @@ suite "integration_action_cache_fingerprint_policies":
         let record = cache.recordActionResult(cas, weakFor("corrupt"),
           ffpChecksum, [inputPath], ["out.txt"], root)
         let casObject = cas.blobPath(record.outputs[0].blob.digest)
-        writeFile(casObject, "corrupted")
+        writeFile(casObject, "fixture-output\nbravo\n")
         removeIfExists(outputPath)
 
         let skippedLookup = cache.lookupActionResult(cas, weakFor("corrupt"),
@@ -275,6 +282,20 @@ suite "integration_action_cache_fingerprint_policies":
         expect CacheIntegrityError:
           cas.restoreOutputs(record, root)
         check not fileExists(outputPath)
+
+      block oversizedActionRecordFrameIsIgnored:
+        let oversizedRoot = tempRoot / "oversized-action-record"
+        let oversizedReproRoot = oversizedRoot / ".repro"
+        createDir(oversizedRoot)
+        let oversizedCas = openLocalCas(oversizedReproRoot / "cas")
+        var oversizedCache = openActionCache(oversizedReproRoot / "action-cache")
+        let oversizedFrameLen = uint32(64 * 1024 * 1024 + 1)
+        writeFile(oversizedReproRoot / "action-cache" / "action-results.records",
+          writeU32Le(oversizedFrameLen))
+
+        let lookup = oversizedCache.lookupActionResult(oversizedCas,
+          weakFor("oversized-action-record"), ffpChecksum)
+        check lookup.status == aclMissNoRecord
 
       block hotMetadataRecordSurvivesAppendLogDamage:
         let hotRoot = tempRoot / "hot-metadata"

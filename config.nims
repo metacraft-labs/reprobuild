@@ -66,10 +66,9 @@ if dirExists(ctTestRunnerAdapterSrc):
 # as the std-only process seam for codetracer's canonical incremental engine.
 # It reaches the engine by EXECUTING the ``ct`` binary as a subprocess (the
 # ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol), NOT
-# by compiling the engine in-process. Resolve it from ``$CODETRACER_SRC`` or
-# the normal sibling checkout. The standalone ``reprobuild-ct-test-runner``
-# repo is retained for ``ct_test_runner_adapter`` only; it is not the source of
-# this incremental process seam.
+# by compiling the engine in-process. Resolve it from ``$CODETRACER_SRC`` /
+# the normal sibling checkout first, then from the standalone
+# ``reprobuild-ct-test-runner`` flake input used by isolated test worktrees.
 let codeTracerSrc = block:
   let fromEnv = getEnv("CODETRACER_SRC")
   if fromEnv.len > 0:
@@ -213,11 +212,11 @@ for libName in [
 # Incremental-Test-Runner M7: reprobuild's build engine consumes the shared
 # ``io-mon`` filesystem-monitoring library instead of its own former
 # ``repro_monitor_depfile`` / ``repro_monitor_shim`` / ``repro_monitor_hooks``
-# fs-snoop stack (now deleted). io-mon is a byte-identical wire-format + ABI
+# io-monitor stack (now deleted). io-mon is a byte-identical wire-format + ABI
 # relocation of that stack onto ``nim-stackable-hooks``; the depfile API
 # (``MonitorDepFile`` / ``readMonitorDepFile`` / ``MonitorRecord`` / the
 # ``mr*`` / ``mo*`` / ``mc*`` enums / ``MonitorDepFileReaderError`` / the
-# ``fs_snoop`` driver + ``findShimLibrary``) is re-exported under the same
+# monitor driver + ``findShimLibrary``) is re-exported under the same
 # names from ``import io_mon`` (and the shim/hooks runtime under
 # ``io_mon/shim`` / ``io_mon/hooks``), so the consumers swapped their imports
 # only — no logic changed. The package's Nim name is ``io_mon`` with srcDir

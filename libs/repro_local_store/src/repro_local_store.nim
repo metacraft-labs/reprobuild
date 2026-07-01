@@ -147,6 +147,7 @@ const
   ActionHotIndexVersion = 1'u16
   RecordTailMask = 0xffff_ffff'u64
   ActionCacheCompactThreshold = 256 * 1024
+  MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
   AllFilePermissions {.used.} = {fpUserExec, fpUserWrite, fpUserRead,
     fpGroupExec, fpGroupWrite, fpGroupRead,
@@ -483,7 +484,18 @@ proc readBlob*(cas: LocalCas; blob: CasBlobRef): seq[byte] =
       digestHex(blob.digest))
 
 proc verifyBlob*(cas: LocalCas; blob: CasBlobRef) =
-  discard cas.readBlob(blob)
+  let path = cas.blobPath(blob.digest)
+  if not fileExists(extendedPath(path)):
+    raise newException(CacheIntegrityError, "missing CAS object " &
+      digestHex(blob.digest))
+  let info = getFileInfo(extendedPath(path), followSymlink = false)
+  if uint64(info.size) != blob.sizeBytes:
+    raise newException(CacheIntegrityError, "CAS size mismatch for " &
+      digestHex(blob.digest))
+  let actual = casFileDigest(extendedPath(path), blob.sizeBytes)
+  if actual != blob.digest:
+    raise newException(CacheIntegrityError, "CAS digest mismatch for " &
+      digestHex(blob.digest))
 
 proc storeBlob*(cas: LocalCas; payload: openArray[byte]): CasBlobRef =
   result.digest = casDigest(payload)
@@ -1106,30 +1118,117 @@ proc appendActionResultRecord*(cache: var ActionCache;
   {.cast(gcsafe).}:
     cache.appendRecord(record)
 
+proc readFully(file: File; data: var seq[byte]; length: int): bool =
+  data.setLen(length)
+  if length == 0:
+    return true
+  var offset = 0
+  while offset < length:
+    let readCount = file.readBuffer(addr data[offset], length - offset)
+    if readCount <= 0:
+      data.setLen(0)
+      return false
+    offset += readCount
+  true
+
+proc payloadWeakFingerprint(payload: openArray[byte]):
+    tuple[ok: bool; weak: ContentDigest] =
+  if payload.len < 6:
+    return
+  for i in 0 ..< 4:
+    if payload[i] != byte(ord(ActionRecordMagic[i])):
+      return
+  var pos = 4
+  try:
+    let version = readU16Le(payload, pos)
+    if version notin {2'u16, ActionRecordVersion}:
+      return
+    result.weak = readDigest(payload, pos)
+    result.ok = true
+  except EnvelopeError:
+    discard
+
+proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest): seq[ActionResultRecord] =
+  let key = digestKey(weak)
+  if not fileExists(extendedPath(cache.recordsPath)):
+    return
+  var handle: File
+  if not open(handle, extendedPath(cache.recordsPath), fmRead):
+    return
+  try:
+    var header: seq[byte] = @[]
+    var payload: seq[byte] = @[]
+    var tailBytes: seq[byte] = @[]
+    while true:
+      header.setLen(4)
+      let headerRead = handle.readBuffer(addr header[0], 4)
+      if headerRead == 0:
+        break
+      if headerRead != 4:
+        break
+      var pos = 0
+      let length = int(readU32Le(header, pos))
+      if length < 0 or length > MaxActionRecordFrameBytes:
+        break
+      if not handle.readFully(payload, length):
+        break
+      if not handle.readFully(tailBytes, 4):
+        break
+      pos = 0
+      let tail = readU32Le(tailBytes, pos)
+      if tail != recordTail(payload):
+        break
+      try:
+        let payloadWeak = payloadWeakFingerprint(payload)
+        if payloadWeak.ok and digestKey(payloadWeak.weak) == key:
+          let record = decodeRecord(payload)
+          result.add(record)
+          if result.len > MaxRecordsPerWeakFingerprint:
+            result = result[result.len - MaxRecordsPerWeakFingerprint .. ^1]
+      except EnvelopeError:
+        discard
+  finally:
+    handle.close()
+
 proc loadRecords(cache: var ActionCache) =
   cache.byWeak.clear()
   cache.loadedAllRecords = true
   if not fileExists(extendedPath(cache.recordsPath)):
     return
-  let raw = bytes(readFile(extendedPath(cache.recordsPath)))
-  var pos = 0
-  while pos + 8 <= raw.len:
-    let length = int(readU32Le(raw, pos))
-    if length < 0 or pos + length + 4 > raw.len:
-      break
-    let payloadStart = pos
-    let payloadEnd = pos + length - 1
-    let payload = raw[payloadStart .. payloadEnd]
-    pos += length
-    let tail = readU32Le(raw, pos)
-    if tail != recordTail(payload):
-      break
-    try:
-      let record = decodeRecord(payload)
-      let key = digestKey(record.weakFingerprint)
-      cache.byWeak.mgetOrPut(key, @[]).add(record)
-    except EnvelopeError:
-      discard
+  var handle: File
+  if not open(handle, extendedPath(cache.recordsPath), fmRead):
+    return
+  try:
+    var header: seq[byte] = @[]
+    var payload: seq[byte] = @[]
+    var tailBytes: seq[byte] = @[]
+    while true:
+      header.setLen(4)
+      let headerRead = handle.readBuffer(addr header[0], 4)
+      if headerRead == 0:
+        break
+      if headerRead != 4:
+        break
+      var pos = 0
+      let length = int(readU32Le(header, pos))
+      if length < 0 or length > MaxActionRecordFrameBytes:
+        break
+      if not handle.readFully(payload, length):
+        break
+      if not handle.readFully(tailBytes, 4):
+        break
+      pos = 0
+      let tail = readU32Le(tailBytes, pos)
+      if tail != recordTail(payload):
+        break
+      try:
+        let record = decodeRecord(payload)
+        let key = digestKey(record.weakFingerprint)
+        cache.byWeak.mgetOrPut(key, @[]).add(record)
+      except EnvelopeError:
+        discard
+  finally:
+    handle.close()
 
 proc compactLoadedRecords(cache: var ActionCache) =
   var frameBytes: seq[byte] = @[]
@@ -1360,13 +1459,19 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
         message: "input metadata changed: " & changedInput,
         changedInputPath: changedInput)
 
-  cache.ensureLoadedRecords()
-  if not cache.byWeak.hasKey(key):
+  let records =
+    if cache.loadedAllRecords:
+      if cache.byWeak.hasKey(key):
+        cache.byWeak[key]
+      else:
+        @[]
+    else:
+      cache.loadRecordsForWeak(weak)
+  if records.len == 0:
     return ActionCacheLookup(status: aclMissNoRecord,
       message: "no cache record for weak fingerprint")
   var sawInputChange = false
   var firstChangedInput = ""
-  let records = cache.byWeak[key]
   for i in countdown(records.high, 0):
     let record = records[i]
     if record.policy != policy:

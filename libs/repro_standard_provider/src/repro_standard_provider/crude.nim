@@ -27,7 +27,7 @@
 ##     directories. The engine treats them as preserve-tree roots so a
 ##     cold rebuild starts from a clean slate.
 ##   * ``dependencyPolicy`` is ``automaticMonitorPolicy()`` — the
-##     FS-snoop monitor (Filesystem-Policy-And-Observed-Inputs.md)
+##     io-monitor monitor (Filesystem-Policy-And-Observed-Inputs.md)
 ##     captures the actual reads/writes at runtime and the engine
 ##     promotes them to the action's effective inputs/outputs for cache
 ##     fingerprinting.
@@ -47,7 +47,7 @@
 ##   their Mode A fragments, which also don't go through DSL evaluation.
 ##
 ## * ``inputGlob`` is intentionally narrow: it controls which files the
-##   action declares as static inputs. The FS-snoop monitor handles the
+##   action declares as static inputs. The io-monitor monitor handles the
 ##   transitive case (Cargo registry caches, target/ writes, etc.) so
 ##   the static list only has to cover "everything under the project
 ##   root that a normal git tracker would see". The default ``["**/*"]``
@@ -82,7 +82,7 @@ const
   ## list useful for conventions that omit the declaration. Keep the
   ## list alphabetically sorted for diff-clean updates — anything not
   ## pruned here either ends up in the static input set or is captured
-  ## by the FS-snoop monitor.
+  ## by the io-monitor monitor.
   StockExcludeDirs* = [
     ".cargo",
     ".git",

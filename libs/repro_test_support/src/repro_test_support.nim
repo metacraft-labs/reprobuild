@@ -54,17 +54,21 @@ const
     ## intent stay visible at every gate site and makes it
     ## trivial to grep for "everything that needs Nix".
 
-  isFsSnoopSupported* = defined(linux) or defined(macosx) or defined(windows)
+  isIoMonitorSupported* = defined(linux) or defined(macosx) or defined(windows)
     ## True on platforms where the dev-env tests can wire in
-    ## ``repro-fs-snoop`` and the monitor shim end-to-end.
+    ## ``repro internal io monitor`` and the monitor shim end-to-end.
     ##
     ## Windows uses an IAT-patching DLL injected via
     ## ``CreateProcess(CREATE_SUSPENDED)`` + ``CreateRemoteThread``
     ## (see ``io-mon: io_mon/shim/windows_interpose.nim``).
     ## The shim depends on ct_interpose's ``hook_registry`` —
-    ## ``prepareMonitorTools`` below threads ``--path:<ct_interpose_src>``
-    ## into the per-test ``compileNim`` invocation the same way
-    ## ``scripts/build_apps.sh`` does for the production build.
+    ## The shim is graph-built by ``scripts/build_apps.sh`` / ``repro build
+    ## test``; tests assert that artifact exists instead of compiling monitor
+    ## components at runtime.
+
+  ioMonitorCliArgs* = @["internal", "io", "monitor"]
+    ## Subcommand selector used when tests invoke the consolidated ``repro``
+    ## binary as the io-monitor driver.
 
 
 type
@@ -337,7 +341,8 @@ proc runquotaEndpointReachable*(endpoint: string): bool =
 
 type
   MonitorTools* = object
-    fsSnoop*: string
+    monitorCliPath*: string
+    monitorCliArgs*: seq[string]
     shim*: string
 
 proc ctInterposeSrcPath*(repoRoot: string): string =
@@ -386,28 +391,6 @@ proc requireBinary*(path, edgeName: string): string {.discardable.} =
       "or declare that edge as a dependency of this test's execute edge.")
   path
 
-proc fsSnoopWrapperSource*(repoRoot, cacheKey: string): string =
-  ## Executable-Consolidation M1 deleted the standalone
-  ## ``apps/repro-fs-snoop/repro_fs_snoop.nim`` entry point: the internal
-  ## filesystem-monitor role now ships inside ``repro`` and is reached via
-  ## ``repro internal fs-snoop`` (build/monitor self-spawn) or
-  ## ``repro debug fs-snoop`` (user-facing). Tests that set ``REPRO_FS_SNOOP``
-  ## to a standalone driver path still need a single-binary fs-snoop image
-  ## whose argv is ``<bin> --depfile … -- <cmd>`` (no subcommand prefix). This
-  ## synthesizes the same four-line wrapper the deleted entry point carried —
-  ## ``runThinApp("repro-fs-snoop")`` routes through the retained compat
-  ## program-name branch to the identical ``runFsSnoopCli`` path — and returns
-  ## its path so callers can ``compileNim`` it exactly as they compiled the
-  ## former source. The file is written UNDER ``repoRoot`` so Nim's
-  ## ``config.nims`` path setup resolves as it did for the original source.
-  let wrapperDir = repoRoot / "build" / "test-fs-snoop" / cacheKey
-  createDir(wrapperDir)
-  result = wrapperDir / "repro_fs_snoop.nim"
-  writeFile(result,
-    "import repro_cli_support\n\n" &
-    "when isMainModule:\n" &
-    "  quit runThinApp(\"repro-fs-snoop\")\n")
-
 proc monitorShimPath*(repoRoot: string): string =
   ## Test-Fixtures-In-Build-Graph M2: the stable on-disk location of the
   ## graph-built monitor-shim library. This is the exact path
@@ -422,8 +405,7 @@ proc monitorShimPath*(repoRoot: string): string =
   else: libDir / "librepro_monitor_shim.dylib"
 
 proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
-  ## Resolve the monitor shim (a graph-built ``test-fixtures`` artifact)
-  ## and compile the per-test ``repro-fs-snoop`` binary on demand.
+  ## Resolve the graph-built ``repro`` monitor driver and monitor shim.
   ##
   ## Test-Fixtures-In-Build-Graph M2: the monitor shim is no longer
   ## compiled here. It is produced once by the
@@ -432,44 +414,15 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   ## ``scripts/run_tests.sh`` before the suite runs) at the stable path
   ## ``monitorShimPath`` returns; this proc asserts its presence via
   ## ``requireBinary`` instead of shelling out to ``nim c --app:lib`` on
-  ## every call. The fs-snoop wrapper compile (Executable-Consolidation
-  ## M1) stays runtime for now — M3 hoists it.
+  ## every call. The io-monitor driver is the graph-built ``repro`` binary
+  ## reached through ``internal io monitor``; tests must not synthesize or
+  ## compile a standalone monitor wrapper at runtime.
   ##
-  ## ``cacheKey`` differentiates per-suite ``nimcache`` directories
-  ## so two dev-env suites compiled into the same process don't
-  ## stomp each other's IR.
-  let binDir = tempRoot / "bin"
-  createDir(binDir)
-  result.fsSnoop = binDir / addFileExt("repro-fs-snoop", ExeExt)
+  discard tempRoot
+  discard cacheKey
+  result.monitorCliPath = requireBinary(
+    repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
+  result.monitorCliArgs = ioMonitorCliArgs
   result.shim = requireBinary(monitorShimPath(repoRoot),
     "reprobuild.test_fixtures.monitor_shim")
-
-  # Concurrent-reuse hazard: the test runner executes many test BINARIES in
-  # parallel, and several of them pass the SAME ``cacheKey`` (e.g. the four
-  # ``t_e2e_shell_hook_*`` programs all share ``"m76-shell-hook"`` via
-  # ``shell_hook_helper``). ``cacheKey`` alone therefore does NOT isolate
-  # processes — only suites WITHIN one process. When two ``nim c`` invocations
-  # from different processes target the same on-disk ``nimcache`` directory,
-  # Nim's incremental compiler renames/removes temporary entries inside it
-  # while a sibling process is still populating the same directory, so the
-  # ``rmdir`` / rename hits ``ENOTEMPTY`` ("Directory not empty") and the
-  # compile aborts. The symptom surfaces intermittently as a dev-session /
-  # shell-hook e2e failure during a provider/fs-snoop compile.
-  #
-  # Scope the nimcache (and the synthesized wrapper source it consumes) to the
-  # current process so parallel binaries never share a nimcache directory,
-  # while repeated calls within ONE process (the per-suite cases) still reuse
-  # the same cache and keep Nim's ``.sha1`` incremental benefit.
-  let processCacheKey = cacheKey & "-p" & $getCurrentProcessId()
-  # Executable-Consolidation M1: compile the synthesized fs-snoop wrapper
-  # (see ``fsSnoopWrapperSource``) instead of the deleted standalone entry
-  # point source.
-  let fsSnoopArgs = @[
-    "nim", "c", "--threads:on", "--verbosity:0", "--hints:off",
-    "--warnings:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" /
-      (processCacheKey & "-fs-snoop"),
-    "--out:" & result.fsSnoop,
-    fsSnoopWrapperSource(repoRoot, processCacheKey)
-  ]
-  discard requireSuccess(shellCommand(fsSnoopArgs), repoRoot)

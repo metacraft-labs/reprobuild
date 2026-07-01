@@ -882,7 +882,7 @@ proc testRunStampPath(projectRoot, packageCrateName, testName: string):
 proc collectRustSourcesUnderManifest(manifestDir: string): seq[string] =
   ## Every ``.rs`` under ``<manifestDir>/src``. These become the declared
   ## inputs of both rustc passes so source-only edits invalidate the
-  ## actions without needing the FS-snoop monitor. We walk *only* the
+  ## actions without needing the io-monitor monitor. We walk *only* the
   ## crate's own ``src/`` — workspace siblings have their own action set
   ## with their own input list.
   let srcDir = manifestDir / "src"
@@ -1383,7 +1383,7 @@ proc rustCrudeFallback(projectRoot: string;
                          GraphFragment {.gcsafe.} =
   ## Mode B emitter for Rust projects that can't take the Mode A path
   ## (today: any project carrying a ``build.rs``). Delegates to
-  ## ``cargo build --release --locked --offline`` under FS-snoop
+  ## ``cargo build --release --locked --offline`` under io-monitor
   ## monitoring per the M6 spec.
   {.cast(gcsafe).}:
     let cargoExe = cargoExecutable()

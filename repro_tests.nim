@@ -4334,8 +4334,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/e2e/fs-snoop/t_debug_fs_snoop_reads_monitor_depfile.nim",
-    binary: "build/test-bin/t_debug_fs_snoop_reads_monitor_depfile",
+    source: "tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim",
+    binary: "build/test-bin/t_debug_io_monitor_reads_monitor_depfile",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -7726,8 +7726,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/unit/t_m9r15c_1_fs_snoop_fragment_log_perf.nim",
-    binary: "build/test-bin/t_m9r15c_1_fs_snoop_fragment_log_perf",
+    source: "tests/unit/t_m9r15c_1_io_monitor_fragment_log_perf.nim",
+    binary: "build/test-bin/t_m9r15c_1_io_monitor_fragment_log_perf",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -7750,8 +7750,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
-    source: "tests/unit/t_m9r15f_1_fs_snoop_batched_writes.nim",
-    binary: "build/test-bin/t_m9r15f_1_fs_snoop_batched_writes",
+    source: "tests/unit/t_m9r15f_1_io_monitor_batched_writes.nim",
+    binary: "build/test-bin/t_m9r15f_1_io_monitor_batched_writes",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

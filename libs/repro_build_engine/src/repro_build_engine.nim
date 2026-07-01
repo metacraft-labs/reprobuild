@@ -10,12 +10,14 @@ import repro_hash
 import repro_local_store
 # Incremental-Test-Runner M7: the build engine consumes the shared ``io-mon``
 # library (a byte-identical wire-format + ABI relocation of reprobuild's former
-# ``repro_monitor_depfile`` fs-snoop stack) for its monitor-evidence dependency
+# ``repro_monitor_depfile`` io-monitor stack) for its monitor-evidence dependency
 # tracking. ``io_mon`` re-exports the depfile API under the SAME names
 # (``MonitorDepFile`` / ``readMonitorDepFile`` / ``MonitorRecord`` / the
 # ``mr*`` / ``mo*`` enums / ``mcComplete`` / ``MonitorDepFileReaderError`` /
 # ``findShimLibrary``), so the call sites below are unchanged.
 import io_mon
+import io_mon/codec as ioMonCodec
+import io_mon/writer as ioMonWriter
 import repro_platform
 import repro_runquota
 
@@ -249,11 +251,11 @@ type
     # Argument vector prepended to ``monitorCliPath`` when wrapping a monitored
     # action (Executable-Consolidation M1). When ``monitorCliPath`` is the
     # ``repro`` executable itself (self-spawn, ``getAppFilename()``), this holds
-    # the ``internal fs-snoop`` subcommand selector so the monitored argv
-    # becomes ``repro internal fs-snoop --depfile … -- <cmd>`` rather than
-    # invoking a standalone ``repro-fs-snoop`` binary. Empty (the default)
+    # the ``internal io monitor`` subcommand selector so the monitored argv
+    # becomes ``repro internal io monitor --depfile … -- <cmd>`` rather than
+    # invoking a standalone monitor binary. Empty (the default)
     # preserves the legacy ``<monitorCliPath> --depfile …`` shape used by tests
-    # and any caller that still points at a dedicated fs-snoop binary.
+    # and any caller that still points at a dedicated monitor binary.
     monitorCliArgs*: seq[string]
     # RA-13: the engine's parallelism knob is an ADVERTISED-FRONTIER bound, NOT
     # an independent CPU-slot quota. It caps how many candidate actions the
@@ -1203,8 +1205,8 @@ proc monitorEvidenceRequired(action: BuildAction): bool =
   ## Monitor evidence is required for monitored policies once an RMDF
   ## (monitor depfile) has actually been wired up for the action. The only
   ## way a monitored action ends up without an RMDF now is an engine config
-  ## that has no fs-snoop wired (``monitorCliPath`` empty): the setup step
-  ## emits a "requires repro-fs-snoop" diagnostic and falls back to the
+  ## that has no io-monitor wired (``monitorCliPath`` empty): the setup step
+  ## emits a "requires an io-monitor driver" diagnostic and falls back to the
   ## statically declared inputs/outputs rather than claiming complete
   ## evidence. (The Windows ``REPRO_MONITOR_BYPASS`` escape hatch that used
   ## to produce this state was removed.)
@@ -1224,6 +1226,116 @@ type
     monitorReads: HashSet[string]
     monitorWrites: HashSet[string]
     monitorProbes: HashSet[string]
+
+proc monitorProfileEvidenceComplete(detail: string): bool =
+  result = true
+  for part in detail.split(';'):
+    let pair = part.split("=", 1)
+    if pair.len == 2 and pair[0] == "evidenceComplete":
+      return pair[1] == "true"
+
+proc raiseMonitorDecodeError(kind: MonitorDepFileReaderErrorKind;
+                             message: string) {.noreturn.} =
+  raiseMonitorDepFileReaderError(kind, message)
+
+proc foldMonitorDepFileEvidence(path, cwd: string;
+                                evidence: var PathSetEvidence;
+                                seen: var EvidenceSeenSets): bool =
+  ## Fold RMDF records directly into build-engine evidence.
+  ##
+  ## `io_mon.readMonitorDepFile` materializes both the decoded record seq and a
+  ## `MonitorDepFile.records` copy. Provider compilation can emit large RMDFs
+  ## because the compiler touches many source/toolchain files, so avoid retaining
+  ## a full depfile object when the engine only needs path sets + completeness.
+  result = true
+  if not fileExists(extendedPath(path)):
+    raiseMonitorDecodeError(mrMissingFile, "RMDF file does not exist: " & path)
+
+  let options = defaultMonitorDepFileReaderOptions()
+  let raw = ioMonCodec.toBytes(readFile(extendedPath(path)))
+  if raw.len < 44:
+    raiseMonitorDecodeError(mrTruncated, "RMDF file is too short")
+  if ioMonCodec.fromBytes(raw.toOpenArray(0, 3)) != RmdfMagic:
+    raiseMonitorDecodeError(mrBadMagic, "unknown RMDF magic")
+
+  var pos = 4
+  let version = ioMonCodec.readU16Le(raw, pos)
+  if version != RmdfVersion:
+    raiseMonitorDecodeError(mrUnsupportedVersion, "unsupported RMDF version")
+  discard ioMonCodec.readU16Le(raw, pos)
+  let headerCount = ioMonCodec.readU64Le(raw, pos)
+  let bodyLen64 = ioMonCodec.readU64Le(raw, pos)
+  if headerCount > options.maxObservationCount:
+    raiseMonitorDecodeError(mrRecordLimitExceeded,
+      "RMDF record count exceeds configured limit")
+  if bodyLen64 > uint64(int.high):
+    raiseMonitorDecodeError(mrTruncated, "RMDF body is too large")
+  let bodyLen = int(bodyLen64)
+  if pos + bodyLen + 20 != raw.len:
+    raiseMonitorDecodeError(mrTruncated,
+      "RMDF body length/trailer mismatch")
+
+  let bodyStart = pos
+  let bodyEnd = bodyStart + bodyLen
+  pos = bodyEnd
+  if ioMonCodec.fromBytes(raw.toOpenArray(pos, pos + 3)) != RmdfTrailerMagic:
+    raiseMonitorDecodeError(mrTruncated, "missing RMDF trailer")
+  pos += 4
+  let trailerCount = ioMonCodec.readU64Le(raw, pos)
+  let trailerChecksum = ioMonCodec.readU64Le(raw, pos)
+  if trailerCount != headerCount:
+    raiseMonitorDecodeError(mrSemanticValidationFailed,
+      "RMDF record count mismatch")
+  if options.requireTrailerChecksum and
+      trailerChecksum != ioMonWriter.checksum(raw.toOpenArray(bodyStart, bodyEnd - 1)):
+    raiseMonitorDecodeError(mrChecksumMismatch, "RMDF checksum mismatch")
+
+  var framePos = bodyStart
+  var expectedSeq = 1'u64
+  var decodedCount = 0'u64
+  while framePos < bodyEnd:
+    var payloadPos = framePos
+    let length = int(ioMonCodec.readU32Le(raw, payloadPos))
+    if length <= 0 or payloadPos + length > bodyEnd:
+      raiseMonitorDecodeError(mrTruncated, "truncated RMDF record frame")
+    let record = ioMonWriter.decodeRecordPayload(
+      raw.toOpenArray(payloadPos, payloadPos + length - 1))
+    if record.seq != expectedSeq:
+      raiseMonitorDecodeError(mrRecordOrderInvalid,
+        "RMDF record sequence is not canonical")
+    inc expectedSeq
+    inc decodedCount
+
+    if record.kind == mrEventLoss or record.observationKind == moEventLoss:
+      result = false
+    elif record.kind == mrBackendProfile and
+        not monitorProfileEvidenceComplete(record.detail):
+      result = false
+
+    let materialized = materialPath(cwd, record.path)
+    case record.kind
+    of mrFileRead:
+      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    of mrFileOpen:
+      case record.observationKind
+      of moFileRead, moFileOpen:
+        evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+      of moFileWrite:
+        evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+      else:
+        discard
+    of mrFileWrite:
+      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+    of mrPathProbe, mrDirectoryEnumerate:
+      evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    else:
+      discard
+
+    framePos = payloadPos + length
+
+  if decodedCount != headerCount:
+    raiseMonitorDecodeError(mrSemanticValidationFailed,
+      "RMDF frame count mismatch")
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
@@ -1325,27 +1437,8 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
         discard
       return
     try:
-      let dep = readMonitorDepFile(action.monitorDepfile)
-      for record in dep.records:
-        let path = materialPath(action.cwd, record.path)
-        case record.kind
-        of mrFileRead:
-          result.evidence.monitorReads.addUnique(seen.monitorReads, path)
-        of mrFileOpen:
-          case record.observationKind
-          of moFileRead, moFileOpen:
-            result.evidence.monitorReads.addUnique(seen.monitorReads, path)
-          of moFileWrite:
-            result.evidence.monitorWrites.addUnique(seen.monitorWrites, path)
-          else:
-            discard
-        of mrFileWrite:
-          result.evidence.monitorWrites.addUnique(seen.monitorWrites, path)
-        of mrPathProbe, mrDirectoryEnumerate:
-          result.evidence.monitorProbes.addUnique(seen.monitorProbes, path)
-        else:
-          discard
-      if dep.completeness != mcComplete:
+      if not foldMonitorDepFileEvidence(action.monitorDepfile, action.cwd,
+          result.evidence, seen):
         result.evidence.diagnostics.add("monitor depfile is incomplete")
         result.publishable = false
     except MonitorDepFileReaderError as err:
@@ -1581,19 +1674,6 @@ proc defaultRunQuotaHelperPath(): string =
 proc monitorCliPath(config: BuildEngineConfig): string =
   if config.monitorCliPath.len > 0:
     return config.monitorCliPath
-  let configured = getEnv("REPRO_FS_SNOOP")
-  if configured.len > 0:
-    return configured
-  # Windows: the fs-snoop binary is `repro-fs-snoop.exe` (ExeExt expansion).
-  # Without the suffix the fileExists check below misses it. Use addFileExt
-  # so the same logic works cross-platform.
-  let appSibling = getAppDir() / addFileExt("repro-fs-snoop", ExeExt)
-  if fileExists(extendedPath(appSibling)):
-    return appSibling
-  let repoBuild = getCurrentDir() / "build" / "bin" /
-    addFileExt("repro-fs-snoop", ExeExt)
-  if fileExists(extendedPath(repoBuild)):
-    return repoBuild
   ""
 
 proc sanitizeActionId(value: string): string =
@@ -1623,22 +1703,22 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # Built-in actions (``kind != bakProcess`` — copy-file, write-text, stamp,
   # workspace-vcs, preserve-tree, binary-cache-substitute) run entirely
   # in-process via ``executeBuiltinAction``: there is no child process to
-  # interpose on, so there is nothing for ``repro-fs-snoop`` to monitor and
+  # interpose on, so there is nothing for the io-monitor to monitor and
   # nothing to gain from wrapping ``argv``. Their dependency evidence is the
   # statically declared inputs/outputs (and, for recognized/converter
   # policies, the post-build reports) — ``monitorEvidenceRequired`` already
   # returns false for them because no RMDF is ever wired. ``builtinAction``
   # tags every such action with the default ``automaticMonitorGatheringPolicy``
   # (a ``MonitorPolicyKinds`` member), so without this guard a built-in would
-  # incorrectly fall into the fs-snoop wiring below and fail with a spurious
-  # "requires repro-fs-snoop" diagnostic on any host without the snoop driver
+  # incorrectly fall into the monitor wiring below and fail with a spurious
+  # "requires an io-monitor driver" diagnostic on any host without the monitor
   # wired (e.g. the hermetic workspace/VCS integration tests). Only
   # ``bakProcess`` actions spawn a monitorable subprocess.
   if action.kind != bakProcess:
     return
   # Direct engine callers may provide a monitor depfile path for actions that
   # produce RMDF evidence themselves. Preserve that prewired evidence path
-  # instead of wrapping the command and overwriting it with fs-snoop output.
+  # instead of wrapping the command and overwriting it with monitor output.
   if action.monitorDepfile.len > 0:
     return
   # Windows: automatic monitor dependency gathering now works on Windows via
@@ -1646,10 +1726,10 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # io-mon sibling: io_mon/shim/windows_interpose.nim and
   # io_mon/windows_injector.nim — Incremental-Test-Runner M7 relocated these
   # from reprobuild's former repro_monitor_shim / repro_monitor_depfile libs).
-  # The same `repro-fs-snoop` driver is used as on macOS — only the underlying
+  # The same io-monitor driver is used as on macOS — only the underlying
   # injection mechanism differs.
   # Monitor-Hook-Shim.md:501 — when monitoring cannot be performed (no
-  # fs-snoop wired, or an unsupported platform), the failure semantics are
+  # monitor wired, or an unsupported platform), the failure semantics are
   # "fail the monitored action OR make it non-cacheable, depending on
   # policy". A NON-CACHEABLE action is the "make it non-cacheable" branch:
   # it is always re-executed, so no cache entry's soundness depends on its
@@ -1658,7 +1738,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
   # false) rather than failing it. This is the sanctioned home for pure
   # network actions with no monitorable file evidence — e.g. ``workspace
   # sync``'s ``git fetch`` (cacheable = false) — which must still run on a
-  # host without the snoop driver wired (the hermetic workspace/VCS
+  # host without the monitor driver wired (the hermetic workspace/VCS
   # integration tests). A CACHEABLE action still fails: caching it without
   # complete evidence would be the removed declared-only soundness hole.
   when not (defined(macosx) or defined(linux) or defined(windows)):
@@ -1672,7 +1752,7 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       if not action.cacheable:
         return
       result.diagnostic =
-        "automatic monitor dependency gathering requires repro-fs-snoop"
+        "automatic monitor dependency gathering requires an io-monitor driver"
       return
     let depfile = cacheRoot / "monitor-depfiles" /
       (sanitizeActionId(action.id) & ".rdep")
@@ -2142,7 +2222,7 @@ proc launchChildEnv(action: BuildAction;
   result = @["REPROBUILD_NO_RUNQUOTA=1"]
   # M9.R.13c.2 — **shim-library env seed**. Inject
   # ``REPRO_MONITOR_SHIM_LIB`` at launch time so the daemon-spawned
-  # ``repro internal fs-snoop`` subprocess deterministically locates
+  # ``repro internal io monitor`` subprocess deterministically locates
   # ``librepro_monitor_shim.{dll,so,dylib}`` without having to inherit
   # the user's shell environment. The seed lives HERE — not in
   # ``result.action.env`` — because the absolute shim path is machine-

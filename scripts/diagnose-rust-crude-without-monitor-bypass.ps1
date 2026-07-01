@@ -45,13 +45,13 @@
 #   1. Sources env.ps1 (managed nim/gcc on PATH).
 #   2. Wipes any prior .repro/build and target/ from the fixture.
 #   3. Invokes repro.exe build on the same fixture as the M6 gate but
-#      explicitly UNSETS REPRO_MONITOR_BYPASS so FS-snoop is active.
+#      explicitly UNSETS REPRO_MONITOR_BYPASS so io-monitor is active.
 #   4. Captures stdout + stderr to build/diagnose-rust-crude-no-bypass.*.
 #   5. Reports exit code + a short summary of any cargo panic markers
 #      found in the stderr stream.
 #
 # This is a M11 diagnostic ARTIFACT — committed alongside the audit
-# note at reprobuild-specs/Notes/m11-fs-snoop-audit.md. It is NOT a
+# note at reprobuild-specs/Notes/m11-io-monitor-audit.md. It is NOT a
 # verification gate (its exit code does not gate CI), it is a probe
 # that the audit can re-run when ct_interpose / the IAT patcher land
 # further fixes.

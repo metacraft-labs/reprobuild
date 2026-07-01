@@ -28,7 +28,8 @@ type
     reproBin*: string
     shimBin*: string
     shimCounter*: string  ## file the shim increments on every spawn
-    fsSnoop*: string
+    monitorCliPath*: string
+    monitorCliArgs*: seq[string]
     monitorShim*: string
 
   CommandOutcome* = object
@@ -133,10 +134,11 @@ proc prepareShellHookCase*(prefix: string): ShellHookCase =
   result.shimBin = compileShim(result.repoRoot, result.tempRoot)
   result.shimCounter = result.tempRoot / "shim-counter.bin"
   writeFile(result.shimCounter, "")  # start at zero
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot,
       result.tempRoot, "m76-shell-hook")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
+    result.monitorCliArgs = monitor.monitorCliArgs
     result.monitorShim = monitor.shim
 
 proc shimSpawnCount*(c: ShellHookCase): int =
@@ -166,8 +168,6 @@ proc baselineEnvForBash*(c: ShellHookCase): StringTableRef =
   # binary to dispatch to.
   result["REPRO_M76_SHIM_COUNTER"] = c.shimCounter
   result["REPRO_M76_SHIM_TARGET"] = c.reproBin
-  if c.fsSnoop.len > 0:
-    result["REPRO_FS_SNOOP"] = c.fsSnoop
   if c.monitorShim.len > 0:
     result["REPRO_MONITOR_SHIM_LIB"] = c.monitorShim
   # Force a stable HOME well outside the project so the bounded walk

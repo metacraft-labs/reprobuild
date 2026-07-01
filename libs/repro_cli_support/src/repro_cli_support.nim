@@ -8,11 +8,16 @@ import repro_depfile
 import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_interface_artifacts
-# Incremental-Test-Runner M7: the fs-snoop CLI driver (``runFsSnoopCli`` /
-# ``findShimLibrary``) now comes from the shared ``io-mon`` library, a
-# byte-identical relocation of reprobuild's former ``repro_monitor_depfile``
-# fs-snoop stack. The submodule path and public procs are preserved.
+# Incremental-Test-Runner M7: the io-monitor CLI driver and shim discovery now
+# come from the shared ``io-mon`` library. The library still exposes the
+# historical ``io_mon/fs_snoop`` module path and proc names, so imports stay on
+# that API until the upstream package renames them.
 import io_mon/fs_snoop
+
+proc runIoMonitorCli(programName: string; args: seq[string]): int =
+  # io-mon still exports the CLI entrypoint under its historical proc name.
+  runFsSnoopCli(programName, args)
+
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider_protocol
@@ -249,10 +254,6 @@ proc renderUsage*(programName: string): string =
       "or REPROBUILD_PROGRESS_BARS=split for separate check/exec bars\n" &
       "build color: auto by default; set NO_COLOR or REPROBUILD_COLOR=never " &
       "to disable, REPROBUILD_COLOR=always to force"
-  elif programName == "repro-fs-snoop":
-    programName & " " & versionString() & "\nusage: " & programName &
-      " [options] -- <command> [args...]\n       " & programName &
-      " inspect <depfile> --format text|json"
   else:
     programName & " " & versionString() & "\nusage: " & programName & " --version"
 
@@ -1017,11 +1018,11 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   let sourceRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if sourceRoot.len > 0:
     env.add("REPROBUILD_SOURCE_ROOT=" & sourceRoot)
-  # The regeneration edge runs under the automatic fs-snoop monitor
+  # The regeneration edge runs under the automatic io-monitor monitor
   # (dependencyPolicy below). ``repro internal io monitor`` needs to locate
   # librepro_monitor_shim.{so,dylib,dll}; when this action runs daemon-hosted
   # — or the inner ``repro build`` is invoked by the forked CMake, which
-  # sanitizes the environment — the shim path is not inherited, so fs-snoop
+  # sanitizes the environment — the shim path is not inherited, so io-monitor
   # fails with "cannot find librepro_monitor_shim". Bake the resolved path
   # into the action env so the monitor finds it regardless of how the edge
   # is launched. Resolution anchors on the running ``repro`` binary's repo,
@@ -3944,18 +3945,17 @@ proc stablePublicCliPath(): string =
     return os.normalizedPath(getCurrentDir() / resolved)
   os.normalizedPath(getCurrentDir() / app)
 
-# Executable-Consolidation M1: the internal filesystem-monitor shim is no
-# longer a standalone ``repro-fs-snoop`` binary. ``repro`` self-spawns its own
-# image with this subcommand selector (``repro internal io monitor …``). The
+# Executable-Consolidation M1: the internal io-monitor driver is no longer a
+# standalone monitor binary. ``repro`` self-spawns its own image with this
+# subcommand selector (``repro internal io monitor …``). The
 # executable path is ``getAppFilename()`` (more robust than argv[0]/sibling
 # lookup) and the selector below is prepended by the build engine via
 # ``BuildEngineConfig.monitorCliArgs``.
-const internalFsSnoopArgs* = @["internal", "io", "monitor"]
+const internalIoMonitorArgs* = @["internal", "io", "monitor"]
 
-proc selfSpawnFsSnoopPath(): string =
+proc selfSpawnIoMonitorPath(): string =
   ## Path to the running ``repro`` image used to self-spawn the internal
-  ## fs-snoop role. Replaces the former ``siblingFsSnoopPath`` /
-  ## ``repro-fs-snoop`` sibling-binary lookup.
+  ## io-monitor role.
   os.normalizedPath(getAppFilename())
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
@@ -5106,8 +5106,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: selfSpawnFsSnoopPath(),
-      monitorCliArgs: internalFsSnoopArgs,
+      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -5292,8 +5292,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         cacheRoot: cmakeCacheRoot,
         actionCacheRoot: currentActionCacheRoot(),
         runQuotaCliPath: publicCliPath,
-        monitorCliPath: selfSpawnFsSnoopPath(),
-        monitorCliArgs: internalFsSnoopArgs,
+        monitorCliPath: selfSpawnIoMonitorPath(),
+        monitorCliArgs: internalIoMonitorArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
@@ -5750,15 +5750,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         runQuotaCliPath: publicCliPath,
         # The provider compile is monitored like every other action: wrapping
         # the inner ``repro __repro-compile-provider`` (which runs ``nim c``)
-        # with fs-snoop captures every file the compile reads — repro.nim and
+        # with io-monitor captures every file the compile reads — repro.nim and
         # ALL transitively imported modules (repro_project_dsl,
         # ct_test_nim_unittest, repro_tests.nim, the stdlib). Without this the
         # provider's fingerprint covered only its statically declared inputs,
         # so editing e.g. the DSL or the test-edge adapter left a stale
         # provider (and, transitively, stale build/execute edges). This is the
         # same monitor wiring the main build's engine config uses.
-        monitorCliPath: selfSpawnFsSnoopPath(),
-        monitorCliArgs: internalFsSnoopArgs,
+        monitorCliPath: selfSpawnIoMonitorPath(),
+        monitorCliArgs: internalIoMonitorArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 1024 * 1024,
         stderrLimit: 1024 * 1024,
@@ -5991,8 +5991,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
       runQuotaCliPath: publicCliPath,
-      monitorCliPath: selfSpawnFsSnoopPath(),
-      monitorCliArgs: internalFsSnoopArgs,
+      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: buildMaxParallelism(),
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -6327,9 +6327,9 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   # ``kernel32!CreateProcessW`` (``ct_inline_hook_install``); every
   # call to CreateProcessW — IAT-routed, dynlib-resolved, or anything
   # else — now lands in ``trampolineCreateProcessW``, whose
-  # ``snoopCreateProcessW`` re-injects the shim into the grandchild
+  # The Windows process-spawn hook re-injects the shim into the grandchild
   # via the same ``CreateRemoteThread(LoadLibraryW)`` flow
-  # ``repro-fs-snoop`` uses to seed the top-level child. No
+  # the io-monitor uses to seed the top-level child. No
   # subprocess-spawn-site rewrite needed here.
   let (output, exitCode) = execCmdEx(quoteShellCommand(argv),
     options = {poStdErrToStdOut, poUsePath},
@@ -6691,23 +6691,18 @@ proc parseDevEnvShellArgs(args: openArray[string]): ParsedDevEnvShell =
   selection.resolveDevEnvSelection()
   result.selection = selection
 
-proc publicDevEnvFsSnoop(publicCliPath: string):
+proc publicDevEnvMonitor(publicCliPath: string):
     tuple[path: string, args: seq[string]] =
   ## Executable-Consolidation M1: the dev-env monitor self-spawns the ``repro``
   ## image (``internal io monitor`` selector returned in ``args``, threaded via
   ## ``DevEnvEdgeConfig.monitorCliArgs``) rather than locating a standalone
-  ## ``repro-fs-snoop`` binary. ``REPRO_FS_SNOOP`` is still honored as an
-  ## override escape hatch for tests / custom monitor drivers; when set it is a
-  ## standalone driver path used with NO extra subcommand args.
-  let override = getEnv("REPRO_FS_SNOOP")
-  if override.len > 0:
-    return (override, @[])
-  (selfSpawnFsSnoopPath(), internalFsSnoopArgs)
+  ## monitor binary.
+  (selfSpawnIoMonitorPath(), internalIoMonitorArgs)
 
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
                          renderShell = false): DevEnvEdgeResult =
-  let monitor = publicDevEnvFsSnoop(publicCliPath)
+  let monitor = publicDevEnvMonitor(publicCliPath)
   computeDevEnvEdge(DevEnvEdgeConfig(
     modulePath: selection.modulePath,
     projectRoot: selection.projectRoot,
@@ -7314,7 +7309,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     outDir: parsed.selection.outDir,
     workDir: reprobuildLibraryWorkDir(),
     publicCliPath: publicCliPath,
-    monitorCliPath: publicDevEnvFsSnoop(publicCliPath).path,
+    monitorCliPath: publicDevEnvMonitor(publicCliPath).path,
     monitorShimLibPath: resolveMonitorShimLibPath(),
     artifactPath: edge.artifactPath,
     activity: parsed.selection.activity,
@@ -12013,8 +12008,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       # compile reads (repro.nim + all transitive imports), not just the
       # statically declared inputs. See the matching wiring on the primary
       # provider-compile config above.
-      monitorCliPath: selfSpawnFsSnoopPath(),
-      monitorCliArgs: internalFsSnoopArgs,
+      monitorCliPath: selfSpawnIoMonitorPath(),
+      monitorCliArgs: internalIoMonitorArgs,
       maxParallelism: 1'u32,
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
@@ -36573,15 +36568,15 @@ proc runThinApp*(programName: string): int =
   # parses daemon-config flags and rejects ``internal`` with
   # ``repro-daemon: unexpected argument: internal`` and exit code 2.
   # Mirrors ``repro debug io monitor``: forward the remaining args to
-  # the shared fs-snoop CLI.
+  # the shared io-monitor CLI.
   if args.len >= 3 and args[0] == "internal" and args[1] == "io" and
       args[2] == "monitor":
-    let fsArgs =
+    let monitorArgs =
       if args.len > 3:
         args[3 .. ^1]
       else:
         @[]
-    return runFsSnoopCli(programName & " internal io monitor", fsArgs)
+    return runIoMonitorCli(programName & " internal io monitor", monitorArgs)
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
@@ -36589,14 +36584,12 @@ proc runThinApp*(programName: string): int =
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
     return runUserDaemonCommand(args)
-  if programName == "repro-fs-snoop":
-    return runFsSnoopCli(programName, args)
   # Documented ``repro internal …`` namespace (Executable-Consolidation M1).
   # ``internal <helper>`` spellings for the role helpers were already rewritten
   # to their ``__repro-<helper>`` argument form by ``normalizeInternalArgs``
   # above, so any ``internal`` argv still reaching here is either an explicit
   # ``--help`` or an unknown/bare subcommand. (``internal io monitor`` was
-  # already routed to the fs-snoop CLI at the top of this proc so any
+  # already routed to the io-monitor CLI at the top of this proc so any
   # self-spawn from a non-``repro`` binary like ``repro-daemon`` reaches
   # the right handler.) ``repro internal`` is intentionally absent from
   # the primary ``repro help`` body; it is documented via
@@ -36703,12 +36696,12 @@ proc runThinApp*(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 3 and args[0] == "debug" and
       args[1] == "io" and args[2] == "monitor":
-    let fsArgs =
+    let monitorArgs =
       if args.len > 3:
         args[3 .. ^1]
       else:
         @[]
-    return runFsSnoopCli("repro debug io monitor", fsArgs)
+    return runIoMonitorCli("repro debug io monitor", monitorArgs)
   if programName == "repro" and args.len >= 2 and args[0] == "debug" and
       args[1] == "artifact":
     try:

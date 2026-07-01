@@ -1,8 +1,8 @@
 ## M74 — ``repro dev-env export bash``.
 ##
 ## Pure-formatter unit tests run unconditionally; the live end-to-end
-## CLI test only runs when ``isFsSnoopSupported`` (the provider build
-## edge needs the fs-snoop + monitor shim) and the test asserts the
+## CLI test only runs when ``isIoMonitorSupported`` (the provider build
+## edge needs the io-monitor + monitor shim) and the test asserts the
 ## stdout passes ``bash -n`` AND contains the fixture's PATH segment,
 ## FIXTURE_MODE, AUX_VALUE, and the ``__REPRO_APPLIED`` marker.
 
@@ -33,7 +33,7 @@ suite "e2e_dev_env_export_bash":
     let emitted = formatExportPlan(plan, skBash)
     check emitted == "export MSG='it'\\''s a test'\n"
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_dev_env_export_bash_against_fixture":
       let c = prepareCase("repro-m74-export-bash")
       defer: removeDir(c.tempRoot)

@@ -18,7 +18,7 @@ suite "e2e_dev_env_export_zsh":
     check formatExportPlan(syntheticPlan(), skZsh) ==
       formatExportPlan(syntheticPlan(), skBash)
 
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_repro_dev_env_export_zsh_against_fixture":
       let c = prepareCase("repro-m74-export-zsh")
       defer: removeDir(c.tempRoot)

@@ -3,7 +3,7 @@
 ## ## Context
 ##
 ## M9.R.13b iteration 12 surfaced a deterministic gap in the from-source
-## smoke. The daemon-hosted ``repro internal fs-snoop`` subprocess
+## smoke. The daemon-hosted ``repro internal io monitor`` subprocess
 ## failed with:
 ##
 ##   cannot find librepro_monitor_shim.dll; run just build or set
@@ -15,13 +15,13 @@
 ## shell DID fix the symptom but the user's hard requirement is
 ## "deterministic and reproducible" — requiring an external env var to
 ## be carried through three process hops (user shell → repro CLI →
-## daemon → fs-snoop subprocess) is neither.
+## daemon -> io-monitor subprocess) is neither.
 ##
 ## ## Root cause
 ##
-## ``fs_snoop.candidateShimLibraries()`` walks ``getAppDir()`` /
+## ``candidateShimLibraries()`` walks ``getAppDir()`` /
 ## ``getCurrentDir()`` plus ``$REPRO_MONITOR_SHIM_LIB``. When the
-## fs-snoop subprocess is spawned by the daemon-hosted build executor,
+## io-monitor subprocess is spawned by the daemon-hosted build executor,
 ## ``getAppDir()`` points at the daemon's executable directory — which
 ## may or may NOT be the canonical reprobuild build layout, depending
 ## on which executable launched the daemon. The 84-recipe wayland chain
@@ -35,7 +35,7 @@
 ## ``BuildEngine.monitoredAction`` now seeds
 ## ``REPRO_MONITOR_SHIM_LIB=<absolute path>`` on the action's env at
 ## wrap-time, using the public ``findShimLibrary()`` helper that
-## ``repro_monitor_depfile.fs_snoop`` already implemented. The seed is
+## the previous monitor driver already implemented. The seed is
 ## skipped when the engine process itself cannot locate a shim (the
 ## fall-through path then handles it from the subprocess's env). An
 ## explicit recipe-supplied env entry wins over the seed — the seed is

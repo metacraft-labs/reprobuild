@@ -18,14 +18,14 @@
     io-mon-src = {
       # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
       # + ABI relocation of the former repro_monitor_depfile / shim / hooks
-      # stack). The build engine, CLI fs-snoop driver and monitor tests import
+      # stack). The build engine, CLI io-monitor driver and monitor tests import
       # it; config.nims reads IO_MON_SRC (then falls back to a ``../io-mon``
       # sibling). Like the other source inputs, the sandboxed package build and
       # the override-free CI jobs have no sibling, so seed it from this input.
       #
       # Pinned to the hardened io-mon revision validated for this retirement
       # campaign.
-      url = "github:metacraft-labs/io-mon/7ef0553";
+      url = "github:metacraft-labs/io-mon/451eb2d664eb996b5a66815fd6decf7dae34be32";
       flake = false;
     };
     nimcrypto-src = {
@@ -47,7 +47,7 @@
     # no sibling and otherwise fails with "cannot open file: stackable_hooks/…".
     stackable-hooks-src = {
       # Pinned to the rev that carries ``platform/linux_preload`` (and the rest
-      # of io-mon 7ef0553's stackable surface); the older lock lacked it, so
+      # of io-mon's stackable surface); the older lock lacked it, so
       # io-mon's ``linux_preload_runtime.nim`` failed with "cannot open file:
       # stackable_hooks/platform/linux_preload" in both the sandboxed package
       # build and ``just bootstrap``.

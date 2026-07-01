@@ -46,7 +46,7 @@ type
     projectRoot: string
     repoRoot: string
     reproBin: string
-    fsSnoop: string
+    monitorCliPath: string
     shim: string
     direnvBin: string
 
@@ -69,9 +69,9 @@ proc prepareCase(prefix: string): M5Case =
   writeFixture(result.projectRoot)
   result.reproBin = reproBinary(result.repoRoot)
   result.direnvBin = requireDirenv()
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     let monitor = prepareMonitorTools(result.repoRoot, result.tempRoot, "m6-direnv-hook")
-    result.fsSnoop = monitor.fsSnoop
+    result.monitorCliPath = monitor.monitorCliPath
     result.shim = monitor.shim
 
 proc envFor(c: M5Case): StringTableRef =
@@ -86,7 +86,6 @@ proc envFor(c: M5Case): StringTableRef =
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPROBUILD_REPRO"] = c.reproBin
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
-  result["REPRO_FS_SNOOP"] = c.fsSnoop
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
@@ -199,7 +198,7 @@ proc requireVcsHooksInstalled(c: M5Case): tuple[prePush: string; postCommit: str
   result.postCommit = readFile(dir / "post-commit")
 
 suite "e2e_hooks_shell_direnv":
-  when isFsSnoopSupported:
+  when isIoMonitorSupported:
     test "e2e_hooks_shell_direnv_real_activation":
       let c = prepareCase("repro-m5-direnv-real")
       defer: removeDir(c.tempRoot)

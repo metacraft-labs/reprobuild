@@ -1,4 +1,4 @@
-## DSL-port M9.R.15f.1 — fs-snoop fragment-log write batching.
+## DSL-port M9.R.15f.1 — io-monitor fragment-log write batching.
 ##
 ## ## Context
 ##
@@ -42,10 +42,10 @@
 ## 3. **Determinism** — same input sequence into two separate fragment
 ##    dirs must produce byte-identical fragment files; the batch
 ##    boundaries must not introduce ordering nondeterminism.
-## 4. **Crash recovery (partial batch)** — write N complete frames
+## 4. **Crash recovery (partial batch)** — write N complete file-open frames
 ##    then truncate a partial frame at the tail; the tolerant reader
-##    must return exactly the N complete records that were flushed
-##    before the simulated crash.
+##    must return the N complete file-open records that were flushed
+##    before the simulated crash plus only the writer's read-tail marker frames.
 
 import std/[monotimes, os, strutils, times, unittest]
 
@@ -68,7 +68,38 @@ proc sampleRecord(seq: uint64; osPid, threadId: uint64;
     path: path,
     detail: "")
 
-suite "DSL-port M9.R.15f.1 — fs-snoop fragment-log batched writes":
+proc checkFileOpenSequence(records: openArray[MonitorRecord]; n: int;
+                           pathPrefix: string; pathSuffix = "";
+                           allowUnmatchedPending = false) =
+  var matched = 0
+  var pendingMarkers = 0
+  var committedMarkers = 0
+  for record in records:
+    if record.kind == mrFileOpen and record.path.startsWith(pathPrefix):
+      inc matched
+      check record.seq == uint64(matched)
+      check record.path == pathPrefix & $matched & pathSuffix
+    elif record.kind == mrEventLoss:
+      if record.detail.startsWith(ReadTailPendingDetail):
+        inc pendingMarkers
+      elif record.detail.startsWith(ReadTailCommittedDetail):
+        inc committedMarkers
+      else:
+        checkpoint("unexpected event-loss marker detail=" & record.detail)
+        check false
+    else:
+      checkpoint("unexpected fragment record kind=" & $record.kind &
+        " path=" & record.path & " detail=" & record.detail)
+      check false
+
+  check matched == n
+  check pendingMarkers >= 1
+  if allowUnmatchedPending:
+    check pendingMarkers == committedMarkers + 1
+  else:
+    check pendingMarkers == committedMarkers
+
+suite "DSL-port M9.R.15f.1 — io-monitor fragment-log batched writes":
 
   test "batched writer is many times faster than per-record syscalls":
     closeFragmentSlot()
@@ -251,10 +282,8 @@ suite "DSL-port M9.R.15f.1 — fs-snoop fragment-log batched writes":
     writeFile(fragmentFile, raw & truncatedTail)
 
     let recovered = readFragmentRecordsTolerant(fragmentFile)
-    check recovered.len == N1
-    for i in 0 ..< N1:
-      check recovered[i].seq == uint64(i + 1)
-      check recovered[i].path == "/crash/path-" & $(i + 1)
+    checkFileOpenSequence(recovered, N1, "/crash/path-",
+      allowUnmatchedPending = true)
 
     # ``mergeFragments`` must parse without raising.
     let outputPath = fragmentDir / "merged.rdep"
@@ -301,6 +330,19 @@ suite "DSL-port M9.R.15f.1 — fs-snoop fragment-log batched writes":
     closeFragmentSlot()
     let recovered = readFragmentRecords(
       fragmentPath(fragmentDir, osPid, threadId))
-    check recovered.len == 2
-    check recovered[0].path == "/t/first"
-    check recovered[1].path == "/t/second"
+    var observedPaths: seq[string] = @[]
+    var markerCount = 0
+    for record in recovered:
+      if record.kind == mrFileOpen and record.path.startsWith("/t/"):
+        observedPaths.add(record.path)
+      elif record.kind == mrEventLoss:
+        inc markerCount
+        check record.detail.startsWith(ReadTailPendingDetail) or
+          record.detail.startsWith(ReadTailCommittedDetail)
+      else:
+        checkpoint("unexpected fragment record kind=" & $record.kind &
+          " path=" & record.path & " detail=" & record.detail)
+        check false
+
+    check observedPaths == @["/t/first", "/t/second"]
+    check markerCount == 4

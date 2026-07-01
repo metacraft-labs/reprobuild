@@ -136,7 +136,7 @@ for path in tests/unit tests/integration tests/compatibility tests/fixtures test
   require_dir "${path}"
 done
 
-for suite in local-build-engine external-packages fs-snoop monitored-cache multi-project codetracer-subset windows-dev-env hcr-agent-ipc hcr-direct-linker hcr-debug-unwind; do
+for suite in local-build-engine external-packages io-monitor monitored-cache multi-project codetracer-subset windows-dev-env hcr-agent-ipc hcr-direct-linker hcr-debug-unwind; do
   require_dir "tests/e2e/${suite}"
 done
 
@@ -144,7 +144,7 @@ for suite in build-engine-throughput cache-consultation-latency monitor-overhead
   require_dir "benchmarks/suites/${suite}"
 done
 
-for example in hello-c hello-nim depfile-c fs-snoop-tool monitored-opaque-tool multi-project codetracer-subset windows-dev-env; do
+for example in hello-c hello-nim depfile-c io-monitor-tool monitored-opaque-tool multi-project codetracer-subset windows-dev-env; do
   require_dir "examples/${example}"
   require_file "examples/${example}/README.md"
 done

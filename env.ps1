@@ -95,7 +95,7 @@ if ($stackableHooksDir) {
     $env:STACKABLE_HOOKS_SRC = Join-Path $stackableHooksDir "src"
 }
 
-# --- io-mon live interpose snoop wiring (Incremental-Test-Runner M8) ----------
+# --- io-mon live interpose monitor wiring (Incremental-Test-Runner M8) --------
 # Make io-mon's standalone `io-mon.exe` CLI + interpose shim discoverable on
 # PATH / via env when the io-mon sibling is present and built, so the CodeTracer
 # incremental test runner's live read-file capture can resolve them

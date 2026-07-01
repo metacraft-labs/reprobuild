@@ -954,7 +954,7 @@ proc actionIdFor(prefix, entry, detail: string): string =
 proc collectNimSources(srcDir: string): seq[string] =
   ## Every ``.nim`` under ``<projectRoot>/src``. These become the
   ## Phase-1 action's declared inputs so source-only edits invalidate
-  ## the action without relying on the FS-snoop monitor.
+  ## the action without relying on the io-monitor monitor.
   if not dirExists(extendedPath(srcDir)):
     return @[]
   for entry in walkDirRec(srcDir):
@@ -1480,7 +1480,7 @@ proc emitTestAction(projectRoot, nimExe, testFile: string;
   ## as inputs (same set used by the Phase 1 library/executable actions)
   ## so a library-source edit invalidates the test action. Outputs are
   ## empty — the test produces a temporary binary that's discarded after
-  ## ``-r`` runs it. ``automaticMonitorPolicy()`` lets the FS-snoop pick
+  ## ``-r`` runs it. ``automaticMonitorPolicy()`` lets the io-monitor pick
   ## up any transitive source reads the eager input list missed.
   ##
   ## The chained ``fs.stamp`` writes ``<scratch>/tests/<stem>.stamp``
@@ -2168,7 +2168,7 @@ proc rustcCrossCompiler(): string =
 proc collectRustSourcesUnderSrcDir(srcDir: string): seq[string] =
   ## Every ``.rs`` under ``srcDir`` recursively. Used as the declared
   ## ``inputs`` set of the rustc action so a source-only edit invalidates
-  ## the cache without depending on the FS-snoop monitor.
+  ## the cache without depending on the io-monitor monitor.
   if not dirExists(extendedPath(srcDir)):
     return @[]
   for path in walkDirRec(srcDir):

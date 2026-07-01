@@ -5,7 +5,7 @@ from repro_test_support import requireBinary, monitorShimPath
 
 when not (defined(macosx) or defined(linux)):
   {.warning[UnreachableCode]: off.}
-  echo "[platform N/A] e2e_debug_fs_snoop_reads_monitor_depfile: " &
+  echo "[platform N/A] e2e_debug_io_monitor_reads_monitor_depfile: " &
     "this gate requires the preload hooks backend"
   quit(0)
 
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
   }
 
   if (argc != 6 || strcmp(argv[1], "--mode") != 0 || strcmp(argv[2], "basic") != 0) {
-    fputs("usage: fs-snoop-fixture --mode basic <input> <child-input> <out-dir>\n", stderr);
+    fputs("usage: io-monitor-fixture --mode basic <input> <child-input> <out-dir>\n", stderr);
     return 65;
   }
 
@@ -201,10 +201,10 @@ proc countRecordEvents(eventStream: string): int =
     if line.contains("\"record\""):
       inc result
 
-suite "e2e_debug_fs_snoop_reads_monitor_depfile":
-  test "standalone and debug CLI read finalized monitor depfiles":
+suite "e2e_debug_io_monitor_reads_monitor_depfile":
+  test "internal and debug CLI read finalized monitor depfiles":
     let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-m11-fs-snoop", "")
+    let tempRoot = createTempDir("repro-m11-io-monitor", "")
     defer: removeDir(tempRoot)
 
     let binDir = tempRoot / "bin"
@@ -217,18 +217,18 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     # one per test; ``prepareMonitorTools`` resolves the identical path.
     let shimDylib = requireBinary(monitorShimPath(repoRoot),
       "reprobuild.test_fixtures.monitor_shim")
-    # Test-Fixtures-In-Build-Graph M3: the standalone fs-snoop driver and the
+    # Test-Fixtures-In-Build-Graph M3: the standalone io-monitor driver and the
     # ``repro`` CLI are now the SAME graph-built ``build/bin/repro`` image
-    # (Executable-Consolidation M1 folded fs-snoop into ``repro internal
-    # fs-snoop``). Assert the graph artifact exists instead of compiling either
-    # one at test runtime; the fs-snoop invocation prepends the ``internal
-    # fs-snoop`` selector below.
+    # (Executable-Consolidation M1 folded io-monitor into ``repro internal
+    # io monitor``). Assert the graph artifact exists instead of compiling either
+    # one at test runtime; the io-monitor invocation prepends the ``internal
+    # io monitor`` selector below.
     let reproBin = requireBinary(
       repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
       "reprobuild.apps.repro")
-    let fsSnoopBin = reproBin
-    let fixtureSource = tempRoot / "fs_snoop_fixture.c"
-    let fixtureBin = binDir / "fs-snoop-fixture"
+    let ioMonitorBin = reproBin
+    let fixtureSource = tempRoot / "io_monitor_fixture.c"
+    let fixtureBin = binDir / "io-monitor-fixture"
     let inputPath = tempRoot / "input.txt"
     let childInputPath = tempRoot / "child-input.txt"
     let depfile = tempRoot / "basic.rdep"
@@ -242,18 +242,18 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
 
     compileFixture(fixtureSource, fixtureBin)
 
-    let fsOutput = requireSuccess(shellCommand([
-      fsSnoopBin, "internal", "io", "monitor",
+    let monitorOutput = requireSuccess(shellCommand([
+      ioMonitorBin, "internal", "io", "monitor",
       "--depfile", depfile,
       "--events", "jsonl",
       "--event-stream", eventsPath,
       "--",
       fixtureBin, "--mode", "basic", inputPath, childInputPath, outDir
     ], [("REPRO_MONITOR_SHIM_LIB", shimDylib)]), repoRoot)
-    check fsOutput.contains("fixture-parent-stdout")
-    check fsOutput.contains("fixture-parent-stderr")
-    check fsOutput.contains("fixture-child-stdout")
-    check fsOutput.contains("fixture-child-stderr")
+    check monitorOutput.contains("fixture-parent-stdout")
+    check monitorOutput.contains("fixture-parent-stderr")
+    check monitorOutput.contains("fixture-child-stdout")
+    check monitorOutput.contains("fixture-child-stderr")
 
     let dep = readMonitorDepFile(depfile)
     check readFile(depfile)[0 .. 3] == "RMDF"
@@ -269,7 +269,7 @@ suite "e2e_debug_fs_snoop_reads_monitor_depfile":
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =
       record.kind == mrDirectoryEnumerate and
         record.observationKind == moDirectoryEnumerate and
-        record.path == outDir and record.detail == "readdir")
+        record.path == outDir and record.detail.startsWith("readdir"))
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =
       record.kind == mrFileWrite and record.path.endsWith("output.txt"))
     check hasRecord(dep.records, proc(record: MonitorRecord): bool =

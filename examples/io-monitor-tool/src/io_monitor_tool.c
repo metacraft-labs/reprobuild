@@ -7,7 +7,7 @@ int main(int argc, char **argv) {
   char buffer[256];
 
   if (argc != 3) {
-    fputs("usage: fs-snoop-tool <input> <output>\n", stderr);
+    fputs("usage: io-monitor-tool <input> <output>\n", stderr);
     return 2;
   }
 

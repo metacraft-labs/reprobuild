@@ -29,7 +29,8 @@ class DevEnvM9PolicyTest(unittest.TestCase):
         # they're declaring that the underlying syscall/binary is absent on
         # the host. The policy still rejects skips outside such guards.
         capability_guarded = re.compile(
-            r"\b(isFsSnoopSupported|bash\.len\s*==\s*0|fsSnoop\.len\s*==\s*0|"
+            r"\b(isIoMonitorSupported|bash\.len\s*==\s*0|"
+            r"monitorCliPath\.len\s*==\s*0|"
             r"monitorShim\.len\s*==\s*0)\b"
         )
         failures = []

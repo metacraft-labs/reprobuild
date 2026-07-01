@@ -225,7 +225,7 @@ suite "e2e_shell_hook_cd_activate_deactivate":
     let bash = findBash()
     if bash.len == 0:
       skip()
-    elif not isFsSnoopSupported:
+    elif not isIoMonitorSupported:
       skip()
     else:
       runFullScenario(bash)

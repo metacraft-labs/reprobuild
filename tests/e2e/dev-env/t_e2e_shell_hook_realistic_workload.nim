@@ -194,7 +194,7 @@ proc runScenario() =
 suite "e2e_shell_hook_realistic_workload":
 
   test "fast_path_keeps_40_prompts_under_cumulative_budget":
-    if not isFsSnoopSupported:
+    if not isIoMonitorSupported:
       skip()
     else:
       runScenario()

@@ -106,13 +106,13 @@ proc profileBuildActionToBuildAction*(pba: ProfileBuildAction):
   # The action uses the spec-baseline automatic-monitor policy — the removed
   # ``dgNoRuntimeDependencies`` declared-only mode MUST NOT be re-added
   # (Reprobuild-Development M17, Monitor-Hook-Shim.md:501). The apply driver's
-  # engine config (``applyBuildActionsEngineConfig``) wires NO ``monitorCliPath``,
-  # so ``monitorEvidenceRequired`` is false for these edges: the engine emits its
-  # "requires repro-fs-snoop" diagnostic and falls back to the statically
-  # declared inputs/outputs rather than claiming complete monitor evidence. That
-  # preserves the declared-input idempotency this apply path needs WITHOUT the
-  # unsound "mark complete/cacheable on declared inputs while silently dropping
-  # runtime read-set discovery" hole the old declared-only kind opened.
+  # engine config (``applyBuildActionsEngineConfig``) can wire an io-monitor
+  # command when the caller has one available. Without one, the engine emits its
+  # "requires an io-monitor driver" diagnostic rather than claiming complete
+  # monitor evidence. That preserves the declared-input idempotency this apply
+  # path needs WITHOUT the unsound "mark complete/cacheable on declared inputs
+  # while silently dropping runtime read-set discovery" hole the old
+  # declared-only kind opened.
   result = action(
     id = pba.id,
     argv = pba.argv,
@@ -151,7 +151,9 @@ const ApplyBuildActionsCacheDirName* = "infra-apply-build-cache"
   ## doesn't perturb the other.
 
 proc applyBuildActionsEngineConfig*(cacheRoot: string;
-                                    spawner: ElevatedExecSpawner):
+                                    spawner: ElevatedExecSpawner;
+                                    monitorCliPath = "";
+                                    monitorCliArgs: openArray[string] = []):
     BuildEngineConfig =
   ## Engine config tuned for a one-shot action-edge dispatch.
   ## Sequential (``maxParallelism = 1``) so the action ordering matches
@@ -175,6 +177,8 @@ proc applyBuildActionsEngineConfig*(cacheRoot: string;
   result.bypassRunQuota = true
   result.suppressTrace = true
   result.brokerSpawn = spawner
+  result.monitorCliPath = monitorCliPath
+  result.monitorCliArgs = @monitorCliArgs
 
 # ---------------------------------------------------------------------------
 # Dispatcher closure construction.
@@ -214,7 +218,10 @@ proc projectActionResult(action: ProfileBuildAction;
     result.diagnostic = "engine returned unrecognised status " & $res.status
 
 proc mkBuildActionDispatcher*(cacheRoot: string;
-                              ctx: FixtureContext): BuildActionDispatcher =
+                              ctx: FixtureContext;
+                              monitorCliPath = "";
+                              monitorCliArgs: openArray[string] = []):
+    BuildActionDispatcher =
   ## Build the dispatcher closure ``repro infra apply`` injects into
   ## ``ApplyOptions.buildActionDispatcher``. The closure captures the
   ## cache root and a pre-built ``ElevatedExecSpawner`` constructed
@@ -227,13 +234,16 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
   ## the closure invariant.
   let spawner = mkInfraApplyBrokerSpawn(ctx)
   let capturedCacheRoot = cacheRoot
+  let capturedMonitorCliPath = monitorCliPath
+  let capturedMonitorCliArgs = @monitorCliArgs
   result = proc(actions: seq[ProfileBuildAction]):
       seq[BuildActionApplyOutcome] {.gcsafe.} =
     {.cast(gcsafe).}:
       if actions.len == 0:
         return @[]
       let g = buildActionsToBuildGraph(actions)
-      let cfg = applyBuildActionsEngineConfig(capturedCacheRoot, spawner)
+      let cfg = applyBuildActionsEngineConfig(capturedCacheRoot, spawner,
+        capturedMonitorCliPath, capturedMonitorCliArgs)
       var runRes: BuildRunResult
       try:
         runRes = runBuild(g, cfg)

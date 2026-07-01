@@ -61,9 +61,19 @@ proc startLinkPoolDaemon(repoRoot: string; linkCap: int):
     tuple[process: owned(Process), socket: string] =
   ## Real ``runquotad`` whose ``link`` pool admits ``linkCap`` units.
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
+  var daemonBin = getEnv("RUNQUOTAD_BIN")
+  if daemonBin.len == 0:
+    daemonBin = findExe("runquotad")
+  let siblingBin = runquotaRoot / "build" / "bin" /
+    addFileExt("runquotad", ExeExt)
+  if daemonBin.len == 0:
+    daemonBin = siblingBin
+  if not fileExists(daemonBin) and daemonBin == siblingBin:
     discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  if not fileExists(daemonBin):
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin &
+      "; set RUNQUOTAD_BIN or use direnv exec so runquotad is on PATH")
   let socketPath = "/tmp/repro-ra13-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -80,6 +90,17 @@ proc startLinkPoolDaemon(repoRoot: string; linkCap: int):
     sleep(25)
   daemon.terminate()
   raise newException(OSError, "runquotad socket did not appear")
+
+proc resolveRunQuotaClient(repoRoot: string): string =
+  result = findExe("runquota")
+  if result.len > 0:
+    return
+  result = repoRoot.parentDir / "runquota" / "build" / "bin" /
+    addFileExt("runquota", ExeExt)
+  if not fileExists(result):
+    raise newException(OSError,
+      "runquota binary missing at " & result &
+      "; use direnv exec so runquota is on PATH")
 
 proc fixtureWrite(path, content: string) =
   createDir(path.splitPath.head)
@@ -200,7 +221,8 @@ suite "RA-13 named pool enforced once via RunQuota (no double-gate)":
       let buildResult = runBuild(buildGraph, BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 8'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -221,8 +243,7 @@ suite "RA-13 named pool enforced once via RunQuota (no double-gate)":
       check observed <= 2
 
       # RunQuota actually granted/finished these leases (it WAS the authority).
-      let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin" /
-        addFileExt("runquota", ExeExt)
+      let runquotaBin = resolveRunQuotaClient(repoRoot)
       let status = requireSuccess(q(runquotaBin) & " status", repoRoot)
       check status.contains("total_granted:")
       check status.contains("total_finished:")

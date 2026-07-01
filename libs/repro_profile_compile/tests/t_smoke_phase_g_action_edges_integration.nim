@@ -48,7 +48,7 @@ import io_mon/writer
 # action edge under ``automaticMonitorGatheringPolicy()`` (a
 # ``dgAutomaticMonitor`` policy). An automatic-monitor CACHEABLE action with
 # no monitor CLI wired now FAILS by design (Monitor-Hook-Shim.md:501 +
-# 2b2706a0: "a cacheable action still fails with the requires-repro-fs-snoop
+# 2b2706a0: "a cacheable action still fails with the requires-io-monitor
 # diagnostic, preserving the cache soundness guard").
 #
 # The ELEVATED edges in this suite bypass the engine's spawn entirely via the
@@ -61,11 +61,10 @@ import io_mon/writer
 # action genuinely runs + materialises its output under real monitoring —
 # this is not a stub, mock, or skip.
 #
-# The apply dispatcher's engine config (``applyBuildActionsEngineConfig``)
-# wires no explicit ``monitorCliPath``, so the engine resolves it from the
-# ``REPRO_FS_SNOOP`` env var (``monitorCliPath(config)`` fallback). The
-# legacy ``<bin> --depfile <path> -- <cmd>`` invocation shape (no
-# ``monitorCliArgs``) is exactly what the passthrough script parses.
+# The test wires the passthrough script as the dispatcher's explicit
+# ``monitorCliPath``. The legacy ``<bin> --depfile <path> -- <cmd>``
+# invocation shape (no ``monitorCliArgs``) is exactly what the passthrough
+# script parses.
 # ---------------------------------------------------------------------------
 
 proc passthroughMonitorCli(cacheRoot: string): string =
@@ -213,17 +212,12 @@ suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
 
       # Non-elevated edges spawn through the engine (not the broker), so the
       # cacheable ``dgAutomaticMonitor`` action needs a monitor CLI wired or
-      # it fails the requires-repro-fs-snoop guard. Wire a REAL passthrough
-      # monitor via REPRO_FS_SNOOP (the engine config's fallback resolver) so
-      # the action runs + materialises its output under real monitoring.
-      let prevSnoop = getEnv("REPRO_FS_SNOOP")
-      putEnv("REPRO_FS_SNOOP", passthroughMonitorCli(cacheRoot))
-      defer:
-        if prevSnoop.len > 0: putEnv("REPRO_FS_SNOOP", prevSnoop)
-        else: delEnv("REPRO_FS_SNOOP")
-
+      # it fails the requires-io-monitor guard. Wire a REAL passthrough
+      # monitor so the action runs + materialises its output under real
+      # monitoring.
       let ctx = FixtureContext(filePrefix: tmpRoot)
-      let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx)
+      let dispatcher = mkBuildActionDispatcher(cacheRoot, ctx,
+        passthroughMonitorCli(cacheRoot))
       let outcomes = dispatcher(@[pba])
 
       check outcomes.len == 1

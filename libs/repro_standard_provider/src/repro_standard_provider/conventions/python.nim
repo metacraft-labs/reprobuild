@@ -16,7 +16,7 @@
 ##
 ## **Mode B backends** (M24 — recognised, routed to the crude fallback
 ## which delegates to ``python -m build --wheel --no-isolation`` under
-## FS-snoop). These backends need their own toolchains (a Rust compiler
+## io-monitor). These backends need their own toolchains (a Rust compiler
 ## for maturin, a CMake-driven C/C++ compiler for scikit-build-core, an
 ## opinionated PEP 517 frontend for poetry-core / pdm-backend / uv_build)
 ## and have manifest shapes that don't reduce cleanly to the four PEP 517
@@ -1037,7 +1037,7 @@ proc pythonCrudeFallback(projectRoot: string;
   ## M24: Mode B emitter for Python projects whose ``[build-system]
   ## .build-backend`` is in the ``ModeBBackends`` catalog (maturin,
   ## scikit-build-core, poetry-core, pdm-backend, uv_build). Delegates
-  ## to ``python -m build --wheel --no-isolation`` under FS-snoop
+  ## to ``python -m build --wheel --no-isolation`` under io-monitor
   ## monitoring per the M6 spec.
   ##
   ## **Design decision — why ``python -m build --wheel --no-isolation``
@@ -1072,7 +1072,7 @@ proc pythonCrudeFallback(projectRoot: string;
   ##
   ## The wheel lands under ``<projectRoot>/dist/`` (``python -m build``
   ## default). The crude fragment declares ``dist`` as an opaque output
-  ## directory and the project root as the input root; FS-snoop
+  ## directory and the project root as the input root; io-monitor
   ## promotes any read/written file the backend touches at runtime.
   {.cast(gcsafe).}:
     let pythonExe = pythonExecutable()

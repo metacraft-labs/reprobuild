@@ -40,9 +40,19 @@ proc removeIfExists(path: string) =
 proc ensureRunQuotaDaemon(repoRoot, tempRoot: string; cpuMilli = "32000"):
     tuple[process: owned(Process), socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
-  if not fileExists(daemonBin):
+  var daemonBin = getEnv("RUNQUOTAD_BIN")
+  if daemonBin.len == 0:
+    daemonBin = findExe("runquotad")
+  let siblingBin = runquotaRoot / "build" / "bin" /
+    addFileExt("runquotad", ExeExt)
+  if daemonBin.len == 0:
+    daemonBin = siblingBin
+  if not fileExists(daemonBin) and daemonBin == siblingBin:
     discard requireSuccess("cd " & q(runquotaRoot) & " && just build", repoRoot)
+  if not fileExists(daemonBin):
+    raise newException(OSError,
+      "runquotad binary missing at " & daemonBin &
+      "; set RUNQUOTAD_BIN or use direnv exec so runquotad is on PATH")
   let socketPath = "/tmp/repro-m12-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -59,6 +69,17 @@ proc ensureRunQuotaDaemon(repoRoot, tempRoot: string; cpuMilli = "32000"):
     sleep(25)
   daemon.terminate()
   raise newException(OSError, "runquotad socket did not appear")
+
+proc resolveRunQuotaClient(repoRoot: string): string =
+  result = findExe("runquota")
+  if result.len > 0:
+    return
+  result = repoRoot.parentDir / "runquota" / "build" / "bin" /
+    addFileExt("runquota", ExeExt)
+  if not fileExists(result):
+    raise newException(OSError,
+      "runquota binary missing at " & result &
+      "; use direnv exec so runquota is on PATH")
 
 proc fixtureWrite(path, content: string) =
   createDir(path.splitPath.head)
@@ -106,7 +127,7 @@ proc fixtureMain(args: seq[string]) =
   of "monitor":
     # dgDeclaredOnly removal: ``monitor-action`` no longer hand-writes a
     # synthetic RMDF for the engine to read back. The default automatic
-    # monitor policy now wraps this process under real ``repro-fs-snoop``,
+    # monitor policy now wraps this process under real ``repro internal io monitor``,
     # so the action must perform the file operations it wants reflected in
     # the monitor evidence. Argv layout is now:
     #   "monitor" <input-path> <output-path>
@@ -184,10 +205,9 @@ proc reportPolicy(kind: DependencyGatheringKind;
 when defined(macosx) or defined(linux):
   # dgDeclaredOnly removal: the default policy is now ``dgAutomaticMonitor``,
   # so every default-policy process action is wrapped under real
-  # ``repro-fs-snoop`` (the test must provide a monitor driver, never a stub).
-  # The fs-snoop wrapper and shim are expensive to build, so compile/resolve
-  # them once per process and reuse across the suite's cases (the shim is
-  # exported via the env var so engine-launched fs-snoop children inherit it).
+  # ``repro internal io monitor`` (the test must provide a monitor driver,
+  # never a stub). Resolve the graph-built monitor and shim once per process
+  # and reuse them across the suite's cases.
   var cachedMonitorTools: MonitorTools
   var cachedMonitorToolsReady = false
 
@@ -276,7 +296,8 @@ suite "integration_build_engine_api_ready_queue":
       var config = BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -356,7 +377,8 @@ suite "integration_build_engine_api_ready_queue":
       var config = BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 1'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -508,7 +530,8 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -618,7 +641,8 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
@@ -676,7 +700,8 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
@@ -781,7 +806,8 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -979,7 +1005,8 @@ suite "integration_build_engine_api_ready_queue":
       ]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 2'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024,
@@ -1053,7 +1080,8 @@ suite "integration_build_engine_api_ready_queue":
         let buildResult = runBuild(graph([buildAction]), BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
-          monitorCliPath: monitorTools(repoRoot).fsSnoop,
+          monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+          monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
           maxParallelism: 1'u32,
           stdoutLimit: 256 * 1024,
           stderrLimit: 256 * 1024,
@@ -1239,7 +1267,8 @@ suite "integration_build_engine_api_ready_queue":
       # dgDeclaredOnly removal: the legacy ``monitorDepfile`` field (which made
       # the engine read a hand-written RMDF) is gone. Under the default
       # automatic-monitor policy the engine wraps this process in real
-      # ``repro-fs-snoop`` and records the syscalls the fixture actually makes:
+      # ``repro internal io monitor`` and records the syscalls the fixture
+      # actually makes:
       # the read of ``monitorInput`` (monitorReads), the write of ``out.txt``
       # (monitorWrites) and the absent path-probe of ``monitorInput & ".missing"``
       # (monitorProbes) asserted below.
@@ -1253,7 +1282,8 @@ suite "integration_build_engine_api_ready_queue":
       let buildResult = runBuild(buildGraph, BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
-        monitorCliPath: monitorTools(repoRoot).fsSnoop,
+        monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+        monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
         maxParallelism: 16'u32,
         stdoutLimit: 256 * 1024,
         stderrLimit: 256 * 1024))
@@ -1320,7 +1350,7 @@ suite "integration_build_engine_api_ready_queue":
 
       check buildResult.trace.len >= actions.len
       check buildResult.trace[0].seq == 1'u64
-      let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin" / addFileExt("runquota", ExeExt)
+      let runquotaBin = resolveRunQuotaClient(repoRoot)
       let status = requireSuccess(q(runquotaBin) & " status", repoRoot)
       check status.contains("total_granted:")
       check status.contains("total_finished:")

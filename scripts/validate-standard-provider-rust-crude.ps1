@@ -4,7 +4,7 @@
 # the project (M6 relaxation — build.rs no longer rejects), and the
 # convention's `emitFragment` routes through the Mode B crude fallback
 # which delegates to `cargo build --release --locked --offline` under
-# FS-snoop monitoring.
+# io-monitor monitoring.
 #
 # Mechanics:
 #
@@ -92,7 +92,7 @@ if (Test-Path -LiteralPath $cargoTargetDir) {
 
 # --- step 2: invoke `repro build` ---
 # M11 (2026-05-27): The previously-required REPRO_MONITOR_BYPASS=1
-# workaround has been retired. The root cause was the FS-snoop IAT
+# workaround has been retired. The root cause was the io-monitor IAT
 # shim's hook bodies (libs/repro_monitor_shim/src/repro_monitor_shim/
 # windows_interpose.nim) clobbering the thread-local LastError that
 # the real Win32 functions had just set. Cargo's std::process::Command
@@ -104,7 +104,7 @@ if (Test-Path -LiteralPath $cargoTargetDir) {
 # LastError around the bookkeeping block, so the caller observes the
 # kernel's actual error code.
 #
-# With the bypass dropped, FS-snoop's automaticMonitor policy is now
+# With the bypass dropped, io-monitor's automaticMonitor policy is now
 # exercised end-to-end on Windows: cargo's reads are captured into the
 # monitor fragment dir and merged into the action's recorded inputs.
 # Ensure no inherited REPRO_MONITOR_BYPASS leaks from the harness env.

@@ -572,7 +572,7 @@ proc crateMetadataHash(projectRoot: string; member: RustDirectMember): string =
 proc collectRustSourcesUnderSrcDir(srcDir: string): seq[string] =
   ## Every ``.rs`` under ``srcDir``, recursively. Used to compute the
   ## declared ``inputs`` of the link action so source-only edits
-  ## invalidate the cache without needing the FS-snoop monitor.
+  ## invalidate the cache without needing the io-monitor monitor.
   if not dirExists(extendedPath(srcDir)):
     return @[]
   for path in walkDirRec(srcDir):

@@ -137,17 +137,15 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, manifestPath,
 ## degenerates to ``repro --depfile <path> -- <cmd>`` — an invalid
 ## invocation that exits non-zero and makes every profile-compile action
 ## fail under ``automaticMonitorGatheringPolicy``. Every production build
-## config in ``repro_cli_support`` (``internalFsSnoopArgs``) sets the same
+## config in ``repro_cli_support`` (``internalIoMonitorArgs``) sets the same
 ## triple; we mirror the literal here because ``repro_profile_compile``
 ## sits below ``repro_cli_support`` in the dependency graph and cannot
 ## import it without a cycle.
 ##
-## NOTE: The dispatched subcommand was ``internal fs-snoop`` before the
-## Executable-Consolidation rename moved every internal helper under
-## category prefixes (``io`` here); the canonical CLI only recognizes
-## the new triple now. ``repro internal fs-snoop`` falls through to the
-## unknown-subcommand path and exits 2 with ``renderInternalUsage``,
-## which surfaces from the build engine as
+## NOTE: The canonical CLI recognizes the full ``internal io monitor`` triple.
+## Omitting the middle ``io`` category falls through to the unknown-subcommand
+## path and exits 2 with ``renderInternalUsage``, which surfaces from the build
+## engine as
 ## ``__repro_profile_compile asFailed`` with the internal-namespace
 ## usage as the diagnostic body.
 const ProfileCompileMonitorCliArgs* = @["internal", "io", "monitor"]

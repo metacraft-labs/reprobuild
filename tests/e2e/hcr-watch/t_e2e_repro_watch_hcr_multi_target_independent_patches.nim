@@ -155,7 +155,7 @@ proc requireSuccess(command: string; cwd = getCurrentDir()) =
 
 # Test-Fixtures-In-Build-Graph M1/M3: ``repro`` is a graph artifact
 # (``reprobuild.apps.repro`` → ``build/bin/repro``); the same consolidated image
-# serves the fs-snoop role (``repro internal fs-snoop``). Assert it exists
+# serves the io-monitor role through ``repro internal io monitor``. Assert it exists
 # instead of recompiling ``apps/repro/repro.nim`` at test runtime.
 proc compileRepro(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
@@ -171,19 +171,8 @@ proc prepareGccProxy(tempRoot: string): string =
   binDir & $PathSep & getEnv("PATH")
 
 when defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
-      shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    # Test-Fixtures-In-Build-Graph M3: the fs-snoop driver is the graph-built
-    # ``build/bin/repro`` (reached via ``repro internal fs-snoop``); ``repro``
-    # honors ``REPRO_FS_SNOOP`` pointing at this consolidated image. Assert it
-    # exists instead of compiling a standalone wrapper at test runtime.
-    result.fsSnoop = requireBinary(
-      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
-      "reprobuild.apps.repro")
+  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+    discard tempRoot
     # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
     # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
     # per test. The host-native single-arch shim is correct: the test process is
@@ -290,7 +279,6 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       let command = shellCommand([
         "env",
         "PATH=" & pathValue,
-        "REPRO_FS_SNOOP=" & monitorTools.fsSnoop,
         "REPRO_MONITOR_SHIM_LIB=" & monitorTools.shim,
         reproBin, "watch", "a", "b",
         "--tool-provisioning=path",

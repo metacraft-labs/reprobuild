@@ -940,7 +940,7 @@ proc checkConfigOutputs(projectRoot: string) =
 
 # Test-Fixtures-In-Build-Graph M1/M3: ``repro`` is a graph artifact
 # (``reprobuild.apps.repro`` → ``build/bin/repro``); the same consolidated image
-# also serves the fs-snoop role (``repro internal fs-snoop``). Both former
+# also serves the io-monitor role through ``repro internal io monitor``. Both former
 # compile helpers (``compileRepro`` for a tempRoot copy, ``compilePublic
 # ReproTestBin`` for ``build/test-bin/repro``) targeted the SAME vanilla
 # ``apps/repro/repro.nim``, so both now assert the single graph artifact.
@@ -955,19 +955,8 @@ proc compilePublicReproTestBin(repoRoot: string): string =
   reproGraphBinary(repoRoot)
 
 when defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
-      shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    # Test-Fixtures-In-Build-Graph M3: the fs-snoop driver is the graph-built
-    # ``build/bin/repro`` (reached via ``repro internal fs-snoop``); ``repro``
-    # honors ``REPRO_FS_SNOOP`` pointing at this consolidated image. Assert it
-    # exists instead of compiling a standalone wrapper at test runtime.
-    result.fsSnoop = requireBinary(
-      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
-      "reprobuild.apps.repro")
+  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+    discard tempRoot
     # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
     # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
     # per test. The host-native single-arch shim is correct: the test process is
@@ -1317,7 +1306,6 @@ when defined(macosx):
       let reproBin = compileRepro(repoRoot, tempRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
-        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
       let projectRoot = tempRoot / "codetracer"
@@ -1372,8 +1360,7 @@ when defined(macosx):
       let reproBin = compilePublicReproTestBin(repoRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
-        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
-        ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
       let projectRoot = tempRoot / "codetracer"
       createDir(projectRoot)
@@ -1454,7 +1441,6 @@ when defined(macosx):
       let reproBin = compilePublicReproTestBin(repoRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let monitorEnv = [
-        ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
       var nativeEnv: seq[(string, string)] = @[]

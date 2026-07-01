@@ -1093,17 +1093,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1782882860,
-        "narHash": "sha256-fHQCPz3z9o1iU9SFBKMRQMkXaF4ehKM+bgFJASIkYCs=",
+        "lastModified": 1782948744,
+        "narHash": "sha256-ScUcFOHgHLGvF1NMWhzDrnm0AODf8bIjVF8UGGzXuww=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "7ef0553277fe8aac8f39a50afe796193b112735d",
+        "rev": "451eb2d664eb996b5a66815fd6decf7dae34be32",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
-        "ref": "7ef0553",
         "repo": "io-mon",
+        "rev": "451eb2d664eb996b5a66815fd6decf7dae34be32",
         "type": "github"
       }
     },

@@ -135,7 +135,8 @@ suite "RA-13 runquota bypass surfaced in build header + report":
         BuildEngineConfig(
           cacheRoot: cacheRoot,
           runQuotaCliPath: app,
-          monitorCliPath: monitorTools(repoRoot).fsSnoop,
+          monitorCliPath: monitorTools(repoRoot).monitorCliPath,
+          monitorCliArgs: monitorTools(repoRoot).monitorCliArgs,
           maxParallelism: 8'u32,
           stdoutLimit: 256 * 1024,
           stderrLimit: 256 * 1024,

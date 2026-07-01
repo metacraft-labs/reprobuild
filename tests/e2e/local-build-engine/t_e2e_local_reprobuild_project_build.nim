@@ -246,11 +246,15 @@ proc pathExists(path: string): bool =
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
   let runquotaRoot = repoRoot.parentDir / "runquota"
-  let daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
+  var daemonBin = getEnv("RUNQUOTAD_BIN")
+  if daemonBin.len == 0:
+    daemonBin = findExe("runquotad")
+  if daemonBin.len == 0:
+    daemonBin = runquotaRoot / "build" / "bin" / addFileExt("runquotad", ExeExt)
   if not fileExists(daemonBin):
     raise newException(OSError,
-      "runquotad binary missing at " & daemonBin & "; build it via " &
-      "the test harness (scripts/run_tests.sh)")
+      "runquotad binary missing at " & daemonBin &
+      "; set RUNQUOTAD_BIN or use direnv exec so runquotad is on PATH")
   let socketPath = "/tmp/repro-m19-rq-" & $getCurrentProcessId() & ".sock"
   if fileExists(socketPath):
     removeFile(socketPath)
@@ -273,33 +277,19 @@ proc writeExecutable(path, content: string) =
   setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-proc compileNim(repoRoot, sourcePath, outputPath, cacheName: string) =
-  discard requireSuccess(shellCommand([
-    "nim", "c", "--verbosity:0", "--hints:off",
-    "--nimcache:" & repoRoot / "build" / "nimcache" / cacheName,
-    "--out:" & outputPath,
-    sourcePath
-  ]), repoRoot)
-
 when defined(macosx) or defined(linux):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[fsSnoop: string;
-      shim: string] =
-    let binDir = tempRoot / "bin"
-    let libDir = tempRoot / "lib"
-    createDir(binDir)
-    createDir(libDir)
-    result.fsSnoop = binDir / "repro-fs-snoop"
+  proc localMonitorTools(repoRoot, tempRoot: string): MonitorTools =
+    discard tempRoot
+    result.monitorCliPath = requireBinary(
+      repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
+      "reprobuild.apps.repro")
+    result.monitorCliArgs = ioMonitorCliArgs
     # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
     # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
     # per test. The host-native single-arch shim is correct: the test process is
     # host-arch, so the former universal (lipo) build is unnecessary.
     result.shim = requireBinary(monitorShimPath(repoRoot),
       "reprobuild.test_fixtures.monitor_shim")
-    # Executable-Consolidation M1: apps/repro-fs-snoop was deleted; compile the
-    # synthesized standalone fs-snoop wrapper instead (same runFsSnoopCli path).
-    compileNim(repoRoot,
-      fsSnoopWrapperSource(repoRoot, "m32-local-repro-fs-snoop"),
-      result.fsSnoop, "m32-local-repro-fs-snoop")
 
   proc writeMonitorFixtureTool(binDir: string) =
     let sourcePath = binDir / "m32-monitor-producer.c"
@@ -970,14 +960,14 @@ suite "e2e_local_reprobuild_project_build":
             removeFile(daemon.socket)
 
         let reproBin = reproBinary(repoRoot)
-        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+        let monitorTools = localMonitorTools(repoRoot, tempRoot / "monitor")
 
         let binDir = tempRoot / "fixture-bin"
         writeMonitorFixtureTool(binDir)
         let pathValue = binDir & $PathSep & getEnv("PATH")
         let monitorEnv = [
-          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
-          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
+          ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim),
+          ("REPROBUILD_STORE_ROOT", tempRoot / "store")
         ]
 
         let projectRoot = tempRoot / "project"
@@ -1089,8 +1079,10 @@ suite "e2e_local_reprobuild_project_build":
       writeFile(projectRoot / "src" / "hidden.txt", "hidden v1\n")
       writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
       writeProject(projectRoot / "reprobuild.nim")
+      let storeEnv = [("REPROBUILD_STORE_ROOT", tempRoot / "store")]
 
-      let selected = build(reproBin, projectRoot & "#consume", repoRoot, pathValue)
+      let selected = build(reproBin, projectRoot & "#consume", repoRoot,
+        pathValue, storeEnv)
       check selected.contains("selectedTarget: consume")
       check selected.contains("scheduler: actions=2")
       check selected.contains("action: produce status=asSucceeded launched=true")
@@ -1114,7 +1106,10 @@ suite "e2e_local_reprobuild_project_build":
       let unknown = requireFailure(shellCommand(@[reproBin, "build",
         projectRoot & "#does-not-exist", "--daemon=off",
         "--tool-provisioning=path"],
-        @[(name: "PATH", value: pathValue)]), repoRoot)
+        @[
+          (name: "PATH", value: pathValue),
+          (name: "REPROBUILD_STORE_ROOT", value: tempRoot / "store")
+        ]), repoRoot)
       # Named-Targets M2 (commit 396e312) replaced the pre-existing
       # ``unknown build target/action id: ... (available: ...)`` error
       # text with the shared ``renderUnknownTargetDiagnostic`` output:
@@ -1267,9 +1262,8 @@ suite "e2e_local_reprobuild_project_build":
 
       let output =
         when defined(macosx) or defined(linux):
-          let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+          let monitorTools = localMonitorTools(repoRoot, tempRoot / "monitor")
           let monitorEnv = [
-            ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
             ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
           ]
           buildCurrentProject(reproBin, projectRoot, pathValue, monitorEnv)
@@ -1307,9 +1301,8 @@ suite "e2e_local_reprobuild_project_build":
 
       let reproBin = reproBinary(repoRoot)
       when defined(macosx) or defined(linux):
-        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+        let monitorTools = localMonitorTools(repoRoot, tempRoot / "monitor")
         let monitorEnv = [
-          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
           ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
         ]
       else:
@@ -1372,9 +1365,8 @@ suite "e2e_local_reprobuild_project_build":
             removeFile(daemon.socket)
 
         let reproBin = reproBinary(repoRoot)
-        let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
+        let monitorTools = localMonitorTools(repoRoot, tempRoot / "monitor")
         let monitorEnv = [
-          ("REPRO_FS_SNOOP", monitorTools.fsSnoop),
           ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
         ]
         let pathValue = stylusDir & $PathSep & getEnv("PATH")
@@ -1867,10 +1859,11 @@ suite "e2e_local_reprobuild_project_build":
       writeFile(projectRoot / "src" / "unrelated.txt", "unrelated v1\n")
       writeProject(projectRoot / "reprobuild.nim")
       let target = projectRoot
+      let storeEnv = [("REPROBUILD_STORE_ROOT", tempRoot / "store")]
       let marker = projectRoot / ".repro" / "tool-runs.log"
       let unrelatedMarker = projectRoot / ".repro" / "tool-runs-unrelated.log"
 
-      let first = build(reproBin, target, repoRoot, pathValue)
+      let first = build(reproBin, target, repoRoot, pathValue, storeEnv)
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
       check first.contains("scheduler: actions=3")
@@ -1935,7 +1928,7 @@ suite "e2e_local_reprobuild_project_build":
 
       let markerAfterFirst = readFile(marker)
       let unrelatedMarkerAfterFirst = readFile(unrelatedMarker)
-      let second = build(reproBin, target, repoRoot, pathValue)
+      let second = build(reproBin, target, repoRoot, pathValue, storeEnv)
       check readFile(marker) == markerAfterFirst
       check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
       check actionLineCacheEffective(second, "produce")
@@ -1943,7 +1936,7 @@ suite "e2e_local_reprobuild_project_build":
       check actionLineCacheEffective(second, "unrelated")
 
       writeFile(projectRoot / "src" / "hidden.txt", "hidden v2\n")
-      let hiddenChanged = build(reproBin, target, repoRoot, pathValue)
+      let hiddenChanged = build(reproBin, target, repoRoot, pathValue, storeEnv)
       check nonEmptyLines(marker) == @["producer", "consumer", "producer",
         "consumer"]
       check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
@@ -1953,7 +1946,8 @@ suite "e2e_local_reprobuild_project_build":
       check readFile(projectRoot / "dist" / "final.txt").contains("hidden=hidden v2")
 
       removeFile(projectRoot / "build" / "generated.txt")
-      let upstreamOutputDeleted = build(reproBin, target, repoRoot, pathValue)
+      let upstreamOutputDeleted = build(reproBin, target, repoRoot, pathValue,
+        storeEnv)
       check nonEmptyLines(marker) == @["producer", "consumer", "producer",
         "consumer", "producer", "consumer"]
       check readFile(unrelatedMarker) == unrelatedMarkerAfterFirst
@@ -1964,14 +1958,18 @@ suite "e2e_local_reprobuild_project_build":
       check actionLineCacheEffective(upstreamOutputDeleted, "unrelated")
 
       let noFlag = requireFailure(shellCommand(
-        [reproBin, "build", target, "--daemon=off"]), repoRoot)
+        [reproBin, "build", target, "--daemon=off"],
+        @[(name: "REPROBUILD_STORE_ROOT", value: tempRoot / "store")]), repoRoot)
       check noFlag.contains("refusing implicit PATH fallback")
 
       let missingRoot = tempRoot / "missing-project"
       writeMissingProject(missingRoot / "reprobuild.nim")
       let missing = requireFailure(shellCommand(@[reproBin, "build",
         missingRoot, "--daemon=off", "--tool-provisioning=path"],
-        @[(name: "PATH", value: pathValue)]), repoRoot)
+        @[
+          (name: "PATH", value: pathValue),
+          (name: "REPROBUILD_STORE_ROOT", value: tempRoot / "store")
+        ]), repoRoot)
       check missing.contains("tool-resolution failed")
       check missing.contains("m19-missing-tool")
       check not fileExists(missingRoot / ".repro" / "missing-ran.log")

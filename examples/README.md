@@ -7,7 +7,7 @@ real source trees without implying later engine behavior is complete.
 - `hello-c/`: minimal C compile fixture.
 - `hello-nim/`: minimal Nim compile fixture.
 - `depfile-c/`: C header dependency fixture for depfile tests.
-- `fs-snoop-tool/`: file read/write fixture for future monitor tests.
+- `io-monitor-tool/`: file read/write fixture for future monitor tests.
 - `monitored-opaque-tool/`: opaque input-discovery fixture.
 - `multi-project/`: small multi-package Nim fixture.
 - `codetracer-subset/`: deferred CodeTracer-subset shape fixture.
