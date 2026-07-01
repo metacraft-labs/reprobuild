@@ -1,0 +1,150 @@
+#!/bin/sh
+# M9.R.51 - Boot-from-disk init for reproos-image build-artifact qcow2s.
+#
+# Simpler sibling of initramfs/init (the live-boot squashfs pivot).
+# Parses `root=UUID=<uuid>` from /proc/cmdline, mounts that ext4
+# partition at /newroot, switches root into it, execs /sbin/init.
+#
+# Designed for the BUSYBOX-only userspace that build-initramfs.sh
+# stages (same busybox binary + slimmed Debian kernel modules).
+# Every binary referenced below is a busybox applet.
+
+set -e
+
+INIT_VERSION='M9.R.51'
+
+log() {
+  echo "[disk-init] $*" >/dev/kmsg 2>/dev/null || echo "[disk-init] $*"
+}
+
+rescue() {
+  log "FATAL: $*"
+  log "dropping to busybox shell - use 'exit' to panic"
+  exec /bin/sh
+}
+
+trap 'rescue "trap fired before reaching switch_root"' EXIT
+
+log "starting $INIT_VERSION"
+
+mkdir -p /proc /sys /dev /run /tmp /newroot
+mount -t proc     none /proc
+mount -t sysfs    none /sys
+mount -t devtmpfs none /dev || true
+mount -t tmpfs    none /run
+mount -t tmpfs    none /tmp
+
+# Parse kernel cmdline for root= and (optional) rootfstype=.
+ROOT_SPEC=''
+ROOT_FSTYPE='ext4'
+DISK_DEBUG=''
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    root=*)       ROOT_SPEC="${arg#root=}" ;;
+    rootfstype=*) ROOT_FSTYPE="${arg#rootfstype=}" ;;
+    disk.debug)   DISK_DEBUG=1 ;;
+  esac
+done
+
+if [ -z "$ROOT_SPEC" ]; then
+  rescue "no root= on kernel cmdline"
+fi
+
+log "root=$ROOT_SPEC rootfstype=$ROOT_FSTYPE"
+
+# Load modules. Same set as live-init but trimmed to what a
+# disk boot on QEMU/virtio needs (no cdrom / iso9660 / squashfs /
+# overlay / loop).
+load_module() {
+  modprobe "$1" 2>/dev/null && log "modprobe $1 ok" || log "modprobe $1 missing/failed (ok)"
+}
+
+log "loading kernel modules"
+load_module virtio
+load_module virtio_ring
+load_module virtio_pci
+load_module virtio_pci_modern_dev
+load_module virtio_pci_legacy_dev
+load_module virtio_blk
+load_module virtio_scsi
+load_module scsi_mod
+load_module sd_mod
+load_module ata_piix
+load_module ahci
+load_module nvme
+load_module nvme_core
+# crc32c BEFORE ext4 - ext4 mount fails without it.
+load_module crc32c_generic
+load_module crc32c-intel
+load_module dm_mod
+load_module dm_crypt
+load_module ext4
+load_module vfat
+load_module nls_cp437
+load_module nls_utf8
+load_module nls_ascii
+load_module drm
+load_module drm_kms_helper
+load_module virtio-gpu
+load_module qxl
+load_module bochs
+
+# Let devtmpfs settle.
+sleep 1
+
+if [ -n "$DISK_DEBUG" ]; then
+  log "disk.debug set - shell drop"
+  trap - EXIT
+  /bin/sh
+  trap 'rescue "post-debug-shell trap"' EXIT
+fi
+
+# Resolve root spec to a device node.
+#   UUID=xxx        -> /dev/disk/by-uuid/xxx
+#   LABEL=xxx       -> /dev/disk/by-label/xxx
+#   PARTUUID=xxx    -> /dev/disk/by-partuuid/xxx
+#   /dev/xxx        -> as-is
+resolve_root() {
+  case "$ROOT_SPEC" in
+    UUID=*)     echo "/dev/disk/by-uuid/${ROOT_SPEC#UUID=}" ;;
+    LABEL=*)    echo "/dev/disk/by-label/${ROOT_SPEC#LABEL=}" ;;
+    PARTUUID=*) echo "/dev/disk/by-partuuid/${ROOT_SPEC#PARTUUID=}" ;;
+    *)          echo "$ROOT_SPEC" ;;
+  esac
+}
+
+ROOT_DEV="$(resolve_root)"
+
+# Wait for the root device to appear.  Busybox mdev/udev may take
+# a few beats to symlink /dev/disk/by-uuid/*.
+attempt=0
+while [ ! -e "$ROOT_DEV" ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    log "root device $ROOT_DEV never appeared; available:"
+    ls /sys/class/block/ >/dev/kmsg 2>/dev/null || ls /sys/class/block/
+    log "/dev/disk/by-uuid/:"
+    ls /dev/disk/by-uuid/ >/dev/kmsg 2>/dev/null || ls /dev/disk/by-uuid/ 2>/dev/null
+    rescue "root device not found"
+  fi
+  sleep 1
+done
+
+log "mounting $ROOT_DEV at /newroot"
+if ! mount -t "$ROOT_FSTYPE" -o ro "$ROOT_DEV" /newroot; then
+  rescue "mount $ROOT_DEV failed"
+fi
+
+# Move /proc /sys /dev into the new root so the pivoted init can
+# still read them.
+mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
+mount --move /proc /newroot/proc
+mount --move /sys  /newroot/sys
+mount --move /dev  /newroot/dev
+mount --move /run  /newroot/run
+
+# Now hand off to the real init.
+log "switch_root -> /sbin/init"
+trap - EXIT
+exec switch_root /newroot /sbin/init
+rescue "switch_root returned - fatal"

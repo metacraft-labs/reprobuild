@@ -269,10 +269,16 @@ echo "[build-reproos-image] stage done; size: $(du -sh "$STAGE_DIR" | awk '{prin
 # initramfs (initramfs-tools / dracut) that pivots into
 # /dev/disk/by-label/reproos-root.
 VENDORED_KERNEL="$REPO_ROOT/recipes/reproos-iso/vendor/vmlinuz-debian-netinst"
-LIVE_INITRD="$REPO_ROOT/recipes/reproos-iso/vendor/initrd.img-live"
+# M9.R.51: generate a boot-from-disk initramfs (init-disk variant of
+# the live-init) instead of reusing the ISO's live-boot initrd (which
+# probes for /live/filesystem.squashfs and drops to rescue on an
+# installed disk).  We invoke reproos-iso/scripts/build-initramfs.sh
+# with REPRO_INITRAMFS_INIT=init-disk so the same busybox+modules
+# staging pipeline packs the boot-from-disk /init instead.
+DISK_INITRD_CACHE="${REPRO_DISK_INITRD_CACHE:-/var/cache/reprobuild/reproos-image/initrd.img-disk}"
 STAGE_BOOT_MARKER="$STAGE_DIR/.repro-boot-seeded"
 if [ ! -f "$STAGE_BOOT_MARKER" ]; then
-  echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + initrd"
+  echo "[build-reproos-image] seeding $STAGE_DIR/boot with kernel + boot-from-disk initrd"
   mkdir -p "$STAGE_DIR/boot"
   if [ -f "$VENDORED_KERNEL" ]; then
     cp "$VENDORED_KERNEL" "$STAGE_DIR/boot/vmlinuz"
@@ -280,12 +286,16 @@ if [ ! -f "$STAGE_BOOT_MARKER" ]; then
   else
     echo "[build-reproos-image] WARNING: $VENDORED_KERNEL missing; run \`pwsh recipes/reproos-iso/vendor/fetch.ps1\` first" >&2
   fi
-  if [ -f "$LIVE_INITRD" ]; then
-    cp "$LIVE_INITRD" "$STAGE_DIR/boot/initrd.img"
-    echo "[build-reproos-image] initrd.img (live-boot placeholder): $(ls -la "$STAGE_DIR/boot/initrd.img" | awk '{print $5}') bytes"
+  if [ ! -f "$DISK_INITRD_CACHE" ]; then
+    echo "[build-reproos-image] generating boot-from-disk initrd via build-initramfs.sh (REPRO_INITRAMFS_INIT=init-disk)"
+    mkdir -p "$(dirname "$DISK_INITRD_CACHE")"
+    REPRO_INITRAMFS_INIT=init-disk \
+      bash "$REPO_ROOT/recipes/reproos-iso/scripts/build-initramfs.sh" "$DISK_INITRD_CACHE"
   else
-    echo "[build-reproos-image] WARNING: $LIVE_INITRD missing (build the iso recipe once to populate)" >&2
+    echo "[build-reproos-image] boot-from-disk initrd cached: $DISK_INITRD_CACHE"
   fi
+  cp "$DISK_INITRD_CACHE" "$STAGE_DIR/boot/initrd.img"
+  echo "[build-reproos-image] initrd.img (boot-from-disk): $(ls -la "$STAGE_DIR/boot/initrd.img" | awk '{print $5}') bytes"
   touch "$STAGE_BOOT_MARKER"
 else
   echo "[build-reproos-image] /boot already seeded (marker present)"
@@ -463,6 +473,22 @@ sudo LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$REPRO_BIN" infra install-root \
   --disko "$DISKO_JSON" \
   --hostname "$HOSTNAME_VAL" \
   || { echo "[build-reproos-image] install-root failed" >&2; exit 70; }
+
+# M9.R.51: rewrite build-time NBD device paths to boot-time virtio
+# paths.  install-root's renderInstalledGrubCfg + renderFstab bake
+# $NBD_DEV (e.g. /dev/nbd0p2) into grub.cfg's root= and fstab's
+# device columns.  At boot, the disk appears as /dev/vda under
+# QEMU virtio.  Substitute NBD -> VDA post-render.  A future
+# milestone will move this into the render functions themselves
+# (parameterize via env or emit LABEL=/UUID= from mkfs.ext4 -L).
+NBD_BASE="$(basename "$NBD_DEV")"       # e.g. nbd0
+BOOT_DEV_BASE="vda"
+echo "[build-reproos-image] rewriting $NBD_BASE -> $BOOT_DEV_BASE in grub.cfg + fstab"
+for f in "$MNT_DIR/boot/grub/grub.cfg" "$MNT_DIR/etc/fstab"; do
+  if [ -f "$f" ]; then
+    sudo sed -i -E "s|/dev/${NBD_BASE}p([0-9]+)|/dev/${BOOT_DEV_BASE}\\1|g; s|/dev/${NBD_BASE}|/dev/${BOOT_DEV_BASE}|g" "$f"
+  fi
+done
 
 # ---------------------------------------------------------------
 # Phase 9: write etc/repro/{system,hardware}.nim from TOML.

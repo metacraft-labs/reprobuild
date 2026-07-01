@@ -383,12 +383,16 @@ done < "$modules_dep_src"
 : > "$STAGE_MOD_ROOT/modules.symbols"
 echo "[initramfs] modules: ${copied_count} files staged for kernel $KERNEL_RELEASE"
 
-# 3) /init script. Vendored under recipes/reproos-iso/initramfs/init.
-if [ ! -f "$INITRAMFS_SRC/init" ]; then
-  echo "build-initramfs.sh: $INITRAMFS_SRC/init missing" >&2
+# 3) /init script. Vendored under recipes/reproos-iso/initramfs/<name>.
+# The variant is selected by REPRO_INITRAMFS_INIT env (default: "init",
+# used by the live-boot ISO; "init-disk" is the M9.R.51 variant used
+# by the reproos-image build-artifact qcow2 for boot-from-disk).
+INIT_NAME="${REPRO_INITRAMFS_INIT:-init}"
+if [ ! -f "$INITRAMFS_SRC/$INIT_NAME" ]; then
+  echo "build-initramfs.sh: $INITRAMFS_SRC/$INIT_NAME missing" >&2
   exit 71
 fi
-cp "$INITRAMFS_SRC/init" "$STAGE/init"
+cp "$INITRAMFS_SRC/$INIT_NAME" "$STAGE/init"
 chmod +x "$STAGE/init"
 
 # 4) /etc minimal files for getty/login - even though we never reach
