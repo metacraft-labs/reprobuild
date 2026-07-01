@@ -39,4 +39,4 @@ reprobuild-test-adapters=main
 # ../nim-stackable-hooks siblings. io-mon is pinned to the hardened revision
 # used by this retirement campaign.
 io-mon=7ef0553277fe8aac8f39a50afe796193b112735d
-nim-stackable-hooks=abea72696dd9d8d24a1d65b0d3d6b24e1d391694
+nim-stackable-hooks=c6cf6ad1ac95201288825970b6ca53f630ea8996

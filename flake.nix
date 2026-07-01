@@ -46,7 +46,12 @@
     # resolves it from the sibling checkout, but the sandboxed package build has
     # no sibling and otherwise fails with "cannot open file: stackable_hooks/…".
     stackable-hooks-src = {
-      url = "github:metacraft-labs/nim-stackable-hooks";
+      # Pinned to the rev that carries ``platform/linux_preload`` (and the rest
+      # of io-mon 7ef0553's stackable surface); the older lock lacked it, so
+      # io-mon's ``linux_preload_runtime.nim`` failed with "cannot open file:
+      # stackable_hooks/platform/linux_preload" in both the sandboxed package
+      # build and ``just bootstrap``.
+      url = "github:metacraft-labs/nim-stackable-hooks/c6cf6ad1ac95201288825970b6ca53f630ea8996";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
