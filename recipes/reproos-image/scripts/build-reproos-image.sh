@@ -931,6 +931,176 @@ Current=reproos
 SDDM_THEME_EOF
 " || { echo "[build-reproos-image] Phase 10.7 sddm theme install failed" >&2; exit 73; }
 
+# ---------------------------------------------------------------
+# Phase 10.8 (M9.R.56.8.1): fix compiled-in /usr/local paths in
+# the from-source sddm binary + install strace instrumentation
+# for the sddm session-launch chain.
+#
+# ## Diagnosis (Phase A — static, per feedback_mcr_no_speculation)
+#
+# The from-source sddm 0.21 recipe (recipes/packages/source/sddm/
+# repro.nim) does NOT set ``CMAKE_INSTALL_PREFIX`` in its
+# ``cmakeFlags:`` block, so CMake defaults to
+# ``/usr/local``.  The prefix bakes into the generated
+# ``src/common/Constants.h`` (Constants.h.in is templated with
+# ``@CMAKE_INSTALL_FULL_LIBEXECDIR@`` etc.), which the sddm
+# daemon then references via ``QStringLiteral`` at every session-
+# launch and theme-load site:
+#
+#   #define LIBEXEC_INSTALL_DIR     "/usr/local/libexec"
+#   #define DATA_INSTALL_DIR        "/usr/local/share/sddm"
+#   #define SESSION_COMMAND         "/usr/local/share/sddm/scripts/Xsession"
+#   #define WAYLAND_SESSION_COMMAND "/usr/local/share/sddm/scripts/wayland-session"
+#   #define SYSTEM_CONFIG_DIR       "/usr/local/lib/sddm/sddm.conf.d"
+#
+# Real files ship at:
+#   /usr/libexec/sddm-helper                       (from-source install-mirror)
+#   /usr/libexec/sddm-helper-start-wayland          (from-source install-mirror)
+#   /usr/libexec/sddm-helper-start-x11user          (from-source install-mirror)
+#   /usr/share/sddm/scripts/{wayland-session,Xsession,Xsetup,Xstop} (Debian dpkg)
+#   /usr/share/sddm/{faces,flags,translations-qt6} (Debian dpkg)
+#   /usr/share/sddm/themes/reproos/Main.qml         (Phase 10.7)
+#
+# Consequences the M9.R.56.7 evidence hit:
+#   * Autologin succeeds via PAM (sddm-autologin PAM stack is
+#     complete) but the ``sddm-helper`` exec at
+#     ``/usr/local/libexec/sddm-helper`` errors ENOENT --- the
+#     user session never spawns.
+#   * Greeter mode (non-autologin) loads the ``Theme.ThemeDir``
+#     default ``/usr/local/share/sddm/themes`` which does not
+#     exist; the QQuickWindow falls back to a blank/black surface.
+#     This exactly matches the M9.R.56.7 mean-grayscale=0 PPM.
+#   * Wayland compositor spawn also fails --- the daemon exec()s
+#     ``/usr/local/share/sddm/scripts/wayland-session <sway.desktop-Exec>``
+#     but the wayland-session script is not at that path.
+#
+# Cascade class: install-prefix baked into a compile-time
+# constant.  The proper fix is to rebuild sddm with the correct
+# CMake flags (documented as a residual for M9.R.57+); the
+# image-time fix in this milestone uses shadow-link symlinks in
+# the same pattern as Phase 10.6 Blocker 3 (the
+# dbus-daemon-launch-helper shim) --- ``/usr/local/libexec ->
+# /usr/libexec`` and ``/usr/local/share/sddm -> /usr/share/sddm``.
+#
+# The ``[Theme] ThemeDir`` / ``[X11] SessionCommand`` /
+# ``[Wayland] SessionCommand`` config overrides layered under
+# /etc/sddm.conf.d/10-paths.conf are belt-and-suspenders: they
+# route the Config-file overridable paths at /usr/share instead of
+# /usr/local, so if a future refactor moves sddm to a proper
+# CMAKE_INSTALL_PREFIX=/usr build the shim symlinks become
+# no-ops and the config overrides pin the correct paths.
+#
+# ## Instrumentation
+#
+# We wrap sddm's ExecStart with strace -f piping to
+# /var/log/m9r56_diag/sddm-strace.log and dump the sddm
+# journal to /var/log/m9r56_diag/sddm-journal.txt via a
+# one-shot post-boot unit.  A future M9.R.56.9 can inspect the
+# diag files by mounting the resulting qcow2 nbd.
+# ---------------------------------------------------------------
+
+echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths + install strace instrumentation"
+
+"$SUDO" bash -c "
+  set -euo pipefail
+
+  # --- Path shims for compiled-in Constants.h defines ---
+  # Create /usr/local/libexec as a directory containing symlinks
+  # to the real /usr/libexec/sddm-helper* binaries.  We use a
+  # directory (not a full symlink) so /usr/local/libexec doesn't
+  # collide with any host-provisioned files a future recipe
+  # might drop into /usr/local.
+  mkdir -p '$MNT_DIR/usr/local/libexec'
+  for helper in sddm-helper sddm-helper-start-wayland sddm-helper-start-x11user; do
+    ln -sfn \"/usr/libexec/\$helper\" \"$MNT_DIR/usr/local/libexec/\$helper\"
+  done
+
+  # /usr/local/share/sddm -> /usr/share/sddm as a full dir
+  # symlink so the daemon finds themes, faces, scripts, and
+  # translations at their compiled-in DATA_INSTALL_DIR.
+  mkdir -p '$MNT_DIR/usr/local/share'
+  ln -sfn /usr/share/sddm '$MNT_DIR/usr/local/share/sddm'
+
+  # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
+  # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
+  mkdir -p '$MNT_DIR/usr/local/lib/sddm'
+  ln -sfn /etc/sddm.conf.d '$MNT_DIR/usr/local/lib/sddm/sddm.conf.d'
+
+  # --- Config-file overrides (belt-and-suspenders) ---
+  # If a future sddm rebuild moves to CMAKE_INSTALL_PREFIX=/usr
+  # the shim symlinks above become no-ops; the config overrides
+  # continue to pin the paths.  Every key here mirrors a
+  # Configuration.h Entry whose default embeds LIBEXEC_INSTALL_DIR
+  # or DATA_INSTALL_DIR.
+  cat > '$MNT_DIR/etc/sddm.conf.d/10-paths.conf' <<'SDDM_PATHS_EOF'
+[Theme]
+ThemeDir=/usr/share/sddm/themes
+FacesDir=/usr/share/sddm/faces
+
+[X11]
+SessionCommand=/usr/share/sddm/scripts/Xsession
+DisplayCommand=/usr/share/sddm/scripts/Xsetup
+DisplayStopCommand=/usr/share/sddm/scripts/Xstop
+SessionDir=/usr/share/xsessions
+
+[Wayland]
+SessionCommand=/usr/share/sddm/scripts/wayland-session
+SessionDir=/usr/share/wayland-sessions
+SDDM_PATHS_EOF
+
+  # --- Instrumentation: strace sddm's ExecStart ---
+  # Diag files land in /var/log/m9r56_diag/ so a
+  # post-boot qemu-nbd inspection can pull them.  strace
+  # follows forks to capture sddm-helper spawn behaviour +
+  # session command exec + PAM helper invocations.
+  mkdir -p '$MNT_DIR/var/log/m9r56_diag'
+  mkdir -p '$MNT_DIR/etc/systemd/system/sddm.service.d'
+  cat > '$MNT_DIR/etc/systemd/system/sddm.service.d/50-strace.conf' <<'SDDM_STRACE_EOF'
+[Service]
+# M9.R.56.8: wrap sddm with strace -f so the sddm ->
+# sddm-helper -> sway spawn chain is captured.  The
+# --absolute-timestamps + -f flags follow every child and
+# tag every syscall with wall-clock time.  Output goes to
+# /var/log/m9r56_diag/sddm-strace.log for post-boot
+# extraction.  We trace only the syscalls that reveal the
+# session-launch path (execve, openat, connect, dup2,
+# setuid, setgid, fork, clone, wait4, kill, exit, exit_group).
+ExecStart=
+ExecStart=/usr/bin/strace -f -tt -o /var/log/m9r56_diag/sddm-strace.log -e trace=execve,openat,connect,dup2,setuid,setgid,fork,clone,wait4,kill,exit,exit_group /usr/bin/sddm
+SDDM_STRACE_EOF
+
+  # --- Instrumentation: post-boot journal capture ---
+  # A one-shot unit that runs after graphical.target and
+  # dumps the sddm.service + sddm-autologin PAM logs to
+  # /var/log/m9r56_diag/sddm-journal.txt.  Runs with a
+  # 30 s delay so sddm has time to emit any startup errors.
+  cat > '$MNT_DIR/etc/systemd/system/m9r56-diag.service' <<'M9R56_DIAG_EOF'
+[Unit]
+Description=M9.R.56.8 diagnostic journal capture
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/mkdir -p /var/log/m9r56_diag
+ExecStartPre=/bin/sh -c 'sleep 30'
+ExecStart=/bin/sh -c 'journalctl --no-pager -u sddm.service > /var/log/m9r56_diag/sddm-journal.txt 2>&1 || true'
+ExecStart=/bin/sh -c 'journalctl --no-pager _PID=1 > /var/log/m9r56_diag/systemd-pid1.txt 2>&1 || true'
+ExecStart=/bin/sh -c 'ls -la /var/log/m9r56_diag/ > /var/log/m9r56_diag/ls.txt 2>&1'
+ExecStart=/bin/sh -c 'systemctl status sddm.service --no-pager > /var/log/m9r56_diag/sddm-status.txt 2>&1 || true'
+ExecStart=/bin/sh -c 'systemctl list-units --failed --no-pager > /var/log/m9r56_diag/failed-units.txt 2>&1 || true'
+ExecStart=/bin/sh -c 'ps auxf > /var/log/m9r56_diag/ps.txt 2>&1'
+ExecStart=/bin/sh -c 'ls -laR /run/user > /var/log/m9r56_diag/run-user.txt 2>&1 || true'
+
+[Install]
+WantedBy=multi-user.target
+M9R56_DIAG_EOF
+  mkdir -p '$MNT_DIR/etc/systemd/system/multi-user.target.wants'
+  ln -sfn /etc/systemd/system/m9r56-diag.service \
+    '$MNT_DIR/etc/systemd/system/multi-user.target.wants/m9r56-diag.service'
+" || { echo "[build-reproos-image] Phase 10.8 sddm path shims + instrumentation failed" >&2; exit 74; }
+
 echo "[build-reproos-image] phase summary:"
 echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
 echo "  mnt root:      $MNT_DIR ($(df -h "$MNT_DIR" 2>/dev/null | tail -1 | awk '{print $3"/"$2}'))"
