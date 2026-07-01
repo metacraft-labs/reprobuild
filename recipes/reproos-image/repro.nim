@@ -121,64 +121,32 @@ package reproosImage:
   defaultToolProvisioning "path"
 
   uses:
+    # M9.R.53: the recipe's operational tool set is now declared
+    # ONLY in ``runtimeDeps:`` below.  The M9.R.53 fold in
+    # ``libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim``
+    # unions ``pkg.toolUses`` (from ``uses:`` + ``buildDeps:``),
+    # ``pkg.nativeBuildDeps`` (from ``nativeBuildDeps:``), and
+    # ``pkg.runtimeDeps`` (from ``runtimeDeps:``) into the interface
+    # projection's ``toolUses`` slot the M9.N Batch B resolver walks,
+    # so the previous twin declaration collapses to a single
+    # semantic slot.
     "sh"
     "bash"
-    # Tools the ``build:`` shell action invokes.  Duplicates the
-    # ``runtimeDeps:`` entries below because the M9.N Batch B tool-
-    # identity resolver walks ``ProjectInterface.toolUses`` (the
-    # engine-side projection of ``uses:`` + ``nativeBuildDeps:``)
-    # rather than the per-kind ``registeredRuntimeDeps`` slot.  Once
-    # M9.R.53's macros_a fold lands (runtimeDeps -> toolUses) the
-    # duplication collapses; until then the twin declaration keeps
-    # both the semantic slot (``runtimeDeps:``) and the operational
-    # slot (``uses:``) aligned.
-    "qemu-img"
-    "qemu-nbd"
-    "parted"
-    "partprobe"
-    "sgdisk"
-    "mkfs.ext4"
-    "mkfs.vfat"
-    "grub-install"
-    "grub-mkconfig"
-    "rsync"
-    "modprobe"
-    "rmmod"
-    "lsmod"
-    "mount"
-    "umount"
-    "mountpoint"
-    "awk"
-    "sed"
-    "grep"
-    "sha256sum"
-    "dirname"
-    "basename"
-    "chmod"
-    "mv"
-    "cp"
-    "rm"
-    "mkdir"
-    "ls"
-    "cat"
-    "sleep"
-    "sync"
-    "touch"
-    "du"
-    "df"
-    "tail"
 
   runtimeDeps:
-    # Semantic slot: these are the tools the shell script invokes
-    # when the recipe runs.  Enumerated in ``reproosImageRuntimeTools``
-    # above.  ``discard`` below satisfies the parser's expectation of
-    # a block body; each individual tool literal is registered via
-    # the ``uses:`` block for the M9.N Batch B resolver walk.
+    # M9.R.53: enumerate every bare-name host tool
+    # ``scripts/build-reproos-image.sh`` invokes.  Each entry is
+    # resolved by the M9.N Batch B tool-identity resolver at build-
+    # plan time; a miss raises a structured "tool-resolution failed:
+    # <name> requested by uses ..." diagnostic BEFORE the shell
+    # action fires -- replacing the previous ad-hoc ``nix-shell -p``
+    # wrap that hid provisioning gaps behind ``command not found``
+    # runtime failures.
     #
-    # TODO(M9.R.53.follow-up): fold ``runtimeDeps`` into ``toolUses``
-    # inside ``macros_a.nim`` so the twin declaration in ``uses:``
-    # above becomes redundant and the semantic split (build-time vs
-    # runtime) survives without operational duplication.
+    # Keep this list in lockstep with the bare tool names in
+    # ``scripts/build-reproos-image.sh``.  ``sudo`` is intentionally
+    # absent -- it's the sole HOST-only escape hatch (setuid; pinned
+    # to /usr/bin/sudo in the script).
     "qemu-img"
     "qemu-nbd"
     "parted"
