@@ -1078,6 +1078,39 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   ln -sfn /opt/repro/reprobuild/recipes/packages/source/pam/.repro/output/install/usr/lib/security \\
     '$MNT_DIR/lib/security'
 
+  # M9.R.56.8.4: strip pam_selinux.so references from the sddm
+  # PAM config files.  The from-source pam recipe does NOT
+  # build pam_selinux.so (it's a separate libselinux-dependent
+  # module).  The Debian sddm-autologin + sddm-greeter PAM config
+  # references pam_selinux.so with control ``[success=ok
+  # ignore=ignore module_unknown=ignore default=bad]``; the
+  # ``module_unknown=ignore`` semantic SHOULD skip a missing
+  # module, but the actual libpam-1.5 pam_start()
+  # implementation treats a file-not-found dlopen error
+  # differently from a module_unknown case: it silently falls
+  # through to /etc/pam.d/other for the affected phase.
+  # /etc/pam.d/other's @include common-auth uses pam_unix.so
+  # nullok --- with autologin (no password supplied), pam_unix
+  # returns PAM_AUTH_ERR, and sddm-helper logs the resulting
+  # ``PAM_PERM_DENIED`` as ``Permission denied`` (verified in
+  # /var/log/sddm.log from the M9.R.56.8.3 boot smoke).
+  #
+  # Fix: use sed to comment out every ``pam_selinux.so`` line
+  # in the two sddm PAM configs.  We use ONLY sed --- no
+  # rewriting the file --- so any future Debian sddm dpkg
+  # update to the PAM config gets picked up (except the
+  # pam_selinux comment).  ReproOS does not ship SELinux;
+  # stripping the module is safe.
+  #
+  # A future M9.R.57+ can either (a) build pam_selinux from
+  # libselinux via a proper from-source module or (b) patch
+  # pam_start()'s file-not-found path to honour
+  # module_unknown=ignore.
+  for f in '$MNT_DIR/etc/pam.d/sddm' '$MNT_DIR/etc/pam.d/sddm-autologin' '$MNT_DIR/etc/pam.d/sddm-greeter'; do
+    [ -f \"\$f\" ] || continue
+    sed -i 's|^\\(.*pam_selinux.so.*\\)\$|# M9.R.56.8.4 stripped: \\1|' \"\$f\"
+  done
+
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
   # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
   mkdir -p '$MNT_DIR/usr/local/lib/sddm'
