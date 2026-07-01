@@ -2,16 +2,17 @@ M9.R.56 — SDDM greeter cascade-peel close-out (continuation sub-agent)
 ====================================================================
 Date: 2026-07-01
 Branch: dev
-HEAD after final push: caf2013b (M9.R.56.6)
+HEAD after final push: f7bad868 (M9.R.56.7)
 
 ## Milestones landed in this session
 
   M9.R.56.4 (f85ffecd)  Dbus runtime dir + gdm.conf strip + libexec symlink
   M9.R.56.5 (215c54a2)  Work around from-source dbus lacking systemd support
   M9.R.56.6 (caf2013b)  Strip UID-1000 collision + tty1 autologin drop-in
+  M9.R.56.7 (f7bad868)  Install minimal SDDM theme + close-out evidence
 
-Total commits M9.R.56.1 .. .6: 6.  Previous 3 (.1/.2/.3) landed by prior
-agent; this session added .4/.5/.6.
+Total commits M9.R.56.1 .. .7: 7.  Previous 3 (.1/.2/.3) landed by prior
+agent; this session added .4/.5/.6/.7.
 
 ## Blocker enumeration (cascade-peel iterations)
 
