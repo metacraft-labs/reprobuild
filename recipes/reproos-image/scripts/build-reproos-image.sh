@@ -1178,6 +1178,74 @@ session    optional   pam_env.so
 session    optional   /usr/lib/x86_64-linux-gnu/security/pam_systemd.so
 PAM_GREETER_EOF
 
+  # M9.R.56.8.7: create /run/user/1000 out-of-band + export
+  # XDG_RUNTIME_DIR in the sway session environment.
+  #
+  # Phase B evidence after M9.R.56.8.6 (system journal +
+  # wayland-session.log):
+  #
+  #   systemd-logind: Failed to start user service
+  #   'user-runtime-dir@1000.service': Failed to execute program
+  #   org.freedesktop.systemd1: Permission denied
+  #
+  #   wayland-session.log: XDG_RUNTIME_DIR is not set in the
+  #   environment. Aborting.
+  #
+  # Root cause: pam_systemd.so calls systemd-logind over dbus
+  # to CreateSession(); logind then tries to start
+  # user-runtime-dir@1000.service by activating org.freedesktop.
+  # systemd1 over the system bus.  The bus service file
+  # /usr/share/dbus-1/system-services/org.freedesktop.systemd1.service
+  # has ``Exec=/bin/false SystemdService=dbus-org.freedesktop.
+  # systemd1.service``, which means dbus MUST use
+  # ``--systemd-activation`` to route the request to systemd.
+  # But the M9.R.56.5 fix stripped ``--systemd-activation`` from
+  # dbus.services ExecStart (because the from-source dbus
+  # recipe was compiled without libsystemd support), so dbus
+  # falls back to executing /bin/false which returns immediately
+  # with the systemd-logind Permission denied error.  Net result:
+  # /run/user/1000 is never created; XDG_RUNTIME_DIR is never
+  # set; sway aborts at startup.
+  #
+  # Fix: bypass systemd-logind entirely for the runtime-dir
+  # creation.  A tmpfiles.d entry creates /run/user/1000 owned
+  # by uid 1000 gid 1000 at boot, and a systemd-tmpfiles
+  # --create call reruns it after the graphical.target reaches.
+  # We ALSO drop /etc/environment.d/50-xdg-runtime-dir.conf
+  # exporting XDG_RUNTIME_DIR=/run/user/1000 so sway inherits
+  # the variable via /bin/bash --login (the wayland-session
+  # script sources /etc/profile which reads
+  # /etc/environment.d/).
+  #
+  # This is a v1 shim.  A future M9.R.57+ rebuild of dbus with
+  # ``-Dsystemd=enabled`` restores the standard flow and the
+  # tmpfiles.d + environment.d shims become no-ops (systemd-
+  # logind then handles /run/user/<uid> normally).
+  mkdir -p '$MNT_DIR/etc/tmpfiles.d'
+  cat > '$MNT_DIR/etc/tmpfiles.d/m9r56-8-xdg-runtime.conf' <<'TMPFILES_EOF'
+# M9.R.56.8.7 --- create /run/user/1000 for the autologin repro
+# user to bypass systemd-logind's user-runtime-dir@.service (which
+# fails because dbus can't systemd-activate org.freedesktop.systemd1).
+d /run/user 0755 root root -
+d /run/user/1000 0700 1000 1000 -
+TMPFILES_EOF
+
+  mkdir -p '$MNT_DIR/etc/environment.d'
+  cat > '$MNT_DIR/etc/environment.d/50-xdg-runtime-dir.conf' <<'ENVD_EOF'
+# M9.R.56.8.7 --- export XDG_RUNTIME_DIR to /run/user/1000
+# (the tmpfiles.d entry above creates the dir).  The wayland-
+# session script sources /etc/profile which reads
+# /etc/environment.d/ via pam_env.so, so sway inherits this.
+XDG_RUNTIME_DIR=/run/user/1000
+ENVD_EOF
+
+  # Also add to /etc/environment (single-line, older-style) as
+  # a belt-and-suspenders fallback for shells that don't process
+  # /etc/environment.d/.
+  if ! grep -q '^XDG_RUNTIME_DIR=' '$MNT_DIR/etc/environment' 2>/dev/null; then
+    echo 'XDG_RUNTIME_DIR=/run/user/1000' >> '$MNT_DIR/etc/environment'
+  fi
+
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
   # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
   mkdir -p '$MNT_DIR/usr/local/lib/sddm'
