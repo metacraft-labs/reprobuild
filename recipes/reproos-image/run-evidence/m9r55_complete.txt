@@ -1,0 +1,159 @@
+M9.R.55 — codetracer-native-recorder flake input repair close-out
+=================================================================
+Date: 2026-07-01
+Branch: dev
+HEAD after fix: ba732ec0 (M9.R.55.1)
+
+
+## Phase A — characterize the 404
+
+M9.R.54 landed devShells.default runtime seeding (qemu, grub2_efi,
+kmod) but the M9.R.54.3 close-out noted `nix develop` itself was
+unreachable because the ``codetracer-native-recorder`` flake input
+pinned to rev ``505b7433faf278bbf8a1b7dc297418f501baea7d`` returned
+HTTP 404 from the tarball archive URL:
+
+    $ curl -sI https://github.com/metacraft-labs/codetracer-native-recorder/archive/505b7433faf278bbf8a1b7dc297418f501baea7d.tar.gz
+    HTTP/1.1 404 Not Found
+
+    $ curl -sI https://codeload.github.com/metacraft-labs/codetracer-native-recorder/tar.gz/505b7433faf278bbf8a1b7dc297418f501baea7d
+    HTTP/1.1 404 Not Found
+
+Falsifying the "repo is private / deleted" hypothesis (which M9.R.54
+had recorded as the presumed cause), the git wire-protocol endpoints
+all resolve fine, both against the exact pinned rev *and* against
+the ``stable`` branch tip, anonymously (no PAT, GIT_TERMINAL_PROMPT=0):
+
+    $ GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/metacraft-labs/codetracer-native-recorder.git refs/heads/stable
+    505b7433faf278bbf8a1b7dc297418f501baea7d	refs/heads/stable
+
+    $ GIT_TERMINAL_PROMPT=0 git clone --depth=1 --branch=stable \
+        https://github.com/metacraft-labs/codetracer-native-recorder.git ctnr-test
+    Cloning into 'ctnr-test'...
+    # succeeds; hook_registry.nim etc. present under ct_interpose/src/ct_interpose/
+
+The GitHub REST API also 404s for the individual commit
+(``api.github.com/repos/.../commits/<rev>``).  Cross-checked against
+the HEAD-of-main rev (``b9725264...``) — same 404 shape — so the
+tarball / API endpoints are broken across every rev of this repo, not
+just the pinned one.  Root cause: the tarball archive endpoint
+(``codeload.github.com``) and the REST commit endpoint are apparently
+disabled for this repository (likely a repo-level setting), while the
+git wire protocol remains fully functional.  Nix's ``github:`` URL
+form uses codeload; ``git+https:`` uses the git wire protocol.
+
+
+## Phase B — option chosen + rationale
+
+Four options considered per the plan:
+
+  1. Latest working upstream rev via ``git ls-remote`` — falsified
+     the "gone upstream" hypothesis (repo exists, refs resolve), so
+     the pin itself isn't stale.  Not the fix.
+  2. Sibling repo (``path:../codetracer-native-recorder``) — works
+     for the dev shell but breaks the sandboxed package build (no
+     sibling inside the sandbox), and locks the flake to a
+     host-relative path that fresh checkouts can't resolve.  Would
+     require ``--override-input`` on CI.  Not clean.
+  3. Vendor last-known-good tree — heavy for a repo whose git
+     endpoints are still fully functional.
+  4. Drop the input — falsified: reproos-image doesn't directly
+     depend on ct_interpose, but the flake's package build wires
+     CT_INTERPOSE_SRC unconditionally (``ctInterposeSrc = "${...}"``
+     at flake.nix:134), and repro_monitor_hooks + the cross-platform
+     monitor shim import from it, so dropping breaks the package
+     build.  Not viable without a much larger refactor.
+
+Chosen: **swap URL form from ``github:`` to ``git+https:``**,
+staying pinned to the same rev.  Cleanest — one-liner ``url =``
+change, no ``--override-input`` / ``--impure`` escape hatch, works
+from a fresh checkout, and Nix's ``git+https`` fetcher produces a
+byte-identical narHash to the previously-locked tarball
+(``sha256-wNr+jtXbOWYeWhiOpHR8jYP8+KnxZbeiaOYmB/EUljI=`` unchanged
+in flake.lock across the swap).
+
+
+## Phase C — repin
+
+Committed as M9.R.55.1 (ba732ec0):
+
+  flake.nix                   +8 -1
+  flake.lock                  +6 -6
+
+flake.nix:81 diff:
+
+    -      url = "github:metacraft-labs/codetracer-native-recorder/stable";
+    +      url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
+
+flake.lock ``codetracer-native-recorder`` node diff:
+
+    -        "owner": "metacraft-labs",
+    -        "repo": "codetracer-native-recorder",
+    +        "ref": "stable",
+             "rev": "505b7433faf278bbf8a1b7dc297418f501baea7d",
+    -        "type": "github"
+    +        "revCount": 973,
+    +        "type": "git",
+    +        "url": "https://github.com/metacraft-labs/codetracer-native-recorder"
+
+narHash + rev unchanged.  Regenerated via ``nix flake lock
+--update-input codetracer-native-recorder`` inside eli-wsl.
+
+
+## Phase D — verification transcript
+
+Run inside eli-wsl at /opt/repro/reprobuild after checkout of M9.R.55.1:
+
+    $ nix develop --command bash -c 'which qemu-img grub-install modprobe kmod'
+    /nix/store/bjn6s1mqinmp0csj8mlaisd9dhz88shc-qemu-10.2.2/bin/qemu-img
+    /nix/store/i5isdb2qfavg32l1d2yb3bsi9b4m4sxv-grub-2.12/bin/grub-install
+    /nix/store/02wkfkv635277dyq176lw5dcqpxlpsl0-kmod-31/bin/modprobe
+    /nix/store/02wkfkv635277dyq176lw5dcqpxlpsl0-kmod-31/bin/kmod
+
+    $ nix develop --command bash -c './build/bin/repro build recipes/reproos-image'
+    [########################] checked=1/1 running=0 succeeded reproosImage.build_image
+    repro build: tool provisioning active (tool-provisioning=path)
+    project: reproosImage
+    providerInvocations: 0
+    loweredGraphCache: hit
+    scheduler: actions=1
+    buildReport: /opt/repro/reprobuild/recipes/reproos-image/.repro/build/repro/build-report.json
+
+    $ ls -la /opt/repro/reprobuild/recipes/reproos-image/build/reproos-installed.qcow2
+    -rw-r--r-- 1 zahary users 5157355520 Jul  1 18:33 reproos-installed.qcow2
+
+    $ sha256sum /opt/repro/reprobuild/recipes/reproos-image/build/reproos-installed.qcow2
+    96510bff408bc9631a231fd3bfaf094ad90f1bad15884915c25748c036ba54d0
+
+No ``nix-shell -p ...`` wrap, no ``LD_LIBRARY_PATH`` seeding, no
+``--impure`` / ``--override-input``.  The M9.R.54.1/54.2 dev-shell
+seeding + M9.R.55.1 flake-input repair together close the
+``nix develop`` → ``repro build recipes/reproos-image`` path for a
+fresh operator on a clean checkout.
+
+
+## Files changed
+
+  M   flake.nix                                            +8 -1
+  M   flake.lock                                           +6 -6
+
+## Commits
+
+  ba732ec0  M9.R.55.1: switch codetracer-native-recorder input to git+https URL form
+
+
+## Honest remaining gap
+
+None on the M9.R.55 scope: ``nix develop`` enters cleanly and
+``repro build recipes/reproos-image`` produces the expected qcow2
+end-to-end.
+
+Adjacent observation (out of M9.R.55 scope):
+GitHub's tarball + REST endpoints are broken repo-wide for
+``metacraft-labs/codetracer-native-recorder`` — every rev 404s at
+codeload and every commit-lookup 404s at api.github.com, while the
+git wire protocol works fine.  This is a repo-level configuration
+issue upstream (likely a private-mode toggle or a recent GitHub
+policy change against the repo).  Worth raising with the codetracer
+team, but does not block reprobuild once the input URL form is
+swapped.
