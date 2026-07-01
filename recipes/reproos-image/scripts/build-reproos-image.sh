@@ -1005,14 +1005,37 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   set -euo pipefail
 
   # --- Path shims for compiled-in Constants.h defines ---
-  # Create /usr/local/libexec as a directory containing symlinks
-  # to the real /usr/libexec/sddm-helper* binaries.  We use a
-  # directory (not a full symlink) so /usr/local/libexec doesn't
-  # collide with any host-provisioned files a future recipe
-  # might drop into /usr/local.
+  # M9.R.56.8.2: point directly at the from-source install-mirror
+  # under /opt/repro/reprobuild.  stage-de-rootfs.sh's
+  # ``link_base_recipe_binaries`` shadow-links only ``usr/{bin,
+  # sbin}`` from the install-mirror --- ``usr/libexec/`` is NOT
+  # shadow-linked (same finding as Phase 10.6 Blocker 3 for
+  # dbus-daemon-launch-helper).  We therefore link
+  # /usr/local/libexec/<helper> DIRECTLY at
+  # /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/libexec/<helper>
+  # rather than via /usr/libexec/<helper> (which does not exist
+  # on the installed disk).
+  #
+  # This matches Phase 10.6 Blocker 3's dbus-daemon-launch-helper
+  # shim exactly.  A future stage-de-rootfs.sh pass that shadow-
+  # links usr/libexec/ from every from-source install-mirror
+  # would let this collapse to ``ln -sfn /usr/libexec/<helper>``
+  # (a single-hop symlink), but that broader shadow-link rework
+  # belongs in M9.R.57+ with the sddm-recipe CMAKE_INSTALL_PREFIX
+  # fix.
   mkdir -p '$MNT_DIR/usr/local/libexec'
+  SDDM_INSTALL_LIBEXEC=/opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/libexec
   for helper in sddm-helper sddm-helper-start-wayland sddm-helper-start-x11user; do
-    ln -sfn \"/usr/libexec/\$helper\" \"$MNT_DIR/usr/local/libexec/\$helper\"
+    ln -sfn \"\$SDDM_INSTALL_LIBEXEC/\$helper\" \"$MNT_DIR/usr/local/libexec/\$helper\"
+  done
+
+  # Also shadow-link /usr/libexec/<helper> so any code path that
+  # references /usr/libexec/sddm-helper directly (e.g. the
+  # /etc/sddm.conf.d/10-paths.conf overrides below, or a rebuilt
+  # sddm binary with CMAKE_INSTALL_PREFIX=/usr) resolves too.
+  mkdir -p '$MNT_DIR/usr/libexec'
+  for helper in sddm-helper sddm-helper-start-wayland sddm-helper-start-x11user; do
+    ln -sfn \"\$SDDM_INSTALL_LIBEXEC/\$helper\" \"$MNT_DIR/usr/libexec/\$helper\"
   done
 
   # /usr/local/share/sddm -> /usr/share/sddm as a full dir
