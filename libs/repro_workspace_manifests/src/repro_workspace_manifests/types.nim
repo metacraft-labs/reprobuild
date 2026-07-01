@@ -510,7 +510,10 @@ type
   #              path = "manifests-team", repos = ["core"] }]
 
   ApplyIfEntry* = object
-    ## HL-1 — one `[[apply_if]]` path-scoped binding.
+    ## HL-1 — one `apply_if` path-scoped binding. Authored as an INLINE-table
+    ## array element (`apply_if = [{ under = "…", config = "…" }]`), not the
+    ## `[[apply_if]]` double-bracket form (the pinned `toml-serialization`
+    ## rejects the nested double-bracket array-of-tables — §4.2).
     under*: string
       ## The directory under which a workspace checkout activates this
       ## binding. `~` is expanded; the value is normalized to an absolute,

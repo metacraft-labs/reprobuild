@@ -19404,6 +19404,97 @@ proc recordRoutedParticipation*(workspaceRoot: string;
   recordWorkspaceParticipation(assignments, projectName, repoShas)
 
 # ---------------------------------------------------------------------------
+# HL-2 (Unified-Locking-And-Hooks §6 Decision 1) — strict per-backend, tier-
+# isolated write / read / publish. The monolithic all-repos lock TOML is the
+# cross-tier leak (a personal repo's SHA and a team repo's SHA landing together
+# in the one git manifest). The procs below partition the observed repos by
+# their resolved ``(tier, backend)`` so each backend receives ONLY the repos
+# routed to it, and the pre-push read / post-gate publish iterate per-backend.
+# ---------------------------------------------------------------------------
+
+proc storeRootMatches(store: LockStore; manifestLayerRoot: string): bool =
+  ## True when ``store`` is a durable backend whose on-disk root is exactly
+  ## ``manifestLayerRoot`` (the git-checkout manifest the monolithic
+  ## ``writeLockFile`` targets). Used to decide which observed repos belong in
+  ## the manifest lock file: only the repos routed to THAT git-checkout backend.
+  if store.isNil: return false
+  let want = os.normalizedPath(absolutePath(manifestLayerRoot))
+  for r in store.manifestLayerRoots():
+    if os.normalizedPath(absolutePath(r)) == want:
+      return true
+  false
+
+proc manifestOwnedRepos*(composed: ComposedRouting;
+    lockRepos: seq[ResolvedRepo]; workspaceRoot, manifestLayerRoot: string;
+    identity: GitToolIdentity): seq[ResolvedRepo] =
+  ## HL-2 — the subset of ``lockRepos`` whose resolved backend is the
+  ## git-checkout manifest at ``manifestLayerRoot``. When NO configuration
+  ## layer declares an explicit route (the today's-common single-tier shape),
+  ## every observed repo is manifest-owned, so the monolithic ``writeLockFile``
+  ## stays BYTE-IDENTICAL to the pre-HL-2 behavior (all repos, one TOML). When
+  ## routes ARE declared, a public repo (committed-lock) and a personal/other-
+  ## backend repo are EXCLUDED — their SHAs never land in the git manifest.
+  if not composed.hasExplicitRoutes:
+    return lockRepos
+  let assignments = resolveRepoBackends(
+    composed, lockRepos, workspaceRoot, identity, identity.binaryPath)
+  var byPath = initTable[string, RepoBackendAssignment]()
+  for a in assignments:
+    byPath[a.repoPath] = a
+  for repo in lockRepos:
+    if byPath.hasKey(repo.path) and
+        storeRootMatches(byPath[repo.path].store, manifestLayerRoot):
+      result.add(repo)
+
+# ---------------------------------------------------------------------------
+# HL-2 (§10 Migration) — legacy ``.repo/manifests`` migration guard.
+#
+# "No implicit team route" (spec §10) means a legacy ``.repo/manifests``
+# workspace with no team route declared would silently become public-only and
+# stop writing its team manifest lock. That is a BREAKING change we must never
+# make silently. When a manifest checkout is present but the composed
+# configuration plane declares NO explicit route (so no team tier points at the
+# manifest), we emit a LOUD, ONE-TIME guidance naming the exact
+# ``repro locking adopt-manifest`` remedy that keeps the manifest as the team
+# backend. The guidance is throttled by a sentinel under ``.repro/`` so it does
+# not spam every lock/gate run.
+# ---------------------------------------------------------------------------
+
+proc legacyManifestMigrationSentinelPath(workspaceRoot: string): string =
+  workspaceRoot / ".repro" / "workspace" / "legacy-manifest-migration.warned"
+
+proc maybeWarnLegacyManifestWithoutTeamRoute*(workspaceRoot: string;
+    composed: ComposedRouting) =
+  ## HL-2 (§10) — emit the one-time migration guidance when a
+  ## ``.repo/manifests`` checkout exists but no explicit route is declared (the
+  ## legacy workspace that WOULD silently go public-only). Best-effort: never
+  ## raises, never blocks the caller.
+  let manifestsDir = workspaceRoot / ".repo" / "manifests"
+  if not dirExists(manifestsDir): return
+  if composed.hasExplicitRoutes: return
+  let sentinel = legacyManifestMigrationSentinelPath(workspaceRoot)
+  if fileExists(sentinel): return
+  stderr.writeLine(
+    "repro: WARNING — this workspace has a `.repo/manifests` checkout but NO " &
+    "team route declared in any configuration layer.")
+  stderr.writeLine(
+    "  Under the tier-isolated locking model there is NO implicit team route: " &
+    "without an explicit route this workspace is PUBLIC-ONLY and will stop " &
+    "writing its team manifest lock (`" & manifestsDir & "/locks/...`).")
+  stderr.writeLine(
+    "  To keep `.repo/manifests` as the TEAM backend, run:  " &
+    "repro locking adopt-manifest --workspace-root=" & workspaceRoot)
+  stderr.writeLine(
+    "  That scaffolds a `[locking] route = [{ visibility = \"team\", " &
+    "backend = \"git-checkout\", path = \".repo/manifests\", repos = [...] }]` " &
+    "route mapping the team tier to the existing manifest checkout.")
+  try:
+    createDir(sentinel.parentDir)
+    writeFile(sentinel, "warned\n")
+  except CatchableError:
+    discard
+
+# ---------------------------------------------------------------------------
 # MO-5 — evidence-only private-repo participation
 # ---------------------------------------------------------------------------
 #
@@ -21744,12 +21835,29 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
     if repo.path in headShas:
       lockRepos.add(repo)
 
+  # HL-2 (§6 Decision 1) — partition by resolved tier so the git-checkout
+  # manifest lock TOML holds ONLY the repos routed to THAT backend, never a
+  # cross-tier mix. ``manifestOwnedRepos`` returns every observed repo when no
+  # explicit route is declared (today's single-tier shape ⇒ byte-identical
+  # monolithic write); when routes ARE declared it drops the public
+  # (committed-lock) and personal/other-backend repos from the manifest file —
+  # their records are written to their OWN backends by
+  # ``recordRoutedParticipation`` below. The tier→backend binding comes from the
+  # HL-1 composed configuration plane.
+  let composed = composeLockingRouting(args.workspaceRoot, identity.binaryPath)
+  # HL-2 (§10) — a legacy ``.repo/manifests`` workspace with no team route must
+  # never silently go public-only; warn (once) and name the ``adopt-manifest``
+  # remedy. Best-effort — never blocks the lock.
+  maybeWarnLegacyManifestWithoutTeamRoute(args.workspaceRoot, composed)
+  let manifestRepos = manifestOwnedRepos(
+    composed, lockRepos, args.workspaceRoot, manifestLayerRoot, identity)
+
   var lock = buildLockFromLiveState(
     project = resolved.projectName,
     workspaceBranch = workspaceBranch,
     createdAt = createdAt,
     createdBy = createdBy,
-    resolved = lockRepos,
+    resolved = manifestRepos,
     headShasByPath = headShas,
     currentBranchesByPath = currentBranches)
 
@@ -21760,22 +21868,30 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs): WorkspaceLockOutcome =
   # same file, so "replaced an existing lock" is simply "the lock file
   # already existed on disk before this write".
   let lockAlreadyExisted = fileExists(lockPath)
-  writeLockFile(lock, lockPath)
-  report.lockFilePath = lockPath
+  # HL-2 (§6 Decision 1) — the monolithic trigger-keyed ``writeLockFile`` is
+  # kept ONLY for the no-explicit-route single-tier shape (today's common
+  # ``.repo/manifests`` workspace), where it stays BYTE-IDENTICAL to pre-HL-2.
+  # When routes ARE declared, each repo's participation is recorded per-repo
+  # through its ASSIGNED backend by ``recordRoutedParticipation`` below (the
+  # team git-checkout backend included, at its own ``locks/<p>/<repo>/<sha>``
+  # path), so the trigger-keyed monolithic file is redundant AND would drop a
+  # cross-tier mix keyed on a possibly-non-team trigger repo. We skip it.
+  if not composed.hasExplicitRoutes:
+    writeLockFile(lock, lockPath)
+    report.lockFilePath = lockPath
+    report.replacedExistingEntry = lockAlreadyExisted
+    for entry in lock.repos:
+      report.repos.add(WorkspaceLockRepoEntry(
+        name: entry.name,
+        path: entry.path,
+        remote: entry.remoteName,
+        revision: entry.revision,
+        branch: entry.branch))
   report.indexFilePath = ""
-  report.replacedExistingEntry = lockAlreadyExisted
   report.triggerRepo = triggerRepo.name
   report.triggerSha = triggerSha
   report.createdAt = createdAt
   report.workspaceBranch = workspaceBranch
-
-  for entry in lock.repos:
-    report.repos.add(WorkspaceLockRepoEntry(
-      name: entry.name,
-      path: entry.path,
-      remote: entry.remoteName,
-      revision: entry.revision,
-      branch: entry.branch))
 
   # MO-4 — record each repo's participation through its ASSIGNED locking
   # backend (config → per-repo backend, keyed by visibility). A no-op when the
@@ -25333,16 +25449,77 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # record) exactly when the underlying ``lockRelPath`` is "".
   let gateStore: LockStore =
     newGitCheckoutLockStore(identity, manifestLayerRoot)
-  let latest = gateStore.latestLockShas(resolved.projectName)
-  let lockedShas = latest.shas
-  var lockMissing = latest.lockKey.sha.len == 0
+  # HL-2 (§6 Decision 1 — target read path) — per-backend currency read.
+  #
+  # When NO explicit route is declared (today's single-tier shape), the read is
+  # BYTE-IDENTICAL to the pre-HL-2 single git-checkout store read: the manifest
+  # is the lock home for every in-scope repo and ``latestLockShas`` parses the
+  # monolithic ``locks/...`` file.
+  #
+  # When routes ARE declared, each repo's locked SHA is read from ITS ASSIGNED
+  # backend (team from the team backend, personal from the personal backend) via
+  # the tolerant per-record ``latestLock`` reader — NOT the single monolithic
+  # ``latestLockShas`` (which strict-parses one all-repos ``reprobuild.workspace
+  # .lock.v1`` file; the routed backends instead hold per-repo participation
+  # records). A public (committed-lock) repo has no store SHA — its currency is
+  # the committed-lock integrity branch above; it is dropped from the store-SHA
+  # comparison here.
+  let gateComposed = composeLockingRouting(
+    parsed.workspaceRoot, identity.binaryPath)
+  var lockedShas = initTable[string, string]()
+  var latest: tuple[shas: Table[string, string]; lockKey: StoreLockKey]
+  var routedBackendRepos: seq[RepoObs] = @[]
+  # Paths whose currency is NOT a store-SHA comparison (public / committed-lock
+  # repos, verified by the committed-lock integrity branch). The staleness loop
+  # skips these so a public repo is never spuriously marked stale for lacking a
+  # store record.
+  var committedLockPaths = initHashSet[string]()
+  if not gateComposed.hasExplicitRoutes:
+    latest = gateStore.latestLockShas(resolved.projectName)
+    lockedShas = latest.shas
+  else:
+    var inScopeRepos: seq[ResolvedRepo] = @[]
+    for repo in resolved.repos:
+      if repoInScope(repo.name): inScopeRepos.add(repo)
+    let gateAssignments = resolveRepoBackends(
+      gateComposed, inScopeRepos, parsed.workspaceRoot, identity,
+      identity.binaryPath)
+    var byPath = initTable[string, RepoBackendAssignment]()
+    for a in gateAssignments: byPath[a.repoPath] = a
+    for obs in observations:
+      if not obs.hasGit: continue
+      if not byPath.hasKey(obs.path): continue
+      let asg = byPath[obs.path]
+      if asg.store.isNil:
+        # Public / committed-lock repo — no store SHA; its currency is the
+        # committed-lock integrity check, so exclude it from the store-SHA
+        # comparison rather than treating a missing store record as stale.
+        committedLockPaths.incl(obs.path)
+        continue
+      # Routed to a durable backend (team / personal / other) — read this repo's
+      # locked SHA from ITS backend via the tolerant per-record reader.
+      routedBackendRepos.add(obs)
+      let got = asg.store.latestLock(resolved.projectName, asg.repoName)
+      if got.isSome:
+        let shas = shasFromBody(got.get().body)
+        if shas.hasKey(obs.path):
+          lockedShas[obs.path] = shas[obs.path]
+        elif shas.len == 1:
+          for _, v in shas: lockedShas[obs.path] = v
+  # ``lockMissing`` = no lock record exists to compare against. The manifest
+  # store contributes ``latest.lockKey.sha``; a routed distinct backend
+  # contributes its own record (``routedBackendRepos`` were read above). When
+  # neither exists there is nothing to compare — the lock must be created.
+  var lockMissing = latest.lockKey.sha.len == 0 and routedBackendRepos.len == 0
   var lockStale = false
   if not lockMissing:
-    if lockedShas.len == 0:
+    if lockedShas.len == 0 and committedLockPaths.len == 0:
       lockMissing = true
     else:
       for obs in observations:
         if not obs.hasGit:
+          continue
+        if obs.path in committedLockPaths:
           continue
         if obs.path notin lockedShas:
           lockStale = true
@@ -25552,6 +25729,72 @@ proc writeCheckReport(report: CheckReport) =
   let reportPath = reportDir / "check-report.json"
   writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
 
+type
+  PerBackendPublishTarget = object
+    ## HL-2 (§6 Decision 1 — target publish path) — one DISTINCT durable
+    ## backend (other than the manifest git-checkout) that a routed workspace
+    ## must publish its pending records through at pre-push. ``backendKind`` is
+    ## the human/JSON label for the diagnostics; ``store`` is the constructed
+    ## backend whose ``publishPending`` commits + pushes its own pending records.
+    backendKind: string
+    store: LockStore
+
+proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
+    identity: GitToolIdentity): seq[PerBackendPublishTarget] =
+  ## HL-2 — resolve the DISTINCT non-manifest durable backends a routed
+  ## workspace must publish through at pre-push, so a personal repo's record
+  ## reaches the personal store and a non-manifest team repo's record reaches
+  ## its own store — never the one git-checkout manifest. Returns ``@[]`` when
+  ## the workspace declares no explicit route (today's single-tier shape ⇒ the
+  ## manifest publish alone, byte-identical to pre-HL-2). Backends are
+  ## de-duplicated: a per-tier backend serves every repo of that tier, so it is
+  ## published once. The manifest git-checkout (published separately by the
+  ## RA-7/RA-21 path) and committed-lock repos (carried by the repo's own push)
+  ## are excluded.
+  result = @[]
+  let composed = composeLockingRouting(parsed.workspaceRoot, identity.binaryPath)
+  if not composed.hasExplicitRoutes: return
+  var resolved: ResolvedProject
+  try:
+    (resolved, _) = resolveCheckProject(parsed)
+  except CatchableError:
+    return
+  # Mirror the gate's RA-21 scope: only the pushed repo's develop-set closure
+  # participated in the write, so only those backends have pending records.
+  var currentRepoName = ""
+  if parsed.currentRepo.len > 0:
+    for repo in resolved.repos:
+      if absolutePath(parsed.workspaceRoot / repo.path) == parsed.currentRepo:
+        currentRepoName = repo.name
+        break
+  let scopeClosure = developSetClosure(resolved.repos, currentRepoName)
+  let scopeIsWholeWorkspace = scopeClosure.len == 0
+  var inScope: seq[ResolvedRepo] = @[]
+  for repo in resolved.repos:
+    if scopeIsWholeWorkspace or repo.name in scopeClosure:
+      inScope.add(repo)
+  var assignments: seq[RepoBackendAssignment]
+  try:
+    assignments = resolveRepoBackends(
+      composed, inScope, parsed.workspaceRoot, identity, identity.binaryPath)
+  except StoreRoutingError:
+    # An unrouted private repo already surfaced as a gate failure on the write
+    # side; do not double-report here.
+    return
+  var seenBackends = initHashSet[string]()
+  for asg in assignments:
+    if asg.store.isNil: continue          # committed-lock: repo's own push
+    if storeRootMatches(asg.store, manifestLayerRoot): continue
+    # De-dupe shared backends (a per-tier backend serves every repo of that
+    # tier). Key on backend kind + its manifest roots.
+    var key = asg.backendKind
+    for r in asg.store.manifestLayerRoots():
+      key.add("\0" & os.normalizedPath(absolutePath(r)))
+    if key in seenBackends: continue
+    seenBackends.incl(key)
+    result.add(PerBackendPublishTarget(
+      backendKind: asg.backendKind, store: asg.store))
+
 proc runCheckCommand*(args: openArray[string]): int =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
   ## [--current-repo=PATH] [--pushed-refs=FILE]
@@ -25683,6 +25926,40 @@ proc runCheckCommand*(args: openArray[string]): int =
               "repo and re-push (fix the network / non-fast-forward / " &
               "manifest-dirty cause above)",
             evidence: pub2.diagnostic))
+          report.exitCode = 2
+
+      # HL-2 (§6 Decision 1 — target publish path) — per-backend publish.
+      # The manifest git-checkout above is one backend; a mixed workspace also
+      # has team/personal records living in DISTINCT durable backends. Iterate
+      # every OTHER routed backend and publish its pending records through THAT
+      # backend, so a personal repo's record reaches the personal store and a
+      # non-manifest team repo's record reaches its own store — never the one
+      # manifest. HL-2 keeps today's loud-on-failure behavior uniformly; the
+      # tier-differentiated refuse-vs-warn policy is HL-3 (out of scope here).
+      for target in perBackendPublishTargets(
+          parsed, report.manifestLayerRoot, identity):
+        let otherPub = target.store.publishPending()
+        let opub = LockPublishResult(
+          outcome: lockPublishFromStorePut(otherPub.outcome),
+          diagnostic: otherPub.diagnostic)
+        case opub.outcome
+        of lpoPublished:
+          stderr.writeLine("repro check: published " & target.backendKind &
+            " backend: " & opub.diagnostic)
+        of lpoNothingToPublish, lpoNotPublishable:
+          discard
+        of lpoRefusedDirty, lpoFailed:
+          let diag = "lock publication failed for " & target.backendKind &
+            " backend: " & opub.diagnostic
+          stderr.writeLine("repro check: " & diag)
+          report.failures.add(CheckFailure(
+            repo: "",
+            property: "lock-publish-failure",
+            remediation:
+              "run 'repro push' to re-publish the " & target.backendKind &
+              " backend (fix the network / non-fast-forward / dirty cause " &
+              "above)",
+            evidence: opub.diagnostic))
           report.exitCode = 2
     writeCheckReport(report)
     if parsed.json:
@@ -34712,7 +34989,7 @@ const reproTopLevelCommands = [
 ]
 
 const reproLockingSubcommands = [
-  "explain",
+  "explain", "adopt-manifest",
 ]
 
 proc runReproLockingExplain(args: openArray[string]): int =
@@ -34781,19 +35058,107 @@ proc runReproLockingExplain(args: openArray[string]): int =
         (if a.layerSource.len > 0: " [" & a.layerSource & "]" else: "")
   return 0
 
+proc runReproLockingAdoptManifest(args: openArray[string]): int =
+  ## HL-2 (Unified-Locking-And-Hooks §10 Migration) — ``repro locking
+  ## adopt-manifest``. Scaffold an explicit TEAM route mapping the existing
+  ## ``.repo/manifests`` git-checkout backend to the team tier, so a legacy
+  ## manifest workspace keeps writing its team manifest lock instead of
+  ## silently going public-only. The route names every resolved repo (tier-by-
+  ## layer) and is written into the VCS-PRIVATE configuration layer (layer 5,
+  ## ``<git-common-dir>/repro/config.toml``) — workspace-local, never pushed —
+  ## so the scaffold does not touch any committed or shared config. Idempotent:
+  ## re-running refreshes the same file.
+  var workspaceRoot = ""
+  var projectName = ""
+  var mode = tpmUnspecified
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--project" or arg.startsWith("--project="):
+      projectName = valueFromFlag(args, i, "--project")
+    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
+      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
+    elif arg.startsWith("-"):
+      stderr.writeLine("repro locking adopt-manifest: unknown flag " & arg)
+      return 2
+    elif projectName.len == 0:
+      projectName = arg
+    inc i
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = absolutePath(workspaceRoot)
+
+  let manifestsDir = workspaceRoot / ".repo" / "manifests"
+  if not dirExists(manifestsDir):
+    stderr.writeLine("repro locking adopt-manifest: no `.repo/manifests` " &
+      "checkout at " & manifestsDir & " — nothing to adopt (this verb makes " &
+      "an EXISTING manifest the team backend).")
+    return 2
+
+  let effectiveMode = if mode == tpmUnspecified: tpmPathOnly else: mode
+  let identity = ensureGitToolResolvable(effectiveMode, getEnv("PATH"))
+  let (resolved, _) = resolveWorkspaceProjectShared(
+    workspaceRoot, projectName, "`repro locking adopt-manifest`")
+
+  # Name every resolved repo so tier-by-layer moves them all into the team
+  # tier backed by the existing manifest (the migration keeps the manifest as
+  # the team backend for the whole workspace).
+  var repoNames: seq[string] = @[]
+  for repo in resolved.repos:
+    repoNames.add(repo.name)
+  if repoNames.len == 0:
+    stderr.writeLine("repro locking adopt-manifest: no repos resolved for " &
+      "this workspace; nothing to route.")
+    return 2
+
+  var quoted: seq[string] = @[]
+  for n in repoNames:
+    quoted.add("\"" & n & "\"")
+  let reposList = quoted.join(", ")
+  # The git-checkout backend path is workspace-relative (``.repo/manifests``),
+  # resolved against the workspace root by ``constructRoutedBackend``.
+  let configBody =
+    "schema = \"reprobuild.config.v1\"\n\n" &
+    "# HL-2 adopt-manifest: keep the existing `.repo/manifests` checkout as the\n" &
+    "# TEAM locking backend (VCS-private layer 5 — never tracked, never pushed).\n" &
+    "[locking]\n" &
+    "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
+    "path = \".repo/manifests\", repos = [" & reposList & "] }]\n"
+
+  let configPath = vcsPrivateConfigPath(workspaceRoot, identity.binaryPath)
+  try:
+    createDir(configPath.parentDir)
+    writeFile(configPath, configBody)
+  except CatchableError as err:
+    stderr.writeLine("repro locking adopt-manifest: failed to write " &
+      configPath & ": " & err.msg)
+    return 1
+
+  stderr.writeLine("repro locking adopt-manifest: wrote team route for " &
+    $repoNames.len & " repo(s) → git-checkout at `.repo/manifests`")
+  stderr.writeLine("  config layer (VCS-private, never pushed): " & configPath)
+  stderr.writeLine("  run `repro locking explain` to verify the resolved " &
+    "(tier, backend) for each repo.")
+  return 0
+
 proc runReproLockingCommand*(args: openArray[string]): int =
   ## Top-level dispatcher for ``repro locking <verb> ...``. HL-1 ships
-  ## ``explain``; later milestones (HL-2 ``adopt-manifest``) extend this family.
+  ## ``explain``; HL-2 adds ``adopt-manifest``.
   if args.len == 0:
-    stderr.writeLine("repro locking: error: missing verb (one of: explain)")
+    stderr.writeLine("repro locking: error: missing verb (one of: explain, " &
+      "adopt-manifest)")
     return 2
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
   case args[0]
   of "explain":
     return runReproLockingExplain(rest)
+  of "adopt-manifest":
+    return runReproLockingAdoptManifest(rest)
   else:
     stderr.writeLine("repro locking: error: unknown verb '" & args[0] &
-      "' (one of: explain)")
+      "' (one of: explain, adopt-manifest)")
     return 2
 
 proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
