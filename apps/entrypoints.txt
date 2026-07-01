@@ -8,6 +8,14 @@ repro apps/repro/repro.nim
 # which the reprobuild Nix package installs so the nixos-modules
 # `services.mcl-repro-binary-cache` systemd unit can run it.
 repro-binary-cache apps/repro-binary-cache/repro_binary_cache.nim
+# Windows-Runner-Binary-Cache-Deploy M2: cross-host publish→substitute driver
+# (gate `t_cross_host_publish_substitute`). Runs on the *client* NixOS node and
+# publishes a 5-member closure to a REMOTE `services.mcl-repro-binary-cache`
+# server over the VM network, then substitutes it back, asserting every payload
+# crossed the wire (bytesFetched>0, not a local cache hit) and re-extracts
+# byte-identical. Building it here ships build/bin/repro-binary-cache-crosshost
+# in the reprobuild Nix package so the M2 nixosTest can reference it.
+repro-binary-cache-crosshost apps/repro-binary-cache-crosshost/repro_binary_cache_crosshost.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim

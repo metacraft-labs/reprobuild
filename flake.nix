@@ -277,6 +277,27 @@
               runHook postInstall
             '';
 
+            # The binary-cache client streaming path dlopen()s libzstd.so.1 at
+            # runtime (zstd frame decompress on substitute). Because it is
+            # dlopen'd it is NOT a DT_NEEDED dep, so the default fixupPhase
+            # (`patchelf --shrink-rpath`) strips any rpath entry pointing at
+            # zstd — which is why adding it in installPhase silently vanished.
+            # Re-add it in postFixup (runs AFTER the shrink) as a forced DT_RPATH
+            # (glibc reliably searches DT_RPATH — not always DT_RUNPATH — for a
+            # binary's own dlopen calls). Without this, repro-binary-cache /
+            # repro-binary-cache-crosshost fail at the first payload transfer
+            # with "could not load: libzstd.so.1" (M1's healthz/cache-info gate
+            # never transferred a payload, so it only surfaced under the M2
+            # cross-host substitute test).
+            postFixup = ''
+              for b in "$out"/bin/*; do
+                if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
+                  ${pkgs.patchelf}/bin/patchelf --force-rpath \
+                    --set-rpath "$orig''${orig:+:}${pkgs.zstd.out}/lib" "$b"
+                fi
+              done
+            '';
+
             meta = {
               description = "Reprobuild build system";
               homepage = "https://github.com/metacraft-labs/reprobuild";
