@@ -78,7 +78,14 @@
       # neither, so we must seed CT_INTERPOSE_SRC from this input. In the
       # CodeTracer workspace this input ``follows`` codetracer's own
       # native-recorder input, so a local sibling checkout is used.
-      url = "github:metacraft-labs/codetracer-native-recorder/stable";
+      #
+      # We use the ``git+https`` URL form (git wire protocol) rather than
+      # the ``github:`` form (tarball archive via codeload.github.com):
+      # the codeload tarball endpoint 404s for this repo even for
+      # anonymous callers (see M9.R.55 evidence — tarball generation is
+      # apparently disabled at the repo level), while the anonymous git
+      # protocol clone works fine and produces a byte-identical narHash.
+      url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
       flake = false;
     };
   };
