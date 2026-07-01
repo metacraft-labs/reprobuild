@@ -142,6 +142,22 @@ jobs:
           path: ${{ github.workspace }}/../vm-harness
           gh-token: ${{ steps.ci_token.outputs.token }}
 
+      # codetracer's .envrc loads its flake-override direnv plugin from a
+      # ``../direnv-nix-flake-overrides`` sibling when present, and only falls
+      # back to a hash-pinned URL otherwise. That URL pin has drifted, so the
+      # fallback fails (``flake_override_args_quoted: command not found``) and
+      # breaks the ``direnv exec`` that drives the ct build below. Clone the
+      # (public) plugin repo next to codetracer so the preferred sibling path is
+      # taken. Not a metacraft-labs repo, and public, so clone it directly.
+      - name: Clone direnv-nix-flake-overrides sibling (codetracer .envrc plugin)
+        run: |
+          set -euo pipefail
+          dest="${{ github.workspace }}/../direnv-nix-flake-overrides"
+          rm -rf "$dest"
+          git clone --depth 1 \
+            https://github.com/blocksense-network/direnv-nix-flake-overrides.git \
+            "$dest"
+
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
