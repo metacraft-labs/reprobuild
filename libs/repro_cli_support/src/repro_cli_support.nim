@@ -20581,6 +20581,40 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       except CatchableError:
         lockedShasByPath = initTable[string, string]()
 
+  # HL-7 (§5 durability + §8.4 capstone) — the durable lock-storage plane is
+  # not limited to the ``.repo/manifests`` git-checkout: a personal/team repo's
+  # locked SHA lives in ITS assigned durable backend (a private manifests repo,
+  # an external-cli DB, …) resolved by the HL-1 configuration plane (§4). On a
+  # FRESH MACHINE the config plane arrives via synced dotfiles (an ``apply-if``
+  # route, Plane A) and the durable lock via the pushed backend (Plane B); the
+  # ``.repo/manifests`` map above holds ONLY the repos routed to that backend
+  # (none, for a personal-only restore). Compose the routing and merge each
+  # ROUTED repo's locked SHA from its assigned backend, so the reconstruction
+  # below lands every tier's repo at the revision its own durable backend pins
+  # — not just the manifest tier's. A no-explicit-route workspace composes to no
+  # routed backends, so this is a byte-identical no-op there (RA-14 unchanged).
+  if resolved.projectName.len > 0:
+    try:
+      let syncComposed = composeLockingRouting(
+        args.workspaceRoot, identity.binaryPath)
+      if syncComposed.hasExplicitRoutes:
+        let syncAssignments = resolveRepoBackends(
+          syncComposed, resolved.repos, args.workspaceRoot, identity,
+          identity.binaryPath)
+        for asg in syncAssignments:
+          if asg.store.isNil: continue
+          let got = asg.store.latestLock(resolved.projectName, asg.repoName)
+          if got.isNone: continue
+          let shas = shasFromBody(got.get().body)
+          if shas.hasKey(asg.repoPath):
+            lockedShasByPath[asg.repoPath] = shas[asg.repoPath]
+          elif shas.len == 1:
+            for _, v in shas: lockedShasByPath[asg.repoPath] = v
+    except CatchableError:
+      # Best-effort: an unresolvable routing layer must never break a plain
+      # sync. The reconstruction below simply falls back to the manifest map.
+      discard
+
   proc lockedShaFor(repo: ResolvedRepo): string =
     ## The concrete SHA the fetch would need to make reachable for this
     ## repo: a SHA-pinned revision is itself; otherwise the lock file's
@@ -20877,6 +20911,51 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
           "action " & a.id & " status=" & $outcome.status &
           " reason=" & outcome.reason &
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+
+  # HL-7 (§8.4 capstone) — reconstruct a FRESHLY-CLONED repo AT ITS DURABLE
+  # LOCKED REVISION. A ``git clone --branch <branch>`` lands the new checkout on
+  # the branch TIP, which may be AHEAD of the revision the durable lock pins
+  # (the branch advanced after the lock was published). A fresh-machine restore
+  # must reproduce the LOCKED state, not the latest tip, so for each repo that
+  # was cloned in THIS sync we compare the cloned HEAD to the durable locked SHA
+  # (from ``.repo/manifests`` OR the routed backend, merged above) and, when
+  # they differ and the locked commit is reachable in the fresh clone, reset the
+  # checkout to it. This is scoped strictly to NEW clones: an existing checkout
+  # keeps its fast-forward/attach semantics unchanged (no regression to the RA
+  # sync corner cases), and a repo with no durable locked SHA (no lock, or a
+  # branch-tip==locked case) is a no-op. Best-effort: a reset failure is
+  # reported but never aborts the sync (RA-11 no-rollback partial-advance).
+  for repoIdx in cloneRepoIdx:
+    if not checkoutStatus.hasKey(repoIdx): continue
+    if checkoutStatus[repoIdx][0] != "cloned": continue
+    let repo = resolved.repos[repoIdx]
+    let lockedSha = lockedShaFor(repo)
+    if lockedSha.len == 0: continue
+    let repoAbs = args.workspaceRoot / repo.path
+    let headNow = revParse(identity, repoAbs, "HEAD")
+    if headNow.len == 0 or headNow == lockedSha: continue
+    if not commitReachableLocally(identity, repoAbs, lockedSha):
+      # The locked commit is not in the fresh clone (a shallow / narrow clone,
+      # or an unreachable pin). Surface it — the restore is INCOMPLETE — rather
+      # than silently leaving the checkout on the wrong (tip) revision.
+      checkoutStatus[repoIdx] = ("failed",
+        "cloned '" & repo.path & "' but the durable locked revision " &
+        lockedSha & " is not reachable in the fresh clone (HEAD=" & headNow &
+        "); the pushed lock and the repo's history are out of sync")
+      continue
+    let resetRes = gitRunPlain(identity,
+      ["-C", repoAbs, "reset", "--hard", lockedSha])
+    if resetRes.code != 0:
+      checkoutStatus[repoIdx] = ("failed",
+        "cloned '" & repo.path & "' but could not reset to the durable " &
+        "locked revision " & lockedSha & ": " & resetRes.output.strip())
+    else:
+      checkoutStatus[repoIdx] = ("cloned",
+        "cloned '" & repo.path & "' and reconstructed at the durable locked " &
+        "revision " & lockedSha & " (branch tip was " & headNow & ")")
+      if emitProgress:
+        stderr.writeLine("workspace sync: [restored] " & repo.path &
+          " @ locked " & lockedSha)
 
   for repoIdx, decision in planned.report.decisions:
     var status = ""
@@ -26099,9 +26178,33 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     var inScopeRepos: seq[ResolvedRepo] = @[]
     for repo in resolved.repos:
       if repoInScope(repo.name): inScopeRepos.add(repo)
-    let gateAssignments = resolveRepoBackends(
-      gateComposed, inScopeRepos, parsed.workspaceRoot, identity,
-      identity.binaryPath)
+    # HL-7 (§8.4 "private repo declared in no backend-supplying layer") — an
+    # in-scope PRIVATE repo the composed configuration plane cannot route
+    # (``resolveRepoBackends`` raises ``StoreRoutingError`` naming the repo, its
+    # tier, and the remedy) must be a LOUD lock-failure refusal at the gate,
+    # NEVER a silent pass. The manifest-LESS routed path already surfaces this as
+    # a structured ``lock-failure`` CheckFailure (exit 2); the manifest-PRESENT
+    # routed currency read reached this call UNGUARDED, so the routing error
+    # propagated as a raw exit-1 with no structured verdict. Catch it here and
+    # surface the SAME structured refusal so both routed paths behave
+    # identically. A fully-routed workspace never raises, so this is a no-op on
+    # the clean/mixed path.
+    var gateAssignments: seq[RepoBackendAssignment]
+    try:
+      gateAssignments = resolveRepoBackends(
+        gateComposed, inScopeRepos, parsed.workspaceRoot, identity,
+        identity.binaryPath)
+    except StoreRoutingError as err:
+      result.failures.add(CheckFailure(
+        repo: "",
+        property: "lock-failure",
+        remediation:
+          "add a `[[locking.route]]` entry (via the appropriate configuration " &
+          "layer / `apply_if`) for the unrouted private repo named below, then " &
+          "re-run `repro check`",
+        evidence: err.msg))
+      result.exitCode = 2
+      return
     var byPath = initTable[string, RepoBackendAssignment]()
     for a in gateAssignments: byPath[a.repoPath] = a
     for obs in observations:
