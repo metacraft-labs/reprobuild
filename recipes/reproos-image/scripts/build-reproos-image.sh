@@ -534,25 +534,194 @@ done
 # ---------------------------------------------------------------
 
 # ---------------------------------------------------------------
-# Phase 10: write /etc/shadow user entry.
+# Phase 10: write /etc/passwd, /etc/group, /etc/shadow, /etc/gshadow
+# user entries + create home directory.
+#
+# M9.R.56.3 — the M9.R.50 emit only wrote /etc/shadow, so at first
+# boot the account had a hashed password on file but no /etc/passwd
+# entry (no uid, no home, no shell), and no /etc/group membership.
+# ``login: repro`` then failed with ``no such user`` and the system
+# fell back to the emergency shell (which prompts for root password
+# — root has ``*`` in shadow so no login possible).  We now emit
+# all four files.  The uid/gid are pinned to 1000/1000 (first
+# non-system id per LSB); the primary group matches ``$USER_NAME``;
+# secondary groups come from the TOML ``[user] groups`` array (falls
+# back to wheel+audio+video, matching M9.R.50 fixture defaults).
 # ---------------------------------------------------------------
-SHADOW_LINE="$USER_NAME:$USER_PWHASH:19000:0:99999:7:::"
+
+# Parse the TOML ``[user] groups`` array.  toml_get returns the raw
+# array text (e.g. ``["wheel", "audio", "video"]``); strip brackets +
+# whitespace + quotes to get a comma-separated list.
+USER_GROUPS_RAW="$(toml_get "$CFG" "user" "groups" || true)"
+USER_GROUPS_RAW="${USER_GROUPS_RAW:-[wheel, audio, video]}"
+USER_GROUPS="$(echo "$USER_GROUPS_RAW" | sed -E 's/^\[//; s/\]$//; s/"//g; s/ //g')"
+# Convert commas to spaces for iteration.
+USER_GROUPS_SPACED="$(echo "$USER_GROUPS" | tr ',' ' ')"
+
+USER_UID=1000
+USER_GID=1000
+USER_HOME="/home/$USER_NAME"
+
+echo "[build-reproos-image] Phase 10: emit passwd + shadow + group + gshadow + home for $USER_NAME (uid=$USER_UID gid=$USER_GID groups='$USER_GROUPS_SPACED')"
+
 "$SUDO" bash -c "
   set -euo pipefail
+
+  # --- /etc/shadow --- (root + user entries).  Preserve any prior
+  # rows (e.g. from the stage-de-rootfs Debian base + ``live`` user).
   if [ ! -f '$MNT_DIR/etc/shadow' ]; then
     echo 'root:*:19000:0:99999:7:::' > '$MNT_DIR/etc/shadow'
-    chmod 0640 '$MNT_DIR/etc/shadow'
   fi
-  # Remove any pre-existing entry for this user (idempotent).
   awk -v u='$USER_NAME' -F: '\$1 != u' '$MNT_DIR/etc/shadow' > '$MNT_DIR/etc/shadow.new'
-  echo '$SHADOW_LINE' >> '$MNT_DIR/etc/shadow.new'
+  echo '$USER_NAME:$USER_PWHASH:19000:0:99999:7:::' >> '$MNT_DIR/etc/shadow.new'
   mv '$MNT_DIR/etc/shadow.new' '$MNT_DIR/etc/shadow'
   chmod 0640 '$MNT_DIR/etc/shadow'
-" || { echo "[build-reproos-image] shadow emit failed" >&2; exit 71; }
+  chown root:root '$MNT_DIR/etc/shadow' 2>/dev/null || true
+
+  # --- /etc/passwd --- (user entry with $USER_HOME + $USER_SHELL).
+  if [ ! -f '$MNT_DIR/etc/passwd' ]; then
+    echo 'root:x:0:0:root:/root:/bin/bash' > '$MNT_DIR/etc/passwd'
+  fi
+  awk -v u='$USER_NAME' -F: '\$1 != u' '$MNT_DIR/etc/passwd' > '$MNT_DIR/etc/passwd.new'
+  echo '$USER_NAME:x:$USER_UID:$USER_GID::$USER_HOME:$USER_SHELL' >> '$MNT_DIR/etc/passwd.new'
+  mv '$MNT_DIR/etc/passwd.new' '$MNT_DIR/etc/passwd'
+  chmod 0644 '$MNT_DIR/etc/passwd'
+
+  # --- /etc/group --- (primary group + secondary group memberships).
+  # Primary group: $USER_NAME with gid $USER_GID.
+  if [ ! -f '$MNT_DIR/etc/group' ]; then
+    echo 'root:x:0:' > '$MNT_DIR/etc/group'
+  fi
+  # Remove any pre-existing entry for the primary group, then re-add.
+  awk -v g='$USER_NAME' -F: '\$1 != g' '$MNT_DIR/etc/group' > '$MNT_DIR/etc/group.new'
+  echo '$USER_NAME:x:$USER_GID:' >> '$MNT_DIR/etc/group.new'
+  # Add user to each secondary group (append user to member list;
+  # create group with gid+100 if it doesn't exist).
+  next_gid=1001
+  for g in $USER_GROUPS_SPACED; do
+    [ -z \"\$g\" ] && continue
+    if grep -qE \"^\$g:\" '$MNT_DIR/etc/group.new'; then
+      # Group exists: append user to member list if not already there.
+      awk -v g=\"\$g\" -v u='$USER_NAME' -F: 'BEGIN{OFS=\":\"} { if (\$1==g) { if (\$4==\"\") { \$4=u } else if (index(\$4,u)==0) { \$4=\$4\",\"u } } print }' '$MNT_DIR/etc/group.new' > '$MNT_DIR/etc/group.new2'
+      mv '$MNT_DIR/etc/group.new2' '$MNT_DIR/etc/group.new'
+    else
+      # Group missing: create with next available gid.
+      echo \"\$g:x:\$next_gid:$USER_NAME\" >> '$MNT_DIR/etc/group.new'
+      next_gid=\$((next_gid+1))
+    fi
+  done
+  mv '$MNT_DIR/etc/group.new' '$MNT_DIR/etc/group'
+  chmod 0644 '$MNT_DIR/etc/group'
+
+  # --- /etc/gshadow --- (shadow-group entries; NSS wants matching).
+  if [ ! -f '$MNT_DIR/etc/gshadow' ]; then
+    echo 'root:*::' > '$MNT_DIR/etc/gshadow'
+  fi
+  awk -v g='$USER_NAME' -F: '\$1 != g' '$MNT_DIR/etc/gshadow' > '$MNT_DIR/etc/gshadow.new'
+  echo '$USER_NAME:!::' >> '$MNT_DIR/etc/gshadow.new'
+  for g in $USER_GROUPS_SPACED; do
+    [ -z \"\$g\" ] && continue
+    if grep -qE \"^\$g:\" '$MNT_DIR/etc/gshadow.new'; then
+      continue
+    fi
+    echo \"\$g:!::$USER_NAME\" >> '$MNT_DIR/etc/gshadow.new'
+  done
+  mv '$MNT_DIR/etc/gshadow.new' '$MNT_DIR/etc/gshadow'
+  chmod 0640 '$MNT_DIR/etc/gshadow'
+
+  # --- /home/\$USER_NAME --- (chown uid:gid so first login has a
+  # writeable home).
+  mkdir -p '$MNT_DIR$USER_HOME'
+  chown $USER_UID:$USER_GID '$MNT_DIR$USER_HOME'
+  chmod 0755 '$MNT_DIR$USER_HOME'
+" || { echo "[build-reproos-image] passwd/shadow/group emit failed" >&2; exit 71; }
 
 # Make sure the hostname file matches the TOML value (install-root
 # already wrote one but the TOML may differ from the default).
 "$SUDO" bash -c "echo '$HOSTNAME_VAL' > '$MNT_DIR/etc/hostname'" || true
+
+# ---------------------------------------------------------------
+# Phase 10.5: wire the default systemd target + display-manager +
+# SDDM autologin for the installed system.
+#
+# M9.R.56.4 — the stage-de-rootfs.sh baseline sets
+# ``default.target -> multi-user.target`` (console mode) and
+# writes an SDDM autologin config for the LIVE ISO (User=live,
+# Session=reproos-installer), then overlays those into the staged
+# tree.  On the INSTALLED disk we need the graphical target + a
+# per-user SDDM autologin per ``[de] default`` + ``[user] name``
+# from auto-config.toml.
+#
+# ``[de] default`` values (validated at Phase 1):
+#   sway         -> Session=sway
+#   kwin         -> Session=plasma (kwin_wayland runs under plasma)
+#   mutter       -> Session=gnome
+#   plasmashell  -> Session=plasma
+#   sddm         -> Session=sway (fallback -- SDDM is not itself a
+#                    session; treat as "graphical with default sway")
+# ---------------------------------------------------------------
+
+case "$DE_DEFAULT" in
+  sway)         SDDM_SESSION="sway" ;;
+  kwin)         SDDM_SESSION="plasma" ;;
+  mutter)       SDDM_SESSION="gnome" ;;
+  plasmashell)  SDDM_SESSION="plasma" ;;
+  sddm)         SDDM_SESSION="sway" ;;
+  *)            SDDM_SESSION="sway" ;;
+esac
+
+echo "[build-reproos-image] Phase 10.5: wire graphical target + sddm autologin (session=$SDDM_SESSION user=$USER_NAME)"
+
+"$SUDO" bash -c "
+  set -euo pipefail
+
+  # Swap default.target to graphical.target (from-source-built
+  # graphical.target is present at /usr/lib/systemd/system/).
+  mkdir -p '$MNT_DIR/etc/systemd/system'
+  if [ -e '$MNT_DIR/usr/lib/systemd/system/graphical.target' ] \\
+      || [ -e '$MNT_DIR/lib/systemd/system/graphical.target' ]; then
+    ln -sfn /usr/lib/systemd/system/graphical.target \\
+      '$MNT_DIR/etc/systemd/system/default.target'
+  else
+    echo '[build-reproos-image] warning: graphical.target not found in installed rootfs -- staying at multi-user.target' >&2
+  fi
+
+  # Wire display-manager.service to sddm (from-source-built sddm.service
+  # was installed to /usr/lib/systemd/system/sddm.service by the
+  # from-source sddm recipe's install-mirror overlay).
+  if [ -e '$MNT_DIR/usr/lib/systemd/system/sddm.service' ] \\
+      || [ -e '$MNT_DIR/lib/systemd/system/sddm.service' ]; then
+    ln -sfn /usr/lib/systemd/system/sddm.service \\
+      '$MNT_DIR/etc/systemd/system/display-manager.service'
+    # Enable at graphical.target.
+    mkdir -p '$MNT_DIR/etc/systemd/system/graphical.target.wants'
+    ln -sfn /usr/lib/systemd/system/sddm.service \\
+      '$MNT_DIR/etc/systemd/system/graphical.target.wants/sddm.service'
+  else
+    echo '[build-reproos-image] warning: sddm.service not found in installed rootfs' >&2
+  fi
+
+  # SDDM autologin config: point at the per-TOML user + session,
+  # replacing the stage-de-rootfs.sh live-ISO default (User=live,
+  # Session=reproos-installer).
+  mkdir -p '$MNT_DIR/etc/sddm.conf.d'
+  cat > '$MNT_DIR/etc/sddm.conf.d/00-autologin.conf' <<SDDM_EOF
+[Autologin]
+User=$USER_NAME
+Session=$SDDM_SESSION
+Relogin=true
+
+[General]
+HaltCommand=/usr/bin/systemctl poweroff
+RebootCommand=/usr/bin/systemctl reboot
+SDDM_EOF
+
+  # Disable the reproos-installer-autorun.service unit -- it only
+  # belongs on the LIVE ISO where the installer needs to run.
+  rm -f '$MNT_DIR/etc/systemd/system/multi-user.target.wants/reproos-installer-autorun.service' \\
+        '$MNT_DIR/etc/systemd/system/graphical.target.wants/reproos-installer-autorun.service' \\
+        2>/dev/null || true
+" || { echo "[build-reproos-image] display-manager wiring failed" >&2; exit 71; }
 
 echo "[build-reproos-image] phase summary:"
 echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
