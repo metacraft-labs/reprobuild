@@ -376,8 +376,19 @@
               # /rmmod /lsmod talk to the Linux kmod interface.  macOS
               # /Windows operators don't build reproos-image so the
               # cost of pulling these in there wouldn't buy anything.
+              #
+              # ``grub2_efi`` (not plain ``grub2``): the reproos-image
+              # target is an EFI-bootable qcow2 (``grub-install
+              # --target=x86_64-efi``), and nixpkgs splits the grub
+              # module output — ``pkgs.grub2`` ships only the
+              # ``i386-pc`` (BIOS) modules, so ``grub-install
+              # --target=x86_64-efi`` fails with ``modinfo.sh doesn't
+              # exist``.  ``pkgs.grub2_efi`` carries the ``x86_64-efi``
+              # module tree; validated end-to-end in the M9.R.54 Phase
+              # B build (grub-install reached ``modinfo.sh`` search
+              # only after the switch to ``grub2_efi``).
               pkgs.qemu
-              pkgs.grub2
+              pkgs.grub2_efi
               pkgs.kmod
             ];
             shellHook = pre-commit-check.shellHook;
