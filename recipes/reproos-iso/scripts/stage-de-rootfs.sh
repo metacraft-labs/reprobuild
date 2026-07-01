@@ -126,6 +126,53 @@ done
 echo "[stage-de-rootfs] staged $staged_recipes from-source install-mirrors"
 
 # ---------------------------------------------------------------------------
+# Phase 1b (M9.R.56.6): overlay every from-source recipe's ``etc/`` subtree
+# onto the stage's ``/etc/``.  Every from-source recipe was built with
+# ``--sysconfdir=/etc`` (default), so its binaries read runtime config
+# from ``/etc/<pkg>/*.conf`` at boot.  But the install-mirror pattern
+# writes those files to ``<install_dir>/etc/`` (i.e.
+# /opt/repro/reprobuild/.../.repro/output/install/etc/), which is NOT
+# ``/etc/`` on the installed rootfs.  Phase 1 mirrors the install-dir
+# at its same-absolute-path location; Phase 1b overlays the ``etc/``
+# subtree onto the FHS ``/etc/`` so from-source daemons find their
+# config where their compile-time-baked path expects.
+#
+# Concrete example that blocked M9.R.56: dbus.service failed to start
+# because ``/etc/dbus-1/system.conf`` was absent (from-source dbus
+# installed it to ``/opt/repro/reprobuild/.../dbus/.repro/output/
+# install/etc/dbus-1/system.conf`` but nothing copied that to
+# ``/etc/dbus-1/`` on the installed rootfs).  Without dbus, SDDM
+# cannot render its greeter.
+#
+# Overlay rule: cp -an (archive + no-clobber) so existing ``/etc/``
+# files (Debian base config, live-ISO overlays we write later in
+# this script) win over from-source defaults.  This makes the
+# overlay additive-only, matching the ``pkg-config --variable=sysconfdir``
+# discipline every mainstream distro follows.
+# ---------------------------------------------------------------------------
+
+etc_overlay_count=0
+for recipe_dir in "$SRC_RECIPES_ROOT"/*; do
+  [ -d "$recipe_dir" ] || continue
+  install_etc="$recipe_dir/.repro/output/install/etc"
+  [ -d "$install_etc" ] || continue
+  # Skip empty etc dirs.
+  if [ -z "$(find "$install_etc" -mindepth 1 -maxdepth 4 -print -quit 2>/dev/null)" ]; then
+    continue
+  fi
+  recipe_name="$(basename "$recipe_dir")"
+  # cp -an: archive (preserve mode/ownership/symlinks/timestamps) + no-clobber
+  # (don't overwrite files already present under $STAGE_DIR/etc).
+  # -R is implicit in -a; -n makes it additive.  We copy directory-by-directory
+  # rather than the whole install_etc/* to avoid clobbering the stage's own
+  # /etc/systemd/system defaults we write later in this script.
+  cp -an "$install_etc"/. "$STAGE_DIR/etc/" 2>/dev/null || \
+    echo "[stage-de-rootfs] warning: $recipe_name etc/ overlay had errors (continuing)"
+  etc_overlay_count=$((etc_overlay_count + 1))
+done
+echo "[stage-de-rootfs] overlaid etc/ subtrees from $etc_overlay_count from-source install-mirrors onto \$STAGE/etc"
+
+# ---------------------------------------------------------------------------
 # Phase 2: walk every staged ELF's RPATH + PT_INTERP, collect unique
 # /nix/store/<hash>-<pkg>/ prefixes, and mirror each one onto the ISO
 # verbatim.  This is the closure of nix-stub deps the from-source
