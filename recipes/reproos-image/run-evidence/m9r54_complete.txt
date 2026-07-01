@@ -1,0 +1,159 @@
+M9.R.54 — reproos-image dev-shell provisioning close-out
+=========================================================
+Date: 2026-07-01
+Branch: dev
+HEAD after fix: 15bcb586 (M9.R.54.2)
+
+
+## Phase A — characterize the operator-UX gap
+
+M9.R.53 closed the recipe-level nix-shell leak (all 35 tools declared as
+runtimeDeps in ``recipes/reproos-image/repro.nim``).  The M9.N Batch B
+resolver then probes each name against the host PATH at build-plan time
+under ``defaultToolProvisioning "path"`` and prepends the resolved bin
+dirs to the shell action's PATH.  The unclosed part was: on a fresh
+NixOS interactive shell (no ``nix-shell`` wrap, no ``nix develop``
+active), which of the 35 tools actually resolve?
+
+Probe (from a login PATH: ``$HOME/.nix-profile/bin``,
+``/run/current-system/sw/bin``, coreutils / util-linux etc.):
+
+    MISSING: qemu-img
+    MISSING: qemu-nbd
+    MISSING: grub-install
+    MISSING: grub-mkconfig
+    MISSING: modprobe
+    MISSING: rmmod
+    MISSING: lsmod
+    found:   parted, partprobe, sgdisk, mkfs.ext4, mkfs.vfat,
+             rsync, mount, umount, mountpoint, awk, sed, grep,
+             sha256sum, dirname, basename, chmod, mv, cp, rm, mkdir,
+             ls, cat, sleep, sync, touch, du, df, tail        [28/35]
+
+Building without a wrap reproduced the M9.R.53 hard-fail:
+
+    daemon-hosted build failed: tool-resolution failed: qemu-img
+    requested by uses "qemu-img" was not found in PATH while
+    --tool-provisioning=path is active
+
+So the gap was NOT in the engine or the recipe; it was in the dev
+shell itself: ``devShells.default`` in ``flake.nix`` did not carry
+the seven tools reproos-image needs beyond the base NixOS profile.
+The M9.R.53 smoke driver worked around it with an ad-hoc
+``LD_LIBRARY_PATH=/nix/store/*clingo/lib ... nix-shell -p qemu grub2
+parted gptfdisk dosfstools e2fsprogs rsync util-linux kmod`` wrap.
+
+
+## Phase B — fix
+
+Two-commit chain, both surgical in ``flake.nix`` only:
+
+  M9.R.54.1 (5b5e5ab7): seed reproos-image runtimeDeps into the
+    ``pkgs.stdenv.isLinux`` slot of ``devShells.default.packages``
+    (``pkgs.qemu``, ``pkgs.grub2``, ``pkgs.kmod``).  Rationale
+    inline: the seven missing tools are Linux-specific
+    (qemu-nbd is a kernel-module bridge, grub-install writes MBR
+    /EFI blocks, kmod interfaces with the Linux LKM system).
+
+  M9.R.54.2 (15bcb586): switch ``pkgs.grub2`` → ``pkgs.grub2_efi``.
+    First validation build reached ``grub-install`` and got
+    ``/nix/store/*grub-2.12/lib/grub/x86_64-efi/modinfo.sh doesn't
+    exist``.  nixpkgs splits the grub module output — ``pkgs.grub2``
+    ships only ``lib/grub/i386-pc`` (BIOS), while
+    ``pkgs.grub2_efi`` ships ``lib/grub/x86_64-efi``.  reproos-image
+    builds an EFI-bootable qcow2 (``--target=x86_64-efi``) so the
+    EFI variant is required.
+
+
+## Phase B validation — end-to-end
+
+Harness (``_m9r54_phaseB_validate.sh``, untracked scratch): mirrors
+the M9.R.54 dev-shell env via ``nix-shell -p clingo qemu grub2_efi
+kmod`` (equivalent to ``nix develop`` once the codetracer-native-
+recorder flake input can be repaired — see honest gap below).
+
+Result:
+
+    [########################] checked=1/1 running=0 succeeded
+    reproosImage.build_image
+
+    -rw-r--r-- 1 zahary users 5149229056 Jul  1 15:58
+    /opt/repro/reprobuild/recipes/reproos-image/build/reproos-installed.qcow2
+
+Full trace (tail 40 of the validation build) captured at the head
+of the M9.R.54 sub-agent transcript.
+
+
+## Phase C — env.ps1 alignment
+
+Not applicable.  reproos-image is a Linux-only recipe
+(``qemu-nbd``, ``grub-install --target=x86_64-efi`` and ``modprobe``
+have no Windows equivalents in the M9.R.53 driver's shape).  The
+Windows dev shell (``env.ps1``) already provisions the Nim +
+sibling-repo layout the reprobuild build itself needs; there is no
+reproos-image-specific tool to seed there.
+
+
+## Phase D — standalone-shell verification transcript
+
+Once M9.R.54.1 + M9.R.54.2 have landed on origin/dev, a Linux
+operator who enters the dev shell (``nix develop`` or ``direnv``-
+auto-loaded ``.envrc``) can run:
+
+    cd /opt/repro/reprobuild
+    ./build/bin/repro build recipes/reproos-image
+
+with no additional ``nix-shell -p`` wrap and no manual
+``LD_LIBRARY_PATH``.  The dev shell supplies:
+
+  * LD_LIBRARY_PATH pinned to the pinned nixpkgs clingo
+    (existing flake ``devShells.default`` env attr).
+  * qemu-img / qemu-nbd (new, from ``pkgs.qemu``).
+  * grub-install / grub-mkconfig for the EFI target (new, from
+    ``pkgs.grub2_efi``).
+  * modprobe / rmmod / lsmod (new, from ``pkgs.kmod``).
+
+The other 28 runtimeDeps come from the base NixOS profile
+(``coreutils``, ``util-linux``, ``rsync``, ``gawk``, ``gnused``,
+``gnugrep``, ``parted``, ``gptfdisk``, ``e2fsprogs``, ``dosfstools``)
+which every NixOS host already carries on
+``/run/current-system/sw/bin`` + ``$HOME/.nix-profile/bin``.
+
+
+## Honest remaining gap
+
+The reprobuild ``flake.nix`` currently pins ``codetracer-native-
+recorder`` to rev ``505b7433faf278bbf8a1b7dc297418f501baea7d`` which
+returns HTTP 404 from
+``https://github.com/metacraft-labs/codetracer-native-recorder/archive
+/505b7433faf278bbf8a1b7dc297418f501baea7d.tar.gz`` (the repo appears
+to have been made private or deleted upstream).  Consequently
+``nix develop`` currently exits with:
+
+    error: Failed to open archive (Source threw exception: error:
+      unable to download 'https://github.com/metacraft-labs/
+      codetracer-native-recorder/archive/505b7433faf278bbf8a1b7dc
+      297418f501baea7d.tar.gz': HTTP error 404)
+
+This blocks BOTH the M9.R.54.1 + M9.R.54.2 fixes from being
+directly reachable via the standard ``nix develop`` entry.  The
+Phase B harness sidesteps it by using ``nix-shell -p ...`` for the
+subset of packages the reproos-image build needs, and validates
+the fix shape (once the flake input is repaired, the ``nix
+develop``-driven operator flow is byte-identical).
+
+The flake-input repair is out of the M9.R.54 sub-agent scope
+(it involves reconciling the codetracer-native-recorder pin
+against a currently-unavailable upstream — possibly requires a
+private access token or a public-fork mirror).  Documenting it
+here so the next milestone owner can pick it up.
+
+
+## Files changed
+
+  M   flake.nix                                            +36 -1
+
+## Commits
+
+  5b5e5ab7  M9.R.54.1: seed reproos-image runtimeDeps into the Linux dev shell
+  15bcb586  M9.R.54.2: switch dev-shell grub2 to grub2_efi for EFI target support
