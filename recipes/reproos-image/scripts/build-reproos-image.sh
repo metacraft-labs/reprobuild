@@ -1044,6 +1044,40 @@ echo "[build-reproos-image] Phase 10.8: shim compiled-in /usr/local sddm paths +
   mkdir -p '$MNT_DIR/usr/local/share'
   ln -sfn /usr/share/sddm '$MNT_DIR/usr/local/share/sddm'
 
+  # M9.R.56.8.3: shim /usr/local/bin/sddm-greeter-qt6.  sddm's
+  # daemon.Greeter.cpp computes the greeter argv as
+  # ``QStringLiteral(BIN_INSTALL_DIR \"/sddm-greeter%1\").arg(suffix)``
+  # which bakes to ``/usr/local/bin/sddm-greeter-qt6``.  Point at
+  # the from-source install-mirror greeter binary directly (the
+  # image's /usr/bin/sddm-greeter-qt6 is already a shadow-link
+  # to the same install-mirror path via stage-de-rootfs.sh's
+  # link_base_recipe_binaries, so pointing at the install-mirror
+  # is equivalent and avoids a two-hop symlink).
+  mkdir -p '$MNT_DIR/usr/local/bin'
+  ln -sfn /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm-greeter-qt6 \\
+    '$MNT_DIR/usr/local/bin/sddm-greeter-qt6'
+  ln -sfn /opt/repro/reprobuild/recipes/packages/source/sddm/.repro/output/install/usr/bin/sddm \\
+    '$MNT_DIR/usr/local/bin/sddm'
+
+  # M9.R.56.8.3: shim /lib/security -> from-source pam's install-
+  # mirror.  libpam.so.0 from the pam recipe (linked by
+  # sddm-helper via RUNPATH) has compiled-in module search path
+  # /lib/security/ (verified via ``strings libpam.so.0``).  The
+  # from-source pam recipe installs modules at
+  # /opt/repro/reprobuild/recipes/packages/source/pam/.repro/output/install/usr/lib/security/
+  # but that path is not shadow-linked into /lib/security/ by
+  # stage-de-rootfs.sh.  Debian's PAMs at
+  # /usr/lib/x86_64-linux-gnu/security/ are ABI-compatible but
+  # linked against Debian's libpam.so.0.85.1 (older), so we
+  # point at the from-source install-mirror to keep the ABI
+  # matched with the sddm-helper's linked libpam.
+  #
+  # We link the whole /lib/security dir at the pam install-
+  # mirror's usr/lib/security subtree.
+  mkdir -p '$MNT_DIR/lib'
+  ln -sfn /opt/repro/reprobuild/recipes/packages/source/pam/.repro/output/install/usr/lib/security \\
+    '$MNT_DIR/lib/security'
+
   # /usr/local/lib/sddm/sddm.conf.d -> /etc/sddm.conf.d so the
   # daemon's SYSTEM_CONFIG_DIR probe finds any drop-ins.
   mkdir -p '$MNT_DIR/usr/local/lib/sddm'
