@@ -5406,6 +5406,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
+    binary: "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
+    binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim",
     binary: "build/test-bin/t_legacy_manifest_without_team_route_warns_and_scaffolds",
     defines: @[],

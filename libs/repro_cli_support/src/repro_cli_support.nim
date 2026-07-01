@@ -18763,6 +18763,8 @@ proc newGitCheckoutLockStore*(identity: GitToolIdentity;
 
 method backendId*(s: GitCheckoutLockStore): string = "git-checkout"
 
+method storeLocationLabel*(s: GitCheckoutLockStore): string = s.manifestRepoRoot
+
 method putLock*(s: GitCheckoutLockStore;
     rec: StoreLockRecord): StorePutResult =
   ## Write the lock body to ``locks/<project>/<repo>/<sha>.toml`` (the RA-1
@@ -18912,9 +18914,26 @@ type
     ## Result of recording one repo's participation through its assigned
     ## backend. ``recorded`` is false for a committed-lock repo (already
     ## captured by ``repro.lock`` — nothing is written to a separate store).
+    ##
+    ## HL-3 (§6 Decision 2) — the gate inspects this per-repo outcome by TIER
+    ## to decide refuse-for-shared / warn-for-personal on an unreachable
+    ## backend. ``tier`` is the repo's resolved visibility (from the HL-1
+    ## ``RepoBackendAssignment.tier``). ``attempted`` distinguishes a genuine
+    ## write attempt from the committed-lock no-op skip (``store == nil``): a
+    ## committed-lock repo has ``attempted == false`` and is NEVER a failure,
+    ## while an attempted write that did not succeed (``attempted == true`` and
+    ## ``recorded == false``) is the unreachable/unwritable backend the policy
+    ## refuses-or-warns on. ``repoPath`` is the workspace-relative path the
+    ## remedy text names.
     repoName*: string
+    repoPath*: string
     backendKind*: string
+    backendLocation*: string
+      ## HL-3 — a human-readable location of the backend (its manifest root(s)
+      ## or program), so the refusal remedy can name WHERE the backend lives.
+    tier*: WorkspaceVisibility
     recorded*: bool
+    attempted*: bool
     diagnostic*: string
 
   StoreRoutingError* = object of CatchableError
@@ -19055,12 +19074,21 @@ proc recordWorkspaceParticipation*(assignments: seq[RepoBackendAssignment];
   ## written into that backend's own medium.
   result = @[]
   for asg in assignments:
+    # HL-3 — carry the repo path, resolved tier, and backend location so the
+    # gate can inspect this outcome by tier (refuse-for-shared / warn-for-
+    # personal on an unreachable backend, §6 Decision 2).
     var outc = ParticipationOutcome(
-      repoName: asg.repoName, backendKind: asg.backendKind)
+      repoName: asg.repoName, repoPath: asg.repoPath,
+      backendKind: asg.backendKind, tier: asg.visibility)
     if asg.store.isNil:
+      # Committed-lock (public) repo — captured by ``repro.lock``; NOT an
+      # attempted store write, so never a backend-unreachable failure.
       outc.recorded = false
+      outc.attempted = false
       result.add(outc)
       continue
+    outc.attempted = true
+    outc.backendLocation = asg.store.storeLocationLabel()
     let sha = repoShas.getOrDefault(asg.repoPath,
       repoShas.getOrDefault(asg.repoName, ""))
     let rec = StoreLockRecord(
@@ -22212,11 +22240,114 @@ proc lockPublishFromStorePut(o: StorePutOutcome): LockPublishOutcome =
   of spoNotPublishable: lpoNotPublishable
   of spoFailed: lpoFailed
 
+proc pushCommittedLockCommits(identity: GitToolIdentity;
+    manifestRepoRoot: string): LockPublishResult =
+  ## HL-3 — push ALREADY-COMMITTED-but-unpushed lock commits to the backend's
+  ## upstream. ``GitCheckoutLockStore.putLock`` COMMITS each record as it writes
+  ## it (so the git-history "latest lock" query resolves it), which means that
+  ## by publish time there is nothing STAGED and ``publishWorkspaceLock`` reports
+  ## ``lpoNothingToPublish`` without ever pushing. For a ROUTED git-checkout
+  ## backend on its OWN remote (a team/personal manifests repo, distinct from
+  ## the workspace's ``.repo/manifests``), that would silently skip the remote
+  ## push — the record would never leave the machine. This helper closes that
+  ## gap: when HEAD is ahead of ``@{u}`` it pushes the committed lock commits
+  ## with the SAME bounded non-fast-forward re-apply retry ``publishWorkspaceLock``
+  ## uses, so a concurrent publisher is invisible and any other push failure
+  ## (unreachable/unwritable remote) stays LOUD (``lpoFailed``) for Decision 2.
+  result.outcome = lpoNothingToPublish
+
+  if manifestRepoRoot.len == 0 or not dirExists(manifestRepoRoot / ".git"):
+    result.outcome = lpoNotPublishable
+    result.diagnostic =
+      "manifest repo root '" & manifestRepoRoot &
+        "' is not a git checkout; cannot publish lock"
+    return
+
+  # No upstream configured ⇒ nothing to push to (benign skip, like RA-7).
+  let upstreamRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "rev-parse", "--abbrev-ref",
+     "--symbolic-full-name", "@{u}"])
+  if upstreamRes.code != 0 or upstreamRes.output.strip().len == 0:
+    result.outcome = lpoNotPublishable
+    result.diagnostic = "manifest repo has no upstream (@{u}); cannot publish lock"
+    return
+  let upstream = upstreamRes.output.strip()
+  let slash = upstream.find('/')
+  if slash < 0:
+    result.outcome = lpoFailed
+    result.diagnostic = "unparseable upstream ref: " & upstream
+    return
+  let remote = upstream[0 ..< slash]
+  let remoteBranch = upstream[(slash + 1) .. ^1]
+
+  # Count commits on HEAD not yet on the recorded upstream tip. Zero ⇒ nothing
+  # to publish (already pushed or never committed here).
+  let aheadRes = gitRunPlain(identity,
+    ["-C", manifestRepoRoot, "rev-list", "--count", "@{u}..HEAD"])
+  if aheadRes.code != 0:
+    # Cannot compare against the upstream tip (e.g. never fetched). Fall back to
+    # attempting the push; the push result is authoritative.
+    discard
+  elif aheadRes.output.strip() == "0":
+    result.outcome = lpoNothingToPublish
+    result.diagnostic = "no unpushed lock commits to publish"
+    return
+
+  var attempt = 0
+  var lastPushOutput = ""
+  while true:
+    let pushRes = gitRunPlain(identity,
+      ["-C", manifestRepoRoot, "push", remote, "HEAD:" & remoteBranch])
+    if pushRes.code == 0:
+      break
+    lastPushOutput = pushRes.output.strip()
+    if not pushOutputIsNonFastForward(pushRes.output):
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "git push " & remote & " HEAD:" & remoteBranch & " failed: " &
+          lastPushOutput
+      return
+    inc attempt
+    if attempt > lockPublishNonFfRetryBudget:
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "git push " & remote & " HEAD:" & remoteBranch &
+        " kept getting non-fast-forward after " &
+        $lockPublishNonFfRetryBudget & " re-apply attempts: " & lastPushOutput
+      return
+    let reapply = reapplyLockCommitOntoFetchedTip(
+      identity, manifestRepoRoot, remote, remoteBranch)
+    if not reapply.ok:
+      result.outcome = lpoFailed
+      result.diagnostic =
+        "non-fast-forward re-apply failed: " & reapply.diagnostic
+      return
+
+  result.outcome = lpoPublished
+  result.diagnostic =
+    "pushed committed lock commits to " & upstream &
+    (if attempt > 0: " (after " & $attempt &
+      " non-fast-forward re-apply attempt" &
+      (if attempt == 1: "" else: "s") & ")" else: "")
+
 method publishPending*(s: GitCheckoutLockStore): StorePutResult =
   ## Route to the byte-identical RA-7 ``publishWorkspaceLock`` (commit + push,
   ## non-ff retry, dirty-outside-``locks/`` refusal) and map its rich outcome
   ## onto the store-level outcome.
+  ##
+  ## HL-3 — ``publishWorkspaceLock`` only pushes what it STAGES; but the routed
+  ## ``putLock`` already COMMITTED each record, so a routed git-checkout backend
+  ## on its own remote has nothing staged and would be a silent
+  ## ``lpoNothingToPublish``. When that happens, fall through to
+  ## ``pushCommittedLockCommits`` which pushes the already-committed lock commits
+  ## (same non-ff retry), so the routed backend's records actually reach its
+  ## remote and a push failure stays LOUD (Decision 2). The dirty-outside /
+  ## refused / failed / published outcomes of the staged path are preserved.
   let pub = publishWorkspaceLock(s.identity, s.manifestRepoRoot)
+  if pub.outcome == lpoNothingToPublish:
+    let pushed = pushCommittedLockCommits(s.identity, s.manifestRepoRoot)
+    return StorePutResult(outcome: storePutFromLockPublish(pushed.outcome),
+      diagnostic: pushed.diagnostic)
   StorePutResult(outcome: storePutFromLockPublish(pub.outcome),
     diagnostic: pub.diagnostic)
 
@@ -23002,6 +23133,12 @@ type
     # successful gate. Empty when the gate short-circuited before the lock
     # stage (e.g. a dirty sibling).
     manifestLayerRoot*: string
+    # HL-3 (§6 Decision 2) — per-repo participation outcomes (tier-tagged) from
+    # the lock write, so ``runCheckCommand`` and the JSON report can see WHICH
+    # repo's backend was unreachable and at what tier. Empty for a workspace
+    # with no explicit routes (the single-tier / manifest-less common shape) and
+    # for a gate that short-circuited before the lock write.
+    participation*: seq[ParticipationOutcome]
     exitCode*: int
 
 proc lockUpdateKindTag(kind: CheckLockUpdateKind): string =
@@ -23044,6 +23181,19 @@ proc toJsonNode*(report: CheckReport): JsonNode =
   lockObj["diagnostic"] = %report.lockUpdate.diagnostic
   result["lockUpdate"] = lockObj
   result["manifestLayerRoot"] = %report.manifestLayerRoot
+  var participation = newJArray()
+  for p in report.participation:
+    var obj = newJObject()
+    obj["repo"] = %p.repoName
+    obj["path"] = %p.repoPath
+    obj["tier"] = %lockingTierLabel(p.tier)
+    obj["backendKind"] = %p.backendKind
+    obj["backendLocation"] = %p.backendLocation
+    obj["recorded"] = %p.recorded
+    obj["attempted"] = %p.attempted
+    obj["diagnostic"] = %p.diagnostic
+    participation.add(obj)
+  result["participation"] = participation
   result["exitCode"] = %report.exitCode
 
 proc renderCheckTextLines*(report: CheckReport): seq[string] =
@@ -25010,6 +25160,81 @@ proc gateDecideUnreadableRepo*(repo: ResolvedRepo; store: LockStore;
         "(repro records the source-free head-sha/clean/published triple)",
       evidence: result.verdict.diagnostic)
 
+# ---------------------------------------------------------------------------
+# HL-3 (§6 Decision 2) — refuse-for-shared / warn-for-personal on an
+# unreachable backend.
+#
+# When a repo's assigned durable backend is unreachable/unwritable at pre-push:
+#   - public or team backend  ⇒ REFUSE the push (exit 2), loud, with a remedy
+#     naming the repo path + tier + backend kind & location + the underlying
+#     diagnostic + a single copy-pasteable next step;
+#   - personal backend        ⇒ WARN but ALLOW (exit unchanged), advising
+#     ``repro lock refresh``.
+# The signal is a per-repo ``ParticipationOutcome`` that ATTEMPTED a write
+# (``attempted == true``, i.e. a real backend, not the committed-lock no-op)
+# and did NOT succeed (``recorded == false``). HL-2 discarded this by tier; HL-3
+# threads it to the gate and applies the split.
+# ---------------------------------------------------------------------------
+
+proc tierIsShared(v: WorkspaceVisibility): bool =
+  ## Public and team/org backends are SHARED — teammates depend on them, so an
+  ## unreachable one REFUSES. Only ``wvPersonal`` is the user's own backend.
+  v in {wvPublic, wvOrg, wvTeam}
+
+proc participationFailed(outc: ParticipationOutcome): bool =
+  ## A genuine unreachable/unwritable backend: a real write was attempted and
+  ## did not succeed. A committed-lock skip (``attempted == false``) is never a
+  ## failure.
+  outc.attempted and not outc.recorded
+
+proc backendUnreachableRemedy(outc: ParticipationOutcome): string =
+  ## §6 Decision 2 "Remedy text shape": name the repo path, its tier, the
+  ## backend kind + location, the underlying diagnostic, and a single
+  ## copy-pasteable next step.
+  let loc =
+    if outc.backendLocation.len > 0: " at " & outc.backendLocation else: ""
+  var s = lockingTierLabel(outc.tier) & " repo '" & outc.repoPath &
+    "' could not be published to its " & outc.backendKind & " backend" & loc
+  if outc.diagnostic.len > 0:
+    s.add(" (" & outc.diagnostic & ")")
+  s.add("; make the backend reachable and re-run `repro push`")
+  s
+
+proc personalBackendWarning(outc: ParticipationOutcome): string =
+  ## §6 Decision 2 personal-tier warning: name the repo, the personal backend,
+  ## and ``repro lock refresh``.
+  let loc =
+    if outc.backendLocation.len > 0: " at " & outc.backendLocation else: ""
+  "personal lock backend " & outc.backendKind & loc &
+    " is unreachable; personal repo '" & outc.repoPath &
+    "' participation was not recorded — run `repro lock refresh` when it is " &
+    "reachable"
+
+proc applyParticipationTierPolicy(report: var CheckReport;
+    outcomes: seq[ParticipationOutcome]) =
+  ## HL-3 (§6 Decision 2) — inspect each per-repo ``ParticipationOutcome`` by
+  ## tier and apply the refuse-for-shared / warn-for-personal split. A failed
+  ## public/team write adds a ``lock-backend-unreachable`` ``CheckFailure`` and
+  ## sets ``exitCode = 2``; a failed personal write adds a ``notices`` warning
+  ## and leaves ``exitCode`` unchanged. Idempotent for the empty / all-recorded
+  ## case (no explicit routes ⇒ ``@[]`` ⇒ no-op, byte-identical to pre-HL-3).
+  for outc in outcomes:
+    if not participationFailed(outc): continue
+    if tierIsShared(outc.tier):
+      report.failures.add(CheckFailure(
+        repo: outc.repoPath,
+        property: "lock-backend-unreachable",
+        remediation: backendUnreachableRemedy(outc),
+        evidence: "tier=" & lockingTierLabel(outc.tier) &
+          " backend=" & outc.backendKind &
+          (if outc.backendLocation.len > 0:
+             " location=" & outc.backendLocation else: "") &
+          (if outc.diagnostic.len > 0: " diagnostic=" & outc.diagnostic
+           else: "")))
+      report.exitCode = 2
+    else:
+      report.notices.add(personalBackendWarning(outc))
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -25438,6 +25663,45 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       return
     result.lockUpdate.kind = cluNone
     result.exitCode = 0
+    # HL-3 (deliverable 3) — a manifest-LESS workspace may still route repos to
+    # durable personal/team backends (a public + personal shape with no team
+    # manifest). Record each routed repo's participation through its ASSIGNED
+    # backend HERE — the manifest-present path does this via
+    # ``executeWorkspaceLock``, but that path is skipped when there is no
+    # ``.repo/manifests`` checkout. Without this, a personal git-checkout-on-a-
+    # remote backend would never see its lock written/pushed in a manifest-less
+    # workspace (the HL-2 disclosed deferral). ``recordRoutedParticipation``
+    # returns ``@[]`` when no explicit route is declared (the pure committed-lock
+    # shape), so this is a byte-identical no-op there.
+    block manifestLessRoutedParticipation:
+      let composed = composeLockingRouting(
+        parsed.workspaceRoot, identity.binaryPath)
+      if not composed.hasExplicitRoutes: break manifestLessRoutedParticipation
+      var inScopeRepos: seq[ResolvedRepo] = @[]
+      for repo in resolved.repos:
+        if repoInScope(repo.name): inScopeRepos.add(repo)
+      var repoShas = initTable[string, string]()
+      for obs in observations:
+        if obs.hasGit: repoShas[obs.path] = obs.headSha
+      try:
+        result.participation = recordRoutedParticipation(
+          parsed.workspaceRoot, inScopeRepos, repoShas,
+          resolved.projectName, identity)
+      except StoreRoutingError as err:
+        # An unrouted private repo — surface it as a loud lock failure (never a
+        # silent pass), mirroring the manifest-present path's propagation.
+        result.failures.add(CheckFailure(
+          repo: "",
+          property: "lock-failure",
+          remediation:
+            "add a `[[locking.route]]` entry for the unrouted private repo " &
+            "named below, then re-run `repro check`",
+          evidence: err.msg))
+        result.exitCode = 2
+        return
+      # HL-3 (§6 Decision 2) — apply the refuse-for-shared / warn-for-personal
+      # split on the routed backends of a manifest-less workspace too.
+      applyParticipationTierPolicy(result, result.participation)
     applyCertificateGate()
     return
   # RA-7: surface the manifest-layer root so the caller can publish
@@ -25581,6 +25845,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     result.lockUpdate.triggerSha = lockOutcome.report.triggerSha
     result.lockUpdate.kind =
       if lockMissing: cluCreated else: cluRefreshed
+    # HL-3 (§6 Decision 2) — surface the per-repo, tier-tagged participation
+    # outcomes from the write so the tier policy below (and ``runCheckCommand``)
+    # can see WHICH backend was unreachable. Empty for the no-explicit-route
+    # single-tier shape (``recordRoutedParticipation`` returns ``@[]``), so this
+    # is byte-identical to pre-HL-3 there.
+    result.participation = lockOutcome.report.participation
 
   # ---- 5. M26: lock visibility (public locks must not reference -----------
   # private-only repos) ----------------------------------------------------
@@ -25721,6 +25991,14 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         result.exitCode = 2
         return
   result.exitCode = 0
+  # HL-3 (§6 Decision 2) — the lock write recorded each repo's participation
+  # through its ASSIGNED backend; inspect those tier-tagged outcomes and apply
+  # the refuse-for-shared / warn-for-personal split. A failed public/team write
+  # flips ``exitCode`` to 2 (REFUSE) with a ``lock-backend-unreachable`` remedy;
+  # a failed personal write adds a warning notice and leaves the exit unchanged
+  # (WARN + ALLOW). A no-explicit-route workspace has an empty ``participation``
+  # ⇒ this is a byte-identical no-op there.
+  applyParticipationTierPolicy(result, result.participation)
   applyCertificateGate()
 
 proc writeCheckReport(report: CheckReport) =
@@ -25737,7 +26015,12 @@ type
     ## must publish its pending records through at pre-push. ``backendKind`` is
     ## the human/JSON label for the diagnostics; ``store`` is the constructed
     ## backend whose ``publishPending`` commits + pushes its own pending records.
+    ## HL-3 — ``tier`` drives the refuse-for-shared / warn-for-personal publish
+    ## policy (§6 Decision 2); ``location`` names WHERE the backend lives for the
+    ## remedy/warning text.
     backendKind: string
+    tier: WorkspaceVisibility
+    location: string
     store: LockStore
 
 proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
@@ -25794,7 +26077,8 @@ proc perBackendPublishTargets(parsed: CheckArgs; manifestLayerRoot: string;
     if key in seenBackends: continue
     seenBackends.incl(key)
     result.add(PerBackendPublishTarget(
-      backendKind: asg.backendKind, store: asg.store))
+      backendKind: asg.backendKind, tier: asg.visibility,
+      location: asg.store.storeLocationLabel(), store: asg.store))
 
 proc runCheckCommand*(args: openArray[string]): int =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
@@ -25853,34 +26137,43 @@ proc runCheckCommand*(args: openArray[string]): int =
     # (Workspace-And-Develop-Mode.md §"Lock publication is loud on
     # failure"). ``lpoNothingToPublish`` is benign (the lock was already
     # current and committed earlier). We never publish a failed gate's lock.
-    if report.exitCode == 0 and report.manifestLayerRoot.len > 0:
+    if report.exitCode == 0:
       let identity = ensureGitToolResolvable(
         parsed.toolProvisioning, getEnv("PATH"))
-      # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
-      # ``LockStore`` (mirroring the gate's already-routed lock READ and
-      # ``executePush``). The git-checkout backend's ``publishPending`` delegates
-      # to the byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping
-      # recovers the exact ``LockPublishResult`` the gate policy below branches
-      # on.
-      let publishStore: LockStore =
+      # HL-3 (deliverable 3) — the RA-7/RA-21 MANIFEST publish runs ONLY when a
+      # ``.repo/manifests`` git-checkout is present (``manifestLayerRoot`` set).
+      # The per-backend publish below runs whenever the gate passes and there
+      # ARE routed non-manifest backends, REGARDLESS of manifest presence —
+      # lifting HL-2's ``manifestLayerRoot.len > 0`` gate so a manifest-less
+      # workspace's personal/team-on-their-own-remote backends still publish
+      # (spec §5/§9). The manifest-present behavior below is byte-identical to
+      # HL-2 (same store, same policy, same offer-to-run remedy).
+      if report.manifestLayerRoot.len > 0:
+       # MO-10: route the RA-7/RA-21 pre-push publish through the abstract
+       # ``LockStore`` (mirroring the gate's already-routed lock READ and
+       # ``executePush``). The git-checkout backend's ``publishPending`` delegates
+       # to the byte-identical ``publishWorkspaceLock``; the 1:1 outcome mapping
+       # recovers the exact ``LockPublishResult`` the gate policy below branches
+       # on.
+       let publishStore: LockStore =
         newGitCheckoutLockStore(identity, report.manifestLayerRoot)
-      let storePub = publishStore.publishPending()
-      let pub = LockPublishResult(
+       let storePub = publishStore.publishPending()
+       let pub = LockPublishResult(
         outcome: lockPublishFromStorePut(storePub.outcome),
         diagnostic: storePub.diagnostic)
-      case pub.outcome
-      of lpoPublished:
+       case pub.outcome
+       of lpoPublished:
         stderr.writeLine("repro check: " & pub.diagnostic)
-      of lpoNothingToPublish:
+       of lpoNothingToPublish:
         discard
-      of lpoNotPublishable:
+       of lpoNotPublishable:
         # The workspace is not configured to publish (no manifest git
         # checkout / no upstream). There is no publication boundary to
         # honour, so this stays a benign best-effort skip — surfaced but
         # not gating.
         stderr.writeLine("repro check: lock publish skipped: " &
           pub.diagnostic)
-      of lpoRefusedDirty, lpoFailed:
+       of lpoRefusedDirty, lpoFailed:
         # Loud-on-failure (RA-21): the reproducible state COULD be published
         # but the attempt was refused (manifest dirty outside ``locks/``) or
         # failed (commit / push / network error). A teammate must never pull
@@ -25929,14 +26222,20 @@ proc runCheckCommand*(args: openArray[string]): int =
             evidence: pub2.diagnostic))
           report.exitCode = 2
 
-      # HL-2 (§6 Decision 1 — target publish path) — per-backend publish.
-      # The manifest git-checkout above is one backend; a mixed workspace also
-      # has team/personal records living in DISTINCT durable backends. Iterate
-      # every OTHER routed backend and publish its pending records through THAT
-      # backend, so a personal repo's record reaches the personal store and a
-      # non-manifest team repo's record reaches its own store — never the one
-      # manifest. HL-2 keeps today's loud-on-failure behavior uniformly; the
-      # tier-differentiated refuse-vs-warn policy is HL-3 (out of scope here).
+      # HL-2/HL-3 (§6 Decision 1 target publish path + Decision 2 tier policy) —
+      # per-backend publish. The manifest git-checkout above is one backend; a
+      # mixed workspace also has team/personal records living in DISTINCT durable
+      # backends. Iterate every OTHER routed backend and publish its pending
+      # records through THAT backend, so a personal repo's record reaches the
+      # personal store and a non-manifest team repo's record reaches its own
+      # store — never the one manifest.
+      #
+      # HL-3 lifts HL-2's ``manifestLayerRoot.len > 0`` gate: this loop now runs
+      # even in a manifest-LESS workspace (a public + personal shape with no team
+      # manifest), so a personal git-checkout-on-a-remote backend gets its remote
+      # push. And it applies the tier split on a publish FAILURE: a public/team
+      # backend REFUSES (exit 2), a personal backend WARNS + ALLOWS (exit
+      # unchanged), per §6 Decision 2.
       for target in perBackendPublishTargets(
           parsed, report.manifestLayerRoot, identity):
         let otherPub = target.store.publishPending()
@@ -25950,18 +26249,35 @@ proc runCheckCommand*(args: openArray[string]): int =
         of lpoNothingToPublish, lpoNotPublishable:
           discard
         of lpoRefusedDirty, lpoFailed:
-          let diag = "lock publication failed for " & target.backendKind &
-            " backend: " & opub.diagnostic
-          stderr.writeLine("repro check: " & diag)
-          report.failures.add(CheckFailure(
-            repo: "",
-            property: "lock-publish-failure",
-            remediation:
-              "run 'repro push' to re-publish the " & target.backendKind &
-              " backend (fix the network / non-fast-forward / dirty cause " &
-              "above)",
-            evidence: opub.diagnostic))
-          report.exitCode = 2
+          let loc =
+            if target.location.len > 0: " at " & target.location else: ""
+          if tierIsShared(target.tier):
+            let diag = "lock publication failed for " &
+              lockingTierLabel(target.tier) & " " & target.backendKind &
+              " backend" & loc & ": " & opub.diagnostic
+            stderr.writeLine("repro check: " & diag)
+            report.failures.add(CheckFailure(
+              repo: "",
+              property: "lock-backend-unreachable",
+              remediation:
+                lockingTierLabel(target.tier) & " " & target.backendKind &
+                " backend" & loc & " could not be published (" &
+                opub.diagnostic & "); make the backend reachable and re-run " &
+                "`repro push`",
+              evidence: "tier=" & lockingTierLabel(target.tier) &
+                " backend=" & target.backendKind &
+                (if target.location.len > 0: " location=" & target.location
+                 else: "") & " diagnostic=" & opub.diagnostic))
+            report.exitCode = 2
+          else:
+            # Personal backend — WARN but ALLOW (exit unchanged), advise
+            # ``repro lock refresh`` (§6 Decision 2).
+            let warn = "personal lock backend " & target.backendKind & loc &
+              " is unreachable; personal repo participation was not published " &
+              "(" & opub.diagnostic & ") — run `repro lock refresh` when it is " &
+              "reachable"
+            stderr.writeLine("repro check: " & warn)
+            report.notices.add(warn)
     writeCheckReport(report)
     if parsed.json:
       stdout.writeLine(pretty(report.toJsonNode(), indent = 2))

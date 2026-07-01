@@ -258,6 +258,12 @@ method manifestLayerRoots*(s: LockStore): seq[string] {.base.} =
   ## / ``variants/``); the record-only backends return an empty seq.
   @[]
 
+method storeLocationLabel*(s: LockStore): string {.base.} =
+  ## HL-3 — a human-readable location for the backend (the on-disk root, the
+  ## program path, …) so a refusal remedy can name WHERE the backend lives.
+  ## The base returns the empty string; concrete backends override.
+  ""
+
 # ---------------------------------------------------------------------------
 # Shared git runner
 # ---------------------------------------------------------------------------
@@ -297,6 +303,8 @@ proc cfRecordPath(s: CommittedFileLockStore; k: StoreLockKey): string =
   s.baseDir / "locks" / k.project / k.repo / (k.sha & ".rec")
 
 method backendId*(s: CommittedFileLockStore): string = "committed-file"
+
+method storeLocationLabel*(s: CommittedFileLockStore): string = s.baseDir
 
 method putLock*(s: CommittedFileLockStore;
     rec: StoreLockRecord): StorePutResult =
@@ -370,6 +378,8 @@ proc gnLatestAnyRef(project: string): string =
 proc gnEvidenceNotesRef(): string = "refs/notes/reprobuild/lock-evidence"
 
 method backendId*(s: GitNotesLockStore): string = "git-notes"
+
+method storeLocationLabel*(s: GitNotesLockStore): string = s.repoPath
 
 method putLock*(s: GitNotesLockStore; rec: StoreLockRecord): StorePutResult =
   let blob = encodeRecord(rec)
@@ -453,6 +463,8 @@ proc newSeparateBranchLockStore*(gitBin, repoPath: string):
   SeparateBranchLockStore(gitBin: gitBin, repoPath: absolutePath(repoPath))
 
 method backendId*(s: SeparateBranchLockStore): string = "separate-branch"
+
+method storeLocationLabel*(s: SeparateBranchLockStore): string = s.repoPath
 
 proc sbHashObject(s: SeparateBranchLockStore; content: string):
     tuple[ok: bool; sha, diag: string] =
@@ -595,6 +607,8 @@ proc newExternalCliLockStore*(program: string): ExternalCliLockStore =
   ExternalCliLockStore(program: absolutePath(program))
 
 method backendId*(s: ExternalCliLockStore): string = "external-cli"
+
+method storeLocationLabel*(s: ExternalCliLockStore): string = s.program
 
 proc ecPutRaw(s: ExternalCliLockStore; key, value: string): StorePutResult =
   let request = $(%*{
