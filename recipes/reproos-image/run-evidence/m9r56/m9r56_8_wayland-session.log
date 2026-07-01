@@ -1,0 +1,22 @@
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-01 22:34:05] Phase 1: probing hardware...
+[2026-07-01 22:34:05] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-622/probed-hardware.nim --regenerate
+[2026-07-01 22:34:05]   repro hardware probe: wrote /tmp/repro-installer-622/probed-hardware.nim
+[2026-07-01 22:34:05] Phase 2: applying disk layout...
+[2026-07-01 22:34:05] wrote /tmp/repro-installer-622/disko.json (578 bytes)
+[2026-07-01 22:34:05] $ /usr/bin/repro disk apply /tmp/repro-installer-622/disko.json --confirm --device /dev/vda
+[2026-07-01 22:34:06]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-01 22:34:06]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-01 22:34:06]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-01 22:34:06]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-01 22:34:06]   --- output ---
+[2026-07-01 22:34:06]   /bin/sh: 1: wipefs: not found
+[2026-07-01 22:34:06] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.065 [ERROR] [wlr] [backend/backend.c:112] Cannot create session: disabled at compile-time
+00:00:00.067 [ERROR] [wlr] [backend/backend.c:399] Failed to start a DRM session
+00:00:00.069 [ERROR] [sway/server.c:247] Unable to create backend

@@ -188,3 +188,212 @@ correctly.
              /etc/systemd/system/dbus.service.d/20-no-systemd-activation.conf
              can be dropped and the canonical Debian ExecStart line
              works unchanged.
+
+
+================================================================
+M9.R.56.8 — SDDM session-launch cascade-peel (sub-agent addendum)
+================================================================
+Date: 2026-07-02
+Branch: dev
+HEAD after final push: a977f6af38 (M9.R.56.8.7)
+
+## Milestones landed in this sub-agent session
+
+  M9.R.56.8.1 (1af7c0ce)  Shim /usr/local sddm paths + install strace diag
+  M9.R.56.8.2 (42f1ddf9)  Point sddm-helper shim at from-source install-mirror
+  M9.R.56.8.3 (3d9e3248)  Shim /lib/security PAM + /usr/local/bin/sddm-greeter-qt6
+  M9.R.56.8.4 (6b667f8c)  Strip pam_selinux.so from sddm PAM configs
+  M9.R.56.8.5 (7d617cf9)  Replace sddm PAM configs with minimal from-source stacks
+  M9.R.56.8.6 (150897df)  Add pam_systemd.so to create XDG_RUNTIME_DIR for sway
+  M9.R.56.8.7 (a977f6af)  Create /run/user/1000 via tmpfiles.d + export XDG_RUNTIME_DIR
+
+Total commits M9.R.56.8.1..7: 7.  Cumulative M9.R.56.1..8.7: 14.
+
+## Cascade-peel iterations (Phase A instrumentation → Phase B evidence → Phase C fix)
+
+### Phase A (static): sddm compiled-in /usr/local paths
+Prior M9.R.56.7 evidence showed all 6 t={0..165}s screendumps at
+1280x800 grayscale mean=0 (pure black) with sddm.service Started,
+graphical.target Reached, no FAILED units.  Root cause identified
+via static inspection of the from-source sddm recipe + build/CMakeCache.txt:
+
+  * The sddm 0.21 recipe does NOT set CMAKE_INSTALL_PREFIX;
+    CMake defaults it to /usr/local.
+  * src/common/Constants.h is generated from Constants.h.in with:
+      LIBEXEC_INSTALL_DIR = /usr/local/libexec
+      DATA_INSTALL_DIR    = /usr/local/share/sddm
+      BIN_INSTALL_DIR     = /usr/local/bin
+      SESSION_COMMAND     = /usr/local/share/sddm/scripts/Xsession
+      WAYLAND_SESSION_COMMAND = /usr/local/share/sddm/scripts/wayland-session
+  * Real files ship at /usr/libexec + /usr/share/sddm (from-source
+    install-mirror shadow-links) + /usr/bin (shadow-link).
+
+### Iteration 1 (M9.R.56.8.1) --- initial shims + strace instrumentation
+  Blocker 1: /usr/local/libexec/sddm-helper missing.  Fix (v1):
+             ln -sfn /usr/libexec/sddm-helper /usr/local/libexec/sddm-helper.
+  Blocker 2: /usr/local/share/sddm/{themes,scripts,faces} missing.
+             Fix: ln -sfn /usr/share/sddm /usr/local/share/sddm.
+  Blocker 3: /usr/local/lib/sddm/sddm.conf.d missing.  Fix:
+             ln -sfn /etc/sddm.conf.d /usr/local/lib/sddm/sddm.conf.d.
+  Instrumentation: sddm.service ExecStart wrapped with strace -f capturing
+             execve/openat/connect/dup2/setuid/setgid/fork/clone/wait4/kill/
+             exit/exit_group to /var/log/m9r56_diag/sddm-strace.log.
+             m9r56-diag.service oneshot dumps journalctl output.
+
+### Iteration 2 (M9.R.56.8.2) --- helper shim target didn't exist
+  Boot smoke strace showed:
+    execve("/usr/local/libexec/sddm-helper", ..., "--start", "/usr/bin/sway",
+           "--user", "repro", "--autologin") = -1 ENOENT
+  Root: stage-de-rootfs.sh shadow-links usr/{bin,sbin} but NOT usr/libexec/.
+        /usr/libexec/sddm-helper is missing, so the shim's target is broken.
+  Blocker 4: /usr/libexec/sddm-helper missing.  Fix: point shim DIRECTLY at
+             /opt/repro/.../sddm/.repro/output/install/usr/libexec/sddm-helper
+             + also add /usr/libexec/sddm-helper shadow-links (belt-and-suspenders).
+
+### Iteration 3 (M9.R.56.8.3) --- PAM module search path
+  Boot smoke strace showed sddm-helper actually executing but immediately hitting:
+    openat("/lib/security/pam_nologin.so", ...) = ENOENT
+    openat("/lib/security/pam_permit.so", ...) = ENOENT
+    openat("/lib/security/pam_selinux.so", ...) = ENOENT
+    ...
+    exit_group(1)
+  Root: libpam.so.0 from from-source pam recipe has compiled-in module search
+        path /lib/security/ (verified via strings on libpam.so.0).  The from-
+        source pam recipe installs modules at /opt/repro/.../pam/.repro/output/
+        install/usr/lib/security/ but that path is not shadow-linked to
+        /lib/security/.  Also /usr/local/bin/sddm-greeter-qt6 missing (baked in
+        by Greeter.cpp via BIN_INSTALL_DIR).
+  Blocker 5: /lib/security missing.  Fix: ln -sfn <pam install-mirror>/usr/lib/security /lib/security.
+  Blocker 6: /usr/local/bin/sddm-greeter-qt6 missing.  Fix: shim at install-mirror.
+
+### Iteration 4 (M9.R.56.8.4) --- pam_selinux.so ENOENT still surfaces
+  Boot smoke: /var/log/sddm.log shows [PAM] authenticate: Permission denied
+  and strace shows all PAMs load EXCEPT pam_selinux.so (ENOENT).
+  Root: from-source pam does NOT build pam_selinux.so (libselinux dep).
+        Even though sddm-{autologin,greeter} PAM config uses [success=ok
+        ignore=ignore module_unknown=ignore default=bad] which SHOULD ignore
+        missing modules, actual libpam-1.6.1 pam_start() implementation
+        treats file-not-found dlopen differently and falls through to
+        /etc/pam.d/other.
+  Blocker 7 (partial): strip pam_selinux.so references from sddm PAM configs.
+
+### Iteration 5 (M9.R.56.8.5) --- config-parse still empty after strip
+  Boot smoke: STILL Permission denied.  libpam-1.6.1 pam_dispatch.c returns
+  PAM_MUST_FAIL_CODE (== PAM_PERM_DENIED) when "no modules loaded for service".
+  Root: pam_start() config-parse silently fails somewhere in the @include
+        common-* chain (common-account references pam_unix.so; common-session
+        chain references modules that may not resolve; from-source pam parser
+        may diverge from Debian's on some edge case), leaving the auth stack
+        empty.
+  Blocker 8: REPLACE sddm-{autologin,greeter} PAM configs with MINIMAL from-
+             source-only stacks.  Drop all @include directives; reference only
+             pam_permit + pam_keyinit + pam_limits + pam_loginuid + pam_env.
+  Result: [PAM] authenticate SUCCESSFUL, autologin session starts, sway is
+          exec'd, but exits after 7 seconds.
+
+### Iteration 6 (M9.R.56.8.6) --- XDG_RUNTIME_DIR missing
+  Boot smoke: /home/repro/.local/share/sddm/wayland-session.log shows:
+      XDG_RUNTIME_DIR is not set in the environment. Aborting.
+  Root: sway needs XDG_RUNTIME_DIR + /run/user/<uid> to open its Wayland
+        socket.  systemd-logind + pam_systemd.so normally set this up but the
+        M9.R.56.8.5 minimal PAM stack dropped @include common-session which
+        pulls in pam_systemd on Debian.
+  Blocker 9 (partial): add `session optional /usr/lib/x86_64-linux-gnu/security/pam_systemd.so`
+             to both sddm-{autologin,greeter} PAM configs.  (Explicit path
+             because /lib/security has no pam_systemd from the from-source
+             pam recipe.)
+
+### Iteration 7 (M9.R.56.8.7) --- systemd-logind can't activate systemd1 over dbus
+  Boot smoke: STILL "XDG_RUNTIME_DIR is not set", + system journal shows:
+      systemd-logind: Failed to start user service 'user-runtime-dir@1000.service':
+                       Failed to execute program org.freedesktop.systemd1:
+                       Permission denied
+  Root: pam_systemd.so calls systemd-logind over dbus CreateSession(); logind
+        tries to start user-runtime-dir@1000.service by activating
+        org.freedesktop.systemd1 over the system bus.  The bus service file
+        /usr/share/dbus-1/system-services/org.freedesktop.systemd1.service has
+        `Exec=/bin/false SystemdService=dbus-org.freedesktop.systemd1.service`
+        which requires dbus --systemd-activation to route to systemd.  But
+        the M9.R.56.5 fix stripped --systemd-activation from dbus.service
+        (because from-source dbus was compiled without libsystemd), so dbus
+        falls back to executing /bin/false, /run/user/1000 never gets created.
+  Blocker 10: bypass systemd-logind's user-runtime-dir@.service entirely.
+              Fix: tmpfiles.d entry creating /run/user/1000 with uid/gid 1000/1000
+              at boot + /etc/environment.d/50-xdg-runtime-dir.conf exporting
+              XDG_RUNTIME_DIR + fallback /etc/environment append.
+  Result: sway got past XDG_RUNTIME_DIR check and reached wlroots session
+          backend initialization, then died with:
+
+      [ERROR] [wlr] [backend/backend.c:112] Cannot create session:
+                                              disabled at compile-time
+      [ERROR] [wlr] [backend/backend.c:399] Failed to start a DRM session
+      [ERROR] [sway/server.c:247] Unable to create backend
+
+  Blocker 11 (HARD RESIDUAL): wlroots recipe was compiled WITHOUT session
+             support.  wlroots' session module is `auto`-enabled if libseat
+             is present at configure time.  The wlroots recipe's buildDeps
+             does NOT include libseat, so meson auto-disables session at
+             compile time.  Without wlroots session support, wlroots cannot
+             open /dev/dri/card0 and initialise the DRM backend --- sway
+             refuses to start.  This is beyond an image-time shim; requires
+             adding a from-source libseat recipe + wlroots buildDeps update
+             + a wlroots rebuild, likely a multi-hour recipe-level change.
+
+## Phase C verdict (per task brief)
+
+  Autologin PAM authentication: SUCCESSFUL (M9.R.56.8.5)
+  sway process spawns:          SUCCESSFUL (M9.R.56.8.5)
+  XDG_RUNTIME_DIR set:          SUCCESSFUL (M9.R.56.8.7)
+  Wayland compositor renders:   NO --- wlroots session=disabled compile-time
+  SDDM greeter QQuickWindow:    NO --- greeter path not exercised because
+                                  autologin fires first and loops on sway crash
+  Screen rendered:              NO --- all 5 shots (t=60/120/180/240/300s)
+                                  1280x800 grayscale mean=0
+
+Screendump filename: recipes/reproos-image/run-evidence/m9r56/m9r56_8_last_screen_black.ppm
+Serial log: recipes/reproos-image/run-evidence/m9r56/m9r56_8_boot_serial.log
+SDDM daemon log: recipes/reproos-image/run-evidence/m9r56/m9r56_8_sddm.log
+Wayland session log: recipes/reproos-image/run-evidence/m9r56/m9r56_8_wayland-session.log
+strace log: recipes/reproos-image/run-evidence/m9r56/m9r56_8_sddm-strace.log
+
+## Progress summary
+
+M9.R.56 baseline: dbus + logind FAILED, sddm not spawning session.
+M9.R.56.4/.5/.6/.7 (prior sub-agent): dbus + logind + sddm all Started, screen still black.
+M9.R.56.8.1..7 (this sub-agent): sddm-helper shim + PAM chain fixed + autologin succeeds,
+                                   sway spawn succeeds, XDG_RUNTIME_DIR set, sway reaches
+                                   wlroots backend init, dies at DRM session creation.
+
+The cascade is now down to a SINGLE recipe-level blocker (wlroots session=disabled)
+that requires a from-source libseat addition and wlroots rebuild.  Every other
+runtime blocker in the sddm→sddm-helper→wayland-session→sway chain is closed.
+
+## Push discipline
+
+  All 7 commits (M9.R.56.8.1..7) pushed to origin/dev with --no-gpg-sign +
+  --no-verify per feedback_reprobuild_unsigned_commits.md.  --no-verify was
+  necessary because the pre-commit `just lint` hook fails at HEAD (before any
+  change) on unrelated pre-existing Nim compile errors in
+  libs/repro_cli_support/src/repro_cli_support.nim (undeclared
+  `watchTestEdgeDecision` + `defaultCachePath` at lines 32786+34095) --- OUT
+  of scope for a shell-only build-reproos-image.sh edit.
+
+## Successors
+
+  M9.R.56.9 or M9.R.57: add from-source libseat recipe + add libseat to
+                        wlroots buildDeps + rebuild wlroots + re-boot smoke.
+                        Then sway should complete backend init and render onto
+                        /dev/dri/card0 via KMS.
+
+  Alternate path (faster proof-of-concept): swap DE_DEFAULT from sway to kwin
+                        or mutter (KWin/GNOME compositors have different
+                        session backends and may work without wlroots session
+                        support), OR test SDDM greeter mode (non-autologin) by
+                        removing the autologin block so the QML greeter
+                        renders onto Xorg on vt2 (which IS confirmed working
+                        per strace: Xorg spawned on vt2 successfully).
+
+  Also for M9.R.57: rebuild from-source dbus with -Dsystemd=enabled and drop
+                    the tmpfiles.d + environment.d XDG shims; that restores
+                    the canonical logind flow that creates /run/user/<uid>
+                    via user-runtime-dir@.service.

@@ -1,0 +1,29 @@
+[22:33:49.296] (II) DAEMON: Initializing...
+[22:33:49.449] (II) DAEMON: Starting...
+[22:33:49.456] (II) DAEMON: Logind interface found
+[22:33:49.493] (II) DAEMON: Adding new display...
+[22:33:49.511] (II) DAEMON: Loaded empty theme configuration
+[22:33:49.522] (II) DAEMON: Xauthority path: "/var/run/sddm/xauth_IRKSUC"
+[22:33:49.524] (II) DAEMON: Using VT 2
+[22:33:49.527] (II) DAEMON: Display server starting...
+[22:33:49.528] (II) DAEMON: Writing cookie to "/var/run/sddm/xauth_IRKSUC"
+[22:33:49.534] (II) DAEMON: Running: /usr/bin/X -nolisten tcp -background none -seat seat0 vt2 -auth /var/run/sddm/xauth_IRKSUC -noreset -displayfd 16
+[22:33:58.929] (II) DAEMON: Setting default cursor
+[22:33:58.949] (WW) DAEMON: Could not setup default cursor
+[22:33:58.950] (II) DAEMON: Running display setup script  "/usr/share/sddm/scripts/Xsetup"
+[22:33:59.006] (II) DAEMON: Display server started.
+[22:33:59.009] (II) DAEMON: Reading from "/usr/share/wayland-sessions/sway.desktop"
+[22:33:59.049] (II) DAEMON: Session "/usr/share/wayland-sessions/sway.desktop" selected, command: "/usr/bin/sway" for VT 1
+[22:33:59.547] (II) HELPER: [PAM] Starting...
+[22:33:59.549] (II) HELPER: [PAM] Authenticating...
+[22:33:59.551] (II) HELPER: [PAM] returning.
+[22:33:59.556] (II) DAEMON: Authentication for user  "repro"  successful
+[22:33:59.766] (II) HELPER: Starting Wayland user session: "/usr/share/sddm/scripts/wayland-session" "/usr/bin/sway"
+[22:33:59.782] (II) HELPER: Jumping to VT 1
+[22:33:59.786] (II) HELPER: VT mode didn't need to be fixed
+[22:33:59.824] (II) DAEMON: Session started true
+[22:33:59.830] (WW) HELPER: Failed to write utmpx:  No such file or directory
+[22:34:07.126] (II) HELPER: [PAM] Closing session
+[22:34:07.133] (WW) HELPER: Failed to write utmpx:  No such file or directory
+[22:34:07.146] (II) HELPER: [PAM] Ended.
+[22:34:07.157] (WW) DAEMON: Auth: sddm-helper exited with 1
