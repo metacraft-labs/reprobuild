@@ -569,6 +569,12 @@ echo "[build-reproos-image] Phase 10: emit passwd + shadow + group + gshadow + h
 
   # --- /etc/shadow --- (root + user entries).  Preserve any prior
   # rows (e.g. from the stage-de-rootfs Debian base + ``live`` user).
+  # M9.R.56.6: also remove any row whose uid collides with the
+  # target uid; the stage-de-rootfs baseline ships a ``live`` user
+  # at uid=1000 which collides with the auto-config ``repro`` user
+  # at uid=1000 --- with both entries present nss lookups for uid
+  # 1000 resolve non-deterministically (typically to ``live``) and
+  # SDDM's autologin=User=repro fails to find a match.
   if [ ! -f '$MNT_DIR/etc/shadow' ]; then
     echo 'root:*:19000:0:99999:7:::' > '$MNT_DIR/etc/shadow'
   fi
@@ -582,10 +588,22 @@ echo "[build-reproos-image] Phase 10: emit passwd + shadow + group + gshadow + h
   if [ ! -f '$MNT_DIR/etc/passwd' ]; then
     echo 'root:x:0:0:root:/root:/bin/bash' > '$MNT_DIR/etc/passwd'
   fi
-  awk -v u='$USER_NAME' -F: '\$1 != u' '$MNT_DIR/etc/passwd' > '$MNT_DIR/etc/passwd.new'
+  # Drop any row matching either the target USER_NAME OR the target USER_UID
+  # (M9.R.56.6 UID-collision cleanup) --- the stage baseline live user shares
+  # uid=1000 with our repro user and shadows autologin.
+  awk -v u='$USER_NAME' -v uid='$USER_UID' -F: '\$1 != u && \$3 != uid' '$MNT_DIR/etc/passwd' > '$MNT_DIR/etc/passwd.new'
   echo '$USER_NAME:x:$USER_UID:$USER_GID::$USER_HOME:$USER_SHELL' >> '$MNT_DIR/etc/passwd.new'
   mv '$MNT_DIR/etc/passwd.new' '$MNT_DIR/etc/passwd'
   chmod 0644 '$MNT_DIR/etc/passwd'
+
+  # Also drop the ``live`` shadow row (matches the ``live`` passwd row we
+  # removed above; nss keeps them in lock-step, and dpkg-triggered
+  # tools scan shadow via getent).
+  awk -v u='$USER_NAME' -F: '\$1 != u && \$1 != \"live\"' '$MNT_DIR/etc/shadow' > '$MNT_DIR/etc/shadow.new2'
+  echo '$USER_NAME:$USER_PWHASH:19000:0:99999:7:::' >> '$MNT_DIR/etc/shadow.new2'
+  mv '$MNT_DIR/etc/shadow.new2' '$MNT_DIR/etc/shadow'
+  chmod 0640 '$MNT_DIR/etc/shadow'
+  chown root:root '$MNT_DIR/etc/shadow' 2>/dev/null || true
 
   # --- /etc/group --- (primary group + secondary group memberships).
   # Primary group: $USER_NAME with gid $USER_GID.
@@ -721,6 +739,14 @@ SDDM_EOF
   rm -f '$MNT_DIR/etc/systemd/system/multi-user.target.wants/reproos-installer-autorun.service' \\
         '$MNT_DIR/etc/systemd/system/graphical.target.wants/reproos-installer-autorun.service' \\
         2>/dev/null || true
+
+  # M9.R.56.6: strip the live-ISO tty1 autologin drop-in --- the
+  # installed disk should not auto-login as root on the text
+  # console (the graphical session via SDDM/autologin is where
+  # the user lands).  Without this the getty@tty1 unit is racing
+  # with sddm.service both trying to own vt1 depending on which
+  # gets ahead in unit ordering.
+  rm -rf '$MNT_DIR/etc/systemd/system/getty@tty1.service.d' 2>/dev/null || true
 " || { echo "[build-reproos-image] display-manager wiring failed" >&2; exit 71; }
 
 # ---------------------------------------------------------------
