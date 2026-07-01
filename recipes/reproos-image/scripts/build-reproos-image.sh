@@ -79,21 +79,35 @@ echo "[build-reproos-image] config: $REPRO_AUTO_CONFIG"
 
 # M9.R.53: sudo is the sole HOST-only tool escape hatch (it needs
 # setuid so it can't be provisioned by a store-managed catalog).
-# Pin to the absolute path /usr/bin/sudo so PATH shadowing (e.g. a
-# scoop-style user-writable shim) can't quietly swap in a non-setuid
-# copy that fails with "sudo: must be setuid".  Every other tool the
-# script invokes is declared in the recipe's runtimeDeps: block
-# (recipes/reproos-image/repro.nim) and resolved via M9.N Batch B
-# path-mode probing at build-plan time -- if a tool goes missing from
-# the dev shell PATH, the resolver raises a structured
-# "tool-resolution failed" diagnostic BEFORE the script fires.
-SUDO=/usr/bin/sudo
-if [ ! -x "$SUDO" ]; then
-  echo "[build-reproos-image] required host tool missing: $SUDO" \
-       "(sudo must be host-installed with setuid; declare-and-provision" \
+# Resolve an absolute path (avoiding a bare ``sudo`` invocation that
+# a scoop-style user-writable shim could shadow to a non-setuid
+# copy) by probing the canonical host locations in order:
+#
+#   * /usr/bin/sudo    -- Debian / Ubuntu / Fedora / Arch / macOS
+#   * /run/wrappers/bin/sudo  -- NixOS (security.sudo.enable = true)
+#   * /usr/local/bin/sudo     -- rare source-install override
+#
+# Every other tool the script invokes is declared in the recipe's
+# runtimeDeps: block (recipes/reproos-image/repro.nim) and resolved
+# via M9.N Batch B path-mode probing at build-plan time -- if a tool
+# goes missing from the dev shell PATH, the resolver raises a
+# structured "tool-resolution failed" diagnostic BEFORE the script
+# fires.
+SUDO=""
+for cand in /usr/bin/sudo /run/wrappers/bin/sudo /usr/local/bin/sudo; do
+  if [ -u "$cand" ] || [ -x "$cand" ]; then
+    SUDO="$cand"
+    break
+  fi
+done
+if [ -z "$SUDO" ]; then
+  echo "[build-reproos-image] required host tool missing: sudo" \
+       "(probed /usr/bin/sudo /run/wrappers/bin/sudo /usr/local/bin/sudo;" \
+       "sudo must be host-installed with setuid; declare-and-provision" \
        "does not apply to setuid binaries)" >&2
   exit 65
 fi
+echo "[build-reproos-image] sudo: $SUDO"
 
 # Required host tools.  Fail loudly if any are missing -- the recipe
 # orchestrator already provisions these in the dev shell via the
