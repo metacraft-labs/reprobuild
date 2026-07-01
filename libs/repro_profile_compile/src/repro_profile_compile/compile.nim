@@ -140,6 +140,9 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     if dirExists(dd / "codetracer-trace-format-nim" / "src"):
       if getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC").len == 0:
         childEnv["CODETRACER_TRACE_FORMAT_NIM_SRC"] = dd / "codetracer-trace-format-nim" / "src"
+    if dirExists(dd / "reprobuild-ct-test-runner"):
+      if getEnv("REPRO_CT_TEST_RUNNER_SRC").len == 0:
+        childEnv["REPRO_CT_TEST_RUNNER_SRC"] = dd / "reprobuild-ct-test-runner"
     if dirExists(dd / "reprobuild-test-adapters" / "src"):
       if getEnv("REPRO_TEST_ADAPTERS_SRC").len == 0:
         childEnv["REPRO_TEST_ADAPTERS_SRC"] = dd / "reprobuild-test-adapters" / "src"

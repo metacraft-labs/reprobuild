@@ -40,29 +40,43 @@ switch("undef", "nixbuild")
 # the M6 smoke check.
 switch("path", ".")
 
-# Test-Edges-And-Parallel-Runner M1: ``repro.nim`` consumes the generated
-# ``repro_tests.nim`` whose data entries each become a
+# Test-Edges-And-Parallel-Runner M1: ``repro.nim`` consumes the
+# generated ``repro_tests.nim`` whose data entries each become a
 # ``buildNimUnittest.build(...)`` call. The build-side typed-tool
-# (``ct_test_nim_unittest`` + its ``ct_test_interface`` contract) lives in-tree
-# under ``libs/`` (added via the ``libName`` loop below). The execution-time
-# ``ct_test_runner_adapter`` and the watch-side ``ct_incremental_adapter`` are
-# both hosted by CodeTracer and resolved from the same source path below.
-#
+# (``ct_test_nim_unittest`` + its ``ct_test_interface`` contract) now
+# lives in-tree under ``libs/`` (added via the ``libName`` loop below):
+# it depends only on ``repro_project_dsl`` and is the half ``repro.nim``
+# imports, so hosting it in-tree removes the reprobuild↔adapter
+# dependency cycle that the previous external import closed. Only the
+# execution-time ``TestRunner`` adapter (``ct_test_runner_adapter`` - the
+# in-process bridge in the ``reprobuild-ct-test-runner`` repo) stays
+# external and is resolved from the sibling checkout below.
+let ctTestRunnerRoot = block:
+  let fromEnv = getEnv("REPRO_CT_TEST_RUNNER_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "reprobuild-ct-test-runner"
+let ctTestRunnerAdapterSrc = ctTestRunnerRoot / "libs" /
+  "ct_test_runner_adapter" / "src"
+if dirExists(ctTestRunnerAdapterSrc):
+  switch("path", ctTestRunnerAdapterSrc)
+
 # Incremental-Test-Runner: ``ct_incremental_adapter`` is hosted by CodeTracer
-# as the std-only process seam for CodeTracer's canonical incremental engine.
+# as the std-only process seam for codetracer's canonical incremental engine.
 # It reaches the engine by EXECUTING the ``ct`` binary as a subprocess (the
 # ``ct test --incremental --watch-decide`` / ``--watch-record`` protocol), NOT
-# by compiling the engine in-process. Resolve CodeTracer-hosted adapters from
-# ``$CODETRACER_SRC`` or the normal sibling checkout, never from the retired
-# standalone adapter repo.
+# by compiling the engine in-process. Resolve it from ``$CODETRACER_SRC`` or
+# the normal sibling checkout. The standalone ``reprobuild-ct-test-runner``
+# repo is retained for ``ct_test_runner_adapter`` only; it is not the source of
+# this incremental process seam.
 let codeTracerSrc = block:
   let fromEnv = getEnv("CODETRACER_SRC")
   if fromEnv.len > 0:
     fromEnv
   else:
     ".." / "codetracer" / "src"
-if fileExists(codeTracerSrc / "ct_incremental_adapter.nim") or
-    fileExists(codeTracerSrc / "ct_test_runner_adapter.nim"):
+if fileExists(codeTracerSrc / "ct_incremental_adapter.nim"):
   switch("path", codeTracerSrc)
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone

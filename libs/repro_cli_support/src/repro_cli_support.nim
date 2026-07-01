@@ -1732,8 +1732,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # byte-for-byte the same argv shape the shim was synthesising — the
   # 500+ reprobuild test edges flow through the standard path. The
   # ``TestRunner`` cross-cutting interface from M3, satisfied by the
-  # CodeTracer-hosted ``ct_test_runner_adapter`` package handles
-  # RUN/LIST/ENUMERATE
+  # standalone ``reprobuild-ct-test-runner`` repo's
+  # ``libs/ct_test_runner_adapter`` package, handles RUN/LIST/ENUMERATE
   # at engine execution time so recipes that need to dispatch back to
   # ct-test-runner do so through ``currentBuildContext().testRunner``.
 
@@ -9300,7 +9300,8 @@ const
     "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "BLAKE3_PREFIX", "XXHASH_PREFIX", "SQLITE_PREFIX",
     "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC",
-    "REPRO_TEST_ADAPTERS_SRC", "CODETRACER_SRC",
+    "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
+    "CODETRACER_SRC",
     # CT_INTERPOSE_SRC threads the ct_interpose package (monitor hooks /
     # SIP-rewrite helpers) onto config.nims's --path. REPROBUILD_SOURCE_ROOT
     # lets reprobuildLibraryWorkDir() locate reprobuild's OWN libs

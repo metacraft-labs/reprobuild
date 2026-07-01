@@ -43,7 +43,7 @@
 ## bare type — a user can construct ``NimUnittestBinary(path: "...")``
 ## directly and invoke the binary by any conventional means.
 ##
-## See CodeTracer's ``ct_test_runner_adapter``
+## See ``ct_test_runner_adapter`` (the sibling library landed in M4)
 ## for the ``TestRunner`` cross-cutting interface implementation that
 ## handles RUN/LIST/ENUMERATE at engine execution time.
 
