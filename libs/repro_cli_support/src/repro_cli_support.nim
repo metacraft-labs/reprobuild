@@ -25771,6 +25771,90 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           lockedShas[obs.path] = shas[obs.path]
         elif shas.len == 1:
           for _, v in shas: lockedShas[obs.path] = v
+    # HL-4 (§8.2 / §8.4 integrity-mismatch row) — PER-TIER INTEGRITY on the
+    # manifest-present / MIXED path. The store-SHA currency comparison above only
+    # detects a locked SHA that DIFFERS from the observed HEAD (a stale record,
+    # which triggers a REFRESH). It does NOT detect a locked entry whose recorded
+    # coordinates no longer describe reachable content — a tampered team/personal
+    # backend record pinning a revision whose commit object is absent, or a
+    # tampered committed lock. Before HL-4 that class of tamper slipped through
+    # the manifest-present path entirely: it was verified ONLY on the
+    # manifest-LESS committed-lock branch above (:24958-:24987). Here we recompute
+    # each in-scope locked entry's multihash AT its coordinates, per tier, via the
+    # SAME source-agnostic ``verifyLockedIntegrityAtCoordinates`` machinery
+    # (MO-8/MO-9): a public repo is sourced from the committed lock, a routed repo
+    # from ITS assigned backend record (``populateLockedDeps`` reading the store's
+    # ``path -> revision`` body and re-tagging the git-native integrity). A
+    # mismatch REFUSES the push (exit 2) with a diagnostic naming the tier +
+    # backend, rather than being silently refreshed. On a CLEAN mixed workspace
+    # every recomputed integrity equals the recorded one, so this is a no-op —
+    # no false ``locked-integrity-mismatch``.
+    var repoByPath = initTable[string, ResolvedRepo]()
+    for repo in inScopeRepos: repoByPath[repo.path] = repo
+    # (a) PUBLIC / committed-lock repos: verify the committed lock's integrity,
+    # scoped to the in-scope public paths (the same check the manifest-less
+    # branch runs, applied here so the mixed path also refuses a tampered public
+    # lock — §8.4 "tampered committed lock fails at the client (public branch)").
+    if committedLockPaths.len > 0:
+      let publicLd = populateLockedDeps(
+        LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot))
+      var scopedPublic = LockedDependencies(
+        schema: publicLd.schema, platform: publicLd.platform, deps: @[])
+      for d in publicLd.deps:
+        if d.path in committedLockPaths: scopedPublic.deps.add(d)
+      let publicFailures = verifyLockedIntegrityAtCoordinates(
+        parsed.workspaceRoot, scopedPublic)
+      if publicFailures.len > 0:
+        let f = publicFailures[0]
+        result.failures.add(CheckFailure(
+          repo: f.path,
+          property: "locked-integrity-mismatch",
+          remediation: "the content at the locked coordinates no longer " &
+            "matches the committed lock's recorded integrity for '" & f.path &
+            "' (tier=public backend=committed-lock); restore the locked " &
+            "revision or run `repro lock refresh` to re-pin",
+          evidence: "tier=public backend=committed-lock " & f.diagnostic))
+        result.exitCode = 2
+        return
+    # (b) ROUTED repos (team / personal / other): verify EACH against ITS OWN
+    # backend record. ``populateLockedDeps`` reads the record's coordinates from
+    # the assigned store and re-tags its git-native integrity, so a record
+    # pinning an unreachable/absent revision (the tamper) fails at the locked
+    # coordinates — exactly the class the SHA-only comparison cannot see.
+    for obs in observations:
+      if not obs.hasGit: continue
+      if not byPath.hasKey(obs.path): continue
+      let asg = byPath[obs.path]
+      if asg.store.isNil: continue
+      if not repoByPath.hasKey(obs.path): continue
+      let srcKind =
+        if asg.backendKind == "external-cli" or asg.backendKind == "committed-file":
+          lskExternalStore
+        else: lskManifestRepo
+      let routedLd = populateLockedDeps(LockSource(
+        kind: srcKind, workspaceRoot: parsed.workspaceRoot,
+        projectName: resolved.projectName, repos: @[repoByPath[obs.path]],
+        store: asg.store))
+      let routedFailures = verifyLockedIntegrityAtCoordinates(
+        parsed.workspaceRoot, routedLd)
+      if routedFailures.len > 0:
+        let f = routedFailures[0]
+        let tierLbl = lockingTierLabel(asg.visibility)
+        let loc = asg.store.storeLocationLabel()
+        result.failures.add(CheckFailure(
+          repo: f.path,
+          property: "locked-integrity-mismatch",
+          remediation: "the content at the locked coordinates no longer " &
+            "matches the recorded integrity for '" & f.path & "' (tier=" &
+            tierLbl & " backend=" & asg.backendKind &
+            (if loc.len > 0: " location=" & loc else: "") &
+            "); restore the locked revision in the " & tierLbl &
+            " backend or run `repro lock refresh` to re-pin",
+          evidence: "tier=" & tierLbl & " backend=" & asg.backendKind &
+            (if loc.len > 0: " location=" & loc else: "") &
+            " " & f.diagnostic))
+        result.exitCode = 2
+        return
   # ``lockMissing`` = no lock record exists to compare against. The manifest
   # store contributes ``latest.lockKey.sha``; a routed distinct backend
   # contributes its own record (``routedBackendRepos`` were read above). When

@@ -5414,6 +5414,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_integrity_mismatch_surfaces_per_tier.nim",
+    binary: "build/test-bin/t_integrity_mismatch_surfaces_per_tier",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
     binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
     defines: @[],
