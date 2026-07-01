@@ -24,6 +24,10 @@ instead.
 - **Faster test watching:** see [Trace-Based Incremental Testing](incremental-testing.md)
   for `repro watch --ct-incremental`, which skips re-running a test when the
   functions it executed haven't changed *(experimental)*.
+- **Locking a multi-repo workspace?** See
+  [Workspace Locking](workspace-locking.md) for choosing a public / team /
+  personal scheme, restoring a workspace on a new machine, and recovering
+  from a refused push.
 
 ## What is reprobuild?
 

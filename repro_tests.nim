@@ -5390,6 +5390,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim",
+    binary: "build/test-bin/t_docs_hooks_reflect_public_tier_only_server_gate",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim",
     binary: "build/test-bin/t_mixed_workspace_each_record_in_its_own_backend_only",
     defines: @[],
