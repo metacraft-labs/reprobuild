@@ -6334,6 +6334,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim",
+    binary: "build/test-bin/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim",
+    binary: "build/test-bin/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
     binary: "build/test-bin/t_lock_file_only_workspace_fully_described_from_lock_not_head",
     defines: @[],

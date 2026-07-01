@@ -24889,6 +24889,154 @@ type
     accepted*: bool
     diagnostic*: string
 
+# ---- HL-5 (§6 Decision 3) — server-side PUBLIC-TIER lock gate --------------
+#
+# The pre-receive gateway is certificate-only above. HL-5 makes it ADDITIONALLY
+# gate the PUBLIC tier — the ONLY tier the server can see, because the committed
+# ``repro.lock`` arrives inside the pushed content while the team / personal /
+# evidence backends are invisible to the receiving bare. Two checks, both
+# ``--no-verify``-proof (they run server-side where client hooks cannot reach):
+#
+#   (a) ``lock_references_private_repo`` — REJECT if the pushed committed
+#       ``repro.lock`` references a private-only repo. This is the SERVER MIRROR
+#       of the client stage-5 ``lock_references_private_repo``
+#       (``executeCheckPrePush``): the client uses the workspace's per-layer path
+#       visibility; the server has no manifest layers, but the committed lock's
+#       own per-dep ``visibility`` field (written by ``lockedDepFromStoreRepo``
+#       via ``lockingTierLabel``) carries the tier. A public committed lock that
+#       is tier-isolated (HL-1) carries only ``public`` deps; a dep tagged
+#       anything else (``org`` / ``team`` / ``personal``) is a private-only
+#       reference a public-only cloner cannot reproduce → REJECT.
+#   (b) ``locked-integrity-mismatch`` — recompute each locked entry's multihash
+#       against the RECEIVED content (the pushed objects, already reachable in
+#       the bare) and REJECT on mismatch. Same MO-8/MO-9 integrity model as the
+#       client (``verifyLockedIntegrityAtCoordinates``), but sourced from the
+#       BARE repo's object store rather than a working tree.
+#
+# BOUNDARY (§6 Decision 3, Q3): the server gates ONLY the public tier. It never
+# reads a team / personal / evidence backend — not even a same-repo
+# ``git-notes`` team backend. A push with NO committed ``repro.lock`` (a repo
+# that does not use the public tier) passes this gate cleanly (nothing to
+# check); the certificate gate still applies independently.
+
+const committedLockPathInTree = CommittedLockFileName
+  ## The committed lock's path inside a pushed commit's tree (repo root).
+
+proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string): string =
+  ## Read the committed ``repro.lock`` blob out of the pushed COMMIT's tree in
+  ## the bare repo. In pre-receive the commit object is already present (the
+  ## push delivered it) even though the branch ref update is still pending, so
+  ## ``git show <commit>:repro.lock`` resolves the blob straight from the
+  ## received objects. Returns "" when the pushed commit carries no
+  ## ``repro.lock`` (a public-tier-less repo) or on any git error — the caller
+  ## treats "no lock" as "nothing to gate", never as a pass-through of a bad
+  ## lock.
+  let res = gitNoteRun(gitBin,
+    ["-C", gatewayBareDir, "show", commit & ":" & committedLockPathInTree])
+  if res.code != 0:
+    return ""
+  res.output
+
+proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
+    ld: LockedDependencies): seq[LockedIntegrityFailure] =
+  ## Server-side analogue of ``verifyLockedIntegrityAtCoordinates`` for the
+  ## RECEIVED committed lock: recompute each locked entry's git-native multihash
+  ## against the BARE repo's object store (no working tree on the server) and
+  ## report a failure on mismatch. For a git dep the integrity IS the object id
+  ## at the locked revision, so verification is: the revision's object must be
+  ## PRESENT in the received bare AND its self-describing object id must equal
+  ## the locked integrity. A tampered ``integrity`` field, or a locked revision
+  ## whose object is absent/unreachable in the received objects, fails.
+  ##
+  ## Only ``git-sha*`` integrities pinned at a concrete revision are verified
+  ## here — those are the entries whose content the SERVER actually received.
+  ## Entries with no integrity, a non-git integrity (a pre-commit ``blake3:``
+  ## tree hash needs a working tree the bare does not have), or no concrete
+  ## revision are left to the client gate; the server makes no false claim about
+  ## content it cannot recompute.
+  result = @[]
+  if gitBin.len == 0: return
+  let objFmt = gitObjectFormatOf(gatewayBareDir)
+  for d in ld.deps:
+    if d.integrity.len == 0: continue
+    if d.coordinates.kind != ckVcs: continue
+    if not d.integrity.startsWith("git-sha"): continue
+    if d.coordinates.revision.len == 0: continue
+    # The locked revision's object must be present among the received objects.
+    let rp = gitNoteRun(gitBin,
+      ["-C", gatewayBareDir, "rev-parse", "--verify", "--quiet",
+       d.coordinates.revision & "^{commit}"])
+    if rp.code != 0 or rp.output.strip().len == 0:
+      result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+        expected: d.integrity, observed: "",
+        diagnostic: "locked revision " & d.coordinates.revision &
+          " is not present/reachable in the received objects for '" &
+          (if d.path.len > 0: d.path else: ".") & "'"))
+      continue
+    let observed = gitObjectMultihash(objFmt, d.coordinates.revision)
+    if observed != d.integrity:
+      result.add(LockedIntegrityFailure(name: d.name, path: d.path,
+        expected: d.integrity, observed: observed,
+        diagnostic: "recomputed integrity " & observed &
+          " at the received locked coordinates does not match the lock's " &
+          "recorded integrity " & d.integrity))
+
+proc gatewayVerifyPublicLock*(gitBin, gatewayBareDir: string;
+                              updates: seq[GatewayRefUpdate]):
+    GatewayVerifyResult =
+  ## HL-5 (§6 Decision 3) — the PUBLIC-TIER lock gate. For each pushed BRANCH
+  ## update, read the committed ``repro.lock`` blob from the received commit and
+  ## run the two checks: (a) reject a private-only reference
+  ## (``lock_references_private_repo``); (b) reject an integrity mismatch
+  ## (``locked-integrity-mismatch``). A branch with NO ``repro.lock`` in its
+  ## tree is a no-op (public-tier-less repo). ALWAYS runs (independent of the
+  ## certificate ``gate_mode``): the public-tier lock invariant holds for every
+  ## public repo regardless of whether the project opts into certificates.
+  result.accepted = true
+  let zeroSha = "0000000000000000000000000000000000000000"
+  for u in updates:
+    if not u.refName.startsWith("refs/heads/"): continue
+    if u.newSha == zeroSha: continue  # branch deletion — nothing in the tree.
+    let lockBlob = gatewayReadPushedLock(gitBin, gatewayBareDir, u.newSha)
+    if lockBlob.strip().len == 0:
+      continue  # no public lock in this push — nothing to gate (boundary).
+    var ld: LockedDependencies
+    try:
+      ld = parseLockedDependencies(lockBlob)
+    except CatchableError as err:
+      # A malformed committed lock about to become the public boundary is
+      # itself refusal-worthy — a public-only cloner could not consume it.
+      result.accepted = false
+      result.diagnostic = u.refName &
+        ": lock_references_private_repo/lock-parse-failed: the pushed " &
+        committedLockPathInTree & " does not parse (" & err.msg & ")"
+      return
+    # (a) private-ref check — the committed public lock must reference ONLY
+    # public-tier repos. ``visibility`` "" (default) or "public" is fine; any
+    # other tier is a private-only reference the server rejects.
+    for d in ld.deps:
+      let vis = d.visibility.strip().toLowerAscii()
+      if vis.len > 0 and vis != "public":
+        result.accepted = false
+        result.diagnostic = u.refName &
+          ": lock_references_private_repo: the pushed public " &
+          committedLockPathInTree & " references the private-only repo '" &
+          (if d.path.len > 0: d.path else: d.name) & "' (visibility=" &
+          d.visibility & "); a public-only clone cannot reproduce it — " &
+          "remove it from the public lock or publish it under a non-public " &
+          "tier's backend"
+        return
+    # (b) integrity check against the received objects.
+    let failures = gatewayVerifyReceivedLockIntegrity(
+      gitBin, gatewayBareDir, ld)
+    if failures.len > 0:
+      let f = failures[0]
+      result.accepted = false
+      result.diagnostic = u.refName &
+        ": locked-integrity-mismatch: '" &
+        (if f.path.len > 0: f.path else: f.name) & "' — " & f.diagnostic
+      return
+
 proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
                         updates: seq[GatewayRefUpdate];
                         cfg: GatewayConfig): GatewayVerifyResult =
@@ -25047,6 +25195,7 @@ proc runGatewayCommand*(args: openArray[string]): int =
   let updates = parseGatewayRefUpdates(stdinText)
   case phase
   of "pre-receive":
+    # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
     let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg)
     if verdict.diagnostic.len > 0:
       stderr.writeLine("reprobuild gateway: " & verdict.diagnostic)
@@ -25054,6 +25203,21 @@ proc runGatewayCommand*(args: openArray[string]): int =
       stderr.writeLine("reprobuild gateway: push REJECTED — no covering " &
         "test certificate (run 'repro certify' then push). The receiving-" &
         "side gateway is authoritative; '--no-verify' does not bypass it.")
+      return 1
+    # HL-5 (§6 Decision 3) — the ADDITIVE PUBLIC-TIER lock gate. Runs after the
+    # certificate gate; BOTH must pass. It reads the received committed
+    # ``repro.lock`` and rejects a private-only reference or an integrity
+    # mismatch. Server-side, so ``--no-verify`` cannot bypass it (same
+    # enforcement point as the cert gate). The server gates ONLY the public
+    # tier — team/personal/evidence backends are never read.
+    let lockVerdict = gatewayVerifyPublicLock(gitBin, gatewayDir, updates)
+    if lockVerdict.diagnostic.len > 0:
+      stderr.writeLine("reprobuild gateway: " & lockVerdict.diagnostic)
+    if not lockVerdict.accepted:
+      stderr.writeLine("reprobuild gateway: push REJECTED — the pushed " &
+        "public repro.lock failed the server-side public-tier lock gate. " &
+        "The receiving-side gateway is authoritative; '--no-verify' does " &
+        "not bypass it.")
       return 1
     return 0
   of "post-receive":
