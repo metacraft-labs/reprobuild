@@ -22610,38 +22610,52 @@ proc cachePushSpawnCommand*(targetOs: WorkspaceTargetOs;
     result.shellInvocation =
       "start /b \"\" " & childArgs & " >NUL 2>&1"
 
+proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
+  ## Resolve the workspace's project repos in the best-effort post-commit /
+  ## cache-push hook context. Mirrors the manifest-vs-compositional dispatch of
+  ## the pre-push gate; returns ``@[]`` on any resolution failure so the caller
+  ## (always best-effort) can silently no-op.
+  try:
+    if isCompositionalWorkspaceToml(workspaceRoot):
+      let workspaceToml = absolutePath(
+        workspaceRoot / ".repo" / "workspace.toml")
+      return composeManifestLayersFromFile(workspaceToml).repos
+    else:
+      let projectName = detectWorkspaceProjectName(workspaceRoot)
+      if projectName.len == 0:
+        return @[]
+      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
+      let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
+      let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
+      if fileExists(projectFile):
+        return resolveProject(projectFile).repos
+      elif fileExists(variantFile):
+        return resolveVariant(variantFile).repos
+      else:
+        return @[]
+  except CatchableError:
+    return @[]
+
+proc findRepoByWorkspacePath(workspaceRoot: string;
+    repos: seq[ResolvedRepo]; repoAbsPath: string): Option[ResolvedRepo] =
+  ## Match the repo whose working tree is at ``repoAbsPath`` against a resolved
+  ## repo set (normalized-path equality). ``none`` when no repo matches.
+  let target = os.normalizedPath(absolutePath(repoAbsPath))
+  for repo in repos:
+    let repoAbs = os.normalizedPath(absolutePath(workspaceRoot / repo.path))
+    if repoAbs == target:
+      return some(repo)
+  none(ResolvedRepo)
+
 proc resolveRepoFetchUrl(workspaceRoot, repoAbsPath: string): string =
   ## Resolve the upstream fetch URL of the repo whose working tree is at
   ## ``repoAbsPath`` by matching it against the resolved project repos.
   ## Returns "" when no match (e.g. the repo is not part of the workspace
   ## manifest) — the caller then skips the cache push.
-  let target = os.normalizedPath(absolutePath(repoAbsPath))
-  var repos: seq[ResolvedRepo]
-  try:
-    if isCompositionalWorkspaceToml(workspaceRoot):
-      let workspaceToml = absolutePath(
-        workspaceRoot / ".repo" / "workspace.toml")
-      repos = composeManifestLayersFromFile(workspaceToml).repos
-    else:
-      let projectName = detectWorkspaceProjectName(workspaceRoot)
-      if projectName.len == 0:
-        return ""
-      let manifestsRoot = workspaceRoot / ".repo" / "manifests"
-      let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
-      let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
-      if fileExists(projectFile):
-        repos = resolveProject(projectFile).repos
-      elif fileExists(variantFile):
-        repos = resolveVariant(variantFile).repos
-      else:
-        return ""
-  except CatchableError:
-    return ""
-  for repo in repos:
-    let repoAbs = os.normalizedPath(absolutePath(workspaceRoot / repo.path))
-    if repoAbs == target:
-      return repo.fetchUrl
-  ""
+  let repos = resolveWorkspaceReposForHook(workspaceRoot)
+  let matched = findRepoByWorkspacePath(workspaceRoot, repos, repoAbsPath)
+  if matched.isNone: return ""
+  matched.get().fetchUrl
 
 proc runCachePushCommand*(args: openArray[string]): int =
   ## Internal entry point for the detached post-commit cache push:
@@ -22671,7 +22685,19 @@ proc runCachePushCommand*(args: openArray[string]): int =
     let workspaceRoot = resolvePostCommitWorkspaceRoot(repoAbs, "")
     if workspaceRoot.len == 0:
       return 0
-    let fetchUrl = resolveRepoFetchUrl(workspaceRoot, repoAbs)
+    let repos = resolveWorkspaceReposForHook(workspaceRoot)
+    let matched = findRepoByWorkspacePath(workspaceRoot, repos, repoAbs)
+    if matched.isNone:
+      return 0
+    # HL-6 (§7.2): evidence-only / source-secret repos are EXCLUDED from the
+    # eager cache push. Propagating the just-committed branch's objects to
+    # sibling workspaces alternated to the same shared bare would LEAK the
+    # repo's source objects locally. All other schemes (public / team /
+    # personal) keep the eager cache push, so this guard is the ONLY behavior
+    # change for a non-evidence repo (byte-identical path otherwise).
+    if isEvidenceOnlyRepo(matched.get()):
+      return 0
+    let fetchUrl = matched.get().fetchUrl
     if fetchUrl.len == 0:
       return 0
     let cacheRoot = defaultCacheRoot(workspaceRoot)
@@ -22719,6 +22745,103 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
       discard execShellCmd("sh -c " & q(spec.shellInvocation))
   except CatchableError:
     discard
+
+proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
+    string =
+  ## HL-6 (§7.1) — best-effort, THROTTLED-on-head-sha post-commit refresh of an
+  ## EVIDENCE-ONLY repo's source-free ``WorkspaceVcsEvidence`` triple.
+  ##
+  ##   * captures NO source: only the head-sha / is-clean / is-published triple
+  ##     via ``gatherRepoEvidence`` (``WorkspaceVcsEvidence`` has no source
+  ##     field), published through the repo's HL-1-assigned backend
+  ##     (``store.putEvidence``);
+  ##   * is THROTTLED on head-sha change: the refresh runs ONLY when the repo's
+  ##     current head-sha differs from the last published evidence triple's
+  ##     head-sha (read back via ``store.getEvidence``). An unchanged head-sha is
+  ##     a no-op — one ``putEvidence`` per NEW commit-sha, not per commit event;
+  ##   * is best-effort and NEVER blocks the commit: every failure (unreachable
+  ##     backend, no checkout, unrouted repo, no evidence-only repo) returns a
+  ##     short diagnostic string the caller logs; the hook still exits 0.
+  ##
+  ## Returns a one-line status the caller folds into the post-commit log/report.
+  ## An empty string means "not applicable" (the current repo is not an
+  ## evidence-only repo, or there is nothing to do) — a common, silent case.
+  let repos = resolveWorkspaceReposForHook(workspaceRoot)
+  if repos.len == 0: return ""
+  let matched = findRepoByWorkspacePath(workspaceRoot, repos, currentRepoAbs)
+  if matched.isNone: return ""
+  let repo = matched.get()
+  if not isEvidenceOnlyRepo(repo): return ""
+
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    return "evidence refresh skipped: git tool unresolvable (" & err.msg & ")"
+
+  # Resolve the repo's HL-1-assigned backend from the COMPOSED configuration
+  # layers (tier-by-layer, §4) — the same resolution the pre-push gate uses, so
+  # a route naming the repo by ``repos = [...]`` assigns its tier + backend.
+  let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
+  if not hasExplicitRoutes(composed):
+    return "evidence refresh skipped: evidence-only repo '" & repo.name &
+      "' has no `[[locking.route]]` backend to publish to"
+  var store: LockStore = nil
+  var projectName = ""
+  try:
+    let assignments = resolveRepoBackends(
+      composed, repos, workspaceRoot, identity, identity.binaryPath)
+    for asg in assignments:
+      if asg.repoName == repo.name:
+        store = asg.store
+        break
+    projectName = detectWorkspaceProjectName(workspaceRoot)
+  except CatchableError as err:
+    return "evidence refresh skipped: backend resolution failed for '" &
+      repo.name & "' (" & err.msg & ")"
+  if store.isNil:
+    return "evidence refresh skipped: evidence-only repo '" & repo.name &
+      "' has no assigned backend"
+
+  let repoAbs = workspaceRoot / repo.path
+  if not dirExists(extendedPath(repoAbs / ".git")):
+    return "evidence refresh skipped: evidence-only repo '" & repo.name &
+      "' has no local checkout at '" & repo.path & "'"
+
+  # Observe the CURRENT head-sha (source-free) so we can throttle.
+  let headRes = queryGitState(headShaQuery(repoAbs), identity)
+  if headRes.status != gqsOk or headRes.headSha.len == 0:
+    return "evidence refresh skipped: could not observe head-sha for '" &
+      repo.name & "'"
+  let currentHead = headRes.headSha
+
+  # THROTTLE: read the last PUBLISHED evidence triple's head-sha and no-op when
+  # it is unchanged. Any read failure is treated as "no prior evidence" so the
+  # first publish still happens (best-effort — never blocks).
+  var lastHead = ""
+  try:
+    let prior = store.getEvidence(projectName, repo.name)
+    if prior.len > 0:
+      lastHead = evidenceTriple(prior).headSha
+  except CatchableError:
+    lastHead = ""
+  if lastHead.len > 0 and lastHead == currentHead:
+    return "evidence refresh throttled: '" & repo.name &
+      "' head-sha unchanged (" & currentHead & ")"
+
+  # Gather + publish the source-free triple (NO source captured).
+  try:
+    let toolDigest = digestHex(identity)
+    let triple = gatherRepoEvidence(
+      identity, repoAbs, repo.path, toolDigest, getTime().toUnix * 1000)
+    let put = store.putEvidence(projectName, repo.name, triple)
+    if put.outcome == spoOk:
+      return "evidence refreshed: '" & repo.name & "' at head-sha " & currentHead
+    else:
+      return "evidence refresh failed: putEvidence for '" & repo.name &
+        "': " & put.diagnostic
+  except CatchableError as err:
+    return "evidence refresh failed: '" & repo.name & "' (" & err.msg & ")"
 
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
@@ -22770,6 +22893,21 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
     spawnAsyncCachePush(absolutePath(parsed.currentRepo),
       extractFilename(workspaceRoot.strip(leading = false, trailing = true,
         chars = {'/'})))
+
+  # HL-6 (§7.1): best-effort, THROTTLED-on-head-sha refresh of the current
+  # repo's source-free evidence triple when it is an EVIDENCE-ONLY repo. This
+  # keeps the published evidence fresh between commits without depending solely
+  # on the manual ``repro workspace publish-evidence`` verb. It captures NO
+  # source, runs at most once per NEW head-sha, and — like every other
+  # post-commit action — never blocks the commit: every outcome (including
+  # "not applicable" / failure) is folded into the post-commit log and the hook
+  # still exits 0.
+  if parsed.currentRepo.len > 0:
+    let evidenceStatus = refreshEvidenceOnlyRepoAtPostCommit(
+      workspaceRoot, absolutePath(parsed.currentRepo))
+    if evidenceStatus.len > 0:
+      appendPostCommitLog(workspaceRoot, timestamp & " evidence " &
+        evidenceStatus)
 
   # Build the strict M11 args from the dispatched argv and invoke the
   # M11 executor in-process. Any raise is downgraded to ``pcoFailed``.
@@ -25399,6 +25537,47 @@ proc applyParticipationTierPolicy(report: var CheckReport;
     else:
       report.notices.add(personalBackendWarning(outc))
 
+proc evidenceReadBackendUnreachable(verdict: UnreadableRepoVerdict): bool =
+  ## HL-6 (§7.3) — distinguish an evidence-only failure that stems from the
+  ## backend being UNREACHABLE for the evidence READ (no store constructed / no
+  ## published evidence to read) from one where the evidence WAS read and proves
+  ## the boundary violated (dirty / unpublished / sha-mismatch / no-lock). Only
+  ## the former is subject to Decision 2's tier split — a violation the evidence
+  ## itself reports must FAIL regardless of tier.
+  verdict in {urvEvidenceNoBackend, urvEvidenceMissing}
+
+proc evidenceReadUnreachableWarning(repoPath, backendKind: string): string =
+  ## §7.3 personal-tier warning for an unreachable evidence READ, shaped like
+  ## the write-side ``personalBackendWarning`` (names the personal backend +
+  ## ``repro lock refresh``).
+  "personal lock backend " & backendKind &
+    " is unreachable for the evidence read of personal repo '" & repoPath &
+    "' — run `repro lock refresh` when it is reachable"
+
+type
+  EvidenceReadGateDecision* = enum
+    ## HL-6 (§7.3) — how the pre-push gate treats one evidence-only repo whose
+    ## published evidence was consumed in lieu of a clone.
+    ergdSatisfied   ## evidence proves the boundary (clean+published+at-locked)
+    ergdRefuse      ## FAIL exit 2: violation, or a SHARED-tier unreachable read
+    ergdWarnAllow   ## exit 0 + notice: a PERSONAL-tier unreachable evidence read
+
+proc decideEvidenceReadTierPolicy*(outcome: UnreadableRepoGateOutcome;
+    visibility: WorkspaceVisibility): EvidenceReadGateDecision =
+  ## HL-6 (§7.3) — the SINGLE decision the pre-push gate applies to an
+  ## evidence-only repo's consumed evidence, so the test drives the gate's real
+  ## decision (not a re-implementation). Decision 2's loud-vs-warn applies to the
+  ## evidence READ of an UNREACHABLE backend: a team/public (SHARED) tier REFUSES
+  ## (teammates depend on it), a PERSONAL tier WARNS but ALLOWS (the user's own
+  ## backend). An evidence-proven violation (dirty / unpublished / sha-mismatch /
+  ## no-lock) FAILS regardless of tier; a satisfied boundary passes.
+  if not outcome.failed:
+    return ergdSatisfied
+  if evidenceReadBackendUnreachable(outcome.verdict.verdict) and
+      not tierIsShared(visibility):
+    return ergdWarnAllow
+  ergdRefuse
+
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   ## Drive the five-stage gate. Each stage short-circuits on the first
   ## failure — the spec is explicit that the gate names ONE failure at
@@ -25573,11 +25752,21 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       let asg = byName.getOrDefault(repo.name)
       let outcome = gateDecideUnreadableRepo(
         repo, asg.store, resolved.projectName)
-      if outcome.failed:
+      # HL-6 (§7.3): Decision 2's loud-vs-warn applies to the evidence READ of an
+      # unreachable backend. ``decideEvidenceReadTierPolicy`` is the single shared
+      # decision (the integration test drives the SAME proc): a PERSONAL-tier
+      # unreachable evidence read WARNS but ALLOWS; a team/public (shared) tier —
+      # or an evidence-proven violation — REFUSES.
+      case decideEvidenceReadTierPolicy(outcome, asg.visibility)
+      of ergdSatisfied:
+        result.notices.add(outcome.notice)
+      of ergdWarnAllow:
+        result.notices.add(
+          evidenceReadUnreachableWarning(repo.path, asg.backendKind))
+      of ergdRefuse:
         result.failures.add(outcome.failure)
         result.exitCode = 2
         return
-      result.notices.add(outcome.notice)
 
   # ---- TC-3 / RA-32: certificate-coverage gate (opt-in per project) ------
   # This nested stage runs ONLY after every other stage has passed (the gate
