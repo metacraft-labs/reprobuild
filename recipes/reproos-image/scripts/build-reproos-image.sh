@@ -723,6 +723,75 @@ SDDM_EOF
         2>/dev/null || true
 " || { echo "[build-reproos-image] display-manager wiring failed" >&2; exit 71; }
 
+# ---------------------------------------------------------------
+# Phase 10.6: close dbus.service boot-blockers so the D-Bus system
+# bus can start (M9.R.56.4).
+#
+# Post-M9.R.56.3 the from-source dbus binary + libdbus + system.conf
+# are present at the expected FHS paths, but three latent bugs from
+# the Debian base rootfs + the install-mirror layout still prevent
+# dbus.service from reaching notify-ready:
+#
+#   Blocker 1 (runtime dir):  the Debian dbus.service unit lacks
+#     ``RuntimeDirectory=dbus``.  dbus-daemon fails with
+#     ``Failed to bind socket "/run/dbus/system_bus_socket": No
+#     such file or directory`` because /run/dbus doesn't exist and
+#     nothing creates it at unit start.  Fix: drop-in override that
+#     adds ``RuntimeDirectory=dbus`` (systemd creates
+#     /run/dbus/ with mode 0755 before ExecStart).
+#
+#   Blocker 2 (Debian gdm.conf):  the Debian base rootfs ships
+#     /etc/dbus-1/system.d/gdm.conf with ``<policy user="gdm">``.
+#     dbus-daemon parses every *.conf in system.d/ at startup and
+#     rejects the whole config file when the user is undefined
+#     (``Unknown username "gdm" in message bus configuration
+#     file``).  We use SDDM not GDM so removing gdm.conf is the
+#     correct cleanup; a future GDM-first config can drop it back
+#     in via the polkit / dconf split we already ship for KDE.
+#
+#   Blocker 3 (dbus-daemon-launch-helper):  the from-source dbus
+#     ships /usr/libexec/dbus-daemon-launch-helper (a setuid helper
+#     the daemon exec()'s for privileged bus-activation), but
+#     stage-de-rootfs.sh's ``link_base_recipe_binaries`` only
+#     shadow-links ``usr/{bin,sbin}`` from-source binaries, NOT
+#     ``usr/libexec/``.  Add a shadow-link at
+#     /usr/libexec/dbus-daemon-launch-helper -> install-mirror.
+#
+# Blocker 4 (falsified):  the LIBDBUS_PRIVATE_1.16.0 warning
+# printed at exec time by ld.so is a NON-FATAL diagnostic caused
+# by Debian's /etc/ld.so.cache holding a stale entry for the older
+# Debian /lib/x86_64-linux-gnu/libdbus-1.so.3 (verified by
+# LD_DEBUG=libs: after the warning ld.so falls through to the
+# from-source libdbus at
+# /opt/repro/reprobuild/.../install/usr/lib/libdbus-1.so.3 via
+# dbus-daemon's RUNPATH and completes the load).  The daemon
+# succeeds after the warning; the warning is a v2 cleanup.
+# ---------------------------------------------------------------
+
+echo "[build-reproos-image] Phase 10.6: wire dbus RuntimeDirectory + strip gdm.conf + shadow-link libexec helper"
+
+"$SUDO" bash -c "
+  set -euo pipefail
+
+  # Blocker 1 --- drop-in override adding RuntimeDirectory=dbus.
+  mkdir -p '$MNT_DIR/etc/systemd/system/dbus.service.d'
+  cat > '$MNT_DIR/etc/systemd/system/dbus.service.d/10-runtime-dir.conf' <<'DBUS_DROPIN_EOF'
+[Service]
+RuntimeDirectory=dbus
+RuntimeDirectoryMode=0755
+DBUS_DROPIN_EOF
+
+  # Blocker 2 --- remove Debian's gdm.conf (references undefined gdm user).
+  rm -f '$MNT_DIR/etc/dbus-1/system.d/gdm.conf'
+
+  # Blocker 3 --- shadow-link the setuid dbus-daemon-launch-helper from
+  # the from-source install-mirror so ExecStart's fork() finds it at
+  # /usr/libexec/dbus-daemon-launch-helper.
+  mkdir -p '$MNT_DIR/usr/libexec'
+  ln -sfn /opt/repro/reprobuild/recipes/packages/source/dbus/.repro/output/install/usr/libexec/dbus-daemon-launch-helper \\
+    '$MNT_DIR/usr/libexec/dbus-daemon-launch-helper'
+" || { echo "[build-reproos-image] Phase 10.6 dbus wiring failed" >&2; exit 72; }
+
 echo "[build-reproos-image] phase summary:"
 echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
 echo "  mnt root:      $MNT_DIR ($(df -h "$MNT_DIR" 2>/dev/null | tail -1 | awk '{print $3"/"$2}'))"
