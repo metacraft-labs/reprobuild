@@ -182,6 +182,18 @@ jobs:
           dev-exec just bootstrap
           repro_bin="$repro_root/build/bin/repro"
           test -x "$repro_bin" || { echo "repro not bootstrapped at $repro_bin" >&2; exit 1; }
+          # The bootstrapped `repro` carries bare dlopen()s for its runtime
+          # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
+          # the binary-cache client) because build_apps.sh strips rpath per the
+          # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. Step 2 below
+          # runs it inside CODETRACER's dev shell, which does not carry those libs,
+          # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
+          # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
+          repro_ld="$(dev-exec sh -c 'printf %s "${LD_LIBRARY_PATH:-}"')"
+          if [ -n "$repro_ld" ]; then
+            cur_rpath="$(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null || true)"
+            dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$repro_bin"
+          fi
           # 2. Build only the `ct` target via codetracer's reprobuild.nim recipe.
           #    build-once.sh's reprobuild path (CODETRACER_REPROBUILD_LINUX=1)
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's

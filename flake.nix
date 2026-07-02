@@ -410,6 +410,10 @@
               runquotaTools
               pkgs.just
               pkgs.nim2
+              # Used by the ct-build CI step to bake reprobuild's runtime library
+              # dirs (clingo + zstd) into the bootstrapped `repro`'s RPATH, so it
+              # resolves its dlopen()s when run inside CodeTracer's dev shell.
+              pkgs.patchelf
               pkgs.cmake
               pkgs.ninja
               pkgs.clang
