@@ -1429,10 +1429,28 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
   if not action.collectConvertedEvidence(converters, result.evidence, seen):
     result.publishable = false
   if action.monitorEvidenceRequired():
+    # M9.R.60.2 — for a non-cacheable action, monitor evidence completeness
+    # can only be a DIAGNOSTIC signal, never a hard failure. No cache
+    # entry's soundness depends on the completeness of a non-cacheable
+    # action's evidence (the action always re-runs), so failing here
+    # merely blocks the rebuild for zero soundness gain. This mirrors the
+    # non-cacheable carve-out that ``setupMonitorDepfile`` already applies
+    # on the missing-monitor-CLI path at repro_build_engine.nim:1731-1746
+    # ("sanctioned home for pure network actions with no monitorable file
+    # evidence -- e.g. workspace sync's git fetch (cacheable = false)").
+    # The canonical trip is a fetch action's ``curl`` making an
+    # ipc-connect to an out-of-tree HTTP peer (github.com,
+    # freedesktop.org, ...): io-mon injects one synthetic mrEventLoss per
+    # unmonitored-subtree/peer (writer.nim:1007-1036 class (c)), which
+    # forced every from-source recipe's fetch action to fail regardless
+    # of the fact that its exit code was 0. See M9.R.60.1's Phase A
+    # characterization.
+    let mustFailOnIncompleteEvidence = action.cacheable
     if action.monitorDepfile.len == 0:
       result.evidence.diagnostics.add(
         "dependency policy requires monitor evidence but no RMDF path is selected")
-      result.publishable = false
+      if mustFailOnIncompleteEvidence:
+        result.publishable = false
       if strict and not result.publishable:
         discard
       return
@@ -1440,10 +1458,12 @@ proc collectEvidence(action: BuildAction; strict: bool): EvidenceCollection =
       if not foldMonitorDepFileEvidence(action.monitorDepfile, action.cwd,
           result.evidence, seen):
         result.evidence.diagnostics.add("monitor depfile is incomplete")
-        result.publishable = false
+        if mustFailOnIncompleteEvidence:
+          result.publishable = false
     except MonitorDepFileReaderError as err:
       result.evidence.diagnostics.add("monitor depfile read failed: " & err.msg)
-      result.publishable = false
+      if mustFailOnIncompleteEvidence:
+        result.publishable = false
   if strict and not result.publishable:
     discard
 
