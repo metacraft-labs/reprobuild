@@ -1,0 +1,173 @@
+M9.R.58 Phase A — PAM stack audit + pam_systemd runtime failure diagnosis
+=========================================================================
+
+Objective
+---------
+M9.R.57 closed the wlroots session backend compile-time gate but
+surfaced a runtime failure: libseat's logind backend fails because
+`/run/systemd/users/1000` does not exist at the moment sway launches.
+Phase A audits WHAT is in place vs WHAT is needed.
+
+
+A.1 — /etc/pam.d/sddm-autologin stack (source of truth: build-reproos-image.sh)
+-------------------------------------------------------------------------------
+Lines 1144-1164 of recipes/reproos-image/scripts/build-reproos-image.sh
+overwrite the Debian-installed sddm-autologin PAM config (M9.R.56.8.5)
+with this minimal stack:
+
+  #%PAM-1.0
+  auth       required   pam_permit.so
+  account    required   pam_permit.so
+  password   required   pam_permit.so
+  session    required   pam_permit.so
+  session    optional   pam_keyinit.so force revoke
+  session    optional   pam_limits.so
+  session    optional   pam_loginuid.so
+  session    optional   pam_env.so
+  session    optional   /usr/lib/x86_64-linux-gnu/security/pam_systemd.so
+
+Verdict: pam_systemd.so IS invoked in sddm-autologin's session stack
+(M9.R.56.8.6 added it). This falsifies task-brief hypothesis (a).
+
+
+A.2 — pam_systemd runtime evidence (M9.R.57 strace tail)
+--------------------------------------------------------
+From /tmp/m9r57_backup/m9r57_sddm-strace.log (M9.R.57 boot smoke run,
+sddm-helper pid 440 doing autologin as repro/uid=1000):
+
+  Line 5219  09:23:11.337926 openat(...)"/usr/lib/x86_64-linux-gnu/security/pam_systemd.so", O_RDONLY|O_CLOEXEC) = 12
+  Line 5290  09:23:11.514289 openat(...)"/usr/lib/x86_64-linux-gnu/libnss_systemd.so.2", O_RDONLY|O_CLOEXEC) = -1 ENOENT
+  Line 5292  09:23:11.521703 connect(13, {sa_family=AF_UNIX, sun_path="/run/dbus/system_bus_socket"}, 30) = 0
+  Line 5296  09:23:11.579599 clone(...) = 446   [child forks for wayland-session exec]
+  Line 5303  09:23:11.590029 openat(...)"/dev/tty0", O_RDWR|O_NOCTTY) = 19   [child pid 446, still uid 0]
+  Line 5307  09:23:11.605259 setgid(1000) = 0
+  Line 5310  09:23:11.612174 setuid(1000) = 0
+  Line 5312  09:23:11.621271 execve("/usr/share/sddm/scripts/wayland-session", ["...", "/usr/bin/sway"])
+  ...
+  Line 6824  09:23:18.554437 openat(AT_FDCWD, "/run/systemd/users/1000", O_RDONLY|O_CLOEXEC) = -1 ENOENT
+
+Verdict:
+  * pam_systemd.so IS loaded (line 5219)
+  * pam_systemd DOES connect to the dbus system bus (line 5292)
+  * Whatever dbus messages pam_systemd sent to logind AFTER the
+    connect did NOT result in /run/systemd/users/1000 being created
+    (line 6824, seven seconds later)
+
+
+A.3 — logind availability (M9.R.57 boot serial log tail)
+--------------------------------------------------------
+From /tmp/m9r57_backup/m9r57_boot_serial.log:
+
+  [  OK  ] Started User Login Management.   [= systemd-logind.service]
+  [  OK  ] Started D-Bus System Message Bus.
+  [  OK  ] Started Simple Desktop Display Manager.
+
+Verdict: systemd-logind.service starts successfully before sddm.
+So pam_systemd's IPC target IS reachable. The failure is inside the
+CreateSession() call itself.
+
+
+A.4 — Root cause (M9.R.56.8.7 note, reconfirmed)
+------------------------------------------------
+pam_systemd → dbus → logind's CreateSession() creates the session
+directory /run/systemd/sessions/<sid> and the user directory
+/run/systemd/users/<uid> DIRECTLY (logind writes those files itself,
+without going through PID-1 systemd). It ALSO tries to start
+user@1000.service by calling org.freedesktop.systemd1's
+StartTransientUnit — which routes through dbus's
+--systemd-activation, which the from-source dbus doesn't support
+(compiled without libsystemd per the reprobuild policy). The
+StartTransientUnit call fails.
+
+Open question the strace can't answer with the current filter (no
+sendmsg/recvmsg/read/write): does logind BAIL OUT of the whole
+CreateSession call when StartTransientUnit fails, thereby leaving
+/run/systemd/users/<uid> uncreated? The absence of the file at
+line 6824 strongly suggests yes.
+
+Downstream effect on libseat's logind backend
+(from-source recipes/packages/source/libseat/src/libseat/backend/logind.c:621):
+  ret = sd_uid_get_display(getuid(), session_id);
+  if (ret < 0) {
+    log_errorf("Could not get primary session for user: %s", strerror(-ret));
+    goto error;
+  }
+sd_uid_get_display reads /run/systemd/users/<uid>; ENOENT → libseat
+falls through to the builtin backend, which needs cap_sys_admin or
+video-group tty ownership. sway runs as uid 1000 with no supplementary
+groups on /dev/tty0; every builtin backend probe fails with EACCES.
+
+
+A.5 — Constraint check against the task-brief shape decision
+-----------------------------------------------------------
+Shape 1 (fix PAM chain): pam_systemd IS already in the chain (per A.1).
+                          Would only add optional-fallback modules like
+                          pam_loginuid that AREN'T what's missing. NOT
+                          the fix.
+
+Shape 2 (session-launcher wrap with systemd-run --user --scope):
+                          Requires org.freedesktop.systemd1.Manager
+                          which needs dbus --systemd-activation OR
+                          a running user@<uid>.service. Both blocked
+                          by A.4. NOT viable without deeper work.
+
+Shape 3 (loginctl enable-linger at first boot): enable-linger creates
+                          /var/lib/systemd/linger/<user> which tells
+                          logind to keep user@ running. But it STILL
+                          requires user@<uid>.service to start ONCE
+                          for /run/systemd/users/<uid> to be
+                          populated by logind. Same wall as Shape 2.
+
+Shape 4 (new — synthesize /run/systemd/users/1000 by hand):
+                          libseat's logind.c uses sd_uid_get_display,
+                          sd_session_is_active, sd_session_get_seat.
+                          These all read text files under
+                          /run/systemd/{users,sessions,seats}.
+                          Then calls sd_bus_default_system +
+                          manager_get_session_path (dbus TakeControl
+                          on logind). BOTH file-reads AND working
+                          logind IPC are needed. Since logind is
+                          running, if we can synthesize the state
+                          files, logind's D-Bus API will still refuse
+                          the TakeControl because logind doesn't
+                          know about a fake session. NOT viable.
+
+Shape 5 (new — enable + build seatd + run as system service):
+                          libseat has THREE backends: seatd, logind,
+                          builtin. Current libseat recipe hard-codes
+                          libseat-seatd=disabled + server=disabled.
+                          Enabling both builds the seatd daemon.
+                          seatd runs as a system service, mediates
+                          /dev/dri and /dev/tty access, and answers
+                          to libseat clients via a unix socket at
+                          /run/seatd.sock. This bypasses logind /
+                          user@.service entirely. Users are granted
+                          via membership in the `seat` group (or
+                          seatd's group=<name> option).
+
+                          This is the CORRECT fix shape: it closes
+                          the gap at the layer where libseat expects
+                          to be pluggable, and it does not depend on
+                          dbus --systemd-activation.
+
+
+A.6 — Chosen fix shape for Phase B: Shape 5 (seatd daemon)
+----------------------------------------------------------
+Concrete changes required:
+  1. libseat recipe: flip libseat-seatd=enabled + server=enabled.
+     Adds the seatd daemon binary + seatd-launch helper to the
+     artifact set. Adds a `seatd` executable + a `seatd-launch`
+     executable.
+  2. Add a seatd.service systemd unit + install into
+     /etc/systemd/system/ via Phase 10.8.
+  3. Enable seatd.service in graphical.target.wants so it starts
+     BEFORE sddm.service.
+  4. Add the repro user to the `seat` group (or set seatd's
+     -g <group>).
+  5. Verify: sway inherits LIBSEAT_BACKEND=seatd (the default
+     backend order is seatd > logind > builtin, so no env var
+     needed).
+
+Trade-off: introduces one new system service. But it's the
+standard non-logind path documented by wlroots + sway upstream,
+and it's the design libseat's `seatd` backend was created for.
