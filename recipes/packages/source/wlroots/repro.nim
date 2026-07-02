@@ -219,6 +219,17 @@ package wlrootsSource:
     ## fall back to a subproject clone when the pkg-config probe
     ## misses and wrap-based downloads are disabled.
     "wayland-protocols"
+    ## libseat is the seat-management client library wlroots' session
+    ## backend links against to reserve DRM devices + tty ownership.
+    ## Without libseat on pkg-config, wlroots' meson probe at
+    ## ``backend/session/meson.build:3`` fails silently and the
+    ## session backend is compiled out entirely — every wlroots-based
+    ## compositor then aborts at ``wlr_session_create()`` with
+    ## ``[wlr] Cannot create session: disabled at compile-time`` (as
+    ## M9.R.56.8's boot smoke caught). M9.R.57.1 ships the libseat
+    ## sibling from-source recipe; M9.R.57.2 declares it here so
+    ## wlroots picks it up during the next recipe-revision rebuild.
+    "libseat >=0.6.0"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
