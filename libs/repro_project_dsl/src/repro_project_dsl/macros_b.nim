@@ -75,6 +75,21 @@ proc collectBuildStatements(pkgBody: NimNode): NimNode =
         if calleeName(libStmt).normalize == "build":
           for buildStmt in libStmt[1]:
             result.add(buildStmt)
+    elif calleeName(stmt).normalize == "files":
+      # M9.R.59.1: data-only ``files X:`` follows the same shape as
+      # ``executable X:`` / ``library X:`` — a Call/Command node whose
+      # third child is the body StmtList. Without this arm,
+      # ``files X: build: shell ...`` silently drops its body in
+      # provider mode (see the hwdata recipe's from-source-custom
+      # driver). Same guard shape as the ``library`` arm: bare
+      # ``files X`` (no body) has only two children and gets skipped.
+      if stmt.len < 3:
+        continue
+      let filesBody = stmt[2]
+      for filesStmt in filesBody:
+        if calleeName(filesStmt).normalize == "build":
+          for buildStmt in filesStmt[1]:
+            result.add(buildStmt)
 
 proc collectDevEnvStatements(pkgBody: NimNode): NimNode =
   result = newStmtList()
