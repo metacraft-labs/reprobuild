@@ -172,6 +172,19 @@ package libseatSource:
     ## enumeration; it links against libudev to walk /dev/input and
     ## reserve device fds for the seat0 owner.
     "libudev >=232"
+    ## libsystemd is required for the systemd-logind backend so libseat
+    ## can delegate seat / VT / DRM device management to logind when
+    ## the process is launched under a logind user session (SDDM +
+    ## PAM's pam_systemd.so path). Without this, the compiled-out
+    ## logind backend forces libseat's fallback chain onto the
+    ## ``builtin`` backend, which needs cap_sys_admin / video-group
+    ## ownership + direct tty0 seizure — SDDM has already claimed the
+    ## tty at that point, so ``Could not open target tty:
+    ## Permission denied`` bubbles out of every wlr_session probe.
+    ## M9.R.57.5 (this edit) flips the compile-time gate: the meson
+    ## `libseat-logind=systemd` option makes libseat prefer logind
+    ## when the runtime env exposes ``/run/systemd/seats/``.
+    "libsystemd"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
@@ -191,7 +204,12 @@ package libseatSource:
     try:
       let opts = @[
         "libseat-seatd=disabled",
-        "libseat-logind=disabled",
+        # M9.R.57.5 — flip logind ON. The builtin backend fallback
+        # collides with SDDM's tty0 seizure inside a Wayland session
+        # (Could not open target tty: Permission denied); logind
+        # delegates seat + VT + DRM device management through the
+        # PAM pam_systemd.so path SDDM already uses.
+        "libseat-logind=systemd",
         "libseat-builtin=enabled",
         "server=disabled",
         "examples=disabled",
