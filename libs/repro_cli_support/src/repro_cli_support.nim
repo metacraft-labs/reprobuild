@@ -2729,6 +2729,35 @@ var producerBuildStack*: seq[string] = @[]
   ## that transitively consumes the consumer would push a root already on the
   ## stack; that raises loudly with the full cycle path rather than looping.
 
+var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
+  initTable[string, ResolvedPackageBinding]()
+  ## Cross-Repo-Source-Consumption SC-4 (§4.3) — the SOURCE-content
+  ## invalidation sink: consumer selector -> the resolved package binding whose
+  ## SOURCE identity folds into the consuming action's weak fingerprint.
+  ##
+  ## In develop mode the entry is the ``rpbkOverride``
+  ## ``ResolvedPackageBinding`` the SC-1 hook returned — carrying the develop
+  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``,
+  ## ``override_resolution.nim:235-263``, which folds the sibling checkout's
+  ## local-path root mtime). ``foldProducerSourceIdentities`` (below) drives
+  ## the NEVER-CALLED-OUTSIDE-A-TEST ``foldOverridesIntoFingerprint``
+  ## (``override_resolution.nim:349-380``) with these bindings — activating that
+  ## fold at the splice seam IS the SC-4 invalidation hook: a change to the
+  ## sibling producer's source (a new mtime -> a new ``contentIdentity``) shifts
+  ## the consumer action's weak fingerprint so the consumer rebuilds.
+  ##
+  ## In lock-pinned mode the source identity is the producer ``LockedDep``'s
+  ## pinned ``revision`` + ``integrity`` (``repro_lock.nim:143-149``); it is
+  ## projected onto the SAME fold framing by synthesizing a ``rpbkOverride``
+  ## binding whose ``contentIdentity`` is a digest of ``revision`` + ``integrity``
+  ## (a refreshed pin shifts the consumer cache key; an unchanged pin does not).
+  ##
+  ## Empty for a build that consumes no cross-repo producer, so a no-producer
+  ## action's cache key is byte-identical to today
+  ## (``foldOverridesIntoFingerprint`` returns the weak fingerprint unchanged
+  ## when no ``rpbkOverride`` binding participates, ``override_resolution.nim:375-379``).
+  ## Exported for the SC-4 integration test to observe the fold.
+
 proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
   ## Cross-Repo-Source-Consumption SC-3: a LIBRARY-channel producer is consumed
   ## through the aux channels (``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH``),
@@ -2801,6 +2830,80 @@ proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
       payload.add('\x00')
     action.weakFingerprint =
       blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+
+proc lockPinnedSourceBinding*(selector: string; dep: LockedDep):
+    ResolvedPackageBinding =
+  ## Cross-Repo-Source-Consumption SC-4 (§4.3, lock-pinned arm) — project a
+  ## lock-pinned producer's SOURCE identity (its ``LockedDep``'s pinned
+  ## ``revision`` + ``integrity``, ``repro_lock.nim:143-149``) onto the SAME
+  ## ``foldOverridesIntoFingerprint`` framing develop mode uses, by synthesizing
+  ## an ``rpbkOverride`` binding whose ``contentIdentity`` is a deterministic
+  ## digest of the pinned coordinates + integrity. A refreshed pin (a new
+  ## ``revision``/``integrity``) shifts this digest and therefore the consumer
+  ## cache key; an unchanged pin leaves it stable — the lock-pinned analogue of
+  ## the develop ``contentIdentity`` (§4.3: "a changed pin ... shifts the
+  ## consumer's cache key through the same fold framing").
+  let coordRevision =
+    if dep.coordinates.kind == ckVcs: dep.coordinates.revision
+    else: ""
+  let coordUrl =
+    if dep.coordinates.kind == ckVcs: dep.coordinates.url
+    else: ""
+  var payload = "cross-repo-producer-lock-source.v1\x00" & selector & "\x00" &
+    coordUrl & "\x00" & coordRevision & "\x00" & dep.integrity & "\x00"
+  let identity = toHex(blake3DomainDigest(payload.bytesOf(),
+    hdActionFingerprint).bytes)
+  ResolvedPackageBinding(
+    kind: rpbkOverride,
+    shadowed: UpstreamPackageBinding(
+      packageName: selector, fetchUrl: coordUrl, revision: coordRevision),
+    override: DevelopOverrideEntry(package: selector, state: "pinned"),
+    localPathAbsolute: "",
+    contentIdentity: identity)
+
+proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
+  ## Cross-Repo-Source-Consumption SC-4 (§4.3): after the consumer graph is
+  ## lowered, fold each materialized cross-repo producer's SOURCE identity into
+  ## the ``weakFingerprint`` of every consumer action that names the producer
+  ## via ``toolIdentityRefs``. This is the SOURCE-content arm of invalidation —
+  ## the complement of SC-2/SC-3's build-PRODUCT ``foldProducerActionHashes``.
+  ##
+  ## The fold is driven by ``foldOverridesIntoFingerprint``
+  ## (``override_resolution.nim:349-380``) — the fold that until SC-4 was called
+  ## ONLY from ``t_workspace_override_shadows_upstream_in_resolver.nim``, never
+  ## from the engine. Activating it HERE, at the splice seam, IS the SC-4
+  ## invalidation hook the spec calls for: a change to a develop-overridden
+  ## sibling producer's source (a new local-path root mtime -> a new
+  ## ``computeOverrideContentIdentity`` -> a new binding ``contentIdentity``)
+  ## shifts the consumer action's weak fingerprint so the consumer rebuilds. In
+  ## lock-pinned mode the source identity is the producer ``LockedDep``'s
+  ## pinned ``revision`` + ``integrity`` (``lockPinnedSourceBinding``), projected
+  ## onto the SAME fold.
+  ##
+  ## An action that names NO materialized producer (or whose named producers all
+  ## resolved to non-``rpbkOverride`` bindings) keeps its ``weakFingerprint``
+  ## byte-for-byte: ``foldOverridesIntoFingerprint`` returns the input digest
+  ## unchanged when no ``rpbkOverride`` binding participates
+  ## (``override_resolution.nim:375-379``). When ``producerSourceBindings`` is
+  ## empty (the common case — no cross-repo producer), this is a whole-graph
+  ## no-op, so a no-producer action's cache key is byte-identical to today.
+  if producerSourceBindings.len == 0:
+    return
+  for action in actions.mitems:
+    if action.toolIdentityRefs.len == 0:
+      continue
+    # Collect the source bindings for this action's producer refs in the
+    # action's own ref order (stable), so the fold is deterministic. Only
+    # ``rpbkOverride`` bindings actually shift the fingerprint; the collection
+    # follows the ref order the SC-2 build-product fold already relies on.
+    var bindings: seq[ResolvedPackageBinding] = @[]
+    for refName in action.toolIdentityRefs:
+      if producerSourceBindings.hasKey(refName):
+        bindings.add(producerSourceBindings[refName])
+    if bindings.len == 0:
+      continue
+    action.weakFingerprint =
+      foldOverridesIntoFingerprint(action.weakFingerprint, bindings)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -5398,6 +5501,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var scheduledActions = lowered.actions
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
+    # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
+    # producer's SOURCE identity (develop ``contentIdentity`` / lock-pinned
+    # ``revision``+``integrity``) into the consumer actions that name it, so a
+    # producer SOURCE change rebuilds the consumer. No-op when nothing was
+    # materialized (byte-identical to today).
+    foldProducerSourceIdentities(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -6073,6 +6182,26 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         producerActionHashes[selector] =
           digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
             hdActionFingerprint))
+        # Cross-Repo-Source-Consumption SC-4 (§4.3) — record the producer's
+        # SOURCE identity for the ``foldOverridesIntoFingerprint`` fold. In
+        # develop mode this is the ``rpbkOverride`` binding the SC-1 hook
+        # returned (its ``contentIdentity`` folds the sibling checkout's
+        # local-path root mtime, ``computeOverrideContentIdentity``,
+        # ``override_resolution.nim:235-263``); in lock-pinned mode it is the
+        # producer ``LockedDep``'s pinned ``revision`` + ``integrity`` projected
+        # onto the SAME fold framing (``lockPinnedSourceBinding``). This is the
+        # SOURCE-content arm that complements the build-PRODUCT
+        # ``producerActionHashes`` above: "the producer's source changed"
+        # (contentIdentity / pin) AND "the producer's build product changed"
+        # (action-hash) BOTH invalidate the consumer (§4.3 last paragraph).
+        case producer.kind
+        of pbkDevelopOverride:
+          producerSourceBindings[selector] = producer.overrideBinding
+        of pbkLockPinned:
+          producerSourceBindings[selector] =
+            lockPinnedSourceBinding(selector, producer.lockedDep)
+        of pbkNotProducer:
+          discard
         # Prepend the freshly-built producer bin dir(s) to the process ``PATH``
         # so the DOWNSTREAM path-mode identity resolution
         # (``warmResolveAndWriteIdentity`` -> ``resolvePathOnlyTool``, which
@@ -6578,6 +6707,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var scheduledActions = lowered.actions
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
+    # Cross-Repo-Source-Consumption SC-4 (§4.3): fold each materialized
+    # producer's SOURCE identity (develop ``contentIdentity`` / lock-pinned
+    # ``revision``+``integrity``) into the consumer actions that name it, so a
+    # producer SOURCE change rebuilds the consumer. No-op when nothing was
+    # materialized (byte-identical to today).
+    foldProducerSourceIdentities(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
