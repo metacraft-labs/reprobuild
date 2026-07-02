@@ -184,14 +184,12 @@ package wlrootsSource:
     "gcc >=11"
     ## pkg-config is required by wlroots' meson probe for every
     ## external dependency (wayland-server, libdrm, xkbcommon,
-    ## libinput, libseat, ...). M9.R.57.2's newly-declared libseat
-    ## buildDep exposed that wlroots wasn't declaring pkg-config
-    ## explicitly — other sibling meson recipes (cairo, libinput,
-    ## dbus-broker) that DO declare pkg-config get the wrapper
-    ## bundled from the nix stdlib channel. Without this declaration,
-    ## wlroots' meson probe reports ``Did not find pkg-config by name
-    ## 'pkg-config'`` + falls back to bundled subprojects (which are
-    ## disabled at wrap_mode) so the setup step aborts.
+    ## libinput, libseat, ...). Historically wlroots inherited the
+    ## pkg-config-wrapper from the pre-M9.R.57 environment; the
+    ## fresh rebuild after M9.R.57.2 exposed that no explicit
+    ## declaration was in place. Adding it here matches the sibling
+    ## meson recipes that already work (cairo pulls it via libpng's
+    ## nixpkgs#libpng dev output, libinput via nixpkgs#systemd^*).
     "pkg-config"
 
   buildDeps:
@@ -241,6 +239,17 @@ package wlrootsSource:
     ## sibling from-source recipe; M9.R.57.2 declares it here so
     ## wlroots picks it up during the next recipe-revision rebuild.
     "libseat >=0.6.0"
+    ## libudev is the second half of wlroots' session-backend
+    ## dependency pair (see ``backend/session/meson.build:2``). The
+    ## meson build gates session support behind
+    ## ``if not (udev.found() and libseat.found())`` so BOTH must
+    ## resolve — otherwise ``features += { 'session': true }`` never
+    ## fires and the compiled-out ``Cannot create session: disabled
+    ## at compile-time`` runtime abort returns. libudev's stdlib
+    ## provisioning routes to ``nixpkgs#systemd^*``; libinput already
+    ## resolves it transitively for its own build but wlroots'
+    ## direct probe needs it declared here explicitly.
+    "libudev >=232"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
