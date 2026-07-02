@@ -250,6 +250,24 @@ package wlrootsSource:
     ## resolves it transitively for its own build but wlroots'
     ## direct probe needs it declared here explicitly.
     "libudev >=232"
+    ## mesa provides libgbm.so (the Generic Buffer Manager the DRM
+    ## backend uses to allocate scanout buffers) and libEGL /
+    ## libGLESv2 (the GLES2 renderer). Without mesa, wlroots' meson
+    ## probe at ``backend/drm/meson.build:1`` fails and BOTH the
+    ## drm-backend + gles2-renderer + gbm-allocator features are
+    ## compiled out — every wlroots-based compositor then aborts
+    ## with ``Cannot create DRM backend: disabled at compile-time``
+    ## + ``Failed to open any DRM device`` at
+    ## ``backend/backend.c:276``. M9.R.58.4 adds mesa here to close
+    ## the last wlroots compile-time gate after M9.R.57 (libseat)
+    ## + M9.R.58 (seatd daemon) closed the runtime chain.
+    ##
+    ## Note: mesa installs gbm.pc under ``usr/lib64/pkgconfig/``
+    ## (M9.R.13's meson ``libdir=lib64`` pin); wlroots' pkg-config
+    ## search path includes both usr/lib/pkgconfig and
+    ## usr/lib64/pkgconfig for every buildDep entry, so no
+    ## additional path massaging is needed.
+    "mesa"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
