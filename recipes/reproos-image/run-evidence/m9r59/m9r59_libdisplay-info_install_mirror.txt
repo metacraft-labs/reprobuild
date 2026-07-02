@@ -1,0 +1,18 @@
+total 240
+drwxr-xr-x 3 zahary users   4096 Jul  2 20:27 .
+drwxr-xr-x 5 zahary users   4096 Jul  2 20:27 ..
+lrwxrwxrwx 1 zahary users     20 Jul  2 20:27 libdisplay-info.so -> libdisplay-info.so.2
+-rwxr-xr-x 1 zahary users 232048 Jul  2 20:27 libdisplay-info.so.0.2.0
+lrwxrwxrwx 1 zahary users     24 Jul  2 20:27 libdisplay-info.so.2 -> libdisplay-info.so.0.2.0
+drwxr-xr-x 2 zahary users   4096 Jul  2 20:27 pkgconfig
+prefix=/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: libdisplay-info
+Description: EDID and DisplayID library
+URL: https://gitlab.freedesktop.org/emersion/libdisplay-info
+Version: 0.2.0
+Libs: -L${libdir} -ldisplay-info
+Libs.private: -lm
+Cflags: -I${includedir}

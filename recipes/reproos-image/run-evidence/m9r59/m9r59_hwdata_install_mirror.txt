@@ -1,0 +1,16 @@
+total 9708
+drwxr-xr-x 2 zahary users    4096 Jul  2 20:26 .
+drwxr-xr-x 4 zahary users    4096 Jul  2 20:26 ..
+-rw-r--r-- 1 zahary users 1779287 Jul  2 20:26 iab.txt
+-rw-r--r-- 1 zahary users 5848103 Jul  2 20:26 oui.txt
+-rw-r--r-- 1 zahary users 1504299 Jul  2 20:26 pci.ids
+-rw-r--r-- 1 zahary users   63481 Jul  2 20:26 pnp.ids
+-rw-r--r-- 1 zahary users  728759 Jul  2 20:26 usb.ids
+prefix=/opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr
+datadir=${prefix}/share
+pkgdatadir=${pc_sysrootdir}${datadir}/hwdata
+
+Name: hwdata
+Description: Hardware identification and configuration data
+Version: 0.395
+URL: https://github.com/vcrhonek/hwdata

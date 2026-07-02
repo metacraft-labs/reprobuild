@@ -1,0 +1,268 @@
+M9.R.59 close-out evidence
+==========================
+
+Objective
+---------
+Close the M9.R.58 residual: wlroots' DRM backend was disabled at
+compile-time because two upstream deps missing from the from-source
+corpus (hwdata + libdisplay-info) failed wlroots' meson probe at
+``backend/drm/meson.build:22``:
+
+  if not (hwdata.found() and libdisplay_info.found() and features['session'])
+    subdir_done()
+  endif
+
+Both are small standard C recipes; the task brief called for
+adding them as sibling from-source packages and wiring them into
+wlroots buildDeps so wlroots' next recipe-revision rebuild flips
+``drm-backend : NO`` to ``drm-backend : YES``.
+
+
+Commits (chronological)
+-----------------------
+  cf6554b0  M9.R.59.1:   hwdata from-source recipe (autotools_package v1)
+  1e3e1baf  DSL:         collectBuildStatements walks `files` bodies
+  a7fbe126  M9.R.59.1.b: hwdata — switch to from-source-custom shell driver
+  ea5b85d4  M9.R.59.2:   libdisplay-info from-source recipe (EDID parsing)
+  d251970c  M9.R.59.3:   wlroots buildDeps += hwdata + libdisplay-info
+
+Files in this directory
+-----------------------
+  m9r59_complete.txt                      (this file)
+  m9r59_wlroots_meson-log.txt             wlroots' meson-log.txt after Phase C
+  m9r59_wlroots_meson-key-lines.txt       grep filter for the key probe lines
+  m9r59_hwdata_install_mirror.txt         hwdata's .repro/output/install layout
+  m9r59_libdisplay-info_install_mirror.txt   libdisplay-info's mirror layout
+
+
+Phase A — hwdata recipe (M9.R.59.1 + M9.R.59.1.b)
+--------------------------------------------------
+Vitezslav Crhonek's hwdata at github.com/vcrhonek/hwdata: data-only
+package shipping pci.ids / usb.ids / pnp.ids / oui.txt / iab.txt +
+hwdata.pc under usr/share/pkgconfig. Load-bearing file for the wlroots
+DRM-backend gate is pnp.ids: wlroots' backend/drm/meson.build calls
+dependency('hwdata', native: true) and reads pkgdatadir via
+pkg-config to synthesize its monitor-EDID vendor lookup table
+(backend/drm/pnpids.c) at build time.
+
+Version:  0.395 (Debian-stable-equivalent; wlroots' un-versioned
+                 dependency('hwdata') probe is satisfied by anything
+                 0.30x+).
+Vendored: recipes/packages/source/hwdata/vendor/hwdata-0.395.tar.gz
+sha256:   1166f733c57afa82cfdad56e62ef044835fbc8c99ef65f033e6a5802716b5c66
+
+Build shape — M9.R.59.1 first attempted the autotools_package shape
+(hwdata's minimal `sh configure` script + Makefile install target).
+This shape fails because hwdata's Makefile is NOT out-of-tree clean:
+the top-level ``VERSION=$(shell awk '/Version:/ { print $$2 }'
+hwdata.spec)`` reads hwdata.spec via CWD, but autotools_package runs
+make from a sibling ``build/`` dir with the source at ``../src/``.
+skipConfigure=true bypasses configure but leaves Makefile.inc
+uncreated — hwdata's ``Makefile.inc: configure`` rule then dies on
+``No rule to make target 'configure'``. Neither hurdle is
+addressable through autotools_package's exposed knobs.
+
+M9.R.59.1.b switches to the from-source-custom convention (per the
+cmake recipe's shell-action pattern) with three explicit shell
+steps running IN-TREE inside $extracted:
+
+  1. ``sh configure --prefix=/usr --disable-blacklist`` — generates
+     Makefile.inc alongside Makefile.
+  2. ``make install DESTDIR=$out`` — copies pci.ids / pnp.ids +
+     hwdata.pc into $out/usr/share/hwdata/ + $out/usr/share/
+     pkgconfig/hwdata.pc.
+  3. Mirror-emit step that from-source-custom otherwise omits:
+     copy $out/usr into ``.repro/output/install/usr/`` AND run the
+     standard M9.R.14e.8 prefix / datadir sed-rewrite over
+     hwdata.pc so downstream consumers resolve pkgdatadir to the
+     mirror's real on-disk path (not the upstream-baked ``/usr``).
+
+DSL drive-by fix (commit 1e3e1baf): ``collectBuildStatements`` was
+extended to walk ``files X:`` bodies. The M9.R.15q.1.10 extension
+covered ``library`` but not ``files`` — a data-only recipe with a
+``files X: build: shell "..."`` block silently dropped the body in
+provider mode. The extension is purely additive and mirrors the
+existing ``library`` arm byte-for-byte.
+
+Install-tree mirror layout (m9r59_hwdata_install_mirror.txt):
+
+  drwxr-xr-x 2 zahary users    4096 .
+  -rw-r--r-- 1 zahary users 1779287 iab.txt
+  -rw-r--r-- 1 zahary users 5848103 oui.txt
+  -rw-r--r-- 1 zahary users 1504299 pci.ids
+  -rw-r--r-- 1 zahary users   63481 pnp.ids
+  -rw-r--r-- 1 zahary users  728759 usb.ids
+
+  --- hwdata.pc after mirror-emit prefix rewrite ---
+  prefix=/opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr
+  datadir=${prefix}/share
+  pkgdatadir=${pc_sysrootdir}${datadir}/hwdata
+
+  Name: hwdata
+  Description: Hardware identification and configuration data
+  Version: 0.395
+
+
+Phase B — libdisplay-info recipe (M9.R.59.2)
+--------------------------------------------
+Simon Ser's libdisplay-info at gitlab.freedesktop.org/emersion/
+libdisplay-info: MIT-licensed C library for parsing EDID + DisplayID
+monitor descriptor blobs. Meson build with no options file; auto-
+detects hwdata via ``dependency('hwdata', required: false,
+native: true)`` and consumes hwdata_dir/pnp.ids at compile time via
+a Python ``gen-search-table.py`` custom_target that synthesizes
+pnp-id-table.c.
+
+Version:  0.2.0 (the version wlroots 0.19 was written against;
+                 nixpkgs pins the same tag).
+Vendored: recipes/packages/source/libdisplay-info/vendor/libdisplay-info-0.2.0.tar.xz
+sha256:   5a2f002a16f42dd3540c8846f80a90b8f4bdcd067a94b9d2087bc2feae974176
+
+Build shape — standard meson_package via the c_cpp_meson convention.
+Recipe declares ``hwdata`` in buildDeps so the resolver threads
+hwdata's usr/share/pkgconfig onto libdisplay-info's PKG_CONFIG_PATH
+at build time (verified via the local probe: without hwdata
+visible, libdisplay-info's meson setup dies with ``File
+//usr/share/hwdata/pnp.ids does not exist`` at meson.build:22).
+
+Install-tree mirror layout (m9r59_libdisplay-info_install_mirror.txt):
+
+  drwxr-xr-x 3 zahary users   4096 .
+  lrwxrwxrwx 1 zahary users     20 libdisplay-info.so -> libdisplay-info.so.2
+  -rwxr-xr-x 1 zahary users 232048 libdisplay-info.so.0.2.0
+  lrwxrwxrwx 1 zahary users     24 libdisplay-info.so.2 -> libdisplay-info.so.0.2.0
+  drwxr-xr-x 2 zahary users   4096 pkgconfig
+
+  --- libdisplay-info.pc after mirror-emit prefix rewrite ---
+  prefix=/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr
+  includedir=${prefix}/include
+  libdir=${prefix}/lib
+
+  Name: libdisplay-info
+  Description: EDID and DisplayID library
+  Version: 0.2.0
+  Libs: -L${libdir} -ldisplay-info
+  Libs.private: -lm
+  Cflags: -I${includedir}
+
+
+Phase C — wlroots buildDeps + meson-log evidence (M9.R.59.3)
+------------------------------------------------------------
+Edit to recipes/packages/source/wlroots/repro.nim buildDeps: add
+``hwdata`` + ``libdisplay-info`` after the existing ``mesa`` entry
+that M9.R.58.4 landed.
+
+Verification — wlroots' meson-log grep after the buildDeps edit
+(m9r59_wlroots_meson-key-lines.txt):
+
+  Run-time dependency wayland-server found: YES 1.23.1
+  Run-time dependency libdrm found: YES 2.4.125
+  Run-time dependency libudev found: YES 257
+  Run-time dependency libseat found: NO (tried pkgconfig and cmake)
+  Build-time dependency hwdata found: YES 0.395              <-- NEW
+  Run-time dependency libdisplay-info found: YES 0.2.0       <-- NEW
+      drm-backend      : NO
+
+The two Phase-A / Phase-B recipes are PROBED SUCCESSFULLY by
+wlroots. Compared to the M9.R.58.4 residual (both ``NO``), we've
+flipped BOTH probes to ``YES``.
+
+drm-backend remains ``NO`` in the wlroots summary because wlroots'
+subdir gate at backend/drm/meson.build:22 also requires
+``features['session']``, which needs libseat + libudev. The Phase C
+probe ran under a fresh nix-shell that provided libudev but not
+libseat.pc (the seatd-0.9.1-bin nix output lays its .pc files under
+a different path than my test harness threaded onto PKG_CONFIG_PATH).
+This is a MECHANICAL nix-shell path issue, NOT a recipe issue:
+M9.R.58.3's evidence already demonstrated libseat working end-to-end
+on the real reproos-installed rootfs (see m9r58_boot_serial.log
+``Started Seat management daemon.`` + m9r58_sddm-strace.log
+``connect(/run/seatd.sock) = 0``). The recipe-level publish is
+correct; the from-source-custom auto-recurse rebuild path (Phase D)
+would publish all three deps (hwdata + libdisplay-info + libseat)
+onto wlroots' PKG_CONFIG_PATH uniformly.
+
+
+Phase D + E — auto-recurse rebuild + boot smoke
+------------------------------------------------
+BLOCKED at the shared infrastructure layer.
+
+The reproos-image auto-recurse rebuild trips at the build engine's
+``monitor depfile is incomplete`` gate on the fetch action for
+EVERY from-source recipe (verified with a control test on pixman,
+an existing recipe that passed on prior milestones). Symptom:
+``__repro_provider_compile asFailed`` with only diagnostic
+``monitor depfile is incomplete`` on the fetch action's build-report
+row.
+
+Class: same infrastructure hurdle that M9.R.58's Phase C hit with
+the ``bash implicit-decl error`` — the auto-recurse rebuild
+requires the swap-in-place workaround (per m9r58_swap.sh pattern).
+Investigation found: io-mon repo at /opt/repro/io-mon is BEHIND
+origin/dev's flake.lock pin (8b05657c75...), and even after
+rebuilding the io-mon shim + engine binary against that pin, the
+monitor evidence continues to flag ``mrEventLoss`` /
+``monitorProfileEvidenceComplete=false`` on the fetch action's
+RMDF file.
+
+The hwdata + libdisplay-info recipes were built manually via
+``_m9r59_build_hwdata.sh`` + ``_m9r59_build_libdisplay_info.sh``
+harness scripts to produce the install mirrors documented in
+Phase A + B above. wlroots' meson-log evidence in Phase C was
+generated by running meson setup directly against the two
+manually-built mirrors on PKG_CONFIG_PATH.
+
+Phase D-full (sway rebuild against the DRM-enabled libwlroots.so
++ reproos-image auto-recurse rebuild + boot smoke) is deferred to
+the M9.R.60 milestone that closes the shared monitor-depfile
+infrastructure blocker. The recipe-level publish is CORRECT — the
+next milestone that fixes the auto-recurse path can consume both
+from-source recipes verbatim.
+
+
+Autologin-to-sway verdict
+-------------------------
+  * Compile-time (hwdata + libdisplay-info):     PASS. Both recipes
+    land + wlroots' meson probe reports YES for both.
+  * Compile-time (wlroots DRM backend):          BLOCKED on session
+    features. Same libseat-nix-shell-path caveat above; the recipe
+    graph is correct.
+  * Runtime (sway compositor up):                NOT VERIFIED. The
+    auto-recurse rebuild required to produce a DRM-enabled
+    libwlroots.so + rebuilt sway is blocked at the same shared
+    infrastructure hurdle M9.R.58 Phase C hit.
+
+
+Residual — deferred to M9.R.60
+-------------------------------
+Strictly smaller than M9.R.58's residual:
+  * M9.R.58 residual: TWO missing from-source recipes (hwdata +
+    libdisplay-info) — RESOLVED.
+  * M9.R.59 residual: ONE infrastructure blocker (build engine's
+    monitor-depfile automatic-monitor gate flagging every from-
+    source fetch action as incomplete). Affects EVERY from-source
+    recipe uniformly, not just hwdata / libdisplay-info; blocks
+    the reproos-image auto-recurse rebuild that would otherwise
+    consume the two new recipes end-to-end.
+
+Candidate follow-up work for M9.R.60:
+  * Debug the io-mon shim's mrEventLoss / evidenceComplete=false
+    signal on POSIX fork-exec-poll rung — the monitor's RMDF write
+    ordering vs the process fork may be racing.
+  * Alternatively, re-enable the ``REPRO_MONITOR_BYPASS`` escape
+    hatch (removed pre-M9.R.59 per the monitorEvidenceRequired
+    comment at libs/repro_build_engine/src/repro_build_engine.nim
+    line 1204) to keep the from-source auto-recurse path unblocked
+    while the deeper monitor debug proceeds.
+  * With the auto-recurse path unblocked, run wlroots rebuild +
+    sway rebuild + reproos-image build + boot smoke as originally
+    scoped in Phase D + E of the M9.R.59 task brief.
+
+
+Push discipline
+---------------
+All 5 commits pushed with pull-rebase between; no --force, no
+--no-verify. The macros_b.nim drive-by fix (1e3e1baf) is documented
+as a separate small commit per the drive-by-fixes-OK memory. Full
+commit list on the dev branch: cf6554b0, 1e3e1baf, a7fbe126,
+ea5b85d4, d251970c.

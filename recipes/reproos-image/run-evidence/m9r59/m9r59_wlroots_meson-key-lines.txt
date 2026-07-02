@@ -1,0 +1,7 @@
+Run-time dependency wayland-server found: YES 1.23.1
+Run-time dependency libdrm found: YES 2.4.125
+Run-time dependency libudev found: YES 257
+Run-time dependency libseat found: NO (tried pkgconfig and cmake)
+Build-time dependency hwdata found: YES 0.395
+Run-time dependency libdisplay-info found: YES 0.2.0
+    drm-backend      : NO

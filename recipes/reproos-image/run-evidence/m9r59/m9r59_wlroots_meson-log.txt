@@ -1,0 +1,1185 @@
+Build started at 2026-07-02T20:30:10.373913
+Main binary: /nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3.12
+Build Options: -Dexamples=false -Dxwayland=disabled -Dxcb-errors=disabled -Dwerror=false -Dbuildtype=release -Dprefix=/usr -Dlibdir=lib
+Python system: Linux
+The Meson build system
+Version: 1.7.2
+Source dir: /opt/repro/reprobuild/recipes/packages/source/wlroots/src
+Build dir: /opt/repro/reprobuild/recipes/packages/source/wlroots/build
+Build type: native build
+Project name: wlroots
+Project version: 0.19.3
+-----------
+Detecting compiler via: `cc --version` -> 0
+stdout:
+gcc (GCC) 14.3.0
+Copyright (C) 2024 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+-----------
+Running command: -cpp -x c -E -dM -
+pre-processor extraction using -cpp -x c failed, falling back w/o lang
+Running command: -E -dM -
+-----
+-----------
+Detecting linker via: `cc -Wl,--version` -> 0
+stdout:
+GNU ld (GNU Binutils) 2.44
+Copyright (C) 2025 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) a later version.
+This program has absolutely no warranty.
+-----------
+stderr:
+collect2 version 14.3.0
+/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin/ld -plugin /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/14.3.0/liblto_plugin.so -plugin-opt=/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/14.3.0/lto-wrapper -plugin-opt=-fresolution=/tmp/ccA9jgBW.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --eh-frame-hdr -m elf_x86_64 -dynamic-linker /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib64/ld-linux-x86-64.so.2 /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/crt1.o /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/crti.o /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/crtbegin.o -L/nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib -L/nix/store/cf1a53iqg6ncnygl698c4v0l8qam5a2q-gcc-14.3.0-lib/lib -L/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin -L/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0 -L/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../.. --version -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/crtend.o /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/crtn.o
+-----------
+Sanity testing C compiler: cc
+Is cross compiler: False.
+Sanity check compiler command line: cc sanitycheckc.c -o sanitycheckc.exe -D_FILE_OFFSET_BITS=64
+Sanity check compile stdout:
+
+-----
+Sanity check compile stderr:
+
+-----
+Running test binary command:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/sanitycheckc.exe
+C compiler for the host machine: cc (gcc 14.3.0 "gcc (GCC) 14.3.0")
+C linker for the host machine: cc ld.bfd 2.44
+-----------
+Detecting archiver via: `gcc-ar --version` -> [Errno 2] No such file or directory: 'gcc-ar'
+-----------
+Detecting archiver via: `ar --version` -> 0
+stdout:
+GNU ar (GNU Binutils) 2.44
+Copyright (C) 2025 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+-----------
+-----------
+Detecting compiler via: `cc --version` -> 0
+stdout:
+gcc (GCC) 14.3.0
+Copyright (C) 2024 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+-----------
+Running command: -cpp -x c -E -dM -
+pre-processor extraction using -cpp -x c failed, falling back w/o lang
+Running command: -E -dM -
+-----
+-----------
+Detecting linker via: `cc -Wl,--version` -> 0
+stdout:
+GNU ld (GNU Binutils) 2.44
+Copyright (C) 2025 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) a later version.
+This program has absolutely no warranty.
+-----------
+stderr:
+collect2 version 14.3.0
+/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin/ld -plugin /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/14.3.0/liblto_plugin.so -plugin-opt=/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/14.3.0/lto-wrapper -plugin-opt=-fresolution=/tmp/ccXCxUph.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --eh-frame-hdr -m elf_x86_64 -dynamic-linker /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib64/ld-linux-x86-64.so.2 /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/crt1.o /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/crti.o /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/crtbegin.o -L/nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib -L/nix/store/cf1a53iqg6ncnygl698c4v0l8qam5a2q-gcc-14.3.0-lib/lib -L/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin -L/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0 -L/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../.. --version -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/crtend.o /nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/crtn.o
+-----------
+Sanity testing C compiler: cc
+Is cross compiler: False.
+Sanity check compiler command line: cc sanitycheckc.c -o sanitycheckc.exe -D_FILE_OFFSET_BITS=64
+Sanity check compile stdout:
+
+-----
+Sanity check compile stderr:
+
+-----
+Running test binary command:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/sanitycheckc.exe
+C compiler for the build machine: cc (gcc 14.3.0 "gcc (GCC) 14.3.0")
+C linker for the build machine: cc ld.bfd 2.44
+-----------
+Detecting archiver via: `gcc-ar --version` -> [Errno 2] No such file or directory: 'gcc-ar'
+-----------
+Detecting archiver via: `ar --version` -> 0
+stdout:
+GNU ar (GNU Binutils) 2.44
+Copyright (C) 2025 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+-----------
+Build machine cpu family: x86_64
+Build machine cpu: x86_64
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Target machine cpu family: x86_64
+Target machine cpu: x86_64
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpvowtoaiy
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpvowtoaiy/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpvowtoaiy/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wundef` -> 0
+Compiler for C supports arguments -Wundef: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmph10u6at0
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmph10u6at0/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmph10u6at0/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wlogical-op` -> 0
+Compiler for C supports arguments -Wlogical-op: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpx11s_p6o
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpx11s_p6o/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpx11s_p6o/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wmissing-include-dirs` -> 0
+Compiler for C supports arguments -Wmissing-include-dirs: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpdqdmcgk0
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpdqdmcgk0/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpdqdmcgk0/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wold-style-definition` -> 0
+Compiler for C supports arguments -Wold-style-definition: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpakvny6zm
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpakvny6zm/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpakvny6zm/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wpointer-arith` -> 0
+Compiler for C supports arguments -Wpointer-arith: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmplo0gk0d_
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmplo0gk0d_/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmplo0gk0d_/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Winit-self` -> 0
+Compiler for C supports arguments -Winit-self: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpbgqden9u
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpbgqden9u/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpbgqden9u/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wstrict-prototypes` -> 0
+Compiler for C supports arguments -Wstrict-prototypes: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp_ierw_vx
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp_ierw_vx/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp_ierw_vx/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wimplicit-fallthrough=2` -> 0
+Compiler for C supports arguments -Wimplicit-fallthrough=2: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpb813ie97
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpb813ie97/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpb813ie97/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wendif-labels` -> 0
+Compiler for C supports arguments -Wendif-labels: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpeg45i9hi
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpeg45i9hi/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpeg45i9hi/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wstrict-aliasing=2` -> 0
+Compiler for C supports arguments -Wstrict-aliasing=2: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpvsk__mg9
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpvsk__mg9/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpvsk__mg9/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Woverflow` -> 0
+Compiler for C supports arguments -Woverflow: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpqt_w6r6o
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpqt_w6r6o/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpqt_w6r6o/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wmissing-prototypes` -> 0
+Compiler for C supports arguments -Wmissing-prototypes: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp1dl8cux3
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp1dl8cux3/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp1dl8cux3/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Walloca` -> 0
+Compiler for C supports arguments -Walloca: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpj014lpj5
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpj014lpj5/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpj014lpj5/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wmissing-braces -Wno-missing-braces` -> 0
+Compiler for C supports arguments -Wno-missing-braces: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpdfd6gn2p
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpdfd6gn2p/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpdfd6gn2p/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wmissing-field-initializers -Wno-missing-field-initializers` -> 0
+Compiler for C supports arguments -Wno-missing-field-initializers: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpnowayckp
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpnowayckp/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpnowayckp/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -Wunused-parameter -Wno-unused-parameter` -> 0
+Compiler for C supports arguments -Wno-unused-parameter: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpgmn13yib
+Code:
+extern int i;
+int i;
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpgmn13yib/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpgmn13yib/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 -fmacro-prefix-map=/prefix/to/hide=` -> 0
+Compiler for C supports arguments -fmacro-prefix-map=/prefix/to/hide=: YES 
+Pkg-config binary missing from cross or native file, or env var undefined.
+Trying a default Pkg-config fallback at pkg-config
+Found pkg-config: YES (/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config) 0.29.2
+Determining dependency 'wayland-server' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion wayland-server` -> 0
+stdout:
+1.23.1
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags wayland-server` -> 0
+stdout:
+-I/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/include
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-server` -> 0
+stdout:
+-L/nix/store/znpca9nxcjxlwhxmfpnrvmd3z3rm704q-wayland-1.23.1/lib -lwayland-server
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-server` -> 0
+stdout:
+-L/nix/store/znpca9nxcjxlwhxmfpnrvmd3z3rm704q-wayland-1.23.1/lib -lwayland-server
+-----------
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpp6bnyh0u
+Code:
+
+        #include<stddef.h>
+        #include<stdio.h>
+        int main(void) {
+            printf("%ld\n", (long)(sizeof(void *)));
+            return 0;
+        }
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpp6bnyh0u/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpp6bnyh0u/output.exe -D_FILE_OFFSET_BITS=64 -O0` -> 0
+Program stdout:
+
+8
+
+Program stderr:
+
+
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpumb6ogts
+Code:
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpumb6ogts/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpumb6ogts/output.obj -c -D_FILE_OFFSET_BITS=64 -O0 --print-search-dirs` -> 0
+stdout:
+install: /nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/
+programs: =/nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/:/nix/store/cf1a53iqg6ncnygl698c4v0l8qam5a2q-gcc-14.3.0-lib/lib/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/cf1a53iqg6ncnygl698c4v0l8qam5a2q-gcc-14.3.0-lib/lib/:/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/libexec/gcc/x86_64-unknown-linux-gnu/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../../x86_64-unknown-linux-gnu/bin/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../../x86_64-unknown-linux-gnu/bin/
+libraries: =/nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/i3ibgfskl99qd8rslafbpaa1dmxdzh1z-glibc-2.40-66/lib/:/nix/store/cf1a53iqg6ncnygl698c4v0l8qam5a2q-gcc-14.3.0-lib/lib/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/cf1a53iqg6ncnygl698c4v0l8qam5a2q-gcc-14.3.0-lib/lib/:/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/iga4lv0say4pbbbgkf1v79403n1ip7hf-binutils-wrapper-2.44/bin/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../../x86_64-unknown-linux-gnu/lib/x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../../x86_64-unknown-linux-gnu/lib/../lib64/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../x86_64-unknown-linux-gnu/14.3.0/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../../lib64/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../../x86_64-unknown-linux-gnu/lib/:/nix/store/y28c83zz73yr4vwz1fsl4nsrn6yz5fj0-gcc-14.3.0/lib/gcc/x86_64-unknown-linux-gnu/14.3.0/../../../
+-----------
+Run-time dependency wayland-server found: YES 1.23.1
+Determining dependency 'libdrm' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion libdrm` -> 0
+stdout:
+2.4.125
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags libdrm` -> 0
+stdout:
+-I/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/include -I/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/include/libdrm
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs libdrm` -> 0
+stdout:
+-L/nix/store/jxspafwj02033q5fjpvndl4vkxd1l1wf-libdrm-2.4.125/lib -ldrm
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs libdrm` -> 0
+stdout:
+-L/nix/store/jxspafwj02033q5fjpvndl4vkxd1l1wf-libdrm-2.4.125/lib -ldrm
+-----------
+Run-time dependency libdrm found: YES 2.4.125
+Determining dependency 'xkbcommon' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion xkbcommon` -> 0
+stdout:
+1.8.1
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags xkbcommon` -> 0
+stdout:
+-I/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/include
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs xkbcommon` -> 0
+stdout:
+-L/nix/store/ilh3k434j6a9kx8vw4q75k3d2s71q4vw-libxkbcommon-1.8.1/lib -lxkbcommon
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs xkbcommon` -> 0
+stdout:
+-L/nix/store/ilh3k434j6a9kx8vw4q75k3d2s71q4vw-libxkbcommon-1.8.1/lib -lxkbcommon
+-----------
+Run-time dependency xkbcommon found: YES 1.8.1
+Determining dependency 'pixman-1' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion pixman-1` -> 0
+stdout:
+0.44.2
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags pixman-1` -> 0
+stdout:
+-I/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/include/pixman-1
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs pixman-1` -> 0
+stdout:
+-L/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib -lpixman-1
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs pixman-1` -> 0
+stdout:
+-L/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib -lpixman-1
+-----------
+Run-time dependency pixman-1 found: YES 0.44.2
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmppaprgswj
+Code:
+int main(void) { return 0; }
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmppaprgswj/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmppaprgswj/output.exe -D_FILE_OFFSET_BITS=64 -O0 -lm -Wl,--allow-shlib-undefined` -> 0
+Library m found: YES
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpedlbrp2y
+Code:
+int main(void) { return 0; }
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpedlbrp2y/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpedlbrp2y/output.exe -D_FILE_OFFSET_BITS=64 -O0 -lrt -Wl,--allow-shlib-undefined` -> 0
+Library rt found: YES
+Determining dependency 'wayland-protocols' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion wayland-protocols` -> 0
+stdout:
+1.44
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags wayland-protocols` -> 0
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-protocols` -> 0
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-protocols` -> 0
+Run-time dependency wayland-protocols found: YES 1.44
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --variable=pkgdatadir wayland-protocols` -> 0
+stdout:
+//nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/wayland-protocols
+-----------
+Got pkg-config variable pkgdatadir : //nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/wayland-protocols
+Determining dependency 'wayland-scanner' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion wayland-scanner` -> 0
+stdout:
+1.23.1
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags wayland-scanner` -> 0
+stdout:
+-I/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/include
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-scanner` -> 0
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-scanner` -> 0
+Build-time dependency wayland-scanner found: YES 1.23.1
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --variable=wayland_scanner wayland-scanner` -> 0
+stdout:
+/nix/store/4j10amqsnyw2r87d434d01fnwgmbl4jw-wayland-scanner-1.23.1-bin/bin/wayland-scanner
+-----------
+Got pkg-config variable wayland_scanner : /nix/store/4j10amqsnyw2r87d434d01fnwgmbl4jw-wayland-scanner-1.23.1-bin/bin/wayland-scanner
+Program /nix/store/4j10amqsnyw2r87d434d01fnwgmbl4jw-wayland-scanner-1.23.1-bin/bin/wayland-scanner found: YES (/nix/store/4j10amqsnyw2r87d434d01fnwgmbl4jw-wayland-scanner-1.23.1-bin/bin/wayland-scanner)
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp1gfguyat
+Code:
+
+        #ifdef __has_include
+         #if !__has_include("linux/dma-buf.h")
+          #error "Header 'linux/dma-buf.h' could not be found"
+         #endif
+        #else
+         #include <linux/dma-buf.h>
+        #endif
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp1gfguyat/testfile.c -E -P -D_FILE_OFFSET_BITS=64 -P -O0 -std=c23` -> 0
+Has header "linux/dma-buf.h" : YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpb63figh0
+Code:
+
+        #ifdef __has_include
+         #if !__has_include("sys/eventfd.h")
+          #error "Header 'sys/eventfd.h' could not be found"
+         #endif
+        #else
+         #include <sys/eventfd.h>
+        #endif
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpb63figh0/testfile.c -E -P -D_FILE_OFFSET_BITS=64 -P -O0 -std=c23` -> 0
+Has header "sys/eventfd.h" : YES 
+Determining dependency 'egl' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion egl` -> 1
+stderr:
+Package egl was not found in the pkg-config search path.
+Perhaps you should add the directory containing `egl.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'egl' found
+-----------
+CMake binary for host machine is not cached
+CMake binary missing from cross or native file, or env var undefined.
+Trying a default CMake fallback at cmake
+Found CMake: /home/zahary/.nix-profile/bin/cmake (3.31.6)
+Extracting basic cmake information
+CMake Toolchain: Calling CMake once to generate the compiler state
+Calling CMake (['/home/zahary/.nix-profile/bin/cmake']) in /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/__CMake_compiler_info__ with:
+  - "--trace-expand"
+  - "--trace-format=json-v1"
+  - "--no-warn-unused-cli"
+  - "--trace-redirect=cmake_trace.txt"
+  - "-G"
+  - "Ninja"
+  - "-DCMAKE_TOOLCHAIN_FILE=/opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/__CMake_compiler_info__/CMakeMesonTempToolchainFile.cmake"
+  - "."
+CMake trace warning: add_executable() non imported executables are not supported
+CMake TRACE: /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/__CMake_compiler_info__/CMakeFiles/CMakeScratch/TryCompile-bWtgz4/CMakeLists.txt:22 add_executable(['cmTC_ba6d5'])
+CMake trace warning: target_link_libraries() TARGET cmTC_ba6d5 not found
+CMake TRACE: /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/__CMake_compiler_info__/CMakeFiles/CMakeScratch/TryCompile-bWtgz4/CMakeLists.txt:28 target_link_libraries(['cmTC_ba6d5', ''])
+Try CMake generator: auto
+Calling CMake (['/home/zahary/.nix-profile/bin/cmake']) in /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/cmake_egl with:
+  - "--trace-expand"
+  - "--trace-format=json-v1"
+  - "--no-warn-unused-cli"
+  - "--trace-redirect=cmake_trace.txt"
+  - "-DCMAKE_TOOLCHAIN_FILE=/opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/cmake_egl/CMakeMesonToolchainFile.cmake"
+  - "."
+CMake failed to gather system information for generator  with error code 1
+OUT:
+Put cmake in trace mode, but with variables expanded.
+Put cmake in trace mode and sets the trace output format.
+Not searching for unused variables given on the command line.
+Put cmake in trace mode and redirect trace output to a file instead of stderr.
+Trace will be written to cmake_trace.txt
+-- Configuring incomplete, errors occurred!
+
+
+
+ERR:
+CMake Error: CMake was unable to find a build program corresponding to "Unix Makefiles".  CMAKE_MAKE_PROGRAM is not set.  You probably need to select a different build tool.
+
+
+
+Try CMake generator: Ninja
+Calling CMake (['/home/zahary/.nix-profile/bin/cmake']) in /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/cmake_egl with:
+  - "-G"
+  - "Ninja"
+  - "--trace-expand"
+  - "--trace-format=json-v1"
+  - "--no-warn-unused-cli"
+  - "--trace-redirect=cmake_trace.txt"
+  - "-DCMAKE_TOOLCHAIN_FILE=/opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/cmake_egl/CMakeMesonToolchainFile.cmake"
+  - "."
+  -- Module search paths:    ['/nix/store/7va01f1pa6bkxy2a869dx148ajxx16dd-cmake-3.31.6']
+  -- CMake root:             /nix/store/7va01f1pa6bkxy2a869dx148ajxx16dd-cmake-3.31.6/share/cmake-3.31
+  -- CMake architectures:    []
+  -- CMake lib search paths: ['lib', 'lib32', 'lib64', 'libx32', 'share', '']
+Preliminary CMake check failed. Aborting.
+Run-time dependency egl found: NO (tried pkgconfig and cmake)
+Determining dependency 'gbm' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion gbm` -> 1
+stderr:
+Package gbm was not found in the pkg-config search path.
+Perhaps you should add the directory containing `gbm.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'gbm' found
+-----------
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency gbm found: NO (tried pkgconfig and cmake)
+Determining dependency 'glesv2' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion glesv2` -> 1
+stderr:
+Package glesv2 was not found in the pkg-config search path.
+Perhaps you should add the directory containing `glesv2.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'glesv2' found
+-----------
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency glesv2 found: NO (tried pkgconfig and cmake)
+Determining dependency 'vulkan' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion vulkan` -> 1
+stderr:
+Package vulkan was not found in the pkg-config search path.
+Perhaps you should add the directory containing `vulkan.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'vulkan' found
+-----------
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp8m4haibk
+Code:
+int main(void) { return 0; }
+
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp8m4haibk/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmp8m4haibk/output.exe -D_FILE_OFFSET_BITS=64 -O0 -lvulkan -Wl,--allow-shlib-undefined` -> 1
+stderr:
+/nix/store/42pzy4ahwk8p41hwfmz2nldgvsdws8q1-binutils-2.44/bin/ld: cannot find -lvulkan: No such file or directory
+collect2: error: ld returned 1 exit status
+-----------
+Run-time dependency vulkan found: NO (tried pkgconfig and system)
+Message: Required for vulkan renderer support.
+Dependency pixman-1 found: YES 0.44.2 (cached)
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency gbm found: NO (tried pkgconfig and cmake)
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpg0kjmsr1
+Code:
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <limits.h>
+
+        #if defined __stub_memfd_create || defined __stub___memfd_create
+        fail fail fail this function is not going to work
+        #endif
+        
+int main(void) {
+            void *a = (void*) &memfd_create;
+            long long b = (long long) a;
+            return (int) b;
+        }
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpg0kjmsr1/testfile.c -o /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpg0kjmsr1/output.exe -D_FILE_OFFSET_BITS=64 -O0 -std=c23 -D_GNU_SOURCE` -> 0
+Checking for function "memfd_create" : YES 
+Running compile:
+Working directory:  /tmp/tmpwbbn7m95
+Code:
+
+        #include <sys/mman.h>
+#include <fcntl.h>
+        #ifndef F_ADD_SEALS
+        # define F_ADD_SEALS "MESON_GET_DEFINE_UNDEFINED_SENTINEL"
+        #endif
+        "MESON_GET_DEFINE_DELIMITER_START"
+F_ADD_SEALS
+"MESON_GET_DEFINE_DELIMITER_END"
+-----------
+Command line: `cc /tmp/tmpwbbn7m95/testfile.c -E -P -D_FILE_OFFSET_BITS=64 -P -O0 -std=c23 -D_GNU_SOURCE` -> 0
+stdout:
+typedef unsigned char __u_char;
+typedef unsigned short int __u_short;
+typedef unsigned int __u_int;
+typedef unsigned long int __u_long;
+typedef signed char __int8_t;
+typedef unsigned char __uint8_t;
+typedef signed short int __int16_t;
+typedef unsigned short int __uint16_t;
+typedef signed int __int32_t;
+typedef unsigned int __uint32_t;
+typedef signed long int __int64_t;
+typedef unsigned long int __uint64_t;
+typedef __int8_t __int_least8_t;
+typedef __uint8_t __uint_least8_t;
+typedef __int16_t __int_least16_t;
+typedef __uint16_t __uint_least16_t;
+typedef __int32_t __int_least32_t;
+typedef __uint32_t __uint_least32_t;
+typedef __int64_t __int_least64_t;
+typedef __uint64_t __uint_least64_t;
+typedef long int __quad_t;
+typedef unsigned long int __u_quad_t;
+typedef long int __intmax_t;
+typedef unsigned long int __uintmax_t;
+typedef unsigned long int __dev_t;
+typedef unsigned int __uid_t;
+typedef unsigned int __gid_t;
+typedef unsigned long int __ino_t;
+typedef unsigned long int __ino64_t;
+typedef unsigned int __mode_t;
+typedef unsigned long int __nlink_t;
+typedef long int __off_t;
+typedef long int __off64_t;
+typedef int __pid_t;
+typedef struct { int __val[2]; } __fsid_t;
+typedef long int __clock_t;
+typedef unsigned long int __rlim_t;
+typedef unsigned long int __rlim64_t;
+typedef unsigned int __id_t;
+typedef long int __time_t;
+typedef unsigned int __useconds_t;
+typedef long int __suseconds_t;
+typedef long int __suseconds64_t;
+typedef int __daddr_t;
+typedef int __key_t;
+typedef int __clockid_t;
+typedef void * __timer_t;
+typedef long int __blksize_t;
+typedef long int __blkcnt_t;
+typedef long int __blkcnt64_t;
+typedef unsigned long int __fsblkcnt_t;
+typedef unsigned long int __fsblkcnt64_t;
+typedef unsigned long int __fsfilcnt_t;
+typedef unsigned long int __fsfilcnt64_t;
+typedef long int __fsword_t;
+typedef long int __ssize_t;
+typedef long int __syscall_slong_t;
+typedef unsigned long int __syscall_ulong_t;
+typedef __off64_t __loff_t;
+typedef char *__caddr_t;
+typedef long int __intptr_t;
+typedef unsigned int __socklen_t;
+typedef int __sig_atomic_t;
+typedef long unsigned int size_t;
+typedef __off64_t off_t;
+typedef __mode_t mode_t;
+
+int memfd_create (const char *__name, unsigned int __flags) __attribute__ ((__nothrow__ , __leaf__));
+int mlock2 (const void *__addr, size_t __length, unsigned int __flags) __attribute__ ((__nothrow__ , __leaf__));
+int pkey_alloc (unsigned int __flags, unsigned int __access_rights) __attribute__ ((__nothrow__ , __leaf__));
+int pkey_set (int __key, unsigned int __access_rights) __attribute__ ((__nothrow__ , __leaf__));
+int pkey_get (int __key) __attribute__ ((__nothrow__ , __leaf__));
+int pkey_free (int __key) __attribute__ ((__nothrow__ , __leaf__));
+int pkey_mprotect (void *__addr, size_t __len, int __prot, int __pkey) __attribute__ ((__nothrow__ , __leaf__));
+
+
+extern void * mmap (void *__addr, size_t __len, int __prot, int __flags, int __fd, __off64_t __offset) __asm__ ("" "mmap64") __attribute__ ((__nothrow__ , __leaf__));
+extern void *mmap64 (void *__addr, size_t __len, int __prot,
+       int __flags, int __fd, __off64_t __offset) __attribute__ ((__nothrow__ , __leaf__));
+extern int munmap (void *__addr, size_t __len) __attribute__ ((__nothrow__ , __leaf__));
+extern int mprotect (void *__addr, size_t __len, int __prot) __attribute__ ((__nothrow__ , __leaf__));
+extern int msync (void *__addr, size_t __len, int __flags);
+extern int madvise (void *__addr, size_t __len, int __advice) __attribute__ ((__nothrow__ , __leaf__));
+extern int posix_madvise (void *__addr, size_t __len, int __advice) __attribute__ ((__nothrow__ , __leaf__));
+extern int mlock (const void *__addr, size_t __len) __attribute__ ((__nothrow__ , __leaf__));
+extern int munlock (const void *__addr, size_t __len) __attribute__ ((__nothrow__ , __leaf__));
+extern int mlockall (int __flags) __attribute__ ((__nothrow__ , __leaf__));
+extern int munlockall (void) __attribute__ ((__nothrow__ , __leaf__));
+extern int mincore (void *__start, size_t __len, unsigned char *__vec)
+     __attribute__ ((__nothrow__ , __leaf__));
+extern void *mremap (void *__addr, size_t __old_len, size_t __new_len,
+       int __flags, ...) __attribute__ ((__nothrow__ , __leaf__));
+extern int remap_file_pages (void *__start, size_t __size, int __prot,
+        size_t __pgoff, int __flags) __attribute__ ((__nothrow__ , __leaf__));
+extern int shm_open (const char *__name, int __oflag, mode_t __mode);
+extern int shm_unlink (const char *__name);
+struct iovec;
+extern __ssize_t process_madvise (int __pid_fd, const struct iovec *__iov,
+      size_t __count, int __advice,
+      unsigned __flags)
+  __attribute__ ((__nothrow__ , __leaf__));
+extern int process_mrelease (int pidfd, unsigned int flags) __attribute__ ((__nothrow__ , __leaf__));
+
+
+struct flock
+  {
+    short int l_type;
+    short int l_whence;
+    __off64_t l_start;
+    __off64_t l_len;
+    __pid_t l_pid;
+  };
+struct flock64
+  {
+    short int l_type;
+    short int l_whence;
+    __off64_t l_start;
+    __off64_t l_len;
+    __pid_t l_pid;
+  };
+struct iovec
+  {
+    void *iov_base;
+    size_t iov_len;
+  };
+enum __pid_type
+  {
+    F_OWNER_TID = 0,
+    F_OWNER_PID,
+    F_OWNER_PGRP,
+    F_OWNER_GID = F_OWNER_PGRP
+  };
+struct f_owner_ex
+  {
+    enum __pid_type type;
+    __pid_t pid;
+  };
+struct file_handle
+{
+  unsigned int handle_bytes;
+  int handle_type;
+  unsigned char f_handle[0];
+};
+
+extern __ssize_t readahead (int __fd, __off64_t __offset, size_t __count)
+    __attribute__ ((__nothrow__ , __leaf__));
+extern int sync_file_range (int __fd, __off64_t __offset, __off64_t __count,
+       unsigned int __flags);
+extern __ssize_t vmsplice (int __fdout, const struct iovec *__iov,
+      size_t __count, unsigned int __flags);
+extern __ssize_t splice (int __fdin, __off64_t *__offin, int __fdout,
+    __off64_t *__offout, size_t __len,
+    unsigned int __flags);
+extern __ssize_t tee (int __fdin, int __fdout, size_t __len,
+        unsigned int __flags);
+extern int fallocate (int __fd, int __mode, __off64_t __offset, __off64_t __len) __asm__ ("" "fallocate64");
+extern int fallocate64 (int __fd, int __mode, __off64_t __offset,
+   __off64_t __len);
+extern int name_to_handle_at (int __dfd, const char *__name,
+         struct file_handle *__handle, int *__mnt_id,
+         int __flags) __attribute__ ((__nothrow__ , __leaf__));
+extern int open_by_handle_at (int __mountdirfd, struct file_handle *__handle,
+         int __flags);
+
+typedef __off64_t off64_t;
+typedef __pid_t pid_t;
+typedef __time_t time_t;
+struct timespec
+{
+  __time_t tv_sec;
+  __syscall_slong_t tv_nsec;
+};
+struct stat
+  {
+    __dev_t st_dev;
+    __ino_t st_ino;
+    __nlink_t st_nlink;
+    __mode_t st_mode;
+    __uid_t st_uid;
+    __gid_t st_gid;
+    int __pad0;
+    __dev_t st_rdev;
+    __off_t st_size;
+    __blksize_t st_blksize;
+    __blkcnt_t st_blocks;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
+    __syscall_slong_t __glibc_reserved[3];
+  };
+struct stat64
+  {
+    __dev_t st_dev;
+    __ino64_t st_ino;
+    __nlink_t st_nlink;
+    __mode_t st_mode;
+    __uid_t st_uid;
+    __gid_t st_gid;
+    int __pad0;
+    __dev_t st_rdev;
+    __off_t st_size;
+    __blksize_t st_blksize;
+    __blkcnt64_t st_blocks;
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
+    __syscall_slong_t __glibc_reserved[3];
+  };
+extern int fcntl (int __fd, int __cmd, ...) __asm__ ("" "fcntl64");
+extern int fcntl64 (int __fd, int __cmd, ...);
+extern int open (const char *__file, int __oflag, ...) __asm__ ("" "open64")
+     __attribute__ ((__nonnull__ (1)));
+extern int open64 (const char *__file, int __oflag, ...) __attribute__ ((__nonnull__ (1)));
+extern int openat (int __fd, const char *__file, int __oflag, ...) __asm__ ("" "openat64") __attribute__ ((__nonnull__ (2)));
+extern int openat64 (int __fd, const char *__file, int __oflag, ...)
+     __attribute__ ((__nonnull__ (2)));
+extern int creat (const char *__file, mode_t __mode) __asm__ ("" "creat64") __attribute__ ((__nonnull__ (1)));
+extern int creat64 (const char *__file, mode_t __mode) __attribute__ ((__nonnull__ (1)));
+extern int lockf (int __fd, int __cmd, __off64_t __len) __asm__ ("" "lockf64");
+extern int lockf64 (int __fd, int __cmd, off64_t __len);
+extern int posix_fadvise (int __fd, __off64_t __offset, __off64_t __len, int __advise) __asm__ ("" "posix_fadvise64") __attribute__ ((__nothrow__ , __leaf__));
+extern int posix_fadvise64 (int __fd, off64_t __offset, off64_t __len,
+       int __advise) __attribute__ ((__nothrow__ , __leaf__));
+extern int posix_fallocate (int __fd, __off64_t __offset, __off64_t __len) __asm__ ("" "posix_fallocate64");
+extern int posix_fallocate64 (int __fd, off64_t __offset, off64_t __len);
+
+        "MESON_GET_DEFINE_DELIMITER_START"
+1033
+"MESON_GET_DEFINE_DELIMITER_END"
+-----------
+Checking if define "F_ADD_SEALS" exists: YES 
+Running compile:
+Working directory:  /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpko4evhxa
+Code:
+
+        #ifdef __has_include
+         #if !__has_include("linux/udmabuf.h")
+          #error "Header 'linux/udmabuf.h' could not be found"
+         #endif
+        #else
+         #include <linux/udmabuf.h>
+        #endif
+-----------
+Command line: `cc /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/tmpko4evhxa/testfile.c -E -P -D_FILE_OFFSET_BITS=64 -P -O0 -std=c23` -> 0
+Has header "linux/udmabuf.h" : YES 
+Determining dependency 'lcms2' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion lcms2` -> 1
+stderr:
+Package lcms2 was not found in the pkg-config search path.
+Perhaps you should add the directory containing `lcms2.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'lcms2' found
+-----------
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency lcms2 found: NO (tried pkgconfig and cmake)
+Determining dependency 'libudev' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion libudev` -> 0
+stdout:
+257
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags libudev` -> 0
+stdout:
+-I/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/include
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs libudev` -> 0
+stdout:
+-L/nix/store/d2402qsphw86lqf2fg6kdrzq3r467x5w-systemd-minimal-257.10/lib -ludev
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs libudev` -> 0
+stdout:
+-L/nix/store/d2402qsphw86lqf2fg6kdrzq3r467x5w-systemd-minimal-257.10/lib -ludev
+-----------
+Run-time dependency libudev found: YES 257
+Determining dependency 'libseat' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion libseat` -> 1
+stderr:
+Package libseat was not found in the pkg-config search path.
+Perhaps you should add the directory containing `libseat.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'libseat' found
+-----------
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency libseat found: NO (tried pkgconfig and cmake)
+Looking for a fallback subproject for the dependency libseat
+Automatic wrap-based subproject downloading is disabled
+Subproject seatd is buildable: NO (disabling)
+Dependency libseat from subproject seatd found: NO (subproject failed to configure)
+Message: Required for session support.
+Determining dependency 'hwdata' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion hwdata` -> 0
+stdout:
+0.395
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags hwdata` -> 0
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs hwdata` -> 0
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs hwdata` -> 0
+Build-time dependency hwdata found: YES 0.395
+Determining dependency 'libdisplay-info' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion libdisplay-info` -> 0
+stdout:
+0.2.0
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags libdisplay-info` -> 0
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs libdisplay-info` -> 0
+stdout:
+-L/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib -ldisplay-info
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs libdisplay-info` -> 0
+stdout:
+-L/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib -ldisplay-info
+-----------
+Run-time dependency libdisplay-info found: YES 0.2.0
+Determining dependency 'libliftoff' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion libliftoff` -> 1
+stderr:
+Package libliftoff was not found in the pkg-config search path.
+Perhaps you should add the directory containing `libliftoff.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'libliftoff' found
+-----------
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency libliftoff found: NO (tried pkgconfig and cmake)
+Looking for a fallback subproject for the dependency libliftoff
+Automatic wrap-based subproject downloading is disabled
+Subproject libliftoff is buildable: NO (disabling)
+Dependency libliftoff from subproject libliftoff found: NO (subproject failed to configure)
+Determining dependency 'libinput' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion libinput` -> 1
+stderr:
+Package libinput was not found in the pkg-config search path.
+Perhaps you should add the directory containing `libinput.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'libinput' found
+-----------
+CMake binary for host machine is cached.
+
+Determining dependency 'libinput' with CMake executable '/home/zahary/.nix-profile/bin/cmake'
+Try CMake generator: Ninja
+Calling CMake (['/home/zahary/.nix-profile/bin/cmake']) in /opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/cmake_libinput with:
+  - "-G"
+  - "Ninja"
+  - "-DNAME=libinput"
+  - "-DARCHS="
+  - "-DVERSION="
+  - "-DCOMPS="
+  - "-DSTATIC=OFF"
+  - "--trace-expand"
+  - "--trace-format=json-v1"
+  - "--no-warn-unused-cli"
+  - "--trace-redirect=cmake_trace.txt"
+  - "-DCMAKE_TOOLCHAIN_FILE=/opt/repro/reprobuild/recipes/packages/source/wlroots/build/meson-private/cmake_libinput/CMakeMesonToolchainFile.cmake"
+  - "."
+WARNING: CMake reported that the package libinput was not found, even though Meson's preliminary check succeeded.
+Dependency lookup for libinput with method 'cmake' failed: Dependency libinput not found: PACKAGE_FOUND is false
+Run-time dependency libinput found: NO (tried pkgconfig)
+Message: Required for libinput backend support.
+Determining dependency 'xcb' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion xcb` -> 1
+stderr:
+Package xcb was not found in the pkg-config search path.
+Perhaps you should add the directory containing `xcb.pc'
+to the PKG_CONFIG_PATH environment variable
+No package 'xcb' found
+-----------
+CMake binary for host machine is cached.
+Preliminary CMake check failed. Aborting.
+Run-time dependency xcb found: NO (tried pkgconfig and cmake)
+Message: Required for X11 backend support.
+Determining dependency 'wayland-client' with pkg-config executable '/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config'
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --modversion wayland-client` -> 0
+stdout:
+1.23.1
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --cflags wayland-client` -> 0
+stdout:
+-I/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/include
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG_ALLOW_SYSTEM_LIBS]: 1
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-client` -> 0
+stdout:
+-L/nix/store/znpca9nxcjxlwhxmfpnrvmd3z3rm704q-wayland-1.23.1/lib -lwayland-client
+-----------
+env[PKG_CONFIG_PATH]: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/output/install/usr/share/pkgconfig:/opt/repro/reprobuild/recipes/packages/source/libdisplay-info/.repro/output/install/usr/lib/pkgconfig:/nix/store/0klw9fpf6cpr53h0d5n58z29775nvmkx-wayland-1.23.1-dev/lib/pkgconfig:/nix/store/c0ns6sxvww059zg49qnbxiasipkrcgm4-wayland-scanner-1.23.1-dev/lib/pkgconfig:/nix/store/wqryaqgg0zxxjaibc8byxypixlf9a7k9-wayland-protocols-1.44/share/pkgconfig:/nix/store/z1hhafn399bnx271kl80h4j8k1ikpm5g-libdrm-2.4.125-dev/lib/pkgconfig:/nix/store/kajg810idk11ddananjv7krax64xsr45-libxkbcommon-1.8.1-dev/lib/pkgconfig:/nix/store/sfk8d2l0yx7xr7w38msspzp7hk6jhz0r-pixman-0.44.2/lib/pkgconfig:/nix/store/dx5ppcvarcyl0javl0vdrbbdpxc9a3p1-libinput-1.27.1-dev/lib/pkgconfig:/nix/store/0fqzcjsvhg2qdwhp73ka39wj2d6drn3x-systemd-minimal-257.10-dev/lib/pkgconfig:/nix/store/r7p5mpg5wzqwnikgp72nsjg705m6ky14-mesa-25.0.7/lib/pkgconfig:/nix/store/nfh8b7g26sy257qg4mb47jay4lw880zh-seatd-0.9.1-dev/lib/pkgconfig
+env[PKG_CONFIG]: /nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config
+-----------
+Called: `/nix/store/h5rj7l2nxnhwz88jj5ljkpr1dz3x0p0f-pkg-config-wrapper-0.29.2/bin/pkg-config --libs wayland-client` -> 0
+stdout:
+-L/nix/store/znpca9nxcjxlwhxmfpnrvmd3z3rm704q-wayland-1.23.1/lib -lwayland-client
+-----------
+Run-time dependency wayland-client found: YES 1.23.1
+Dependency xwayland skipped: feature xwayland disabled
+Configuring config.h using configuration
+Configuring version.h using configuration
+Configuring config.h using configuration
+Build targets in project: 154
+
+wlroots 0.19.3
+
+    drm-backend      : NO
+    x11-backend      : NO
+    libinput-backend : NO
+    xwayland         : NO
+    gles2-renderer   : NO
+    vulkan-renderer  : NO
+    gbm-allocator    : NO
+    udmabuf-allocator: YES
+    session          : NO
+    color-management : NO
+    xcb-errors       : NO
+    egl              : NO
+    libliftoff       : NO
+
+  Subprojects
+    libliftoff       : NO
+                       Automatic wrap-based subproject downloading is disabled
+    seatd            : NO
+                       Automatic wrap-based subproject downloading is disabled
+
+  User defined options
+    buildtype        : release
+    examples         : false
+    libdir           : lib
+    prefix           : /usr
+    werror           : false
+    xcb-errors       : disabled
+    xwayland         : disabled
+
+Found ninja-1.12.1 at /nix/store/vzhaimx1jdsx680i85j3rh8qn0n3fak7-ninja-1.12.1/bin/ninja
