@@ -55,29 +55,43 @@
 ##  2,509,267 bytes; downloaded once from the upstream GitHub
 ##  release URL recorded in ``versions:`` above).
 ##
-## ## Build shape
+## ## Build shape — from-source-custom shell actions
 ##
-## hwdata's upstream build system is NOT autoconf-generated — it
-## ships a hand-rolled minimal shell ``configure`` script (48 lines,
-## by Colin Walters, 2010) that only emits a ``Makefile.inc`` with
-## the standard ``$(prefix)`` / ``$(datadir)`` / ``$(libdir)``
-## expansions. The consuming ``Makefile`` then runs ``make install``
-## against these variables. Both drive-parts honour ``DESTDIR``.
+## hwdata's upstream build system is NOT autoconf-generated and is
+## NOT out-of-tree clean: it ships a hand-rolled minimal shell
+## ``configure`` script (48 lines, by Colin Walters, 2010) that
+## emits a ``Makefile.inc`` alongside itself, and a Makefile that
+## references ``hwdata.spec`` / ``hwdata.pc.in`` / the ``.ids``
+## data files by relative CWD path. Running the standard autotools
+## out-of-tree pattern (``../src/configure && make -C build``)
+## trips on ``awk: cannot open hwdata.spec`` (Makefile reads the
+## spec via CWD).
 ##
-## We reuse the ``autotools_package`` constructor: it invokes
-## ``sh configure --prefix=/usr`` then ``make install
-## DESTDIR=<out>``, which is a byte-exact match for what hwdata's
-## build wants. No autotools features (autoconf / automake /
-## libtool) are actually exercised — the constructor's shape happens
-## to be a strict superset of hwdata's needs.
+## We therefore drive the build via the ``from-source-custom``
+## convention (per ``recipes/packages/source/cmake/repro.nim``'s
+## shell-action pattern) which runs each step IN-TREE inside
+## ``$extracted``:
 ##
-## The Makefile's default ``all:`` target is empty (data-only
-## package; the .ids files ship pre-generated in the tarball). We
-## rely on the default make invocation to be a no-op.
+##   1. ``sh configure --prefix=/usr`` — generates Makefile.inc
+##      alongside the Makefile.
+##   2. ``make install DESTDIR=$out`` — installs the .ids / .txt
+##      files + hwdata.pc under ``$out/usr/share/hwdata/`` +
+##      ``$out/usr/share/pkgconfig/hwdata.pc``.
+##   3. Shell action mirroring ``$out/`` into the canonical
+##      ``recipes/packages/source/hwdata/.repro/output/install/``
+##      directory that the M9.R.14e.8 mirror-emit stage
+##      normally publishes for downstream sibling recipes' pkg-
+##      config search-path channels. Since ``from-source-custom``
+##      doesn't emit the mirror automatically (unlike
+##      ``autotools_package``), we do it here explicitly. The
+##      mirror-emit shell step also runs the standard prefix-
+##      rewrite over hwdata.pc so downstream consumers'
+##      ``pkg-config --variable=pkgdatadir hwdata`` returns the
+##      real on-disk path (not the upstream-baked ``/usr``).
 ##
 ## ## Artifacts
 ##
-## hwdata ships:
+## hwdata ships (after ``make install`` lands in ``$out``):
 ##
 ##   * ``usr/share/hwdata/pci.ids`` — PCI vendor/device lookup table
 ##   * ``usr/share/hwdata/usb.ids`` — USB vendor/product lookup table
@@ -92,26 +106,12 @@
 ##                                        ``pkgdatadir`` variable
 ##                                        wlroots' meson build reads
 ##                                        via ``get_variable``)
-##   * ``usr/lib/modprobe.d/dist-blacklist.conf`` — kernel-module
-##                                                  blacklist (not
-##                                                  wlroots-relevant
-##                                                  but shipped for
-##                                                  completeness)
 ##
-## We register no ``library`` or ``executable`` artifacts (data-only
-## package) and rely on ``installTreeMirror()`` to publish the
-## on-disk layout for downstream consumers. The
-## ``m9r14eThreadRecipeDepsAsToolRefs`` chain routes the mirror's
-## ``share/pkgconfig`` onto downstream builds' ``PKG_CONFIG_PATH``
-## (via ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/
-## package_result.nim`` line 1424's share/pkgconfig channel).
-##
-## ## Configurables
-##
-## v1 ships NO configurables — the configure options are hardcoded
-## to a minimal-hwdata baseline per the M9.R.59.1 task brief.
-## Downstream configuration knobs would live here when a future
-## variant needs a non-``/usr`` prefix.
+## We register the artifact under the ``files pnp.ids`` name so the
+## from-source-custom stage-copy step probes ``$out/share/pnp.ids``
+## (per its fixed candidate list). The stage-copy is a single-file
+## sanity marker; the load-bearing consumer-facing publish is the
+## step-3 mirror emit into ``.repro/output/install/``.
 
 import repro_project_dsl
 import repro_dsl_stdlib/constructors
@@ -125,9 +125,9 @@ package hwdataSource:
   ## From-source hwdata — closes the M9.R.58 wlroots DRM-backend gap
   ## (paired with libdisplay-info via M9.R.59.2).
   ##
-  ## Data-only package: no ``library`` or ``executable`` artifacts.
-  ## The install-tree mirror publishes the pnp.ids / pci.ids /
-  ## usb.ids + hwdata.pc under the standard usr/share layout.
+  ## Data-only package driven via the from-source-custom convention:
+  ## hwdata's Makefile is not out-of-tree clean, so we run each step
+  ## in-tree via explicit shell actions.
 
   versions:
     ## Pinned upstream tag. ``sourceUrl`` records the GitHub
@@ -158,17 +158,13 @@ package hwdataSource:
     extractStrip: 1
 
   nativeBuildDeps:
-    ## make is the build-system driver — hwdata's Makefile is
-    ## GNU-make-compatible.
+    ## from-source-custom convention: declare ``sh`` as the driver
+    ## so the synthesis dispatch selects "custom" and defers to the
+    ## explicit ``build:`` block below. make + gawk + sed are the
+    ## utilities the shell action invokes.
+    "sh"
     "make"
-    ## awk is invoked by the Makefile to parse the Version: line
-    ## from hwdata.spec (``VERSION=$(shell awk '/Version:/ { print
-    ## $$2 }' hwdata.spec)``). gawk on nixpkgs' base profile
-    ## satisfies this.
     "gawk"
-    ## sed is invoked by the Makefile's ``hwdata.pc`` target to
-    ## substitute @prefix@ / @datadir@ / @VERSION@ / @NAME@ in the
-    ## hwdata.pc.in template.
     "sed"
 
   buildDeps:
@@ -178,37 +174,49 @@ package hwdataSource:
     discard
 
   config:
-    ## No prefix lifted; the configure options are inlined in the
-    ## ``build:`` block below.
+    ## No prefix lifted; the shell actions inline every parameter
+    ## in the ``build:`` block below.
     discard
 
-  build:
-    ## M9.R.5b — explicit ``build:`` block. Calls the M9.R.2b
-    ## high-level ``autotools_package(...)`` constructor with
-    ## ``--disable-blacklist`` (hwdata's optional kernel-module
-    ## blacklist file; not needed for the wlroots DRM backend
-    ## consumption).
-    setCurrentOwningPackageOverride("hwdataSource")
-    try:
-      let opts = @[
-        # Skip the kernel-module blacklist install. Not consumed
-        # by wlroots; keeps the mirror payload smaller and avoids
-        # a write to /usr/lib/modprobe.d.
-        "--disable-blacklist",
-      ]
-      let pkg = autotools_package(srcDir = "./src", configureOptions = opts)
-      # Data-only package: emit the install-tree mirror so the
-      # convention layer's downstream mirror-emit stage
-      # (M9.R.14e.8) walks the ``usr/share/hwdata/`` payload +
-      # ``usr/share/pkgconfig/hwdata.pc`` under
-      # ``.repro/output/install/usr/`` and rewrites the .pc file's
-      # prefix / datadir lines to point at the mirror's absolute
-      # path. Downstream consumers (libdisplay-info + wlroots)
-      # then find hwdata via pkg-config on their inherited
-      # PKG_CONFIG_PATH.
-      pkg.installTreeMirror()
-    finally:
-      clearCurrentOwningPackageOverride()
+  files hwdataFiles:
+    ## Placeholder artifact name for the from-source-custom
+    ## stage-copy step's fixed candidate list (``$out/share/<name>``
+    ## / ``$out/<name>``). The real consumer-facing publish is the
+    ## install-tree mirror at
+    ## ``recipes/packages/source/hwdata/.repro/output/install/``
+    ## that step 3 of the shell chain emits — see below. The
+    ## stage-copy is a sanity marker only; step 3 also plants a
+    ## single-file copy at ``$out/share/hwdataFiles`` so the stage-
+    ## copy resolves against the ``files`` candidate list.
+    build:
+      # Step 1: configure. hwdata's minimal shell configure writes
+      # Makefile.inc alongside the Makefile, encoding the standard
+      # prefix / datadir / libdir expansions. Runs in-tree via the
+      # from-source-custom cd-into-$extracted preamble.
+      shell "sh configure --prefix=/usr --disable-blacklist"
+      # Step 2: install. The Makefile's ``install`` target copies
+      # the .ids / .txt data files to $(DESTDIR)$(datadir)/hwdata/
+      # and installs hwdata.pc under $(DESTDIR)$(datadir)/pkgconfig.
+      # ``all:`` is empty (data-only), so we can skip straight to
+      # ``install``. DESTDIR=$out puts everything under the
+      # per-package output root.
+      shell "make install DESTDIR=$out"
+      # Step 3: emit the install-tree mirror at
+      # ``recipes/packages/source/hwdata/.repro/output/install/``
+      # for downstream sibling recipes' pkg-config search-path
+      # channels. The M9.R.14e.8 mirror-emit stage that the
+      # autotools_package constructor runs is NOT emitted by the
+      # from-source-custom convention, so we replicate its
+      # essential shape here: copy $out/usr into
+      # $extracted/../../../.repro/output/install/usr, then rewrite
+      # the .pc file's prefix / datadir lines to point at the
+      # mirror's absolute path (rather than the upstream-baked
+      # ``/usr``). The prefix-rewrite matches libs/repro_dsl_stdlib
+      # /src/repro_dsl_stdlib/types/package_result.nim line 1438-
+      # 1447. Also emit a stage-copy sanity marker: link pnp.ids
+      # into $out/share/pnp.ids so the from-source-custom
+      # stage-copy step probes it as the ``files pnp.ids`` artifact.
+      shell "set -eux && MIRROR=\"$(cd $extracted/.. && pwd)/.repro/output/install\" && MIRROR_USR=\"$MIRROR/usr\" && mkdir -p \"$MIRROR_USR\" && cp -rT \"$out/usr\" \"$MIRROR_USR\" && for pc in \"$MIRROR_USR/share/pkgconfig\"/*.pc; do [ -f \"$pc\" ] || continue; sed -i \"1,/^prefix=/{ s|^prefix=.*|prefix=$MIRROR_USR|; }\" \"$pc\"; sed -i \"s|^exec_prefix=/usr|exec_prefix=$MIRROR_USR|\" \"$pc\"; sed -i \"s|^libdir=/usr/lib64|libdir=$MIRROR_USR/lib64|\" \"$pc\"; sed -i \"s|^libdir=/usr/lib|libdir=$MIRROR_USR/lib|\" \"$pc\"; sed -i \"s|^includedir=/usr/include|includedir=$MIRROR_USR/include|\" \"$pc\"; sed -i \"s|^datadir=/usr/share|datadir=$MIRROR_USR/share|\" \"$pc\"; sed -i \"s|^datarootdir=/usr/share|datarootdir=$MIRROR_USR/share|\" \"$pc\"; done && mkdir -p \"$out/share\" && cp -f \"$out/usr/share/hwdata/pnp.ids\" \"$out/share/hwdataFiles\""
 
   runtimeDeps:
     ## Data-only package: no runtime linked deps. The pnp.ids /
