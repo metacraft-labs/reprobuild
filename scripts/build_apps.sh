@@ -259,3 +259,80 @@ case "$(uname -s)" in
     fi
     ;;
 esac
+
+# Windows-Runner-Binary-Cache-Deploy M3b -- Windows self-containment for the
+# binary-cache client CLI's SQLITE dependency: stage sqlite3_64.dll next to
+# the built binaries so the Nim ``{.dynlib: "(sqlite3_64|sqlite3|sqlite3_32).dll".}``
+# FFI in
+# ``libs/repro_local_store/src/repro_local_store/sqlite3_binding.nim``
+# resolves from the executable's own directory at LoadLibrary time. The
+# client CLI links ``repro_local_store``, so it HARD-REQUIRES this dynlib even
+# for ``derive-key`` -- without it a fresh-shell
+# ``repro-binary-cache-client.exe derive-key`` crashes at module init with
+# ``could not load: (sqlite3_64|sqlite3|sqlite3_32).dll`` because Win32's
+# LoadLibrary searches the .exe's dir, then system dirs, then PATH -- and only
+# a provisioned dev shell puts the Nim ``dist`` dir on PATH.
+#
+# Source resolution policy (mirrors the libzstd.dll / clingo.dll blocks above
+# -- no hardcoded store path): the Windows Nim distribution SHIPS
+# ``sqlite3_64.dll`` inside its own tree (under the Nim root's ``bin`` dir or a
+# sibling ``dist``/``dlls`` dir). Locate ``nim.exe`` on PATH at build time
+# (``command -v nim.exe`` works under MSYS2 / Git Bash) and probe the same-dir
+# and sibling ``dist``/``dlls`` layouts for the DLL. As a fallback also probe
+# the DLL directly on PATH (``command -v sqlite3_64.dll`` succeeds when the
+# Nim bin dir is on PATH). When none is found we WARN rather than fail -- the
+# binaries still build; the client just won't self-load its sqlite dynlib
+# until it is provisioned.
+#
+# IMPORTANT (Linux/MinGW cross-build): sqlite3_64.dll is a Windows PE that only
+# exists inside a *Windows* Nim install. A Linux host cross-building for MinGW
+# has no such DLL to stage, so this whole ``case`` arm is Windows-only and is a
+# no-op on Linux (guarded by ``uname -s``). The PRODUCTION seed's
+# sqlite3_64.dll is therefore captured from the GUEST's Nim install (the M3b
+# approach (b) seed: it is copied out of ``C:\dev-deps\nim\...`` next to the
+# guest-built repro-binary-cache-client.exe), NOT synthesised on Linux. This
+# build-time staging covers the from-source Windows build path (install-
+# reprobuild.ps1 on the guest), so a guest-side ``build_apps.sh`` run drops
+# sqlite3_64.dll next to repro.exe / the client reproducibly.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    sqlite_src_dll=""
+    nim_exe="$(command -v nim.exe 2>/dev/null || true)"
+    if [ -n "${nim_exe}" ]; then
+      nim_bin_dir="$(dirname "${nim_exe}")"
+      nim_root_dir="$(dirname "${nim_bin_dir}")"
+      for cand in \
+        "${nim_bin_dir}/sqlite3_64.dll" \
+        "${nim_root_dir}/dist/sqlite3_64.dll" \
+        "${nim_root_dir}/dlls/sqlite3_64.dll" \
+        "${nim_root_dir}/bin/sqlite3_64.dll"; do
+        if [ -f "${cand}" ]; then
+          sqlite_src_dll="${cand}"
+          break
+        fi
+      done
+    fi
+    if [ -z "${sqlite_src_dll}" ]; then
+      # Fallback: the DLL itself on PATH (Nim's dist dir on PATH).
+      sqlite_on_path="$(command -v sqlite3_64.dll 2>/dev/null || true)"
+      if [ -n "${sqlite_on_path}" ]; then
+        sqlite_src_dll="${sqlite_on_path}"
+      fi
+    fi
+    if [ -n "${sqlite_src_dll}" ]; then
+      cp -f "${sqlite_src_dll}" build/bin/sqlite3_64.dll
+      echo "Staged sqlite3_64.dll from ${sqlite_src_dll} -> build/bin/sqlite3_64.dll"
+    else
+      # TODO(Windows sqlite provisioning): the Windows Nim distribution ships
+      # sqlite3_64.dll in its own tree; ensure-nim.ps1's provisioned Nim under
+      # C:\dev-deps\nim carries it. If a future build host strips it, a
+      # windows/ensure-sqlite.ps1 provisioner (analogous to ensure-clingo /
+      # the referenced ensure-zstd TODO) should put sqlite3_64.dll on PATH so
+      # this staging step resolves. Until then a build host without it stages
+      # nothing and only warns. Intended source: the guest's Nim install
+      # (dist/sqlite3_64.dll), which is exactly where the M3b production seed's
+      # sqlite3_64.dll was captured from.
+      echo "warning: sqlite3_64.dll not found near nim.exe or on PATH; cannot stage it next to repro-binary-cache-client.exe -- the client will fail 'could not load: sqlite3_64.dll' in a clean shell until Nim's dist sqlite dll is provisioned" >&2
+    fi
+    ;;
+esac
