@@ -182,6 +182,17 @@ package wlrootsSource:
     ## gcc is the host C toolchain — wlroots is C11; 0.19 requires
     ## gcc 11+ for atomics + C11 thread-local storage portability.
     "gcc >=11"
+    ## pkg-config is required by wlroots' meson probe for every
+    ## external dependency (wayland-server, libdrm, xkbcommon,
+    ## libinput, libseat, ...). M9.R.57.2's newly-declared libseat
+    ## buildDep exposed that wlroots wasn't declaring pkg-config
+    ## explicitly — other sibling meson recipes (cairo, libinput,
+    ## dbus-broker) that DO declare pkg-config get the wrapper
+    ## bundled from the nix stdlib channel. Without this declaration,
+    ## wlroots' meson probe reports ``Did not find pkg-config by name
+    ## 'pkg-config'`` + falls back to bundled subprojects (which are
+    ## disabled at wrap_mode) so the setup step aborts.
+    "pkg-config"
 
   buildDeps:
     ## libdrm is the user-space DRM ioctl wrapper that wlroots' DRM
