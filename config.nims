@@ -134,6 +134,9 @@ for libName in [
   "repro_profile",
   "repro_profile_intent",
   "repro_profile_compile",
+  # Windows-Runner-Binary-Cache-Deploy M5: the signed desired-state
+  # manifest pull agent (reprobuild-native analog of mcl-deploy-agent).
+  "repro_deploy_agent",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",

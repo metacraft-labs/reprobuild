@@ -582,6 +582,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim",
+    binary: "build/test-bin/t_repro_deploy_agent_converges_from_signed_manifest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim",
+    binary: "build/test-bin/t_repro_deploy_agent_rejects_wrong_signer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_catalog_round_trip.nim",
     binary: "build/test-bin/t_c1_catalog_round_trip",
     defines: @[],

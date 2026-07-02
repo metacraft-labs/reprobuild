@@ -59,6 +59,7 @@ import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/infra
+import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/mode1_loader
@@ -232,6 +233,8 @@ proc renderUsage*(programName: string): string =
       " infra {plan | apply | install-root} ...\n       " &
           programName &
       " system {add | remove | list | why | sync | history | rollback | audit} ...\n       " &
+          programName &
+      " deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> ...\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
           programName &
@@ -36691,6 +36694,7 @@ const reproTopLevelCommands = [
   "branch",
   "checkout", "hooks", "check", "workspace", "prompt", "completion", "store",
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
+  "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
 ]
 
@@ -38259,6 +38263,17 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runSystemCommand(systemArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "deploy-agent":
+    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
+    # desired-state manifest pull loop (poll → verify against the
+    # allowed-signers set → apply the highest valid sequence for this
+    # target via the M4 runInfraApply path).
+    let deployArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return cli_deploy_agent.runDeployAgentCommand(deployArgs)
   if programName == "repro" and args.len > 0 and args[0] == "hardware":
     # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
     # from the live system. The dispatcher lives in
