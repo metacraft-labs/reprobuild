@@ -7,7 +7,11 @@ repro apps/repro/repro.nim
 # means `just build` / scripts/build_apps.sh produce build/bin/repro-binary-cache,
 # which the reprobuild Nix package installs so the nixos-modules
 # `services.mcl-repro-binary-cache` systemd unit can run it.
-repro-binary-cache apps/repro-binary-cache/repro_binary_cache.nim
+#
+# Windows-Runner-Binary-Cache-Deploy M6: --define:ssl compiles the opt-in
+# HTTPS transport (TLS-wrapped accept loop in server.nim, gated behind
+# `when defined(ssl)`). Plain HTTP is unchanged when no TLS cert/key is set.
+repro-binary-cache apps/repro-binary-cache/repro_binary_cache.nim --define:ssl
 # Windows-Runner-Binary-Cache-Deploy M2: cross-host publish→substitute driver
 # (gate `t_cross_host_publish_substitute`). Runs on the *client* NixOS node and
 # publishes a 5-member closure to a REMOTE `services.mcl-repro-binary-cache`
@@ -26,7 +30,11 @@ repro-binary-cache-crosshost apps/repro-binary-cache-crosshost/repro_binary_cach
 # (the streaming substitute path dlopen()s libzstd). This is the artifact the
 # Windows runner pulls to substitute pre-built deployment prefixes from the
 # cache instead of building from source.
-repro-binary-cache-client apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim
+# Windows-Runner-Binary-Cache-Deploy M6: --define:ssl for HTTPS substitute +
+# publish (the client's http_pool TLS-wraps the socket; in_process/CLI hand
+# newHttpClient an SSL context for https:// endpoints). Plain http:// is
+# unchanged; the manifest ECDSA-P256 signature stays the end-to-end trust.
+repro-binary-cache-client apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim --define:ssl
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim

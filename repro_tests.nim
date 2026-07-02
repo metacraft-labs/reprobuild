@@ -278,6 +278,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim",
+    binary: "build/test-bin/t_repro_binary_cache_https_publish_authz",
+    defines: @["ssl"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary: "build/test-bin/t_engine_action_create_dyndep",
     defines: @[],

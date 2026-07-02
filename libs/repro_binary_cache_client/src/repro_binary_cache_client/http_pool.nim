@@ -30,6 +30,32 @@
 
 import std/[net, os, parseutils, strutils, times, uri]
 
+# Windows-Runner-Binary-Cache-Deploy M6 — HTTPS support. TLS is compiled
+# in only under ``-d:ssl`` (OpenSSL); without it, an https:// URL raises a
+# clear error at ``parseTarget`` and plain HTTP is unaffected. The CA /
+# verification mode is resolved from the environment so a self-signed
+# server cert (the M6 gate + behind-NetBird deployment) is usable:
+#
+#   * ``REPRO_BINARY_CACHE_CA_FILE``  — PEM CA/cert to trust (verify peer).
+#   * ``REPRO_BINARY_CACHE_TLS_INSECURE=1`` — skip cert verification
+#     (self-signed, no CA on hand). The manifest ECDSA-P256 signature is
+#     the end-to-end trust boundary, so this only relaxes transport auth.
+when defined(ssl):
+  var gTlsCtx: SslContext = nil
+
+  proc tlsContext(): SslContext =
+    if gTlsCtx != nil:
+      return gTlsCtx
+    let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
+    let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in ["1", "true", "yes"]
+    if insecure:
+      gTlsCtx = newContext(verifyMode = CVerifyNone)
+    elif caFile.len > 0:
+      gTlsCtx = newContext(verifyMode = CVerifyPeer, caFile = caFile)
+    else:
+      gTlsCtx = newContext(verifyMode = CVerifyPeer)
+    return gTlsCtx
+
 type
   HostKey = tuple[host: string; port: Port; secure: bool]
 
@@ -98,15 +124,17 @@ type
     secure*: bool
 
 proc parseTarget*(url: string): ParsedUrl =
-  ## Splits the URL into host / port / path. We only support HTTP in
-  ## A2.5; HTTPS slot is reserved for the follow-up.
+  ## Splits the URL into host / port / path. HTTPS is supported when the
+  ## binary is compiled with ``-d:ssl`` (Windows-Runner-Binary-Cache-Deploy
+  ## M6); otherwise an https:// URL raises so plain-HTTP builds fail loud
+  ## rather than silently talking plaintext to a TLS port.
   let u = parseUri(url)
   if u.scheme.toLowerAscii() notin ["http", "https"]:
     raise newException(HttpError, "unsupported scheme: " & u.scheme)
   result.secure = u.scheme.toLowerAscii() == "https"
-  if result.secure:
+  if result.secure and not defined(ssl):
     raise newException(HttpError,
-      "A2.5 ships HTTP only; HTTPS is reserved for a follow-up")
+      "https:// requires a build with -d:ssl; this binary is HTTP-only")
   result.host = u.hostname
   let defaultPort = if result.secure: 443 else: 80
   result.port = Port(if u.port.len > 0: parseInt(u.port) else: defaultPort)
@@ -135,6 +163,18 @@ proc leaseConnection(pool: HttpPool; host: string; port: Port;
   except OSError as e:
     raise newException(HttpError,
       "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
+  if secure:
+    when defined(ssl):
+      try:
+        tlsContext().wrapConnectedSocket(sock, handshakeAsClient, host)
+      except CatchableError as e:
+        try: sock.close() except CatchableError: discard
+        raise newException(HttpError,
+          "TLS handshake to " & host & ":" & $int(port) & " failed: " & e.msg)
+    else:
+      try: sock.close() except CatchableError: discard
+      raise newException(HttpError,
+        "https:// requires a build with -d:ssl; this binary is HTTP-only")
   result = PooledConnection(sock: sock, host: host, port: port,
                             secure: secure, inUse: true)
   if pool.connections.len < pool.maxConnections:

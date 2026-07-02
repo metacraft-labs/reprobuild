@@ -40,7 +40,7 @@
 ## arbitrary header attributes inside the parts are tolerated.
 
 import std/[asyncdispatch, asynchttpserver, asyncnet, httpcore, net, options,
-            os, strutils, tables, uri]
+            os, sets, strutils, tables, uri]
 
 import repro_local_store
 
@@ -81,6 +81,21 @@ type
     listenHost*: string
     listenPort*: Port
     running*: bool
+    tlsCertFile*: string
+      ## Windows-Runner-Binary-Cache-Deploy M6 — opt-in HTTPS. When BOTH
+      ## ``tlsCertFile`` and ``tlsKeyFile`` are non-empty, ``start`` serves
+      ## over TLS (PEM cert + key; self-signed acceptable) via a custom
+      ## accept loop that TLS-wraps each accepted socket
+      ## (``handshakeAsServer``) and drives the SAME ``handleRequest``
+      ## routing as the plain-HTTP path. When either is empty the server
+      ## stays plain-HTTP (``std/asynchttpserver``), so the existing tests
+      ## and behind-NetBird use are unchanged. Requires the binary to be
+      ## compiled with ``-d:ssl``; without it, enabling TLS raises at
+      ## ``start`` (plain HTTP still works).
+    tlsKeyFile*: string
+    tlsListenSock*: AsyncSocket
+      ## The listening socket for the TLS accept loop (nil in plain-HTTP
+      ## mode). Held so ``close`` can tear it down.
     serveFut*: Future[void]
       ## The in-flight ``AsyncHttpServer.serve`` accept loop. Held so
       ## ``close`` can install a completion handler that swallows the
@@ -260,13 +275,24 @@ proc handlePublish*(s: BinaryCacheServerState;
   if req.manifestBytes.len == 0:
     raise newException(PublishError, "publish missing manifest part")
   let manifest = decodeManifest(req.manifestBytes)
-  # Signature check on the embedded producer pubkey. The trust-anchor
-  # allowlist enforcement is logged-only in v1 (single-tenant); a
-  # federated deployment would gate here on
-  # ``s.info.publicSigners.contains(manifest.producerPubKey)``.
+  # Signature check on the embedded producer pubkey.
   if not verifyManifest(manifest):
     raise newException(PublishError,
       "manifest signature failed verification against embedded pubkey")
+  # Windows-Runner-Binary-Cache-Deploy M6 — publish AUTHORIZATION.
+  # When a ``publicSigners`` allowlist is configured (non-empty), a
+  # cryptographically-valid signature is NOT sufficient: the embedded
+  # producer pubkey MUST be a member of the allowlist. A non-member is
+  # REJECTED here — BEFORE any storeCasBlob / storeManifest call — so a
+  # rejected publish leaves the on-disk store completely untouched. The
+  # HTTP layer maps ``BinaryCacheSignatureError`` to ``Http403``. When
+  # no allowlist is configured the server stays permissive (the v1
+  # single-tenant default).
+  if publishAllowlistEnforced(s) and
+     manifest.producerPubKey notin s.allowedSigners.publicKeys:
+    raise newException(BinaryCacheSignatureError,
+      "publish rejected: producer pubkey is not in the publicSigners " &
+      "allowlist (authorized signature required)")
   # Hard-cap projection — runs BEFORE any storeCasBlob call so a
   # rejection leaves the on-disk footprint unchanged.
   if s.evictionPolicy.hardCapBytes > 0:
@@ -649,6 +675,167 @@ proc sweeperLoop(srv: BinaryCacheHttpServer) {.async.} =
       except CatchableError as e:
         stderr.writeLine("sentinel sweep failed: " & e.msg)
 
+proc tlsEnabled*(srv: BinaryCacheHttpServer): bool =
+  ## True when the server is configured to serve over HTTPS — i.e. both
+  ## a TLS cert and key path are set. See ``tlsCertFile``.
+  srv.tlsCertFile.len > 0 and srv.tlsKeyFile.len > 0
+
+# ---------------------------------------------------------------------------
+# HTTPS transport (Windows-Runner-Binary-Cache-Deploy M6).
+#
+# ``std/asynchttpserver`` has no TLS support and its accept loop /
+# request parser are not injectable (the listening socket + the
+# ``processClient`` parser are private). So the HTTPS path runs a small
+# purpose-built accept loop: it opens its own ``AsyncSocket``, and for
+# each accepted connection TLS-wraps it with ``handshakeAsServer`` and
+# then parses one-or-more HTTP/1.1 requests, constructing the SAME
+# ``asynchttpserver.Request`` object the plain path uses so 100% of the
+# routing + handlers (``handleRequest``) are shared. Only the transport
+# differs. Requires ``-d:ssl``.
+# ---------------------------------------------------------------------------
+
+when defined(ssl):
+  import std/[parseutils, nativesockets]
+
+  proc recvHttpLine(client: AsyncSocket): Future[string] {.async.} =
+    ## Reads a single CRLF/LF-terminated line off the (TLS) socket, one
+    ## byte at a time. Returns the line WITHOUT the terminator. An empty
+    ## string is returned both for a bare blank line and for a peer
+    ## close — the caller distinguishes via a separate EOF signal.
+    var line = ""
+    while true:
+      let ch = await client.recv(1)
+      if ch.len == 0:
+        return line          # peer closed
+      if ch == "\n":
+        if line.len > 0 and line[^1] == '\r':
+          line.setLen(line.len - 1)
+        return line
+      line.add(ch)
+      if line.len > 65536:
+        raise newException(ValueError, "HTTP header line exceeds 64 KiB")
+
+  proc serveTlsConnection(srv: BinaryCacheHttpServer;
+                          client: AsyncSocket;
+                          address: string) {.async.} =
+    ## Parses and services HTTP/1.1 requests on an already-TLS-wrapped
+    ## socket until the peer closes or a request is non-keep-alive.
+    ## Mirrors the essential parts of ``asynchttpserver``'s private
+    ## ``processRequest`` (request line, headers, Content-Length body)
+    ## and dispatches through the shared ``handleRequest``.
+    try:
+      while srv.running:
+        # Request line: METHOD SP TARGET SP HTTP/x.y
+        var reqLine = ""
+        # Skip leading blank lines per RFC 7230 §3.5.
+        for _ in 0 .. 2:
+          reqLine = await recvHttpLine(client)
+          if reqLine.len > 0:
+            break
+        if reqLine.len == 0:
+          break            # peer closed / no request
+        var req = Request(client: client, hostname: address,
+                          headers: newHttpHeaders())
+        let parts = reqLine.split(' ')
+        if parts.len < 3:
+          await req.respond(Http400, "malformed request line")
+          break
+        case parts[0]
+        of "GET": req.reqMethod = HttpGet
+        of "POST": req.reqMethod = HttpPost
+        of "HEAD": req.reqMethod = HttpHead
+        of "PUT": req.reqMethod = HttpPut
+        of "DELETE": req.reqMethod = HttpDelete
+        of "PATCH": req.reqMethod = HttpPatch
+        of "OPTIONS": req.reqMethod = HttpOptions
+        else:
+          await req.respond(Http400, "unsupported method: " & parts[0])
+          break
+        try:
+          parseUri(parts[1], req.url)
+        except ValueError:
+          await req.respond(Http400, "malformed request target")
+          break
+        # Headers.
+        var contentLength = 0
+        var keepAlive = true    # HTTP/1.1 default
+        while true:
+          let hline = await recvHttpLine(client)
+          if hline.len == 0:
+            break               # end of headers
+          let colon = hline.find(':')
+          if colon < 0:
+            continue
+          let name = hline[0 ..< colon].strip()
+          let value = hline[colon + 1 .. ^1].strip()
+          req.headers[name] = value
+          let lname = name.toLowerAscii()
+          if lname == "content-length":
+            discard parseSaturatedNatural(value, contentLength)
+          elif lname == "connection":
+            if value.toLowerAscii().contains("close"):
+              keepAlive = false
+        # Body (Content-Length only; the publish path always sends one).
+        if contentLength > 0:
+          var body = ""
+          while body.len < contentLength:
+            let chunk = await client.recv(contentLength - body.len)
+            if chunk.len == 0:
+              break
+            body.add(chunk)
+          req.body = body
+        # Dispatch through the shared router.
+        await handleRequest(srv, req)
+        if not keepAlive:
+          break
+    except CatchableError as e:
+      # A client that drops mid-handshake / mid-request is routine on a
+      # public HTTPS endpoint — log at debug granularity, never crash the
+      # accept loop.
+      stderr.writeLine("repro-binary-cache TLS connection error: " & e.msg)
+    finally:
+      try: client.close() except CatchableError: discard
+
+  proc serveTls(srv: BinaryCacheHttpServer; host: string;
+                port: Port) {.async.} =
+    ## The HTTPS accept loop. Binds a fresh listening socket, wraps each
+    ## accepted connection with the server-side TLS context, and hands it
+    ## to ``serveTlsConnection``.
+    if not fileExists(srv.tlsCertFile):
+      raise newException(IOError,
+        "repro-binary-cache TLS cert not found: " & srv.tlsCertFile)
+    if not fileExists(srv.tlsKeyFile):
+      raise newException(IOError,
+        "repro-binary-cache TLS key not found: " & srv.tlsKeyFile)
+    let ctx = net.newContext(verifyMode = CVerifyNone,
+                             certFile = srv.tlsCertFile,
+                             keyFile = srv.tlsKeyFile)
+    let listenSock = newAsyncSocket()
+    listenSock.setSockOpt(OptReuseAddr, true)
+    listenSock.bindAddr(port, host)
+    listenSock.listen()
+    srv.tlsListenSock = listenSock
+    while srv.running:
+      var accepted: tuple[address: string, client: AsyncSocket]
+      try:
+        accepted = await listenSock.acceptAddr()
+      except CatchableError:
+        # Listening socket torn down by ``close`` — expected on shutdown.
+        break
+      if not srv.running:
+        try: accepted.client.close() except CatchableError: discard
+        break
+      # TLS-wrap the freshly-accepted socket + do the server handshake,
+      # then service it concurrently. A per-connection failure (bad
+      # handshake, plaintext probe) must not sink the accept loop.
+      try:
+        wrapConnectedSocket(ctx, accepted.client, handshakeAsServer)
+      except CatchableError as e:
+        stderr.writeLine("repro-binary-cache TLS handshake-wrap error: " & e.msg)
+        try: accepted.client.close() except CatchableError: discard
+        continue
+      asyncCheck serveTlsConnection(srv, accepted.client, accepted.address)
+
 proc start*(srv: BinaryCacheHttpServer; listenAddr: string) {.async.} =
   let (host, port) = parseListenAddr(listenAddr)
   srv.listenHost = host
@@ -660,6 +847,16 @@ proc start*(srv: BinaryCacheHttpServer; listenAddr: string) {.async.} =
     try:
       discard sweepExpiredSentinels(srv.state)
     except CatchableError: discard
+  if srv.tlsEnabled():
+    when defined(ssl):
+      srv.serveFut = serveTls(srv, host, port)
+      asyncCheck sweeperLoop(srv)
+      return
+    else:
+      raise newException(ValueError,
+        "repro-binary-cache: HTTPS requested (tlsCertFile/tlsKeyFile set) " &
+        "but this binary was built without -d:ssl. Rebuild with SSL " &
+        "support or unset the TLS cert/key to serve plain HTTP.")
   proc cb(req: Request) {.async, gcsafe.} =
     {.cast(gcsafe).}:
       await handleRequest(srv, req)
@@ -683,4 +880,8 @@ proc close*(srv: BinaryCacheHttpServer) =
     # eventual failure as consumed, so ``asyncCheck``'s default reraise
     # path never runs for the shutdown-induced ``OSError``.
     srv.serveFut.callback = proc () = discard
+  # Tear down the TLS listening socket (HTTPS mode) so the accept loop's
+  # pending ``acceptAddr`` unblocks and exits.
+  if not srv.tlsListenSock.isNil:
+    try: srv.tlsListenSock.close() except CatchableError: discard
   try: srv.server.close() except CatchableError: discard

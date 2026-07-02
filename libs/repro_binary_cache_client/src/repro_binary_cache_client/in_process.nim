@@ -22,7 +22,7 @@
 ## a thin wrapper that builds a ``PublishInProcessRequest`` from CLI
 ## flags and forwards.
 
-import std/[algorithm, httpclient, httpcore, os, random, strutils, times]
+import std/[algorithm, httpclient, httpcore, net, os, random, strutils, times]
 
 import blake3
 
@@ -424,7 +424,27 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     if req.endpoint.len > 0: req.endpoint
     else: "http://localhost:7878"
   let url = baseUrl & "/publish"
-  let client = newHttpClient(timeout = 60_000)
+  # Windows-Runner-Binary-Cache-Deploy M6 — publish over HTTPS when the
+  # endpoint is https://. Under -d:ssl we hand newHttpClient an SSL
+  # context resolved from the same env knobs the GET path uses
+  # (REPRO_BINARY_CACHE_CA_FILE / REPRO_BINARY_CACHE_TLS_INSECURE);
+  # otherwise std/httpclient's getDefaultSSL() would reject verification
+  # of a self-signed server cert.
+  let client =
+    when defined(ssl):
+      if baseUrl.toLowerAscii().startsWith("https://"):
+        let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
+        let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in
+          ["1", "true", "yes"]
+        let ctx =
+          if insecure: newContext(verifyMode = CVerifyNone)
+          elif caFile.len > 0: newContext(verifyMode = CVerifyPeer, caFile = caFile)
+          else: newContext(verifyMode = CVerifyPeer)
+        newHttpClient(timeout = 60_000, sslContext = ctx)
+      else:
+        newHttpClient(timeout = 60_000)
+    else:
+      newHttpClient(timeout = 60_000)
   defer: client.close()
   client.headers["Content-Type"] = "multipart/form-data; boundary=" & boundary
   result.bytesUploaded = body.len

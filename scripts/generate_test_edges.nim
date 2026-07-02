@@ -77,6 +77,7 @@ type
     binary: string        # repo-relative output path
     identName: string     # Nim identifier for the let-binding
     needsProviderMode: bool
+    needsSsl: bool        # M6: carries --define:ssl (HTTPS transport gate)
     requiresReproBinary: bool
       ## Bootstrap-And-Self-Build B3: ``true`` when the test spawns
       ## ``./build/bin/repro`` as a subprocess. The generator detects
@@ -100,6 +101,16 @@ type
     targetOs: TargetOs
       ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
+
+proc needsSslDefine(path: string): bool =
+  ## Windows-Runner-Binary-Cache-Deploy M6: the HTTPS + publish-authz gate
+  ## exercises the real TLS transport (server-side ``when defined(ssl)``
+  ## accept loop + client-side https), so its build edge must carry
+  ## ``--define:ssl``. Matched by path so the generated diff is explicit.
+  ## The OpenSSL ``-L`` is supplied by the dev-shell ``NIX_LDFLAGS`` during
+  ## the engine test build (a plain ``-d:ssl`` compile links in the
+  ## reprobuild dev shell without an explicit ``--passL``).
+  path.endsWith("/t_repro_binary_cache_https_publish_authz.nim")
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a
@@ -257,6 +268,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       binary: binary,
       identName: identFromBasename(stem),
       needsProviderMode: isProviderModePath(rel),
+      needsSsl: needsSslDefine(rel),
       requiresReproBinary: detectReproBinaryUsage(repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
@@ -375,9 +387,10 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     result.add("  TestSpec(\n")
     result.add("    source: \"" & edge.source & "\",\n")
     result.add("    binary: \"" & edge.binary & "\",\n")
-    let definesLit =
-      if edge.needsProviderMode: "@[\"reproProviderMode\"]"
-      else: "@[]"
+    var definesList: seq[string] = @[]
+    if edge.needsProviderMode: definesList.add("reproProviderMode")
+    if edge.needsSsl: definesList.add("ssl")
+    let definesLit = seqLiteral(definesList)
     let reqLit = if edge.requiresReproBinary: "true" else: "false"
     let targetOsLit = case edge.targetOs
       of soAny: "soAny"

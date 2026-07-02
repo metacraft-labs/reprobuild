@@ -62,7 +62,7 @@
 ## with thousands of files, swap this format for tar+zstd; the
 ## manifest carries ``compression`` + a ``name`` field that distinguishes.
 
-import std/[algorithm, asyncdispatch, httpclient, httpcore, os, parseopt,
+import std/[algorithm, asyncdispatch, httpclient, httpcore, net, os, parseopt,
             random, sequtils, strutils, tables, times]
 
 import ../../libs/repro_binary_cache_client/src/repro_binary_cache_client
@@ -247,6 +247,23 @@ proc extractPrefix(archive: openArray[byte]; outDir: string) =
 proc defaultCacheUrl(): string =
   result = getEnv("REPRO_BINARY_CACHE_URL", DefaultUrl)
 
+proc newCacheHttpClient(url: string; timeoutMs: int): HttpClient =
+  ## Windows-Runner-Binary-Cache-Deploy M6 — HTTP client that speaks
+  ## HTTPS to an https:// endpoint. Under -d:ssl an https URL gets an SSL
+  ## context honoring REPRO_BINARY_CACHE_CA_FILE / _TLS_INSECURE; plain
+  ## http (and non-ssl builds) keep the default client.
+  when defined(ssl):
+    if url.toLowerAscii().startsWith("https://"):
+      let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
+      let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in
+        ["1", "true", "yes"]
+      let ctx =
+        if insecure: newContext(verifyMode = CVerifyNone)
+        elif caFile.len > 0: newContext(verifyMode = CVerifyPeer, caFile = caFile)
+        else: newContext(verifyMode = CVerifyPeer)
+      return newHttpClient(timeout = timeoutMs, sslContext = ctx)
+  return newHttpClient(timeout = timeoutMs)
+
 proc defaultStoreRoot(): string =
   let envRoot = getEnv("REPRO_LOCAL_STORE", "")
   if envRoot.len > 0:
@@ -285,8 +302,9 @@ proc cmdLookup(args: seq[string]): int =
     stderr.writeLine(Usage)
     return 2
   let hex = parseEntryKeyHex(args[0])
-  let url = defaultCacheUrl() & "/manifests/" & hex
-  let client = newHttpClient(timeout = 15_000)
+  let baseUrl = defaultCacheUrl()
+  let url = baseUrl & "/manifests/" & hex
+  let client = newCacheHttpClient(baseUrl, 15_000)
   defer: client.close()
   # Use GET (the A2 server only implements GET / POST routes; HEAD
   # returns 405 from Nim's asynchttpserver).

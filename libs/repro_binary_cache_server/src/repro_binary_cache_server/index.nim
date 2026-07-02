@@ -89,6 +89,19 @@ type
       ## without restarting the daemon. Empty string disables
       ## reload (the in-memory ``evictionPolicy.pins`` is used
       ## verbatim).
+    allowedSigners*: peerAuth.TrustAnchors
+      ## Windows-Runner-Binary-Cache-Deploy M6 — publish-authorization
+      ## allowlist. When this anchor set is **non-empty**, ``handlePublish``
+      ## ENFORCES that the manifest's embedded ``producerPubKey`` is a
+      ## member: a publish signed by any other key (even with a valid
+      ## signature) is REJECTED with ``BinaryCacheSignatureError`` and
+      ## NOTHING is written to the store. When it is nil / empty the
+      ## server is permissive (any validly-signed manifest is accepted) —
+      ## the v1 single-tenant default, preserved so the existing
+      ## plain-HTTP tests are unaffected. The daemon loads it from
+      ## ``<root>/trust/allowed-signers`` (or ``REPRO_BINARY_CACHE_ALLOWED_SIGNERS``)
+      ## at boot and always self-adds the server's own producer key so a
+      ## server can publish to itself.
 
 # ---------------------------------------------------------------------------
 # Filesystem helpers.
@@ -218,9 +231,44 @@ proc openBinaryCacheServer*(root: string;
       softCapBytes = softCapBytes,
       hardCapBytes = hardCapBytes,
       pins = initialPins),
-    pinListPath: pinListPath)
+    pinListPath: pinListPath,
+    allowedSigners: peerAuth.newTrustAnchors())
   ensureProducerKey(result)
   writeCacheInfo(result)
+
+proc publishAllowlistEnforced*(s: BinaryCacheServerState): bool =
+  ## True when the publish-authorization allowlist is CONFIGURED — i.e.
+  ## ``handlePublish`` will REJECT a producer pubkey that is not a member.
+  ## When false (nil / empty allowlist) the server is permissive (v1
+  ## single-tenant default). See ``BinaryCacheServerState.allowedSigners``.
+  (not s.allowedSigners.isNil) and s.allowedSigners.publicKeys.len > 0
+
+proc addAllowedSigner*(s: BinaryCacheServerState;
+                       pub: peerAuth.PublicKeyBytes) =
+  ## Registers a single producer pubkey in the publish allowlist. The
+  ## server's own producer key is always added so it can publish to
+  ## itself. Adding the first anchor flips the server into ENFORCED mode.
+  if s.allowedSigners.isNil:
+    s.allowedSigners = peerAuth.newTrustAnchors()
+  peerAuth.addAnchor(s.allowedSigners, pub)
+
+proc loadAllowedSignersFile*(s: BinaryCacheServerState; path: string) =
+  ## Loads a trust-anchor file (one 130-char hex ECDSA-P256 pubkey per
+  ## non-blank / non-``#`` line — the same format ``auth.loadTrustAnchors``
+  ## and the M5 deploy-agent use) into the publish allowlist. The
+  ## server's own producer key is re-added afterwards so a populated
+  ## allowlist never locks the server out of publishing to itself.
+  ## Missing file is tolerated (leaves the allowlist untouched, i.e.
+  ## permissive) so an unconfigured deployment keeps the v1 default.
+  if path.len == 0 or not fileExists(path):
+    return
+  let loaded = peerAuth.loadTrustAnchors(path)
+  if s.allowedSigners.isNil:
+    s.allowedSigners = peerAuth.newTrustAnchors()
+  for pub in loaded.publicKeys:
+    peerAuth.addAnchor(s.allowedSigners, pub)
+  # Always keep the server's own key allowed.
+  peerAuth.addAnchor(s.allowedSigners, s.producerKeypair.publicKey)
 
 proc close*(s: BinaryCacheServerState) =
   if s.isNil:
