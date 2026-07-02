@@ -1,0 +1,30 @@
+Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.
+Qt depends on a UTF-8 locale, but has failed to switch to one.
+If this causes problems, reconfigure your locale. See the locale(1) manual
+for more information.
+[2026-07-02 09:23:17] Phase 1: probing hardware...
+[2026-07-02 09:23:17] $ /usr/bin/repro hardware probe --output /tmp/repro-installer-451/probed-hardware.nim --regenerate
+[2026-07-02 09:23:17]   repro hardware probe: wrote /tmp/repro-installer-451/probed-hardware.nim
+[2026-07-02 09:23:17] Phase 2: applying disk layout...
+[2026-07-02 09:23:17] wrote /tmp/repro-installer-451/disko.json (578 bytes)
+[2026-07-02 09:23:17] $ /usr/bin/repro disk apply /tmp/repro-installer-451/disko.json --confirm --device /dev/vda
+[2026-07-02 09:23:17]   [apply] umount: umount -lf /dev/vda (exit 32)
+[2026-07-02 09:23:17]   [apply] umount: umount -lf /dev/vda1 (exit 32)
+[2026-07-02 09:23:17]   [apply] umount: umount -lf /dev/vda2 (exit 32)
+[2026-07-02 09:23:17]   repro disk apply: FAILED at step wipefs — wipefs failed (exit 127): wipefs -af /dev/vda
+[2026-07-02 09:23:17]   --- output ---
+[2026-07-02 09:23:17]   /bin/sh: 1: wipefs: not found
+[2026-07-02 09:23:17] disk apply failed
+install failed: disk apply failed
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.068 [ERROR] [wlr] [libseat] [libseat/backend/logind.c:621] Could not get primary session for user: No data available
+00:00:00.082 [ERROR] [wlr] [libseat] [common/terminal.c:162] Could not open target tty: Permission denied
+00:00:00.084 [ERROR] [wlr] [libseat] [seatd/seat.c:70] Could not open tty0 to update VT: Permission denied
+00:00:00.087 [ERROR] [wlr] [libseat] [common/terminal.c:162] Could not open target tty: Permission denied
+00:00:00.089 [ERROR] [wlr] [libseat] [seatd/seat.c:80] Could not open terminal for VT 0: Permission denied
+00:00:00.091 [ERROR] [wlr] [libseat] [seatd/seat.c:544] Could not open VT for client
+00:00:00.093 [ERROR] [wlr] [libseat] [common/terminal.c:162] Could not open target tty: Permission denied
+00:00:00.095 [ERROR] [wlr] [libseat] [seatd/seat.c:94] Could not open terminal to clean up VT 0: Permission denied
+00:00:10.122 [ERROR] [wlr] [backend/backend.c:105] Timeout waiting session to become active
+00:00:10.125 [ERROR] [wlr] [backend/backend.c:399] Failed to start a DRM session
+00:00:10.127 [ERROR] [sway/server.c:247] Unable to create backend

@@ -1,0 +1,173 @@
+M9.R.57 close-out evidence
+===========================
+
+Objective
+---------
+Close the last compile-time gate that M9.R.56.8's boot smoke caught in
+the sddm → pam → wayland-session → sway chain:
+
+  [wlr] backend/backend.c:112 Cannot create session: disabled at compile-time
+  [wlr] backend/backend.c:399 Failed to start a DRM session
+  [sway/server.c:247]         Unable to create backend
+
+Root cause: wlroots was compiled without libseat (no libseat recipe in
+the repo, no pkg-config visible libseat when wlroots' meson probed).
+
+
+Commits (chronological)
+-----------------------
+  cbd625ca  M9.R.57.1: libseat from-source recipe
+  5b985a12  M9.R.57.2: wlroots buildDeps += libseat (session backend enabled)
+  399f7a39  M9.R.57.2b: declare pkg-config native dep on wlroots
+  3c3c336a  M9.R.57.2c: wlroots buildDeps += libudev (session backend needs both)
+  52861127  M9.R.57.3:  sway nativeBuildDeps += pkg-config (matches wlroots fix)
+  dc84e26e  M9.R.57.4:  pin libdir=lib on wlroots + libseat (path stability)
+  8441e8a8  M9.R.57.5:  libseat — enable systemd-logind backend (SDDM tty0 fix)
+  53395108  M9.R.57.5.1: libseat nativeBuildDeps += pkg-config (needed for logind probe)
+
+
+Phase A — libseat from-source recipe (M9.R.57.1)
+-------------------------------------------------
+New recipe at recipes/packages/source/libseat/repro.nim:
+  * Upstream:      Kenny Levinsen's seatd 0.9.1
+  * URL:           https://git.sr.ht/~kennylevinsen/seatd/archive/0.9.1.tar.gz
+  * sha256:        819979c922a0be258aed133d93920bce6a3d3565a60588d6d372ce9db2712cd3
+  * Vendored:      recipes/packages/source/libseat/vendor/seatd-0.9.1.tar.gz (41,968 bytes)
+  * meson options: libseat-seatd=disabled + libseat-builtin=enabled +
+                   libseat-logind=systemd + server=disabled +
+                   examples=disabled + man-pages=disabled + libdir=lib
+  * artifact:      libseat.so.1 (~76 KB) + libseat.pc with
+                   have_logind=true + have_builtin=true
+
+Standalone build verified:
+  $ repro build --tool-provisioning=from-source recipes/packages/source/libseat
+  succeeded all 6 actions
+  $ ls .repro/output/install/usr/lib/
+  libseat.so  libseat.so.1  pkgconfig
+
+
+Phase B — wlroots buildDeps + rebuild (M9.R.57.2 through M9.R.57.4)
+-------------------------------------------------------------------
+wlroots recipe changes:
+  * buildDeps += "libseat >=0.6.0"
+  * buildDeps += "libudev >=232"      (session backend needs BOTH per
+                                        backend/session/meson.build)
+  * nativeBuildDeps += "pkg-config"   (fresh rebuild exposed cache-clean
+                                        missing pkg-config wrapper)
+  * configureOptions += "libdir=lib"  (avoid meson 1.9.1's lib64 default)
+
+Confirmation from meson-log.txt after M9.R.57.2c:
+  Called: `.../pkg-config --modversion libudev` -> 0
+  Run-time dependency libudev found: YES 258
+  Called: `.../pkg-config --modversion libseat` -> 0
+  Run-time dependency libseat found: YES 0.9.1
+
+readelf -d libwlroots-0.19.so | grep NEEDED:
+  libwayland-server.so.0   libm.so.6
+  libdrm.so.2              libxkbcommon.so.0
+  libpixman-1.so.0         libudev.so.1        <-- NEW
+  libseat.so.1             libinput.so.10      <-- NEW (libseat, libinput)
+  libwayland-client.so.0   libc.so.6
+
+The "disabled at compile-time" error is impossible on this binary.
+
+
+Phase C — sway rebuild verification (M9.R.57.3)
+------------------------------------------------
+sway required the same pkg-config nativeBuildDep fix; rebuilt clean
+against the libseat-enabled wlroots.
+
+readelf -d sway | grep libwlroots:
+  libwlroots-0.19.so                <-- links against new wlroots
+
+
+Phase D — image swap + boot smoke (M9.R.57.5, .5.1)
+----------------------------------------------------
+The full reproos-image rebuild via `repro build recipes/reproos-image`
+auto-recurses to every from-source recipe (74+ packages) and hit an
+implicit-decl error in bash which is out of scope for this milestone.
+
+Chose the swap-in-place path instead (M9.R.56.8's diag-disk pattern):
+  1. qemu-nbd --connect + mount reproos-installed.qcow2 partition 2.
+  2. Copy new libwlroots-0.19.so, libseat.so.1, sway executable.
+  3. Append libseat install-mirror to /etc/ld.so.conf.d/zz-reproos-overlay.conf.
+  4. patchelf --set-interpreter + --set-rpath: swap /nix/store/ ->
+     /repro/store/ (M9.R.46 relocated-nix convention).
+  5. umount + qemu-nbd --disconnect.
+  6. 300s QMP boot smoke with screendump every 60s.
+
+Wayland-session.log tail (see m9r57_wayland-session.log):
+
+  Fontconfig error: Cannot load default config file: No such file: (null)
+  [wlr] [libseat] logind.c:621 Could not get primary session for user: No data available
+  [wlr] [libseat] common/terminal.c:162 Could not open target tty: Permission denied
+  [wlr] [libseat] seatd/seat.c:70 Could not open tty0 to update VT: Permission denied
+  ...
+  [wlr] backend/backend.c:105  Timeout waiting session to become active
+  [wlr] backend/backend.c:399  Failed to start a DRM session
+
+The "disabled at compile-time" line is GONE. libseat's runtime backend
+chain (logind first, then builtin fallback) is now active. Both
+backends fail at RUNTIME for a different reason (see residual below).
+
+
+Phase E — visual proof
+-----------------------
+Screendumps at t=60/120/180/240/300 s of the boot cycle (SDDM greeter
+still rendering, sway compositor not yet up):
+  m9r57_shot_{60,120,180,240,300}.ppm   3 MB each, 1024x768 raw PPM
+
+The screens show SDDM's minimal theme (from M9.R.56.7's build) — sway
+does NOT reach the compositor-running state, so no sway wallpaper /
+cursor is captured. The autologin-to-sway verdict is:
+
+  * Compile-time: PASS. wlroots' session backend is baked into the
+    shipped libwlroots-0.19.so; the M9.R.56.8 abort is closed.
+  * Runtime:       FAIL, with a different, smaller class of error
+                   (see residual).
+
+
+Residual — logind primary-session missing at compositor launch
+--------------------------------------------------------------
+The libseat logind backend probes `sd_pid_get_owner_uid(getpid(), &uid)`
+which reads `/run/systemd/users/<uid>` and returns ENOENT because
+pam_systemd hasn't registered a user session yet at that point in the
+SDDM → wayland-session chain. strace confirms:
+
+  446 openat(AT_FDCWD, "/run/systemd/users/1000", O_RDONLY|O_CLOEXEC) = -1 ENOENT
+  477 openat(AT_FDCWD, "/dev/tty0", O_RDWR|O_NOCTTY) = -1 EACCES
+
+Without a logind session, libseat falls back to the builtin backend
+which needs cap_sys_admin / video-group ownership of the tty; SDDM has
+already claimed it under the sddm user.
+
+This residual is STRICTLY SMALLER than the original M9.R.56.8 blocker:
+before M9.R.57, wlroots physically could not create ANY session (the
+session code path was compiled out — no runtime remedy would have
+worked). After M9.R.57 the session code is present and both backends
+run their probe logic to completion. The remaining gap is a systemd
++ PAM + SDDM integration issue, not a wlroots compile-time gate.
+
+Candidate follow-up work for M9.R.58 (out of scope here):
+  * verify pam_systemd.so is invoked BEFORE sway launches (add
+    -DDEBUG_PAM=1 to sddm build or systemctl status user@1000)
+  * check if SDDM's session-launcher runs setsid + setuid in the
+    correct order (systemd-logind requires the process be the leader
+    of a login session pgid)
+  * consider explicit systemd-run --user --scope --property=Type=idle
+    wrapping around the wayland-session invocation
+
+
+Files in this directory
+-----------------------
+  m9r57_complete.txt         (this file)
+  m9r57_wayland-session.log  sway's stderr showing the new runtime
+                              failure class
+  m9r57_sddm.log              SDDM's own log confirming the wayland-
+                              session hand-off happened
+  m9r57_sddm-strace.log       strace of sddm-helper showing the
+                              missing /run/systemd/users/1000
+  m9r57_boot_serial.log       QEMU serial console output for the 300s
+                              boot cycle
+  m9r57_shot_{60,120,180,240,300}.ppm  screendump every 60s (SDDM
+                              greeter visible; compositor not up)
