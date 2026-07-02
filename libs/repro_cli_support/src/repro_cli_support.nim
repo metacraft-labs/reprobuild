@@ -2681,6 +2681,35 @@ var producerMaterializedBinDirs*: Table[string, seq[string]] =
   ## the freshly-built producer executable lands on the consuming action's
   ## ``PATH``. Exported for the SC-2 integration test to observe the splice.
 
+type ProducerAuxPaths* = object
+  ## Cross-Repo-Source-Consumption SC-3 — the library-channel splice payload
+  ## for one resolved producer. A NEW SOURCE (a from-source sibling PROJECT
+  ## build), projected onto the SAME aux channels the tool-identity resolver
+  ## already threads (``repro_build_engine.nim:611-662,634-650``;
+  ## ``ResolvedToolIdentity``'s
+  ## ``includeDirs``/``libDirs``/``pkgConfigDirs``/``cmakePrefixDirs`` fields):
+  ##   * ``includeDirs``    → ``CPATH``
+  ##   * ``libDirs``        → ``LIBRARY_PATH`` + ``LD_LIBRARY_PATH``
+  ##   * ``pkgConfigDirs``  → ``PKG_CONFIG_PATH``
+  ##   * ``cmakePrefixDirs`` → ``CMAKE_PREFIX_PATH``
+  ## No new channel is introduced; SC-3 adds only the SOURCE.
+  includeDirs*: seq[string]
+  libDirs*: seq[string]
+  pkgConfigDirs*: seq[string]
+  cmakePrefixDirs*: seq[string]
+
+var producerMaterializedAuxPaths*: Table[string, ProducerAuxPaths] =
+  initTable[string, ProducerAuxPaths]()
+  ## SC-3 splice sink: consumer selector -> the producer's realized library
+  ## aux-channel dirs. The ``mkToolIdentityResolver`` closure returns these as
+  ## a ``ResolvedToolIdentity``'s
+  ## ``includeDirs``/``libDirs``/``pkgConfigDirs``/``cmakePrefixDirs`` so the
+  ## consuming action links/loads the freshly-built sibling library through
+  ## ``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH`` — no manual copy/patchelf.
+  ## Empty for a build that consumes no cross-repo LIBRARY producer, so a
+  ## non-producer / executable-only build resolves every ref byte-for-byte as
+  ## before. Exported for the SC-3 integration test to observe the splice.
+
 var producerActionHashes*: Table[string, string] =
   initTable[string, string]()
   ## SC-2 fingerprint fold sink: consumer selector -> the producer edge's
@@ -2699,6 +2728,44 @@ var producerBuildStack*: seq[string] = @[]
   ## ``fromSourceBuildStack`` (``repro_cli_support.nim:5456-5521``). A producer
   ## that transitively consumes the consumer would push a root already on the
   ## stack; that raises loudly with the full cycle path rather than looping.
+
+proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
+  ## Cross-Repo-Source-Consumption SC-3: a LIBRARY-channel producer is consumed
+  ## through the aux channels (``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH``),
+  ## which the engine threads by walking each action's ``toolIdentityRefs``
+  ## through the tool-identity resolver
+  ## (``repro_build_engine.nim`` ``resolveToolAuxPaths``/``resolvedToolAuxPaths``).
+  ## Unlike the executable channel (a ``shell(...)`` action that invokes the
+  ## producer executable already carries its name as a ref), a consuming action
+  ## that merely LINKS/LOADS the producer's library does NOT name the producer
+  ## as a tool ref by construction. Attach every materialized library-producer
+  ## selector as a ``toolIdentityRef`` on every consumer action so the engine's
+  ## per-ref resolver fires and threads the producer's realized library dirs
+  ## onto the aux channels. This is the string-surface behavior (the producer's
+  ## library reaches the consuming actions); the typed surface (SC-10) refines
+  ## it to the specific typed-accessor call sites.
+  ##
+  ## Aux channels only BROADEN a search path (they never remove entries), so
+  ## attaching the ref is safe for actions that do not link the library. No-op
+  ## when no library producer materialized (``producerMaterializedAuxPaths``
+  ## empty), so a build consuming no cross-repo LIBRARY producer is
+  ## byte-identical to today.
+  if producerMaterializedAuxPaths.len == 0:
+    return
+  for action in actions.mitems:
+    for selector in producerMaterializedAuxPaths.keys:
+      if selector.len == 0:
+        continue
+      if selector in action.toolIdentityRefs:
+        continue
+      action.toolIdentityRefs.add(selector)
+      # Keep ``toolIdentityRefKinds`` in sync when the action carries an
+      # explicit per-ref kind array (else it would silently fall back to the
+      # ``dkBuild`` default for every ref). ``dkBuild`` is the legacy ``uses:``
+      # kind — the HOST-platform cache key that collapses to ``"native"`` on a
+      # native build (``repro_build_engine.nim`` ``kindForRef``).
+      if action.toolIdentityRefKinds.len > 0:
+        action.toolIdentityRefKinds.add(dkBuild)
 
 proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
   ## SC-2 (§4.2 point 3): after the consumer graph is lowered, fold each
@@ -3762,8 +3829,22 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   if cached.hit:
     return (identity: cached.identity, identityPath: paths.identityPath,
       inspectionPath: paths.inspectionPath)
+  # Cross-Repo-Source-Consumption SC-3: selectors the producer pre-pass
+  # materialized as LIBRARY-channel producers are consumed through the aux
+  # channels, not PATH; pass them so ``toolBuildIdentity`` skips the path-mode
+  # executable lookup (which would otherwise raise "not found in PATH" for a
+  # pure-library producer). Empty when nothing was materialized → byte-identical
+  # to pre-SC-3.
+  var producerAuxSelectors = initTable[string, ProducerAuxDirs]()
+  for selector, aux in producerMaterializedAuxPaths.pairs:
+    producerAuxSelectors[selector] = ProducerAuxDirs(
+      includeDirs: aux.includeDirs,
+      libDirs: aux.libDirs,
+      pkgConfigDirs: aux.pkgConfigDirs,
+      cmakePrefixDirs: aux.cmakePrefixDirs)
   let identity = toolBuildIdentity(artifact, mode,
-    storeRoot = outDir / "tool-store")
+    storeRoot = outDir / "tool-store",
+    producerAuxSelectors = producerAuxSelectors)
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
   writeToolIdentityCache(outDir, mode, artifact, identity)
@@ -3993,31 +4074,46 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         let producer = resolveProducerBinding(name, producerWorkspaceRoot)
         if producer.kind != pbkNotProducer:
           lastResolvedProducerBinding = producer
-          # SC-2 splice: if the pre-pass built this producer's executable
-          # edge, its output ``bin`` dir is on the splice sink — return it so
-          # the freshly-built binary lands on the consuming action's PATH.
-          # (A producer resolved for the library channel only, SC-3, has no
-          # bin dir recorded and still falls through to ``none`` here.)
+          # SC-2/SC-3 splice: the pre-pass has built this producer's declared
+          # edge(s) and recorded the executable channel (``build/bin`` dir on
+          # ``producerMaterializedBinDirs``) and/or the library channel (the
+          # realized library aux-channel dirs on ``producerMaterializedAuxPaths``).
+          # Project WHATEVER channel(s) the pre-pass materialized into one
+          # ``ResolvedToolIdentity`` here: ``binDirs`` → PATH (executable), and
+          # ``includeDirs``/``libDirs``/``pkgConfigDirs``/``cmakePrefixDirs`` →
+          # the aux env channels (library). A producer that materialized neither
+          # (nothing on disk for this ref) still falls through to ``none``.
+          var binDirs: seq[string] = @[]
           if producerMaterializedBinDirs.hasKey(name):
-            let binDirs = producerMaterializedBinDirs[name]
-            if binDirs.len > 0:
-              # ``resolvedExecutablePath`` is the catalog's tool-of-record
-              # path for the ref (``repro_build_engine.nim:629-633``); it must
-              # be an EXECUTABLE, not a bin DIRECTORY. Bind it to the produced
-              # binary named after the selector when it materialized under a
-              # spliced bin dir; leave it empty otherwise (the PATH-splice
-              # channel reads only ``binDirs``, so an empty tool-of-record path
-              # is harmless — the freshly-built binary is still found on PATH).
-              var toolOfRecord = ""
-              for binDir in binDirs:
-                let candidate = binDir / addFileExt(name, ExeExt)
-                if fileExists(extendedPath(candidate)):
-                  toolOfRecord = candidate
-                  break
-              return some(ResolvedToolIdentity(
-                binDirs: binDirs,
-                resolvedExecutablePath: toolOfRecord,
-                cachePlatformTag: cacheTag))
+            binDirs = producerMaterializedBinDirs[name]
+          var aux = ProducerAuxPaths()
+          if producerMaterializedAuxPaths.hasKey(name):
+            aux = producerMaterializedAuxPaths[name]
+          let haveLib = aux.includeDirs.len > 0 or aux.libDirs.len > 0 or
+            aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0
+          if binDirs.len > 0 or haveLib:
+            # ``resolvedExecutablePath`` is the catalog's tool-of-record
+            # path for the ref (``repro_build_engine.nim:629-633``); it must
+            # be an EXECUTABLE, not a bin DIRECTORY. Bind it to the produced
+            # binary named after the selector when it materialized under a
+            # spliced bin dir; leave it empty otherwise (the PATH-splice
+            # channel reads only ``binDirs``, so an empty tool-of-record path
+            # is harmless — a pure-library producer has no executable of
+            # record and the aux channels carry the library).
+            var toolOfRecord = ""
+            for binDir in binDirs:
+              let candidate = binDir / addFileExt(name, ExeExt)
+              if fileExists(extendedPath(candidate)):
+                toolOfRecord = candidate
+                break
+            return some(ResolvedToolIdentity(
+              binDirs: binDirs,
+              resolvedExecutablePath: toolOfRecord,
+              includeDirs: aux.includeDirs,
+              libDirs: aux.libDirs,
+              pkgConfigDirs: aux.pkgConfigDirs,
+              cmakePrefixDirs: aux.cmakePrefixDirs,
+              cachePlatformTag: cacheTag))
     none(ResolvedToolIdentity)
 
 proc runQuotaSocketDiagnostic(): string =
@@ -5292,11 +5388,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
-    # Cross-Repo-Source-Consumption SC-2 (§4.2 point 3): fold each materialized
-    # cross-repo producer's action-hash into the consumer actions that name it,
-    # so the producer edge is a real input of the consumer cache key. No-op
-    # when nothing was materialized (byte-identical to today).
+    # Cross-Repo-Source-Consumption SC-2/SC-3 (§4.2 points 3-4): attach each
+    # materialized LIBRARY-channel producer as a tool ref on the consumer
+    # actions (SC-3, so the engine threads its realized library dirs onto the
+    # aux channels), then fold each materialized producer's action-hash into
+    # the consumer actions that name it, so the producer edge is a real input
+    # of the consumer cache key. Both are no-ops when nothing was materialized
+    # (byte-identical to today).
     var scheduledActions = lowered.actions
+    attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
@@ -5748,7 +5848,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
-      if producerMaterializedBinDirs.hasKey(selector):
+      if producerMaterializedBinDirs.hasKey(selector) or
+          producerMaterializedAuxPaths.hasKey(selector):
         continue  # already built + spliced in this session (dedup)
       # ``resolveProducerBinding`` re-raises a structured override diagnostic
       # (a registered override whose local checkout is missing) instead of a
@@ -5857,13 +5958,81 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               binDirs.add(binDir)
             if realized notin realizedBinaries:
               realizedBinaries.add(realized)
-        if binDirs.len == 0:
+        # Cross-Repo-Source-Consumption SC-3 (§4.2 point 4, library channel) —
+        # extract the producer's declared ``library``'s producing edge, bound
+        # to the realized ``.so``/``.dylib``/``.dll`` by declared-output
+        # BASENAME (the same canonical basename rule SC-2 uses for the
+        # executable channel), and project the realized library's DIRECTORY
+        # onto the EXISTING aux channels: ``libDirs`` → ``LIBRARY_PATH`` +
+        # ``LD_LIBRARY_PATH``, ``includeDirs`` → ``CPATH`` (headers dir),
+        # ``pkgConfigDirs`` → ``PKG_CONFIG_PATH``, ``cmakePrefixDirs`` →
+        # ``CMAKE_PREFIX_PATH`` where the producer emits them. A NEW SOURCE
+        # feeding the SAME channels — no new channel is introduced
+        # (``repro_build_engine.nim:611-662,634-650``;
+        # ``repro_cli_support.nim`` ``mkToolIdentityResolver`` aux projection).
+        #
+        # Realized-library discovery: a producer's ``library <name>`` builds a
+        # ``lib<name>.{so,dylib,dll}`` (or ``<name>.{...}``) under the canonical
+        # ``build/lib`` output dir; a companion header lives under
+        # ``build/include``. We bind by basename over the declared library
+        # name(s), matching either the ``lib``-prefixed or bare form and any
+        # platform extension, so the realized file the producer's edge actually
+        # wrote is located regardless of the host's shared-library extension.
+        var aux = ProducerAuxPaths()
+        var realizedLibraries: seq[string] = @[]
+        block libraryChannel:
+          let libOutDir = producerRootAbs / "build" / "lib"
+          let includeOutDir = producerRootAbs / "build" / "include"
+          let pkgConfigOutDir = producerRootAbs / "build" / "lib" / "pkgconfig"
+          if not dirExists(extendedPath(libOutDir)):
+            break libraryChannel
+          for lib in producerArtifact.projectInterface.publicLibraries:
+            if lib.name.len == 0:
+              continue
+            # A header-only library exports no linkable artifact; its headers
+            # (if any) are still projected onto CPATH below.
+            if lib.kind == lkHeaderOnly:
+              continue
+            # Match the realized file by basename over the declared library
+            # name: ``lib<name>.<ext>`` or ``<name>.<ext>`` for any extension.
+            let stem = lib.name
+            let libStem = "lib" & lib.name
+            for entryKind, entryPath in walkDir(extendedPath(libOutDir)):
+              if entryKind != pcFile:
+                continue
+              let tail = splitPath(entryPath).tail
+              let dotIdx = tail.find('.')
+              let base =
+                if dotIdx > 0: tail[0 ..< dotIdx] else: tail
+              if base == stem or base == libStem:
+                let realizedLib = libOutDir / tail
+                if realizedLib notin realizedLibraries:
+                  realizedLibraries.add(realizedLib)
+          if realizedLibraries.len > 0:
+            if libOutDir notin aux.libDirs:
+              aux.libDirs.add(libOutDir)
+            if dirExists(extendedPath(includeOutDir)) and
+                includeOutDir notin aux.includeDirs:
+              aux.includeDirs.add(includeOutDir)
+            if dirExists(extendedPath(pkgConfigOutDir)) and
+                pkgConfigOutDir notin aux.pkgConfigDirs:
+              aux.pkgConfigDirs.add(pkgConfigOutDir)
+        let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
+          aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0
+        if binDirs.len == 0 and not haveLibChannel:
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no executable whose ``build/bin/<name>`` output " &
-            "materialized; nothing to splice onto PATH. (A pure-library " &
-            "producer is consumed through the aux channels — SC-3.)")
-        producerMaterializedBinDirs[selector] = binDirs
+            "materialized and no library whose ``build/lib/<name>`` output " &
+            "materialized; nothing to splice onto PATH or the aux channels.")
+        if binDirs.len > 0:
+          producerMaterializedBinDirs[selector] = binDirs
+        if haveLibChannel:
+          producerMaterializedAuxPaths[selector] = aux
+          logSummary("cross-repo producer: spliced \"" & selector &
+            "\" library aux dir(s): libDirs=" & aux.libDirs.join(", ") &
+            (if aux.includeDirs.len > 0: " includeDirs=" &
+              aux.includeDirs.join(", ") else: ""))
         # SC-2 deliverable #2 sub-clause — "the producer edge's action-hash
         # folds into the consuming action's cache key" (§4.2 point 3). Compute
         # the producer edge's ACTION-HASH as a content digest over the
@@ -5881,13 +6050,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # product changed" via the action-hash); the SOURCE-content arm
         # (``foldOverridesIntoFingerprint`` on the develop ``contentIdentity``)
         # is SC-4.
+        # SC-3 folds the realized LIBRARY artifacts into the SAME action-hash
+        # (§4.2 point 3, library channel): a rebuilt ``.so``/``.dylib``/``.dll``
+        # shifts the folded hash and rebuilds the consumer exactly as a rebuilt
+        # executable does. The digest tracks WHICH artifact changed (basename)
+        # as well as its bytes, over both the executable and library products.
         realizedBinaries.sort()
+        realizedLibraries.sort()
         var actionHashPayload = "cross-repo-producer-action-hash.v1\x00" &
           selector & "\x00"
         for realized in realizedBinaries:
           actionHashPayload.add(extractFilename(realized))
           actionHashPayload.add('\x00')
           actionHashPayload.add(fileContentDigest(realized))
+          actionHashPayload.add('\x00')
+        for realizedLib in realizedLibraries:
+          actionHashPayload.add("lib:")
+          actionHashPayload.add(extractFilename(realizedLib))
+          actionHashPayload.add('\x00')
+          actionHashPayload.add(fileContentDigest(realizedLib))
           actionHashPayload.add('\x00')
         producerActionHashes[selector] =
           digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
@@ -5902,15 +6083,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         # selector as "not on PATH" before the consumer's engine pass even
         # started. (The SC-1 producer branch in ``mkToolIdentityResolver``
         # additionally splices the bin dir for a selector the path-mode profile
-        # loop does not claim — belt-and-suspenders for both channels.)
-        block prependProducerPath:
-          var pathParts: seq[string] = binDirs
-          let existing = getEnv("PATH")
-          if existing.len > 0:
-            pathParts.add(existing)
-          putEnv("PATH", pathParts.join($PathSep))
-        logSummary("cross-repo producer: spliced \"" & selector &
-          "\" bin dir(s) onto PATH: " & binDirs.join(", "))
+        # loop does not claim — belt-and-suspenders for both channels.) A
+        # pure-library producer (SC-3, no executable) skips the PATH prepend —
+        # its library reaches the consumer through the aux channels the resolver
+        # closure returns, not through PATH.
+        if binDirs.len > 0:
+          block prependProducerPath:
+            var pathParts: seq[string] = binDirs
+            let existing = getEnv("PATH")
+            if existing.len > 0:
+              pathParts.add(existing)
+            putEnv("PATH", pathParts.join($PathSep))
+          logSummary("cross-repo producer: spliced \"" & selector &
+            "\" bin dir(s) onto PATH: " & binDirs.join(", "))
       finally:
         if producerBuildStack.len > 0 and
             producerBuildStack[^1] == producerRootAbs:
@@ -6383,11 +6568,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
-    # Cross-Repo-Source-Consumption SC-2 (§4.2 point 3): fold each materialized
-    # cross-repo producer's action-hash into the consumer actions that name it,
-    # so the producer edge is a real input of the consumer cache key. No-op
-    # when nothing was materialized (byte-identical to today).
+    # Cross-Repo-Source-Consumption SC-2/SC-3 (§4.2 points 3-4): attach each
+    # materialized LIBRARY-channel producer as a tool ref on the consumer
+    # actions (SC-3, so the engine threads its realized library dirs onto the
+    # aux channels), then fold each materialized producer's action-hash into
+    # the consumer actions that name it, so the producer edge is a real input
+    # of the consumer cache key. Both are no-ops when nothing was materialized
+    # (byte-identical to today).
     var scheduledActions = lowered.actions
+    attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &

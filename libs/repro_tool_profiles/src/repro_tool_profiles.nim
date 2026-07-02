@@ -80,6 +80,17 @@ type
       ## block — and carries the sentinel `exitCode`
       ## `probeTimeoutExitCode`.
 
+  ProducerAuxDirs* = object
+    ## Cross-Repo-Source-Consumption SC-3: a from-source sibling LIBRARY
+    ## producer's realized aux-channel dirs, threaded onto the consuming
+    ## action's ``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH``/
+    ## ``PKG_CONFIG_PATH``/``CMAKE_PREFIX_PATH`` via the profile's existing
+    ## aux fields. A NEW source, the SAME channels.
+    includeDirs*: seq[string]
+    libDirs*: seq[string]
+    pkgConfigDirs*: seq[string]
+    cmakePrefixDirs*: seq[string]
+
   PathOnlyToolProfile* = object
     installMethod*: string
     packageSelector*: string
@@ -4404,8 +4415,48 @@ proc tryResolveStdlibProvisioning*(useDef: InterfaceToolUse;
     return true
   false
 
+proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
+                                 dirs: ProducerAuxDirs):
+    PathOnlyToolProfile =
+  ## Cross-Repo-Source-Consumption SC-3: a ``uses:`` selector that resolves to
+  ## a from-source sibling PROJECT consumed through the LIBRARY aux channels
+  ## has NO executable on PATH — its library reaches the consuming action via
+  ## ``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH`` (the aux channels the engine
+  ## threads at fork time), not via PATH. Build a profile that carries the
+  ## producer's realized library dirs directly on the SAME
+  ## ``cpathList``/``libraryPathList``/``pkgConfigSearchList``/``cmakePrefixList``
+  ## fields the from-source resolver populates, so pre-flight identity
+  ## resolution does NOT raise the path-mode "not found in PATH" diagnostic AND
+  ## the resolver closure's EXISTING aux projection returns these dirs for the
+  ## consuming action's ``CPATH``/``LIBRARY_PATH``/``LD_LIBRARY_PATH`` — a NEW
+  ## source (from-source sibling PROJECT build) feeding the SAME channels.
+  PathOnlyToolProfile(
+    installMethod: "path",
+    packageSelector: useDef.packageSelector,
+    packageId: useDef.packageSelector,
+    declaredExecutablePath: useDef.executableName,
+    executableName: useDef.executableName,
+    resolvedExecutablePath: "",
+    cpathList: dirs.includeDirs,
+    libraryPathList: dirs.libDirs,
+    pkgConfigSearchList: dirs.pkgConfigDirs,
+    cmakePrefixList: dirs.cmakePrefixDirs,
+    adapterStrength: asWeak,
+    cachePortability: cpLocalOnly)
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
-                    pathValue, storeRoot: string): PathOnlyToolProfile =
+                    pathValue, storeRoot: string;
+                    producerAuxSelectors: Table[string, ProducerAuxDirs] =
+                      initTable[string, ProducerAuxDirs]()):
+    PathOnlyToolProfile =
+  # SC-3: a selector materialized as a library-channel producer is consumed
+  # through the aux channels, not PATH — skip path-mode executable resolution
+  # for it and hand back a profile carrying the producer's realized library
+  # dirs on the aux-channel fields.
+  if useDef.packageSelector.len > 0 and
+      producerAuxSelectors.hasKey(useDef.packageSelector):
+    return mkAuxChannelProducerProfile(useDef,
+      producerAuxSelectors[useDef.packageSelector])
   case mode
   of tpmPathOnly:
     # M7 (Windows reprobuild migration): when path-mode resolution
@@ -4569,12 +4620,22 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
 proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                         mode: ToolProvisioningMode;
                         pathValue = getEnv("PATH");
-                        storeRoot = ""):
+                        storeRoot = "";
+                        producerAuxSelectors: Table[string, ProducerAuxDirs] =
+                          initTable[string, ProducerAuxDirs]()):
     PathOnlyBuildIdentity =
+  ## SC-3: ``producerAuxSelectors`` maps the ``uses:`` selectors that the
+  ## cross-repo producer pre-pass materialized as LIBRARY-channel producers
+  ## (consumed via the aux channels, not PATH) to their realized aux dirs.
+  ## ``toolProfileFor`` returns an aux-channel profile carrying those dirs for
+  ## such selectors instead of raising the path-mode "not found in PATH"
+  ## diagnostic. Empty by default → byte-identical to pre-SC-3 for every
+  ## non-producer build.
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   for useDef in artifact.projectInterface.toolUses:
-    let profile = toolProfileFor(useDef, mode, pathValue, storeRoot)
+    let profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
+      producerAuxSelectors)
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 
