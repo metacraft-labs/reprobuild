@@ -166,6 +166,10 @@ package libseatSource:
     ## gcc is the host C toolchain — seatd is plain C11 with modest
     ## compiler-flag surface.
     "gcc >=7"
+    ## pkg-config is required by libseat's meson probe for libsystemd
+    ## (activated by M9.R.57.5's libseat-logind=systemd flip). Matches
+    ## the same fix M9.R.57.2b landed on wlroots.
+    "pkg-config"
 
   buildDeps:
     ## libseat's builtin backend uses evdev for input device
