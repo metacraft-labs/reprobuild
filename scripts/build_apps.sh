@@ -206,3 +206,56 @@ case "$(uname -s)" in
     fi
     ;;
 esac
+
+# Windows-Runner-Binary-Cache-Deploy M3a -- Windows self-containment for the
+# binary-cache client CLI: stage libzstd.dll next to the built binaries so the
+# Nim ``{.dynlib: "libzstd.dll".}`` FFI in
+# ``libs/repro_binary_cache_client/src/repro_binary_cache_client/decompress.nim``
+# resolves from the executable's own directory at LoadLibrary time (the
+# streaming substitute path decompresses zstd frames via dlopen, not a
+# DT_NEEDED/import-lib dependency). Without this, a fresh-shell
+# ``repro-binary-cache-client-cli.exe substitute`` crashes the first time it
+# hits a zstd-compressed payload with ``could not load: libzstd.dll`` because
+# Win32's LoadLibrary searches the .exe's dir, then system dirs, then PATH --
+# and only a provisioned dev shell puts libzstd.dll on PATH.
+#
+# Source resolution policy (mirrors the clingo.dll block above -- no hardcoded
+# store path): locate ``zstd.exe`` on PATH at build time (``command -v
+# zstd.exe`` works under MSYS2 / Git Bash) and stage its co-located
+# libzstd.dll. Two layouts are probed: the MSYS2 ``mingw64`` pacman package
+# (``mingw-w64-x86_64-zstd``) co-locates ``libzstd.dll`` with ``zstd.exe`` in
+# the same ``bin`` dir; the facebook/zstd win64 release (the reprobuild
+# ``packages/zstd.nim`` tarball, stripComponents=1) puts ``zstd.exe`` at the
+# prefix root with ``libzstd.dll`` under a sibling ``dll/`` subdir. When
+# neither is found we WARN rather than fail -- the binaries still build; the
+# client just won't self-load a compressed payload until zstd is provisioned.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    zstd_exe="$(command -v zstd.exe 2>/dev/null || true)"
+    if [ -n "${zstd_exe}" ]; then
+      zstd_src_dir="$(dirname "${zstd_exe}")"
+      zstd_src_dll=""
+      if [ -f "${zstd_src_dir}/libzstd.dll" ]; then
+        zstd_src_dll="${zstd_src_dir}/libzstd.dll"
+      elif [ -f "${zstd_src_dir}/dll/libzstd.dll" ]; then
+        # facebook/zstd win64 release layout (packages/zstd.nim tarball).
+        zstd_src_dll="${zstd_src_dir}/dll/libzstd.dll"
+      fi
+      if [ -n "${zstd_src_dll}" ]; then
+        cp -f "${zstd_src_dll}" build/bin/libzstd.dll
+        echo "Staged libzstd.dll from ${zstd_src_dll} -> build/bin/libzstd.dll"
+      else
+        echo "warning: zstd.exe on PATH at ${zstd_exe} but no sibling libzstd.dll (checked ${zstd_src_dir}/libzstd.dll and ${zstd_src_dir}/dll/libzstd.dll); repro-binary-cache-client-cli.exe will fail to decompress payloads in a clean shell" >&2
+      fi
+    else
+      # TODO(Windows zstd provisioning): once a windows/ensure-zstd.ps1
+      # provisioner lands (analogous to the referenced ensure-clingo.ps1), it
+      # should put zstd.exe + libzstd.dll on PATH so this staging step resolves.
+      # Until then, a build host without zstd on PATH stages nothing and only
+      # warns. Intended source: MSYS2 ``pacman -S mingw-w64-x86_64-zstd`` (bin/
+      # co-located) or the facebook/zstd v1.5.6 win64 release used by
+      # libs/repro_dsl_stdlib/.../packages/zstd.nim.
+      echo "warning: zstd.exe not on PATH; cannot stage libzstd.dll next to repro-binary-cache-client-cli.exe -- provision zstd (MSYS2 mingw-w64-x86_64-zstd) first" >&2
+    fi
+    ;;
+esac

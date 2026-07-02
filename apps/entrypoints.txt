@@ -16,6 +16,17 @@ repro-binary-cache apps/repro-binary-cache/repro_binary_cache.nim
 # byte-identical. Building it here ships build/bin/repro-binary-cache-crosshost
 # in the reprobuild Nix package so the M2 nixosTest can reference it.
 repro-binary-cache-crosshost apps/repro-binary-cache-crosshost/repro_binary_cache_crosshost.nim
+# Windows-Runner-Binary-Cache-Deploy M3a: ship the binary-cache client CLI in
+# the product. The CLI (publish/substitute/lookup/derive-key/gen-key over
+# arbitrary directory trees, rbcarc-v1) was previously only built as a
+# `test-helpers` edge for the A3 CLI gate; adding it here makes
+# `scripts/build_apps.sh` / `just build` produce
+# build/bin/repro-binary-cache-client, which the reprobuild Nix package
+# installPhase installs and the zstd `postFixup` rpath-fixes automatically
+# (the streaming substitute path dlopen()s libzstd). This is the artifact the
+# Windows runner pulls to substitute pre-built deployment prefixes from the
+# cache instead of building from source.
+repro-binary-cache-client apps/repro-binary-cache-client/repro_binary_cache_client_cli.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim
 repro-peer-cache-mint-cert apps/repro-peer-cache-mint-cert/repro_peer_cache_mint_cert.nim

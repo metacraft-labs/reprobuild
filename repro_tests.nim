@@ -238,6 +238,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim",
+    binary: "build/test-bin/t_client_cli_prefix_substitute",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/test_auto_credentials.nim",
     binary: "build/test-bin/test_auto_credentials",
     defines: @[],

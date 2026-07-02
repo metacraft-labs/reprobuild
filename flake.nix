@@ -333,15 +333,39 @@
             type = "app";
             program = "${reproBinaryCache}/bin/repro-binary-cache";
           };
+          # Windows-Runner-Binary-Cache-Deploy M3a — expose the binary-cache
+          # client CLI as its own package so the Windows runner deploy path (and
+          # the nixos-modules integration tests) have a runnable artifact to
+          # reference. Same `just build` closure as `reprobuild` (the
+          # installPhase copies every build/bin/* entrypoint, including the
+          # newly-added build/bin/repro-binary-cache-client); we only
+          # retarget `meta.mainProgram` so `lib.getExe` resolves the CLI. It
+          # inherits the zstd `postFixup` DT_RPATH for free — the streaming
+          # substitute path dlopen()s libzstd.so.1, so without that rpath the
+          # CLI would fail at the first payload transfer, exactly like the
+          # daemon did under the M2 cross-host substitute gate.
+          reproBinaryCacheClient = reprobuild.overrideAttrs (old: {
+            pname = "repro-binary-cache-client";
+            meta = (old.meta or { }) // {
+              description = "Reprobuild binary-cache client CLI (publish/substitute/lookup)";
+              mainProgram = "repro-binary-cache-client";
+            };
+          });
+          reproBinaryCacheClientApp = {
+            type = "app";
+            program = "${reproBinaryCacheClient}/bin/repro-binary-cache-client";
+          };
         in
         {
           apps.default = reproApp;
           apps.repro = reproApp;
           apps.repro-binary-cache = reproBinaryCacheApp;
+          apps.repro-binary-cache-client = reproBinaryCacheClientApp;
 
           packages.default = reprobuild;
           packages.reprobuild = reprobuild;
           packages.repro-binary-cache = reproBinaryCache;
+          packages.repro-binary-cache-client = reproBinaryCacheClient;
 
           checks = {
             inherit pre-commit-check;
