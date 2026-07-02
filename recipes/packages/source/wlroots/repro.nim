@@ -273,6 +273,14 @@ package wlrootsSource:
         "xwayland=disabled",
         "xcb-errors=disabled",
         "werror=false",
+        # M9.R.57.4 — pin libdir=lib so wlroots' install landing matches
+        # every other sibling recipe (libinput, libseat, ...). Without
+        # this meson defaults to lib64 on x86_64 hosts, which drops
+        # libwlroots-0.19.so under usr/lib64/ instead of usr/lib/;
+        # every downstream consumer (sway meson probe + reproos-image
+        # rootfs stage) hardcodes usr/lib/ and would silently miss the
+        # rebuilt .so.
+        "libdir=lib",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libwlroots")

@@ -196,6 +196,10 @@ package libseatSource:
         "server=disabled",
         "examples=disabled",
         "man-pages=disabled",
+        # M9.R.57.4 — pin libdir=lib for sibling-consumer path stability
+        # (wlroots' pkg-config probe searches lib/pkgconfig on every
+        # sibling install-mirror path).
+        "libdir=lib",
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libseat")
