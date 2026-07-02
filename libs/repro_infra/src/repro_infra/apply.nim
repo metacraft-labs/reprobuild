@@ -69,6 +69,15 @@ type
       ## in ``ApplyResult.noOpCount`` for the apply summary so a
       ## repeat-apply prints "no-op" rather than "applied" for an
       ## already-converged action edge.
+    substitutedFromCache*: bool
+      ## Windows-Runner-Binary-Cache-Deploy M4: true when this edge's
+      ## outputs were FETCHED FROM THE BINARY CACHE
+      ## (``bakBinaryCacheSubstitute``) rather than produced by a local
+      ## build. A substituted edge is a cache HIT (``cacheHit = true``
+      ## as well) — it produced no local process. Counted separately in
+      ## ``ApplyResult.substitutedFromCacheCount`` so the apply summary
+      ## can report "N substituted from cache, M built locally" and the
+      ## M4 gate can assert hits > 0 / locally-built == 0.
     diagnostic*: string
 
   BuildActionDispatcher* = proc(actions: seq[ProfileBuildAction]):
@@ -151,6 +160,19 @@ type
     restartNeeded*: bool
     usedBroker*: bool
     brokerLaunchCount*: int
+    substitutedFromCacheCount*: int
+      ## Windows-Runner-Binary-Cache-Deploy M4: how many build-action
+      ## edges had their outputs SERVED FROM THE BINARY CACHE this
+      ## apply (``BuildActionApplyOutcome.substitutedFromCache``). Zero
+      ## when no cache is configured (``REPRO_BINARY_CACHE_URL`` unset)
+      ## or every edge missed the cache and built locally. The apply
+      ## summary reports "N substituted from cache, M built locally"
+      ## where N == this count and M == the number of applied edges
+      ## that were NOT substituted.
+    locallyBuiltActionCount*: int
+      ## M4 companion to ``substitutedFromCacheCount``: build-action
+      ## edges that ran a local process this apply (not a cache hit /
+      ## substitute). This is the "M built locally" number.
     auditLogPath*: string
     diagnostics*: seq[string]
     buildActionResults*: seq[BuildActionApplyOutcome]
@@ -293,8 +315,15 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
       result.diagnostics.add("build-action " & o.id & ": " & o.diagnostic)
     elif o.cacheHit:
       inc result.noOpCount
+      # M4: a cache hit that came from the BINARY CACHE (substitute)
+      # rather than the engine's local action-cache is counted
+      # separately so the apply can report the substitute tally.
+      if o.substitutedFromCache:
+        inc result.substitutedFromCacheCount
     else:
       inc result.appliedCount
+      # M4: a non-cache-hit edge ran a local process this apply.
+      inc result.locallyBuiltActionCount
 
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded

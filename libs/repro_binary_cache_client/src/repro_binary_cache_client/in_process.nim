@@ -184,6 +184,78 @@ proc packSingleFilePrefix*(prefixPath: string): seq[byte] =
   for ch in body: result.add(byte(ch))
 
 # ---------------------------------------------------------------------------
+# Archive reader (mirror of the CLI's ``extractPrefix``).
+#
+# Windows-Runner-Binary-Cache-Deploy M4: the apply-time build-action
+# substitute path (``repro_profile_compile.apply_build_actions``) needs
+# to MATERIALISE a substituted prefix archive from CAS back into a
+# target directory, byte-identically, the same way the CLI's
+# ``substitute`` command does. Lifting the reader into the library (next
+# to ``packPrefix``) lets the apply dispatcher share the exact
+# extraction logic without shelling out to the CLI. The CLI keeps its
+# own copy for now; both agree on the ``rbcarc-v1`` layout.
+# ---------------------------------------------------------------------------
+
+proc readU32LE(buf: openArray[byte]; pos: var int): uint32 =
+  result = 0
+  for shift in countup(0, 24, 8):
+    result = result or (uint32(buf[pos]) shl uint32(shift))
+    inc pos
+
+proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
+  result = 0
+  for shift in countup(0, 56, 8):
+    result = result or (uint64(buf[pos]) shl uint64(shift))
+    inc pos
+
+proc extractPrefix*(archive: openArray[byte]; outDir: string) =
+  ## Extract an ``rbcarc-v1`` archive into ``outDir``. Byte-identical
+  ## reader to the CLI's ``extractPrefix``: same magic / version guard,
+  ## same unsafe-path rejection, same POSIX exec-bit restore for entries
+  ## whose recorded mode carries the 0o100 owner-exec bit. Raises
+  ## ``IOError`` on a malformed / truncated archive.
+  if archive.len < 4 + 4 + 4:
+    raise newException(IOError, "rbcarc too short: " & $archive.len)
+  for i in 0 ..< 4:
+    if archive[i] != byte(ArchiveMagic[i]):
+      raise newException(IOError, "rbcarc magic mismatch at byte " & $i)
+  var pos = 4
+  let ver = readU32LE(archive, pos)
+  if ver != ArchiveVersion:
+    raise newException(IOError, "rbcarc version mismatch: got " & $ver)
+  let count = readU32LE(archive, pos)
+  createDir(outDir)
+  for _ in 0 ..< count:
+    let pathLen = int(readU32LE(archive, pos))
+    if pos + pathLen > archive.len:
+      raise newException(IOError, "rbcarc truncated reading path")
+    var rel = newString(pathLen)
+    for i in 0 ..< pathLen:
+      rel[i] = char(archive[pos + i])
+    inc pos, pathLen
+    if rel.contains("..") or rel.startsWith("/"):
+      raise newException(IOError, "rbcarc rejected unsafe path: " & rel)
+    let mode = readU32LE(archive, pos)
+    let size = readU64LE(archive, pos)
+    if pos + int(size) > archive.len:
+      raise newException(IOError,
+        "rbcarc truncated reading file body for " & rel)
+    let absOut = outDir / rel
+    createDir(parentDir(absOut))
+    var data = newString(int(size))
+    for i in 0 ..< int(size):
+      data[i] = char(archive[pos + i])
+    inc pos, int(size)
+    writeFile(absOut, data)
+    when not defined(windows):
+      if (mode and 0o100'u32) != 0:
+        var perms = getFilePermissions(absOut)
+        perms.incl(fpUserExec)
+        perms.incl(fpGroupExec)
+        perms.incl(fpOthersExec)
+        setFilePermissions(absOut, perms)
+
+# ---------------------------------------------------------------------------
 # Multipart body builder.
 # ---------------------------------------------------------------------------
 

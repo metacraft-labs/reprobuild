@@ -184,6 +184,38 @@ suite "Windows-System-Resources Phase G — runInfraApply action-edge dispatch":
     check res.buildActionResults[0].cacheHit
     check not res.buildActionResults[1].cacheHit
 
+  test "M4: substituted-from-cache outcome tallies substitutedFromCacheCount":
+    # Windows-Runner-Binary-Cache-Deploy M4: an edge whose outputs were
+    # SERVED FROM THE BINARY CACHE carries substitutedFromCache = true
+    # (and is a cacheHit). The driver must count it in BOTH noOpCount
+    # (it's a no-op locally) AND substitutedFromCacheCount, while a
+    # freshly-built edge increments locallyBuiltActionCount.
+    let tmp = createTempDir("phaseG-apply-m4-", "")
+    defer:
+      try: removeDir(tmp)
+      except CatchableError: discard
+    let capture = newCapture()
+    capture.scriptedOutcomes = @[
+      BuildActionApplyOutcome(id: "cachedEdge", address: "cachedEdge",
+        ok: true, cacheHit: true, substitutedFromCache: true,
+        requiresElevation: true),
+      BuildActionApplyOutcome(id: "localEdge", address: "localEdge",
+        ok: true, cacheHit: false, substitutedFromCache: false,
+        requiresElevation: false)]
+    var opts = mkApplyOptions(tmp)
+    opts.buildActions = @[
+      ProfileBuildAction(id: "cachedEdge", argv: @["/bin/true"],
+        cacheable: true),
+      ProfileBuildAction(id: "localEdge", argv: @["/bin/true"],
+        cacheable: true)]
+    opts.buildActionDispatcher = mkRecordingDispatcher(capture)
+    let res = runInfraApply(EmptyProfileText, opts)
+    check res.substitutedFromCacheCount == 1     # cachedEdge
+    check res.locallyBuiltActionCount == 1       # localEdge
+    check res.noOpCount == 1                      # cachedEdge (cache hit)
+    check res.appliedCount == 1                   # localEdge
+    check res.errorCount == 0
+
   test "per-edge failure outcome lands in errorCount AND diagnostics":
     let tmp = createTempDir("phaseG-apply-failure-", "")
     defer:

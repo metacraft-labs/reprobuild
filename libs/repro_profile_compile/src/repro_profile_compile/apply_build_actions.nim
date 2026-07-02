@@ -39,7 +39,7 @@
 ##   opts.buildActions = compiledProfile.buildActions
 ##   runInfraApply(profileText, opts)
 
-import std/strutils
+import std/[os, strutils, tables]
 
 import repro_build_engine
 import repro_core
@@ -50,6 +50,20 @@ import repro_local_store
 import repro_profile
 
 import ./infra_apply_broker
+import ./binary_cache_build_actions
+
+proc sanitizeForPath(value: string): string =
+  ## Reduce an action id to a filesystem-safe scratch-dir component so
+  ## the M4 per-action substitute/publish scratch dirs never collide or
+  ## escape ``cacheRoot``. Non-alphanumerics collapse to ``_``.
+  result = newStringOfCap(value.len)
+  for ch in value:
+    if ch in {'a'..'z', 'A'..'Z', '0'..'9', '-', '.'}:
+      result.add(ch)
+    else:
+      result.add('_')
+  if result.len == 0:
+    result = "action"
 
 # ---------------------------------------------------------------------------
 # ProfileBuildAction -> BuildAction conversion.
@@ -241,37 +255,83 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
     {.cast(gcsafe).}:
       if actions.len == 0:
         return @[]
-      let g = buildActionsToBuildGraph(actions)
-      let cfg = applyBuildActionsEngineConfig(capturedCacheRoot, spawner,
-        capturedMonitorCliPath, capturedMonitorCliArgs)
-      var runRes: BuildRunResult
-      try:
-        runRes = runBuild(g, cfg)
-      except CatchableError as err:
-        # Catastrophic engine failure — project onto a per-edge
-        # failure outcome for EVERY input so the audit log records
-        # which actions did not run. The diagnostic is the same
-        # across the seq so the operator can grep for the root cause.
-        let detail = "build engine raised " & $err.name & ": " & err.msg
-        for a in actions:
-          result.add(BuildActionApplyOutcome(
-            id: a.id,
-            address: a.id,
-            ok: false,
-            requiresElevation: a.requiresElevation,
-            cacheHit: false,
-            diagnostic: detail))
-        return result
-      # Project per-edge ActionResult onto BuildActionApplyOutcome.
-      # The engine's result order matches the graph's action order
-      # (validateGraph rejects duplicate ids).
-      var byId = newSeq[ActionResult](0)
-      for r in runRes.results: byId.add(r)
+
+      # ---- M4: binary-cache substitute-first / publish-on-miss. ----
+      # When ``REPRO_BINARY_CACHE_URL`` is set we PREFER fetching each
+      # edge's outputs from the cache instead of building locally. Edges
+      # substituted from the cache are removed from the engine's
+      # build-graph; only the misses (and edges with no substitutable
+      # outputs) go through ``runBuild``. On a successful local build we
+      # publish the freshly-built outputs back so a later fresh apply
+      # hits. Off-by-default: an unset URL yields ``configured = false``
+      # and the whole block is a no-op — the local-build path below is
+      # byte-identical to pre-M4 behaviour.
+      let cacheCfg = resolveBuildActionCacheConfig()
+      # The M4 CAS + scratch lives beside the engine's action-cache
+      # under the same apply-scoped cache root so a cache sweep of the
+      # action-edge half removes both.
+      let m4ScratchRoot = capturedCacheRoot / "binary-cache-substitute"
+      # Cache a substituted-outcome per action id so the final result
+      # ordering matches the input ordering.
+      var substituted = initTable[string, BuildActionApplyOutcome]()
+      var toBuild: seq[ProfileBuildAction] = @[]
       for a in actions:
+        if cacheCfg.configured:
+          let attempt = trySubstituteBuildAction(
+            a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
+          if attempt.hit:
+            substituted[a.id] = BuildActionApplyOutcome(
+              id: a.id,
+              address: a.id,
+              ok: true,
+              requiresElevation: a.requiresElevation,
+              cacheHit: true,
+              substitutedFromCache: true)
+            continue
+        toBuild.add(a)
+
+      # Map from action id -> engine ActionResult for the local-build
+      # subset. Empty when every edge was substituted.
+      var byId = newSeq[ActionResult](0)
+      var engineFailedAll = false
+      var engineFailDetail = ""
+      if toBuild.len > 0:
+        let g = buildActionsToBuildGraph(toBuild)
+        let cfg = applyBuildActionsEngineConfig(capturedCacheRoot, spawner,
+          capturedMonitorCliPath, capturedMonitorCliArgs)
+        try:
+          let runRes = runBuild(g, cfg)
+          for r in runRes.results: byId.add(r)
+        except CatchableError as err:
+          engineFailedAll = true
+          engineFailDetail = "build engine raised " & $err.name & ": " & err.msg
+
+      # ---- Assemble the per-edge outcomes in INPUT order. ----
+      for a in actions:
+        if substituted.hasKey(a.id):
+          result.add(substituted[a.id])
+          continue
+        if engineFailedAll:
+          result.add(BuildActionApplyOutcome(
+            id: a.id, address: a.id, ok: false,
+            requiresElevation: a.requiresElevation,
+            cacheHit: false, diagnostic: engineFailDetail))
+          continue
         var matched = false
         for r in byId:
           if r.id == a.id:
-            result.add(projectActionResult(a, r))
+            let outcome = projectActionResult(a, r)
+            result.add(outcome)
+            # Publish-on-miss: after a genuinely-fresh local build
+            # (asSucceeded), publish the outputs so a later fresh apply
+            # substitutes them. Best-effort — a publish failure never
+            # perturbs the (already-converged) apply outcome. A cache
+            # HIT from the engine's OWN action-cache (asCacheHit /
+            # asUpToDate) is NOT re-published: the bytes are unchanged
+            # and were published on the run that produced them.
+            if cacheCfg.configured and outcome.ok and not outcome.cacheHit:
+              discard publishBuildActionOutputs(
+                a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
             matched = true
             break
         if not matched:
