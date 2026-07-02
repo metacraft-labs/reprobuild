@@ -180,11 +180,24 @@ proc emitFetchAction*(projectRoot, packageName: string;
     if spec.gitRevision.len > 0:
       argv.add("--rev")
       argv.add(spec.gitRevision)
+  # M9.R.60.3 — fetch is a pure source-acquisition step (download ->
+  # hash-verify -> extract): it has NO monitorable file-dependency
+  # evidence (its only "inputs" are the declared URL + content hash,
+  # already folded into the action fingerprint). Per Monitor-Hook-Shim.md
+  # :501 an action with no monitorable evidence must be FAILED or made
+  # NON-CACHEABLE; mark NON-CACHEABLE (always re-run) mirroring the
+  # ``autotools_package``'s fetch emitter at autotools_package.nim:215.
+  # Without ``cacheable = false``, the fetch action's ipc-connect to the
+  # upstream URL trips io-mon's unmonitored-subtree/peer downgrade and
+  # the engine fails the action with "monitor depfile is incomplete"
+  # (M9.R.60.1 Phase A characterization). Pairs with the M9.R.60.2
+  # engine-side ``collectEvidence`` carve-out for defense-in-depth.
   result = buildAction(
     id = fetchActionId(packageName),
     call = inlineExecCall(argv, projectRoot),
     inputs = @[],
     outputs = @[stamp],
     pool = "fetch",
+    cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-fetch." & kindTag & "." & hashAlgTag)
