@@ -190,9 +190,19 @@ jobs:
           # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
           # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
           repro_ld="$(dev-exec sh -c 'printf %s "${LD_LIBRARY_PATH:-}"')"
+          echo "ct-build: reprobuild dev-shell lib dirs = ${repro_ld:-<EMPTY>}"
           if [ -n "$repro_ld" ]; then
-            cur_rpath="$(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null || true)"
-            dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$repro_bin"
+            # `repro build ct` self-spawns a repro-daemon and other helper
+            # binaries; patch every bootstrapped binary, not just `repro`.
+            for b in "$repro_root"/build/bin/*; do
+              [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
+              cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
+              dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
+                || echo "ct-build: patchelf failed for $b"
+            done
+            echo "ct-build: repro RPATH now = $(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null)"
+          else
+            echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
           fi
           # 2. Build only the `ct` target via codetracer's reprobuild.nim recipe.
           #    build-once.sh's reprobuild path (CODETRACER_REPROBUILD_LINUX=1)
