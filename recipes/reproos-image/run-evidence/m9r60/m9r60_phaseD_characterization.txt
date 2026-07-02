@@ -1,0 +1,276 @@
+M9.R.60 Phase D: characterization of the residual "monitor depfile
+is incomplete" failure after Phases A/B/C landed
+=================================================================
+
+Objective
+---------
+Re-execute M9.R.59's full chain against CLEAN caches after Phases
+A/B/C landed (M9.R.60.1 characterization, .2 engine carve-out, .3
+fetch-emitter cacheable=false), to verify the "monitor depfile is
+incomplete" gate is closed and the from-source recipe chain
+(hwdata + libdisplay-info + libseat + wlroots + sway + reproos-image)
+rebuilds end-to-end without the M9.R.58/57 swap-in-place workaround.
+
+
+Reproduction
+------------
+Working dir: eli-wsl `/opt/repro/reprobuild` (branch dev @ ab8baae8
+after `git pull --rebase origin dev`; the deploy-agent M5 commit
+8238cb3c landed on top, unrelated to this milestone).
+
+Per the task-brief plan:
+
+  rm -rf recipes/packages/source/hwdata/.repro/build \
+         recipes/packages/source/libdisplay-info/.repro/build \
+         recipes/packages/source/libseat/.repro/build \
+         recipes/packages/source/wlroots/.repro/build \
+         recipes/packages/source/sway/.repro/build \
+         recipes/reproos-image/.repro/build \
+         recipes/reproos-image/build
+  nix develop --command './build/bin/repro build recipes/reproos-image'
+
+
+Immediate finding — reproos-image doesn't cascade dep builds
+-------------------------------------------------------------
+`recipes/reproos-image/repro.nim`'s `extraInputs` only lists static
+paths (build script, auto-config fixture, three reused
+`reproos-iso/scripts/*.sh` staging helpers) — NOT the per-recipe
+install-mirror output paths. The reproos-image action itself is a
+single shell action that runs `stage-de-rootfs.sh` which merely
+MIRRORS existing `.repro/output/install/` trees from
+`recipes/packages/source/*/` into the ISO staging dir; it does not
+recursively drive their build.
+
+Consequence: `repro build recipes/reproos-image` alone cannot rebuild
+hwdata / libdisplay-info / wlroots / sway. Each from-source recipe
+must be built independently first (as M9.R.58/59 did through the
+`_m9r59_build_*.sh` manual harness scripts).
+
+So Phase D switched to per-recipe rebuilds of the smallest recipe
+first (hwdata), and — as a baseline control test — pixman (the same
+recipe M9.R.60.1's Phase A characterization used):
+
+  rm -rf recipes/packages/source/pixman/.repro/build
+  nix develop --command \
+    ./build/bin/repro build --tool-provisioning=from-source \
+      recipes/packages/source/pixman
+
+Full transcript: m9r60_phaseD_pixman_build.log
+
+
+NEW failure class observed
+--------------------------
+Both hwdata AND pixman still fail with the same diagnostic — but
+on a DIFFERENT action:
+
+  daemon-hosted build failed: __repro_provider_compile asFailed
+  monitor depfile is incomplete
+
+The failing action is `__repro_provider_compile` (the DSL-provider
+compile edge that runs reprobuild's OWN `nim c` of the recipe's
+provider binary), NOT the fetch action (`ccpp-fetch-*`) that
+M9.R.60.1's Phase A characterization identified.
+
+Phase A DID correctly identify the fetch-action gate, and M9.R.60.3's
+`cacheable = false` on the shared c-cpp fetch emitter closes it —
+but a SECOND independent gate was hidden behind it. Once the fetch
+action no longer fails first, the next-in-order action to fail is
+`__repro_provider_compile`.
+
+
+RMDF inspection of the provider-compile depfile
+------------------------------------------------
+Built a standalone io-mon inspector binary from
+`/opt/repro/io-mon/cmd/io_mon_snoop.nim` and pointed it at the failing
+depfile:
+
+  RMDF version=1 records=251136 completeness=mcIncomplete
+  summary records=251136 processes=838 observations=250954 eventLoss=182
+
+Full header + all 182 event-loss records: m9r60_phaseD_pixman_rmdf_header.txt
+
+The 182 event-loss records ALL carry the same detail:
+
+  event-loss pid=<N> tid=<N> detail=process killed with an un-flushed
+    read batch (kill-before-flush)
+
+This is emitted by `io_mon/writer.nim`'s `mergeFragments` at line 1673
+via the ROUND-5 F "read-tail net" logic: a monitored process wrote
+a durable `read-tail-pending` marker to its fragment when a read
+batch went dirty, but no matching `read-tail-committed` marker
+was seen before the process died. Netting per (osPid, threadId),
+one synthetic `mrEventLoss` per unmatched pending is injected so
+the completeness gate FALSE-DOWNGRADES to `mcIncomplete`.
+
+
+Root-cause chain
+-----------------
+1. `__repro_provider_compile` runs `nim c` on the recipe's provider
+   Nim module. Nim's compile driver spawns a bash-clang-wrapper
+   subprocess per compilation unit; pixman produces 838 total
+   subprocesses observed by the monitor (nim + cc-wrapper +
+   clang + ld + gcc-libgcc post-fixup + coreutils rm).
+
+2. Every subprocess exit that skips the io-mon shim's flush path
+   (SIGKILL, direct `syscall(SYS_exit_group)` after the shim was
+   `dlclose`d out of the process's mmap set, uncaught fatal
+   signal, `abort()`, ...) leaves its per-thread read-batch
+   sentinel un-committed.
+
+3. On post-run merge, `mergeFragments` netting counts 182 such
+   unmatched pending markers across the 838 subprocess set,
+   injects 182 synthetic `mrEventLoss` records, and marks the
+   RMDF `completeness=mcIncomplete`.
+
+4. `foldMonitorDepFileEvidence` (`repro_build_engine.nim:1309`)
+   returns `false` on the first `mrEventLoss` seen. `collectEvidence`
+   (`repro_build_engine.nim:1460`) adds the diagnostic
+   "monitor depfile is incomplete" and sets `publishable = false`
+   because `action.cacheable == true` for `__repro_provider_compile`
+   (declared at `repro_cli_support.nim:3498`).
+
+5. Action-cache gates action-completion on `publishable`; failure
+   surfaces as `__repro_provider_compile asFailed`.
+
+
+Why M9.R.60.2's non-cacheable carve-out doesn't cover this
+-----------------------------------------------------------
+M9.R.60.2 patched `collectEvidence` so:
+
+    let mustFailOnIncompleteEvidence = action.cacheable
+
+For `__repro_provider_compile`, `action.cacheable = true`, so the
+carve-out does not apply. And this cacheability is BY DESIGN — an
+in-code comment at `repro_cli_support.nim:3485-3492` explicitly
+rejects a prior `dgNoRuntimeDependencies` downgrade as "an
+unapproved soundness hole": the provider-compile edge's monitor
+evidence is spec-baseline defense for opaque nim-compile inputs
+(pinned nim stdlib + reprobuild's OWN libs), and a change to any
+transitive `nim c` input the declared-inputs list doesn't cover
+must invalidate the cache. Blanket-demoting completeness for this
+action would replay the soundness hole.
+
+
+Class taxonomy
+--------------
+Two distinct classes fall under the "monitor depfile is incomplete"
+diagnostic and must be addressed by separate defenses:
+
+  Class M9.R.60.1 (fetch-action): the fetch action's `curl`
+    ipc-connect to `github.com` / `freedesktop.org` / ... trips
+    io-mon's writer.nim:1725-1730 unmonitored-subtree/peer
+    downgrade -> one synthetic `mrEventLoss` -> `mcIncomplete`.
+    Fix (LANDED in M9.R.60.2 + .3): defense-in-depth on both
+    engine + recipe sides — engine's `collectEvidence` carves out
+    non-cacheable actions from the completeness gate, and every
+    fetch emitter declares `cacheable = false`. Soundness
+    preserved: non-cacheable actions ALWAYS re-run, so no cache
+    entry's soundness is at stake.
+
+  Class M9.R.60.D (provider-compile-child-flush): the recipe DSL
+    compile edge's `nim c` spawns many subprocesses whose exit
+    paths escape the io-mon Linux preload shim's `_exit` /
+    `execve` flush hooks (`f428b9b` + `451eb2d` in io-mon's
+    history). Each escaped exit leaves a `read-tail-pending`
+    marker un-netted; merge fabricates one synthetic
+    `mrEventLoss` per unmatched pending -> `mcIncomplete`.
+    NOT closed by M9.R.60 — this is a new class the milestone
+    did not scope.
+
+
+Candidate fixes (documented for a follow-up milestone)
+------------------------------------------------------
+Ordered from most-conservative (preserves soundness fully) to
+least (introduces documented soundness holes):
+
+  A. io-mon-side: close the Linux kill-before-flush pathway
+     completely by installing a robust `SIGKILL`-side-effect
+     mechanism (e.g., a supervisor process that owns the fragment
+     dir and commits pending batches on child SIGCHLD, mirroring
+     the round-2 sidecar-file mechanism the current shim retired
+     for tamper-resistance reasons). This is a substantial
+     change to `io_mon/writer.nim` + `linux_preload_runtime.nim`
+     and lives in the io-mon repo, not reprobuild.
+
+  B. reprobuild-engine-side (narrow): add a per-action opt-in
+     policy `dgOpaqueToolWithDeclaredInputs` that permits
+     `mrEventLoss` records ONLY inside spawned children of a
+     specific opaque tool (nim c) when the top-level action's
+     declared inputs + weakFingerprint fully cover the cache
+     key. `__repro_provider_compile` already carries a
+     `plan.compileEdge.actionFingerprint` weakFingerprint that
+     encodes reprobuild's pinned libs closure, so cache soundness
+     is preserved even if child-process read-tails are lost.
+     Requires a rigorous audit that no untracked `nim c` input
+     can reach the compiled provider binary — non-trivial.
+
+  C. Recipe-side: declare `dependencyPolicy = declaredOnlyPolicy()`
+     for `__repro_provider_compile`. Rejected upstream at
+     `repro_cli_support.nim:3488-3492` as "an unapproved
+     soundness hole". Not a viable fix.
+
+  D. io-mon-side (workaround): downgrade the `mcIncomplete` seal
+     to `mcComplete` when the ONLY loss records are kill-before-
+     flush markers AND the un-flushed child was an inner
+     compile-driver (nim c / gcc / clang / ld). Same soundness
+     tradeoff as B but implemented in io-mon rather than
+     reprobuild.
+
+
+Retroactive validation of M9.R.57/58/59 recipes
+------------------------------------------------
+M9.R.57 (libseat compile), M9.R.58 (seatd server-mode +
+graphical.target.wants integration), and M9.R.59 (hwdata +
+libdisplay-info + wlroots buildDeps edit) all LAND CORRECTLY at the
+recipe level — their edits are visible in `git log`, `git show`
+reproduces the diffs, and the on-disk install-mirror layouts
+documented in m9r58/m9r59 evidence dirs are unaffected.
+
+But the ONLY way to observe them at runtime end-to-end from a clean
+tree is via the `_m9r58_swap.sh` swap-in-place chain that Phase D
+was chartered to REPLACE. Because M9.R.60.D is unresolved, that
+retroactive validation cannot be produced without either:
+  - the swap-in-place chain (forbidden by the task-brief's hard
+    constraint), OR
+  - closing M9.R.60.D via a new milestone.
+
+
+Autologin-to-sway verdict
+-------------------------
+NOT VALIDATED in this milestone. Same class as M9.R.59's residual:
+the from-source auto-recurse rebuild is blocked at the shared build-
+engine infrastructure. The recipe-level publishes (M9.R.57 libseat
+compile, M9.R.58 seatd server + service, M9.R.59 hwdata + libdisplay-
+info + wlroots buildDeps) remain correct; they cannot be end-to-end
+validated until either M9.R.60.D lands (Class B, C, or D fix above)
+or the io-mon side (Class A fix) closes the Linux kill-before-flush
+gap.
+
+
+Residual — strictly smaller than M9.R.59's
+-------------------------------------------
+  * M9.R.59 residual: EVERY from-source recipe blocks at the fetch
+    action's "monitor depfile is incomplete" gate.
+  * M9.R.60 residual (after Phase D): the FETCH action's gate is
+    closed (Class M9.R.60.1); a NEW class (M9.R.60.D) surfaces on
+    the `__repro_provider_compile` action, driven by subprocess
+    kill-before-flush inside `nim c` under the Linux LD_PRELOAD
+    shim. Same "monitor depfile is incomplete" diagnostic, but
+    different action + different root cause.
+
+
+Evidence files (M9.R.60 Phase D)
+--------------------------------
+  m9r60_phaseD_characterization.txt      this file
+  m9r60_phaseD_reproos_image_build.log   initial reproos-image build
+                                         attempt (aborted after
+                                         discovering it doesn't
+                                         cascade dep builds)
+  m9r60_phaseD_pixman_build.log          `repro build pixman` failing
+                                         transcript (baseline control)
+  m9r60_phaseD_hwdata_build.log          `repro build hwdata` failing
+                                         transcript
+  m9r60_phaseD_pixman_rmdf_header.txt    io-mon inspector dump of the
+                                         pixman `__repro_provider_compile`
+                                         depfile (header + all 182
+                                         event-loss records + summary)

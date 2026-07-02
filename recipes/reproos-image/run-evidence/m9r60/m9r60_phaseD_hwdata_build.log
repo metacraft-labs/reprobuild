@@ -1,0 +1,11 @@
+daemon-hosted build failed: __repro_provider_compile asFailed
+monitor depfile is incomplete
+repro build: tool provisioning active (tool-provisioning=from-source)
+project: hwdataSource
+interface: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/project-interface.rbsz
+toolIdentity: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/from-source-tool-identities.rbtp
+inspection: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/from-source-tool-identities.inspect.json
+cachePortability: local-only
+runQuotaSocket: /tmp/nix-shell.vYKGCc/reprobuild-runquota-3035710.sock
+providerCompile: started
+EXIT=0

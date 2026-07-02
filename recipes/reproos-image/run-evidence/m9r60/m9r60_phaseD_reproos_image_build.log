@@ -1,0 +1,2 @@
+evaluation warning: nixfmt-rfc-style is now the same as pkgs.nixfmt which should be used instead.
+[++++++++++++++++++++++++] checked=1/1 running=1 started reproosImage.build_image
