@@ -1,0 +1,187 @@
+M9.R.60 Phase A: characterization of the "monitor depfile is incomplete" gate
+=============================================================================
+
+Objective
+---------
+Characterize precisely what triggers the "monitor depfile is incomplete"
+diagnostic that M9.R.57, M9.R.58, and M9.R.59 all hit on the fetch action
+of every from-source recipe. Each of those milestones fell back to the
+swap-in-place workaround; M9.R.60's job is to close the root cause so the
+recipe stack can be validated via clean full rebuilds.
+
+
+Reproduction
+------------
+Chose hwdata (freshly landed in M9.R.59) as a small representative
+from-source recipe:
+
+  cd /opt/repro/reprobuild
+  rm -rf recipes/packages/source/hwdata/.repro/build \
+         recipes/packages/source/hwdata/.repro/fetch/*
+  nix develop --command \
+    ./build/bin/repro build --verbose --tool-provisioning=path \
+      recipes/packages/source/hwdata
+
+Verbose scheduler tail (tee'd to /tmp/m9r60_hwdata_verbose.log):
+
+  [########################] checked=5/5 running=0 failed
+  ccpp-fetch-hwdataSource
+    repro build: action failed: ccpp-fetch-hwdataSource (exit code 0)
+    monitor depfile is incomplete
+  daemon-hosted build failed
+
+The fetch action's underlying script (curl -> sha256sum -> tar) exits 0,
+i.e. the tarball IS downloaded and verified. The failure is triggered
+STRICTLY by the "monitor depfile is incomplete" post-build check on the
+RMDF (repro monitor depfile) that io-mon produced.
+
+
+RMDF inspection
+---------------
+Compiled a small Nim inspector from io-mon's render.nim
+(/tmp/inspect_rmdf.nim):
+
+  RMDF version=1 records=1336 completeness=mcIncomplete
+  #1  process-spawn pid=0 tid=0 child=2905650 detail=io-mon-root-spawn ...
+  #2  event-loss pid=0 tid=0 detail=unmonitored subtree/peer
+      (un-injectable spawn child, SETEXEC into a hardened image, or IPC
+      connect to an out-of-tree breakaway daemon)
+  #3  backend-profile ... evidenceComplete=true
+  #4..#13 capability-gap ... required=false                     <-- non-blocking
+  ...
+  #175 ipc-connect pid=2905652 tid=2905652 result=10
+        detail=connect af_inet peer=unknown run=...
+  #180 ipc-connect pid=2905652 tid=2905652 result=13
+        detail=connect af_inet peer=unknown run=...
+  #184 process-exec pid=2905652 path=curl-8.18.0-bin/bin/curl
+  summary records=1336 processes=7 observations=1335 eventLoss=1
+
+  Full inspector output tail: /tmp/m9r60_hwdata_rmdf_tail.txt
+
+
+Root-cause chain (fully mapped)
+--------------------------------
+1. hwdata's fetch action is auto-emitted by autotools_package's
+   ``maybeEmitFetchAction`` (recipe declares ``fetch: url + sha256``).
+   The action script is:
+
+     set -e
+     mkdir -p <extracted>
+     if [ ! -f <tarball> ]; then
+       curl -fsSL -o <tarball> "<url>"
+     fi
+     echo "<sha256>  <tarball>" | sha256sum -c -
+     tar --force-local -xf <tarball> -C <extracted> --strip-components=1
+     touch <stamp>
+
+   Recipe carries the upstream GitHub URL
+   (https://github.com/vcrhonek/hwdata/archive/refs/tags/v0.395.tar.gz)
+   and NOT a file:// URL, so curl DOES make a real HTTPS connection.
+
+2. The action is emitted with ``cacheable = false`` (autotools_package.
+   nim:215) and ``dependencyPolicy = automaticMonitorPolicy()``
+   (autotools_package.nim:216). The in-code comment lines 196-208
+   explicitly documents this: "fetch action is a pure source-acquisition
+   step: it has NO monitorable file-dependency evidence -- its only
+   'inputs' are the declared URL + content hash... So the action is
+   marked NON-CACHEABLE (always re-run)".
+
+3. The Linux LD_PRELOAD shim (io-mon 8b05657 pin) DOES successfully
+   inject into curl AND records its syscalls. The RMDF has 1,336
+   records covering curl's DNS/connect/read/write path,
+   sha256sum's file reads, and tar/gzip's extract path. The shim itself
+   is armored and healthy.
+
+4. io-mon's post-run merge (writer.nim ``mergeFragments`` at
+   line 1710-1730) walks the merged records looking for
+   ``unmonitoredSubtreeLossCount`` triggers per writer.nim:1007-1036:
+
+     (a) SPAWN with no matching process-start (child never loaded shim)
+     (b) EXEC into un-injectable image (execCount catches up to start)
+     (c) IPC-connect to un-monitored peer (out-of-tree daemon)
+
+   The curl fetch trips CLASS (c): it emits ``ipc-connect ...
+   af_inet peer=unknown`` (records #175 + #180). The peer is
+   github.com (or an intermediate CDN) -- outside the monitored tree by
+   definition of "external URL fetch". writer.nim:1725-1730 injects
+   one synthetic ``mrEventLoss`` record per un-paired peer.
+
+5. writer.nim ``depFileFromRecords`` (line 532-549) then observes
+   ``summary.eventLossCount != 0`` and forces ``completeness =
+   mcIncomplete`` on the emitted RMDF, PLUS flips
+   ``profile.evidenceComplete = false``.
+
+6. reprobuild's engine (repro_build_engine.nim ``foldMonitorDepFileEvidence``
+   at line 1309-1313) sees the mrEventLoss record and returns false.
+   ``collectEvidence`` at line 1440-1443 then adds the diagnostic
+   "monitor depfile is incomplete" and sets ``publishable = false``.
+
+7. The scheduler at line 4139-4149 sees ``not evidence.publishable`` and
+   sets the action status to asFailed -- regardless of the fact that the
+   underlying script exited 0 and the action is non-cacheable so no
+   cache soundness can possibly depend on the completeness of its
+   monitor evidence.
+
+
+The three candidate shapes
+--------------------------
+Shape 1 -- io-mon shim isn't recording fetch action's syscalls: FALSIFIED
+  1336 records recorded, curl's process-exec + all its socket + file
+  syscalls captured. The shim IS attached and healthy.
+
+Shape 2 -- fetch's dependencyPolicy is wrong: PARTIALLY TRUE
+  automaticMonitorPolicy() is the ONLY policy fetch can use per the
+  spec (dependency_gathering.nim:10-25 comment: "there is intentionally
+  NO 'declared-only' / 'no runtime dependencies' gathering kind").
+  Fetch has no monitorable evidence AND cannot legally use a
+  declared-only mode. The comment explicitly says: "actions with no
+  monitorable evidence (e.g. a pure network fetch) are made NON-CACHEABLE
+  per Monitor-Hook-Shim.md:501 ... never marked complete-on-declared-
+  inputs". Fetch already does this (cacheable = false), so the
+  dependencyPolicy IS the right one -- it's the engine's completeness
+  check that fails to honor the "non-cacheable => don't fail on
+  incomplete evidence" carve-out.
+
+Shape 3 -- engine's completeness check is too strict: TRUE
+  Lines 1725-1746 of the engine's ``setupMonitorDepfile`` procedure
+  ALREADY carve out a non-cacheable branch on the ABSENT-monitor-CLI
+  path ("Run it unmonitored (leave monitorDepfile empty so
+  monitorEvidenceRequired stays false) rather than failing it").
+  But when the monitor IS wired (the normal case), the same non-
+  cacheable branch does NOT skip the evidence completeness check --
+  it enables monitoring, sets ``monitorDepfile``, and the action fails
+  on any incompleteness that io-mon flags. The spec's intent (comment
+  at 1734-1743: "sanctioned home for pure network actions with no
+  monitorable file evidence -- e.g. 'workspace sync's git fetch
+  (cacheable = false) -- which must still run on a host without the
+  monitor driver wired") is that non-cacheable actions are ALWAYS
+  allowed to succeed regardless of the monitor evidence, since no
+  cache entry's soundness depends on their evidence.
+
+
+Root cause summary
+------------------
+Shape 3 -- the engine's ``collectEvidence`` unconditionally FAILS a
+non-cacheable action when its monitor depfile is flagged incomplete.
+This contradicts Monitor-Hook-Shim.md's non-cacheable branch semantics
+that ``setupMonitorDepfile``'s own commentary spells out at lines
+1734-1746. The fix is to teach ``collectEvidence`` the SAME non-cacheable
+carve-out that ``setupMonitorDepfile`` already applies on the missing-
+monitor-CLI path: when ``action.cacheable == false``, downgrade a
+monitor-completeness failure from asFailed to a diagnostic warning
+that lets the action succeed. The action still re-runs on every build
+(non-cacheable), so no cache soundness invariant can be violated by
+succeeding here.
+
+The evidence chain is complete and mechanical. Proceeding to Phase B
+(implement the fix) and Phase C (validate via end-to-end reproos-image
+full-rebuild + boot smoke).
+
+
+Evidence files
+--------------
+  m9r60_phaseA_characterization.txt      this file
+  m9r60_verbose_scheduler.log            scheduler tail with "monitor
+                                         depfile is incomplete"
+  m9r60_rmdf_summary.txt                 io-mon inspector RMDF summary
+                                         (records=1336, eventLoss=1)

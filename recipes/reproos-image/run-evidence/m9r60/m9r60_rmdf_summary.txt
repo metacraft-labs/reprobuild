@@ -1,0 +1,33 @@
+RMDF version=1 records=1336 completeness=mcIncomplete
+#1 process-spawn pid=0 tid=0 child=2905650 detail=io-mon-root-spawn launcher-expected-root
+#2 event-loss pid=0 tid=0 detail=unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+#3 backend-profile pid=0 tid=0 path=linux-preload-hooks-m14 detail=backend=linux-preload-hooks;supported=process,file-read,file-write,path-probe,directory-enumerate,event-loss,process-tree,process-exec,backend-provenance,file-create,file-truncate,file-append,rename,ipc-connect,observed-env,non-determinism;required=process,file-read,file-write,path-probe,directory-enumerate,event-loss,process-tree,process-exec,backend-provenance,file-create,file-truncate,file-append,rename,ipc-connect,observed-env,non-determinism;evidenceComplete=true
+#14 process-start pid=2905650 tid=2905650 detail=linux-preload-hooks run=1783020699.594525
+#15 process-start pid=2905650 tid=2905650 detail=linux-preload-hooks run=1783020699.594525
+#44 process-spawn pid=2905650 tid=2905650 child=2905651 result=2905651 detail=fork run=1783020699.594525
+#72 process-spawn pid=2905650 tid=2905650 child=2905652 result=2905652 detail=fork run=1783020699.594525
+#73 process-spawn pid=2905650 tid=2905650 child=2905655 result=2905655 detail=fork run=1783020699.594525
+#74 process-spawn pid=2905650 tid=2905650 child=2905656 result=2905656 detail=fork run=1783020699.594525
+#135 process-spawn pid=2905650 tid=2905650 child=2905657 result=2905657 detail=fork run=1783020699.594525
+#149 process-exec pid=2905650 tid=2905650 path=/nix/store/74sind1d6vf2bfwd7yklg8chsvzqxmmq-coreutils-9.10/bin/touch detail=run=1783020699.594525
+#150 process-start pid=2905651 tid=2905651 detail=linux-preload-hooks run=1783020699.594525
+#152 process-start pid=2905651 tid=2905651 detail=linux-preload-hooks run=1783020699.594525
+#153 process-exec pid=2905651 tid=2905651 path=/nix/store/74sind1d6vf2bfwd7yklg8chsvzqxmmq-coreutils-9.10/bin/mkdir detail=run=1783020699.594525
+#154 process-start pid=2905652 tid=2905652 detail=linux-preload-hooks run=1783020699.594525
+#175 ipc-connect pid=2905652 tid=2905652 result=10 detail=connect af_inet peer=unknown run=1783020699.594525
+#180 ipc-connect pid=2905652 tid=2905652 result=13 detail=connect af_inet peer=unknown run=1783020699.594525
+#183 process-start pid=2905652 tid=2905652 detail=linux-preload-hooks run=1783020699.594525
+#184 process-exec pid=2905652 tid=2905652 path=/nix/store/6j3b51rypymg5inhr27rcc7in5cxbvjz-curl-8.18.0-bin/bin/curl detail=run=1783020699.594525
+#187 process-start pid=2905655 tid=2905655 detail=linux-preload-hooks run=1783020699.594525
+#188 process-start pid=2905656 tid=2905656 detail=linux-preload-hooks run=1783020699.594525
+#190 process-start pid=2905656 tid=2905656 detail=linux-preload-hooks run=1783020699.594525
+#204 process-exec pid=2905656 tid=2905656 path=/nix/store/74sind1d6vf2bfwd7yklg8chsvzqxmmq-coreutils-9.10/bin/sha256sum detail=run=1783020699.594525
+#205 process-start pid=2905657 tid=2905657 detail=linux-preload-hooks run=1783020699.594525
+#212 process-spawn pid=2905657 tid=2905657 child=2905658 result=2905658 detail=fork run=1783020699.594525
+#324 process-start pid=2905657 tid=2905657 detail=linux-preload-hooks run=1783020699.594525
+#326 process-exec pid=2905657 tid=2905657 path=/nix/store/kvmqv1jqv4792rsihf7yjc5kwk3d8z6x-gnutar-1.35/bin/tar detail=run=1783020699.594525
+#1304 process-start pid=2905658 tid=2905658 detail=linux-preload-hooks run=1783020699.594525
+#1305 process-start pid=2905658 tid=2905658 detail=linux-preload-hooks run=1783020699.594525
+#1318 process-start pid=2905658 tid=2905658 detail=linux-preload-hooks run=1783020699.594525
+#1336 process-exec pid=2905658 tid=2905658 path=/nix/store/pnxiz967z73a45f4x7c1icldjaaqmlcp-gzip-1.14/bin/.gzip-wrapped detail=run=1783020699.594525
+summary records=1336 processes=7 observations=1335 eventLoss=1

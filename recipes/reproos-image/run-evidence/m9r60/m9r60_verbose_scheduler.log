@@ -1,0 +1,21 @@
+[++++....................] checked=1/5 running=1 started ccpp-fetch-hwdataSource[#########...............] checked=2/5 running=0 blocked from-source-custom-shell-1-hwdataSource[##############..........] checked=3/5 running=0 blocked from-source-custom-shell-2-hwdataSource[###################.....] checked=4/5 running=0 blocked from-source-custom-shell-3-hwdataSource[########################] checked=5/5 running=0 blocked from-source-custom-mirror-hwdataSource [########################] checked=5/5 running=0 failed ccpp-fetch-hwdataSource                repro build: action failed: ccpp-fetch-hwdataSource (exit code 0)
+monitor depfile is incomplete
+daemon-hosted build failed
+
+repro build: tool provisioning active (tool-provisioning=path)
+repro build: provisioning-disabled mode active (tool-provisioning=path)
+project: hwdataSource
+interface: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/project-interface.rbsz
+toolIdentity: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/path-only-tool-identities.rbtp
+inspection: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/path-only-tool-identities.inspect.json
+cachePortability: local-only
+runQuotaSocket: /tmp/nix-shell.LHTOEj/reprobuild-runquota-2903972.sock
+providerCompile: started
+providerBinary: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/provider/project-provider
+providerCompileArtifact: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/provider-compile.rbsz
+providerArtifact: 526e30d8117a102383492595770cd0667179a45faf1b4f6a2851f8cedd15b91a
+providerGraphSnapshot: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/provider-graph/provider-fragments.rbsz
+providerInvocations: 1
+scheduler: actions=5
+runQuota: active (lease authority)
+buildReport: /opt/repro/reprobuild/recipes/packages/source/hwdata/.repro/build/repro/build-report.json
