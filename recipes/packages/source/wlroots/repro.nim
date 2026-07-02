@@ -268,6 +268,36 @@ package wlrootsSource:
     ## usr/lib64/pkgconfig for every buildDep entry, so no
     ## additional path massaging is needed.
     "mesa"
+    ## hwdata provides the ``pnp.ids`` EISA PnP vendor lookup table
+    ## that wlroots' DRM backend meson probe consumes at build time
+    ## via ``hwdata.get_variable(pkgconfig: 'pkgdatadir')``
+    ## (backend/drm/meson.build:1-25). Without hwdata, wlroots'
+    ## meson-log emits ``Build-time dependency hwdata found: NO`` and
+    ## the DRM subdir short-circuits at ``if not (hwdata.found() and
+    ## libdisplay_info.found() and features['session'])``. The
+    ## ``gen_pnpids.sh`` script synthesizes a per-vendor lookup
+    ## table (``backend/drm/pnpids.c``) linked into libwlroots.so
+    ## for the monitor-EDID vendor lookup codepath.
+    ##
+    ## M9.R.59.1 adds hwdata as a sibling from-source recipe; this
+    ## edge closes the FIRST of the two DRM-backend meson probe
+    ## dependencies M9.R.58.4's evidence flagged as missing.
+    "hwdata"
+    ## libdisplay-info is the EDID + DisplayID parsing library that
+    ## wlroots' DRM backend consumes for monitor-descriptor parsing.
+    ## Same subdir gate at backend/drm/meson.build:22 requires it.
+    ## Without libdisplay-info, wlroots' meson-log emits ``Run-time
+    ## dependency libdisplay-info found: NO`` and the DRM backend is
+    ## compiled out entirely (matching the runtime abort
+    ## ``[wlr] Cannot create DRM backend: disabled at compile-time``
+    ## M9.R.58.4's boot smoke caught).
+    ##
+    ## M9.R.59.2 adds libdisplay-info as a sibling from-source
+    ## recipe; this edge closes the SECOND of the two DRM-backend
+    ## meson probe dependencies. With BOTH hwdata + libdisplay-info
+    ## on pkg-config, wlroots' next recipe-revision rebuild flips
+    ## ``drm-backend : NO`` to ``drm-backend : YES`` in meson-log.
+    "libdisplay-info"
 
   config:
     ## No prefix lifted from `mesonOptions:`; flags inlined in the `build:` block.
