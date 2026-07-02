@@ -5798,6 +5798,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim",
+    binary: "build/test-bin/t_sc_engine_routes_producer_selector_through_override_and_lock",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_d3_ct_test_flake_pin_carries_b4_api.nim",
     binary: "build/test-bin/t_d3_ct_test_flake_pin_carries_b4_api",
     defines: @[],

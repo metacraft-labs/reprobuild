@@ -3745,7 +3745,43 @@ proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
   ## before reaching this predicate.
   mode in {tpmPathOnly, tpmNix, tpmTarball, tpmScoop, tpmFromSource}
 
-proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
+# Cross-Repo-Source-Consumption SC-1 — forward declarations for the
+# "resolve package binding" hook + its observability sink, so the
+# ``mkToolIdentityResolver`` closure below can route a cross-repo producer ref
+# through it. The bodies live next to the committed-lock helpers (where
+# ``LockedDep`` / ``parseLockedDependencies`` are in scope).
+type
+  ProducerBindingKind* = enum
+    pbkNotProducer
+    pbkDevelopOverride
+    pbkLockPinned
+
+  ProducerBinding* = object
+    selector*: string
+    case kind*: ProducerBindingKind
+    of pbkNotProducer:
+      discard
+    of pbkDevelopOverride:
+      localPathAbsolute*: string
+      contentIdentity*: string
+      overrideBinding*: ResolvedPackageBinding
+    of pbkLockPinned:
+      lockedDep*: LockedDep
+
+proc resolveProducerBinding*(selector: string;
+                             workspaceRoot: string): ProducerBinding
+
+var lastResolvedProducerBinding*: ProducerBinding =
+  ProducerBinding(selector: "", kind: pbkNotProducer)
+  ## SC-1 observability sink. The ``mkToolIdentityResolver`` closure records
+  ## the most-recent cross-repo producer decision here so tests (and, later,
+  ## ``repro why``) can observe that a ref was routed through the SC-1 seam
+  ## rather than the host-binary branch. SC-2 replaces the closure's
+  ## ``return none`` with the spliced producer bin dir; SC-1 records the
+  ## decision without yet materializing it.
+
+proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
+                             workspaceRoot = ""):
     ToolIdentityResolver =
   ## M9.N Batch B: project a ``PathOnlyBuildIdentity`` into the engine-
   ## side ``ToolIdentityResolver`` closure shape. The CLI calls this
@@ -3753,6 +3789,17 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
   ## ``BuildEngineConfig.toolIdentityResolver``. The engine then walks
   ## each action's ``toolIdentityRefs`` through the closure at fork
   ## time and prepends the resolved bin dirs to PATH.
+  ##
+  ## Cross-Repo-Source-Consumption SC-1 (§4.1): ``workspaceRoot`` is the
+  ## consumer project root (where ``repro.lock`` +
+  ## ``.repro/develop-overrides.toml`` live). When non-empty, a ref that
+  ## does NOT match any host / nix / tarball / scoop / corpus-recipe action
+  ## identity is routed through the ADDITIVE cross-repo producer branch
+  ## (``resolveProducerBinding``) before the closure returns ``none``. That
+  ## branch fires ONLY for a ref naming a producer resolved via the develop-
+  ## override map or a committed ``LockedDep``; every existing ref keeps its
+  ## branch byte-for-byte (the empty-``workspaceRoot`` default preserves the
+  ## pre-SC-1 behavior exactly for callers/tests that don't opt in).
   ##
   ## Matching: the ref name (e.g. ``"meson"``) is matched against
   ## ``ToolActionIdentity.executableName`` AND
@@ -3774,6 +3821,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
   ## untouched and the action's bare-name argv falls through to the
   ## host's existing PATH.
   let snapshot = identity
+  let producerWorkspaceRoot = workspaceRoot
   result = proc(name: string; kind: DepKind): Option[ResolvedToolIdentity]
       {.gcsafe, closure.} =
     if name.len == 0:
@@ -3832,6 +3880,35 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity):
         includeDirs: actionIdy.cpathList,
         libDirs: actionIdy.libraryPathList,
         cachePlatformTag: cacheTag))
+    # Cross-Repo-Source-Consumption SC-1 (§4.1) — ADDITIVE cross-repo
+    # producer branch. A ref that matched NO host / nix / tarball / scoop /
+    # corpus-recipe action identity above is a candidate cross-repo producer.
+    # Route it through the SC-1 "resolve package binding" hook: the develop-
+    # override map first, then the committed ``LockedDep``. This fires ONLY
+    # when a consumer workspace root was supplied AND the selector actually
+    # resolves as a producer — otherwise the closure falls through to the
+    # SAME ``return none`` as before, so every non-producer ref is
+    # byte-identical to the pre-SC-1 resolver.
+    #
+    # SC-1 is the RESOLUTION seam only: it records the producer decision in
+    # the observability sink so the seam is genuinely exercised (not test-
+    # only, the never-called ``resolvePackageWithOverrides`` gap). The
+    # producer graph load + splice that turns this decision into a bin dir on
+    # ``PATH`` (executable channel) / the aux channels (library channel) is
+    # SC-2 / SC-3; until they land the closure still returns ``none`` for the
+    # materialization, so the action's bare-name argv falls through as today.
+    if producerWorkspaceRoot.len > 0:
+      # ``resolveProducerBinding`` reads the committed ``repro.lock`` +
+      # ``.repro/develop-overrides.toml`` (file I/O) and the observability
+      # sink is a module-level ``var`` holding GC'd strings. The CLI build
+      # path is single-threaded at this seam (the resolver runs on the fork-
+      # scheduling thread), so both are safe. Wrap in ``cast(gcsafe)`` to
+      # match the established pattern in this module (see the git_actions /
+      # repro_local_store gcsafe I/O sites).
+      {.cast(gcsafe).}:
+        let producer = resolveProducerBinding(name, producerWorkspaceRoot)
+        if producer.kind != pbkNotProducer:
+          lastResolvedProducerBinding = producer
     none(ResolvedToolIdentity)
 
 proc runQuotaSocketDiagnostic(): string =
@@ -5603,7 +5680,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # pick it up on subsequent invocations. Calls that happen on the
     # cache-warm fast path BEFORE this point fall through to a nil
     # resolver — see the holder's declaration.
-    pendingToolIdentityResolver = mkToolIdentityResolver(identity)
+    # Cross-Repo-Source-Consumption SC-1 (§4.1): pass the consumer project
+    # root so the resolver closure routes cross-repo producer refs through the
+    # develop-override + committed-``LockedDep`` seam.
+    pendingToolIdentityResolver =
+      mkToolIdentityResolver(identity, result.projectRoot)
     logSummary("repro build: tool provisioning active (tool-provisioning=" &
       effectiveMode.modeName & ")")
     if effectiveMode == tpmPathOnly:
@@ -5938,7 +6019,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # build path resolves it before reaching here); the closure
     # walks each action's ``toolIdentityRefs`` and prepends the
     # resolved bin dirs to PATH at fork time.
-    engineConfig.toolIdentityResolver = mkToolIdentityResolver(identity)
+    # Cross-Repo-Source-Consumption SC-1 (§4.1): thread the consumer project
+    # root through so the resolver routes cross-repo producer refs through the
+    # develop-override + committed-``LockedDep`` seam.
+    engineConfig.toolIdentityResolver =
+      mkToolIdentityResolver(identity, projectRoot)
     engineConfig.statsEnabled = statsEnabled
     if eventSink != nil:
       engineConfig.progressCallback = proc(event: BuildProgressEvent) =
@@ -10384,6 +10469,127 @@ proc committedLockPath*(projectDir: string): string =
 
 proc solverInputsPath*(projectDir: string): string =
   projectDir / SolverInputsFileName
+
+# ---------------------------------------------------------------------------
+# Cross-Repo-Source-Consumption SC-1 — the "resolve package binding" hook.
+#
+# Spec: ``Cross-Repo-Source-Consumption.md`` §4.1 (call-site wiring); §2 (the
+# gap). This is the engine-facing entry point the M21 resolver contract was
+# built for and the M22 comment (``override_resolution.nim:56-68``) deferred:
+# a SINGLE seam that routes a cross-repo PRODUCER selector through
+#
+#   1. the develop-override map (``resolvePackageWithOverrides`` →
+#      ``rpbkOverride`` → ``localPathAbsolute`` + ``contentIdentity``), then
+#   2. on no override match, the consumer's committed ``repro.lock``
+#      ``LockedDep`` for that producer (``Coordinates`` + ``integrity``).
+#
+# It is ADDITIVE and surface-agnostic (§4). It reuses — does NOT reinvent —
+# ``resolvePackageWithOverrides`` (``override_resolution.nim:269-343``, until
+# now called ONLY from a test) and the MO-8 ``LockedDep`` model
+# (``repro_lock.nim:135-164``). SC-1 delivers the RESOLUTION seam only; the
+# producer graph load + splice (SC-2/SC-3), the aux-channel materialization,
+# and the ``foldOverridesIntoFingerprint`` invalidation (SC-4) build on the
+# ``ProducerBinding`` this hook returns.
+#
+# A ref that is NOT a cross-repo producer (no develop override AND no matching
+# ``LockedDep``) yields ``pbkNotProducer`` so every existing host-binary / nix
+# / tarball / scoop / corpus-recipe ref keeps its resolver branch byte-for-
+# byte (§4.1, §10). That is the "byte-identical for every non-producer ref"
+# deliverable, asserted negatively in the SC-1 integration test.
+# ---------------------------------------------------------------------------
+
+## SC-1 ``ProducerBinding`` / ``ProducerBindingKind`` are declared up next to
+## ``mkToolIdentityResolver`` (forward-declaration block) so the resolver
+## closure can route a producer ref through the hook. The kind semantics:
+##
+##   * ``pbkNotProducer`` — no develop override matched AND no committed
+##     ``LockedDep`` carries the selector: the caller keeps its existing
+##     resolution branch unchanged (the "byte-identical for non-producer
+##     refs" property, §4.1/§10).
+##   * ``pbkDevelopOverride`` — a ``.repro/develop-overrides.toml`` entry
+##     shadows the producer with a local checkout; ``localPathAbsolute`` is
+##     the sibling checkout root and ``contentIdentity`` folds into the
+##     consuming action's fingerprint (SC-4). ``overrideBinding`` is retained
+##     so SC-4 can feed ``foldOverridesIntoFingerprint`` without re-resolving.
+##   * ``pbkLockPinned`` — no override matched but the consumer's committed
+##     ``repro.lock`` pins the producer as a ``LockedDep`` (VCS ``Coordinates``
+##     + ``integrity``, §5.2) SC-6 fetches + verifies + builds from.
+
+proc resolveProducerBinding*(selector: string;
+                             workspaceRoot: string;
+                             lock: LockedDependencies;
+                             overrides: Option[DevelopOverrides]):
+    ProducerBinding =
+  ## The SC-1 "resolve package binding" hook (§4.1). Route ``selector``
+  ## through the develop-override map first, then the committed ``LockedDep``
+  ## set, and return the ``ProducerBinding`` describing how (or whether) the
+  ## selector names a cross-repo producer.
+  ##
+  ## Order is significant and matches §5: a develop override always shadows a
+  ## lock pin (develop-mode local-on-top, §6), so we consult
+  ## ``resolvePackageWithOverrides`` FIRST and only fall through to the
+  ## committed ``LockedDep`` when no override matched (``rpbkUpstream``). A
+  ## selector present in NEITHER surface yields ``pbkNotProducer`` so the
+  ## caller's existing resolution branch is unchanged.
+  ##
+  ## ``workspaceRoot`` MUST be absolute when ``overrides`` is ``some`` (see
+  ## ``resolveOverrideAbsolutePath``). A resolution DIAGNOSTIC from the
+  ## override resolver (override registered but its path is missing on disk)
+  ## is surfaced by re-raising it — silent fallback to the lock pin is exactly
+  ## the failure mode ``override_resolution.nim`` warns against (a remote
+  ## worker would compute a divergent cache key).
+  if selector.len == 0:
+    return ProducerBinding(selector: selector, kind: pbkNotProducer)
+
+  # 1. develop mode — the override map shadows the upstream/lock binding.
+  let upstream = UpstreamPackageBinding(packageName: selector)
+  let resolved = resolvePackageWithOverrides(upstream, overrides, workspaceRoot)
+  if resolved.kind == orrkError:
+    # The override matched by name but its local checkout is missing. Do NOT
+    # silently fall through to the lock pin — re-raise the structured
+    # diagnostic (Cross-Repo-Source-Consumption.md §4.1; the "no silent
+    # fallback" property of ``override_resolution.nim``).
+    raiseDiagnostic(resolved.diagnostic)
+  if resolved.binding.kind == rpbkOverride:
+    return ProducerBinding(
+      selector: selector,
+      kind: pbkDevelopOverride,
+      localPathAbsolute: resolved.binding.localPathAbsolute,
+      contentIdentity: resolved.binding.contentIdentity,
+      overrideBinding: resolved.binding)
+
+  # 2. lock-pinned mode — no override matched; consult the committed lock.
+  for dep in lock.deps:
+    if dep.name == selector:
+      return ProducerBinding(
+        selector: selector,
+        kind: pbkLockPinned,
+        lockedDep: dep)
+
+  # 3. Not a cross-repo producer — the caller keeps its existing branch.
+  ProducerBinding(selector: selector, kind: pbkNotProducer)
+
+proc resolveProducerBinding*(selector: string;
+                             workspaceRoot: string): ProducerBinding =
+  ## Workspace-rooted convenience: read the committed ``repro.lock`` and the
+  ## ``.repro/develop-overrides.toml`` from ``workspaceRoot`` and delegate to
+  ## the explicit overload. This is the shape the engine seam calls — it has
+  ## only the workspace root at fork time. A missing lock file yields an empty
+  ## ``LockedDependencies`` (no lock-pinned producers); a missing overrides
+  ## file yields ``none`` (no develop overrides) — so a workspace that
+  ## declares no cross-repo producers resolves every ref to ``pbkNotProducer``.
+  let lockP = committedLockPath(workspaceRoot)
+  let lock =
+    if fileExists(extendedPath(lockP)):
+      parseLockedDependencies(readFile(extendedPath(lockP)))
+    else:
+      LockedDependencies()
+  let overrides =
+    if workspaceRoot.len > 0:
+      readDevelopOverridesFile(workspaceRoot)
+    else:
+      none(DevelopOverrides)
+  resolveProducerBinding(selector, workspaceRoot, lock, overrides)
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-9 — the unified locked-dependency populator.
