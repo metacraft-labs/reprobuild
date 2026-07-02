@@ -637,12 +637,21 @@ package reprobuild:
         paths = @[ioMonSrc, stackableHooksSrc],
         actionId = "reprobuild.test_fixtures.monitor_shim"))
     else:
+      # The Linux shim exports a version-scripted, interposed ``dlsym``
+      # (``.symver …,dlsym@GLIBC_2.2.5`` / ``@GLIBC_2.34`` in
+      # ``linux_preload_runtime.nim``); the ``GLIBC_2.2.5`` version node only
+      # exists if the linker is handed io-mon's ``linux_preload_versions.map``.
+      # io-mon's ``build_shim.sh`` passes it via ``--version-script``; mirror it
+      # here or the fixture link fails with "version node not found for symbol
+      # dlsym@GLIBC_2.2.5 / failed to set dynamic section sizes".
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "linux_preload.nim",
         binary = "build/lib/librepro_monitor_shim.so",
         appLib = true,
         threadsOn = true,
         paths = @[ioMonSrc, stackableHooksSrc],
+        passL = @["-Wl,--version-script=" &
+          (ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map")],
         actionId = "reprobuild.test_fixtures.monitor_shim"))
 
     discard collect("test-fixtures", reprobuildTestFixturesActions)
