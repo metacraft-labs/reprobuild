@@ -388,7 +388,12 @@
             # `dlopen("libclingo.so")` with no rpath and rely on a runtime
             # LD_LIBRARY_PATH (as build_apps.sh documents). Provide it so `repro`
             # and the test binaries resolve clingo under `dev-exec`/CI `just test`.
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.clingo ];
+            # zstd is the same story: the binary-cache client dlopen()s
+            # libzstd.so.1 at runtime (its DT_RPATH is only patched into the Nix
+            # package build's binaries, not the `just bootstrap` binaries the
+            # ct build and `just test` run), so add it here too — otherwise a
+            # bootstrapped `repro` aborts with "could not load: libzstd.so.1".
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.clingo pkgs.zstd ];
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;
