@@ -88,9 +88,13 @@
 ## v1 ships NO configurables — the meson options are hardcoded to a
 ## minimal-libseat baseline per the M9.R.57 task brief:
 ##
-##   * ``libseat-seatd=disabled``  — skip the external seatd daemon
-##                                    IPC backend; we don't ship the
-##                                    daemon on the ReproOS image.
+##   * ``libseat-seatd=enabled``   — M9.R.58.2: enable the seatd
+##                                    daemon IPC backend. This is
+##                                    the primary backend the
+##                                    ReproOS image uses (bypassing
+##                                    logind, which can't complete
+##                                    CreateSession without a
+##                                    dbus-with-libsystemd build).
 ##   * ``libseat-logind=disabled`` — skip the systemd-logind backend
 ##                                    link; keeps libseat.so from
 ##                                    linking libsystemd (which would
@@ -102,8 +106,12 @@
 ##                                    inside libseat itself); this is
 ##                                    the ONLY backend the recipe
 ##                                    ships.
-##   * ``server=disabled``         — skip the standalone seatd server
-##                                    executable + seatd-launch.
+##   * ``server=enabled``          — M9.R.58.2: build the standalone
+##                                    seatd daemon + seatd-launch
+##                                    helper. A systemd unit
+##                                    installed by the reproos-image
+##                                    build runs the daemon before
+##                                    sddm.service.
 ##   * ``examples=disabled``       — skip the example seat clients.
 ##   * ``man-pages=disabled``      — skip man page generation (no
 ##                                    scdoc dependency).
@@ -202,20 +210,46 @@ package libseatSource:
     ## install-glue closes.
     discard
 
+  executable seatd:
+    ## ``seatd`` — the standalone seat-management daemon. M9.R.58.2
+    ## enables the seatd backend + server so the daemon is available
+    ## for ReproOS's non-logind session-management path (see
+    ## m9r58_phaseA_pam_audit.txt for the rationale).
+    discard
+
+  executable seatdLaunch:
+    ## ``seatd-launch`` — helper that starts seatd on a private socket
+    ## then exec's the caller inside a subshell with SEATD_SOCK set.
+    ## Not used in the ReproOS system-wide seatd setup, but shipped
+    ## alongside the daemon per the upstream package convention.
+    discard
+
   build:
     ## M9.R.5b — explicit `build:` block constructed from the lifted `config:` values + the inlined verbatim flags. Calls the M9.R.2b high-level `meson_package(...)` constructor.
     setCurrentOwningPackageOverride("libseatSource")
     try:
       let opts = @[
-        "libseat-seatd=disabled",
-        # M9.R.57.5 — flip logind ON. The builtin backend fallback
-        # collides with SDDM's tty0 seizure inside a Wayland session
-        # (Could not open target tty: Permission denied); logind
-        # delegates seat + VT + DRM device management through the
-        # PAM pam_systemd.so path SDDM already uses.
+        # M9.R.58.2 — flip seatd backend + server ON. The from-source
+        # dbus recipe was compiled without --systemd-activation
+        # support, so pam_systemd → logind → PID-1 systemd
+        # StartTransientUnit for user@<uid>.service fails silently.
+        # logind then aborts CreateSession(), leaving
+        # /run/systemd/users/<uid> uncreated (M9.R.57 residual;
+        # see recipes/reproos-image/run-evidence/m9r58/
+        # m9r58_phaseA_pam_audit.txt). Enabling seatd bypasses
+        # logind: sway (via libseat) opens /run/seatd.sock, the
+        # seatd daemon (running as a system service before sddm)
+        # mediates /dev/dri/* and /dev/tty* on its behalf.
+        "libseat-seatd=enabled",
+        # Keep logind enabled as the second-choice backend for
+        # future ReproOS variants where dbus IS built with
+        # --systemd-activation (then no seatd daemon is needed).
         "libseat-logind=systemd",
         "libseat-builtin=enabled",
-        "server=disabled",
+        # M9.R.58.2 — flip server + seatd-launch ON to produce the
+        # seatd daemon binary + the seatd-launch helper. The image
+        # phase adds a systemd unit to run `seatd -g video` at boot.
+        "server=enabled",
         "examples=disabled",
         "man-pages=disabled",
         # M9.R.57.4 — pin libdir=lib for sibling-consumer path stability
@@ -225,6 +259,8 @@ package libseatSource:
       ]
       let pkg = meson_package(srcDir = "./src", configureOptions = opts)
       discard pkg.library("libseat")
+      discard pkg.executable("seatd")
+      discard pkg.executable("seatd-launch")
     finally:
       clearCurrentOwningPackageOverride()
 

@@ -1326,6 +1326,105 @@ M9R56_DIAG_EOF
     '$MNT_DIR/etc/systemd/system/multi-user.target.wants/m9r56-diag.service'
 " || { echo "[build-reproos-image] Phase 10.8 sddm path shims + instrumentation failed" >&2; exit 74; }
 
+# ---------------------------------------------------------------
+# Phase 10.9: install + enable the seatd system service so libseat's
+# seatd backend can mediate DRM + tty access without going through
+# systemd-logind.  Rationale (M9.R.58.2):
+#
+# M9.R.57 closed the wlroots compile-time gate but sway still fails
+# to start a session at runtime with:
+#
+#   [wlr] [libseat] [logind.c:621] Could not get primary session for user: No data available
+#   [wlr] [libseat] [common/terminal.c:162] Could not open target tty: Permission denied
+#   [wlr] backend/backend.c:399 Failed to start a DRM session
+#
+# Root cause (see recipes/reproos-image/run-evidence/m9r58/
+# m9r58_phaseA_pam_audit.txt): pam_systemd IS invoked in the sddm-
+# autologin PAM stack (M9.R.56.8.6), IS reaching dbus, but its
+# CreateSession() side effect ``/run/systemd/users/1000`` is never
+# created.  logind's CreateSession call to PID-1 systemd's
+# StartTransientUnit needs dbus --systemd-activation, which the
+# from-source dbus recipe was compiled without (per M9.R.56.5).
+# libseat then falls through to the builtin backend which needs
+# cap_sys_admin or video-group ownership on tty0 (uid 1000 has
+# neither).
+#
+# Fix: enable libseat's ``seatd`` backend and ship the seatd daemon
+# as a system service (Shape 5 in the Phase A audit).  seatd runs
+# as root, listens on /run/seatd.sock, and hands out fd's for
+# /dev/dri/* and /dev/tty* to libseat clients that connect + prove
+# group membership (via the seatd socket group).  This bypasses
+# logind entirely.  Requires:
+#
+#   1. libseat rebuilt with libseat-seatd=enabled + server=enabled
+#      (M9.R.58.2 flipped these in recipes/packages/source/libseat/
+#      repro.nim).
+#   2. seatd daemon binary shadow-linked into /usr/bin/seatd (via
+#      stage-de-rootfs.sh's normal link_base_recipe_binaries pass).
+#   3. This phase: /etc/systemd/system/seatd.service + a
+#      graphical.target.wants symlink so seatd starts BEFORE sddm.
+#   4. This phase: add the ``repro`` user to the ``seat`` group so
+#      the wayland-session process can open /run/seatd.sock.
+# ---------------------------------------------------------------
+echo "[build-reproos-image] Phase 10.9: install + enable seatd system service (libseat seatd backend)"
+
+"$SUDO" bash -c "
+  set -euo pipefail
+
+  # Shadow-link the seatd daemon binary from the libseat install-
+  # mirror.  stage-de-rootfs.sh's link_base_recipe_binaries only
+  # walks /usr/bin + /usr/sbin of each install-mirror, but the
+  # libseat recipe installs seatd + seatd-launch under
+  # <install>/usr/bin, so those should already be linked.  Belt-
+  # and-suspenders: force-link them here in case the recipe layout
+  # changes.
+  LIBSEAT_INSTALL=/opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin
+  if [ -x \"\$LIBSEAT_INSTALL/seatd\" ]; then
+    ln -sfn \"\$LIBSEAT_INSTALL/seatd\" '$MNT_DIR/usr/bin/seatd'
+  else
+    echo '[build-reproos-image] warning: seatd binary not at expected install-mirror path' >&2
+  fi
+  if [ -x \"\$LIBSEAT_INSTALL/seatd-launch\" ]; then
+    ln -sfn \"\$LIBSEAT_INSTALL/seatd-launch\" '$MNT_DIR/usr/bin/seatd-launch'
+  fi
+
+  # Create the ``seat`` group used by seatd's socket ownership.
+  # Uses a fixed high GID (985) so successive image builds are
+  # reproducible.  Idempotent: skip if the group already exists.
+  if ! grep -q '^seat:' '$MNT_DIR/etc/group' 2>/dev/null; then
+    echo 'seat:x:985:repro' >> '$MNT_DIR/etc/group'
+  fi
+
+  # Systemd unit for the seatd daemon.  Runs as root (needs
+  # CAP_SYS_ADMIN to open /dev/tty0 etc.), sets socket ownership
+  # to the ``seat`` group so unprivileged wayland-session
+  # processes can connect.
+  cat > '$MNT_DIR/etc/systemd/system/seatd.service' <<'SEATD_UNIT_EOF'
+[Unit]
+Description=Seat management daemon
+Documentation=man:seatd(1)
+DefaultDependencies=no
+After=systemd-user-sessions.service
+# Must be up BEFORE sddm.service since sddm-helper's wayland-session
+# spawns sway (via libseat) which connects to /run/seatd.sock.
+Before=sddm.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/seatd -g seat
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=graphical.target
+SEATD_UNIT_EOF
+
+  # Enable the unit in graphical.target so it starts on boot.
+  mkdir -p '$MNT_DIR/etc/systemd/system/graphical.target.wants'
+  ln -sfn /etc/systemd/system/seatd.service \\
+    '$MNT_DIR/etc/systemd/system/graphical.target.wants/seatd.service'
+" || { echo "[build-reproos-image] Phase 10.9 seatd install failed" >&2; exit 75; }
+
 echo "[build-reproos-image] phase summary:"
 echo "  staged tree:   $STAGE_DIR ($(du -sh "$STAGE_DIR" 2>/dev/null | awk '{print $1}'))"
 echo "  mnt root:      $MNT_DIR ($(df -h "$MNT_DIR" 2>/dev/null | tail -1 | awk '{print $3"/"$2}'))"
