@@ -213,6 +213,12 @@ package swaySource:
     ## gcc is the host C toolchain — Sway is C11; 1.11 requires
     ## gcc 11+ for the same C11 atomics / TLS features wlroots uses.
     "gcc >=11"
+    ## pkg-config is required by sway's meson probe for every external
+    ## dependency (wlroots, wayland, libxkbcommon, pcre2, json-c, ...).
+    ## M9.R.57.2b landed the same declaration on wlroots after a fresh
+    ## rebuild exposed the silent inheritance from a pre-M9.R.57 env.
+    ## Adding it here matches wlroots' fix.
+    "pkg-config"
 
   buildDeps:
     ## wlroots is the modular Wayland compositor library Sway links
