@@ -2657,6 +2657,84 @@ var fromSourceResolvedRecipes*: HashSet[string] = initHashSet[string]()
   ## even re-walking the candidate list). Exported for test
   ## introspection + ``repro why`` diagnostics.
 
+# ---------------------------------------------------------------------------
+# Cross-Repo-Source-Consumption SC-2 — producer graph load + splice
+# (executable channel). The pre-pass ``buildAndSpliceProducers`` (defined next
+# to ``executeBuildTarget``) resolves each ``uses:`` selector through the SC-1
+# ``resolveProducerBinding`` hook, and for a cross-repo PRODUCER (a develop-
+# overridden sibling checkout, or a lock-pinned checkout on disk) loads the
+# producer's ``repro.nim``, builds its declared ``executable``'s producing
+# edge from source (recursively, via ``executeBuildTarget`` — the SAME
+# in-process sub-build the from-source auto-recurse pass uses, NOT a ``repro
+# build`` subprocess), and records the producer's output ``bin`` dir here so
+# the ``mkToolIdentityResolver`` closure can splice it onto the consuming
+# action's ``PATH`` (§4.2 point 4, ``repro_build_engine.nim:1975-2010``).
+#
+# This is the "producer edge is a real input; its bin dir reaches the action
+# PATH" deliverable. Keyed by the consumer selector name (matching the ref the
+# resolver closure sees). Empty for a build that consumes no cross-repo
+# producer, so a non-producer build resolves every ref byte-for-byte as before.
+var producerMaterializedBinDirs*: Table[string, seq[string]] =
+  initTable[string, seq[string]]()
+  ## SC-2 splice sink: consumer selector -> producer output ``bin`` dirs. The
+  ## resolver closure returns these as a ``ResolvedToolIdentity.binDirs`` so
+  ## the freshly-built producer executable lands on the consuming action's
+  ## ``PATH``. Exported for the SC-2 integration test to observe the splice.
+
+var producerActionHashes*: Table[string, string] =
+  initTable[string, string]()
+  ## SC-2 fingerprint fold sink: consumer selector -> the producer edge's
+  ## ACTION-HASH (a content digest over the producer's realized build
+  ## product — its executable binaries — bound by declared-output basename).
+  ## Folded into the ``weakFingerprint`` of every consumer action that names
+  ## the producer via ``toolIdentityRefs`` (``foldProducerActionHashes``),
+  ## so the producer edge is a real input of the consuming action and "the
+  ## producer's build product changed" invalidates the consumer cache key
+  ## (§4.2 point 3; SC-2 deliverable #2 sub-clause). Empty for a build that
+  ## consumes no cross-repo producer, so a non-producer action's cache key is
+  ## byte-identical to today. Exported for the SC-2 integration test.
+
+var producerBuildStack*: seq[string] = @[]
+  ## SC-2 cycle/depth guard (absolute producer roots), the analogue of
+  ## ``fromSourceBuildStack`` (``repro_cli_support.nim:5456-5521``). A producer
+  ## that transitively consumes the consumer would push a root already on the
+  ## stack; that raises loudly with the full cycle path rather than looping.
+
+proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
+  ## SC-2 (§4.2 point 3): after the consumer graph is lowered, fold each
+  ## materialized cross-repo producer's ACTION-HASH (``producerActionHashes``)
+  ## into the ``weakFingerprint`` of every consumer action that names that
+  ## producer via ``toolIdentityRefs``. This makes the producer edge a real
+  ## input of the consuming action's cache key: a changed producer build
+  ## product shifts the folded hash and rebuilds the consumer.
+  ##
+  ## An action that names NO materialized producer keeps its ``weakFingerprint``
+  ## byte-for-byte (the fold is skipped entirely), preserving the "an action
+  ## consuming no cross-repo producer keeps its cache key unchanged" property
+  ## (the same property ``foldOverridesIntoFingerprint`` guarantees). When
+  ## ``producerActionHashes`` is empty (the common case — no cross-repo
+  ## producer), this is a no-op over the whole graph.
+  if producerActionHashes.len == 0:
+    return
+  for action in actions.mitems:
+    if action.toolIdentityRefs.len == 0:
+      continue
+    # Collect the folded producer hashes for this action in the action's own
+    # ref order (stable), so the resulting fingerprint is deterministic.
+    var contributions: seq[string] = @[]
+    for refName in action.toolIdentityRefs:
+      if producerActionHashes.hasKey(refName):
+        contributions.add(refName & "=" & producerActionHashes[refName])
+    if contributions.len == 0:
+      continue
+    var payload = "cross-repo-producer-fold.v1\x00" &
+      digestHex(action.weakFingerprint) & "\x00"
+    for contribution in contributions:
+      payload.add(contribution)
+      payload.add('\x00')
+    action.weakFingerprint =
+      blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
     if not fileExists(extendedPath(path)):
@@ -3891,25 +3969,55 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     # SAME ``return none`` as before, so every non-producer ref is
     # byte-identical to the pre-SC-1 resolver.
     #
-    # SC-1 is the RESOLUTION seam only: it records the producer decision in
-    # the observability sink so the seam is genuinely exercised (not test-
-    # only, the never-called ``resolvePackageWithOverrides`` gap). The
-    # producer graph load + splice that turns this decision into a bin dir on
-    # ``PATH`` (executable channel) / the aux channels (library channel) is
-    # SC-2 / SC-3; until they land the closure still returns ``none`` for the
-    # materialization, so the action's bare-name argv falls through as today.
+    # SC-1 was the RESOLUTION seam only: it recorded the producer decision in
+    # the observability sink so the seam was genuinely exercised (not test-
+    # only, the never-called ``resolvePackageWithOverrides`` gap). SC-2 turns
+    # that decision into a materialized bin dir on ``PATH`` (executable
+    # channel): the ``buildAndSpliceProducers`` pre-pass (run inside
+    # ``executeBuildTarget`` before this closure fires) has already loaded the
+    # producer's ``repro.nim``, built its declared ``executable`` edge from
+    # source, and recorded the output ``bin`` dir in
+    # ``producerMaterializedBinDirs``. The closure returns it here so the
+    # engine prepends it to the consuming action's ``PATH``
+    # (``repro_build_engine.nim:1975-2010``). SC-3 will add the library
+    # aux-channel projection alongside this on the same producer branch.
     if producerWorkspaceRoot.len > 0:
       # ``resolveProducerBinding`` reads the committed ``repro.lock`` +
-      # ``.repro/develop-overrides.toml`` (file I/O) and the observability
-      # sink is a module-level ``var`` holding GC'd strings. The CLI build
-      # path is single-threaded at this seam (the resolver runs on the fork-
-      # scheduling thread), so both are safe. Wrap in ``cast(gcsafe)`` to
-      # match the established pattern in this module (see the git_actions /
-      # repro_local_store gcsafe I/O sites).
+      # ``.repro/develop-overrides.toml`` (file I/O); the observability sink
+      # and the splice sink are module-level ``var``s holding GC'd strings.
+      # The CLI build path is single-threaded at this seam (the resolver runs
+      # on the fork-scheduling thread), so both are safe. Wrap in
+      # ``cast(gcsafe)`` to match the established pattern in this module (see
+      # the git_actions / repro_local_store gcsafe I/O sites).
       {.cast(gcsafe).}:
         let producer = resolveProducerBinding(name, producerWorkspaceRoot)
         if producer.kind != pbkNotProducer:
           lastResolvedProducerBinding = producer
+          # SC-2 splice: if the pre-pass built this producer's executable
+          # edge, its output ``bin`` dir is on the splice sink — return it so
+          # the freshly-built binary lands on the consuming action's PATH.
+          # (A producer resolved for the library channel only, SC-3, has no
+          # bin dir recorded and still falls through to ``none`` here.)
+          if producerMaterializedBinDirs.hasKey(name):
+            let binDirs = producerMaterializedBinDirs[name]
+            if binDirs.len > 0:
+              # ``resolvedExecutablePath`` is the catalog's tool-of-record
+              # path for the ref (``repro_build_engine.nim:629-633``); it must
+              # be an EXECUTABLE, not a bin DIRECTORY. Bind it to the produced
+              # binary named after the selector when it materialized under a
+              # spliced bin dir; leave it empty otherwise (the PATH-splice
+              # channel reads only ``binDirs``, so an empty tool-of-record path
+              # is harmless — the freshly-built binary is still found on PATH).
+              var toolOfRecord = ""
+              for binDir in binDirs:
+                let candidate = binDir / addFileExt(name, ExeExt)
+                if fileExists(extendedPath(candidate)):
+                  toolOfRecord = candidate
+                  break
+              return some(ResolvedToolIdentity(
+                binDirs: binDirs,
+                resolvedExecutablePath: toolOfRecord,
+                cachePlatformTag: cacheTag))
     none(ResolvedToolIdentity)
 
 proc runQuotaSocketDiagnostic(): string =
@@ -5184,10 +5292,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
+    # Cross-Repo-Source-Consumption SC-2 (§4.2 point 3): fold each materialized
+    # cross-repo producer's action-hash into the consumer actions that name it,
+    # so the producer edge is a real input of the consumer cache key. No-op
+    # when nothing was materialized (byte-identical to today).
+    var scheduledActions = lowered.actions
+    foldProducerActionHashes(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
-        $lowered.actions.len)
-      buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
+        $scheduledActions.len)
+      buildResult = runBuild(graph(scheduledActions, lowered.pools), engineConfig)
     except CatchableError:
       progressRenderer.finishProgress()
       raise
@@ -5597,6 +5711,210 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             fromSourceBuildStack[^1] == siblingRecipeDir:
           discard fromSourceBuildStack.pop()
       fromSourceResolvedRecipes.incl(siblingRecipeDir)
+
+  # Cross-Repo-Source-Consumption SC-2 (§4.2) — producer graph load + splice
+  # (executable channel). A pre-pass that mirrors the from-source auto-recurse
+  # above, but keyed on the SC-1 "resolve package binding" hook instead of the
+  # corpus-recipe layout: for every ``uses:`` selector that resolves to a
+  # cross-repo PRODUCER (a develop-overridden sibling checkout, or a lock-
+  # pinned checkout present on disk), LOAD the producer's ``repro.nim``, BUILD
+  # its declared ``executable``'s producing edge from source (recursively, via
+  # the SAME in-process ``executeBuildTarget`` the from-source pass uses — NOT
+  # a ``repro build`` subprocess), and RECORD the producer's output ``bin`` dir
+  # in ``producerMaterializedBinDirs`` so the ``mkToolIdentityResolver`` closure
+  # splices it onto the consuming action's ``PATH``
+  # (``repro_build_engine.nim:1975-2010``). The producer edge runs FIRST (this
+  # pre-pass completes before the consumer's engine pass), so its realized
+  # output is available as the consumer action starts.
+  #
+  # The declared-executable edge is bound by declared-output BASENAME (§4.2
+  # point 2): the producer's ``executable <name>: name: "<bin>"`` maps to
+  # ``build/bin/<bin>`` under the producer root (the canonical output layout
+  # every DSL ``nim.c(binary = "build/bin/<bin>")`` / shell edge writes to; see
+  # the runquota edges producing ``build/bin/runquotad``).
+  #
+  # Cycle/depth guard: ``producerBuildStack`` (the analogue of
+  # ``fromSourceBuildStack``) — a producer that transitively consumes the
+  # consumer would push a root already on the stack; that raises loudly with
+  # the full cycle path rather than looping. ``FromSourceMaxRecursionDepth`` is
+  # reused as the shared sanity ceiling.
+  #
+  # This branch fires ONLY for a ``uses:`` selector that resolves as a producer
+  # via the develop-override map / committed ``LockedDep``; every other
+  # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
+  # build that consumes no cross-repo producer is byte-identical to today.
+  if not prepareOnly and result.projectRoot.len > 0:
+    for useDef in artifact.projectInterface.toolUses:
+      let selector = useDef.packageSelector
+      if selector.len == 0:
+        continue
+      if producerMaterializedBinDirs.hasKey(selector):
+        continue  # already built + spliced in this session (dedup)
+      # ``resolveProducerBinding`` re-raises a structured override diagnostic
+      # (a registered override whose local checkout is missing) instead of a
+      # silent host-PATH fallthrough — the SC-1 "no silent fallback" contract.
+      let producer = resolveProducerBinding(selector, result.projectRoot)
+      # SC-2 scope is the FROM-SOURCE build of a sibling checkout available on
+      # disk: develop mode always has one (``localPathAbsolute``); lock-pinned
+      # mode has one when the pinned revision is already checked out beside the
+      # consumer (the VCS fetch of a not-yet-present revision is SC-6). A
+      # producer whose source is not on disk is left for its milestone; the
+      # resolver closure then falls through to ``none`` for this ref as before.
+      var producerRoot = ""
+      case producer.kind
+      of pbkDevelopOverride:
+        producerRoot = producer.localPathAbsolute
+      of pbkLockPinned:
+        let sibling = findSiblingProjectFile(selector, result.projectRoot)
+        if sibling.len > 0:
+          producerRoot = parentDir(sibling)
+      of pbkNotProducer:
+        continue
+      if producerRoot.len == 0 or
+          not dirExists(extendedPath(producerRoot)):
+        continue
+      let producerRootAbs = absolutePath(producerRoot)
+      let producerProjectFile =
+        try:
+          resolveProjectFile(producerRootAbs).path
+        except CatchableError:
+          ""
+      if producerProjectFile.len == 0:
+        continue
+      # Cycle guard: a producer that (transitively) resolves back to a root
+      # already being built raises with the full cycle path.
+      if producerRootAbs in producerBuildStack:
+        var cycle = producerBuildStack
+        cycle.add(producerRootAbs)
+        raise newException(ValueError,
+          "cross-repo producer cycle detected while resolving \"" & selector &
+          "\": " & cycle.join(" -> ") &
+          ". A producer project transitively consumes its consumer; break " &
+          "the ``uses:`` cycle in one of these projects.")
+      if producerBuildStack.len >= FromSourceMaxRecursionDepth:
+        raise newException(ValueError,
+          "cross-repo producer recursion depth bound exceeded (" &
+          $FromSourceMaxRecursionDepth & ") while resolving \"" & selector &
+          "\" at " & producerRootAbs & ". Active stack: " &
+          producerBuildStack.join(" -> ") & ".")
+      logSummary("cross-repo producer: building \"" & selector &
+        "\" from source at " & producerRootAbs & " (" & $producer.kind & ")")
+      producerBuildStack.add(producerRootAbs)
+      try:
+        let producerOutcome = executeBuildTarget(producerProjectFile,
+          effectiveMode, publicCliPath,
+          selectDefaultAction = true,
+          workRoot = workRoot,
+          progressMode = progressMode,
+          progressBarStyle = progressBarStyle,
+          statsMode = statsMode,
+          reportMode = reportMode,
+          logMode = logMode,
+          diagnosticsPath = "",
+          prepareOnly = false,
+          dryRun = dryRun,
+          forceRebuild = forceRebuild,
+          skipCmakeRegeneration = skipCmakeRegeneration,
+          bypassRunQuotaExplicit = bypassRunQuotaExplicit,
+          eventSink = eventSink,
+          cancelCheck = cancelCheck)
+        if producerOutcome.exitCode != 0:
+          raise newException(OSError,
+            "cross-repo producer build failed: sub-build of " &
+            producerRootAbs & " (selector \"" & selector &
+            "\") exited with status " & $producerOutcome.exitCode &
+            ". See the sub-build's diagnostics for the underlying failure.")
+        # Extract the producer's interface to bind its declared executable(s)
+        # to their output binaries by BASENAME (§4.2 point 2). The producer's
+        # ``executable <exp>: name: "<bin>"`` produces ``build/bin/<bin>``
+        # under the producer root; the bin dir spliced onto PATH is the parent
+        # of the realized binary.
+        let producerOutDir = producerOutcome.outDir
+        let producerIface = producerOutDir / "producer-interface.rbsz"
+        let producerStub = producerOutDir / "producer-interface.nim"
+        var binDirs: seq[string] = @[]
+        var realizedBinaries: seq[string] = @[]
+        let producerArtifact =
+          try:
+            extractInterfaceFromModule(producerProjectFile, producerIface,
+              producerStub, reprobuildLibraryWorkDir(),
+              producerOutDir / "producer-iface-work", requireStub = false)
+          except CatchableError:
+            raise newException(OSError,
+              "cross-repo producer \"" & selector & "\" at " &
+              producerRootAbs & " built but its interface could not be " &
+              "loaded to bind the declared executable to its output binary.")
+        for exe in producerArtifact.projectInterface.publicExecutables:
+          let binName =
+            if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
+          if binName.len == 0:
+            continue
+          let realized = producerRootAbs / "build" / "bin" /
+            addFileExt(binName, ExeExt)
+          if fileExists(extendedPath(realized)):
+            let binDir = parentDir(realized)
+            if binDir notin binDirs:
+              binDirs.add(binDir)
+            if realized notin realizedBinaries:
+              realizedBinaries.add(realized)
+        if binDirs.len == 0:
+          raise newException(OSError,
+            "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
+            " declares no executable whose ``build/bin/<name>`` output " &
+            "materialized; nothing to splice onto PATH. (A pure-library " &
+            "producer is consumed through the aux channels — SC-3.)")
+        producerMaterializedBinDirs[selector] = binDirs
+        # SC-2 deliverable #2 sub-clause — "the producer edge's action-hash
+        # folds into the consuming action's cache key" (§4.2 point 3). Compute
+        # the producer edge's ACTION-HASH as a content digest over the
+        # producer's realized build product: its declared-executable output
+        # binaries, bound by basename (the same basename binding that maps
+        # ``executable <exp>: name: "<bin>"`` onto ``build/bin/<bin>`` above),
+        # each folded together with the producer selector + declared-output
+        # name so the digest tracks WHICH binary changed as well as its bytes.
+        # ``foldProducerActionHashes`` (below, called after the consumer graph
+        # is lowered) folds this into every consumer action naming the producer
+        # via ``toolIdentityRefs``. A changed producer build product (rebuilt
+        # binary bytes) shifts this hash and therefore the consumer cache key;
+        # an unchanged producer leaves it stable. This is the build-product
+        # arm of invalidation (§4.3's last paragraph: "the producer's build
+        # product changed" via the action-hash); the SOURCE-content arm
+        # (``foldOverridesIntoFingerprint`` on the develop ``contentIdentity``)
+        # is SC-4.
+        realizedBinaries.sort()
+        var actionHashPayload = "cross-repo-producer-action-hash.v1\x00" &
+          selector & "\x00"
+        for realized in realizedBinaries:
+          actionHashPayload.add(extractFilename(realized))
+          actionHashPayload.add('\x00')
+          actionHashPayload.add(fileContentDigest(realized))
+          actionHashPayload.add('\x00')
+        producerActionHashes[selector] =
+          digestHex(blake3DomainDigest(actionHashPayload.bytesOf(),
+            hdActionFingerprint))
+        # Prepend the freshly-built producer bin dir(s) to the process ``PATH``
+        # so the DOWNSTREAM path-mode identity resolution
+        # (``warmResolveAndWriteIdentity`` -> ``resolvePathOnlyTool``, which
+        # reads ``getEnv("PATH")``) finds the producer's executable as a normal
+        # profile — the same "build first, then the resolver finds artifacts on
+        # disk" contract the from-source auto-recurse pass relies on. Without
+        # this the path-mode resolver would reject the ``uses:`` producer
+        # selector as "not on PATH" before the consumer's engine pass even
+        # started. (The SC-1 producer branch in ``mkToolIdentityResolver``
+        # additionally splices the bin dir for a selector the path-mode profile
+        # loop does not claim — belt-and-suspenders for both channels.)
+        block prependProducerPath:
+          var pathParts: seq[string] = binDirs
+          let existing = getEnv("PATH")
+          if existing.len > 0:
+            pathParts.add(existing)
+          putEnv("PATH", pathParts.join($PathSep))
+        logSummary("cross-repo producer: spliced \"" & selector &
+          "\" bin dir(s) onto PATH: " & binDirs.join(", "))
+      finally:
+        if producerBuildStack.len > 0 and
+            producerBuildStack[^1] == producerRootAbs:
+          discard producerBuildStack.pop()
 
   # Tier 2b fast path: a package whose DSL body declared no ``build:``
   # block is eligible for the pre-built ``repro-standard-provider``
@@ -6065,10 +6383,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         progressRenderer.renderProgress(event)
     var buildResult: BuildRunResult
     let engineStart = statStart(statsEnabled)
+    # Cross-Repo-Source-Consumption SC-2 (§4.2 point 3): fold each materialized
+    # cross-repo producer's action-hash into the consumer actions that name it,
+    # so the producer edge is a real input of the consumer cache key. No-op
+    # when nothing was materialized (byte-identical to today).
+    var scheduledActions = lowered.actions
+    foldProducerActionHashes(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
-        $lowered.actions.len)
-      buildResult = runBuild(graph(lowered.actions, lowered.pools), engineConfig)
+        $scheduledActions.len)
+      buildResult = runBuild(graph(scheduledActions, lowered.pools), engineConfig)
     except CatchableError:
       progressRenderer.finishProgress()
       raise
