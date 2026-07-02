@@ -1,0 +1,252 @@
+M9.R.58 close-out evidence
+==========================
+
+Objective
+---------
+Close the M9.R.57 runtime residual: libseat's logind backend failed
+because ``/run/systemd/users/1000`` doesn't exist at the moment sway
+launches under sddm-helper's PAM chain. Cascade:
+
+  [wlr] [libseat] logind.c:621  Could not get primary session for user: No data available
+  [wlr] [libseat] common/terminal.c:162  Could not open target tty: Permission denied
+  [wlr] backend/backend.c:399  Failed to start a DRM session
+
+
+Commits (chronological)
+-----------------------
+  57bf53d1  M9.R.58.1: PAM stack audit findings
+  6a5886f0  M9.R.58.2: enable seatd backend + install seatd system service
+  5730f871  M9.R.58.3: seatd runtime evidence — libseat backend chain fixed
+  253cb7bd  M9.R.58.4: wlroots buildDeps += mesa (DRM backend + gles2 renderer)
+
+Phase A + a related emergency fix in the swap driver also produced
+two Phase-B/C helper commits documented inline.
+
+
+Phase A — PAM stack audit (M9.R.58.1)
+--------------------------------------
+See m9r58_phaseA_pam_audit.txt in this dir.
+
+Verdict: pam_systemd.so IS invoked (M9.R.56.8.6 wired it) and IS
+reaching the dbus system bus (strace line 5292 in the M9.R.57
+sddm-strace log), but the CreateSession() side-effect
+``/run/systemd/users/1000`` is never created. Root cause traces to
+M9.R.56.8.7's known dbus-lacking-``--systemd-activation`` gap —
+logind's downstream call to PID-1 systemd (StartTransientUnit for
+user@1000.service) fails and logind aborts CreateSession.
+
+Falsifies the task-brief Shape-1 hypothesis (add pam_systemd to
+the chain). Task-brief Shape-2 (systemd-run --user --scope) hits
+the same dbus wall. Task-brief Shape-3 (enable-linger) requires
+user@ to start once, same wall.
+
+New Shape 5 chosen: enable libseat's ``seatd`` backend and run the
+standalone ``seatd`` daemon as a system service before sddm.service.
+This bypasses logind + user-manager entirely: libseat clients
+(sway) connect to ``/run/seatd.sock``; seatd (running as root)
+mediates /dev/dri and /dev/tty access via a Unix-domain socket
+group check.
+
+
+Phase B — recipe + image-build changes (M9.R.58.2)
+--------------------------------------------------
+Two file edits:
+
+  1. recipes/packages/source/libseat/repro.nim
+     * meson options: libseat-seatd=disabled → **enabled**
+                       server=disabled       → **enabled**
+     * new executable outputs: seatd + seatd-launch (in addition to
+       the existing libseat library)
+     * (kept libseat-logind=systemd + libseat-builtin=enabled so
+       future ReproOS variants with a dbus-with-libsystemd build
+       fall back cleanly.)
+
+  2. recipes/reproos-image/scripts/build-reproos-image.sh Phase 10.9
+     * shadow-link the seatd binary from the libseat install-mirror
+       into /usr/bin/seatd
+     * create the ``seat`` group (GID 985, reproducible)
+     * install /etc/systemd/system/seatd.service (runs
+       ``seatd -g seat`` as root)
+     * enable in graphical.target.wants so seatd starts before sddm
+
+Verification of the libseat standalone rebuild:
+  $ nix develop --command ./build/bin/repro build --tool-provisioning=from-source recipes/packages/source/libseat
+  succeeded all 8 actions
+  $ ls .repro/output/install/usr/bin/
+  seatd  seatd-launch
+
+
+Phase C — swap-in-place + boot smoke (M9.R.58.3)
+------------------------------------------------
+The full auto-recurse rebuild via ``repro build recipes/reproos-image``
+hits an implicit-decl error in bash (out of scope per M9.R.57), so
+we followed the M9.R.57.5 swap-in-place pattern:
+
+  1. qemu-nbd --connect + mount reproos-installed.qcow2 partition 2
+  2. Copy new libseat.so.1 + seatd + seatd-launch into
+     the libseat install-mirror path on the mounted rootfs
+  3. patchelf: --set-interpreter + --set-rpath swap
+     /nix/store/ → /repro/store/ (M9.R.46 convention); also
+     PREPEND the Nix glibc lib dir to the RPATH so libc.so.6
+     resolves to the SAME glibc that ld-linux-x86-64.so.2 came
+     from (fixes M9.R.58.3 finding: mismatched ld/libc pair AVs
+     seatd at __libc_start_main with ``seatd[N]: segfault at 2
+     ip 0x2 error 14``)
+  4. Shadow-link /usr/bin/seatd → install-mirror path
+  5. Create ``seat`` group in /etc/group
+  6. Write /etc/systemd/system/seatd.service + graphical.target.wants
+     symlink
+  7. Preserve /etc/ld.so.cache (M9.R.58.3 finding: deleting the
+     cache panics init with ``Attempted to kill init! exitcode=
+     0x00007f00`` since PID-1 systemd fails to load without it).
+     Use ``ldconfig -r <root>`` via chroot to regenerate the cache
+     with the new overlay path.
+
+Swap driver: _m9r58_swap.sh (in the repo root; helper artifact)
+
+Verification via chroot before boot smoke:
+  $ chroot /mnt/m9r58_fix /usr/bin/seatd -h
+  seatd - A seat management daemon.
+  ...
+  $ chroot /mnt/m9r58_fix /usr/bin/seatd
+  00:00:00.000 [INFO] [seatd/seat.c:48] Created VT-bound seat seat0
+  00:00:00.000 [INFO] [seatd/seatd.c:194] seatd started
+
+Boot smoke (300 s, screendumps every 60 s) — serial log tail
+(m9r58_boot_serial.log):
+
+  [  OK  ] Started D-Bus System Message Bus.
+  [  OK  ] Started Console Getty.
+  [  OK  ] Started Seat management daemon.        <-- NEW
+  [  OK  ] Started Serial Getty on ttyS0.
+  [  OK  ] Reached target Login Prompts.
+  [  OK  ] Started User Login Management.
+  [  OK  ] Started Simple Desktop Display Manager.
+  [  OK  ] Reached target Multi-User System.
+  [  OK  ] Reached target Graphical Interface.
+
+Post-boot wayland-session.log tail (m9r58_wayland-session.log):
+
+  Fontconfig error: Cannot load default config file: No such file: (null)
+  00:00:00.006 [ERROR] [wlr] [backend/backend.c:276] Cannot create DRM backend: disabled at compile-time
+  00:00:00.007 [ERROR] [wlr] [backend/backend.c:420] Failed to open any DRM device
+  00:00:00.010 [ERROR] [sway/server.c:247] Unable to create backend
+
+The M9.R.57 libseat cascade (Could not get primary session,
+Could not open target tty, Timeout waiting session to become
+active) is GONE. sway reaches libseat, libseat's seatd backend
+connects successfully to /run/seatd.sock (strace evidence:
+``connect(6, {sa_family=AF_UNIX, sun_path="/run/seatd.sock"}, 17) = 0``
+at m9r58_sddm-strace.log). The failure is now a NEW, smaller
+class of runtime abort inside wlroots' backend chain.
+
+
+Phase D — wlroots DRM backend gate (M9.R.58.4)
+----------------------------------------------
+Root cause of the "Cannot create DRM backend: disabled at
+compile-time" error at wlroots' ``backend/backend.c:276``:
+
+The wlroots 0.19 meson probe for DRM backend requires FOUR
+runtime deps: libdrm + libgbm + hwdata + libdisplay-info. The
+pre-M9.R.58.4 wlroots recipe declared libdrm only (mesa was
+missing entirely). meson-log.txt confirms:
+
+  Package gbm was not found in the pkg-config search path.
+  Run-time dependency gbm found: NO (tried pkgconfig and cmake)
+      drm-backend      : NO
+      gles2-renderer   : NO
+      gbm-allocator    : NO
+
+M9.R.58.4 adds ``mesa`` to wlroots buildDeps. Fresh rebuild:
+
+  Run-time dependency gbm found: YES 23.3.6
+  Dependency gbm found: YES 23.3.6 (cached)
+      drm-backend      : NO       <-- still NO
+      gles2-renderer   : YES      <-- was NO
+      gbm-allocator    : YES      <-- was NO
+
+drm-backend is still NO because two MORE recipes remain missing
+(neither has a from-source recipe in this repo yet):
+
+  Package hwdata was not found in the pkg-config search path.
+  Build-time dependency hwdata found: NO (tried pkgconfig and cmake)
+  Package libdisplay-info was not found in the pkg-config search path.
+  Run-time dependency libdisplay-info found: NO (tried pkgconfig and cmake)
+
+These are the last two upstream deps of wlroots' DRM backend on
+wlroots 0.19. Adding recipes for them is out of scope for M9.R.58
+(which was scoped to the libseat runtime residual). Documented
+here as the M9.R.58 residual.
+
+
+Phase E — visual proof
+-----------------------
+Screendumps at t=60/120/180/240 s (m9r58_shot_{60,120,180,240}.ppm,
+plus m9r58_shot_240.png). All four frames show SDDM's minimal theme
+— sway does NOT reach compositor-running state, so no sway wallpaper
+is captured (the wlroots DRM backend gap in Phase D is the blocker).
+
+
+Autologin-to-sway verdict
+-------------------------
+  * Compile-time (libseat): PASS. M9.R.57 baseline.
+  * Runtime (libseat backends): PASS. seatd daemon starts, sway
+    connects to /run/seatd.sock, libseat backend chain is not the
+    blocker anymore.
+  * Compile-time (wlroots DRM backend): FAIL. mesa fixed 2/3 output
+    features (gles2-renderer + gbm-allocator); drm-backend still NO
+    because hwdata + libdisplay-info recipes don't exist yet.
+  * Runtime (sway compositor up): FAIL. No wallpaper visible.
+
+
+Residual — hwdata + libdisplay-info from-source recipes
+-------------------------------------------------------
+Strictly smaller than the M9.R.57 residual:
+  * M9.R.57 residual: libseat's TWO backends (logind + builtin)
+    both fail at runtime with logind IPC + tty permission errors —
+    a systemd + PAM + SDDM + logind integration issue with no
+    obvious clean fix without a dbus rebuild.
+  * M9.R.58 residual: TWO from-source recipes are missing (hwdata
+    + libdisplay-info). Both are small pure-C libraries with
+    well-understood upstream release cadences; each is a
+    self-contained M9.K-style recipe following the libseat /
+    libinput precedent (~1 file each, ~50-100 lines).
+
+Candidate follow-up work for M9.R.59:
+  * Add recipes/packages/source/hwdata/repro.nim (upstream
+    https://github.com/vcrhonek/hwdata; MIT-licensed data-only
+    package; wlroots consumes hwdata's pci.ids for the DRM
+    connector labeling)
+  * Add recipes/packages/source/libdisplay-info/repro.nim
+    (upstream https://gitlab.freedesktop.org/emersion/libdisplay-info;
+    small C library, meson-built; wlroots consumes it for EDID
+    parsing)
+  * Declare BOTH in wlroots buildDeps
+  * Rebuild wlroots; expect ``drm-backend : YES`` in meson-log.txt
+
+
+Files in this directory
+-----------------------
+  m9r58_complete.txt         (this file)
+  m9r58_phaseA_pam_audit.txt  Phase A PAM audit + shape decision
+  m9r58_wayland-session.log   sway's stderr showing the new runtime
+                               failure class (drm-backend disabled)
+  m9r58_sddm.log              SDDM's own log showing 3 wayland-session
+                               launch attempts (autologin retry loop)
+  m9r58_sddm-strace.log       strace of sddm-helper showing sway's
+                               connect(/run/seatd.sock) success
+  m9r58_boot_serial.log       QEMU serial console output for the 300s
+                               boot cycle
+  m9r58_shot_{60,120,180,240}.ppm  screendump every 60s (SDDM
+                               greeter visible; compositor not up)
+  m9r58_shot_240.png          PNG of the last screendump (SDDM
+                               theme background + text cursor)
+
+
+Push discipline
+---------------
+All 4 commits pushed with pull-rebase between; no --force, no
+--no-verify, no --no-gpg-sign was needed as the branch has
+commit.gpgsign disabled locally per the reprobuild policy
+memory. Full commit list on the dev branch: 57bf53d1, 6a5886f0,
+5730f871, 253cb7bd.
