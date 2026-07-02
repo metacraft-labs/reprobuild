@@ -33,7 +33,7 @@
 ## loaded lazily via ``dynlib:`` so a build that never requests a
 ## ``ckZstd`` payload doesn't need libzstd installed.
 
-import std/[strutils]
+import std/[strutils, dynlib]
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types
 
@@ -80,15 +80,61 @@ type
     size: csize_t
     pos: csize_t
 
-proc ZSTD_createDStream(): pointer {.cdecl, importc, dynlib: ZstdDynLib.}
-proc ZSTD_freeDStream(d: pointer): csize_t {.cdecl, importc, dynlib: ZstdDynLib.}
-proc ZSTD_initDStream(d: pointer): csize_t {.cdecl, importc, dynlib: ZstdDynLib.}
-proc ZSTD_decompressStream(d: pointer; outBuf: ptr ZSTD_outBuffer;
-                            inBuf: ptr ZSTD_inBuffer): csize_t {.
-  cdecl, importc, dynlib: ZstdDynLib.}
-proc ZSTD_isError(code: csize_t): cuint {.cdecl, importc, dynlib: ZstdDynLib.}
-proc ZSTD_getErrorName(code: csize_t): cstring {.cdecl, importc, dynlib: ZstdDynLib.}
-proc ZSTD_DStreamOutSize(): csize_t {.cdecl, importc, dynlib: ZstdDynLib.}
+# The bindings are resolved by a runtime ``loadLib`` on first ckZstd use rather
+# than the ``{.dynlib.}`` pragma. ``{.dynlib.}`` dlopens the library in the
+# module's INIT proc (before ``main``), so ANY binary that merely links this
+# module — including the recipe *provider* binaries reprobuild compiles on the
+# fly and runs inside a foreign dev shell — aborts at startup with
+# "could not load: libzstd.so.1" when libzstd is not on the loader search path,
+# and the ``DecompressUnavailable`` fallback the docs promise never gets to run.
+# Deferring the load to ``ensureZstdLoaded`` makes that "loaded lazily" contract
+# actually hold: a build that never decompresses a ckZstd payload never touches
+# libzstd.
+type
+  ZstdCreateDStreamProc = proc(): pointer {.cdecl, gcsafe, raises: [].}
+  ZstdFreeDStreamProc = proc(d: pointer): csize_t {.cdecl, gcsafe, raises: [].}
+  ZstdInitDStreamProc = proc(d: pointer): csize_t {.cdecl, gcsafe, raises: [].}
+  ZstdDecompressStreamProc = proc(d: pointer; outBuf: ptr ZSTD_outBuffer;
+                                  inBuf: ptr ZSTD_inBuffer): csize_t {.
+    cdecl, gcsafe, raises: [].}
+  ZstdIsErrorProc = proc(code: csize_t): cuint {.cdecl, gcsafe, raises: [].}
+  ZstdGetErrorNameProc = proc(code: csize_t): cstring {.cdecl, gcsafe, raises: [].}
+  ZstdDStreamOutSizeProc = proc(): csize_t {.cdecl, gcsafe, raises: [].}
+
+var
+  zstdLibHandle: LibHandle
+  ZSTD_createDStream: ZstdCreateDStreamProc
+  ZSTD_freeDStream: ZstdFreeDStreamProc
+  ZSTD_initDStream: ZstdInitDStreamProc
+  ZSTD_decompressStream: ZstdDecompressStreamProc
+  ZSTD_isError: ZstdIsErrorProc
+  ZSTD_getErrorName: ZstdGetErrorNameProc
+  ZSTD_DStreamOutSize: ZstdDStreamOutSizeProc
+
+proc ensureZstdLoaded() =
+  ## dlopen libzstd on first ckZstd use; raise ``DecompressUnavailable`` if it
+  ## (or any expected symbol) is missing so the caller can fall back to ckNone.
+  if zstdLibHandle != nil:
+    return
+  let lib = loadLib(ZstdDynLib)
+  if lib == nil:
+    raise newException(DecompressUnavailable,
+      "libzstd not loadable: could not load " & ZstdDynLib)
+  template resolve(field: untyped; T: typedesc; name: string) =
+    let p = lib.symAddr(name)
+    if p == nil:
+      unloadLib(lib)
+      raise newException(DecompressUnavailable,
+        "libzstd missing symbol " & name)
+    field = cast[T](p)
+  resolve(ZSTD_createDStream, ZstdCreateDStreamProc, "ZSTD_createDStream")
+  resolve(ZSTD_freeDStream, ZstdFreeDStreamProc, "ZSTD_freeDStream")
+  resolve(ZSTD_initDStream, ZstdInitDStreamProc, "ZSTD_initDStream")
+  resolve(ZSTD_decompressStream, ZstdDecompressStreamProc, "ZSTD_decompressStream")
+  resolve(ZSTD_isError, ZstdIsErrorProc, "ZSTD_isError")
+  resolve(ZSTD_getErrorName, ZstdGetErrorNameProc, "ZSTD_getErrorName")
+  resolve(ZSTD_DStreamOutSize, ZstdDStreamOutSizeProc, "ZSTD_DStreamOutSize")
+  zstdLibHandle = lib
 
 # ---------------------------------------------------------------------------
 # Constructor / destructor
@@ -99,21 +145,18 @@ proc newDecompressor*(kind: CompressionKind): Decompressor =
   of ckNone:
     result = Decompressor(kind: ckNone, impl: ckNone)
   of ckZstd:
-    var d: pointer = nil
-    var outSize: csize_t = 0
-    try:
-      d = ZSTD_createDStream()
-      if d == nil:
-        raise newException(DecompressUnavailable,
-          "libzstd ZSTD_createDStream returned NULL")
-      let initRc = ZSTD_initDStream(d)
-      if ZSTD_isError(initRc) != 0:
-        raise newException(DecompressError,
-          "ZSTD_initDStream: " & $ZSTD_getErrorName(initRc))
-      outSize = ZSTD_DStreamOutSize()
-    except LibraryError as e:
+    # Loads libzstd on demand; raises DecompressUnavailable if it isn't present
+    # so the caller can fall back to a ckNone payload.
+    ensureZstdLoaded()
+    let d = ZSTD_createDStream()
+    if d == nil:
       raise newException(DecompressUnavailable,
-        "libzstd not loadable: " & e.msg)
+        "libzstd ZSTD_createDStream returned NULL")
+    let initRc = ZSTD_initDStream(d)
+    if ZSTD_isError(initRc) != 0:
+      raise newException(DecompressError,
+        "ZSTD_initDStream: " & $ZSTD_getErrorName(initRc))
+    let outSize = ZSTD_DStreamOutSize()
     result = Decompressor(kind: ckZstd, impl: ckZstd,
                           zstdDStream: d,
                           zstdOutBuf: newSeq[byte](int(outSize)))
