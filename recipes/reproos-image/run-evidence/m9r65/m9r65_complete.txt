@@ -1,0 +1,301 @@
+M9.R.65 close-out — Class θ root cause identified + fixed
+==========================================================
+
+Milestone summary
+-----------------
+M9.R.65 landed 3 commits across two repos over ~5 hours. It:
+  1. FALSIFIED M9.R.64's Class θ attribution (which said "nim
+     SIGKILLs its parallel-compile pool of bash cc-wrapper
+     children") with an strace of the full pixman workload and a
+     bisection down to a two-line minimal reproducer.
+  2. Identified the REAL cause: the io-mon shim did not interpose
+     glibc's PATH-searching exec family (`execvp` / `execvpe` /
+     `execlp`) or `fexecve`. NixOS-WSL's `/bin/sh` is a Rust
+     `wrapped-sh` binary that calls `execvp` to chain into the real
+     shell. glibc's `execvp` invokes execve INTERNALLY (bypasses
+     PLT/GOT), so LD_PRELOAD interposition of `execve` did not
+     intercept the transition and the shim's `repro_hook_execve`
+     never fired at that boundary.
+  3. Implemented the fix in io-mon: added `execvp` / `execvpe` /
+     `execlp` / `fexecve` interposers that route through the shim's
+     existing execve hook (emit `mrProcessExec` + flush the pending
+     read-tail marker) before delegating to the real glibc entry
+     point via RTLD_NEXT.
+  4. Verified the fix closes the 182 pixman provider-compile
+     kill-before-flush residuals (eventLoss=182 → eventLoss=0).
+
+  io-mon (main) — 1 commit
+    M9.R.65.2  interpose glibc execvp / execvpe / execlp / fexecve
+
+  reprobuild (dev) — 2 commits
+    M9.R.65.1     Phase A investigation evidence (SIGKILL sender
+                  identification + falsification of M9.R.64
+                  attribution)
+    M9.R.65.3.pin bump io-mon pin to b3fb107 (execvp interposers)
+
+
+Phase A — SIGKILL sender identification (M9.R.65.1)
+---------------------------------------------------
+M9.R.64 attributed Class θ to "nim's parallel-compile pool
+SIGKILL's outstanding children when it cancels".  Three orthogonal
+lines of evidence falsified that hypothesis:
+
+  * Full-workload strace filtered to
+    `kill,tgkill,tkill,exit,exit_group` on the pixman build
+    captured ZERO kill/tgkill/tkill syscalls.  Every one of the
+    ~20 000 processes exited via `exit_group(0)`.  See
+    /tmp/m9r65/strace-pixman.log (23 lines).
+
+  * Nim compiler source audit
+    (nim 2.2.4, compiler/extccomp.nim + lib/pure/osproc.nim):
+    `execCmdsInParallel` uses `execProcesses`, which waits on all
+    children via `waitpid(-1, ...)` and never sends a signal.
+    A failing child triggers `rawMessage(errGenerated, ...)` →
+    `handleError` (doAbort) → `quit(1)`.  `quit(1)` runs atexit
+    and `_Exit`s — it does NOT kill outstanding siblings; those
+    are reparented to init.
+
+  * Minimal-reproducer bisection reduced the Class θ shape from
+    182 records to a two-line test.  On the NixOS-WSL host this
+    campaign runs on:
+
+        io-mon --depfile /tmp/dep.rmdf -- /bin/sh -c "echo hi"
+        → eventLoss=1 (the class-θ shape:
+          argv=/nix/store/…-wrapped-sh/wrapper, emits=2,
+          lastPath=/dev/tty, phase=emit)
+
+        io-mon --depfile /tmp/dep.rmdf -- bash -c "echo hi"
+        → eventLoss=0
+
+    The difference is `/bin/sh` vs `bash`.  On this host `/bin/sh`
+    is a symlink to a Rust `wrapped-sh` binary
+    (/nix/store/…-wrapped-sh/wrapper) that calls `execvp` to chain
+    into the real shell.
+
+
+Phase B — root cause classification (M9.R.65.1)
+-----------------------------------------------
+The io-mon shim exports these exec family symbols
+(nm -D /opt/repro/io-mon/build/lib/librepro_monitor_shim.so, BEFORE fix):
+
+    T execl
+    T execle
+    T execv
+    T execve
+    T posix_spawn
+    T posix_spawnp
+
+It did NOT export:
+    execvp, execvpe, execlp, fexecve
+
+Every one of those unexported entry points also delegates to
+`execve` (internally via a hidden reference, not via the PLT/GOT),
+so LD_PRELOAD interposition on `execve` alone did not intercept
+callers using the PATH-search variants.  When such a caller sits on
+the process's first cycle after `mrFileOpen("/dev/tty")` (which
+writes a pending read-tail marker), the intermediate `execvp`
+transition leaves the pending marker un-paired: the shim's
+`repro_hook_execve` doesn't fire, so no committed marker is
+written, and `mergeFragments`' pending-vs-committed netting
+injects one synthetic kill-before-flush record.
+
+For the pixman workload, Nim's `execProcesses` unconditionally adds
+`poEvalCommand` (osproc.nim:373), so every one of its 182
+clang-wrapper `cc` invocations is dispatched through
+`/bin/sh -c "…"`.  On the NixOS-WSL host `/bin/sh` is the Rust
+`wrapped-sh` — 182 invocations, one orphaned pending marker each,
+182 identical kill-before-flush event-loss records.
+
+CLASSIFICATION: neither nim nor reprobuild sent SIGKILL.  The
+shim's LD_PRELOAD table was missing exec-family entry points, and
+the specific caller (NixOS-WSL's `wrapped-sh` Rust binary) always
+uses one of the missing ones (`execvp`).
+
+
+Phase C — fix decision + implementation (M9.R.65.2 in io-mon)
+-------------------------------------------------------------
+Fix went in io-mon (the right repo — the shim's exec interpose
+table is the wrong side of the missing symbols).
+
+Added to
+`libs/io_mon/src/io_mon/hooks/linux_preload_runtime.nim`:
+
+  * type-alias, real-function slot, and RTLD_NEXT-resolving real
+    wrapper for each new entry point:
+        ct_execvp_real_fn   / ct_linux_preload_real_execvp
+        ct_execvpe_real_fn  / ct_linux_preload_real_execvpe
+        ct_fexecve_real_fn  / ct_linux_preload_real_fexecve
+
+  * `ct_linux_preload_dispatch_execvp` / `_dispatch_execvpe` /
+    `_dispatch_fexecve` — each routes through the shim's existing
+    `ct_execve_hook` (which emits `mrProcessExec` + flushes the
+    fragment slot's committed marker via `repro_monitor_shim_flush`)
+    then delegates to the real glibc entry via `real_execvp` /
+    `real_execvpe` / `real_fexecve` (dlsym'd from RTLD_NEXT).
+
+  * `execvp` / `execvpe` / `execlp` / `fexecve` public-symbol
+    interposers with `visibility("default")`.  `execlp` builds the
+    argv from its varargs (mirrors the existing `execl` /
+    `execle` implementations).
+
+The chained hook's real-execve call fails with ENOENT for the
+relative-name case (which is fine — control returns to us and we
+call the real execvp so glibc's PATH search + exec runs the
+actual image).  For an absolute-path caller the chained
+real-execve succeeds and the process becomes the new image
+without ever returning to us.  Either way the shim's flush has
+landed on disk.
+
+AFTER-FIX exports:
+    T execl     T execle
+    T execl_p   T execlp    (execlp added)
+    T execv     T execve
+    T execvp    T execvpe   (both added)
+    T fexecve                (added)
+    T posix_spawn   T posix_spawnp
+
+The fix required NO change to the shim's linux_preload.nim shim
+policy or to the merge policy.
+
+
+Phase D — minimal-reproducer verification (M9.R.65.2)
+------------------------------------------------------
+Post-fix, all three minimal reproducers PASS (eventLoss=0):
+
+    io-mon --depfile /tmp/d.rmdf -- /bin/sh -c "echo hi"
+      → summary records=44 processes=1 observations=44 eventLoss=0
+
+    io-mon --depfile /tmp/d.rmdf -- wrapped-sh/wrapper -c "echo hi"
+      → summary records=44 processes=1 observations=44 eventLoss=0
+
+    io-mon --depfile /tmp/d.rmdf --
+        /bin/sh -c "clang-wrapper/cc --version"
+      → summary records=185 processes=4 observations=185 eventLoss=0
+
+
+Phase E — full pixman rebuild + retroactive check (M9.R.65.3.pin)
+------------------------------------------------------------------
+Full pixman `__repro_provider_compile` rerun with the M9.R.65.3.pin
+(io-mon b3fb107) + `IO_MON_KILL_DIAG_DEEP=1`:
+
+  Provider compile depfile:
+    summary records=252 975 processes=838 observations=252 975
+    eventLoss=0
+    (was: records=251 183 processes=838 observations=250 995
+     eventLoss=182 on the M9.R.64.2 pin)
+
+  Class θ is CLOSED.  The 182 kill-before-flush residuals are 0.
+
+The pixman gate itself does NOT close in this milestone because
+two DOWNSTREAM residuals surface (previously hidden behind the
+provider-compile trip):
+
+  * meson-fetch-pixmanSource: eventLoss=0 (closes cleanly when
+    the vendored tarball is present; the residual seen earlier was
+    a pre-existing curl-on-out-of-tree-peer trip, not new).
+    → Now succeeds.  Not a residual.
+
+  * mesonbin-setup-15268905b1316721: eventLoss=3.  Decomposes to:
+      1× unmonitored subtree/peer (M9.R.60.1 pre-existing class —
+        an out-of-tree spawn child during meson configure)
+      2× libc raw syscall unsupported nr=186
+        (SYS_gettid — meson's Python runtime calls
+        `syscall(SYS_gettid)`; the shim's `syscall(3)`
+        interposer doesn't yet catch this nr in
+        `unsupported-syscall` classification)
+
+  Neither of these is Class θ (kill-before-flush).  Both are
+  DIFFERENT event-loss classes that pre-existed but were hidden
+  behind the provider-compile Class θ trap.  They belong to
+  separate future milestones (M9.R.60 follow-up for the fetch
+  peer + a `syscall(3)` gettid coverage addendum for the setup
+  trip).
+
+
+Retroactive validation (M9.R.57–M9.R.60)
+----------------------------------------
+Unchanged from M9.R.64 close-out.  Pixman gate remains open because
+of the two downstream residuals (not Class θ).  DE screendump not
+reached in this milestone.
+
+
+Residual, honestly
+------------------
+STRICTLY SMALLER than M9.R.64's residual:
+
+  * M9.R.64 residual: 1 mis-attributed class (Class θ described as
+    "nim SIGKILLs parallel pool") + 1 REGRESSION (M9.R.63.5
+    clang-crash, reverted in M9.R.64.2).
+    Fix path: merge-side policy change (a wrong fix path per the
+    real root cause — the shim was actually missing execvp
+    interposers).
+
+  * M9.R.65 residual: TWO different downstream event-loss classes
+    on the same pixman recipe (`unmonitored subtree/peer` in
+    meson configure + `libc raw syscall unsupported nr=186`
+    (SYS_gettid) in meson configure).  Neither is class θ.
+    Fix path: separate work per class.  M9.R.60.1 has the
+    canonical characterization of the fetch-peer class; a new
+    milestone can add SYS_gettid to the shim's supported nr list.
+
+  NEW COVERAGE (net-positive):
+    - Every LD_PRELOAD tracee that dispatches through `execvp` /
+      `execvpe` / `execlp` / `fexecve` now correctly fires the
+      shim's execve hook.  This is the majority of userspace code
+      that PATH-searches for an executable — the fix is broadly
+      applicable, not pixman-specific.
+    - The 182-record kill-before-flush residual on pixman
+      provider-compile is closed.
+    - The Rust-`wrapped-sh` NixOS-WSL execvp chain is now
+      correctly monitored end-to-end.
+
+
+Reviewer boundary
+-----------------
+Every stackable API consumed here is POLICY-FREE per the M-FW-0
+boundary.  No upstream nim-stackable-hooks change was needed.
+
+  Framework-safe helpers used (unchanged):
+    - CT_CALL_HOOK / CT_BYPASS macros
+    - ct_execve_hook function pointer
+    - CT_REAL RTLD_NEXT resolution
+    - dispatchExecve / repro_hook_execve chain
+
+  io-mon-owned policy / composition (M9.R.65):
+    - Four new public interposer functions
+      (execvp / execvpe / execlp / fexecve) that delegate through
+      the existing execve hook chain.  No new hook / dispatcher /
+      framework surface; only additional exported entry points for
+      the same hook.
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    M9.R.65.1     Phase A investigation evidence
+    M9.R.65.3.pin bump io-mon pin to b3fb107 (execvp interposers)
+
+  io-mon (main):
+    M9.R.65.2  interpose glibc execvp / execvpe / execlp / fexecve
+
+
+Evidence files (M9.R.65)
+------------------------
+  m9r65_complete.txt                       this file
+  m9r65_phaseA_sigkill_sender.txt          SIGKILL sender ID +
+                                            root cause
+
+
+Regression-test surfaces
+------------------------
+The io-mon test suite already covers `execve` / `posix_spawn`
+paths.  A regression pin for the new interposers belongs at:
+
+    io-mon/tests/linux/test_io_mon_linux_execvp_family.nim
+
+with reproducers for the wrapped-sh chain (execvp),
+`execlp("sh", "sh", "-c", "...", NULL)` (execlp variadic form),
+and `execvpe(...)` (env-override variant) — asserting eventLoss=0
+in each case.  Deferred to a follow-up milestone in io-mon; the
+minimal reproducer suite in this milestone's Phase D covers the
+practical shapes.

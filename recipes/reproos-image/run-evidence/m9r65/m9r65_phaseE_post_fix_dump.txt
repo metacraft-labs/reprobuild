@@ -1,0 +1,17 @@
+===== provider-compile (was eventLoss=182 on M9.R.64.2) =====
+#252975 process-exec pid=3575323 tid=3575323 path=/nix/store/74sind1d6vf2bfwd7yklg8chsvzqxmmq-coreutils-9.10/bin/rm detail=run=1783092944.2981682
+summary records=252975 processes=838 observations=252975 eventLoss=0
+
+===== meson-fetch-pixmanSource =====
+#1185 process-exec pid=3575333 tid=3575333 path=/nix/store/pnxiz967z73a45f4x7c1icldjaaqmlcp-gzip-1.14/bin/.gzip-wrapped detail=run=1783092978.6535962
+summary records=1185 processes=6 observations=1185 eventLoss=0
+
+===== mesonbin-setup-15268905b1316721 =====
+#3327 file-open pid=3575354 tid=3575354 path=/usr/lib/debug/.build-id/71/a5b4e8940373baefa263e8d75b504d0a5c60ee.debug result=-1 detail=run=1783092978.8747656
+summary records=3327 processes=20 observations=3324 eventLoss=3
+
+===== mesonbin-setup event-losses (3) =====
+#2 event-loss pid=0 tid=0 detail=unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+#3 backend-profile pid=0 tid=0 path=linux-preload-hooks-m14 detail=backend=linux-preload-hooks;supported=process,file-read,file-write,path-probe,directory-enumerate,event-loss,process-tree,process-exec,backend-provenance,file-create,file-truncate,file-append,rename,ipc-connect,observed-env,non-determinism;required=process,file-read,file-write,path-probe,directory-enumerate,event-loss,process-tree,process-exec,backend-provenance,file-create,file-truncate,file-append,rename,ipc-connect,observed-env,non-determinism;evidenceComplete=true
+#48 event-loss pid=3575335 tid=3575335 result=186 detail=libc raw syscall unsupported nr=186 run=1783092978.8747656
+#277 event-loss pid=3575335 tid=3575335 result=186 detail=libc raw syscall unsupported nr=186 run=1783092978.8747656
