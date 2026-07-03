@@ -289,11 +289,22 @@
             # with "could not load: libzstd.so.1" (M1's healthz/cache-info gate
             # never transferred a payload, so it only surfaced under the M2
             # cross-host substitute test).
+            #
+            # clingo is the same story: repro_solver's Nim bindings dlopen()
+            # libclingo.so by bare leaf name at runtime (see build_apps.sh's
+            # .rodata-bake guard that clears NIX_LDFLAGS/LD_LIBRARY_PATH), so it
+            # is not DT_NEEDED and the shrink strips any clingo rpath too.
+            # Append clingo's lib dir alongside zstd so every reprobuild binary
+            # (repro, repro-binary-cache, repro-binary-cache-client — the latter
+            # two are overrideAttrs of this derivation and inherit this
+            # postFixup) resolves its clingo dlopen via its own DT_RPATH, with no
+            # external LD_LIBRARY_PATH. This lets the nixos-modules
+            # `mcl-repro-deploy-agent` unit drop its LD_LIBRARY_PATH workaround.
             postFixup = ''
               for b in "$out"/bin/*; do
                 if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
                   ${pkgs.patchelf}/bin/patchelf --force-rpath \
-                    --set-rpath "$orig''${orig:+:}${pkgs.zstd.out}/lib" "$b"
+                    --set-rpath "$orig''${orig:+:}${pkgs.zstd.out}/lib:${pkgs.clingo}/lib" "$b"
                 fi
               done
             '';
