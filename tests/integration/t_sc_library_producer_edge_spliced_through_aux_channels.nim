@@ -224,9 +224,20 @@ created_at = "2026-07-02T00:00:00Z"
       # ---- Build the consumer. The SC-3 pre-pass must build ../libprod first
       # and splice its realized library + header dirs onto the aux channels so
       # the consumer's cc action links + loads the freshly-built library. ----
+      # Hermetic action-cache root: this heavy test drives ``repro build``, which
+      # otherwise shares the developer's ``~/.cache/repro/action-cache``. A
+      # co-tenant-bloated shared cache (multi-GB) makes the build wedge on a
+      # full-file scan. Point ``repro build`` at a fresh empty cache under this
+      # test's scratch (highest-precedence ``--action-cache-root`` flag,
+      # ``repro_cli_support.nim:377``) so the test is immune to that bloat and
+      # does not pollute the shared cache. Test hygiene only; no production
+      # cache-behavior change.
+      let cacheRoot = absolutePath(scratch / "action-cache-root")
+      createDir(cacheRoot)
       let cmd = q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
         " --tool-provisioning=path --daemon=off --log=quiet" &
-        " --progress=quiet --report=none"
+        " --progress=quiet --report=none" &
+        " --action-cache-root=" & q(cacheRoot)
       checkpoint("running: " & cmd)
       let (code, output) = run(cmd, repoRoot)
       checkpoint("exit=" & $code)
