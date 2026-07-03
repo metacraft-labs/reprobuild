@@ -137,10 +137,14 @@ proc removeIfExists(path: string) =
     removeFile(path)
 
 proc cacheRecordsSize(cacheRoot: string): int =
-  let path = cacheRoot / "action-cache" / "action-results.records"
-  if not fileExists(path):
+  # Per-edge store: the record footprint is the sum of every `hot-records/*`
+  # file (there is no global append-log anymore).
+  let dir = cacheRoot / "action-cache" / "hot-records"
+  if not dirExists(dir):
     return 0
-  int(getFileSize(path))
+  for kind, path in walkDir(dir):
+    if kind == pcFile:
+      result += int(getFileSize(path))
 
 proc reportPolicy(formatName, reportPath: string): DependencyGatheringPolicy =
   DependencyGatheringPolicy(

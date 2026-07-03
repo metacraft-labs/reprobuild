@@ -56,15 +56,35 @@ proc writeU32Le(value: uint32): string =
   result[2] = char((value shr 16) and 0xff'u32)
   result[3] = char((value shr 24) and 0xff'u32)
 
-proc checkActionRecordsFrame(recordsPath: string) =
+proc perEdgeRecordPath(cacheRoot: string; weak: ContentDigest): string =
+  cacheRoot / "action-cache" / "hot-records" / perEdgeRecordFileName(weak)
+
+proc checkPerEdgeRecordFrame(recordsPath: string) =
+  ## The authoritative per-edge file is an `RBPE` container (magic + version
+  ## + record count) whose first contained record is the existing `RBAR`
+  ## full-record frame.
   check fileExists(recordsPath)
   let raw = readFile(recordsPath)
-  check raw.len >= 12
-  if raw.len >= 12:
-    let payloadLen = int(readU32Le(raw, 0))
+  check raw.len >= 10
+  if raw.len >= 10:
+    check raw[0 .. 3] == "RBPE"
+    let count = int(readU32Le(raw, 6))
+    check count >= 1
+    let payloadLen = int(readU32Le(raw, 10))
     check payloadLen >= 6
-    check raw.len >= 4 + payloadLen + 4
-    check raw[4 .. 7] == "RBAR"
+    check raw.len >= 14 + payloadLen + 4
+    check raw[14 .. 17] == "RBAR"
+
+proc perEdgeRecordsBytes(cacheRoot: string): int =
+  ## Total on-disk size of every per-edge record file, i.e. the whole
+  ## record store's footprint under the per-edge layout. Used where the
+  ## old tests measured `action-results.records` size.
+  let dir = cacheRoot / "action-cache" / "hot-records"
+  if not dirExists(dir):
+    return 0
+  for kind, path in walkDir(dir):
+    if kind == pcFile:
+      result += int(getFileSize(path))
 
 suite "integration_action_cache_fingerprint_policies":
   when isNixSupported:
@@ -91,7 +111,7 @@ suite "integration_action_cache_fingerprint_policies":
         check not record.inputs[0].hasLocalHash
         check record.outputs.len == 1
         check readBlob(cas, record.outputs[0].blob) == asBytes("fixture-output\nalpha\n")
-        checkActionRecordsFrame(reproRoot / "action-cache" / "action-results.records")
+        checkPerEdgeRecordFrame(perEdgeRecordPath(reproRoot, weakFor("timestamp")))
 
         removeIfExists(outputPath)
         var reloaded = openActionCache(reproRoot / "action-cache")
@@ -188,12 +208,13 @@ suite "integration_action_cache_fingerprint_policies":
         check cutoff.record.inputs[0].metadata == observeFile(inputPath, ffpHybrid).metadata
         cas.restoreOutputs(cutoff.record, root)
         check readFile(outputPath) == "fixture-output\nalpha\n"
-        let recordsSizeAfterCutoff = getFileInfo(reproRoot / "action-cache" /
-          "action-results.records").size
+        let recordsSizeAfterCutoff = getFileInfo(
+          perEdgeRecordPath(reproRoot, weakFor("hybrid"))).size
         let refreshedHit = cache.lookupActionResult(cas, weakFor("hybrid"), ffpHybrid)
         check refreshedHit.status == aclHit
-        check getFileInfo(reproRoot / "action-cache" /
-          "action-results.records").size == recordsSizeAfterCutoff
+        check getFileInfo(
+          perEdgeRecordPath(reproRoot, weakFor("hybrid"))).size ==
+          recordsSizeAfterCutoff
 
         block noHashFastPath:
           let fastRoot = tempRoot / "hybrid-fast-path"
@@ -289,15 +310,27 @@ suite "integration_action_cache_fingerprint_policies":
         createDir(oversizedRoot)
         let oversizedCas = openLocalCas(oversizedReproRoot / "cas")
         var oversizedCache = openActionCache(oversizedReproRoot / "action-cache")
+        # Hand-write a corrupt per-edge file: valid RBPE header claiming one
+        # record whose inner RBAR frame length is oversized. The decoder must
+        # ignore it (no records → clean miss), never trust the length.
+        let oversizedWeak = weakFor("oversized-action-record")
         let oversizedFrameLen = uint32(64 * 1024 * 1024 + 1)
-        writeFile(oversizedReproRoot / "action-cache" / "action-results.records",
-          writeU32Le(oversizedFrameLen))
+        var corrupt = "RBPE"
+        corrupt.add(writeU32Le(1'u32)[0 .. 1])       # version (u16) = 1
+        corrupt.add(writeU32Le(1'u32))               # record count = 1
+        corrupt.add(writeU32Le(oversizedFrameLen))   # inner frame length
+        createDir(oversizedReproRoot / "action-cache" / "hot-records")
+        writeFile(perEdgeRecordPath(oversizedReproRoot, oversizedWeak), corrupt)
 
         let lookup = oversizedCache.lookupActionResult(oversizedCas,
-          weakFor("oversized-action-record"), ffpChecksum)
+          oversizedWeak, ffpChecksum)
         check lookup.status == aclMissNoRecord
 
-      block hotMetadataRecordSurvivesAppendLogDamage:
+      block perEdgeRecordSurvivesGlobalLogDamage:
+        # The former global `action-results.*` files no longer exist. A build
+        # that reads an edge's record must go through its per-edge file, and
+        # stray legacy global files (or a damaged one) must not affect it:
+        # `openActionCache` ignores-then-deletes them on open.
         let hotRoot = tempRoot / "hot-metadata"
         let hotReproRoot = hotRoot / ".repro"
         let hotActionRoot = hotRoot / "action"
@@ -311,14 +344,19 @@ suite "integration_action_cache_fingerprint_policies":
         discard hotCache.recordActionResult(hotCas, weakFor("hot-metadata-record"),
           ffpHybrid, [inputPath], ["out.txt"], hotActionRoot)
         hotCache.flushHotIndex()
-        check fileExists(hotReproRoot / "action-cache" / "action-results.hot.index")
+        # The per-edge file exists; no global append-log/index is created.
+        check fileExists(perEdgeRecordPath(hotReproRoot, weakFor("hot-metadata-record")))
+        check not fileExists(hotReproRoot / "action-cache" / "action-results.hot.index")
 
+        # Plant a damaged legacy global file. Re-opening must delete it and
+        # still serve the edge from its per-edge file.
         writeFile(hotReproRoot / "action-cache" / "action-results.records",
           "truncated full action cache")
         var hotReloaded = openActionCache(hotReproRoot / "action-cache")
-        let defaultMiss = hotReloaded.lookupActionResult(hotCas,
+        check not fileExists(hotReproRoot / "action-cache" / "action-results.records")
+        let defaultHit = hotReloaded.lookupActionResult(hotCas,
           weakFor("hot-metadata-record"), ffpHybrid, verifyOutputBlobs = false)
-        check defaultMiss.status == aclMissNoRecord
+        check defaultHit.status == aclHit
         let hotHit = hotReloaded.lookupActionResult(hotCas,
           weakFor("hot-metadata-record"), ffpHybrid, verifyOutputBlobs = false,
           allowMetadataOnlyHit = true)

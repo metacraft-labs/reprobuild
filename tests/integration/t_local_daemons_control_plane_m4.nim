@@ -106,23 +106,40 @@ proc normalizedActionEvidenceSummary(reportPath, directProject,
         directProject, daemonProject)
     })
 
-proc actionCacheRecordsPath(tempRoot: string): string =
-  tempRoot / "action-cache" / "action-cache" / "action-results.records"
+proc actionCacheRecordsDir(tempRoot: string): string =
+  tempRoot / "action-cache" / "action-cache" / "hot-records"
 
-proc countFramedActionCacheRecords(path: string): int =
+proc u32Le(raw: string; pos: int): int =
+  ord(raw[pos]) or
+    (ord(raw[pos + 1]) shl 8) or
+    (ord(raw[pos + 2]) shl 16) or
+    (ord(raw[pos + 3]) shl 24)
+
+proc countFramedRecordsInPerEdgeFile(path: string): int =
+  # A per-edge file is: "RBPE" + u16 version + u32 count + count *
+  # (u32 frameLen + frame + u32 tail). Count the intact contained records.
   let raw = readFile(path)
-  var pos = 0
-  while pos + 8 <= raw.len:
-    let length =
-      ord(raw[pos]) or
-      (ord(raw[pos + 1]) shl 8) or
-      (ord(raw[pos + 2]) shl 16) or
-      (ord(raw[pos + 3]) shl 24)
+  if raw.len < 10 or raw[0 .. 3] != "RBPE":
+    return 0
+  let declared = u32Le(raw, 6)
+  var pos = 10
+  for _ in 0 ..< declared:
+    if pos + 8 > raw.len:
+      break
+    let length = u32Le(raw, pos)
     pos += 4
     if length <= 0 or pos + length + 4 > raw.len:
       break
     pos += length + 4
     inc result
+
+proc countFramedActionCacheRecords(dir: string): int =
+  # Total records across every per-edge file — the whole-store record count.
+  if not dirExists(dir):
+    return 0
+  for kind, path in walkDir(dir):
+    if kind == pcFile:
+      result += countFramedRecordsInPerEdgeFile(path)
 
 proc assertRunQuotaReport(output, socket: string) =
   let reportPath = valueAfter(output, "buildReport:")
@@ -295,12 +312,12 @@ suite "Local daemons/control-plane M4 daemon-hosted builds":
     check normalizedActionEvidenceSummary(directReport, directProject,
       daemonProject) == normalizedActionEvidenceSummary(daemonReport,
       directProject, daemonProject)
-    check fileExists(actionCacheRecordsPath(directRoot))
-    check fileExists(actionCacheRecordsPath(daemonRoot))
+    check dirExists(actionCacheRecordsDir(directRoot))
+    check dirExists(actionCacheRecordsDir(daemonRoot))
     let directRecordCount = countFramedActionCacheRecords(
-      actionCacheRecordsPath(directRoot))
+      actionCacheRecordsDir(directRoot))
     let daemonRecordCount = countFramedActionCacheRecords(
-      actionCacheRecordsPath(daemonRoot))
+      actionCacheRecordsDir(daemonRoot))
     check directRecordCount > 0
     check directRecordCount == daemonRecordCount
 

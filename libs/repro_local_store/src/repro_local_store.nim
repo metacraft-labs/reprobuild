@@ -78,18 +78,15 @@ type
 
   ActionCache* = object
     root*: string
-    recordsPath*: string
+    # Directory holding the authoritative per-edge record files. Each edge
+    # (keyed by its weak fingerprint via `digestFileName`) owns exactly one
+    # file `hot-records/<key>` containing that edge's bounded record set
+    # (<= MaxRecordsPerWeakFingerprint path-sets). There is no global
+    # append-only log anymore; every write is a temp-file + atomic-rename
+    # rewrite of a single edge's file, so cross-edge contention is impossible
+    # and independent concurrent builds of the same edge converge on an
+    # equivalent file via rename() (Action-Cache-Per-Edge-Store.md §2, §3).
     hotRoot: string
-    hotRecordsPath: string
-    hotIndexPath: string
-    loadedAllRecords: bool
-    hotLoaded: bool
-    hotIndexDirty: bool
-    hotIndexRaw: seq[byte]
-    hotIndexRawValid: bool
-    byWeak: Table[string, seq[ActionResultRecord]]
-    hotByWeak: Table[string, ActionResultRecord]
-    hotInputs: seq[FileFingerprint]
 
   FileMetadataCache* = object
     entries: Table[string, FileMetadata]
@@ -117,10 +114,6 @@ type
     message*: string
     changedInputPath*: string
 
-  HotIndexDecode = object
-    records: Table[string, ActionResultRecord]
-    inputs: seq[FileFingerprint]
-
   HotMetadataProbe* = object
     weakFingerprint*: ContentDigest
     policy*: FileFingerprintPolicy
@@ -141,12 +134,13 @@ type
 const
   ActionRecordMagic = "RBAR"
   ActionRecordVersion = 3'u16
-  ActionHotRecordMagic = "RBAH"
-  ActionHotRecordVersion = 1'u16
-  ActionHotIndexMagic = "RBHI"
-  ActionHotIndexVersion = 1'u16
+  # Per-edge record file: a small self-describing container holding the
+  # edge's bounded record set. Each contained record is the existing
+  # `RBAR` full-record frame, so producers/consumers (incl. the peer cache)
+  # stay byte-compatible with `encodeActionResultRecord`.
+  PerEdgeFileMagic = "RBPE"
+  PerEdgeFileVersion = 1'u16
   RecordTailMask = 0xffff_ffff'u64
-  ActionCacheCompactThreshold = 256 * 1024
   MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
   AllFilePermissions {.used.} = {fpUserExec, fpUserWrite, fpUserRead,
@@ -282,6 +276,13 @@ proc digestKey(digest: ContentDigest): string =
 proc digestFileName(digest: ContentDigest): string =
   $ord(digest.algorithm) & "-" & $ord(digest.domain) & "-" &
     toHex(digest.bytes) & ".rbar"
+
+proc perEdgeRecordFileName*(weak: ContentDigest): string =
+  ## Name of the authoritative per-edge record file for `weak` inside the
+  ## cache's `hot-records/` directory. Exposed so callers (GC/retention,
+  ## tooling, tests) can locate an individual edge's file without
+  ## duplicating the naming scheme.
+  digestFileName(weak)
 
 when defined(windows):
   # Minimal binding to GetFileAttributesExW so fingerprintMetadata can collect
@@ -695,50 +696,9 @@ proc metadataOnly(input: FileFingerprint): FileFingerprint =
     metadata: input.metadata,
     hasLocalHash: false)
 
-proc encodeHotRecord(record: ActionResultRecord): seq[byte] =
-  result.add(byte(ord(ActionHotRecordMagic[0])))
-  result.add(byte(ord(ActionHotRecordMagic[1])))
-  result.add(byte(ord(ActionHotRecordMagic[2])))
-  result.add(byte(ord(ActionHotRecordMagic[3])))
-  result.writeU16Le(ActionHotRecordVersion)
-  result.writeDigest(record.weakFingerprint)
-  result.add(byte(ord(record.policy)))
-  result.writeU32Le(uint32(record.inputs.len))
-  for input in record.inputs:
-    result.writeString(input.path)
-    result.add(byte(ord(input.policy)))
-    result.writeMetadata(input.metadata)
-
-proc decodeHotRecord(payload: openArray[byte]): ActionResultRecord =
-  if payload.len < 6:
-    raiseEnvelopeError(eeMalformed, "truncated action hot record")
-  for i in 0 ..< 4:
-    if payload[i] != byte(ord(ActionHotRecordMagic[i])):
-      raiseEnvelopeError(eeUnknownMagic, "unknown action hot record magic")
-  var pos = 4
-  let version = readU16Le(payload, pos)
-  if version != ActionHotRecordVersion:
-    raiseEnvelopeError(eeUnsupportedVersion, "unsupported action hot record version")
-  result.weakFingerprint = readDigest(payload, pos)
-  let policy = readByte(payload, pos)
-  if policy > byte(ord(ffpHybrid)):
-    raiseEnvelopeError(eeMalformed, "invalid hot record policy")
-  result.policy = FileFingerprintPolicy(policy)
-  result.outputPayloadKind = opkMetadataOnly
-  let inputCount = int(readU32Le(payload, pos))
-  result.inputs = newSeq[FileFingerprint](inputCount)
-  for i in 0 ..< inputCount:
-    result.inputs[i].path = readString(payload, pos)
-    let inputPolicy = readByte(payload, pos)
-    if inputPolicy > byte(ord(ffpHybrid)):
-      raiseEnvelopeError(eeMalformed, "invalid hot input policy")
-    result.inputs[i].policy = FileFingerprintPolicy(inputPolicy)
-    result.inputs[i].metadata = readMetadata(payload, pos)
-    result.inputs[i].hasLocalHash = false
-  if pos != payload.len:
-    raiseEnvelopeError(eeMalformed, "trailing action hot record bytes")
-
 proc hotRecordPath(cache: ActionCache; weak: ContentDigest): string =
+  ## Authoritative per-edge record file for `weak`. One file per edge; it
+  ## holds the edge's full bounded record set (<= MaxRecordsPerWeakFingerprint).
   cache.hotRoot / digestFileName(weak)
 
 proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
@@ -753,568 +713,273 @@ proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
 proc recordTail(payload: openArray[byte]): uint32 =
   uint32(localHash(payload).value and RecordTailMask)
 
-proc appendFramedPayload(path: string; payload: openArray[byte]) =
-  var frame: seq[byte] = @[]
-  frame.writeU32Le(uint32(payload.len))
-  frame.add(payload)
-  frame.writeU32Le(recordTail(payload))
-  var handle = open(extendedPath(path), fmAppend)
+proc encodePerEdgeFile(records: openArray[ActionResultRecord]): seq[byte] =
+  ## Serialize an edge's bounded record set into its per-edge container.
+  ## Each contained record is the existing `RBAR` full-record frame, so the
+  ## bytes are identical to what `encodeActionResultRecord` produces for a
+  ## single record.
+  result.add(byte(ord(PerEdgeFileMagic[0])))
+  result.add(byte(ord(PerEdgeFileMagic[1])))
+  result.add(byte(ord(PerEdgeFileMagic[2])))
+  result.add(byte(ord(PerEdgeFileMagic[3])))
+  result.writeU16Le(PerEdgeFileVersion)
+  result.writeU32Le(uint32(records.len))
+  for record in records:
+    let payload = encodeRecord(record)
+    result.writeU32Le(uint32(payload.len))
+    result.add(payload)
+    result.writeU32Le(recordTail(payload))
+
+proc decodePerEdgeFile(raw: openArray[byte]): seq[ActionResultRecord] =
+  ## Inverse of `encodePerEdgeFile`. Tolerates a truncated tail (a crashed
+  ## writer that lost the rename race leaves either the old file or a
+  ## complete new file; a torn body is treated as "stop at the last intact
+  ## record" rather than raising, matching the pre-existing frame reader).
+  if raw.len < 10:
+    return
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(PerEdgeFileMagic[i])):
+      return
+  var pos = 4
+  let version = readU16Le(raw, pos)
+  if version != PerEdgeFileVersion:
+    return
+  let count = int(readU32Le(raw, pos))
+  for _ in 0 ..< count:
+    if pos + 8 > raw.len:
+      break
+    let length = int(readU32Le(raw, pos))
+    if length < 0 or length > MaxActionRecordFrameBytes or pos + length + 4 > raw.len:
+      break
+    let payload = raw[pos .. pos + length - 1]
+    pos += length
+    let tail = readU32Le(raw, pos)
+    if tail != recordTail(payload):
+      break
+    try:
+      result.add(decodeRecord(payload))
+    except EnvelopeError:
+      break
+
+proc perEdgeRecordFileIsIntact*(raw: openArray[byte]): bool =
+  ## Strict validator: true iff `raw` is a byte-complete per-edge file — a
+  ## valid RBPE header whose declared record count is fully present and every
+  ## contained RBAR frame decodes with a matching tail and no trailing bytes.
+  ## Unlike `decodePerEdgeFile` (which stops at the first torn frame), this
+  ## rejects a torn/interleaved file. Used to prove atomicity: an atomic
+  ## rename never publishes a file that fails this check; a truncate-then-write
+  ## can. An empty file is treated as "not yet an intact record file".
+  if raw.len == 0:
+    return false
+  if raw.len < 10:
+    return false
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(PerEdgeFileMagic[i])):
+      return false
+  var pos = 4
+  if readU16Le(raw, pos) != PerEdgeFileVersion:
+    return false
+  let count = int(readU32Le(raw, pos))
+  for _ in 0 ..< count:
+    if pos + 8 > raw.len:
+      return false
+    let length = int(readU32Le(raw, pos))
+    if length < 0 or length > MaxActionRecordFrameBytes or
+        pos + length + 4 > raw.len:
+      return false
+    let payload = raw[pos .. pos + length - 1]
+    pos += length
+    if readU32Le(raw, pos) != recordTail(payload):
+      return false
+    try:
+      discard decodeRecord(payload)
+    except EnvelopeError:
+      return false
+  pos == raw.len
+
+proc loadPerEdgeRecords(cache: ActionCache; weak: ContentDigest):
+    seq[ActionResultRecord] =
+  ## Read the single authoritative `hot-records/<key>` file for `weak`.
+  ## O(1) file open — never a whole-cache scan.
+  let path = cache.hotRecordPath(weak)
+  if not fileExists(extendedPath(path)):
+    return
   try:
-    handle.write(byteString(frame))
-  finally:
-    handle.close()
+    result = decodePerEdgeFile(bytes(readFile(extendedPath(path))))
+  except OSError, IOError:
+    result = @[]
 
-proc ensureHotRecordsLoaded(cache: var ActionCache)
+proc writePerEdgeRecords(cache: ActionCache; weak: ContentDigest;
+                         records: openArray[ActionResultRecord]) =
+  ## Atomically publish an edge's record set: encode to a uniquely named
+  ## temp file, fsync-free `rename()` over `hot-records/<key>`. A rewrite of
+  ## exactly one edge's file, never an append. Concurrent independent builds
+  ## of the same edge each produce an equivalent file and the last rename
+  ## wins — convergence by construction (Action-Cache-Per-Edge-Store.md §2.1).
+  let finalPath = cache.hotRecordPath(weak)
+  createDir(extendedPath(cache.hotRoot))
+  let now = getTime()
+  let tmpPath = cache.hotRoot / (digestFileName(weak) & ".tmp." &
+    $getCurrentProcessId() & "." & $now.toUnix & "." & $now.nanosecond)
+  writeFile(extendedPath(tmpPath), byteString(encodePerEdgeFile(records)))
+  try:
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
+  except OSError:
+    if fileExists(extendedPath(tmpPath)):
+      removeFile(extendedPath(tmpPath))
+    raise
 
-proc appendHotRecord(cache: var ActionCache; record: ActionResultRecord) =
-  cache.ensureHotRecordsLoaded()
-  var hot = record
-  hot = hotMetadataRecord(record)
-  let payload = encodeHotRecord(hot)
-  appendFramedPayload(cache.hotRecordsPath, payload)
-  cache.hotByWeak[digestKey(record.weakFingerprint)] = hot
-  cache.hotIndexDirty = true
+proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
+  ## Merge `record` into its edge's bounded set (dedup by strong fingerprint,
+  ## keep the most recent MaxRecordsPerWeakFingerprint path-sets) and rewrite
+  ## the per-edge file atomically. Idempotent: re-installing an identical
+  ## record leaves the file byte-unchanged in content.
+  var records = cache.loadPerEdgeRecords(record.weakFingerprint)
+  var filtered: seq[ActionResultRecord] = @[]
+  for existing in records:
+    if existing.strongFingerprint != record.strongFingerprint:
+      filtered.add(existing)
+  filtered.add(record)
+  if filtered.len > MaxRecordsPerWeakFingerprint:
+    filtered = filtered[filtered.len - MaxRecordsPerWeakFingerprint .. ^1]
+  cache.writePerEdgeRecords(record.weakFingerprint, filtered)
 
 proc hotInputKey(input: FileFingerprint): string =
   input.path & "\0" & $ord(input.policy) & "\0" &
     $ord(input.metadata.kind) & "\0" & $input.metadata.sizeBytes & "\0" &
     $input.metadata.mtimeNs
 
-proc rebuildHotInputs(cache: var ActionCache) =
-  var seen = initHashSet[string]()
-  cache.hotInputs.setLen(0)
-  for key in cache.hotByWeak.keys:
-    for input in cache.hotByWeak[key].inputs:
-      let inputKey = hotInputKey(input)
-      if seen.contains(inputKey):
-        continue
-      seen.incl(inputKey)
-      cache.hotInputs.add(input)
-
-proc encodeHotIndex(records: Table[string, ActionResultRecord]): seq[byte] =
-  type
-    InputKey = object
-      path: string
-      policy: FileFingerprintPolicy
-      metadata: FileMetadata
-  var inputIds = initTable[string, uint32]()
-  var inputs: seq[InputKey] = @[]
-  var recordInputIds = initTable[string, seq[uint32]]()
-  for key in records.keys:
-    var ids: seq[uint32] = @[]
-    for input in records[key].inputs:
-      let inputKey = hotInputKey(input)
-      if not inputIds.hasKey(inputKey):
-        inputIds[inputKey] = uint32(inputs.len)
-        inputs.add(InputKey(path: input.path, policy: input.policy,
-          metadata: input.metadata))
-      ids.add(inputIds[inputKey])
-    recordInputIds[key] = ids
-
-  result.add(byte(ord(ActionHotIndexMagic[0])))
-  result.add(byte(ord(ActionHotIndexMagic[1])))
-  result.add(byte(ord(ActionHotIndexMagic[2])))
-  result.add(byte(ord(ActionHotIndexMagic[3])))
-  result.writeU16Le(ActionHotIndexVersion)
-  result.writeU32Le(uint32(inputs.len))
-  for input in inputs:
-    result.writeString(input.path)
-    result.add(byte(ord(input.policy)))
-    result.writeMetadata(input.metadata)
-  result.writeU32Le(uint32(records.len))
-  for key in records.keys:
-    let record = records[key]
-    result.writeDigest(record.weakFingerprint)
-    result.add(byte(ord(record.policy)))
-    let ids = recordInputIds[key]
-    result.writeU32Le(uint32(ids.len))
-    for id in ids:
-      result.writeU32Le(id)
-
-proc decodeHotIndex(payload: openArray[byte]): HotIndexDecode =
-  result.records = initTable[string, ActionResultRecord]()
-  if payload.len < 6:
-    raiseEnvelopeError(eeMalformed, "truncated action hot index")
-  for i in 0 ..< 4:
-    if payload[i] != byte(ord(ActionHotIndexMagic[i])):
-      raiseEnvelopeError(eeUnknownMagic, "unknown action hot index magic")
-  var pos = 4
-  let version = readU16Le(payload, pos)
-  if version != ActionHotIndexVersion:
-    raiseEnvelopeError(eeUnsupportedVersion, "unsupported action hot index version")
-  let inputCount = int(readU32Le(payload, pos))
-  var inputs = newSeq[FileFingerprint](inputCount)
-  for i in 0 ..< inputCount:
-    inputs[i].path = readString(payload, pos)
-    let policy = readByte(payload, pos)
-    if policy > byte(ord(ffpHybrid)):
-      raiseEnvelopeError(eeMalformed, "invalid hot index input policy")
-    inputs[i].policy = FileFingerprintPolicy(policy)
-    inputs[i].metadata = readMetadata(payload, pos)
-    inputs[i].hasLocalHash = false
-  let recordCount = int(readU32Le(payload, pos))
-  for _ in 0 ..< recordCount:
-    var record: ActionResultRecord
-    record.weakFingerprint = readDigest(payload, pos)
-    let policy = readByte(payload, pos)
-    if policy > byte(ord(ffpHybrid)):
-      raiseEnvelopeError(eeMalformed, "invalid hot index record policy")
-    record.policy = FileFingerprintPolicy(policy)
-    record.outputPayloadKind = opkMetadataOnly
-    let recordInputCount = int(readU32Le(payload, pos))
-    record.inputs = newSeq[FileFingerprint](recordInputCount)
-    for i in 0 ..< recordInputCount:
-      let inputId = int(readU32Le(payload, pos))
-      if inputId < 0 or inputId >= inputs.len:
-        raiseEnvelopeError(eeMalformed, "invalid hot index input reference")
-      record.inputs[i] = inputs[inputId]
-    result.records[digestKey(record.weakFingerprint)] = record
-  result.inputs = inputs
-  if pos != payload.len:
-    raiseEnvelopeError(eeMalformed, "trailing action hot index bytes")
-
-proc skipString(data: openArray[byte]; pos: var int) =
-  let length = int(readU32Le(data, pos))
-  if pos + length > data.len:
-    raiseEnvelopeError(eeMalformed, "truncated string")
-  pos += length
-
-proc parseHotIndexLayout(data: openArray[byte];
-                         inputOffsets: var seq[int];
-                         recordStart: var int;
-                         recordCount: var int) =
-  if data.len < 6:
-    raiseEnvelopeError(eeMalformed, "truncated action hot index")
-  for i in 0 ..< 4:
-    if data[i] != byte(ord(ActionHotIndexMagic[i])):
-      raiseEnvelopeError(eeUnknownMagic, "unknown action hot index magic")
-  var pos = 4
-  let version = readU16Le(data, pos)
-  if version != ActionHotIndexVersion:
-    raiseEnvelopeError(eeUnsupportedVersion, "unsupported action hot index version")
-  let inputCount = int(readU32Le(data, pos))
-  inputOffsets = newSeq[int](inputCount)
-  for i in 0 ..< inputCount:
-    inputOffsets[i] = pos
-    skipString(data, pos)
-    discard readByte(data, pos)
-    discard readMetadata(data, pos)
-  recordCount = int(readU32Le(data, pos))
-  recordStart = pos
-
-proc hotIndexInputUnchanged(data: openArray[byte]; inputOffset: int;
-                            metadataCache: ptr FileMetadataCache): bool =
-  var pos = inputOffset
-  let path = readString(data, pos)
-  discard readByte(data, pos)
-  let recordedMetadata = readMetadata(data, pos)
-  fingerprintMetadata(path, metadataCache) == recordedMetadata
-
-proc scanHotIndexMetadataInputs(data: openArray[byte];
-                                probes: openArray[HotMetadataProbe];
-                                metadataCache: ptr FileMetadataCache = nil):
-                                HotMetadataScan =
-  if probes.len == 0:
-    return HotMetadataScan(status: hmssHit)
-  try:
-    var inputOffsets: seq[int]
-    var recordStart = 0
-    var recordCount = 0
-    parseHotIndexLayout(data, inputOffsets, recordStart, recordCount)
-    result.recordCount = recordCount
-    result.inputCount = inputOffsets.len
-    var matched = newSeq[bool](probes.len)
-    var neededInputIds = initHashSet[uint32]()
-    var pos = recordStart
-    for _ in 0 ..< recordCount:
-      let weak = readDigest(data, pos)
-      let policyByte = readByte(data, pos)
-      if policyByte > byte(ord(ffpHybrid)):
-        raiseEnvelopeError(eeMalformed, "invalid hot index record policy")
-      let policy = FileFingerprintPolicy(policyByte)
-      let recordInputCount = int(readU32Le(data, pos))
-      var needed = false
-      for i, probe in probes:
-        if probe.weakFingerprint == weak and probe.policy == policy:
-          matched[i] = true
-          needed = true
-      for _ in 0 ..< recordInputCount:
-        let inputId = readU32Le(data, pos)
-        if int(inputId) < 0 or int(inputId) >= inputOffsets.len:
-          raiseEnvelopeError(eeMalformed, "invalid hot index input reference")
-        if needed:
-          neededInputIds.incl(inputId)
-    if pos != data.len:
-      raiseEnvelopeError(eeMalformed, "trailing action hot index bytes")
-    for item in matched:
-      if not item:
-        return HotMetadataScan(status: hmssMissingRecord,
-          recordCount: recordCount, inputCount: inputOffsets.len)
-    for inputId in neededInputIds:
-      inc result.checkedInputCount
-      if not hotIndexInputUnchanged(data, inputOffsets[int(inputId)],
-                                    metadataCache):
-        result.status = hmssInputChanged
-        return
-    result.status = hmssHit
-  except EnvelopeError:
-    result.status = hmssCorrupt
-
 proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
                                           probes: openArray[HotMetadataProbe];
                                           metadataCache: ptr FileMetadataCache = nil):
                                           HotMetadataScan =
-  if not cache.hotIndexRawValid:
-    return HotMetadataScan(status: hmssUnavailable)
+  ## Batch "are all these edges still cache hits" check, now served by
+  ## reading each probe's single authoritative `hot-records/<key>` file
+  ## instead of scanning a global index. Cost is O(probes), page-cached,
+  ## never a whole-cache scan. Result semantics match the former index
+  ## scan: hmssHit iff every probe has a matching record whose inputs are
+  ## all metadata-unchanged; hmssMissingRecord if any probe has no matching
+  ## record; hmssInputChanged if a matched record's input changed.
   if probes.len == 0:
     return HotMetadataScan(status: hmssHit)
-  # Read into an owned buffer rather than mmap. The hot index is the
-  # shared user-level action cache (~/Library/Caches/repro/...) which
-  # is written by every `repro build` invocation system-wide.
-  # ``writeFile`` opens with O_TRUNC, so a concurrent rewrite from a
-  # sibling test or build in the same suite would truncate the file
-  # underneath an mmap'd reader and dereferences past the new EOF
-  # raise SIGBUS on macOS (Nim's std/os.removeDir junction-hazard
-  # parallel — same class of unrecoverable signal). ``readFile``
-  # snapshots the bytes into our own seq, so the decode never touches
-  # the kernel mapping again. The trade-off is a single allocation +
-  # copy of the file; the hot index is bounded by
-  # ``ActionCacheCompactThreshold`` and the cost is amortised across
-  # the build's many cache hits.
-  try:
-    let raw = bytes(readFile(extendedPath(cache.hotIndexPath)))
-    if raw.len <= 0:
-      return HotMetadataScan(status: hmssUnavailable)
-    scanHotIndexMetadataInputs(raw, probes, metadataCache)
-  except OSError, IOError:
-    if cache.hotIndexRaw.len > 0:
-      return scanHotIndexMetadataInputs(cache.hotIndexRaw, probes, metadataCache)
-    HotMetadataScan(status: hmssUnavailable)
-
-proc writeHotIndex(cache: ActionCache) =
-  writeFile(extendedPath(cache.hotIndexPath), byteString(encodeHotIndex(cache.hotByWeak)))
-
-proc sourceNewerThanIndex(sourcePath, indexPath: string): bool =
-  if not fileExists(extendedPath(sourcePath)):
-    return false
-  if not fileExists(extendedPath(indexPath)):
-    return true
-  getLastModificationTime(extendedPath(sourcePath)) > getLastModificationTime(extendedPath(indexPath))
-
-proc tryLoadHotIndexRaw(cache: var ActionCache) =
-  cache.hotIndexRaw.setLen(0)
-  cache.hotIndexRawValid = false
-  if fileExists(extendedPath(cache.hotIndexPath)) and
-      not sourceNewerThanIndex(cache.hotRecordsPath, cache.hotIndexPath):
-    try:
-      cache.hotIndexRawValid = getFileSize(extendedPath(cache.hotIndexPath)) > 0
-    except OSError:
-      cache.hotIndexRawValid = false
-
-proc loadHotRecords(cache: var ActionCache) =
-  cache.hotLoaded = true
-  cache.hotByWeak.clear()
-  if cache.hotIndexRawValid:
-    # Snapshot the hot index into an owned buffer before decoding. The
-    # shared user-level action cache (the default
-    # ~/Library/Caches/repro/... root on macOS, $XDG_CACHE_HOME/repro/...
-    # on Linux) is shared by every ``repro build`` invocation on the
-    # host — the test suite alone triggers dozens of overlapping
-    # truncate+rewrite cycles through ``writeHotIndex`` (which uses
-    # ``writeFile`` → open(O_TRUNC)). An mmap'd reader of the same
-    # file would dereference past the new EOF and take SIGBUS on
-    # macOS the moment a concurrent writer truncated the file. The
-    # observed failure mode landed inside ``decodeHotIndex`` at
-    # ``readString`` / ``readU64Le`` even though the application-level
-    # bounds checks pass against ``mapping.size`` — the kernel
-    # mapping itself is no longer backed once the file shrinks.
-    # ``readFile`` copies the bytes once into our own seq[byte], after
-    # which the decode is purely in-process memory.
-    try:
-      let raw = bytes(readFile(extendedPath(cache.hotIndexPath)))
-      if raw.len > 0:
-        let decoded = decodeHotIndex(raw)
-        cache.hotByWeak = decoded.records
-        cache.hotInputs = decoded.inputs
-        return
-    except EnvelopeError, OSError, IOError:
-      cache.hotByWeak.clear()
-      cache.hotInputs.setLen(0)
-  if not fileExists(extendedPath(cache.hotRecordsPath)):
-    return
-  let raw = bytes(readFile(extendedPath(cache.hotRecordsPath)))
-  var pos = 0
-  while pos + 8 <= raw.len:
-    let length = int(readU32Le(raw, pos))
-    if length < 0 or pos + length + 4 > raw.len:
-      break
-    let payloadStart = pos
-    let payloadEnd = pos + length - 1
-    let payload = raw[payloadStart .. payloadEnd]
-    pos += length
-    let tail = readU32Le(raw, pos)
-    if tail != recordTail(payload):
-      break
-    try:
-      let record = decodeHotRecord(payload)
-      cache.hotByWeak[digestKey(record.weakFingerprint)] = record
-    except EnvelopeError:
-      discard
-  if getFileSize(extendedPath(cache.hotRecordsPath)) >= ActionCacheCompactThreshold:
-    cache.rebuildHotInputs()
-    cache.writeHotIndex()
-    cache.tryLoadHotIndexRaw()
-    cache.hotIndexDirty = false
-  else:
-    cache.rebuildHotInputs()
-
-proc ensureHotRecordsLoaded(cache: var ActionCache) =
-  if not cache.hotLoaded:
-    cache.loadHotRecords()
+  var checkedInputs = 0
+  var totalRecords = 0
+  for probe in probes:
+    let records = cache.loadPerEdgeRecords(probe.weakFingerprint)
+    var matched = false
+    for record in records:
+      inc totalRecords
+      if record.weakFingerprint == probe.weakFingerprint and
+          record.policy == probe.policy:
+        matched = true
+    if not matched:
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords)
+    for record in records:
+      if record.weakFingerprint == probe.weakFingerprint and
+          record.policy == probe.policy:
+        for input in record.inputs:
+          inc checkedInputs
+          if fingerprintMetadata(input.path, metadataCache) != input.metadata:
+            return HotMetadataScan(status: hmssInputChanged,
+              recordCount: totalRecords, checkedInputCount: checkedInputs)
+  HotMetadataScan(status: hmssHit, recordCount: totalRecords,
+    checkedInputCount: checkedInputs)
 
 proc readHotRecord(cache: var ActionCache; weak: ContentDigest):
     tuple[found: bool; record: ActionResultRecord] =
-  cache.ensureHotRecordsLoaded()
-  let key = digestKey(weak)
-  if cache.hotByWeak.hasKey(key):
-    return (found: true, record: cache.hotByWeak[key])
-  let path = cache.hotRecordPath(weak)
-  if not fileExists(extendedPath(path)):
-    return
-  try:
-    result.record = decodeHotRecord(bytes(readFile(extendedPath(path))))
-    if result.record.weakFingerprint == weak:
-      result.found = true
-  except EnvelopeError:
-    discard
-
-proc appendRecord(cache: var ActionCache; record: ActionResultRecord) =
-  let payload = encodeRecord(record)
-  var frame: seq[byte] = @[]
-  frame.writeU32Le(uint32(payload.len))
-  frame.add(payload)
-  frame.writeU32Le(recordTail(payload))
-  var handle = open(extendedPath(cache.recordsPath), fmAppend)
-  try:
-    handle.write(byteString(frame))
-  finally:
-    handle.close()
-  let key = digestKey(record.weakFingerprint)
-  var records = cache.byWeak.mgetOrPut(key, @[])
-  records.add(record)
-  if records.len > MaxRecordsPerWeakFingerprint:
-    records = records[records.len - MaxRecordsPerWeakFingerprint .. ^1]
-  cache.byWeak[key] = records
-  cache.appendHotRecord(record)
+  ## Read the newest metadata-only view of the edge's record from its single
+  ## per-edge file. Returns the most recent record (last in the bounded set)
+  ## matching `weak`, downcast to metadata-only so callers observe the same
+  ## shape the old hot store returned.
+  let records = cache.loadPerEdgeRecords(weak)
+  for i in countdown(records.high, 0):
+    if records[i].weakFingerprint == weak:
+      return (found: true, record: hotMetadataRecord(records[i]))
 
 proc appendActionResultRecord*(cache: var ActionCache;
                                record: ActionResultRecord) {.gcsafe.} =
-  ## Public wrapper over the internal `appendRecord` so the peer-cache
-  ## reader bridge can install a peer-fetched record into the local
-  ## action cache. Idempotency with respect to already-present records
-  ## is bounded by `MaxRecordsPerWeakFingerprint` — repeated installs
-  ## for the same weak fingerprint are coalesced by the internal
-  ## append.
+  ## Public bridge so the peer-cache reader can install a peer-fetched
+  ## record into the local action cache. Writes the edge's per-edge file
+  ## (temp + atomic rename), never an append. Idempotency is bounded by
+  ## `MaxRecordsPerWeakFingerprint`; re-installing an identical record
+  ## leaves the file's record set unchanged.
   {.cast(gcsafe).}:
-    cache.appendRecord(record)
+    cache.writePerEdgeRecord(record)
 
-proc readFully(file: File; data: var seq[byte]; length: int): bool =
-  data.setLen(length)
-  if length == 0:
-    return true
-  var offset = 0
-  while offset < length:
-    let readCount = file.readBuffer(addr data[offset], length - offset)
-    if readCount <= 0:
-      data.setLen(0)
-      return false
-    offset += readCount
-  true
+proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
+    seq[ActionResultRecord] =
+  ## Full-record lookup for one edge: read the single authoritative
+  ## `hot-records/<key>` file, keeping only records whose weak fingerprint
+  ## matches (defensive against a hash collision on the filename). Never a
+  ## whole-cache scan.
+  for record in cache.loadPerEdgeRecords(weak):
+    if record.weakFingerprint == weak:
+      result.add(record)
+      if result.len > MaxRecordsPerWeakFingerprint:
+        result = result[result.len - MaxRecordsPerWeakFingerprint .. ^1]
 
-proc payloadWeakFingerprint(payload: openArray[byte]):
-    tuple[ok: bool; weak: ContentDigest] =
-  if payload.len < 6:
-    return
-  for i in 0 ..< 4:
-    if payload[i] != byte(ord(ActionRecordMagic[i])):
-      return
-  var pos = 4
-  try:
-    let version = readU16Le(payload, pos)
-    if version notin {2'u16, ActionRecordVersion}:
-      return
-    result.weak = readDigest(payload, pos)
-    result.ok = true
-  except EnvelopeError:
-    discard
+const LegacyGlobalStoreFiles = [
+  "action-results.records",
+  "action-results.hot.records",
+  "action-results.hot.index"]
 
-proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest): seq[ActionResultRecord] =
-  let key = digestKey(weak)
-  if not fileExists(extendedPath(cache.recordsPath)):
-    return
-  var handle: File
-  if not open(handle, extendedPath(cache.recordsPath), fmRead):
-    return
-  try:
-    var header: seq[byte] = @[]
-    var payload: seq[byte] = @[]
-    var tailBytes: seq[byte] = @[]
-    while true:
-      header.setLen(4)
-      let headerRead = handle.readBuffer(addr header[0], 4)
-      if headerRead == 0:
-        break
-      if headerRead != 4:
-        break
-      var pos = 0
-      let length = int(readU32Le(header, pos))
-      if length < 0 or length > MaxActionRecordFrameBytes:
-        break
-      if not handle.readFully(payload, length):
-        break
-      if not handle.readFully(tailBytes, 4):
-        break
-      pos = 0
-      let tail = readU32Le(tailBytes, pos)
-      if tail != recordTail(payload):
-        break
+proc removeLegacyGlobalStore(root: string) =
+  ## One-time ignore-then-delete of the pre-existing global append-log files
+  ## (Action-Cache-Per-Edge-Store.md §3). Best-effort: a busy concurrent
+  ## reader on another host/process may still hold one open; a failed unlink
+  ## is harmless because the per-edge store is authoritative and the global
+  ## files are never read.
+  for name in LegacyGlobalStoreFiles:
+    let path = root / name
+    if fileExists(extendedPath(path)):
       try:
-        let payloadWeak = payloadWeakFingerprint(payload)
-        if payloadWeak.ok and digestKey(payloadWeak.weak) == key:
-          let record = decodeRecord(payload)
-          result.add(record)
-          if result.len > MaxRecordsPerWeakFingerprint:
-            result = result[result.len - MaxRecordsPerWeakFingerprint .. ^1]
-      except EnvelopeError:
+        removeFile(extendedPath(path))
+      except OSError:
         discard
-  finally:
-    handle.close()
-
-proc loadRecords(cache: var ActionCache) =
-  cache.byWeak.clear()
-  cache.loadedAllRecords = true
-  if not fileExists(extendedPath(cache.recordsPath)):
-    return
-  var handle: File
-  if not open(handle, extendedPath(cache.recordsPath), fmRead):
-    return
-  try:
-    var header: seq[byte] = @[]
-    var payload: seq[byte] = @[]
-    var tailBytes: seq[byte] = @[]
-    while true:
-      header.setLen(4)
-      let headerRead = handle.readBuffer(addr header[0], 4)
-      if headerRead == 0:
-        break
-      if headerRead != 4:
-        break
-      var pos = 0
-      let length = int(readU32Le(header, pos))
-      if length < 0 or length > MaxActionRecordFrameBytes:
-        break
-      if not handle.readFully(payload, length):
-        break
-      if not handle.readFully(tailBytes, 4):
-        break
-      pos = 0
-      let tail = readU32Le(tailBytes, pos)
-      if tail != recordTail(payload):
-        break
-      try:
-        let record = decodeRecord(payload)
-        let key = digestKey(record.weakFingerprint)
-        cache.byWeak.mgetOrPut(key, @[]).add(record)
-      except EnvelopeError:
-        discard
-  finally:
-    handle.close()
-
-proc compactLoadedRecords(cache: var ActionCache) =
-  var frameBytes: seq[byte] = @[]
-  cache.hotByWeak.clear()
-  cache.hotInputs.setLen(0)
-  cache.hotLoaded = true
-  for key in cache.byWeak.keys:
-    var records = cache.byWeak[key]
-    if records.len > MaxRecordsPerWeakFingerprint:
-      records = records[records.len - MaxRecordsPerWeakFingerprint .. ^1]
-      cache.byWeak[key] = records
-    for record in records:
-      let payload = encodeRecord(record)
-      frameBytes.writeU32Le(uint32(payload.len))
-      frameBytes.add(payload)
-      frameBytes.writeU32Le(recordTail(payload))
-    if records.len > 0:
-      cache.hotByWeak[digestKey(records[^1].weakFingerprint)] =
-        hotMetadataRecord(records[^1])
-  writeFile(extendedPath(cache.recordsPath), byteString(frameBytes))
-  cache.writeHotIndex()
-  cache.tryLoadHotIndexRaw()
-
-proc maybeCompactRecords(cache: var ActionCache) =
-  if not fileExists(extendedPath(cache.recordsPath)):
-    return
-  if getFileSize(extendedPath(cache.recordsPath)) < ActionCacheCompactThreshold:
-    return
-  compactLoadedRecords(cache)
 
 proc openActionCache*(root: string): ActionCache =
   result.root = root
-  result.recordsPath = root / "action-results.records"
   result.hotRoot = root / "hot-records"
-  result.hotRecordsPath = root / "action-results.hot.records"
-  result.hotIndexPath = root / "action-results.hot.index"
-  result.loadedAllRecords = false
-  result.hotLoaded = false
-  result.hotIndexDirty = false
-  result.hotIndexRaw = @[]
-  result.hotIndexRawValid = false
-  result.byWeak = initTable[string, seq[ActionResultRecord]]()
-  result.hotByWeak = initTable[string, ActionResultRecord]()
-  result.hotInputs = @[]
   createDir(extendedPath(result.root))
   createDir(extendedPath(result.hotRoot))
-  if not fileExists(extendedPath(result.recordsPath)):
-    writeFile(extendedPath(result.recordsPath), "")
-  if not fileExists(extendedPath(result.hotRecordsPath)):
-    writeFile(extendedPath(result.hotRecordsPath), "")
-  result.tryLoadHotIndexRaw()
+  # One-time cleanup: the old global append-log store is gone. Ignore any
+  # pre-existing `action-results.*` files and delete them on open so a
+  # migrated cache root stops growing without a re-init.
+  removeLegacyGlobalStore(result.root)
 
 proc flushHotIndex*(cache: var ActionCache) =
-  if not cache.hotIndexDirty:
-    return
-  cache.ensureHotRecordsLoaded()
-  cache.rebuildHotInputs()
-  cache.writeHotIndex()
-  cache.tryLoadHotIndexRaw()
-  cache.hotIndexDirty = false
+  ## Retained as a public no-op for callers that flushed the former
+  ## write-behind hot index. Per-edge records are now written synchronously
+  ## and atomically at record time, so there is nothing to flush. (The
+  ## shared-memory write-back tier is AC-2; this proc gains real work there.)
+  discard
 
 proc lookupHotMetadataRecord*(cache: var ActionCache; weak: ContentDigest;
                               policy: FileFingerprintPolicy):
     Option[ActionResultRecord] =
-  cache.ensureHotRecordsLoaded()
+  ## Metadata-only lookup served from the edge's single per-edge file.
   if policy notin {ffpTimestamp, ffpHybrid}:
     return none(ActionResultRecord)
-  let key = digestKey(weak)
-  if not cache.hotByWeak.hasKey(key):
+  let hot = cache.readHotRecord(weak)
+  if not hot.found or hot.record.policy != policy:
     return none(ActionResultRecord)
-  let record = cache.hotByWeak[key]
-  if record.policy != policy:
-    return none(ActionResultRecord)
-  some(record)
+  some(hot.record)
 
 proc hotMetadataInputsUnchanged*(cache: var ActionCache;
                                  metadataCache: ptr FileMetadataCache = nil): bool =
-  cache.ensureHotRecordsLoaded()
-  for input in cache.hotInputs:
-    if fingerprintMetadata(input.path, metadataCache) != input.metadata:
-      return false
+  ## Retained for API compatibility. There is no whole-cache hot-input set
+  ## to scan anymore; per-edge input freshness is checked by the batch
+  ## `scanHotIndexMetadataInputsUnchanged` / per-record helpers. With no
+  ## global set to iterate, this trivially holds.
   true
 
 proc hotMetadataRecordCount*(cache: var ActionCache): int =
-  cache.ensureHotRecordsLoaded()
-  cache.hotByWeak.len
+  ## The former whole-cache count is meaningless without a global hot store.
+  ## Returning 0 makes the build engine's `actions.len == count` shortcut
+  ## never fire, so it always takes the per-record path (which reads each
+  ## edge's file) — semantics-preserving, no whole-cache scan.
+  0
 
 proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
                                        metadataCache: ptr FileMetadataCache = nil): bool =
@@ -1328,12 +993,6 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
       if fingerprintMetadata(input.path, metadataCache) != input.metadata:
         return false
   true
-
-proc ensureLoadedRecords(cache: var ActionCache) =
-  if cache.loadedAllRecords:
-    return
-  cache.loadRecords()
-  cache.maybeCompactRecords()
 
 proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
@@ -1371,7 +1030,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
         CasBlobRef()
     result.outputs.add(OutputBlob(path: path, metadata: sourceMetadata,
       blob: blob, permissions: perms))
-  cache.appendRecord(result)
+  cache.writePerEdgeRecord(result)
 
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
@@ -1440,7 +1099,6 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          verifyOutputBlobs = true;
                          allowMetadataOnlyHit = false;
                          metadataCache: ptr FileMetadataCache = nil): ActionCacheLookup =
-  let key = digestKey(weak)
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
@@ -1459,14 +1117,7 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
         message: "input metadata changed: " & changedInput,
         changedInputPath: changedInput)
 
-  let records =
-    if cache.loadedAllRecords:
-      if cache.byWeak.hasKey(key):
-        cache.byWeak[key]
-      else:
-        @[]
-    else:
-      cache.loadRecordsForWeak(weak)
+  let records = cache.loadRecordsForWeak(weak)
   if records.len == 0:
     return ActionCacheLookup(status: aclMissNoRecord,
       message: "no cache record for weak fingerprint")
@@ -1507,7 +1158,7 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
         return ActionCacheLookup(status: aclRejectedCorruptOutput,
           record: candidate, message: err.msg)
     if hybridCutoff:
-      cache.appendRecord(candidate)
+      cache.writePerEdgeRecord(candidate)
       return ActionCacheLookup(status: aclHybridCutoff, record: candidate)
     return ActionCacheLookup(status: aclHit, record: candidate)
   if sawInputChange:

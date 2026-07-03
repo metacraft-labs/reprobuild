@@ -131,8 +131,17 @@ proc metricCount(path, name: string): int =
 proc waitForTimestampBoundary() =
   sleep(1100)
 
-proc actionHotIndexPath(tempRoot: string): string =
-  tempRoot / "action-cache" / "action-cache" / "action-results.hot.index"
+proc perEdgeRecordsExist(tempRoot: string): bool =
+  ## The per-edge store replaces the former global hot index: a completed
+  ## build must have written at least one authoritative `hot-records/<key>`
+  ## file (and no global `action-results.*` files).
+  let dir = tempRoot / "action-cache" / "action-cache" / "hot-records"
+  if not dirExists(dir):
+    return false
+  for kind, path in walkDir(dir):
+    if kind == pcFile:
+      return true
+  false
 
 suite "Local daemons/control-plane M6 warm no-op path":
   when isNixSupported:
@@ -170,7 +179,7 @@ suite "Local daemons/control-plane M6 warm no-op path":
         "repro file metadata warm revalidate") > 0
       check metricCount(warmBenchmark,
         "repro file metadata warm unchanged") > 0
-      check fileExists(actionHotIndexPath(tempRoot))
+      check perEdgeRecordsExist(tempRoot)
 
     test "integration_direct_and_daemon_share_incremental_records":
       let tempRoot = createTempDir("repro-daemon-m6-shared", "")
@@ -187,7 +196,7 @@ suite "Local daemons/control-plane M6 warm no-op path":
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
         directBenchmark, daemonMode = "off"), repoRoot())
       check executedActions(directBenchmark) == 2
-      check fileExists(actionHotIndexPath(tempRoot))
+      check perEdgeRecordsExist(tempRoot)
       check readFile(projectRoot / "dist" / "output-0.txt") == "input 0\n"
       check readFile(projectRoot / "dist" / "output-1.txt") == "input 1\n"
 

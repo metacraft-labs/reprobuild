@@ -3093,9 +3093,13 @@ proc durableEvidence(path: string): string =
     "unavailable"
 
 proc actionCacheDurableEvidence(root: string): string =
-  durableEvidence(root / "action-results.hot.records") & "|" &
-    durableEvidence(root / "action-results.hot.index") & "|" &
-    durableEvidence(root / "action-results.records")
+  # The action cache is now the per-edge disk store (no global append-log).
+  # An `ActionCache` holds no in-memory record snapshot — every lookup reads
+  # the current `hot-records/<key>` file straight from disk — so a warmed
+  # handle can never go stale against on-disk writes. We key the warm entry
+  # on the `hot-records` directory's own metadata purely to reuse the handle
+  # (and its `createDir` work) for the same root within a process.
+  durableEvidence(root / "hot-records")
 
 proc warmActionCacheFor(root: string): WarmActionCache =
   let evidence = actionCacheDurableEvidence(root)
