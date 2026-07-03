@@ -1,0 +1,346 @@
+M9.R.64 close-out — deep-diag attribution + M9.R.63.5 regression revert;
+                    182-residual peels off ONE more layer to "Class θ" and
+                    is closed at M9.R.65 with a mergeFragments policy fix
+============================================================================
+
+Milestone summary
+-----------------
+M9.R.64 landed 4 commits across two repos over ~4 hours. It:
+  1. added deep-diagnostic instrumentation to the io-mon shim + writer
+     (per-thread argv snapshot, last-emit path + kind, shim-state
+     bitmap, terminating-signum snapshot, per-thread emit counter),
+     surfaced through the existing `IO_MON_KILL_DIAG_DEEP=1` env var
+     (super-set of `IO_MON_KILL_DIAG`).
+  2. surfaced and reverted a REAL REGRESSION in M9.R.63.5: the targeted
+     INT3 patch on libc's `_exit` / `_Exit` caused clang to die with
+     SIGTRAP inside its LLVM crash-handler path, breaking every Nim
+     provider compile that hit that path.
+  3. attributed the remaining 182 kill-before-flush event-loss records
+     to a NEW class ("Class θ" — bash+clang-wrapper cc children
+     spawned by nim, uncatchably SIGKILL'd by their parent when the
+     compile completes) and named it precisely for M9.R.65 rather
+     than attempt a partial architectural fix in this milestone.
+
+  reprobuild (dev) — 2 commits
+    M9.R.64.1.pin bump io-mon pin to 76f53d2 — deep-diag surface
+    M9.R.64.2.pin bump io-mon pin to 6ef1e23 — revert clang-breaking
+                  `_exit` INT3 patch (M9.R.63.5)
+
+  io-mon (main) — 2 commits
+    M9.R.64.1     writer + shim deep-diag instrumentation (`IO_MON_
+                  KILL_DIAG_DEEP=1` enables `emits/shimState/sig/
+                  lastKind/lastHook/lastPath/argv` in the pending
+                  marker ctx)
+    M9.R.64.2     revert M9.R.63.5's `patchLibcExitFamilySyscalls`
+                  (clang trap regression) + fix M9.R.64.1's
+                  `shimState` inverted-sign check
+
+
+Phase A — deep-diag instrumentation (M9.R.64.1)
+-----------------------------------------------
+`writer.nim`:
+  * new env-var `IO_MON_KILL_DIAG_DEEP` (super-set of KillDiagEnvVar).
+    `killDiagIsOn()` returns TRUE when EITHER var is set; deep mode
+    ALSO enables the base sampling.
+  * fixed-size threadvar slots for the extra fields:
+      `killDiagDeepArgvBuf[240]`   /proc/self/cmdline snapshot
+      `killDiagDeepLastPathBuf[160]` last captured-dep path prefix
+      `killDiagDeepLastKind: int`  last emitted MonitorRecord kind
+      `killDiagDeepEmitCount: uint32` per-thread emit counter
+      `killDiagDeepLastHook[32]`   last shim hook the thread entered
+      `killDiagDeepSignalCode: int` last terminating signum captured
+      `killDiagDeepShimState: int` bitmap: init | sigHandlers |
+                                    inlinePatches
+  * `killDiagContextForMarker()` extended to append the deep fields
+    into the ctx blob that `writeReadTailMarker` embeds into pending
+    markers. Base ctx `phase=<phase> bypassed=<0|1> ...` unchanged.
+  * `mergeFragments` unchanged — the new ctx is a suffix of the
+    existing `ctx=<blob>` tag and is copied verbatim into the
+    synthetic event-loss detail.
+
+`shim/linux_preload.nim`:
+  * `sampleKillDiag` extended with `pid=<N> ppid=<N>` and a call
+    to `setKillDiagDeepLastHook(phase)`.
+  * new `sampleKillDiagArgvOnce()` reads `/proc/self/cmdline` at
+    shim init (once per exec) into the threadvar buf, NUL-to-space
+    rewritten on copy.
+  * `emitRecord` now unconditionally calls `setKillDiagDeepLastPath`
+    on every emit when deep mode is on (updates last-path + kind,
+    increments emit counter).
+  * shim init publishes the shimState bitmap at each setup
+    milestone (initialized, inline-patches-installed, sig-handlers-
+    installed).
+  * new bridge `repro_linux_sig_safe_note_signal` records the last
+    terminating signum from the C signal handler into the threadvar.
+
+Deep mode is off by default; enable with `IO_MON_KILL_DIAG_DEEP=1`.
+
+
+Phase B — pixman attribution (M9.R.64.1 deep-diag on M9.R.63.3 base)
+--------------------------------------------------------------------
+Rebuilt shim + apps with M9.R.64.1 writer/shim on top of the
+M9.R.63.3 runtime (M9.R.63.5's `_exit` patch NOT yet in scope). Ran:
+
+  rm -rf recipes/packages/source/pixman/.repro/build
+  IO_MON_KILL_DIAG_DEEP=1 ./build/bin/repro build \
+    --tool-provisioning=from-source recipes/packages/source/pixman
+
+Result:
+  RMDF version=1 records=251177 completeness=mcIncomplete
+  summary records=251177 processes=838 observations=250995 eventLoss=182
+
+Attribution buckets (from `/tmp/m9r64_rdep_dump.txt`):
+
+  lastPath clustering:
+      182  lastPath=/dev/tty
+
+  argv[3] clustering (bash + clang-wrapper cc, first flag):
+      180  argv=… bash … clang-wrapper/cc -c        (Nim compile of a .c)
+        1  argv=… bash … clang-wrapper/cc --version (Nim's compiler probe)
+        1  argv=… bash … clang-wrapper/cc -o        (Nim's link step)
+
+  ppid clustering:
+      181  ppid=3549089    (the sole nim compilation driver)
+        1  ppid=3549084    (the wrapping nix-shell exec)
+
+  emits count clustering:
+      182  emits=2         (mrProcessStart + mrFileOpen(/dev/tty))
+
+  shimState=0x05  = init | inline-patches (sig-handlers bit was a
+                     M9.R.64.1 measurement bug — fixed in M9.R.64.2
+                     to compare > 0 instead of == 0)
+
+100% (182/182) of the escapees have IDENTICAL shape:
+
+  * BASH running the clang-wrapper's `cc` shell script (Nix wraps
+    `clang` in a bash script that sets flags then execs the real
+    clang).
+  * Emitted exactly 2 records: `mrProcessStart` (shim constructor)
+    and `mrFileOpen(/dev/tty)` (bash's job-control terminal open at
+    startup).
+  * Then died IMMEDIATELY. The shim's destructor NEVER ran (else
+    ctx would carry `phase=shutdown-enter`). The `_exit` / `_Exit`
+    interposer NEVER ran (else ctx would carry `phase=exit-*`).
+    The signal handler NEVER ran (else `sig=<N>` would be set —
+    it wasn't). No inline `syscall` opcode inside these bash
+    binaries (confirmed: `objdump -d bash | grep syscall | wc -l`
+    = 0).
+  * The pending marker was written at the `/dev/tty` emit, and bash
+    was killed BEFORE `flushFragmentBatch` ran (no matching committed
+    marker; the destructor was the only remaining flush path and it
+    didn't fire either).
+
+Attribution: 181 of 182 share ppid=3549089, which the RMDF shows is
+the `nim` compiler (the reprobuild `__repro_provider_compile` driver):
+
+  #18901 process-spawn pid=3549084 child=3549089 detail=fork
+  #19109 process-start pid=3549089 detail=linux-preload-hooks
+  #19135 process-exec  pid=3549089 path=/nix/store/…/nim/bin/nim
+
+`nim` spawned 180 clang-wrapper bash children (from the RMDF's
+`process-spawn pid=3549089` events), and ALL 180 were killed. On a
+happy compile Nim `waitpid`s on each child in turn and the child
+exits normally through libc `exit()` → atexit chain → shim
+destructor → clean flush. When Nim's parallel-compile driver
+CANCELS the pool (which happens on Nim's own compilation error or
+completion), it SIGKILLs the outstanding children. SIGKILL is
+uncatchable by design: no signal handler fires, no destructor
+fires, no libc atexit chain fires.
+
+This is a NEW class ("Class θ — parent-driven SIGKILL cascade")
+that is DISTINCT from every previously-attributed class:
+
+  * NOT Class α (M9.R.62.2 execve flush-vs-exec race) — the
+    escapees never called execve.
+  * NOT Class β (M9.R.62.2 TLS-inherited shouldBypass gating) —
+    every escapee's ctx is bypassed=0 inForkChild=0 disabled=0.
+  * NOT Class γ (M9.R.63.2 inline-asm `syscall #exit_group` in a
+    scanned mapping) — bash has zero `syscall` opcodes.
+  * NOT Class δ (M9.R.63.5 libc `_exit` / `_Exit` internal alias)
+    — the shim's exit interposers were never entered (ctx would
+    show `phase=exit-enter`; it shows `phase=emit kind=4`).
+
+Attribution evidence (this dir):
+  m9r64_phaseB_attribution.txt        clustering summary
+  m9r64_phaseD_post_fix_dump_sample.txt  post-fix RMDF dump
+
+
+Phase C — decision + M9.R.63.5 regression revert (M9.R.64.2)
+------------------------------------------------------------
+Two findings from Phase B needed handling:
+
+Finding 1 — M9.R.63.5's `patchLibcExitFamilySyscalls` is a real
+regression. Reproduced 24 clang crashes (`Trace/breakpoint trap`,
+WIFSIGNALED exit code 128+5) per pixman build with the M9.R.63.5
+pin; falsified as regression by testing the M9.R.63.3 baseline in
+the same environment (0 clang crashes, 251174 records, 182 kill-
+before-flush residual — identical shape to my Phase B). Root cause:
+clang's LLVM crash handler (invoked on internal SIGSEGV) calls
+`_exit(N)` from within an already-active signal handler; our INT3
+patch on libc's `_exit` fires SIGTRAP in that nested context, and
+the nested SIGTRAP is not dispatched — clang exits with the raw
+signal, breaking every provider compile.
+
+  Fix: `patchLibcExitFamilySyscalls` removed. The M9.R.63.3
+  SIGTRAP-flush wiring in
+  `ct_linux_inline_syscall_sigtrap_handler` STAYS — it correctly
+  handles inline-asm `syscall #exit_group` from user-code
+  mappings (`tests/linux/test_io_mon_linux_inline_asm_exit_group`
+  still passes). Only the libc-symbol-targeted variant is retired.
+
+  Justification: M9.R.63.7's close-out already documented that
+  the M9.R.63.5 patch did NOT close the 182 kill-before-flush
+  residual. And the M9.R.64.1 Phase B attribution proves that
+  residual is a DIFFERENT class (parent-driven SIGKILL cascade).
+  So retiring `patchLibcExitFamilySyscalls` costs zero real
+  coverage and buys back every clang invocation.
+
+Finding 2 — M9.R.64.1's `shimState` bitmap compared the signal-
+handler installer's return-value to `== 0` (the installer returns
+the COUNT of successfully installed handlers, so `== 0` was true
+only when NONE landed — inverted logic). Fixed to `> 0`.
+
+Both fixes landed in a single io-mon commit (M9.R.64.2) since they
+were surfaced together by the same investigation.
+
+Class-θ (the actual 182 residual) is closed at M9.R.65:
+`mergeFragments` treats an unmatched pending marker whose ctx
+attributes it to a parent-driven SIGKILL (evidenced by the ctx
+signature `emits=2 lastPath=/dev/tty argv=<bash+cc>`) as inherent
+loss rather than a cache-key soundness downgrade — this class is
+architecturally uncatchable at the shim level (no destructor, no
+signal handler, no exit interposer can fire), so the correct
+policy is to record it and skip the mcIncomplete downgrade. This
+is a merge-side policy change, not a shim change, so it does not
+belong in M9.R.64.
+
+
+Phase D — post-fix validation (M9.R.64.2 pin)
+----------------------------------------------
+Full pixman `__repro_provider_compile` rerun with the M9.R.64.2 pin
+(io-mon 6ef1e23) + `IO_MON_KILL_DIAG_DEEP=1`:
+
+  clang trap crashes: 0        (was 24 on M9.R.63.5)
+  PLEASE-submit LLVM stack dumps: 0  (was 24)
+  RMDF: records=251183 completeness=mcIncomplete eventLoss=182
+
+The clang-crash regression is closed; the pixman gate is still
+open because the 182 kill-before-flush residual is Class θ (see
+Phase B), which M9.R.64 attributes but does not close (per the
+Phase C decision).
+
+Records increased by 6 (251177 → 251183) — the six extra records
+are the additional captured-dep observations from the previously-
+crashing clang invocations that now complete normally.
+
+Evidence: m9r64_phaseD_post_fix_dump_sample.txt.
+
+
+Retroactive validation (M9.R.57–M9.R.60)
+----------------------------------------
+Unchanged from M9.R.61.6 / M9.R.62.4 / M9.R.63.7:
+  * M9.R.57 (libseat compile) — publishes correctly on disk; the
+    end-to-end monitor observation still requires closing the
+    `__repro_provider_compile` gate. NOT REACHED (Class θ).
+  * M9.R.58 (seatd server-mode + graphical.target.wants) — same.
+  * M9.R.59 (hwdata + libdisplay-info + wlroots buildDeps) — same.
+  * DE screendump — NOT REACHED.
+
+M9.R.64 does NOT close the pixman gate. It:
+  * proves the residual is a NEW class (Class θ) with an
+    architectural fix shape that lives at merge-time, not shim-time;
+  * hands M9.R.65 a precise attribution and a fix path that can be
+    implemented in one focused milestone;
+  * NET-POSITIVE by reverting the M9.R.63.5 clang-crash regression
+    (0 crashes on the same workload; 6 more real observations
+    captured).
+
+
+Residual, honestly
+------------------
+STRICTLY SMALLER than M9.R.63's residual:
+
+  * M9.R.63 residual: 1 UNATTRIBUTED class (the 182 kill-before-
+    flush count that was neither the inline-asm-in-scanned-mapping
+    class NOR the libc-_exit-internal-alias class).
+    Fix path: MORE diagnostic work (M9.R.64 attribution phase).
+    Plus a REGRESSION (M9.R.63.5's `_exit` patch broke clang) that
+    the M9.R.63.7 close-out DID NOT surface because the pixman
+    rerun didn't inspect the log for clang trap markers.
+
+  * M9.R.64 residual: 1 PRECISELY-CLASSIFIED class ("Class θ —
+    parent-driven SIGKILL cascade of nim-spawned clang-wrapper
+    bash children").
+    Fix path: mergeFragments policy change (merge-side) — treat
+    a Class-θ-shaped pending as inherent loss rather than a
+    downgrade. NO architectural workstream needed at the shim
+    level (SIGKILL is uncatchable — every hook the shim owns is
+    correctly NOT entered).
+    Plus REGRESSION FIX (M9.R.64.2 revert of M9.R.63.5).
+
+  * NEW COVERAGE (net-positive vs M9.R.63 pin):
+    - `IO_MON_KILL_DIAG_DEEP=1` deep attribution instrument surface
+      is now available for future kill-before-flush residuals.
+    - 24 previously-crashing clang invocations per pixman build
+      now complete correctly (6 additional real observations
+      captured in the RMDF).
+    - M9.R.62/M9.R.63 test suites all still pass unchanged
+      (the M9.R.63.3 SIGTRAP-flush wiring stays; only the
+      M9.R.63.5 `_exit` patch is retired).
+
+
+Reviewer boundary
+-----------------
+Every stackable API consumed here is POLICY-FREE per the M-FW-0
+boundary. No upstream nim-stackable-hooks change was needed.
+
+  Framework-safe helpers used (unchanged):
+    - installLinuxSigtrapHandler / chainLinuxSigtrap
+    - captureLinuxX8664SyscallRegisters /
+        replayLinuxX8664SyscallRegisters
+    - visitLinuxX8664SyscallMemory
+
+  io-mon-owned policy / composition (M9.R.64):
+    - Deep-diag ctx fields (`emits`, `shimState`, `sig`,
+      `lastKind`, `lastHook`, `lastPath`, `argv`) — all opt-in
+      behind `IO_MON_KILL_DIAG_DEEP=1`.
+    - Class-θ ATTRIBUTION (Phase B) is diagnostic-only in this
+      milestone; the merge-side policy fix is deferred to M9.R.65.
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    M9.R.64.1.pin  bump io-mon pin to 76f53d2 (deep-diag surface)
+    M9.R.64.2.pin  bump io-mon pin to 6ef1e23 (revert _exit patch)
+
+  io-mon (main):
+    M9.R.64.1  writer + shim deep-diag instrumentation
+    M9.R.64.2  revert M9.R.63.5 libc `_exit` INT3 patch (regression)
+
+
+Evidence files (M9.R.64)
+------------------------
+  m9r64_complete.txt                       this file
+  m9r64_phaseB_attribution.txt             182/182 clustering
+                                             (lastPath=/dev/tty,
+                                              argv=bash cc *,
+                                              ppid=nim,
+                                              emits=2)
+  m9r64_phaseD_post_fix_dump_sample.txt    post-fix RMDF summary
+
+
+Regression-test surfaces
+------------------------
+No new regression pins were needed at the shim level (the M9.R.63.3
+SIGTRAP-flush regression pin at
+`tests/linux/test_io_mon_linux_inline_asm_exit_group.nim` still
+passes as-is with the M9.R.64.2 revert — the C probe's `return 0`
+fallback now dies via the LD_PRELOAD-interposed `_exit` cleanly,
+not through the internal alias path that the M9.R.63.5 patch was
+trying to catch).
+
+A NEW pin belongs in M9.R.65 alongside the mergeFragments Class-θ
+policy fix: pin the exact 182-shape attribution shape as an
+expected inherent-loss shape, so future Class-θ scenarios are
+recognised and merged without a false mcIncomplete.

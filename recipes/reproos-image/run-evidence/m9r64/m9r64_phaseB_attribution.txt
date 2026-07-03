@@ -1,0 +1,23 @@
+#18941 event-loss pid=3549085 tid=3549085 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=emit kind=4 bypassed=0 inForkChild=0 disabled=0 pid=3549085 ppid=3549084 emits=2 shimState=0x05 lastKind=4 lastHook=emit kind=4 lastPath=/dev/tty argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc --version ]
+#72685 event-loss pid=3549103 tid=3549103 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=emit kind=4 bypassed=0 inForkChild=0 disabled=0 pid=3549103 ppid=3549089 emits=2 shimState=0x05 lastKind=4 lastHook=emit kind=4 lastPath=/dev/tty argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc -c -w -ferror-limit=3 -pthread -I/nix/store/szq2pqhcgygc2yihwxq7g2gskp5flz8m-libblake3-prefix/include -]
+#72773 event-loss pid=3549104 tid=3549104 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=emit kind=4 bypassed=0 inForkChild=0 disabled=0 pid=3549104 ppid=3549089 emits=2 shimState=0x05 lastKind=4 lastHook=emit kind=4 lastPath=/dev/tty argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc -c -w -ferror-limit=3 -pthread -I/nix/store/szq2pqhcgygc2yihwxq7g2gskp5flz8m-libblake3-prefix/include -]
+#72866 event-loss pid=3549106 tid=3549106 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=emit kind=4 bypassed=0 inForkChild=0 disabled=0 pid=3549106 ppid=3549089 emits=2 shimState=0x05 lastKind=4 lastHook=emit kind=4 lastPath=/dev/tty argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc -c -w -ferror-limit=3 -pthread -I/nix/store/szq2pqhcgygc2yihwxq7g2gskp5flz8m-libblake3-prefix/include -]
+#74342 event-loss pid=3549110 tid=3549110 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=emit kind=4 bypassed=0 inForkChild=0 disabled=0 pid=3549110 ppid=3549089 emits=2 shimState=0x05 lastKind=4 lastHook=emit kind=4 lastPath=/dev/tty argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc -c -w -ferror-limit=3 -pthread -I/nix/store/szq2pqhcgygc2yihwxq7g2gskp5flz8m-libblake3-prefix/include -]
+
+--- Full attribution summary ---
+Total kill-before-flush: 182
+
+lastPath clustering:
+    182 lastPath=/dev/tty
+
+argv[3] clustering:
+    180 argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc -c
+      1 argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc --version
+      1 argv=/nix/store/v8sa6r6q037ihghxfbwzjj4p59v2x0pv-bash-5.3p9/bin/bash /nix/store/hh6y3s72d21whp6q98h4dh0valxiaw69-clang-wrapper-21.1.8/bin/cc -o
+
+ppid clustering:
+    181 ppid=3549089
+      1 ppid=3549084
+
+emits count clustering:
+    182 emits=2
