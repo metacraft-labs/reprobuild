@@ -1,0 +1,59 @@
+RMDF version=1 records=251154 completeness=mcIncomplete
+#1 process-spawn pid=0 tid=0 child=3059971 detail=io-mon-root-spawn launcher-expected-root
+#2 backend-profile pid=0 tid=0 path=linux-preload-hooks-m14 detail=backend=linux-preload-hooks;supported=process,file-read,file-write,path-probe,directory-enumerate,event-loss,process-tree,process-exec,backend-provenance,file-create,file-truncate,file-append,rename,ipc-connect,observed-env,non-determinism;required=process,file-read,file-write,path-probe,directory-enumerate,event-loss,process-tree,process-exec,backend-provenance,file-create,file-truncate,file-append,rename,ipc-connect,observed-env,non-determinism;evidenceComplete=true
+#3 capability-gap pid=0 tid=0 path=adversarial-raw-syscall detail=backend=linux-preload-hooks;capability=adversarial-raw-syscall;required=false;reason=Linux LD_PRELOAD covers libc syscall(2), selected application inline syscall sites, and tracked anonymous executable mappings, but does not claim adversarial/direct raw-syscall completeness for excluded runtime-prefix DSOs, executable mappings outside the preload mmap lifecycle, or unclassified syscall families
+#4 capability-gap pid=0 tid=0 path=authorization-enforcement detail=backend=linux-preload-hooks;capability=authorization-enforcement;required=false;reason=Linux preload shim observes only and cannot authorize or deny operations
+#5 capability-gap pid=0 tid=0 path=endpoint-security detail=backend=linux-preload-hooks;capability=endpoint-security;required=false;reason=EndpointSecurity is macOS-only; Linux native backend is future eBPF work
+#6 capability-gap pid=0 tid=0 path=executable-mapping-lifecycle detail=backend=linux-preload-hooks;capability=executable-mapping-lifecycle;required=false;reason=Linux LD_PRELOAD scans executable mappings only when they are owned by the preload mmap/mprotect/munmap/mremap lifecycle; mappings created outside that lifecycle are not production-complete
+#7 capability-gap pid=0 tid=0 path=external-content detail=backend=linux-preload-hooks;capability=external-content;required=false;reason=Linux preload shim records libc-visible positioned/vector and zero-copy file movers, but broader external content channels and direct raw zero-copy syscalls are not advertised by this profile
+#8 capability-gap pid=0 tid=0 path=hybrid detail=backend=linux-preload-hooks;capability=hybrid;required=false;reason=hybrid native plus preload profile is not implemented
+#9 capability-gap pid=0 tid=0 path=library-load detail=backend=linux-preload-hooks;capability=library-load;required=false;reason=Linux preload shim does not yet emit library-load records
+#10 capability-gap pid=0 tid=0 path=path-identity detail=backend=linux-preload-hooks;capability=path-identity;required=false;reason=Linux preload shim records libc-visible hardlink creation source/alias and rename-staging final paths, but does not yet provide full pre-existing hardlink/inode alias or raw-mutation identity fidelity
+#11 capability-gap pid=0 tid=0 path=path-mutation detail=backend=linux-preload-hooks;capability=path-mutation;required=false;reason=Linux preload shim records libc-visible link/linkat and rename/renameat/renameat2 path mutations, but does not cover the full raw mutation surface yet
+#12 capability-gap pid=0 tid=0 path=symlink detail=backend=linux-preload-hooks;capability=symlink;required=false;reason=Linux preload shim does not yet normalize symlink/readlink as path mutations
+#13 process-start pid=3059971 tid=3059971 detail=linux-preload-hooks run=1783064024.7804782
+#14 time-read pid=3059971 tid=3059971 path=clock_gettime:1 detail=linux time run=1783064024.7804782
+#15 env-read pid=3059971 tid=3059971 path=REPRO_PROVIDER_NIMCACHE_SESSION detail=linux getenv run=1783064024.7804782
+#16 file-open pid=3059971 tid=3059971 path=/opt/repro/reprobuild/recipes/packages/source/pixman/.repro/build/repro/project-interface.rbsz result=93825013231024 detail=stdio:rbe run=1783064024.7804782
+#17 file-read pid=3059971 tid=3059971 path=/opt/repro/reprobuild/recipes/packages/source/pixman/.repro/build/repro/project-interface.rbsz result=4228 detail=run=1783064024.7804782
+#18 path-probe pid=3059971 tid=3059971 path=/opt/repro/reprobuild/recipes/packages/source/pixman/repro.nim probe=prExistingOther detail=run=1783064024.7804782
+#19 file-open pid=3059971 tid=3059971 path=/opt/repro/reprobuild/recipes/packages/source/pixman/repro.nim result=93825013231024 detail=stdio:rbe run=1783064024.7804782
+...
+(182 event-loss records — all identical shape, ctx=phase=init bypassed=0 inForkChild=0 disabled=0)
+...
+#18914 event-loss pid=3059972 tid=3059972 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+#72658 event-loss pid=3059977 tid=3059977 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+#72746 event-loss pid=3059978 tid=3059978 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+#72839 event-loss pid=3059980 tid=3059980 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+#74315 event-loss pid=3059984 tid=3059984 detail=process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+...
+#251126 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyz_frafbef.nim.c.o result=24 detail=run=1783064024.7804782
+#251127 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=648 detail=run=1783064024.7804782
+#251128 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=950 detail=run=1783064024.7804782
+#251129 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=888 detail=run=1783064024.7804782
+#251130 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=144 detail=run=1783064024.7804782
+#251131 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=216 detail=run=1783064024.7804782
+#251132 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=528 detail=run=1783064024.7804782
+#251133 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=72 detail=run=1783064024.7804782
+#251134 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fsszcrt.nim.c.o result=24 detail=run=1783064024.7804782
+#251135 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=648 detail=run=1783064024.7804782
+#251136 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=950 detail=run=1783064024.7804782
+#251137 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=888 detail=run=1783064024.7804782
+#251138 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=144 detail=run=1783064024.7804782
+#251139 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=216 detail=run=1783064024.7804782
+#251140 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=512 detail=run=1783064024.7804782
+#251141 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=72 detail=run=1783064024.7804782
+#251142 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@z..@f..@f..@f..@fyvof@ferceb_qfy_fgqyvo@ffep@ferceb_qfy_fgqyvo@fcnpxntrf@fyvoin.nim.c.o result=24 detail=run=1783064024.7804782
+#251143 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@zerceb.nim.c.o result=1680 detail=run=1783064024.7804782
+#251144 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@zerceb.nim.c.o result=352 detail=run=1783064024.7804782
+#251145 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@zerceb.nim.c.o result=528 detail=run=1783064024.7804782
+#251146 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@zerceb.nim.c.o result=1608 detail=run=1783064024.7804782
+#251147 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@zerceb.nim.c.o result=280 detail=run=1783064024.7804782
+#251148 file-read pid=3060807 tid=3060807 path=/tmp/nix-shell.ZGmFUx/repro-nimcache-provider/2b9ecd38b61bff80/@zerceb.nim.c.o result=168 detail=run=1783064024.7804782
+#251149 file-read pid=3060807 tid=3060807 path=/nix/store/lvwga6ivl1d4lnw0zis9ajs0rqx9gp4i-gcc-15.2.0/lib/gcc/x86_64-unknown-linux-gnu/15.2.0/crtendS.o result=48 detail=run=1783064024.7804782
+#251150 file-read pid=3060807 tid=3060807 path=/nix/store/lvwga6ivl1d4lnw0zis9ajs0rqx9gp4i-gcc-15.2.0/lib/gcc/x86_64-unknown-linux-gnu/15.2.0/crtendS.o result=4 detail=run=1783064024.7804782
+#251151 path-probe pid=3060807 tid=3060807 path=/opt/repro/reprobuild/recipes/packages/source/pixman/.repro/build/repro/provider/project-provider probe=prExistingOther detail=run=1783064024.7804782
+#251152 process-start pid=3060808 tid=3060808 detail=linux-preload-hooks run=1783064024.7804782
+#251153 process-start pid=3060808 tid=3060808 detail=linux-preload-hooks run=1783064024.7804782
+#251154 process-exec pid=3060808 tid=3060808 path=/nix/store/74sind1d6vf2bfwd7yklg8chsvzqxmmq-coreutils-9.10/bin/rm detail=run=1783064024.7804782
+summary records=251154 processes=838 observations=250972 eventLoss=182

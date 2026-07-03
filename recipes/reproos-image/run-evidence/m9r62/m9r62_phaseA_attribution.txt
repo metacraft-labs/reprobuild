@@ -1,0 +1,133 @@
+M9.R.62 Phase A: precise attribution of the 182 kill-before-flush residuals
+============================================================================
+
+Milestone
+---------
+M9.R.62.1 landed a per-thread diagnostic-context slot in io-mon writer.nim
+plus strategic sampling in the Linux LD_PRELOAD shim (fork enter + child
+branches, execve enter + pre/post flush, exit enter + bypass, shim init).
+The context is embedded into every ROUND-5 F read-tail-pending marker when
+`IO_MON_KILL_DIAG=1`, then extracted by mergeFragments into the synthetic
+kill-before-flush event-loss detail so the surviving loss records carry the
+shim's LAST-OBSERVED phase + shouldBypass state.
+
+Reproduction
+------------
+Working dir: eli-wsl `/opt/repro/reprobuild` at commit d6e0a916 (M9.R.62.1a
+pin bump). Rebuilt reprobuild apps + shim via `bash scripts/build_apps.sh`
+inside `nix develop` so the freshly-diagnosed io-mon shim was live. Then:
+
+  rm -rf recipes/packages/source/pixman/.repro/build
+  IO_MON_KILL_DIAG=1 ./build/bin/repro build \
+    --tool-provisioning=from-source recipes/packages/source/pixman
+
+The build failed at the same diagnostic as M9.R.60.D / M9.R.61.2:
+
+  daemon-hosted build failed: __repro_provider_compile asFailed
+  monitor depfile is incomplete
+
+RMDF summary:
+
+  RMDF version=1 records=251154 completeness=mcIncomplete
+  every loss record: kill-before-flush + diag-ctx
+
+Distinct ctx buckets (from `grep -oE 'diag-ctx=\[[^]]+\]' | sort | uniq -c`):
+
+    182 diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+
+Attribution — Candidates 2 and 3 are FALSIFIED
+----------------------------------------------
+100% (182/182) of escaping loss records carry `phase=init` with `bypassed=0
+inForkChild=0 disabled=0`. This unambiguously falsifies BOTH original
+hypotheses:
+
+  * Candidate 2 (execve flush-vs-exec-transition race):
+    FALSIFIED. If the execve hook had been entered, sampleKillDiag would
+    have overwritten "init" with "execve-enter" / "execve-bypassed" /
+    "execve-pre-flush" / "execve-post-flush". No escapee's ctx carries an
+    execve* phase.
+
+  * Candidate 3 (TLS-inherited shouldBypass gating):
+    FALSIFIED. If shouldBypass() were true at any transition point,
+    sampleKillDiag would have recorded bypassed=1 or inForkChild=1. Every
+    escapee's ctx is bypassed=0 AND inForkChild=0 AND disabled=0.
+
+Also inspected: every escapee's pid equals its tid — the dying thread is the
+process main thread, not a worker. This falsifies any hypothesis that
+worker-thread cleanup gaps are involved.
+
+A new class emerges (Candidate 4)
+---------------------------------
+The escape shape is: a process that
+  (a) started with the shim loaded (constructor ran → sampleKillDiag("init")
+      set the ctx; recordProcessStart emitted the linux-preload-hooks record);
+  (b) did reads (markReadingSentinel wrote a read-tail-pending marker
+      carrying ctx="init"); and
+  (c) died without any of the shim's fork / execve / exit hooks being
+      entered AND without the shim's __attribute__((destructor)) firing.
+
+The termination paths that satisfy (c) and are plausible for the pixman +
+meson + gcc workload:
+
+  * Uncatchable / default-terminating signal:
+      - SIGKILL (kernel-side, unhookable — the loss is inherent)
+      - SIGPIPE (default action = terminate; common in shell pipelines when
+        a downstream reader closes its end — e.g. `foo | head`)
+      - SIGSEGV / SIGABRT / SIGBUS / SIGFPE / SIGILL (crash paths — default
+        action terminates without libc cleanup)
+      - SIGTERM / SIGINT (default action = terminate; parent build engine
+        may deliver these on timeout / cancel)
+
+  * Raw `syscall(SYS_exit_group, N)` bypass:
+      - Bypasses libc's atexit chain AND the shim destructor (dlclose /
+        __cxa_finalize does not run). Some `exec`d bash / /bin/sh paths use
+        this after their final builtin.
+
+The current shim registers `_exit` / `_Exit` interposers (via the
+`ct_linux_preload_*` hook framework in nim-stackable-hooks) and a libc
+destructor. Neither is entered on any of the above paths.
+
+Fix shape (Phase B target)
+--------------------------
+Install a set of signal handlers for the terminating signals AT SHIM INIT
+that:
+  1. Call closeFragmentSlot equivalent (async-signal-safe) to write the
+     read-tail-committed marker + close the fragment fd, so the netting is
+     clean.
+  2. Restore the default disposition for the signal + re-raise so the
+     process still dies with the correct exit status (WIFSIGNALED semantics
+     preserved).
+
+Signals to hook (default action = terminate, catchable):
+  SIGPIPE, SIGTERM, SIGINT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL,
+  SIGHUP, SIGQUIT
+
+SIGKILL and SIGSTOP are uncatchable by design — losses through those paths
+remain inherent (`mrEventLoss` correctly reflects them).
+
+Async-signal-safety constraint: the flush path cannot call `flushFile`
+(→ `fflush` → `malloc` — not signal-safe). Must use the underlying raw
+`write(2)` + `close(2)` syscalls directly. The fragment slot's `batchBuf`
+is a fixed-size threadvar stack array (not heap-allocated), so it is safe
+to read from a signal handler. We can also emit the read-tail-committed
+marker via the same raw path.
+
+Implementation plan for M9.R.62.2:
+  * Add an async-signal-safe `flushFragmentSlotFromSignalHandler` in
+    writer.nim that mirrors closeFragmentSlot but uses ct_linux_raw_syscall
+    for the writes.
+  * Register handlers via `sigaction` at shim init (with SA_RESTART for the
+    catchable non-crash signals; SA_RESETHAND for crash signals so we
+    dispatch, flush, then let the default terminate the process).
+  * Chain to the previously-installed handler if any, so we don't clobber
+    a caller's handler.
+  * Regression test: a portable test that simulates a raw exit_group +
+    a SIGPIPE-terminated pipeline, asserts the fragment's read-tail-pending
+    is matched by a committed marker.
+
+Residual
+--------
+The attribution alone is a milestone — Candidate 2 / 3 are OFF the table;
+the M9.R.61.6 residual (which enumerated three hypotheses) is now narrowed
+to ONE with an actionable fix shape. Phase B lands the fix; Phase C bumps
+the pin; Phase D re-runs the reproos-image full-rebuild.
