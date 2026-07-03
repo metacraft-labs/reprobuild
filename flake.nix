@@ -25,7 +25,7 @@
       #
       # Pinned to the hardened io-mon revision validated for this retirement
       # campaign.
-      url = "github:metacraft-labs/io-mon/451eb2d664eb996b5a66815fd6decf7dae34be32";
+      url = "github:metacraft-labs/io-mon/220074e6cb44bd9ae6a3993970d92a474bf70fa9";
       flake = false;
     };
     nimcrypto-src = {
