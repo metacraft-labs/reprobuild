@@ -1,0 +1,198 @@
+M9.R.61 close-out — infrastructure gate on __repro_provider_compile
+===================================================================
+
+Milestone summary
+-----------------
+Retry of M9.R.61 after the previous attempt hit a server-side rate
+limit at 30 s with 0 commits. This retry landed 5 commits across
+two repos:
+
+  reprobuild (dev) — 4 commits (fcf2ac75 → a520b8e8)
+    M9.R.61.1        sync io-mon pin to latest upstream (kill-before-flush fix)
+    M9.R.61.2        Phase B re-verification on the hardened io-mon tip
+    M9.R.61.4.pin    bump io-mon pin to include Windows shim flush parity fix
+    M9.R.61.4.audit  Windows shim exit-path audit findings
+
+  io-mon (main) — 3 commits (451eb2d → c5b9d3d)
+    M9.R.61.4        Windows shim flush parity — retire the kill-before-flush sentinel
+                     + regression test tests/windows/test_io_mon_windows_flush_parity.nim
+    M9.R.61.3        post-fork sentinel-state hygiene (defense-in-depth)
+                     + regression test tests/portable/test_io_mon_post_fork_sentinel_hygiene.nim
+
+
+Phase A — io-mon sync (M9.R.61.1)
+----------------------------------
+Reprobuild's flake pin was at io-mon `8b05657c` (2026-06-27). Latest
+main is `451eb2d` (2026-07-02) — a 71-commit delta whose tip carries
+exactly the two commits the M9.R.60 Phase D characterization flagged
+as the escape hooks:
+
+  f428b9b  Flush Linux monitor batches on direct exit
+  451eb2d  Flush Linux monitor batches before exec
+
+Bumped the flake input's URL and re-ran `nix flake lock --update-input
+io-mon-src` to refresh narHash. The rest of the 71-commit delta is
+covered by the broader hardening line documented in
+`io-mon/docs/shim-build-policy.md` + the round-3 adversarial suite —
+none of it requires reprobuild-side changes.
+
+
+Phase B — re-verification (M9.R.61.2)
+--------------------------------------
+Repeated the M9.R.60 Phase D reproduction against pixman's
+`__repro_provider_compile` on the newly-pinned io-mon:
+
+  daemon-hosted build failed: __repro_provider_compile asFailed
+  monitor depfile is incomplete
+
+  RMDF: records=251135 processes=838 observations=250953 eventLoss=182
+  every loss record: detail=process killed with an un-flushed
+    read batch (kill-before-flush)
+
+Result — the gate is STILL OPEN. The eventLoss count is IDENTICAL
+to M9.R.60.D (182). The two upstream flush commits close the class
+of app that exits through libc's `_exit` / `_Exit` / `execve` — but
+another class remains that this rebuild reproducibly hits.
+
+Characterization enumerates three candidate root causes
+(Candidate 1 — post-fork sentinel-state leak; Candidate 2 — execve
+flush-vs-exec-transition race; Candidate 3 — TLS-inherited
+`shouldBypass` gating). Full write-up in
+`m9r61_phaseB_characterization.txt` + trimmed
+`m9r61_phaseB_pixman_rmdf_header.txt` (header + all 182 event-loss +
+summary).
+
+
+Phase C — Linux-side fixes (M9.R.61.3)
+---------------------------------------
+Closed Candidate 1: `discardFragmentSlotAfterFork` did not reset
+`readingSentinelActive` symmetrically with `closeFragmentSlot`. In
+steady-state this is inert (the child's next `openFragmentSlot` at
+writer.nim:524 clears the flag when it opens the child's own
+fragment), but it left a documented soundness hole for future
+refactors (vfork-preserved-pid variants + diagnostic samplers) that
+would rely on the flag being correct BEFORE the next open. Landed
+as defense-in-depth with the required regression test.
+
+Candidates 2 + 3 not scoped for this milestone (not-yet-bisected
+against a minimum-viable Linux reproducer). Phase B's residual
+still stands: the pixman `__repro_provider_compile` still emits 182
+kill-before-flush events on the hardened tip.
+
+
+Phase D — Windows shim audit (M9.R.61.4 + M9.R.61.4.pin + audit)
+-----------------------------------------------------------------
+Audit found ONE critical + TWO documented gaps:
+
+  Finding 1 (CRITICAL — LANDED) — repro_monitor_shim_flush and
+    repro_monitor_shim_shutdown were both no-op `= 0` stubs on
+    Windows, and the addExitProc callback only uninstalled inline-
+    hook trampolines. Consequence: the ROUND-5 F kill-before-flush
+    sentinel was NEVER retired by a matching committed marker on any
+    Windows-side exit / execve path — every Windows capture ended
+    with at least one un-matched pending per active thread, and
+    mergeFragments' netting always injected synthetic loss records,
+    false-downgrading completeness to mcIncomplete. Fixed in io-mon
+    M9.R.61.4 by wiring closeFragmentSlot into all three Windows
+    exit paths. Regression test lands on Windows only; validates the
+    single-cycle + multi-cycle flush semantics.
+
+  Finding 2 (MEDIUM — documented, not scoped) — no
+    SetUnhandledExceptionFilter hook, so a process that dies via
+    TerminateProcess / unhandled SEH / RaiseFailFastException /
+    DebugBreak-in-a-non-debugged-process still escapes the flush
+    path. Candidate fix shape documented in
+    `m9r61_phaseD_windows_audit.txt`.
+
+  Finding 3 (LOW — documented, not scoped) — no CreateJobObject
+    supervisor (Windows counterpart of the Linux SIGCHLD supervisor
+    the M9.R.61 task-brief flagged as the preferred long-term shape).
+
+Reprobuild's flake pin bumped in M9.R.61.4.pin to include the
+Finding 1 fix.
+
+
+Phase E — end-to-end rebuild + boot smoke — NOT REACHED
+--------------------------------------------------------
+Blocked by the unresolved Phase B residual. The
+`__repro_provider_compile` gate is still open on the pixman + hwdata
++ libseat + wlroots + sway + libdisplay-info recipes; the from-source
+auto-recurse rebuild that would produce a fresh
+`reproos-installed.qcow2` cannot complete without either closing
+that class or invoking the swap-in-place chain (forbidden by
+task-brief).
+
+
+Retroactive validation status
+------------------------------
+Unchanged from M9.R.60.D:
+
+  * M9.R.57 (libseat compile) — publishes correct on disk;
+    end-to-end observation requires closing the __repro_provider_compile
+    gate.
+  * M9.R.58 (seatd server-mode + graphical.target.wants integration)
+    — same as M9.R.57.
+  * M9.R.59 (hwdata + libdisplay-info + wlroots buildDeps edit)
+    — same as M9.R.57.
+
+The recipe edits are all present in `git log` / `git show`; the
+reproduced install-mirror layouts under
+`recipes/packages/source/*/.repro/output/install/` are still there
+from the last successful swap-in-place chain. The next milestone
+(closing Phase B's residual) will unblock end-to-end validation.
+
+
+Residual, honestly
+-------------------
+STRICTLY SMALLER than M9.R.60's residual (which was "provider-compile
+gate + Windows hardening gap"):
+
+  * PROVIDER-COMPILE gate remains open on Linux — same 182
+    kill-before-flush event-loss shape. Root cause narrowed to
+    Candidates 2 (execve flush-vs-exec-transition race) or 3
+    (TLS-inherited shouldBypass gating) — Candidate 1 is closed by
+    M9.R.61.3. Next milestone should build a minimum-viable Linux
+    reproducer (a bash-wrapped clang subshell equivalent) and bisect
+    between the two remaining candidates.
+
+  * WINDOWS gap NARROWED — Finding 1 CLOSED. Findings 2 + 3
+    documented for a future milestone (SetUnhandledExceptionFilter
+    hook + CreateJobObject supervisor).
+
+Progress vs. M9.R.60:
+  * io-mon pin bumped from 8b05657c → 220074e6 (72-commit delta,
+    including the Windows shim flush parity fix that fixes ALL
+    Windows captures, not just the reprobuild-driven ones);
+  * Windows-side ROUND-5 F parity now enforced via regression test;
+  * Post-fork sentinel-state hygiene now defense-in-depth-hardened
+    with regression test;
+  * Three candidate root causes for Phase B's residual enumerated
+    + narrowed to two.
+
+
+Evidence files (M9.R.61)
+-------------------------
+  m9r61_complete.txt                        this file
+  m9r61_phaseB_characterization.txt         Phase B write-up
+  m9r61_phaseB_pixman_rmdf_header.txt       trimmed io-mon-snoop dump
+                                             (all 182 event-loss + header + summary)
+  m9r61_phaseD_windows_audit.txt            Windows shim audit findings
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    fcf2ac75  M9.R.61.1: sync io-mon pin to latest upstream (kill-before-flush fix)
+    ee83b777  M9.R.61.2: Phase B re-verification on the hardened io-mon tip
+    f7f00357  M9.R.61.4.pin: bump io-mon pin to include Windows shim flush parity fix
+    a520b8e8  M9.R.61.4.audit: Windows shim exit-path audit findings
+
+  io-mon (main):
+    220074e6  M9.R.61.4: Windows shim flush parity — retire the kill-before-flush sentinel
+    c5b9d3d0  M9.R.61.3: post-fork sentinel-state hygiene (defense-in-depth)
+
+
+Regression-test surfaces added
+-------------------------------
+  io-mon: tests/windows/test_io_mon_windows_flush_parity.nim
+  io-mon: tests/portable/test_io_mon_post_fork_sentinel_hygiene.nim
