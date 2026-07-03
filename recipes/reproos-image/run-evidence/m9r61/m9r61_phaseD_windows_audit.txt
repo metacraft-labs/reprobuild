@@ -1,0 +1,158 @@
+M9.R.61 Phase D: Windows shim hardening audit
+==============================================
+
+Charter
+-------
+The M9.R.61 task-brief requested a proactive Windows hardening audit
+because the recent io-mon work (f428b9b, 451eb2d + the 71-commit
+delta) was Linux/macOS-focused. Windows uses different injection
+mechanisms — DLL injection via CreateProcess(CREATE_SUSPENDED) +
+CreateRemoteThread with IAT + inline hooking, rather than
+LD_PRELOAD; ExitProcess / TerminateProcess rather than POSIX
+`_exit`; asynchronous named-pipe I/O rather than POSIX read().
+
+Method
+------
+Read the entire Windows shim surface
+(`src/io_mon/shim/windows_interpose.nim` + `windows_iat_patcher.nim` +
+`windows_hook_registry.nim` + `windows_injector.nim`) with a search
+matrix over the Windows process-lifecycle surface: ExitProcess,
+TerminateProcess, FatalExit, SetUnhandledExceptionFilter, DebugBreak,
+RaiseException, atexit, __attribute__((destructor)), flush.
+
+Also verified against the Linux shim's parity — every ROUND-5 F
+mechanism the Linux shim depends on
+(closeFragmentSlot / flushFile / clearReadingSentinel / the
+read-tail-pending durability sentinel) is shared through
+`io_mon/writer.nim`, so any behaviour drift is Windows-side either in
+the shim's exported ABI or in its lifecycle hookpoints.
+
+
+Finding 1 — CRITICAL — repro_monitor_shim_flush / _shutdown are no-op stubs
+---------------------------------------------------------------------------
+`src/io_mon/shim/windows_interpose.nim` before this milestone:
+
+    proc repro_monitor_shim_flush*(): cint {.exportc, dynlib, cdecl.} = 0
+    proc repro_monitor_shim_shutdown*(): cint {.exportc, dynlib, cdecl.} = 0
+
+Both procs are exported at the DLL ABI (used by out-of-tree
+consumers driving live captures — the CodeTracer incremental test
+runner's read-file capture, reprobuild's monitor-depfile driver,
+etc.) and both are hard-coded to return 0 without touching the
+fragment slot. In contrast the Linux shim's counterparts
+(`src/io_mon/shim/linux_preload.nim:572-586`) BOTH delegate to
+`closeFragmentSlot` in `io_mon/writer.nim` — that call flushes the
+per-thread batch (which writes the matching `read-tail-committed`
+marker via `clearReadingSentinel`) and closes the fragment file.
+
+Consequence — the ROUND-5 F kill-before-flush sentinel written by
+`appendFragmentRecord` (via `markReadingSentinel` at writer.nim:688)
+is NEVER retired by a matching committed marker on any Windows-side
+exit / execve path that goes through the exported ABI. Every
+Windows capture ends with at least one un-matched pending marker
+per active thread on the fragment file; `mergeFragments`' netting
+in writer.nim:1653-1673 injects a synthetic `mrEventLoss` record
+per unmatched pending, forcing `mcIncomplete` — a false-downgrade
+of Windows-capture completeness.
+
+The `addExitProc` callback that WAS registered at the bottom of
+`repro_monitor_shim_init` (windows_interpose.nim:3357-3364)
+uninstalled inline-hook trampolines but did NOT flush the fragment
+either — same gap.
+
+Fix (LANDED in this milestone as io-mon commit M9.R.61.4, rev
+220074e6cb44bd9ae6a3993970d92a474bf70fa9): wire `closeFragmentSlot`
+into ALL THREE Windows exit paths (the two exported ABI procs +
+the addExitProc callback). Reprobuild pin bumped in
+M9.R.61.4.pin to include the fix.
+
+Regression test lands as `tests/windows/test_io_mon_windows_flush_parity.nim`:
+drives appendFragmentRecord (which activates the sentinel) +
+closeFragmentSlot and asserts `mergeFragments` reports
+`eventLossCount == 0`. Also covers 32-record multi-cycle append +
+mid-loop flush + trailing-batch-retired-only-by-exit-proc.
+
+
+Finding 2 — MEDIUM — no SetUnhandledExceptionFilter hook
+---------------------------------------------------------
+Windows processes can terminate through paths that DO NOT run
+Nim's atexit registry (registered via `addExitProc`) or the CRT's
+atexit chain:
+
+  * `TerminateProcess(GetCurrentProcess(), status)` — hard kill,
+    bypasses all cleanup;
+  * unhandled SEH exception (`ACCESS_VIOLATION`, stack overflow) —
+    the OS default handler calls `RtlExitUserProcess` bypassing
+    atexit;
+  * `RaiseFailFastException` — same as unhandled SEH;
+  * `DebugBreak` in a non-debugged process — becomes an unhandled
+    exception.
+
+The Windows shim installs NO exception filter (grep for
+`SetUnhandledExceptionFilter` returns zero matches across the entire
+io-mon source tree). A process that dies via any of these paths
+leaves the sentinel un-retired IDENTICALLY to Finding 1 pre-fix.
+
+Fix — NOT LANDED in this milestone. Candidate shape:
+
+    var priorUEF: LPTOP_LEVEL_EXCEPTION_FILTER = nil
+    proc reproMonitorShimUEF(ep: PEXCEPTION_POINTERS): LONG {.stdcall.} =
+      # Flush the sentinel before the exception propagates.
+      try: closeFragmentSlot()
+      except CatchableError: discard
+      # Delegate to any previously-installed filter (e.g. a debugger).
+      if priorUEF != nil: return priorUEF(ep)
+      return EXCEPTION_CONTINUE_SEARCH
+
+    # in repro_monitor_shim_init:
+    priorUEF = SetUnhandledExceptionFilter(reproMonitorShimUEF)
+
+Left for a future milestone because (a) it needs regression
+coverage that spans process-boundaries (a helper .exe that raises
+an AV under the shim; Windows-Sandbox-hosted); (b) real cross-
+process TerminateProcess coverage requires a supervisor thread /
+CreateJobObject with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — a
+broader architectural change.
+
+
+Finding 3 — LOW — no CreateJobObject supervisor
+------------------------------------------------
+The Linux side has a documented preference for a SIGCHLD-based
+supervisor that catches every child death regardless of the child's
+exit path (M9.R.60.D characterization + M9.R.61 task-brief
+Candidate A). The Windows equivalent is a `CreateJobObject` with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` + a supervisor thread that
+`WaitForMultipleObjects` on job-completion-port notifications; the
+parent process would flush pending fragments before any child dies.
+
+Neither exists on the current Windows shim. Left for a future
+milestone; not scoped for M9.R.61.
+
+
+Finding 4 — INFO — no observed drift between Windows + POSIX writer
+--------------------------------------------------------------------
+The core writer (`io_mon/writer.nim`) is shared. The ROUND-5 F
+markReadingSentinel / clearReadingSentinel machinery, the
+closeFragmentSlot path, and the mergeFragments netting are the SAME
+code on both platforms. So the completeness taxonomy is unified —
+once Finding 1 lands and Finding 2 is closed, Windows captures net
+identically to Linux captures against a shared regression suite.
+
+
+Summary
+--------
+  Finding 1 (repro_monitor_shim_flush / _shutdown stubs) —
+    CLOSED in M9.R.61.4 (io-mon 220074e6) + M9.R.61.4.pin
+    (reprobuild flake bump).
+
+  Finding 2 (no SetUnhandledExceptionFilter hook) —
+    documented, not scoped for this milestone.
+
+  Finding 3 (no CreateJobObject supervisor) —
+    documented, not scoped for this milestone.
+
+  Finding 4 — informational: shared-writer parity.
+
+Evidence file
+-------------
+  m9r61_phaseD_windows_audit.txt      this file
