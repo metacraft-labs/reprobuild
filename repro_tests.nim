@@ -6862,6 +6862,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_sc_producer_exports_typed_cli_contract_across_workspace.nim",
+    binary: "build/test-bin/t_sc_producer_exports_typed_cli_contract_across_workspace",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_shared_clone_alternates_skip_redownload.nim",
     binary: "build/test-bin/t_shared_clone_alternates_skip_redownload",
     defines: @[],

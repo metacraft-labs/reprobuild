@@ -11404,6 +11404,199 @@ proc resolveProducerBinding*(selector: string;
   resolveProducerBinding(selector, workspaceRoot, lock, overrides)
 
 # ---------------------------------------------------------------------------
+# Cross-Repo-Source-Consumption SC-8 — the producer's ``executable … cli:`` /
+# ``library`` schema as a consumable TYPED CONTRACT keyed by workspace project
+# name (export-by-default).
+#
+# Spec: ``Cross-Repo-Source-Consumption.md`` §9.1 (producer export contract),
+# §1.3 (the two-layer split). Milestone
+# ``Cross-Repo-Source-Consumption.milestones.org`` §SC-8.
+#
+# SC-8 establishes WHAT crosses the workspace boundary as a producer's typed
+# contract. Layer 2 of the typed surface (§1.3) is the compile-time
+# schema-import + accessor emission; SC-9 extends ``usesImportCode``
+# (``macros_a.nim:2187-2316``) to IMPORT this contract and SC-10 proves the
+# end-to-end typed call. SC-8 is the piece BENEATH that import: a producer's
+# declared ``executable <name>: cli:`` command schema (command names, params,
+# the ``providerEntrypointId`` — exactly what ``toolActionWrapperCode``,
+# ``macros_a.nim:1973-2099``, turns into per-command typed wrapper procs) and
+# its ``library`` blocks are EXPORT-BY-DEFAULT (no new DSL keyword — the
+# producer ALREADY declares them) and become addressable, keyed by the
+# workspace project NAME.
+#
+# The payload is projected straight out of the shipped
+# ``ProjectInterface.publicExecutables`` / ``.publicLibraries``
+# (``repro_interface_artifacts.nim:106-114``) the SC-2/SC-3 pre-pass already
+# extracts via ``extractInterfaceFromModule`` — SC-8 reuses that projection
+# verbatim, adding only the workspace-name-keyed DISCOVERY + the "does this
+# producer export a typed contract at all" verdict. The schema-import mechanism
+# (SC-9) is MODE-AGNOSTIC — it runs at consumer macro expansion regardless of
+# how the producer artifact is later materialized — so SC-8's discovery locates
+# the producer's SOURCE root (a develop override or an on-disk workspace
+# sibling), NOT a built artifact.
+# ---------------------------------------------------------------------------
+
+type
+  ProducerTypedContractKind* = enum
+    ## The verdict of ``resolveProducerTypedContract``.
+    ptckNoProducer
+      ## The selector names no discoverable workspace producer (no develop
+      ## override, no on-disk sibling project) — the caller keeps its existing
+      ## resolution branch; typed consumption is not possible for this
+      ## selector (SC-9 falls back to the bundled-stdlib list / local import).
+    ptckNoContract
+      ## A workspace producer WAS discovered, but it declares NEITHER an
+      ## ``executable`` NOR a ``library`` — there is no typed contract to
+      ## export. A consumer trying to bind ``producer.tool(...)`` against it
+      ## must fail loudly at macro expansion (SC-9), not silently no-op.
+    ptckContract
+      ## The producer exports a consumable typed contract: its declared
+      ## ``executable … cli:`` command schema and/or ``library`` blocks.
+
+  ProducerTypedContract* = object
+    ## SC-8: a workspace producer's export-by-default typed contract, keyed by
+    ## the workspace project ``selector``. This is the exact schema payload a
+    ## typed consumer imports (SC-9) to emit ``producer.tool(args)`` accessors
+    ## through the EXISTING ``toolActionWrapperCode`` machinery — no new schema
+    ## shape is invented; the fields mirror ``ProjectInterface`` verbatim.
+    selector*: string
+      ## The workspace project name the contract is keyed by (the ``uses:``
+      ## selector / the LHS of a ``producer.tool`` typed call).
+    kind*: ProducerTypedContractKind
+    projectName*: string
+      ## The producer's declared ``package`` name (``ProjectInterface.projectName``).
+    sourceRoot*: string
+      ## The producer's discovered source root (a develop override checkout or
+      ## an on-disk workspace sibling). Empty for ``ptckNoProducer``.
+    projectFile*: string
+      ## The resolved producer ``repro.nim`` / ``reprobuild.nim`` path — the
+      ## module SC-9's ``usesImportCode`` extension imports the CLI schema from.
+    publicExecutables*: seq[InterfaceExecutable]
+      ## The exported ``executable … cli:`` schema (command names, params,
+      ## ``providerEntrypointId``) — export-by-default, exactly the payload
+      ## ``toolActionWrapperCode`` consumes to emit per-command typed wrappers.
+    publicLibraries*: seq[InterfaceLibrary]
+      ## The exported ``library`` blocks — export-by-default.
+
+proc hasTypedContract*(contract: ProducerTypedContract): bool =
+  ## True iff the producer exports at least one ``executable`` or ``library``
+  ## the consumer can bind a typed accessor against.
+  contract.kind == ptckContract
+
+proc typedContractCommands*(contract: ProducerTypedContract;
+                            exportName: string): seq[string] =
+  ## The command names a consumer may bind as ``producer.<exportName>.<cmd>``
+  ## typed calls — the per-command payload ``toolActionWrapperCode`` turns into
+  ## wrapper procs (``macros_a.nim:1973-2099``). Returns the empty seq when the
+  ## producer declares no ``executable`` with that export name, so a mistyped
+  ## command name / renamed ``cli:`` verb yields no binding (SC-8 deliverable:
+  ## "a producer whose ``cli:`` command is renamed shifts the exported schema").
+  for exe in contract.publicExecutables:
+    if exe.exportName == exportName:
+      for cmd in exe.commands:
+        result.add(cmd.name)
+      return
+
+proc discoverProducerSourceRoot*(selector: string;
+                                 workspaceRoot: string): string =
+  ## SC-8 workspace-name-keyed producer SOURCE discovery. Locate the producer's
+  ## checkout keyed by the workspace project ``selector``:
+  ##
+  ##   1. a develop override (``resolveProducerBinding`` → ``pbkDevelopOverride``
+  ##      → ``localPathAbsolute`` — the sibling checkout, §5.1), then
+  ##   2. an on-disk workspace SIBLING (``findSiblingProjectFile`` — one level
+  ##      up: ``../<selector>/repro.nim``, the same discovery
+  ##      ``repro build <sibling>:<target>`` already drives, §7).
+  ##
+  ## Returns the producer's source root, or the empty string when the selector
+  ## names no discoverable workspace producer. The schema import (SC-9) is
+  ## compile-time + mode-agnostic, so a lock-pinned-only producer (no override,
+  ## no on-disk sibling) is NOT discovered here for the typed-contract payload —
+  ## the fetched-source materialization is SC-6's build-time concern, distinct
+  ## from the compile-time schema export SC-8 pins down.
+  if selector.len == 0 or workspaceRoot.len == 0:
+    return ""
+  # 1. develop override — the sibling checkout the override points at.
+  let binding =
+    try:
+      resolveProducerBinding(selector, workspaceRoot)
+    except CatchableError:
+      # A registered override whose checkout is missing re-raises the structured
+      # diagnostic in ``resolveProducerBinding``; for the pure discovery query we
+      # treat a resolution failure as "not discoverable" and fall through to the
+      # on-disk sibling probe rather than propagating.
+      ProducerBinding(selector: selector, kind: pbkNotProducer)
+  if binding.kind == pbkDevelopOverride and
+      binding.localPathAbsolute.len > 0 and
+      dirExists(extendedPath(binding.localPathAbsolute)):
+    return binding.localPathAbsolute
+  # 2. on-disk workspace sibling (``../<selector>/repro.nim``).
+  let sibling = findSiblingProjectFile(selector, workspaceRoot)
+  if sibling.len > 0:
+    return parentDir(sibling)
+  ""
+
+proc resolveProducerTypedContract*(selector: string;
+                                   workspaceRoot: string):
+    ProducerTypedContract =
+  ## SC-8: resolve a workspace producer's export-by-default typed contract,
+  ## keyed by the workspace project ``selector``. Discovers the producer's
+  ## source root (``discoverProducerSourceRoot``), extracts its shipped
+  ## ``ProjectInterface`` (``extractInterfaceFromModule`` — the SAME extractor
+  ## the SC-2/SC-3 splice pre-pass uses), and projects its
+  ## ``publicExecutables`` / ``publicLibraries`` as the consumable typed
+  ## contract. The producer's ``executable … cli:`` / ``library`` are
+  ## export-by-default: a producer that declares one exposes a discoverable
+  ## typed schema (``ptckContract``); a producer that declares NEITHER exposes
+  ## none (``ptckNoContract``); a selector naming no workspace producer yields
+  ## ``ptckNoProducer``.
+  result = ProducerTypedContract(selector: selector, kind: ptckNoProducer)
+  let sourceRoot = discoverProducerSourceRoot(selector, workspaceRoot)
+  if sourceRoot.len == 0:
+    return
+  let sourceRootAbs = absolutePath(sourceRoot)
+  let projectFile =
+    try:
+      resolveProjectFile(sourceRootAbs).path
+    except CatchableError:
+      ""
+  if projectFile.len == 0:
+    return
+  result.sourceRoot = sourceRootAbs
+  result.projectFile = projectFile
+  # Extract the producer's ProjectInterface — the shipped extractor the SC-2/
+  # SC-3 pre-pass already drives. The interface artifact + stub scratch land in
+  # a workspace-local, selector-keyed dir under the consumer's ``.repro`` tree
+  # (hermetic to the consumer; never $HOME).
+  let scratchRoot =
+    if workspaceRoot.len > 0:
+      absolutePath(workspaceRoot) / ".repro" / "typed-contracts" / selector
+    else:
+      sourceRootAbs / ".repro" / "typed-contract"
+  createDir(extendedPath(scratchRoot))
+  let ifacePath = scratchRoot / "producer-typed-contract.rbsz"
+  let stubPath = scratchRoot / "producer-typed-contract.nim"
+  let artifact =
+    try:
+      extractInterfaceFromModule(projectFile, ifacePath, stubPath,
+        reprobuildLibraryWorkDir(), scratchRoot / "work", requireStub = false)
+    except CatchableError:
+      # The producer's interface could not be extracted — surface as
+      # "no discoverable typed contract" rather than a hard failure, so a
+      # malformed / non-reprobuild sibling does not crash the consumer's macro
+      # expansion; SC-9 then falls back to the bundled-stdlib / local import.
+      return
+  result.projectName = artifact.projectInterface.projectName
+  result.publicExecutables = artifact.projectInterface.publicExecutables
+  result.publicLibraries = artifact.projectInterface.publicLibraries
+  # Export-by-default verdict: a producer declaring an ``executable`` and/or a
+  # ``library`` exposes a typed contract; one declaring NEITHER exposes none.
+  if result.publicExecutables.len > 0 or result.publicLibraries.len > 0:
+    result.kind = ptckContract
+  else:
+    result.kind = ptckNoContract
+
+# ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-9 — the unified locked-dependency populator.
 #
 # ONE entry point — ``populateLockedDeps(source)`` — fills the MO-8
