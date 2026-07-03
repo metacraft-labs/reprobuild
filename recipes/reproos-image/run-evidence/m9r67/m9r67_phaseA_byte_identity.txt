@@ -1,0 +1,121 @@
+M9.R.67 Phase A + B — byte-identity + path-dependence characterization
+======================================================================
+
+Objective
+---------
+M9.R.66 close-out documented a "byte-identical shim behaves differently by
+filesystem path" phenomenon and attributed it to reprobuild's
+`config.nims switch("undef", "nixbuild")` (M9.R.47.2). Phase A verifies
+byte-identity BEFORE accepting the attribution.
+
+Phase A — byte-identity verification
+------------------------------------
+Two shim builds, one via reprobuild's dev shell + `scripts/build_apps.sh`,
+one directly via `io-mon/scripts/build_shim.sh` from the io-mon dir:
+
+  reprobuild-flow shim
+    sha256=15dbfe81e67e6df5fe4ef3a03b737a6330d8690b4364dce847e36a42f1382364
+    size=1107448
+    STACKABLE_HOOKS_SRC resolves to `/nix/store/lww9wcnyvz…-source/src/`
+    (the flake input, from reprobuild's `nix develop` env)
+
+  io-mon-flow shim
+    sha256=f5946352bc8ae3a922a4f32ae30a40df29816a8c7f8d12568944488a1ccad89d
+    size=1107200
+    STACKABLE_HOOKS_SRC resolves to `/opt/repro/nim-stackable-hooks/src/`
+    (the sibling checkout)
+
+Byte-identity: FALSE — the two builds differ (`.debug` paths / __FILE__
+strings + 248 bytes total). M9.R.66's attribution to `config.nims
+undef nixbuild` was incorrect: reprobuild's `config.nims` does NOT govern
+the shim's `nim c` invocation. `build_apps.sh` does `bash
+"${io_mon_src}/scripts/build_shim.sh"` which `cd "$here"` (the io-mon
+repo root); `nim c` reads config.nims from `<cwd>` + source-dir, NOT from
+the parent invoker's dir. The reprobuild `config.nims` never enters the
+shim's compile.
+
+Both shims reproduce the pixman cc1 crash EQUALLY. The relevant delta is
+not the `nixbuild` define; it is the shim's OWN filename at LD_PRELOAD
+resolution time (Phase B).
+
+Phase B — path-dependence characterization
+-------------------------------------------
+The io-mon-flow shim (sha256=f594…), when byte-copied to three different
+paths, produces three different runtime behaviors:
+
+  Path                                                          Result
+  /tmp/shim_iomon_flow.so                                       CLEAN
+  /opt/repro/io-mon/build/lib/librepro_monitor_shim.so          CRASH
+  /opt/repro/reprobuild/build/lib/librepro_monitor_shim.so      CRASH
+
+Renaming the shim under the SAME parent dir eliminates the crash:
+
+  /opt/repro/reprobuild/build/lib/shim.so                       CLEAN
+  /opt/repro/reprobuild/build/lib/monitor_shim.so               CLEAN
+  /opt/repro/reprobuild/build/lib/librepro_shim.so              CLEAN
+  /opt/repro/reprobuild/build/lib/librepro_monitor.so           CLEAN
+  /opt/repro/reprobuild/build/lib/librepro_monitor_shim.so      CRASH
+  /opt/repro/reprobuild/build/lib/librepro_monitor_shim_extra.so CLEAN
+
+The differentiator is EXACTLY the filename `librepro_monitor_shim.so`.
+
+Root cause — false-positive INT3 patching of the toolchain executable
+-----------------------------------------------------------------------
+`io_mon/hooks/linux_preload_runtime.nim :: shouldPatchInlineSyscallMapping`
+decides which /proc/self/maps mappings to scan for `0F 05 XX` (raw
+`syscall` opcode) sites and replace with `INT3`. Before this fix the
+predicate short-circuits IF the mapping is the /proc/self/exe target:
+
+    if normalized == executablePath:
+      return true                             ← always patch the executable
+    if isMonitorShimMappingPath(normalized) or
+       isSystemRuntimeMappingPath(normalized):
+      return false                            ← keep /nix/store toolchains out
+
+For pixman's mesonbin-setup, the top-of-tree "executable" the shim sees
+is `/nix/store/kzq…-gcc-14.3.0/libexec/gcc/…/cc1` (a toolchain binary
+under the very `/nix/store/` prefix `isSystemRuntimeMappingPath`
+enumerates to keep out). The early-return on line 3149 bypasses the
+`isSystemRuntimeMappingPath` filter and patches cc1's `.text` anyway.
+Cc1's `init_emit_regs()` contains a byte sequence that the conservative
+`looksLikeLinuxX8664Syscall` predicate false-positives on (`0F 05 XX`
+with `XX != 0x00` at a non-instruction-boundary offset inside a legit
+non-syscall instruction). INT3 replacement mid-instruction corrupts
+cc1, and the very first compilation SIGSEGV-crashes at `init_emit_regs`
+(SEGV_MAPERR, si_addr=0x3a0).
+
+Path-dependence explanation
+---------------------------
+The shim's OWN mapping is filtered out via `isMonitorShimMappingPath` ONLY
+when its filename is `librepro_monitor_shim.so`. Under that name, the shim
+skips patching its own text but still walks the executable-path branch and
+patches cc1 (the same wrong path). Under any other filename, the shim's
+own mapping falls through to `endsWith(".so") -> true` and its own
+`.text` is patched too. Neither shim-own-text-patching nor executable-
+patching is CORRECT, but only one of the four combinations (shim named
+`librepro_monitor_shim.so` + cc1 as `executablePath` under `/nix/store/`)
+manages to reproduce the specific cc1 crash consistently.
+
+Fix
+---
+Swap the order of the two filter clauses so the system-runtime /
+monitor-shim exclusions take precedence over the executable short-circuit:
+
+    if isMonitorShimMappingPath(normalized) or
+       isSystemRuntimeMappingPath(normalized):
+      return false
+    if normalized == executablePath:
+      return true
+
+After this swap a nix-store toolchain binary (any executable whose path
+starts with `/lib/`, `/lib64/`, `/usr/lib/`, `/usr/lib64/`, or
+`/nix/store/`) is EXCLUDED from inline-syscall INT3 patching — the same
+policy `isSystemRuntimeMappingPath`'s docstring already states ("Keep
+startup DSO scanning out of loader/libc/toolchain runtime mappings").
+User-app executables outside those prefixes (the M9.R.63.2 inline-asm
+regression pin lives under `/tmp/`, unaffected) still get patched.
+
+Verification (with fixed shim at the canonical-crash path):
+  LD_PRELOAD=/opt/repro/reprobuild/build/lib/librepro_monitor_shim.so
+  /nix/store/vr15…-gcc-wrapper-14.3.0/bin/gcc /tmp/sc.c -o /tmp/sc.exe
+    → RC=0, no cc1 SIGSEGV
