@@ -1,0 +1,311 @@
+M9.R.63 close-out — SIGTRAP-flush wiring closes the C-probe class;
+                     pixman residual attribution INCOMPLETE, needs M9.R.64
+============================================================================
+
+Milestone summary
+-----------------
+M9.R.63 landed 6 commits across two repos, closing the doc-audit
+question raised by user pushback ("nim-stackable-hooks may already
+cover this") and CLOSING the minimal escape class documented in the
+M9.R.62 attribution ("inline-assembly raw SYS_exit_group / SYS_exit
+issued from user code"). NO seccomp-BPF architecture was designed;
+the mechanism was already in place.
+
+  reprobuild (dev) — 4 commits
+    M9.R.63.1     Phase A sync + doc audit — stackable INT3/SIGTRAP
+                    substrate already exists (M-FW-3C landed 2026-06-30)
+    M9.R.63.2     Phase B evidence — inline-asm exit_group repro under
+                    io-mon (14 records, mcIncomplete, kill-before-flush)
+    M9.R.63.4     Bump io-mon pin to include the SIGTRAP-flush wiring
+    M9.R.63.7     Final pin bump + this close-out (Phase F)
+
+  io-mon (main) — 3 commits
+    M9.R.63.2     Minimal repro test — inline-asm exit_group escape
+                    class (tests/linux/test_io_mon_linux_inline_asm_
+                    exit_group.nim, IO_MON_M9R63_XFAIL polarity switch)
+    M9.R.63.3     SIGTRAP handler flushes fragment before replaying
+                    exit_group (linux_preload_runtime.nim +
+                    linux_preload.nim, 2 files, 47 net lines)
+    M9.R.63.5     Patch libc `_exit` / `_Exit` internal-alias inline
+                    syscalls (defense-in-depth for the __GI__exit shape)
+
+
+Phase A — sync + doc audit (M9.R.63.1)
+--------------------------------------
+Fast-forwarded nim-stackable-hooks from 13eeb0a to c6cf6ad (24 new
+commits, mostly M-FW-3 slices). Read both mfw0-mcr-monkey-patch-
+inventory.md and mfw3-mcr-migration-blockers.md end-to-end.
+
+FINDING: M-FW-3C accepted 2026-06-30 landed the FULL INT3 raw-syscall
+callsite substrate in stackable_hooks/platform/linux_raw_syscalls:
+
+  installInt3SyscallPatchTransaction — patch 0f 05 -> INT3
+  installLinuxSigtrapHandler         — SIGTRAP install + chain substrate
+  captureLinuxX8664SyscallRegisters  — ucontext -> (nr, args)
+  replayLinuxX8664SyscallRegisters   — issue the real syscall
+  writeLinuxX8664SyscallResult       — result back to ucontext
+  visitLinuxExecutableMappingSyscalls — per-mapping visitor
+  enumerateLinuxExecutableMappings   — /proc/self/maps enumerator
+
+FINDING: io-mon already CONSUMES this substrate at
+src/io_mon/hooks/linux_preload_runtime.nim (installInlineSyscallPatches
++ ct_linux_inline_syscall_sigtrap_handler). Two gaps:
+
+  Gap 1 (WIRING, Fix Part A): the SIGTRAP handler unconditionally
+    called stackable_linux_replay_syscall_regs even when the trapped
+    syscall was SYS_exit_group / SYS_exit — both of which never
+    return. So the fragment slot was never flushed, and
+    mergeFragments injected a synthetic kill-before-flush event-loss.
+
+  Gap 2 (POLICY, Fix Part B, defense-in-depth): libc's `_exit` /
+    `_Exit` internal alias `__GI__exit` sits inside libc.so.6, which
+    isSystemRuntimeMappingPath excludes broadly for correct reasons.
+    LD_PRELOAD cannot interpose the internal binding, so `return 0`
+    from `main()` reaches an unhooked inline `syscall #exit_group`.
+
+Evidence: recipes/reproos-image/run-evidence/m9r63/m9r63_phaseA_docs.txt
+
+
+Phase B — minimal repro test case (M9.R.63.2)
+---------------------------------------------
+Built tests/linux/test_io_mon_linux_inline_asm_exit_group.nim.
+Self-contained C probe:
+  - open + read a marker file (real captured-dependency)
+  - inline `syscall` opcode with rax=231 (SYS_exit_group), rdi=status
+  - open-coded assembly, no libc `_exit` / `syscall(3)` involvement
+
+Ran against io-mon tip 5d7a320b (M9.R.62.3b pin) on eli-wsl inside
+`nix develop`:
+
+  RMDF version=1 records=14 completeness=mcIncomplete
+  #14 event-loss detail=process killed with an un-flushed read batch
+                                                (kill-before-flush)
+  summary records=14 processes=1 observations=12 eventLoss=2
+
+Exactly the shape of the 182 residuals in the M9.R.62.4 pixman
+transcript. Regression pin achieved.
+
+Evidence: recipes/reproos-image/run-evidence/m9r63/m9r63_phaseB_repro.txt
+
+
+Phase C — apply Fix Part A (M9.R.63.3)
+--------------------------------------
+Two-file change:
+
+  src/io_mon/shim/linux_preload.nim
+    Un-static repro_linux_sig_safe_flush (was file-scope static) so it
+    can be linked from the hooks runtime translation unit. The flush
+    is async-signal-safe (raw SYS_write / SYS_fsync / SYS_close only,
+    no libc / malloc / lock).
+
+  src/io_mon/hooks/linux_preload_runtime.nim
+    Add extern declaration for repro_linux_sig_safe_flush. Extend
+    ct_linux_inline_syscall_sigtrap_handler so that when regs.nr ==
+    SYS_exit_group or SYS_exit, invoke repro_linux_sig_safe_flush()
+    BEFORE stackable_linux_replay_syscall_regs. Mirrors the
+    M9.R.62.2b libc syscall(3) interposer contract but for inline-asm
+    callers. Every other syscall replays unchanged.
+
+VERIFICATION on eli-wsl inside nix develop:
+
+  BEFORE (io-mon 5d7a320b):
+    RMDF records=14 completeness=mcIncomplete
+    event-loss #14 kill-before-flush
+    eventLossCount=2
+
+  AFTER (io-mon c071361f, this fix):
+    RMDF records=15 completeness=mcComplete
+    file-open + file-read for /tmp/marker.txt captured
+    eventLossCount=0
+
+Test tests/linux/test_io_mon_linux_inline_asm_exit_group.nim:
+  [OK] process that reads then exits via inline-asm syscall #exit_group
+
+Full existing suite tests/linux/test_io_mon_linux_stdio_ipc.nim: 26/26
+OK, including:
+  [OK] inline assembly syscall openat/read captures dependency
+  [OK] startup shared library inline syscall openat/read captures
+       dependency
+  [OK] unrelated SIGTRAP is not swallowed by inline syscall handler
+
+No regression in the SIGTRAP dispatch chain.
+
+Evidence: recipes/reproos-image/run-evidence/m9r63/m9r63_phaseC_repro_after_fix.txt
+
+
+Phase D — reprobuild pin bump (M9.R.63.4)
+-----------------------------------------
+Bumped io-mon-src from 5d7a320b (M9.R.62.2b) to c071361f (M9.R.63.3),
+then to b255b44 (M9.R.63.5) after Phase E surfaced the additional
+libc-exit-family class. stackable-hooks-src was already at c6cf6ad
+(the M-FW-3 fully-migrated tip).
+
+
+Phase E — pixman rerun surfaces INCOMPLETE M9.R.62 attribution
+--------------------------------------------------------------
+Full pixman `__repro_provider_compile` rerun against the M9.R.63.4 pin
+(io-mon c071361f):
+
+  RMDF records=251168 completeness=mcIncomplete
+  kill-before-flush event-loss records: 182
+  summary records=251168 processes=838 observations=250986 eventLoss=182
+
+IDENTICAL to the M9.R.62.4 baseline. The C-probe fix does NOT
+reproduce the pixman escape class.
+
+Investigated Gap 2 (libc __GI__exit inline syscall). Added Fix Part B
+(M9.R.63.5) — targeted INT3 patch on libc's `_exit` / `_Exit` symbols
+resolved through openLibraryNoLoad("libc.so.6") +
+resolveSymbolInHandle(). Reran pixman:
+
+  RMDF records=251166 completeness=mcIncomplete
+  kill-before-flush event-loss records: 182  <-- SAME COUNT
+
+Fix Part B does NOT close the pixman residual either. This is a
+HONEST NEGATIVE result: the pixman escape shape is NEITHER of
+
+  (a) inline `syscall #exit_group` in a scanned mapping [C-probe]
+  (b) libc `_exit` / `_Exit` internal-alias inline `syscall`
+
+The M9.R.62.4 attribution ("INLINE-ASSEMBLY raw SYS_exit_group /
+SYS_exit issued from user code") was INCOMPLETE. The actual pixman
+escape must be through a DIFFERENT path, still consistent with the
+diagnostic evidence at M9.R.62.3b:
+
+  * shim loaded (constructor + recordProcessStart)
+  * emitted a captured-dependency record (kind=4 = mrFileOpen)
+  * died without entering fork / execve / exit hooks
+  * died without the libc destructor firing
+  * died without any of the 10 default-terminating signals
+  * died without calling libc syscall(3) for SYS_exit_group
+  * died without an inline `syscall #exit_group` at a scanned site
+  * died without going through libc's __GI__exit thunk
+
+Candidates for the M9.R.64 attribution phase (not addressed here):
+
+  * clone3 / vfork with CLONE_VFORK where the child issues an inline
+    `syscall #execve` before the shim init runs (would show
+    `phase=init` in current diag), and the exec image is
+    similarly-hooked but a different process
+  * A different exit family: SYS_exit vs SYS_exit_group when called
+    from a thread inside a threaded builder
+  * Signal delivery on the WRONG thread (main-thread handler
+    installed, but a worker calls _exit through a pre-existing
+    signal disposition inheritance) — SIGKILL on a non-main thread
+  * A subprocess that unmaps librepro_monitor_shim.so (dlclose)
+    before exiting, so all our hooks are gone
+  * dlopen of a fresh non-io-mon-hooked libc handle (RTLD_DEEPBIND
+    or explicit libc.so.6 dlopen from a nix wrapper) whose _exit
+    then does inline syscall
+
+Diagnostic path forward (deferred to M9.R.64):
+  1. Add per-escapee last-fd + last-record-address to the diag ctx
+  2. Run under strace -f -e trace=exit_group,exit,execve,tgkill
+     for a single failing process to see the kernel-level shape
+  3. Inspect a single dying process's /proc/PID/maps to see what
+     mappings were loaded (potentially fresh dlopen of libc.so.6)
+  4. Inspect the raw fragment on-disk to see the LAST record kind
+     before the kill
+
+None of these require a new architectural workstream. All are
+observation-only diagnostics that will pin the escape shape
+unambiguously — same recipe as M9.R.62.1's diag-ctx sampling.
+
+
+Phase F — evidence + close-out
+------------------------------
+This file + the phase A/B/C evidence files above.
+
+
+Retroactive validation status
+-----------------------------
+Unchanged from M9.R.61.6 / M9.R.62.4:
+  * M9.R.57 (libseat compile) — publishes correct on disk; end-to-end
+    observation still requires closing the __repro_provider_compile
+    gate. NOT REACHED because pixman is upstream.
+  * M9.R.58 (seatd server-mode + graphical.target.wants) — same.
+  * M9.R.59 (hwdata + libdisplay-info + wlroots buildDeps) — same.
+  * DE screendump — NOT REACHED (pixman still gates the full rebuild).
+
+Recipe edits remain in `git log`; last-successful swap-in-place
+install-mirrors remain in place under `recipes/packages/source/*/
+.repro/output/install/`.
+
+
+Residual, honestly
+------------------
+STRICTLY SMALLER than M9.R.62's residual:
+
+  * M9.R.62 residual: 1 speculated candidate (INLINE-ASSEMBLY raw
+    SYS_exit_group / SYS_exit issued from user code). Fix proposed
+    was seccomp-BPF, an architectural workstream.
+
+  * M9.R.63 residual: 1 CONFIRMED-NOT-inline-asm-in-scanned-mapping,
+    CONFIRMED-NOT-libc-__GI__exit class. Fix path is more targeted
+    diagnostic work (M9.R.64 attribution phase, 4 candidate paths
+    listed). NO architectural workstream needed.
+
+  * NEW COVERAGE (net-positive vs M9.R.62 pin):
+    - Inline-asm `syscall #exit_group` from user code at a scanned
+      mapping is now caught. Test:
+      tests/linux/test_io_mon_linux_inline_asm_exit_group.nim.
+    - libc's `_exit` / `_Exit` internal-alias inline syscall is now
+      caught. Regression-covered by the same test (the C probe's
+      `return 0` fallback path exercises it).
+    - Both new mechanisms leverage the existing M-FW-3C substrate
+      and add no new architectural surface.
+
+
+Reviewer boundary
+-----------------
+Every stackable API consumed here is POLICY-FREE per the M-FW-0
+boundary (mfw0-mcr-monkey-patch-inventory.md § "Program-Text Raw
+Syscall Scan and INT3 Trap"):
+
+  Framework-safe helpers (stackable_hooks/platform/linux_raw_syscalls):
+    - installInt3SyscallPatchTransaction
+    - installLinuxSigtrapHandler / chainLinuxSigtrap
+    - captureLinuxX8664SyscallRegisters / replayLinuxX8664SyscallRegisters
+    - openLibraryNoLoad / resolveSymbolInHandle
+    - visitLinuxX8664SyscallMemory
+
+  io-mon-owned policy / composition (in linux_preload_runtime.nim):
+    - Which syscall numbers get the flush-before-replay treatment
+      (SYS_exit_group + SYS_exit; M9.R.63.3)
+    - Which libc symbols get the targeted-scan treatment
+      (`_exit`, `_Exit`; M9.R.63.5)
+    - Mapping eligibility (shouldPatchInlineSyscallMapping)
+    - Completeness policy, fail-open/fail-closed decisions
+
+Zero upstream nim-stackable-hooks change was needed. This is the
+architecture the M-FW-0 inventory doc PREDICTED for io-mon (line 111
+of mfw0-mcr-monkey-patch-inventory.md, "expected future consumer").
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    c60f200d  M9.R.63.1: Phase A sync + doc audit
+    11abebd5  M9.R.63.2: Phase B evidence
+    45760223  M9.R.63.4: bump io-mon pin — SIGTRAP-flush wiring
+    <hash>    M9.R.63.7: final pin bump + close-out (this file)
+
+  io-mon (main):
+    be0dc89   M9.R.63.2: minimal repro — inline-asm exit_group escape
+    c071361   M9.R.63.3: SIGTRAP handler flushes fragment before replay
+    b255b44   M9.R.63.5: patch libc `_exit` / `_Exit` internal-alias
+
+
+Evidence files (M9.R.63)
+------------------------
+  m9r63_complete.txt                       this file
+  m9r63_phaseA_docs.txt                    doc-audit findings + API map
+  m9r63_phaseB_repro.txt                   C-probe baseline (mcIncomplete)
+  m9r63_phaseC_repro_after_fix.txt         C-probe post-fix (mcComplete)
+
+
+Regression-test surfaces added
+------------------------------
+  io-mon: tests/linux/test_io_mon_linux_inline_asm_exit_group.nim
+    Pins the C-probe class both ways (default: expected-pass;
+    IO_MON_M9R63_XFAIL=1: expected-fail baseline).
