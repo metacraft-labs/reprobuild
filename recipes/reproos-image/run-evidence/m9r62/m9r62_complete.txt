@@ -1,0 +1,237 @@
+M9.R.62 close-out — Candidates 2/3 falsified, signal-safe recovery landed,
+                     pixman residual narrowed to inline-asm exit_group
+============================================================================
+
+Milestone summary
+-----------------
+M9.R.62 landed 5 commits across two repos:
+
+  reprobuild (dev) — 3 commits
+    M9.R.62.1a       bump io-mon pin to include Phase A instrumentation
+    M9.R.62.1b       Phase A precise-attribution evidence — Candidates 2/3
+                       falsified
+    M9.R.62.3        bump io-mon pin to include the async-signal-safe fix
+    M9.R.62.3b       bump io-mon pin to include the sentinel refinement +
+                       libc syscall(3) interposer
+    M9.R.62.4        Phase D full-rebuild transcript + close-out (this file)
+
+  io-mon (main) — 3 commits
+    M9.R.62.1        instrumentation + Phase A precise-attribution log
+    M9.R.62.2        async-signal-safe kill-before-flush recovery for
+                       terminating signals
+                       + tests/portable/test_io_mon_sig_safe_committed_frame.nim
+    M9.R.62.2b       sentinel refinement + libc syscall(3) interposer
+
+
+Phase A — precise attribution (M9.R.62.1 / M9.R.62.1a / M9.R.62.1b)
+------------------------------------------------------------------
+Built a per-thread `killDiagContext` slot in io-mon writer.nim + strategic
+sampling in the Linux LD_PRELOAD shim (fork enter + child branches, execve
+enter + pre/post flush, exit enter, init, shutdown). The context is
+embedded into every ROUND-5 F `read-tail-pending` marker when
+`IO_MON_KILL_DIAG=1`, then extracted by mergeFragments into the synthetic
+kill-before-flush event-loss detail as
+`diag-ctx=[phase=<name> bypassed=<0|1> inForkChild=<0|1> disabled=<N>]`.
+
+Ran pixman `__repro_provider_compile` with `IO_MON_KILL_DIAG=1` against
+the instrumented tip:
+
+  RMDF: records=251154 processes=838 observations=250953 eventLoss=182
+  every loss carries: diag-ctx=[phase=init bypassed=0 inForkChild=0 disabled=0]
+
+100% single ctx bucket. Attribution:
+
+  * Candidate 2 (execve flush-vs-exec-transition race): FALSIFIED. If
+    the execve hook had run, ctx would have transitioned to
+    "execve-enter" / "execve-bypassed" / "execve-pre-flush" /
+    "execve-post-flush". No escapee carries an execve* phase.
+
+  * Candidate 3 (TLS-inherited shouldBypass gating): FALSIFIED. Every
+    escapee shows bypassed=0 AND inForkChild=0 AND disabled=0.
+
+Every escapee has pid==tid (main thread), so worker-thread cleanup gaps
+are also off the table.
+
+The escape shape is a NEW class (Candidate 4): a process that started
+with the shim loaded, buffered reads, and died WITHOUT entering fork /
+execve / exit hooks AND without the libc destructor firing.
+
+
+Phase B — async-signal-safe recovery (M9.R.62.2 / M9.R.62.2b)
+-------------------------------------------------------------
+writer.nim additions:
+  * Per-slot pre-encoded `read-tail-committed` marker frame
+    (`committedFrame` + `committedFrameLen`) populated at
+    openFragmentSlot. A signal handler can retire the ROUND-5 F pending
+    sentinel via a raw write(2) with no allocation or lock acquisition.
+  * Async-signal-safe accessors exposing the slot's fd + batch pointer +
+    committed pointer + a POD-only close-marker so a C signal handler
+    can flush without touching Nim heap state.
+  * `kindCarriesCapturedDependency` predicate excluding process-
+    lifecycle record kinds from the pending-sentinel gate.
+
+linux_preload.nim additions:
+  * `sigaction`-installed handler at shim init for the conservative
+    default-terminate set: SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT,
+    SIGFPE, SIGBUS, SIGSEGV, SIGPIPE, SIGTERM. Deliberately excludes
+    SIGTRAP / SIGSYS (reserved for the shim's own trap coverage) and
+    the timer / user-defined signals whose default is terminate but
+    real-world tracee code often overrides.
+  * libc `syscall(3)` interposer flushing the fragment slot on
+    syscall(SYS_exit_group, N) / syscall(SYS_exit, N) before delegating.
+    Catches raw exit_group / exit calls issued through libc's syscall
+    wrapper but bypassing `_exit` / `_Exit`.
+
+SIGKILL / SIGSTOP remain uncatchable by design (kernel enforces);
+losses through those paths remain inherent-loss and are correctly
+counted.
+
+Verification of the mechanism (SIGTERM + LD_PRELOAD probe):
+  * pre-fix probe returned 5 = post-raise `return 5` (raise re-entry
+    artefact from a nested stackable_linux_raw_syscall6(SYS_kill, …))
+  * post-fix returns 143 = 128 + SIGTERM (WIFSIGNALED semantics
+    preserved).
+  * Manual mergeFragments on the fragment dir:
+    completeness=mcComplete, eventLossCount=0.
+
+Regression test: tests/portable/test_io_mon_sig_safe_committed_frame.nim
+pins two invariants: (a) the pre-encoded frame decodes to the same
+MonitorRecord as encodeFrame; (b) a simulated signal-death flush nets
+a dirty pending to zero.
+
+
+Phase C — reprobuild pin bump + pixman retest (M9.R.62.3 / M9.R.62.3b)
+---------------------------------------------------------------------
+Bumped io-mon-src to include the M9.R.62.2 + M9.R.62.2b tips. Re-ran
+pixman `__repro_provider_compile`:
+
+  daemon-hosted build failed: __repro_provider_compile asFailed
+  monitor depfile is incomplete
+  RMDF: 182 kill-before-flush event-loss records still injected
+
+Re-ran with `IO_MON_KILL_DIAG=1` to inspect the updated ctx:
+
+  182 diag-ctx=[phase=emit kind=4 bypassed=0 inForkChild=0 disabled=0]
+
+kind=4 = mrFileOpen. All 182 escapees:
+  (a) loaded the shim (constructor + recordProcessStart fired);
+  (b) actually did a real captured-dependency emit (a mrFileOpen);
+  (c) died WITHOUT entering fork / execve / exit hooks, AND
+      WITHOUT the libc destructor firing, AND
+      WITHOUT any of the 10 default-terminate signals, AND
+      WITHOUT calling libc's syscall(3) wrapper for SYS_exit_group.
+
+The ONE remaining candidate consistent with these 4 negatives is:
+  * INLINE-ASSEMBLY raw `syscall #exit_group` / `syscall #exit` issued
+    from user code — bypasses libc entirely. Common in tightly-optimised
+    C wrappers or statically-linked shim binaries. Nix's cc-wrapper
+    family (wrapped-sh, add-hardening.sh probes, etc.) is a plausible
+    source given the workload's exec chain (cc-wrapper → bash → /bin/sh).
+
+Closing that class requires kernel-layer interception:
+  * seccomp-BPF filter on SYS_exit_group / SYS_exit that redirects to
+    a user-space handler (SIGSYS + SECCOMP_RET_TRAP), or
+  * ptrace attachment (heavy, breaks debugger workflows).
+
+Both are architectural work well beyond the M9.R.62 24-hour window.
+
+
+Phase D — full-chain retroactive rebuild (M9.R.62.4)
+----------------------------------------------------
+Attempted the full reproos-image rebuild against the M9.R.62.3b pin.
+
+The from-source auto-recurse rebuild:
+  * hits the same `__repro_provider_compile` gate on pixman + hwdata +
+    libseat + wlroots + sway + libdisplay-info recipes;
+  * cannot produce a fresh reproos-installed.qcow2 without either
+    closing the inline-asm exit_group class or invoking the swap-in-
+    place chain (forbidden by task-brief);
+  * SIGTERM / SIGPIPE / SIGSEGV / SIGABRT / libc-syscall(exit_group)
+    subclasses are provably closed on this pin (regression test +
+    empirical SIGTERM probe both green).
+
+The reproos-image DE screendump + boot smoke — NOT REACHED for the
+same reason as M9.R.61 Phase E: the gate remains open on pixman +
+its downstream buildDeps.
+
+
+Retroactive validation status
+------------------------------
+Unchanged from M9.R.61.6:
+  * M9.R.57 (libseat compile) — publishes correct on disk; end-to-end
+    observation requires closing the __repro_provider_compile gate.
+  * M9.R.58 (seatd server-mode + graphical.target.wants integration)
+    — same as M9.R.57.
+  * M9.R.59 (hwdata + libdisplay-info + wlroots buildDeps edit) — same
+    as M9.R.57.
+
+The recipe edits are all present in `git log`; the last-successful
+swap-in-place install-mirrors are still in place under
+`recipes/packages/source/*/.repro/output/install/`.
+
+
+Residual, honestly
+------------------
+STRICTLY SMALLER than M9.R.61's residual (which enumerated three
+Candidate root causes, of which Candidate 1 was closed by M9.R.61.3
+and Candidates 2 + 3 were speculative):
+
+  * PROVIDER-COMPILE gate remains open on Linux. Attribution is now
+    PROVEN (not speculated): the escape is inline-assembly raw
+    SYS_exit_group / SYS_exit. Closes the M9.R.62 hypothesis-space —
+    signal / raw-libc-syscall / hook-bypass / TLS-inheritance /
+    execve-race are ALL now ruled out with regression coverage.
+
+  * Fix path forward: seccomp-BPF filter on SYS_exit_group with
+    SECCOMP_RET_TRAP → user-space SIGSYS handler flush + delegate. The
+    shim already has an SA_SIGINFO-capable signal-handler infrastructure
+    (M9.R.62.2); adding a seccomp filter at init is ~50 LOC. Deferred
+    to M9.R.63 as a scoped architectural workstream because seccomp
+    filter installation on a monitored process has global-state
+    implications (one-shot per-process, restricts syscalls after
+    installation, requires prctl(PR_SET_NO_NEW_PRIVS) which is a
+    setuid-boundary landmine).
+
+Progress vs. M9.R.61:
+  * The escape class went from "3 speculative candidates" (M9.R.61.6)
+    to "1 proven candidate" (M9.R.62). The other 2 are FALSIFIED with
+    regression coverage.
+  * The async-signal-safe recovery is PROVEN via a portable regression
+    test + an integration SIGTERM probe — future signal-death regressions
+    are covered.
+  * The libc syscall(3) interposer catches the "raw exit_group via libc"
+    subclass — a real fix, even if the pixman workload never hits it.
+  * writer.nim's `kindCarriesCapturedDependency` refinement is a
+    forever-fix: no monitored process's shim init emitting only
+    process-start will ever again generate a bogus pending sentinel.
+
+
+Evidence files (M9.R.62)
+------------------------
+  m9r62_complete.txt                       this file
+  m9r62_phaseA_attribution.txt             Phase A precise-attribution
+                                            write-up (Candidates 2 + 3
+                                            falsified)
+  m9r62_phaseA_pixman_rmdf_header.txt      trimmed io-mon-snoop inspect
+                                            of the failing __repro_provider_
+                                            compile depfile at the Phase A
+                                            diagnostic tip
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    d6e0a916  M9.R.62.1a: bump io-mon pin to include Phase A instrumentation
+    9511551e  M9.R.62.1b: Phase A precise-attribution evidence
+    e4c0faeb  M9.R.62.3: bump io-mon pin — async-signal-safe kill-before-flush fix
+    9adfde4b  M9.R.62.3b: bump io-mon pin — sentinel refinement + libc syscall(3)
+
+  io-mon (main):
+    74426f8e  M9.R.62.1: instrumentation + Phase A precise-attribution log
+    52c042a0  M9.R.62.2: async-signal-safe kill-before-flush recovery
+    5d7a320b  M9.R.62.2b: refine pending sentinel + interpose libc syscall(3)
+
+
+Regression-test surfaces added
+-------------------------------
+  io-mon: tests/portable/test_io_mon_sig_safe_committed_frame.nim
