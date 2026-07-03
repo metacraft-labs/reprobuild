@@ -2864,6 +2864,141 @@ proc lockPinnedSourceBinding*(selector: string; dep: LockedDep):
     localPathAbsolute: "",
     contentIdentity: identity)
 
+# ---------------------------------------------------------------------------
+# Cross-Repo-Source-Consumption SC-6 (§5.2, §6) — lock-pinned VCS-sibling
+# fetch. When a producer is consumed in LOCK-PINNED mode (no develop override)
+# and its checkout is NOT already on disk beside the consumer, fetch the
+# producer's VCS at the committed ``LockedDep``'s pinned ``revision``, verify
+# the fetched commit against the locked ``integrity`` (reusing the SAME
+# ``gitObjectMultihash`` computation the MO-9 gate uses,
+# ``verifyLockedIntegrityAtCoordinates`` / ``computeDepIntegrity``), and hand
+# back the fetched tree root so the SC-2/SC-3 splice builds the producer's edge
+# from that source. The producer is built from its OWN committed ``repro.lock``
+# (§6): we only materialize the producer revision here — the producer's own
+# solve is not re-run against the consumer's constraints.
+# ---------------------------------------------------------------------------
+
+proc gitObjectFormatOf(repoRoot: string): string
+  ## Forward-declared for SC-6's ``fetchLockPinnedProducer`` integrity check;
+  ## the body (MO-8) lives with the other lock-integrity helpers below.
+
+proc lockPinnedProducerCacheRoot(workspaceRoot: string): string =
+  ## Where a fetched lock-pinned producer checkout is materialized. Under the
+  ## consumer workspace's ``.repro`` tree (workspace-local, never ``$HOME``), so
+  ## the fetch is hermetic to the consumer and cleaned with the workspace. Keyed
+  ## per-producer + per-revision below so a refreshed pin fetches a fresh tree.
+  absolutePath(workspaceRoot) / ".repro" / "cross-repo-producers"
+
+proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
+  ## SC-6 (§5.2): materialize a lock-pinned producer's source at its pinned
+  ## revision and verify integrity. Returns the checkout root of the fetched
+  ## producer tree; raises loudly (never silently falls back) on an unreachable
+  ## revision or an integrity mismatch — the reproducibility boundary §5.2/§6
+  ## require. Only the ``ckVcs`` (git) coordinate kind is materialized here (the
+  ## primary workspace-repo case, ``repro_lock.nim:110-133``); a non-VCS
+  ## coordinate returns "" (left to its own resolution path).
+  ##
+  ## Idempotent + revision-keyed: the checkout lives at
+  ## ``<workspace>/.repro/cross-repo-producers/<name>/<revision>``. A second
+  ## consume of the SAME pin reuses the existing verified checkout; a REFRESHED
+  ## pin (new revision) materializes a fresh sibling tree, so a changed pin is
+  ## observable to the SC-4 fold AND rebuilds from the new source.
+  if dep.coordinates.kind != ckVcs:
+    return ""
+  let url = dep.coordinates.url
+  let revision = dep.coordinates.revision
+  if url.len == 0 or revision.len == 0:
+    raise newException(OSError,
+      "cross-repo producer \"" & dep.name &
+      "\" is pinned in the lock but its VCS coordinates are incomplete " &
+      "(url=\"" & url & "\" revision=\"" & revision &
+      "\"); cannot fetch it at the pinned revision. Regenerate the lock at a " &
+      "concrete revision.")
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    raise newException(OSError,
+      "cross-repo producer \"" & dep.name &
+      "\" must be fetched from its VCS at the pinned revision " & revision &
+      " but no ``git`` binary is on PATH.")
+  let checkoutRoot =
+    lockPinnedProducerCacheRoot(workspaceRoot) / dep.name / revision
+
+  proc git(args: openArray[string]; cwd = ""): tuple[code: int; output: string] =
+    var cmd = quoteShell(gitBin)
+    for a in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(a))
+    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd)
+    (code: r.exitCode, output: r.output)
+
+  proc verifyRevisionIntegrity() =
+    ## Reuse the MO-9 gate computation: the fetched commit object at the pinned
+    ## revision must be PRESENT and its self-describing object id must equal the
+    ## locked integrity. A tampered integrity or an unreachable revision fails.
+    let rp = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
+      revision & "^{commit}"])
+    if rp.code != 0 or rp.output.strip().len == 0:
+      raise newException(OSError,
+        "cross-repo producer \"" & dep.name & "\" locked revision " & revision &
+        " is not present/reachable in the fetched checkout at " & checkoutRoot &
+        " (the pin points at a revision the remote " & url &
+        " does not provide).")
+    if dep.integrity.len > 0 and dep.integrity.startsWith("git-sha"):
+      let observed =
+        gitObjectMultihash(gitObjectFormatOf(checkoutRoot), revision)
+      if observed != dep.integrity:
+        raise newException(OSError,
+          "cross-repo producer \"" & dep.name &
+          "\" integrity check FAILED: the fetched commit at the pinned " &
+          "revision " & revision & " has integrity " & observed &
+          " but the lock records " & dep.integrity &
+          " (the fetch is refused; regenerate the lock or fix the remote).")
+
+  # Reuse an already-materialized + verified checkout for the SAME pin.
+  if dirExists(extendedPath(checkoutRoot / ".git")):
+    verifyRevisionIntegrity()
+    return checkoutRoot
+
+  createDir(extendedPath(parentDir(checkoutRoot)))
+  # A partially-materialized directory from a prior interrupted fetch is not
+  # trustworthy — start clean so the integrity check governs.
+  if dirExists(extendedPath(checkoutRoot)):
+    removeDir(extendedPath(checkoutRoot))
+  createDir(extendedPath(checkoutRoot))
+
+  # Initialize an empty repo and fetch exactly the pinned revision from the
+  # remote, then check it out detached. ``git fetch <url> <rev>`` fetches the
+  # single commit (and its reachable tree) without needing a named branch — the
+  # minimal fetch the pinned-revision contract needs.
+  var step = git(["-C", checkoutRoot, "init", "--quiet"])
+  if step.code != 0:
+    raise newException(OSError,
+      "cross-repo producer \"" & dep.name &
+      "\" fetch failed: could not initialize a checkout at " & checkoutRoot &
+      ": " & step.output.strip())
+  step = git(["-C", checkoutRoot, "fetch", "--quiet", "--depth", "1", url,
+    revision])
+  if step.code != 0:
+    # A remote that cannot serve a bare revision by SHA (some servers reject
+    # ``fetch <sha>`` without ``uploadpack.allowReachableSHA1InWant``) — fall
+    # back to fetching everything, then checking out the pinned revision.
+    step = git(["-C", checkoutRoot, "fetch", "--quiet", url])
+    if step.code != 0:
+      raise newException(OSError,
+        "cross-repo producer \"" & dep.name & "\" fetch failed from " & url &
+        " at pinned revision " & revision & ": " & step.output.strip())
+  step = git(["-C", checkoutRoot, "checkout", "--quiet", "--detach", revision])
+  if step.code != 0:
+    raise newException(OSError,
+      "cross-repo producer \"" & dep.name &
+      "\" fetch succeeded but could not check out the pinned revision " &
+      revision & " at " & checkoutRoot & ": " & step.output.strip())
+
+  # Verify integrity AFTER materialization — a tampered integrity or an
+  # unreachable revision fails the fetch loudly (§5.2 "verifies integrity").
+  verifyRevisionIntegrity()
+  checkoutRoot
+
 proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ## Cross-Repo-Source-Consumption SC-4 (§4.3): after the consumer graph is
   ## lowered, fold each materialized cross-repo producer's SOURCE identity into
@@ -3682,6 +3817,28 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
   if mode == tpmPathOnly:
     payload.addCacheField(getEnv("PATH"))
+  # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
+  # consumer") — fold each materialized cross-repo LIBRARY producer's realized
+  # aux directories into the tool-identity cache key. The executable channel is
+  # already covered by the ``getEnv("PATH")`` field above (the SC-2 PATH
+  # prepend shifts it when a producer bin dir changes); the LIBRARY channel is
+  # threaded through the resolver aux paths, NOT PATH, so a changed producer
+  # realized dir (a refreshed lock pin fetches into a NEW revision-keyed dir,
+  # ``<ws>/.repro/cross-repo-producers/<name>/<rev>/build/lib``) would
+  # otherwise reuse the stale on-disk tool identity from the previous pin and
+  # link/load the OLD library. Folding the realized aux dirs here re-resolves
+  # the identity when the pin changes; an unchanged pin (same dirs) keeps the
+  # key stable. Empty ``producerMaterializedAuxPaths`` (the common case — no
+  # cross-repo library producer) contributes nothing, so this is byte-identical
+  # to today for a build consuming no cross-repo library producer.
+  for selector in toSeq(producerMaterializedAuxPaths.keys).sorted:
+    let aux = producerMaterializedAuxPaths[selector]
+    payload.addCacheField("producer-aux")
+    payload.addCacheField(selector)
+    payload.addCacheField(aux.includeDirs.join("\n"))
+    payload.addCacheField(aux.libDirs.join("\n"))
+    payload.addCacheField(aux.pkgConfigDirs.join("\n"))
+    payload.addCacheField(aux.cmakePrefixDirs.join("\n"))
   for useDef in artifact.projectInterface.toolUses:
     payload.addCacheField(useDef.rawConstraint)
     payload.addCacheField(useDef.packageSelector)
@@ -5967,12 +6124,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # (a registered override whose local checkout is missing) instead of a
       # silent host-PATH fallthrough — the SC-1 "no silent fallback" contract.
       let producer = resolveProducerBinding(selector, result.projectRoot)
-      # SC-2 scope is the FROM-SOURCE build of a sibling checkout available on
-      # disk: develop mode always has one (``localPathAbsolute``); lock-pinned
-      # mode has one when the pinned revision is already checked out beside the
-      # consumer (the VCS fetch of a not-yet-present revision is SC-6). A
-      # producer whose source is not on disk is left for its milestone; the
-      # resolver closure then falls through to ``none`` for this ref as before.
+      # Materialize the producer's SOURCE root. Develop mode always has one on
+      # disk (``localPathAbsolute``). Lock-pinned mode uses an existing sibling
+      # checkout beside the consumer if present (SC-2); OTHERWISE — the SC-6
+      # case — it FETCHES the producer's VCS at the committed ``LockedDep``'s
+      # pinned revision into a workspace-local cache and VERIFIES it against the
+      # locked integrity (§5.2), so a consumer with only a pinned lock (no
+      # sibling on disk) builds the producer from its own repo source at the
+      # pinned revision — identical to develop mode from the consuming action's
+      # perspective.
       var producerRoot = ""
       case producer.kind
       of pbkDevelopOverride:
@@ -5981,6 +6141,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         let sibling = findSiblingProjectFile(selector, result.projectRoot)
         if sibling.len > 0:
           producerRoot = parentDir(sibling)
+        else:
+          # SC-6: no sibling checkout on disk — fetch the pinned revision from
+          # the producer's VCS and verify integrity (raises loudly on an
+          # unreachable revision / integrity mismatch; never a silent fallback).
+          producerRoot = fetchLockPinnedProducer(
+            producer.lockedDep, result.projectRoot)
       of pbkNotProducer:
         continue
       if producerRoot.len == 0 or
