@@ -1,0 +1,143 @@
+M9.R.66 Phase B — mesonbin-setup unmonitored subtree characterization
+======================================================================
+
+Objective
+---------
+M9.R.65 close-out (m9r65_complete.txt) documented two residual
+event-loss classes on the pixman `mesonbin-setup-15268905b1316721`
+action:
+
+  1. `libc raw syscall unsupported nr=186` × 2 (SYS_gettid)
+  2. `unmonitored subtree/peer (un-injectable spawn child, SETEXEC ...
+     or IPC connect to an out-of-tree breakaway daemon)` × 1
+
+M9.R.66.1 closed class (1) by adding `SYS_gettid = 186` as supported
+in io-mon's raw-syscall dispatcher (io-mon@47a9846). Phase B
+characterizes class (2) so M9.R.66.3 can fix it precisely.
+
+Setup
+-----
+  rm -rf recipes/packages/source/pixman/.repro/build
+  IO_MON_KILL_DIAG_DEEP=1 nix develop --command \
+    ./build/bin/repro build recipes/packages/source/pixman \
+    --tool-provisioning=from-source
+
+  # Depfile of interest:
+  recipes/packages/source/pixman/.repro/build/repro/build-engine-cache/
+    monitor-depfiles/mesonbin-setup-15268905b1316721.rdep
+
+  # Inspector summary (with M9.R.66.1 landed):
+  summary records=3321 processes=20 observations=3320 eventLoss=1
+
+That's down from `eventLoss=3` on the M9.R.65 pin: class (1)'s two
+SYS_gettid records are gone, leaving exactly one event-loss record.
+
+The remaining event-loss
+------------------------
+  #2 event-loss pid=0 tid=0 detail=unmonitored subtree/peer
+     (un-injectable spawn child, SETEXEC into a hardened image, or IPC
+     connect to an out-of-tree breakaway daemon)
+
+`writer.nim`'s `unmonitoredSubtreeLossCount` at
+`io-mon/src/io_mon/writer.nim:1334` computes this over three signals:
+
+  (a) SPAWN with no child process-start.
+  (b) EXEC into an un-injectable image
+      (`execCount(pid) >= startCount(pid)` with execCount > 0).
+  (c) IPC-CONNECT to an out-of-tree / opaque peer
+      (`mrIpcConnect` with no matching process-start).
+
+Attribution
+-----------
+Reading the depfile records:
+
+  Zero `ipc-connect` records — signal (c) is not the trigger.
+
+  Spawned-children set vs process-start set:
+      comm -23 spawned-children started-pids  ==  empty.
+  Every spawned child has a matching process-start — signal (a) is
+  not the trigger.
+
+  Per-pid exec vs start counts:
+      pid=3583630   execCount=4   startCount=2   ← FIRES (b)
+      pid=3583631   execCount=1   startCount=2   ok
+      pid=3583632   execCount=1   startCount=2   ok
+      pid=3583634   execCount=1   startCount=2   ok
+      pid=3583641   execCount=1   startCount=2   ok
+      pid=3583642   execCount=1   startCount=2   ok
+      pid=3583643   execCount=1   startCount=2   ok
+
+Signal (b) fires for pid=3583630 alone.
+
+The four process-exec records for pid=3583630
+---------------------------------------------
+  #1263 process-exec pid=3583630 tid=3583630
+        path=/nix/store/kzq…-gcc-14.3.0/bin/gcc
+  #1264 process-exec pid=3583630 tid=3583630
+        path=/nix/store/f8g…-meson-1.9.1/bin/gcc
+  #1265 process-exec pid=3583630 tid=3583630
+        path=/nix/store/nib…-ninja-1.13.1/bin/gcc
+  #1266 process-exec pid=3583630 tid=3583630
+        path=/nix/store/vr1…-gcc-wrapper-14.3.0/bin/gcc
+
+Four DIFFERENT paths, same pid, all named `gcc`. Only the last is a
+real image transition; the first three are FAILED PATH-lookup attempts
+by glibc's internal execve loop.
+
+Root cause — M9.R.65 shim double-count
+---------------------------------------
+`ct_linux_preload_dispatch_execvp` (io-mon's M9.R.65 fix) does:
+
+    CT_CALL_HOOK(ct_execve_hook(file, argv, environ));   // emit #1263
+    return ct_linux_preload_real_execvp(file, argv);     // glibc PATH loop
+
+`real_execvp` walks PATH and issues `execve()` per candidate directory
+until a matching image is found. Each of those internal `execve()`
+calls hits our LD_PRELOAD `execve` interposer (`dispatch_execve`),
+which — outside a bracket — sees CT_BYPASS()==false (depth==0 after
+CT_CALL_HOOK exited its bracket) and re-fires the execve hook.
+
+Net effect: for a `gcc` invoked with $PATH containing gcc / meson-bin
+/ ninja-bin / gcc-wrapper-bin, we emit ONE mrProcessExec for our
+manual hook + ONE per failed PATH candidate + ONE for the successful
+final image transition. Here the PATH order and pixman's build
+environment produce exactly 4 records for pid=3583630, so
+execCount(3583630) = 4 vs startCount = 2.
+
+The 2 process-starts for pid=3583630 are legitimate: one from the
+initial shim load in gcc-wrapper, one from the re-load after the
+successful final exec landed. `execCount(pid) >= startCount(pid)`
+(4 >= 2) trips T0 signal (b), the single "unmonitored subtree/peer"
+loss record fires, mcIncomplete is sealed, action fails.
+
+Fix path (M9.R.66.2)
+--------------------
+Bracket the `real_execvp` / `real_execvpe` / `real_fexecve` call
+inside dispatch_execvp / dispatch_execvpe / dispatch_fexecve with
+`stackable_linux_preload_enter_hook()` /
+`stackable_linux_preload_exit_hook()` so the PATH-lookup loop's
+internal `execve()` interposers see CT_BYPASS()==true and delegate
+straight to `real_execve` without re-firing the hook. The initial
+manual `CT_CALL_HOOK(ct_execve_hook(...))` still emits exactly ONE
+mrProcessExec for the exec transition, matching the ONE mrProcessStart
+that fires when the successful image reloads the shim.
+
+Regression pin
+--------------
+`test_io_mon_linux_stdio_ipc.nim`'s existing "execvp / execvpe /
+execlp / fexecve" wrapped-sh regression (M9.R.65 minimal reproducer
+family) is silent on double-counting because those tests all check
+`eventLoss=0` on the DEPFILE, not per-pid exec-vs-start invariants.
+Add a new "PATH-searching execvp emits exactly one process-exec per
+image transition" regression that asserts (execCount(pid) ==
+startCount(pid) - 1) for a probe that runs `execvp("gcc", …)` under
+a $PATH with multiple candidate directories where only the last
+carries the target binary.
+
+Or, equivalent: run the same probe through the monitor, assert
+mcComplete + zero event-loss records with the "unmonitored subtree"
+detail. The mcComplete check IS the invariant that matters (T0's
+downgrade fires when the double-count trips it, so passing
+mcComplete proves the fix works). The M9.R.66 Phase D per-recipe
+verification is the load-bearing evidence; the unit-level regression
+provides fast local feedback.
