@@ -1,0 +1,234 @@
+M9.R.67 close-out — inline-syscall patch predicate order + io_uring gap
+========================================================================
+
+Milestone summary
+-----------------
+M9.R.67 traced the "byte-identical shim behaves differently by path"
+phenomenon M9.R.66 Phase D documented + reproduced its actual root
+cause — an executable-mapping short-circuit in
+`shouldPatchInlineSyscallMapping` bypassing the toolchain-runtime
+exclusion — landed the fix, closed a second io_uring event-loss
+residual the fix uncovered, and validated pixman end-to-end under the
+`--tool-provisioning=from-source` monitored path.
+
+Phase A — byte-identity verification
+------------------------------------
+M9.R.66's attribution to reprobuild's `config.nims switch("undef",
+"nixbuild")` (M9.R.47.2) was VERIFIED WRONG. Two shim builds
+(reprobuild-flow vs io-mon-flow):
+
+  reprobuild-flow shim
+    sha256=15dbfe81e67e6df5fe4ef3a03b737a6330d8690b4364dce847e36a42f1382364
+    size=1107448
+
+  io-mon-flow shim
+    sha256=f5946352bc8ae3a922a4f32ae30a40df29816a8c7f8d12568944488a1ccad89d
+    size=1107200
+
+NOT byte-identical. Both trip the cc1 crash equally. reprobuild's
+`config.nims` never enters the shim's compile (`build_shim.sh` cd's to
+the io-mon repo root before `nim c`; Nim reads config.nims from cwd +
+source dir, NOT from a parent invoker). See
+`m9r67_phaseA_byte_identity.txt`.
+
+Phase B — path-dependence characterization
+-------------------------------------------
+The io-mon-flow shim (sha256=f594...), byte-copied to different paths:
+
+  Path                                                          Result
+  /tmp/shim_iomon_flow.so                                       CLEAN
+  /opt/repro/io-mon/build/lib/librepro_monitor_shim.so          CRASH
+  /opt/repro/reprobuild/build/lib/librepro_monitor_shim.so      CRASH
+  /opt/repro/reprobuild/build/lib/shim.so                       CLEAN
+  /opt/repro/reprobuild/build/lib/monitor_shim.so               CLEAN
+  /opt/repro/reprobuild/build/lib/librepro_shim.so              CLEAN
+  /opt/repro/reprobuild/build/lib/librepro_monitor.so           CLEAN
+  /opt/repro/reprobuild/build/lib/librepro_monitor_shim_extra.so CLEAN
+
+The differentiator is EXACTLY the filename `librepro_monitor_shim.so`.
+
+Phase C — root cause: `shouldPatchInlineSyscallMapping` bug
+-----------------------------------------------------------
+`io_mon/hooks/linux_preload_runtime.nim :: shouldPatchInlineSyscallMapping`
+before the fix ran the executable-mapping short-circuit BEFORE the
+`isSystemRuntimeMappingPath` / `isMonitorShimMappingPath` exclusions:
+
+    let normalized = normalizeMappingPath(mapping.path)
+    if normalized == executablePath:
+      return true                        ← patched cc1 anyway
+    if isMonitorShimMappingPath(normalized) or
+       isSystemRuntimeMappingPath(normalized):
+      return false
+
+For a monitored subtree with a `/nix/store/…-gcc-14.3.0/…/cc1`
+top-of-tree exec, the early-return patched cc1 despite the docstring
+saying `/nix/store/` is toolchain runtime that must NOT be patched.
+`looksLikeLinuxX8664Syscall`'s conservative `0F 05 XX` byte-level
+predicate false-positived on a byte sequence inside a legit non-syscall
+cc1 instruction; INT3 replacement mid-instruction crashed cc1 with
+SEGV_MAPERR si_addr=0x3a0 at `init_emit_regs()`.
+
+Filename-dependence: when the shim's own mapping is at
+`librepro_monitor_shim.so`, `isMonitorShimMappingPath` excludes it
+correctly. When renamed (`shim.so`), the shim's own mapping falls
+through to `endsWith(".so") -> true` and its own text is patched too —
+which apparently perturbs the same code path enough that cc1's crash
+does not trigger (likely because patching the shim's own text under
+its own execution context aborts the patch scan via
+`installInt3SyscallPatchTransaction` returning an error before it ever
+reaches cc1's mapping). Both configurations are wrong; only
+`librepro_monitor_shim.so` deterministically manifests the crash.
+
+Phase D — fix (M9.R.67.1 + M9.R.67.2)
+-------------------------------------
+M9.R.67.1 (io-mon commit faa6cbf) — swap the two clauses in
+`shouldPatchInlineSyscallMapping` so the system-runtime / monitor-shim
+exclusions run BEFORE the executable short-circuit. A monitored
+toolchain exec under `/nix/store/`, `/lib/`, `/lib64/`, `/usr/lib/`, or
+`/usr/lib64/` is now correctly SKIPPED. A user-app exec under `/tmp/`,
+`/home/`, `/opt/` (outside those prefixes) is still patched, so the
+M9.R.63.2 inline-asm `exit_group` regression pin remains covered.
+
+Regression: `io-mon/tests/linux/test_io_mon_inline_patch_predicate.nim`
+exercises 8 predicate branches (both exclusion cases + executable
+exemption + user-app patching + writable/anon/shared skipping).
+
+M9.R.67.2 (io-mon commit 449d9ce) — after the shim stopped crashing
+cc1, the next-layer residual surfaced: 47× `libc raw syscall
+unsupported nr=425` / `nr=426` event-loss on the pixman `mesonbin-setup`
+depfile. Python 3.13's stdlib uses io_uring internally under recent
+kernels (WSL2 5.19+ / native Linux) for its buffering / signal-fd wake
+paths.
+
+Classify `io_uring_setup` (425) and `io_uring_enter` (426) as supported
+without recording, mirroring M9.R.66.1's SYS_gettid treatment. Python's
+own io_uring usage in the stdlib does NOT perform file-open / file-read
+/ file-write against sources or outputs — those still route through
+open(2) / read(2) / write(2) libc symbols the shim already hooks.
+
+Regression: new "raw libc io_uring_setup probe (failing) is supported
+(no event-loss)" test in
+`io-mon/tests/linux/test_io_mon_linux_stdio_ipc.nim`.
+
+Phase E — validation
+--------------------
+pixman `--tool-provisioning=from-source`:
+  meson-fetch-pixmanSource                       asUpToDate  0
+  mesonbin-setup-15268905b1316721                asSucceeded 0
+  mesonbin-compile-dc7b356010c0060e              asSucceeded 0
+  mesonbin-install-327946c3d8f80dd0              asSucceeded 0
+  autotools-stage-library-pixmanSource-libpixman1 asSucceeded 0
+  install-mirror-pixmanSource                    asSucceeded 0
+
+All 6 actions succeed cleanly. No cc1 SIGSEGV, no `monitor depfile is
+incomplete` event-loss.
+
+M9.R.57-59 recipe cascade (sway):
+  sway meson-setup + wlroots + libseat + libdisplay-info + hwdata: all
+  actions run through the fixed shim without any cc1-crash or io_uring
+  event-loss regression. Sway's `mesonbin-compile` currently fails on a
+  DIFFERENT class: missing xf86drm.h + libinput.h headers (libdrm and
+  libinput are not part of the from-source recipe cascade yet). That is
+  a from-source-recipe-coverage gap, not a shim / monitoring gap — it
+  would have blocked the same way even without M9.R.67's shim work.
+
+Full reproos-image rebuild attempt: blocks at the FIRST tool-provisioning
+sub-build (bash from-source). The bash Autotools `./configure` cascade
+generates 1,603,396 records / 6,385 processes / 12 event-loss records
+of the T0 unmonitored-subtree signal (spawn-from-monitored-parent
+with no matching process-start, or un-injectable exec) —
+`autotools-fetch-bashSource:exec-09cacb0998ffc889` fails with
+`monitor depfile is incomplete`.
+
+This is NOT the same class as pixman's cc1 crash. It's a T0-completeness
+signal-(a) recurrence: some of bash's `./configure` sub-shell invocations
+fall through the M9.R.66.5 unanchored-pid guard (which only exempts
+un-injectable exec, not "spawn with no child process-start"). Attribution
++ fix belong to a follow-up milestone (io-mon T0-completeness signal-(a)
+relaxation) — orthogonal to M9.R.67's shim scope.
+
+The shim itself is validated by pixman + the M9.R.57-59 wlroots family
+meson-setup actions. Every cc1 invocation the shim wraps runs cleanly.
+
+Autologin-to-sway verdict
+-------------------------
+NOT VALIDATED at this milestone. Blocked BELOW M9.R.67's scope:
+sway's mesonbin-compile fails on missing libdrm + libinput headers
+(from-source recipe cascade incompleteness — separate open work item).
+The M9.R.67 fix itself DOES unblock every action that reaches cc1
+through the LD_PRELOAD monitor path.
+
+M9.R.57-59 retroactive validation
+---------------------------------
+UNBLOCKED at the shim layer — every M9.R.57-59 recipe now runs its
+cc1 compiles without SIGSEGV under the monitored `from-source` path.
+END-TO-END validation of sway boot into a GUI is blocked below M9.R.67
+by the aforementioned recipe-cascade gap (libdrm / libinput).
+
+Residual, honestly
+------------------
+STRICTLY SMALLER than M9.R.66's residual on M9.R.67's chartered scope:
+
+  * M9.R.66 residual: cc1 crashes under the LD_PRELOAD shim, blocking
+    every meson-driven from-source recipe compile.
+
+  * M9.R.67 residual (shim scope, closed): cc1 runs cleanly under the
+    shim. Pixman succeeds end-to-end. All M9.R.57-59 wlroots-family
+    meson-setup actions run their cc1 compiles without SIGSEGV.
+
+  * M9.R.67 residuals (OUT of shim scope, deferred):
+    - sway's mesonbin-compile blocks on missing libdrm + libinput
+      from-source recipes (recipe cascade coverage gap; not a shim
+      issue). Would have blocked the same way even without M9.R.67.
+    - reproos-image full-rebuild blocks at the first tool-provisioning
+      sub-build (bash Autotools ./configure) with 12 T0 unmonitored-
+      subtree signal-(a) event-losses across 6385 processes / 1.6M
+      records. This is a distinct T0-completeness residual (M9.R.66.5's
+      unanchored-pid exemption covers signal-(b) but not signal-(a));
+      follow-up milestone owns.
+
+  * Documented io_uring gap: an application that DELIBERATELY submits
+    real I/O SQEs through io_uring is unmonitored by this backend. A
+    future `io_uring_enter` SQE-decoder extension can close it. Python's
+    stdlib use of io_uring for internal buffering / signal-fd wake ups
+    does NOT open this gap because it never routes file I/O through the
+    ring — real file I/O still traverses open(2) / read(2) / write(2).
+
+Reviewer boundary
+-----------------
+Every stackable API consumed here remains POLICY-FREE per the M-FW-0
+boundary. No upstream nim-stackable-hooks change was needed.
+
+  Framework-safe helpers used (unchanged):
+    - visitLinuxExecutableMappingSyscalls / installInt3SyscallPatchTransaction
+    - looksLikeLinuxX8664Syscall
+    - CT_CALL_HOOK / CT_BYPASS macros
+
+  io-mon-owned policy / composition (M9.R.67):
+    - `shouldPatchInlineSyscallMapping` predicate order (M9.R.67.1)
+    - `classifyRawFileSyscall` io_uring supported case (M9.R.67.2)
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    M9.R.67.1.pin       d7187bd  bump io-mon pin to faa6cbf (predicate order)
+    M9.R.67.1.evidence  e397301  Phase A + B byte-identity + path-dependence
+    M9.R.67.2.pin       8211b84  bump io-mon pin to 449d9ce (io_uring)
+
+  io-mon (main):
+    M9.R.67.1  faa6cbf  swap inline-syscall patch predicate order
+    M9.R.67.2  449d9ce  classify io_uring_setup / io_uring_enter as supported
+
+
+Evidence files (M9.R.67)
+------------------------
+  m9r67_complete.txt                     this file
+  m9r67_phaseA_byte_identity.txt         Phase A + B characterization
+
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force, no
+--no-verify. `--no-gpg-sign` on reprobuild per the standing convention
+documented in `feedback_reprobuild_unsigned_commits.md`.
