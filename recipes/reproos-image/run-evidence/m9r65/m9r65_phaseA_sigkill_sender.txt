@@ -1,0 +1,191 @@
+M9.R.65 Phase A — Class θ root cause (the SIGKILL hypothesis was WRONG)
+=========================================================================
+
+TL;DR
+-----
+M9.R.64's Class θ attribution said "nim's parallel-compile pool
+SIGKILLs its bash cc-wrapper children when the pool cancels".  That
+hypothesis was WRONG — falsified in three orthogonal ways here.
+
+  Real root cause: the io-mon shim does NOT interpose glibc's
+  `execvp` (only `execv` and `execve`).  On NixOS-WSL, `/bin/sh`
+  resolves to a Rust `wrapped-sh` binary that calls `execvp` to
+  chain into the real shell.  glibc's `execvp` calls `execve`
+  INTERNALLY (bypassing PLT/GOT — LD_PRELOAD interposition does not
+  apply), so the shim's `repro_hook_execve` NEVER FIRES on that
+  transition.  The pending read-tail marker from the wrapped-sh's
+  first cycle (from its `open("/dev/tty")` mrFileOpen) is therefore
+  never paired with a committed marker at the intermediate exec
+  boundary, and `mergeFragments` counts one unmatched pending →
+  one synthetic kill-before-flush event-loss.  No process was ever
+  killed.
+
+
+Falsification of M9.R.64's SIGKILL hypothesis
+---------------------------------------------
+Phase A1 — strace of the full pixman workload for
+`kill,tgkill,tkill,exit,exit_group`:
+
+  Trace: /tmp/m9r65/strace-pixman.log (23 lines total).
+  Every process exited via `exit_group(0)`.  ZERO `kill` /
+  `tgkill` / `tkill` syscalls in the entire trace.  No signal
+  was ever sent to any child.
+
+Phase A2 — nim compiler source audit (extccomp.nim, osproc.nim).
+`execCmdsInParallel` calls `execProcesses`.  `execProcesses`
+uses `waitpid(-1, ...)` — it never sends a signal.  The
+`afterRunEvent` callback runs `rawMessage(errGenerated, ...)`
+on a nonzero exit, which routes through `handleError` →
+`doAbort` → `quit(1)`.  `quit(1)` runs `atexit` and `_Exit`s —
+it does NOT kill outstanding children.  If nim aborts while
+children are running, they are reparented to init and continue.
+
+Phase A3 — minimal reproducer bisection.
+The Class θ shape reproduces from a workload as small as:
+
+  ./build/bin/io-mon --depfile /tmp/dep.rmdf -- /bin/sh -c "echo hi"
+  → summary records=38 processes=1 observations=37 eventLoss=1
+
+The same shell body under `bash -c "..."` produces `eventLoss=0`:
+
+  ./build/bin/io-mon --depfile /tmp/dep.rmdf -- bash -c "echo hi"
+  → summary records=30 processes=1 observations=30 eventLoss=0
+
+The difference is the invocation chain, not the shell.  On this
+NixOS-WSL host, `/bin/sh` is a symlink to:
+
+  /nix/store/0ivfsmgxdgy6cxvrlw32c89pdzdcb9qw-wrapped-sh/wrapper
+
+...which is a Rust binary that:
+  1. Waits for NixOS-WSL activation to finish (inotify).
+  2. Sources /etc/set-environment via a
+     `bash -c ". /etc/set-environment && env -0"` subshell.
+  3. Uses `Command::exec()` — which calls `execvp` — to replace
+     itself with the real shell
+     (/nix/store/…-sh/bin/sh, which is itself a bash script that
+     `exec`s /nix/store/…-bash-interactive/bin/sh).
+
+The pixman workload triples down on this trigger because Nim's
+`execCmdsInParallel` runs each cc invocation under
+`{poStdErrToStdOut, poUsePath, poParentStreams}` and
+`execProcesses` unconditionally adds `poEvalCommand`, so every
+one of the 182 clang-wrapper `cc` invocations is dispatched
+through `/bin/sh -c "…"` — 182 separate `wrapped-sh` invocations,
+each losing one pending marker → 182 event-loss records.
+
+
+Direct fragment-file evidence
+-----------------------------
+Strace of `io-mon … -- /bin/sh -c "echo hi"` filtered to
+fragment-file writes (see /tmp/m9r65-trace/strace.log):
+
+  execve("/bin/sh", …)                          # 1st exec
+  openat(…rmdf-frag, O_APPEND|O_CLOEXEC) = 3
+  write(3, "U…", 89)                            # pending marker
+  execve("/nix/store/…-sh/bin/sh", …)           # 2nd exec — no
+                                                # close(), no
+                                                # committed marker!
+  openat(…rmdf-frag) = 3                        # reopen
+  write(3, "U…", 89)                            # pending marker 2
+  write(3, "n…", 1859)                          # batch payload
+  write(3, "W…", 91)                            # committed 2
+  close(3)
+  execve("/nix/store/…-bash-interactive/bin/sh") # 3rd exec
+  openat(…rmdf-frag) = 3
+  write(3, "U…", 89)                            # pending 3
+  write(3, "n…", 1090)
+  write(3, "W…", 91)                            # committed 3
+  close(3)
+
+Ledger:
+    3 pending markers written
+    2 committed markers written
+    → 1 unmatched pending → 1 event-loss (kill-before-flush)
+
+The gap is at the FIRST execve.  The pending marker was
+written by `writeReadTailMarker(ReadTailPendingDetail)` on the
+mrFileOpen("/dev/tty") that the shim recorded from the Rust
+wrapper's early startup.  But NO committed marker was written
+before the execve — because the shim's `repro_hook_execve`
+did not fire.
+
+
+Why the execve hook doesn't fire on `execvp`
+---------------------------------------------
+The shim's LD_PRELOAD table exports (via
+`nm -D /opt/repro/io-mon/build/lib/librepro_monitor_shim.so`):
+
+    T execv
+    T execve
+    T posix_spawn
+    T posix_spawnp
+
+It does NOT export `execvp`, `execvpe`, `execle`, `execlp`,
+`execl`, or `fexecve`.
+
+The `wrapped-sh` Rust binary imports (via
+`readelf -W --dyn-syms /nix/store/…-wrapped-sh/wrapper`):
+
+    UND execvp@GLIBC_2.2.5
+    UND syscall@GLIBC_2.2.5
+    UND fork@GLIBC_2.2.5
+
+So the caller invokes `execvp`.  glibc's `execvp` performs
+PATH lookup then internally invokes its OWN `__execve`
+(a static / hidden reference, not resolved through the
+dynamic linker).  LD_PRELOAD only interposes GOT/PLT-resolved
+symbols; a call to the same-object hidden reference bypasses
+interposition.  So the shim's `repro_hook_execve` never gets a
+chance to write the committed marker before glibc jumps into
+the SYS_execve trap.
+
+The 182 pixman cc invocations all go through
+`/bin/sh -c "<cc-cmd>"` (via `poEvalCommand` in Nim's
+`execProcesses`).  Every one hits this exact gap.
+
+
+Attribution class — Class θ is a shim-side gap, not a
+                    parent-driven cascade
+-----------------------------------------------------
+Class θ is NOT parent-driven SIGKILL.  It is:
+
+  Class θ (revised) — shim's `execve` hook doesn't fire on
+  glibc `execvp` (and by extension `execvpe` / `execle` /
+  `execlp` / `execl` / `fexecve`) because the shim only
+  exports `execv` and `execve` and glibc's internal call from
+  `execvp` bypasses PLT interposition.  Any pending read-tail
+  marker written by the caller's first cycle is orphaned at
+  the exec boundary, false-downgrading the merge to
+  mcIncomplete.
+
+  The 182/182 pixman residual is not a lost race with a
+  SIGKILL; it is 182 identical orphaned pending markers at
+  182 identical `/bin/sh` → `wrapped-sh` → shell exec chains.
+
+
+Fix path
+--------
+The fix belongs in io-mon, not reprobuild.  Interpose every
+glibc `exec*` variant that userspace code calls directly:
+
+  execvp, execvpe, execle, execlp, execl, fexecve
+
+Each delegates internally to `execve`, but the internal call
+bypasses PLT/GOT.  Interposing at the public entry point
+restores the shim's execve hook coverage across every real
+caller.
+
+`posix_spawn` / `posix_spawnp` are already covered; the
+runtime's fs-snoop test suite passes on them today.
+
+Reprobuild-side workaround (NOT chosen): rewriting
+`execProcesses` to bypass `poEvalCommand` (i.e. skip
+`/bin/sh -c` and shell-quote the command ourselves) would
+sidestep the specific `wrapped-sh` chain that this
+reproducer hits, but leaves the underlying shim gap for
+every other tracee that calls `execvp` — which is the
+majority of all Unix code that uses PATH-lookup exec.
+
+M9.R.65 fix lives at:
+  io-mon/src/io_mon/hooks/linux_preload_runtime.nim
+  io-mon/src/io_mon/shim/linux_preload.nim
