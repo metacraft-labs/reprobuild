@@ -1,0 +1,11 @@
+records=6572
+starts=12
+spawns=6
+execs=6
+ipcConnects=0
+eventLosses=0
+unique-start-pids=6
+signal-a raw candidates (child pid never started)=0
+signal-a unique childs=0
+---first 30 event-loss detail strings---
+---first 30 signal-a candidates (parent, child, detail-abridged)---

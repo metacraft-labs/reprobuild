@@ -1,0 +1,23 @@
+records=1603396
+starts=9962
+spawns=6385
+execs=3589
+ipcConnects=0
+eventLosses=12
+unique-start-pids=6385
+signal-a raw candidates (child pid never started)=0
+signal-a unique childs=0
+---first 30 event-loss detail strings---
+0: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+1: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+2: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+3: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+4: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+5: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+6: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+7: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+8: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+9: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+10: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+11: unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a hardened image, or IPC connect to an out-of-tree breakaway daemon)
+---first 30 signal-a candidates (parent, child, detail-abridged)---

@@ -1,0 +1,17 @@
+signal-a candidates=0
+signal-b anchored trips=12
+---signal-b examples (pid, execs, starts)---
+pid=3648066 execs=1 starts=1
+pid=3648064 execs=1 starts=1
+pid=3653311 execs=1 starts=1
+pid=3653808 execs=1 starts=1
+pid=3648060 execs=1 starts=1
+pid=3648058 execs=1 starts=1
+pid=3648062 execs=1 starts=1
+pid=3648072 execs=1 starts=1
+pid=3648068 execs=1 starts=1
+pid=3648074 execs=1 starts=1
+pid=3649087 execs=1 starts=1
+pid=3648070 execs=1 starts=1
+spawn matched (child started)=6385
+spawn unmatched (child never started)=0

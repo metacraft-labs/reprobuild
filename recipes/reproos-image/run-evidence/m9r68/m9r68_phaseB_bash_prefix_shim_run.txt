@@ -1,0 +1,24 @@
+evaluation warning: nixfmt-rfc-style is now the same as pkgs.nixfmt which should be used instead.
+[+++.....................] checked=1/7 running=1 started autotools-fetch-bashSource[###.....................] checked=1/7 running=0 succeeded autotools-fetch-bashSource[###+++..................] checked=2/7 running=1 started exec-09cacb0998ffc889       [##########..............] checked=3/7 running=0 blocked makebin-dcd34752042bb848[#############...........] checked=4/7 running=0 blocked makebin-8e46fb7171bc083c[#################.......] checked=5/7 running=0 blocked autotools-la-cleanup-bashSource[####################....] checked=6/7 running=0 blocked autotools-stage-executable-bashSource-bash[########################] checked=7/7 running=0 blocked install-mirror-bashSource                 [########################] checked=7/7 running=0 failed exec-09cacb0998ffc889     repro build: action failed: exec-09cacb0998ffc889 (exit code 0)
+configure: WARNING: unrecognized options: --disable-static
+configure: WARNING: unrecognized options: --disable-static
+
+monitor depfile is incomplete
+daemon-hosted build failed
+
+repro build: tool provisioning active (tool-provisioning=from-source)
+project: bashSource
+interface: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/project-interface.rbsz
+toolIdentity: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/from-source-tool-identities.rbtp
+inspection: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/from-source-tool-identities.inspect.json
+cachePortability: local-only
+runQuotaSocket: /tmp/nix-shell.2RF408/reprobuild-runquota-3660986.sock
+providerCompile: started
+providerBinary: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/provider/project-provider
+providerCompileArtifact: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/provider-compile.rbsz
+providerArtifact: 487a6986b52bc29827fbbc255e63a449ac9bc3f6fa917657973ab6578fe2b8ab
+providerGraphSnapshot: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/provider-graph/provider-fragments.rbsz
+providerInvocations: 1
+scheduler: actions=7
+runQuota: active (lease authority)
+buildReport: /opt/repro/reprobuild/recipes/packages/source/bash/.repro/build/repro/build-report.json
