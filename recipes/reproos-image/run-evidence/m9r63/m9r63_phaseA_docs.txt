@@ -1,0 +1,214 @@
+================================================================================
+M9.R.63.1 — Phase A: nim-stackable-hooks + io-mon doc/API audit
+================================================================================
+
+Charter
+-------
+The M9.R.62.4 close-out proposed seccomp-BPF as the fix path for the residual
+inline-assembly SYS_exit_group / SYS_exit escape class. User pushback for
+M9.R.63:
+
+  1. Sync BOTH io-mon and nim-stackable-hooks to their latest tips before
+     assuming any missing mechanism.
+  2. nim-stackable-hooks may already provide a monkey-patch mechanism for
+     inline-assembly syscalls; read the docs FIRST.
+  3. Build a minimal reproducible failing test case in io-mon BEFORE
+     proposing any architectural fix.
+
+Phase A resolves the DOC-AUDIT question in 20 minutes flat with a HIT.
+
+
+Sync snapshot
+-------------
+Both siblings exist at D:/metacraft/{io-mon,nim-stackable-hooks}. Pulled origin.
+
+io-mon (main): 5d7a320bf34148105f5c8c3aeba96fa4282404c8
+  == M9.R.62.3b pin already consumed by reprobuild d886a55f. No new tips.
+
+nim-stackable-hooks (main): fast-forwarded from 13eeb0a to c6cf6ad
+                            (24 new commits, mostly M-FW-3 slices).
+
+New nim-stackable-hooks commits directly relevant to the residual class:
+  c07c92b  linux: add raw syscall helper primitives
+  317fa4d  linux: add INT3 raw syscall substrate
+  acf4c24  linux: add original-call trampoline helpers
+  8e6793f  linux: add patch transaction ABI helpers
+  529b6dd  linux: add fixed-page INT3 syscall helpers
+  5d00832  linux: add vdso patch helper primitives
+  2a1db96  linux: add atomic jit helper primitives
+  1747fb5  linux: add preload helper primitives
+  bfaf903  docs: inventory MCR monkey-patch helpers (M-FW-0)
+  badb871  docs: document MCR migration blockers      (M-FW-3)
+  1163917  docs: mark M-FW-3 parent migration complete
+
+
+Doc-audit findings
+------------------
+Two normative docs cover the mechanism we need:
+
+  1) nim-stackable-hooks/docs/mfw0-mcr-monkey-patch-inventory.md
+     § "Program-Text Raw Syscall Scan and INT3 Trap"
+
+     Named io-mon as an EXPECTED CONSUMER of the exact API family we need:
+       "io-mon: detect and route inline `0f 05` callsites in monitored
+        programs to an io-mon syscall classifier, with fail-closed
+        capability reporting when the scan or trap install is required
+        but unavailable."
+
+  2) nim-stackable-hooks/docs/mfw3-mcr-migration-blockers.md
+     § M-FW-3C accepted 2026-06-30, § M-FW-3D accepted 2026-06-30
+
+     The INT3 raw-syscall callsite substrate is IMPLEMENTED and covers:
+       * sorted callsite-table lookup for signal-handler dispatch
+       * INT3 patch/restore transactions for selected `0f 05` sites
+       * Linux x86_64 ucontext_t syscall-register capture and result/RIP
+         writeback
+       * raw syscall replay from captured register state
+       * neutral C ABI entry points
+       * low-level SIGTRAP install / chain / uninstall substrate
+       * default clone/fork/vfork/clone3 continuation classifier
+       * synthetic continuation-state helpers computing parent result/RIP
+         writeback and child resume-RIP semantics
+
+     Live coverage: an INT3-patched `getpid` syscall stub was proven to
+     continue through replay and RIP writeback (accepted-review note).
+
+
+Concrete stackable APIs relevant to the pixman escapee class
+-------------------------------------------------------------
+From stackable_hooks/platform/linux_raw_syscalls.nim (README lines 54-127):
+
+  Scan side:
+    scanLinuxX8664SyscallBytes         byte-region 0f 05 scanner
+    visitLinuxX8664SyscallBytes        byte-region visitor
+    visitLinuxX8664SyscallMemory       readable memory visitor
+    visitLinuxExecutableMappingSyscalls  per-mapping visitor
+    parseLinuxMapsLine                 /proc/self/maps parser
+    enumerateLinuxExecutableMappings   full-map enumerator
+    addrInLinuxExecutableSegment       validation
+  Callsite bookkeeping:
+    LinuxInt3CallsiteTable
+    addLinuxInt3Callsite
+    findLinuxInt3Callsite
+    findLinuxInt3CallsiteForTrapRip
+  Patch side:
+    installInt3SyscallPatchTransaction   replaces byte 0 with INT3
+    restoreInt3SyscallPatch              symmetric restore
+    installLinuxSigtrapHandler           low-level SIGTRAP install
+    chainLinuxSigtrap                    chained-handler dispatch
+    uninstallLinuxSigtrapHandler
+  Register state:
+    captureLinuxX8664SyscallRegisters    ucontext -> (nr, args)
+    writeLinuxX8664SyscallResult         result -> ucontext
+    replayLinuxX8664SyscallRegisters     raw replay
+  Clone / fork:
+    isLinuxX8664DefaultCloneContinuationSyscall
+    isLinuxX8664CloneContinuationSyscall
+    computeLinuxX8664Int3ResumeRip
+    computeLinuxX8664CloneContinuation
+  Static-runtime C ABI (no libc):
+    staticRawSyscall6
+    rtSigreturnRestorerAddress
+    cloneContinuationTrampolineAddress
+    plus stackable_linux_* neutral C symbols
+
+
+io-mon consumption today
+------------------------
+io-mon ALREADY consumes this substrate. Confirmed at:
+
+  src/io_mon/shim/linux_preload.nim:10
+    import stackable_hooks/platform/linux_raw_syscalls
+
+  src/io_mon/hooks/linux_preload_runtime.nim
+    proc installInlineSyscallPatches*(): InlineSyscallPatchStatus
+      # startup pass: enumerateLinuxExecutableMappings ->
+      # shouldPatchInlineSyscallMapping (policy) ->
+      # visitLinuxExecutableMappingSyscalls ->
+      # installInt3SyscallPatchTransaction
+
+    proc scanInlineSyscallPatchesForNewMappings*
+    proc scanInlineSyscallPatchesForOwnedAnonymousRange*
+    proc scanInlineSyscallPatchesForTrackedMprotectRange*
+      # incremental passes: dlopen / mmap / mprotect
+
+  README.md, § "Platform scope" -> Linux:
+    "Main-executable, startup non-system application-owned shared-object,
+     and post-constructor dlopen/dlmopen application-DSO inline `0f 05`
+     syscall sites are scanned and patched through the same stackable
+     raw-syscall INT3/SIGTRAP substrate."
+
+  So io-mon has the MECHANISM. The residual is POLICY: which mappings
+  the io-mon startup pass considers eligible for patching.
+
+
+The M9.R.63 fix shape (Shape B, per the plan taxonomy)
+------------------------------------------------------
+The mechanism EXISTS in nim-stackable-hooks AND io-mon consumes it. The
+residual gap is in io-mon's mapping-eligibility POLICY at:
+
+  src/io_mon/hooks/linux_preload_runtime.nim
+    proc isSystemRuntimeMappingPath(path: string): bool =
+      ## Keep startup DSO scanning out of loader/libc/toolchain runtime
+      ## mappings.
+      path.startsWith("/lib/") or path.startsWith("/lib64/") or
+        path.startsWith("/usr/lib/") or path.startsWith("/usr/lib64/") or
+        path.startsWith("/nix/store/")            <-- LOAD-BEARING LINE
+
+The pixman `__repro_provider_compile` workload (M9.R.62.3 + M9.R.62.3b
+attribution) is a nix-built toolchain (cc-wrapper, wrapped-sh,
+add-hardening.sh, bash-invoked shells) whose EVERY executable and
+application-owned DSO lives under /nix/store/. So even though io-mon
+scans its own main-executable, /nix/store/-hosted binaries have their
+main-executable AND their application DSOs excluded by the CURRENT
+policy — including any workload binary that issues an inline
+`syscall #exit_group` from a nix-built .so or a nix-built static exec.
+
+M9.R.62 concluded the escape shape was "INLINE-ASSEMBLY raw
+`syscall #exit_group` / `syscall #exit` issued from user code" and
+proposed seccomp-BPF as the fix. Per user pushback, the correct fix is:
+
+  Refine `shouldPatchInlineSyscallMapping` so it patches ANY mapping
+  whose normalized path matches the CURRENT-PROCESS EXECUTABLE PATH,
+  regardless of whether that path is under /nix/store/, and also
+  patches nix-store-hosted application binaries and their non-runtime
+  application DSOs. Keep the loader / libc / dynamic-linker runtime
+  exclusion (glibc / musl / libpthread / libdl / ld-linux.so) to avoid
+  making a nix-hosted glibc's `syscall(2)` wrapper INT3-scan itself.
+
+
+Verification path forward
+-------------------------
+Phase B: minimal repro test case, tests/linux/, that
+  (1) builds a small C program using inline-asm `syscall $231, rdi=42`
+      (SYS_exit_group)
+  (2) runs it under io-mon's LD_PRELOAD shim
+  (3) verifies BEFORE the fix: dep.completeness == mcIncomplete AND
+      dep.records has an mrEventLoss with "kill-before-flush" detail
+  (4) after the fix: dep.completeness == mcComplete AND no such event
+      loss.
+
+Phase C: refine the policy in linux_preload_runtime.nim and add matching
+regression coverage. Do NOT design seccomp-BPF.
+
+Phase D: bump reprobuild's io-mon-src pin.
+
+Phase E: retry the reproos-image full rebuild.
+
+
+Reviewer boundary
+-----------------
+Every stackable API named above is POLICY-FREE per the M-FW-0 boundary:
+io-mon owns mapping selection, self-exclusion, monitor classification,
+completeness policy, and fail-open/fail-closed decisions. This M9.R.63
+mapping-policy refinement is CORRECTLY io-mon-owned; upstream
+nim-stackable-hooks needs no change. Confirmed by:
+
+  mfw0-mcr-monkey-patch-inventory.md:100
+    "MCR-owned adapters and policy: [...] Mapping eligibility based on
+     MCR recorder invariants."
+  mfw0-mcr-monkey-patch-inventory.md:111
+    "io-mon: detect and route inline `0f 05` callsites [...] with
+     fail-closed capability reporting."
+
+Both docs put "which mappings are scanned" firmly on the consumer side.
