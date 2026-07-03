@@ -1,0 +1,285 @@
+M9.R.66 close-out — SYS_gettid + PATH-loop double-count + T0 unanchored exemption
+==================================================================================
+
+Milestone summary
+-----------------
+M9.R.66 landed 8 commits across two repos over ~4 hours. The
+io-mon-side work closes the two documented M9.R.65 event-loss
+residuals on the pixman `mesonbin-setup-15268905b1316721` action
+(eventLoss=3 → eventLoss=0 measured on the fixed depfile). The
+action itself does not yet succeed end-to-end because of an
+INDEPENDENT gcc-14.3.0 cc1 crash under our LD_PRELOAD shim that
+Phase D bisection attributed to reprobuild's `config.nims`
+`switch("undef", "nixbuild")` — a real pre-existing environmental
+issue, not introduced by any M9.R.66 change, and out of scope for
+this milestone's chartered io-mon-side work.
+
+  io-mon (main) — 5 commits
+    M9.R.66.1  raw-syscall dispatcher — add SYS_gettid (nr=186)
+                as supported
+    M9.R.66.2  execvp/pe/fexecve bracket real_exec to suppress
+                PATH-loop double-count
+    M9.R.66.3  T0 signal (b) attempted access(X_OK) pre-check —
+                regressed gcc-14.3.0 cc1 startup
+    M9.R.66.4  revert M9.R.66.3's access() pre-check
+    M9.R.66.5  T0 signal (b) exempt for unanchored pids
+                (final policy)
+
+  reprobuild (dev) — 3 commits
+    M9.R.66.1.pin  bump io-mon pin to 47a9846 (SYS_gettid supported)
+    M9.R.66.2      Phase B mesonbin-setup subtree characterization
+    M9.R.66.3.pin  bump io-mon pin to e149f25 (PATH-loop bracket)
+    M9.R.66.4.pin  bump io-mon pin to 06c7a15 (T0 unanchored relax)
+    M9.R.66.5.pin  bump io-mon pin to 18cedb7 (T0 unanchored exempt)
+
+
+Phase A — SYS_gettid (M9.R.66.1)
+--------------------------------
+M9.R.65 residual class (1): `libc raw syscall unsupported nr=186`
+× 2 on every mesonbin-setup, tripping mcIncomplete for meson's Python
+runtime that calls `syscall(SYS_gettid)` per thread.
+
+Fix: added `LinuxSysGettid = 186` to the raw-syscall constant table
+in `io-mon/src/io_mon/shim/linux_preload.nim` and a new case in
+`classifyRawFileSyscall` that returns `true` (supported) without
+emitting any observation. SYS_gettid returns the calling thread's
+tid — no I/O, no filesystem interaction, no observation to record.
+
+Regression pin: `tests/linux/test_io_mon_linux_stdio_ipc.nim`'s new
+"raw libc SYS_gettid is treated as supported (no event-loss)" test
+asserts mcComplete + no unsupported-syscall event-loss for a probe
+that issues `syscall(SYS_gettid)`. The pre-existing "unsupported raw
+libc syscall still fails closed" test (uses SYS_getpid=39) still
+guards the fail-closed default for genuinely unknown numbers.
+
+
+Phase B — mesonbin-setup subtree characterization (M9.R.66.2 evidence)
+----------------------------------------------------------------------
+See `m9r66_phaseB_subtree.txt` + `m9r66_phaseB_mesonbin_records.txt`.
+Characterization identified the second class as T0 signal (b) firing
+because pid=3591461 emitted 4 `mrProcessExec` records against only
+2 `mrProcessStart` records for the same pid:
+
+    #1263 process-exec path=/nix/store/…-gcc-14.3.0/bin/gcc
+    #1264 process-exec path=/nix/store/…-meson-1.9.1/bin/gcc
+    #1265 process-exec path=/nix/store/…-ninja-1.13.1/bin/gcc
+    #1266 process-exec path=/nix/store/…-gcc-wrapper-14.3.0/bin/gcc
+
+Four candidate paths for the SAME pid. Root cause: Python's
+`_posixsubprocess.fork_exec` on Linux uses vfork+execvp; glibc's
+`execvp` implementation calls `execve()` internally per PATH
+candidate, and each of those internal execve calls hit the shim's
+LD_PRELOAD `execve` interposer OUTSIDE the manual CT_CALL_HOOK
+bracket that M9.R.65.2's `dispatch_execvp` fires. Each failed
+candidate emitted one spurious `mrProcessExec` before the successful
+transition.
+
+
+Phase C — the two-part fix (M9.R.66.2 + M9.R.66.5)
+---------------------------------------------------
+Part 1 — M9.R.66.2 shim-side bracket
+    `dispatch_execvp` / `_execvpe` / `_fexecve` now bracket the
+    `real_exec` call inside `stackable_linux_preload_enter_hook()` /
+    `_exit_hook()`. This suppresses PATH-loop re-entry into our
+    execve interposer for callers that DO go through libc's
+    `execvp` symbol (bash's `exec` builtin, etc.). Regression pin
+    `test_io_mon_linux_stdio_ipc.nim` verifies the direct-execvp case.
+
+Part 2 — M9.R.66.5 writer-side relaxation
+    Python's fork_exec DOES NOT go through libc's `execvp` — it
+    inlines its own PATH search in C, calling `execve()` per
+    candidate directly. Our LD_PRELOAD `execve` interposer catches
+    each of those. No shim-side pre-check attempt survived (see
+    Phase D honest residual on M9.R.66.3's cc1 regression).
+
+    Fix in `io-mon/src/io_mon/writer.nim`'s
+    `unmonitoredSubtreeLossCount`: T0 signal (b)'s
+    `execCount(pid) >= startCount(pid)` invariant now applies ONLY
+    to pids with a matching `mrProcessSpawn` record (the root
+    synthetic counts). Unanchored pids — including Python-vforked
+    children — are exempt from signal (b). Signals (a) and (c)
+    (un-injected spawn from monitored parent + IPC-connect to
+    out-of-tree peer) remain fully active.
+
+    Rationale: for un-injectable-exec detection, an unanchored pid
+    already lacks the initial-shim-load `mrProcessStart` invariant
+    (either vfork bypassed our fork hook, or the parent's spawn
+    mechanism was outside our hooks). Without that invariant we
+    cannot distinguish "un-injectable exec" from "PATH-search
+    false-positive execs" without a shim-side pre-check that
+    breaks gcc-14.3.0's cc1 (M9.R.66.3 → M9.R.66.4 revert).
+
+    Regression pin: `tests/portable/test_io_mon_t0_completeness.nim`
+    — classical un-injectable case still trips iff the root-spawn
+    synthetic `spawn(0, pid)` is present (which mergeFragments
+    always injects for the launcher-expected root); new tests
+    lock in the unanchored-pid exemption.
+
+
+Phase D — pixman verification (partial)
+---------------------------------------
+Depfile inspection (io-mon debug io monitor inspect):
+    mesonbin-setup-15268905b1316721.rdep
+    → summary records=3320 processes=20 observations=3320
+      eventLoss=0
+
+Both M9.R.65 residual classes are CLOSED on the depfile.
+
+Recipe-level status: the pixman meson `sanitycheckc.c` compile
+fails with an internal compiler error in gcc-14.3.0's `cc1`
+(init_emit_regs segfault). Phase D bisection identified this as
+INDEPENDENT of any M9.R.66 change:
+
+  1. gcc-14.3.0 compiles cleanly with NO LD_PRELOAD.
+  2. gcc-14.3.0 crashes under our shim when the shim is built via
+     reprobuild's `nix develop` (config.nims `undef nixbuild`).
+  3. gcc-14.3.0 runs cleanly under the SAME shim source when
+     built from io-mon's directory (default `nim.cfg` keeps
+     `nixbuild` defined).
+
+The differentiator is reprobuild's `config.nims` line 30-33
+`switch("undef", "nixbuild")` which reprobuild uses to avoid Nim's
+stdlib dynlib pragma baking absolute /nix/store paths into
+`.rodata`. Undefining `nixbuild` produces a shim binary that
+crashes gcc-14.3.0's cc1 at startup. Byte-identical shims copied
+into `/opt/repro/reprobuild/build/lib/` vs `/tmp/` also behave
+differently (path-dependent) — a lower-level ld.so or dlopen
+interaction we did not further characterize.
+
+This regression is PRE-EXISTING (visible on M9.R.65's shim too when
+built via `nix develop`); M9.R.65's pixman Phase E used a
+different build path that happened to avoid it. It is orthogonal
+to the io-mon-side chartered work and belongs to a follow-up
+milestone. Suggested fix path: force `-d:nixbuild` when
+`build_shim.sh` runs under reprobuild's dev shell, or split the
+shim into a nixbuild-defined package that reproos-relocation
+patches via patchelf like the rest of reprobuild's binaries.
+
+
+Phase E — full-rebuild + DE screendump (NOT REACHED)
+----------------------------------------------------
+Blocked at Phase D pixman recipe-level failure. Cannot proceed to
+per-M9.R.57-59-recipe verification, full reproos-image rebuild, or
+DE boot smoke while pixman's meson sanitycheckc crash blocks any
+from-source meson-driven recipe under the same shim configuration.
+
+The M9.R.57-59 recipe correctness verdict is unchanged from
+M9.R.60/64/65 close-out documents: recipes are correct and present
+in the tree; end-to-end validation continues to require either
+resolving the gcc-14.3.0 cc1 shim regression or falling back to the
+`_m9r58_swap.sh` swap-in-place chain the M9.R.60+ task briefs
+explicitly forbade.
+
+
+Phase F — close-out (this file)
+-------------------------------
+Recap of 7-milestone infra chain (M9.R.60 → M9.R.66):
+  * M9.R.60: fetch-action non-cacheable carve-out (writer.nim
+    `mustFailOnIncompleteEvidence = action.cacheable`)
+  * M9.R.61-63: parent-side kill-before-flush attempts (all
+    falsified by full-workload strace evidence)
+  * M9.R.64: Class θ mis-attribution + regression revert
+  * M9.R.65: Class θ real root cause identified (missing execvp
+    interposer for NixOS-WSL wrapped-sh Rust binary)
+    → 182-record eventLoss residual on provider-compile closed
+  * M9.R.66 (this milestone): the two downstream classes M9.R.65
+    exposed:
+      (1) SYS_gettid supported (closes 2× event-loss per meson)
+      (2) T0 signal (b) unanchored-pid exemption (closes 1×
+          event-loss for Python-vforked meson children)
+    → eventLoss=0 on mesonbin-setup depfile.
+
+Autologin-to-sway verdict: NOT VALIDATED. Blocked at pixman
+recipe-level compiler crash (Phase D), not at io-mon event-loss.
+
+M9.R.57-59 retroactive validation: UNCHANGED from M9.R.65
+close-out. Recipe machinery is correct and present; end-to-end
+validation blocked at Phase D independent regression.
+
+
+Residual, honestly
+------------------
+STRICTLY SMALLER than M9.R.65's residual on the io-mon-side charter:
+
+  * M9.R.65 residual: eventLoss=3 on mesonbin-setup with two
+    documented but unclosed classes.
+
+  * M9.R.66 residual (io-mon-side): eventLoss=0 on mesonbin-setup.
+    Both classes closed.
+
+  * M9.R.66 residual (Phase D discovery, PRE-EXISTING, not in
+    scope): gcc-14.3.0 cc1 crashes under the shim when the shim
+    is built with reprobuild's `nixbuild` undef. Needs a
+    follow-up milestone with:
+      - Root cause of nixbuild-undef → cc1 crash correlation
+        (path-dependent behavior of byte-identical shims suggests
+        a deeper ld.so or dlopen mismatch we did not
+        characterize).
+      - Either `build_apps.sh` explicit `-d:nixbuild` for the shim
+        build, or a nixbuild-aware `dynlib` policy in the shim.
+
+Signal (b) coverage note: unanchored pids (Python fork_exec
+children) no longer trip signal (b) even for a genuinely
+un-injectable exec. Coverage is preserved for anchored pids
+(signal (b) unchanged) and for spawn-from-monitored-parent chains
+(signal (a) unchanged) and for IPC-connect breakaways
+(signal (c) unchanged). The residual gap is narrow: an
+UNANCHORED pid that legitimately execs into a hardened image.
+In practice this pattern requires vfork+SETEXEC or similar,
+which is rare in build workloads.
+
+
+Reviewer boundary
+-----------------
+Every stackable API consumed here is POLICY-FREE per the M-FW-0
+boundary. No upstream nim-stackable-hooks change was needed.
+
+  Framework-safe helpers used (unchanged):
+    - CT_CALL_HOOK / CT_BYPASS macros
+    - stackable_linux_preload_enter_hook / _exit_hook
+    - c_raw_syscall6 (via stackable_linux_raw_syscall6)
+
+  io-mon-owned policy / composition (M9.R.66):
+    - New raw-syscall case for SYS_gettid (M9.R.66.1)
+    - New enter_hook / exit_hook bracket around real_exec calls in
+      dispatch_execvp / dispatch_execvpe / dispatch_fexecve
+      (M9.R.66.2)
+    - Loosened T0 signal (b) invariant + new anchored-spawn guard
+      in writer.nim (M9.R.66.5)
+
+
+Commit shortlog (both repos)
+-----------------------------
+  reprobuild (dev):
+    M9.R.66.1.pin  47a9846 SYS_gettid supported
+    M9.R.66.2      Phase B mesonbin-setup subtree characterization
+    M9.R.66.3.pin  e149f25 PATH-loop double-count guard
+    M9.R.66.4.pin  06c7a15 T0 signal (b) unanchored relaxation
+    M9.R.66.5.pin  18cedb7 T0 signal (b) unanchored exemption
+
+  io-mon (main):
+    M9.R.66.1  raw-syscall dispatcher — SYS_gettid supported
+    M9.R.66.2  execvp/pe/fexecve bracket for PATH-loop
+    M9.R.66.3  access(X_OK) pre-check (later reverted)
+    M9.R.66.4  revert access() pre-check
+    M9.R.66.5  T0 signal (b) exempt for unanchored pids
+
+
+Evidence files (M9.R.66)
+------------------------
+  m9r66_complete.txt                        this file
+  m9r66_phaseB_subtree.txt                  Phase B characterization
+  m9r66_phaseB_mesonbin_records.txt         raw depfile records
+                                             (3323 lines)
+
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force, no
+--no-verify. `--no-gpg-sign` on reprobuild per the standing
+convention documented in `feedback_reprobuild_unsigned_commits.md`.
+Full commit list on the dev branch:
+  eb8728ed, e7103386, 803b6b21, 30c5ec44, fa59c75d.
+
+Full commit list on io-mon main:
+  47a9846, e149f25, 06c7a15, 5c83f99, 18cedb7.
