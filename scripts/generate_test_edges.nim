@@ -103,14 +103,22 @@ type
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
 
 proc needsSslDefine(path: string): bool =
-  ## Windows-Runner-Binary-Cache-Deploy M6: the HTTPS + publish-authz gate
-  ## exercises the real TLS transport (server-side ``when defined(ssl)``
-  ## accept loop + client-side https), so its build edge must carry
-  ## ``--define:ssl``. Matched by path so the generated diff is explicit.
-  ## The OpenSSL ``-L`` is supplied by the dev-shell ``NIX_LDFLAGS`` during
-  ## the engine test build (a plain ``-d:ssl`` compile links in the
-  ## reprobuild dev shell without an explicit ``--passL``).
-  path.endsWith("/t_repro_binary_cache_https_publish_authz.nim")
+  ## Windows-Runner-Binary-Cache-Deploy M6/M7: the HTTPS gates exercise the
+  ## real TLS transport (server-side ``when defined(ssl)`` accept loop +
+  ## client-side https), so their build edges must carry ``--define:ssl``.
+  ## Matched by path so the generated diff is explicit. The OpenSSL ``-L``
+  ## is supplied by the dev-shell ``NIX_LDFLAGS`` during the engine test
+  ## build (a plain ``-d:ssl`` compile links in the reprobuild dev shell
+  ## without an explicit ``--passL``).
+  ##
+  ##   * M6: the server HTTPS + publish-authz gate.
+  ##   * M7 (prereq a+b): the end-to-end consumer gate — it drives the
+  ##     ssl-enabled http_pool substitute path (M4 over TLS) AND the
+  ##     deploy-agent's ssl ``defaultHttpGet`` (M5 over TLS), so it too must
+  ##     compile with ``-d:ssl`` (the same mechanism the packaged ``repro``
+  ##     binary now uses via ``apps/entrypoints.txt``).
+  path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
+    path.endsWith("/t_repro_https_cache_end_to_end.nim")
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a

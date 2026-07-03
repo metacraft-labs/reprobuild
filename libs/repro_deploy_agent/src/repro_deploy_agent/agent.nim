@@ -34,8 +34,49 @@
 
 import std/[algorithm, httpclient, os, strutils, uri]
 
+when defined(ssl):
+  import std/net
+
 import ./manifest
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
+
+# Windows-Runner-Binary-Cache-Deploy M7 (prereq b): HTTPS manifest sources.
+# When built with -d:ssl (the packaged `repro` binary is, per
+# apps/entrypoints.txt), the deploy-agent's default fetcher builds an OpenSSL
+# context for https:// URLs, resolving the verify mode from the SAME env knobs
+# the substitute client's http_pool uses so the two consumer paths behave
+# identically:
+#
+#   * REPRO_BINARY_CACHE_TLS_INSECURE=1|true|yes → CVerifyNone (skip-verify
+#     escape hatch; the manifest ECDSA-P256 signature stays the end-to-end
+#     trust boundary, so this only relaxes TRANSPORT auth).
+#   * else REPRO_BINARY_CACHE_CA_FILE set → CVerifyPeer against that CA (the
+#     self-signed cert of the M6 HTTPS cache / behind-NetBird deployment).
+#   * else CVerifyPeer against the system trust store.
+#
+# Plain http:// never touches this context. In a non-ssl build the context is
+# nil and newHttpClient stays plain-HTTP-only (https:// then fails loud in
+# std/httpclient), so this file still compiles without -d:ssl.
+when defined(ssl):
+  var gAgentTlsCtx: SslContext = nil
+
+  proc agentTlsContext(): SslContext {.gcsafe.} =
+    # The context is process-global and resolved once (the agent tick runs
+    # on one thread, mirroring http_pool's cached ``gTlsCtx``); the
+    # ``cast(gcsafe)`` documents that the global access is safe here.
+    {.cast(gcsafe).}:
+      if gAgentTlsCtx != nil:
+        return gAgentTlsCtx
+      let caFile = getEnv("REPRO_BINARY_CACHE_CA_FILE", "")
+      let insecure = getEnv("REPRO_BINARY_CACHE_TLS_INSECURE", "") in
+        ["1", "true", "yes"]
+      if insecure:
+        gAgentTlsCtx = newContext(verifyMode = CVerifyNone)
+      elif caFile.len > 0:
+        gAgentTlsCtx = newContext(verifyMode = CVerifyPeer, caFile = caFile)
+      else:
+        gAgentTlsCtx = newContext(verifyMode = CVerifyPeer)
+      return gAgentTlsCtx
 
 type
   AgentOutcomeKind* = enum
@@ -153,7 +194,20 @@ proc fileUrlToPath(source: string): string =
 
 proc defaultHttpGet(url: string; timeoutMs: int):
     tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.} =
-  var client = newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
+  let isHttps = url.toLowerAscii().startsWith("https://")
+  when defined(ssl):
+    var client =
+      if isHttps:
+        newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1),
+                      sslContext = agentTlsContext())
+      else:
+        newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
+  else:
+    if isHttps:
+      return (ok: false, missing: false, body: @[],
+              error: "https:// manifest source requires a build with -d:ssl; " &
+                     "this binary is HTTP-only")
+    var client = newHttpClient(timeout = (if timeoutMs > 0: timeoutMs else: -1))
   try:
     let resp = client.get(url)
     if resp.code == Http404:

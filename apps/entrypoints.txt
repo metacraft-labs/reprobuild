@@ -1,5 +1,15 @@
 # name path [extra-nim-flags...]
-repro apps/repro/repro.nim
+# Windows-Runner-Binary-Cache-Deploy M7 (prereq a): --define:ssl so the main
+# `repro` binary links OpenSSL/TLS and its EMBEDDED cache-consumer paths can
+# speak https://. Without it, `repro infra apply`'s substitute path
+# (substituteInProcess → http_pool.parseTarget) RAISES on an https:// cache
+# URL ("https:// requires -d:ssl"), and the M5 `repro deploy-agent` manifest
+# pull (agent.defaultHttpGet) has no way to TLS-wrap. With -d:ssl the same
+# http_pool TLS path the M6 `repro-binary-cache-client` uses is compiled in,
+# honoring REPRO_BINARY_CACHE_CA_FILE / REPRO_BINARY_CACHE_TLS_INSECURE. Plain
+# http:// is unchanged. The reprobuild dev shell / nix build supplies the
+# OpenSSL `-L` via NIX_LDFLAGS.
+repro apps/repro/repro.nim --define:ssl
 # ReproOS-Generations-And-Foreign-Packages A2 / Windows-Runner-Binary-Cache-Deploy M1:
 # the long-lived binary-cache HTTP daemon. Serves GET /healthz, GET /cache-info,
 # GET /manifests/<hex>, GET /payloads/<hex>, POST /publish on 0.0.0.0:7878 by
