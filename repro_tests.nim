@@ -6854,6 +6854,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim",
+    binary: "build/test-bin/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_shared_clone_alternates_skip_redownload.nim",
     binary: "build/test-bin/t_shared_clone_alternates_skip_redownload",
     defines: @[],
