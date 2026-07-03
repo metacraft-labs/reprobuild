@@ -1,0 +1,158 @@
+M9.R.61 Phase B: re-verification of the M9.R.60.D residual on the
+hardened io-mon tip (451eb2d)
+=================================================================
+
+Objective
+---------
+Repeat M9.R.60 Phase D's pixman `__repro_provider_compile` rebuild
+against the io-mon pin bumped in M9.R.61.1 (`8b05657c` → `451eb2d`,
+71-commit delta whose tip carries the two direct-exit + pre-exec flush
+commits) and determine whether the "monitor depfile is incomplete"
+gate is closed by the upstream hardening alone.
+
+
+Reproduction
+------------
+Working dir: eli-wsl `/opt/repro/reprobuild` (branch dev at
+`fcf2ac7526` — M9.R.61.1 tip). Post-clean of the pixman build cache:
+
+  cd /opt/repro/reprobuild
+  git pull --rebase origin dev
+  rm -rf recipes/packages/source/pixman/.repro/build
+  nix develop --command \
+    ./build/bin/repro build --tool-provisioning=from-source \
+      recipes/packages/source/pixman
+
+The pin update from M9.R.61.1 is materialised in the flake input —
+`nix develop` observably re-hashed the io-mon source root before
+handing over to the shim build; the compiled `.so` linked against
+the new tip is the one loaded by the `nim c` subprocess set.
+
+
+Result — the gate is STILL open
+--------------------------------
+The build fails at the same action + same diagnostic as M9.R.60.D:
+
+  daemon-hosted build failed: __repro_provider_compile asFailed
+  monitor depfile is incomplete
+
+Standalone io-mon-snoop inspect of the resulting depfile
+(`.repro/build/repro/build-engine-cache/monitor-depfiles/__repro_provider_compile.rdep`;
+saved as `m9r61_phaseB_pixman_rmdf.txt`):
+
+  RMDF version=1 records=251135 completeness=mcIncomplete
+  summary records=251135 processes=838 observations=250953 eventLoss=182
+
+The eventLoss count is 182 — IDENTICAL to M9.R.60.D's characterization
+against pin 8b05657c. Every single loss record still carries:
+
+  event-loss pid=<N> tid=<N>
+    detail=process killed with an un-flushed read batch (kill-before-flush)
+
+Netting `read-tail-pending` vs `read-tail-committed` markers in
+`writer.nim`'s `mergeFragments` still finds 182 unmatched pending
+markers across 182 distinct child pids.
+
+
+Why the upstream flush commits don't cover this class
+------------------------------------------------------
+The two direct-exit + pre-exec flush commits (`f428b9b`, `451eb2d`)
+add a new `ExitContext` + `ct_exit_hook` registration and a
+`ct_linux_preload_real_exit` raw-syscall trampoline, plus flush the
+fragment on `_exit` / `_Exit` / execve. The shim's own
+`repro_hook_exit` calls `repro_monitor_shim_shutdown` →
+`closeFragmentSlot` (writes the committed marker, closes fd);
+`repro_hook_execve` calls `repro_monitor_shim_flush` (same closure
+minus the shutdown-marker recording).
+
+The class the two commits DO cover is: an app that reaches libc's
+`_exit` / `_Exit` / `execve`. The class STILL escaping in the pixman
+compile is 182 subprocesses that:
+
+  * did emit `linux-preload-hooks` process-start (so the shim WAS
+    loaded); and
+  * did emit `read-tail-pending` (so their per-thread batch went
+    dirty at least once); but
+  * emitted NO matching `read-tail-committed` before their fragment
+    handle stopped being appended to.
+
+Inspection of the exec chain for a representative escaping pid
+(3053571): `clang-wrapper cc` → `bash-interactive sh` → `/bin/sh`,
+then three `fork` spawns of pipeline pids. Every escape belongs to
+the same shape — a bash-wrapped clang subshell where the parent
+bash forks a pipeline child and the child dies in a way that DOES
+reach `_exit` (proved by the fragment file being closed cleanly and
+no corrupt-fragment record firing) but leaves the sentinel dirty.
+
+The most-likely root-cause candidates ordered by probability, all
+requiring a fix in io-mon:
+
+  Candidate 1 — post-fork sentinel-state leak. `repro_hook_fork`
+    on the child branch calls `discardFragmentSlotAfterFork`, which
+    resets `fragmentSlot.readingSentinelActive` to `false` inside
+    the child. HOWEVER the PARENT's on-disk `read-tail-pending`
+    marker (already emitted with the parent's osPid+threadId) is
+    still on the parent's fragment; if the parent then dies via a
+    path the exit-hook does not observe, the marker remains
+    unmatched. `discardFragmentSlotAfterFork` does not itself
+    emit `read-tail-committed` before closing the inherited fd
+    — the assumption being that the parent will flush its own copy
+    of the batch later. If the parent instead exits via a raw
+    exit_group syscall (glibc's pthread_exit → _exit fast path
+    inside the last thread), the un-flushed pending remains.
+
+  Candidate 2 — race between execve's `repro_monitor_shim_flush`
+    and the exec kernel-transition. `execve` returns success by
+    NOT returning at all; the hook writes the committed marker,
+    calls flushFile, closes the fd, then calls the real execve.
+    If the flushFile buffer or the fd close were to be reordered
+    against the kernel's atomic-exec transition, the write could
+    be lost.
+
+  Candidate 3 — CT_BYPASS gating. The fork/execve hooks both bail
+    to `callNext(ctx)` when `shouldBypass()` is set. The bypass
+    flag is TLS-scoped and inherited across fork copy-on-write;
+    a child that inherits `disabled > 0` never emits process-start
+    itself but the parent's on-disk pending remains.
+
+Any of these three could account for 182 of ~838 subprocess exits
+on this workload. The next milestone (M9.R.61.3) needs to bisect
+against a minimum-viable reproducer, starting with Candidate 1
+because it is the only shape whose fix is orthogonal to the
+existing exit/exec hardening — the other two are supersets of
+what M9.R.60.D already characterised.
+
+
+Retroactive validation status
+-----------------------------
+Unchanged from M9.R.60.D: the recipe-level publishes for
+M9.R.57 / M9.R.58 / M9.R.59 remain correct on disk; end-to-end
+observation requires either closing this class or invoking the
+swap-in-place chain (forbidden by task-brief).
+
+
+Residual, honestly
+-------------------
+M9.R.61.1 landed the pin bump but the gate is still open on the
+identical `mrEventLoss=182 completeness=mcIncomplete` shape. The
+NARROW residual is now:
+
+  * bash-wrapped `clang / cc / ld / rm / bash-shell` subprocess
+    escape via a code path outside the newly-hooked _exit/execve
+    (Candidates 1-3 above)
+  * same as M9.R.60.D in scope + severity — no ANY-new class
+
+Evidence files (M9.R.61 Phase B)
+--------------------------------
+  m9r61_phaseB_characterization.txt        this file
+  m9r61_phaseB_pixman_rmdf_header.txt      trimmed io-mon-snoop
+                                            inspect of the failing
+                                            __repro_provider_compile
+                                            depfile (header + all
+                                            182 event-loss records
+                                            + summary; the full
+                                            251135-line dump was
+                                            43 MB — trimmed to just
+                                            the diagnostic-relevant
+                                            lines to keep evidence
+                                            checked-in-friendly)
