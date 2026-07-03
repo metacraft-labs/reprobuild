@@ -226,6 +226,27 @@ package swaySource:
     ## implementations. 0.19 is the line Sway 1.11 pins; the sibling
     ## ``wlrootsSource`` recipe vendors 0.19.3 to match.
     "wlroots >=0.19"
+    ## libdrm is the user-space DRM ioctl wrapper. Sway's C sources
+    ## directly ``#include <xf86drm.h>`` (via ``sway/output.c`` and
+    ## the DRM-lease protocol path) so libdrm's headers +
+    ## pkg-config fragment must be on the compile path even though
+    ## wlroots transitively links against it. M9.R.67 close-out
+    ## surfaced this as the "sway mesonbin-compile fails on missing
+    ## xf86drm.h" residual: transitive linkage doesn't propagate
+    ## include search paths through the M9.R.14e install-mirror
+    ## PKG_CONFIG_PATH threading; each recipe that ``#include``s a
+    ## header must explicitly declare the providing dep. Matches
+    ## the sibling wlroots recipe's own libdrm declaration.
+    "libdrm >=2.4.122"
+    ## libinput is the input-device abstraction library. Sway's C
+    ## sources directly ``#include <libinput.h>`` (via
+    ## ``sway/input/*`` and the seat management path). Same
+    ## rationale as libdrm above: transitive linkage through
+    ## wlroots doesn't propagate include search paths; each recipe
+    ## that ``#include``s a header must declare the providing dep.
+    ## Matches the sibling wlroots recipe's own libinput
+    ## declaration.
+    "libinput >=1.14"
     ## wayland-scanner is the protocol-XML → C marshalling-stub
     ## generator from the Wayland package; Sway's meson build invokes
     ## it during configure / compile to emit protocol stubs for
