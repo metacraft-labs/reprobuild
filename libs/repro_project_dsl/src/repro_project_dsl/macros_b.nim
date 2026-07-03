@@ -3322,8 +3322,14 @@ macro package*(name: untyped; body: untyped): untyped =
   # ── existing M0/M1 emissions ─────────────────────────────────────
   let recordActions = collectBuildStatements(bodyForBuild).len == 0 and
     pkg.executables.len > 0
+  # Cross-Repo-Source-Consumption SC-9: anchor the workspace-producer schema
+  # discovery on the CONSUMER's own source file (``name.lineInfoObj().filename``
+  # — the consumer's ``repro.nim`` path at macro expansion), so a ``uses:``
+  # selector naming an on-disk workspace sibling imports that producer's
+  # exported CLI schema module and the consumer can bind it as a typed call.
+  let consumerSourceFile = name.lineInfoObj().filename
   let generated = parseStmt(
-    usesImportCode(pkg) &
+    usesImportCode(pkg, consumerSourceFile) &
     "registerPackageDef(" & packageLiteral(pkg) & ")\n" &
     wrapperCode(pkg, recordActions))
   result = newStmtList()

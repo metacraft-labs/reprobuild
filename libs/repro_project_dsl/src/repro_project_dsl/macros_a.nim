@@ -2184,7 +2184,47 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
           escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
           "])\n")
 
-proc usesImportCode(pkg: PackageDef): string =
+proc workspaceProducerModule(selector, consumerSourceFile: string): string =
+  ## Cross-Repo-Source-Consumption SC-9 — compile-time discovery of a
+  ## workspace/sibling PROJECT's ``repro.nim`` for a ``uses:`` selector that
+  ## names a workspace producer, so ``usesImportCode`` can IMPORT that
+  ## producer's exported ``executable … cli:`` schema module and the consumer
+  ## can name it as a typed ``producer.tool(args)`` call (§9.2, §9.3).
+  ##
+  ## Mirrors the runtime ``findSiblingProjectFile``
+  ## (``repro_cli_support.nim:612-650``) — one level up from the CONSUMER's
+  ## ``repro.nim`` source directory: ``../<selector>/repro.nim`` (or
+  ## ``reprobuild.nim``). Anchoring on ``consumerSourceFile`` (the consumer's
+  ## own source path, available at macro expansion via ``lineInfoObj``) makes
+  ## the discovery hermetic and MODE-AGNOSTIC: it runs at consumer macro
+  ## expansion regardless of how the producer artifact is later materialized
+  ## (develop / lock-pinned), exactly as §9.2 requires.
+  ##
+  ## Returns the producer ``repro.nim`` module path WITHOUT its ``.nim``
+  ## extension (Nim's ``import "<path>"`` form), or the empty string when the
+  ## selector names no on-disk workspace sibling. Empty for an unsafe spelling
+  ## (a selector carrying a path separator / dot / colon is not a bare
+  ## workspace project name — the caller keeps its existing branch).
+  if selector.len == 0 or consumerSourceFile.len == 0:
+    return ""
+  for ch in selector:
+    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
+      return ""
+  let anchorDir = consumerSourceFile.parentDir
+  if anchorDir.len == 0:
+    return ""
+  let siblingDir = anchorDir.parentDir / selector
+  if not dirExists(siblingDir):
+    return ""
+  for base in ["repro.nim", "reprobuild.nim"]:
+    let candidate = siblingDir / base
+    if fileExists(candidate):
+      # Return the extension-stripped path so the emitted
+      # ``import "<path>" as <alias>`` resolves the module by file path.
+      return candidate[0 ..< candidate.len - ".nim".len]
+  ""
+
+proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
     # M29 (Provisioning catalog cleanup): autoconf, automake, bun,
     # maturin, npm, pnpm, pyproject-hooks added so every catalog
@@ -2311,6 +2351,42 @@ proc usesImportCode(pkg: PackageDef): string =
     let moduleName = modulePath.split('/')[^1]
     let moduleAlias = moduleName & "_module"
     result.add("import " & modulePath & " as " & moduleAlias & "\n")
+    result.add("when compiles(" & moduleAlias &
+      ".reprobuildPackageMarker()):\n")
+    result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
+  # Cross-Repo-Source-Consumption SC-9 — import a WORKSPACE PROJECT's exported
+  # CLI schema. For a ``uses:`` selector that is NEITHER a bundled-stdlib
+  # selector NOR covered by an explicit ``usesImportPath`` (both handled
+  # above), probe for an on-disk workspace sibling (``../<selector>/repro.nim``
+  # anchored on the CONSUMER's own source file) and, when found, import the
+  # producer's ``repro.nim`` module. Importing it emits the producer's typed
+  # surface (``type <Producer>* = object`` + ``const <producer>* = ...`` + the
+  # per-command wrapper procs ``toolActionWrapperCode`` generated,
+  # ``macros_a.nim:1973-2099``) into the CONSUMER's scope, so a typed
+  # ``producer.tool(args)`` call type-checks against the producer's exported
+  # schema at consumer macro expansion (§9.2, §9.3). This mirrors the
+  # bundled-stdlib import path above (import + ``reprobuildPackageMarker()``
+  # compiles-check) but sourced from the resolved sibling project root rather
+  # than the bundled catalog. MODE-AGNOSTIC — it fixes non-develop typed
+  # consumption too.
+  var producerModules: seq[(string, string)] = @[]  # (alias, module path)
+  for useDef in pkg.toolUses:
+    let selector = useDef.packageSelector
+    if isBundledStdlibSelector(selector):
+      continue
+    let producerModule = workspaceProducerModule(selector, consumerSourceFile)
+    if producerModule.len == 0:
+      continue
+    let moduleAlias = selectorModuleName(selector) & "_workspace_module"
+    var seen = false
+    for (existingAlias, _) in producerModules:
+      if existingAlias == moduleAlias:
+        seen = true
+        break
+    if not seen:
+      producerModules.add((moduleAlias, producerModule))
+  for (moduleAlias, producerModule) in producerModules:
+    result.add("import \"" & producerModule & "\" as " & moduleAlias & "\n")
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
     result.add("  " & moduleAlias & ".reprobuildPackageMarker()\n")
