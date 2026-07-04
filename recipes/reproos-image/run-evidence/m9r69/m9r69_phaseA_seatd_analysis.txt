@@ -1,0 +1,138 @@
+M9.R.69 Phase A — seatd binary + segfault post-mortem
+======================================================
+
+Objective
+---------
+M9.R.68 Phase D3 boot smoke logged 5 seatd segfaults inside the first
+10 s of graphical.target startup:
+
+    seatd[591]: segfault at 2 ip 0000000000000002 sp 0x... error 14
+    Code: Unable to access opcode bytes at 0xffffffffffffffd8.
+
+Signature = "indirect call through NULL / bad function pointer", RIP
+jumped to virtual address 0x2 (bytes 0x02 0x?? = "add %eax, ...").
+M9.R.68 pointed at a "stale libseat build" hypothesis — falsified
+below in favour of Candidate epsilon (a recipe bug that was patched
+by _m9r58_swap.sh on the qcow2 in M9.R.58 but NEVER landed into
+the recipe, so M9.R.68's clean rebuild regressed it).
+
+Method
+------
+1. qemu-nbd --connect=/dev/nbd0 --read-only reproos-installed.qcow2
+2. mount /dev/nbd0p2 /mnt/inspect (read-only)
+3. Copy seatd + libseat.so.1 into /tmp for readelf inspection
+4. Copy the entire mount contents into /tmp/reproos_probe for a
+   writable chroot repro under LD_DEBUG=libs,symbols.
+5. Try seatd with LD_LIBRARY_PATH pointing to (a) the Debian glibc
+   at /lib/x86_64-linux-gnu vs (b) the /repro/store xx7cm72... glibc.
+
+Findings — seatd ELF properties
+--------------------------------
+Binary: /opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin/seatd
+Size:   65 624 bytes
+Class:  ELF64 x86-64 PIE (DYN) — expected
+INTERP: /repro/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib/ld-linux-x86-64.so.2
+        (glibc 2.40 hash xx7cm72...; the same store path IS present
+         inside the qcow2 root as /repro/store/xx7cm72*/lib/... —
+         M9.R.46 relocation applied.)
+
+DT_NEEDED:  libc.so.6                (only — libseat's server-daemon
+                                       side needs neither libseat.so
+                                       nor libsystemd for the seatd
+                                       binary — it uses only libc)
+
+DT_RUNPATH (11 entries, verbatim from readelf -d):
+  $ORIGIN
+  $ORIGIN/../lib
+  $ORIGIN/../lib64
+  /repro/store/f8gicbns4hymkc8k82h6c1cnz4pjs7ip-meson-1.9.1/lib
+  /repro/store/0gc2hfzrbcr89jqgsyq2vd7srf9zkqhz-systemd-258.2-debug/lib
+  /repro/store/4xzf35hvsmbs585nawkbsiinlwybnk33-systemd-258.2-dev/lib
+  /repro/store/zf8qy81dsw1vqwgh9p9n2h40s1k0g2l1-systemd-258.2/lib
+  /repro/store/v3y237spdrj3xlv4fnl4w9w8dff1ppqp-systemd-minimal-258.2-debug/lib
+  /repro/store/vjl4zszmnxqm0dg7m8xny54pikv584s0-systemd-minimal-258.2-dev/lib
+  /repro/store/wqay8yh6wwz70423ldm0cpx8zjrxpmbq-systemd-minimal-258.2/lib
+  /repro/store/kgibywhn2k14lr2mwwx2sp08p57pdizp-clingo-5.8.0/lib
+  /repro/store/xm08aqdd7pxcdhm0ak6aqb1v7hw5q6ri-gcc-14.3.0-lib/lib
+
+NONE of the 11 RUNPATH entries contains libc.so.6.  In particular
+the entry for the glibc that supplied the ld-linux INTERP
+(`xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66`) is ABSENT.
+
+Symbol-version demand: GLIBC_2.2.5 through GLIBC_2.34.  Both the
+qcow2's 2.40 store glibc AND the Debian 2.41 base rootfs glibc satisfy
+these — the crash is NOT a symbol-version shortfall.
+
+Findings — image glibc situation
+--------------------------------
+The qcow2 contains SIX distinct libc.so.6 files:
+
+  /lib/x86_64-linux-gnu/libc.so.6      1 995 216 B  Debian 2.41-12+deb13u3
+  /repro/store/xx7cm72*/lib/libc.so.6  2 421 272 B  Nix    2.40-66
+  /repro/store/i3ibgfs*/lib/libc.so.6  2 413 080 B  Nix    2.40-66
+  /repro/store/5m9amsv*/lib/libc.so.6  2 351 672 B  Nix    2.40-66
+  /repro/store/jms7zxz*/lib/libc.so.6  2 433 648 B  Nix    2.42-51
+  (six because /nix/store exists as a compat symlink layer)
+
+/etc/ld.so.cache is the Debian rootfs cache — its FIRST-preference
+entry for libc.so.6 is `/lib/x86_64-linux-gnu/libc.so.6` (Debian 2.41).
+The Nix-built ld-linux at INTERP does not read /etc/ld.so.cache
+directly: its baked-in cache path is
+/nix/store/xx7cm72*/etc/ld.so.cache, and the image installs
+/nix/store/xx7cm72*/etc/ld.so.cache as a compat symlink -> /etc/ld.so.cache.
+So the same wrong-first-preference cascade applies.
+
+Repro of the crash (chroot into an rw copy of the image rootfs)
+---------------------------------------------------------------
+$ sudo chroot /tmp/reproos_probe env \
+        LD_LIBRARY_PATH=/lib/x86_64-linux-gnu \
+        /opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin/seatd -h
+  <no output>
+  RC=0 in shell but no help text (silent crash on __libc_start_main
+   — the exact "segfault at 2 ip 0x2" pattern from boot smoke, hidden
+   under chroot without journal capture).
+
+$ sudo chroot /tmp/reproos_probe env \
+        LD_LIBRARY_PATH=/repro/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib \
+        /opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install/usr/bin/seatd -h
+  Usage: seatd [options]
+    -h		Show this help message
+    ...
+  RC=0 (clean).
+
+Under normal boot the ld-linux from INTERP fails to find libc.so.6 in
+any RUNPATH entry, falls through to /etc/ld.so.cache (the Debian
+cache), picks up Debian glibc 2.41, and __libc_start_main from 2.41
+smashes something the 2.40 ld-linux had already staged — hence the
+IP=0x2 crash inside setup.
+
+Verdict
+-------
+Candidate epsilon — RECIPE BUG.  The libseat recipe (repro.nim)
+uses `meson_package(...)` to build both the library and the seatd /
+seatd-launch binaries, but the resulting RUNPATH does NOT include
+the ld-linux-providing glibc's lib dir.  Meson RPATH resolution
+picked up the recipe's declared build/runtime dependencies (meson,
+systemd, clingo, gcc-lib) but not glibc itself — glibc is treated
+as an implicit toolchain input by meson/pkg-config and its lib dir
+never made it into the recipe's runtime-lib set.
+
+This IS the same bug M9.R.58.3 characterised.  It was patched on the
+image via _m9r58_swap.sh's patchelf --set-rpath that prepended the
+Nix-glibc lib dir.  The fix WAS NEVER LANDED in repro.nim, so
+M9.R.68's clean rebuild ships an un-patched binary — hence the
+regression.
+
+Falsifications
+--------------
+- Not Candidate alpha (backend dlopen zero-init): the crash reproduces
+  under the exact same boot conditions with -h flag before any backend
+  registration runs.  It is pre-main.
+- Not Candidate beta (missing symbol resolution): the versioned-symbol
+  demand is fully satisfied by both 2.40 and 2.41 libc.
+- Not Candidate gamma (TLS init failure with static TLS overflow):
+  static TLS budget on this seatd is trivial; test above proves a
+  same-hash libc works.
+- Not Candidate delta (libudev binding): the seatd server binary does
+  not link libudev at all (readelf -d shows only libc.so.6 in NEEDED),
+  and the crash reproduces before dlopen would happen.
