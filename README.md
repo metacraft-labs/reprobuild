@@ -85,6 +85,8 @@ If you are already familiar with the modern DevOps and build toolchain, Reprobui
 *   **Reprobuild is like direnv**, but is completely zero-bypass—since compiler tools are scoped to the project environment, **agents can't forget to run it**.
 *   **Reprobuild is like Docker Compose & Process Compose**, but it **type-checks** your service configuration.
 
+Reprobuild unifies all of these tools behind one simple concept: a build graph of arbitrary inputs and outputs where the nodes are not necessarily files, but a more abstract notion of states (the activation of a particular system setting, the launch of a daemon, the creation of a user or a database, etc.). Reprobuild can build files, system configurations, and entire cloud fleets on the basis of the same abstraction. The outputs or side-effects from executing the edges are automatically cleaned up when they are no longer relevant.
+
 ---
 
 ## 4. Key CLI Commands

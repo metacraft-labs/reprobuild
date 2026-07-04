@@ -144,3 +144,5 @@ If you are already familiar with the modern DevOps and build toolchain, Reprobui
 *   **Live++**: Supports hot code reloading, but does it on all operating systems.
 *   **direnv**: Completely zero-bypass—since compiler tools are scoped to the project environment, **agents can't forget to run it**.
 *   **Docker Compose & Process Compose**: Orchestrates development services, but **type-checks** your service configuration.
+
+Reprobuild unifies all of these tools behind one simple concept: a build graph of arbitrary inputs and outputs where the nodes are not necessarily files, but a more abstract notion of states (the activation of a particular system setting, the launch of a daemon, the creation of a user or a database, etc.). Reprobuild can build files, system configurations, and entire cloud fleets on the basis of the same abstraction. The outputs or side-effects from executing the edges are automatically cleaned up when they are no longer relevant.
