@@ -1,0 +1,291 @@
+M9.R.75 — R6 (source read-only) + R7 (double-write reject) — close-out
+========================================================================
+
+Objective
+---------
+reprobuild-specs Filesystem-Policy-And-Observed-Inputs.md §"Double
+Writes" (R7, lines 246-262) + §"Source Rewrites" (R6, lines 264-278)
+mandate that (a) two producers writing the same output are errors,
+and (b) actions writing to nominally-read-only source paths are
+errors. The M9.R.72 Phase A summary flagged both as "Gap VI (low
+impact for M9.R.60-70 but spec-mandated): source-rewrite and
+double-write enforcement (R6/R7) is missing." M9.R.74 landed the
+foundational ActionCwdKind + resolveCanonicalExecRoot; this milestone
+lands the R6 + R7 enforcement layers on top.
+
+
+Landed commits (reprobuild dev + main)
+---------------------------------------
+  * 77d2106d  M9.R.75.1: Phase A R6+R7 audit
+  * 02066f67  M9.R.75.2: engine — double-write graph-time detection
+  * 4541222a  M9.R.75.3: engine — source-write reject (R6) post-hoc
+              monitor check
+  * 9c2c8b95  M9.R.75.3.1: R7 dep-chain relaxation — allow sequential
+              shared roots
+  * f66a516b  M9.R.75.4: DSL — from_source_custom populates
+              declaredOutputs + readOnlyRoots
+  * 1406c10a  M9.R.75.5: retroactive validation — pixman/wlroots/
+              libseat unaffected
+  * (this)    M9.R.75.6: close-out
+
+No spec addendum landed on reprobuild-specs — R6 + R7 as written are
+already clear and match the BuildXL-style "double writes are errors"
+default the M9.R.75 code implements. See the Phase A audit for
+justification.
+
+
+Phase A summary — spec reading + gap enumeration
+-------------------------------------------------
+Filesystem-Policy-And-Observed-Inputs.md §"Double Writes" (R7,
+lines 246-262):
+
+    A double write occurs when more than one producer writes the
+    same output.
+    ...
+    The default should be the strictest safe behavior:
+    - double writes are errors
+
+Filesystem-Policy-And-Observed-Inputs.md §"Source Rewrites" (R6,
+lines 264-278):
+
+    A source rewrite occurs when an action mutates a source or
+    other nominally read-only file.
+    ...
+    The default should be:
+    - source rewrites are errors
+
+Current-implementation grade at Phase A:
+
+  * R7 partially implemented — ``validateGraph`` at
+    libs/repro_build_engine/src/repro_build_engine.nim:986-1002
+    rejects two actions declaring the same string in ``outputs``, but
+    conventions declare only stamp files there (unique per action by
+    design), so the check misses the real hazard (two configure /
+    install actions racing for the same buildDir / DESTDIR).
+
+  * R6 not implemented — monitor evidence records ``mrFileWrite`` per
+    path but no engine code classifies them against a "source root"
+    allowlist.
+
+Full audit in m9r75_phaseA_r6r7_reading.txt.
+
+
+Phase B summary — R7 double-write graph-time detection
+-------------------------------------------------------
+libs/repro_project_dsl/src/repro_project_dsl/types.nim
+  + BuildActionDef.declaredOutputs*: seq[string]
+    — per-action write-root declaration. Distinct from ``outputs``:
+      the latter is the stamp / artefact set for post-run readiness;
+      ``declaredOutputs`` carries the FULL write ROOT (buildDir /
+      installDir / fetchExtracted) for graph-time R7 grading.
+  + BuildActionDef.readOnlyRoots*: seq[string]
+    — per-action read-only-root declaration for R6 grading (Phase C).
+
+libs/repro_project_dsl/src/repro_project_dsl/runtime_core.nim
+  + Payload codec bumped to v22 with two length-prefixed string seqs
+    (declaredOutputs, readOnlyRoots). v21-and-earlier payloads
+    decode with both empty so legacy artefacts round-trip
+    byte-identically.
+  + buildAction() proc gains matching parameters, defaulting to
+    empty seqs.
+
+libs/repro_build_engine/src/repro_build_engine.nim
+  + BuildAction.declaredOutputs* + BuildAction.readOnlyRoots*
+  + normalizeWriteRoot / writeRootsOverlap helpers
+  + validateGraph pairwise-intersection pass grades every pair of
+    declaredOutputs entries; overlap → structured graph-time error
+    naming both action ids + the conflicting path.
+
+libs/repro_cli_support/src/repro_cli_support.nim
+  + lowerGraphAction copies both fields from payload to BuildAction.
+
+Regression tests:
+  * libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim
+    — 7 codec cases (empty legacy default, single entry, multi-entry
+      order-preservation, readOnlyRoots preservation, both fields
+      simultaneously, buildAction() default empty, buildAction()
+      explicit opt-in). All 7 pass.
+  * libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim
+    — 7 cases at Phase B (equality, containment, sibling disjointness,
+      prefix look-alike, empty-seq legacy behaviour, self-overlap
+      skipped, trailing-slash normalisation). Phase B version passed;
+      Phase D.1 (M9.R.75.3.1) added 2 more cases (see below).
+
+
+Phase C summary — R6 source-write reject via post-hoc monitor check
+--------------------------------------------------------------------
+libs/repro_build_engine/src/repro_build_engine.nim
+  + detectSourceWrites* — exported helper. Given readOnlyRoots +
+    monitorWrites, returns every (write, root) pair where the write
+    landed at or under a read-only root.
+  + collectEvidence extends the monitor-fold pass with an R6 check
+    after ``foldMonitorDepFileEvidence`` populates monitorWrites;
+    any offender flips ``result.publishable`` to false with a
+    structured "source-write attempt (R6): ..." diagnostic.
+  + publishable = false is the same escalation channel M9.R.72.3's
+    monitor-loss ladder uses; the scheduler's post-execution check
+    at line 4691 flips asSucceeded → asFailed when
+    evidence.publishable is false, so source-write attempts land as
+    hard action failures with the full diagnostic in stderr.
+
+Enforcement Shape chosen: Shape B (post-hoc monitor check,
+cross-platform). Shape A (Linux bwrap sandbox) is architecturally
+correct + immediate for Linux but requires wiring bwrap into the
+engine's spawn wrapper — deferred to a follow-up milestone.
+
+Fetch actions leave readOnlyRoots empty per R6's "action explicitly
+owns the target location" carve-out; legacy actions predate the
+field entirely so both cases no-op byte-for-byte.
+
+Regression test:
+  * libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim
+    — 11 cases (at-root hit, under-root hit, sibling miss, prefix
+      look-alike miss, empty-roots fetch-carve-out, empty-writes,
+      multi-offender aggregation, trailing-slash normalisation on
+      both sides, multi-root cross-checks, Windows-style separator
+      normalisation). All 11 pass.
+
+
+Phase C.1 summary — R7 dep-chain relaxation
+--------------------------------------------
+The Phase B R7 pass fired on ANY two actions declaring overlapping
+write roots. But the canonical from-source pattern is configure →
+compile → install all declaring the same buildDir — these are
+SEQUENTIAL, not double writes.
+
+Refined semantic: R7 targets CONCURRENT double writes. Two actions
+whose declaredOutputs overlap are only rejected when NEITHER
+transitively depends on the other. Uses a bounded DFS reachability
+probe on the byId table.
+
+Regression added 2 new cases to test_m9r75_double_write_reject.nim:
+  * sequential actions (direct dep chain) sharing a write root are
+    allowed;
+  * transitive dep chain (C deps B deps A, C+A shared root) allowed.
+
+All 9 R7 tests now pass.
+
+
+Phase D summary — from_source_custom populates the fields
+----------------------------------------------------------
+libs/repro_standard_provider/src/repro_standard_provider/conventions/
+  from_source_custom.nim:
+    * emitShellActions: each shell row declares
+        - declaredOutputs = @[outPath]
+        - readOnlyRoots = @[extractedPath]
+      so the R7 pass grades this-package writes against other
+      packages, and the R6 pass grades any accidental writes into
+      the upstream source tree.
+    * emitStageCopyAction: stage-copy declares
+        - declaredOutputs = @[outDir]
+        - readOnlyRoots intentionally empty (reads from outPath,
+          which is a writable scope owned by earlier shell rows in
+          the same convention; adding it as read-only would conflict
+          with those rows' declaredOutputs).
+
+meson_package / autotools_package / cmake_package DEFERRED — see
+"Deferred to follow-up milestones" below.
+
+
+Phase E summary — retroactive validation
+-----------------------------------------
+pixman + wlroots + libseat all route through ``meson_package``,
+which Phase D deferred. So the new enforcement layer sees empty
+declaredOutputs + readOnlyRoots on every emitted action and no-ops
+per design. NO recipe fixes required.
+
+Engine + DSL R6/R7 regression tests: 7 codec + 9 R7 double-write +
+11 R6 source-write + M9.R.72 phaseD monitor-loss (spot check for
+no regression) — all pass on compiled binaries. Full evidence in
+m9r75_phaseE_validation.txt.
+
+
+Deferred to follow-up milestones
+---------------------------------
+
+1. **meson_package / autotools_package / cmake_package thread-through.**
+   These three high-level constructors emit configure / compile /
+   install edges through typed-tool call sites (``meson(...)`` /
+   ``make(...)`` / ``cmake(...)``) rather than direct ``buildAction()``.
+   Threading ``declaredOutputs`` + ``readOnlyRoots`` requires
+   extending the typed-tool call-site emitter OR the fragment
+   assembler that turns each call site into a ``BuildActionDef``.
+   Not one-milestone work — this milestone lands the MECHANISM;
+   the follow-up lifts the conventions to populate the new fields.
+
+2. **Shape A (bwrap sandbox) on Linux.** Phase C landed Shape B
+   (post-hoc monitor check) as the immediate cross-platform
+   enforcement. Shape A would wrap each action's spawn in
+   ``bwrap --ro-bind $ro $ro --bind $rw $rw ...`` so writes to the
+   source tree fail hard with EROFS INSIDE the action, not just at
+   the post-hoc evidence-fold stage. Requires wiring bwrap into
+   the engine's spawn wrapper (``startBypassRunQuotaProcess`` +
+   ``startRunQuotaProcess``) with the tool catalog for Linux hosts;
+   Windows keeps Shape B as the sole enforcement.
+
+3. **``outputs`` vs ``declaredOutputs`` naming disambiguation.**
+   The engine's legacy ``BuildAction.outputs`` field represents the
+   per-action stamp / artefact set; the M9.R.75
+   ``BuildAction.declaredOutputs`` represents the write ROOT for R7
+   grading. Two orthogonal concepts with confusingly similar names.
+   A follow-up doc pass could rename to ``declaredArtifacts`` /
+   ``writeRoots`` for clarity; codec would need a v23 rename.
+
+4. **Same-content double-write hatch.** Spec R7 line 260 allows
+   "same-content double writes may be acceptable in carefully
+   controlled cases" as a non-default policy. The M9.R.75 code
+   implements only the strict default; a follow-up milestone could
+   thread a per-action ``sameContentDoubleWriteOk = false`` slot
+   through the payload codec for the tightly-controlled cases the
+   spec permits.
+
+
+Honest residuals (accepted for M9.R.75)
+----------------------------------------
+
+  a. Parallel-agent stage collisions during this milestone — the
+     M9.R.76.3 agent's ``package_result.nim`` +
+     ``install_mirror_resolver.nim`` edits appeared in the working
+     tree at the same time as this milestone's work. Kept isolated
+     per the M9.R.74 lesson: never staged those files as part of
+     M9.R.75 commits, verified via ``git status --short`` before each
+     commit. No stage collisions in this milestone's landed history.
+
+  b. pixman / wlroots / libseat validation is a no-op today because
+     their convention (meson_package) hasn't been lifted to populate
+     declaredOutputs / readOnlyRoots. This is a documented
+     deferral, not an oversight — see Deferred item 1.
+
+  c. Shape A (bwrap sandbox) is documented but not implemented in
+     this milestone. Shape B alone captures the R6 enforcement in a
+     cross-platform way; layering Shape A on top would tighten
+     Linux enforcement without changing the DSL surface.
+
+
+Time budget
+------------
+Wall time: ~3.5hr (audit 30min, Phase B impl+tests 90min, Phase C
+impl+tests 45min, Phase C.1 dep-chain refinement + tests 30min,
+Phase D from_source_custom 15min, Phase E audit + writeup 15min,
+close-out 15min). Well under the 24hr budget.
+
+
+Files touched (M9.R.75 scope)
+------------------------------
+reprobuild:
+  * libs/repro_project_dsl/src/repro_project_dsl/types.nim
+  * libs/repro_project_dsl/src/repro_project_dsl/runtime_core.nim
+  * libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim
+  * libs/repro_build_engine/src/repro_build_engine.nim
+  * libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim
+  * libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim
+  * libs/repro_cli_support/src/repro_cli_support.nim
+  * libs/repro_standard_provider/src/repro_standard_provider/conventions/from_source_custom.nim
+  * recipes/reproos-image/run-evidence/m9r75/m9r75_phaseA_r6r7_reading.txt
+  * recipes/reproos-image/run-evidence/m9r75/m9r75_phaseE_validation.txt
+  * recipes/reproos-image/run-evidence/m9r75/m9r75_complete.txt (this file)
+
+reprobuild-specs: no spec addendum required.
+
+
+End of close-out.
