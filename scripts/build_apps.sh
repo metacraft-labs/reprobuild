@@ -36,9 +36,13 @@ io_mon_src="${IO_MON_SRC:-../io-mon}"
 # ``config.nims`` switch("path", ioMonSrc) lookup picks up
 # ``<root>/src/io_mon.nim``).  This script wants the io-mon repo ROOT
 # so ``scripts/build_shim.sh`` resolves.  Strip a trailing ``/src``
-# segment so the same env value works for both consumers.
+# segment (with either separator — the Windows env.ps1 hands us
+# ``...\io-mon\src`` with backslashes, so the ``/src`` glob would
+# otherwise leave the trailing segment attached) so the same env value
+# works for both consumers.
 case "$io_mon_src" in
-  */src) io_mon_src="${io_mon_src%/src}" ;;
+  */src)   io_mon_src="${io_mon_src%/src}" ;;
+  *\\src)  io_mon_src="${io_mon_src%\\src}" ;;
 esac
 if [ ! -x "${io_mon_src}/scripts/build_shim.sh" ]; then
   echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
