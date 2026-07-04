@@ -201,22 +201,27 @@ package hwdataSource:
       # ``install``. DESTDIR=$out puts everything under the
       # per-package output root.
       shell "make install DESTDIR=$out"
-      # Step 3: emit the install-tree mirror at
-      # ``recipes/packages/source/hwdata/.repro/output/install/``
-      # for downstream sibling recipes' pkg-config search-path
-      # channels. The M9.R.14e.8 mirror-emit stage that the
-      # autotools_package constructor runs is NOT emitted by the
-      # from-source-custom convention, so we replicate its
-      # essential shape here: copy $out/usr into
-      # $extracted/../../../.repro/output/install/usr, then rewrite
-      # the .pc file's prefix / datadir lines to point at the
-      # mirror's absolute path (rather than the upstream-baked
-      # ``/usr``). The prefix-rewrite matches libs/repro_dsl_stdlib
-      # /src/repro_dsl_stdlib/types/package_result.nim line 1438-
-      # 1447. Also emit a stage-copy sanity marker: link pnp.ids
-      # into $out/share/pnp.ids so the from-source-custom
-      # stage-copy step probes it as the ``files pnp.ids`` artifact.
-      shell "set -eux && MIRROR=\"$(cd $extracted/.. && pwd)/.repro/output/install\" && MIRROR_USR=\"$MIRROR/usr\" && mkdir -p \"$MIRROR_USR\" && cp -rT \"$out/usr\" \"$MIRROR_USR\" && for pc in \"$MIRROR_USR/share/pkgconfig\"/*.pc; do [ -f \"$pc\" ] || continue; sed -i \"1,/^prefix=/{ s|^prefix=.*|prefix=$MIRROR_USR|; }\" \"$pc\"; sed -i \"s|^exec_prefix=/usr|exec_prefix=$MIRROR_USR|\" \"$pc\"; sed -i \"s|^libdir=/usr/lib64|libdir=$MIRROR_USR/lib64|\" \"$pc\"; sed -i \"s|^libdir=/usr/lib|libdir=$MIRROR_USR/lib|\" \"$pc\"; sed -i \"s|^includedir=/usr/include|includedir=$MIRROR_USR/include|\" \"$pc\"; sed -i \"s|^datadir=/usr/share|datadir=$MIRROR_USR/share|\" \"$pc\"; sed -i \"s|^datarootdir=/usr/share|datarootdir=$MIRROR_USR/share|\" \"$pc\"; done && mkdir -p \"$out/share\" && cp -f \"$out/usr/share/hwdata/pnp.ids\" \"$out/share/hwdataFiles\""
+      # Step 3: emit the install-tree mirror at ``${OUT_MIRROR}`` for
+      # downstream sibling recipes' pkg-config search-path channels.
+      # ``$OUT_MIRROR`` is populated per-shell-action by the M9.R.79.5
+      # from_source_custom emitter — its value is the recipe's own
+      # ``.repro/output/install`` root (POSIX-slashed).  This replaced
+      # the pre-M9.R.79 ``MIRROR=$(cd $extracted/.. && pwd)/.repro/output/install``
+      # host-relative resolution so the recipe no longer depends on the
+      # ``$extracted`` position under the recipe root.
+      #
+      # The M9.R.14e.8 mirror-emit stage that the autotools_package
+      # constructor runs is NOT emitted by the from-source-custom
+      # convention, so we replicate its essential shape here: copy
+      # $out/usr into ${OUT_MIRROR}/usr, then rewrite the .pc file's
+      # prefix / datadir lines to point at the mirror's absolute path
+      # (rather than the upstream-baked ``/usr``). The prefix-rewrite
+      # matches libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/
+      # package_result.nim line 1438-1447. Also emit a stage-copy
+      # sanity marker: link pnp.ids into $out/share/pnp.ids so the
+      # from-source-custom stage-copy step probes it as the ``files
+      # pnp.ids`` artifact.
+      shell "set -eux && MIRROR=\"${OUT_MIRROR}\" && MIRROR_USR=\"$MIRROR/usr\" && mkdir -p \"$MIRROR_USR\" && cp -rT \"$out/usr\" \"$MIRROR_USR\" && for pc in \"$MIRROR_USR/share/pkgconfig\"/*.pc; do [ -f \"$pc\" ] || continue; sed -i \"1,/^prefix=/{ s|^prefix=.*|prefix=$MIRROR_USR|; }\" \"$pc\"; sed -i \"s|^exec_prefix=/usr|exec_prefix=$MIRROR_USR|\" \"$pc\"; sed -i \"s|^libdir=/usr/lib64|libdir=$MIRROR_USR/lib64|\" \"$pc\"; sed -i \"s|^libdir=/usr/lib|libdir=$MIRROR_USR/lib|\" \"$pc\"; sed -i \"s|^includedir=/usr/include|includedir=$MIRROR_USR/include|\" \"$pc\"; sed -i \"s|^datadir=/usr/share|datadir=$MIRROR_USR/share|\" \"$pc\"; sed -i \"s|^datarootdir=/usr/share|datarootdir=$MIRROR_USR/share|\" \"$pc\"; done && mkdir -p \"$out/share\" && cp -f \"$out/usr/share/hwdata/pnp.ids\" \"$out/share/hwdataFiles\""
 
   runtimeDeps:
     ## Data-only package: no runtime linked deps. The pnp.ids /
