@@ -43,6 +43,23 @@ import std/[os, strutils]
 
 const InstallMirrorModeEnvVar* = "REPRO_INSTALL_MIRROR_MODE"
 
+const StoreRootEnvVar* = "REPRO_STORE_ROOT"
+  ## Environment variable that overrides the default CAS/Layer-2 store
+  ## root when the hashed resolver is active. Mirrors the same variable
+  ## already consumed by ``repro_local_store``'s ``resolveStoreRoot``.
+
+const RealizationInfoFileName* = ".realization-info"
+  ## The per-recipe sidecar the M9.R.77.3 hashed-mirror flow writes at
+  ## ``<recipesRoot>/<depName>/.repro/output/.realization-info``. Two
+  ## KV lines terminate with LF:
+  ##
+  ##   ``version=<version-string>``
+  ##   ``realization-hash=<64-char-lowercase-hex>``
+  ##
+  ## The file is committed by the install-mirror emit action once the
+  ## recipe has opted into ``useHashedMirror`` mode. Both keys are
+  ## required for the hashed resolver to return a non-empty path.
+
 type
   InstallMirrorMode* = enum
     immLegacy = "legacy"
@@ -68,18 +85,112 @@ proc legacyDepMirrorRoot(recipesRoot, depName: string): string =
   ## copies of the same string literal.
   (recipesRoot / depName / LegacyInstallSubpath).replace("\\", "/")
 
-proc hashedDepMirrorRoot(depName: string): string =
-  ## Placeholder for the content-hashed resolver.
+proc resolveCasStoreRoot*(): string =
+  ## Return the absolute CAS/Layer-2 store root the hashed resolver
+  ## resolves against. The single choke point so a downstream caller
+  ## needing the same value (a shell script, an evidence dump, a
+  ## test) reads one function name.
   ##
-  ## In v1 (this milestone) no recipe publishes to a hashed prefix so
-  ## we return the empty string; the caller then falls back to legacy.
-  ## Once the emit-side wiring lands (a follow-up milestone), this
-  ## reads the recipe's realization hash from a per-recipe metadata
-  ## file at ``<recipesRoot>/<depName>/.repro/output/.realization-hash``
-  ## and returns
-  ## ``<REPRO_STORE_ROOT>/prefixes/<depName>/<version>-<hash>/``.
-  discard depName
-  ""
+  ## Resolution order (matches ``repro_local_store.resolveStoreRoot``):
+  ##
+  ##   1. ``$REPRO_STORE_ROOT`` when non-empty.
+  ##   2. Platform default:
+  ##        * Windows:  ``%LOCALAPPDATA%\repro\store``
+  ##        * Linux:    ``$XDG_CACHE_HOME/repro/store`` or
+  ##                    ``$HOME/.cache/repro/store``
+  ##        * macOS:    ``$HOME/Library/Caches/repro/store``
+  let fromEnv = getEnv(StoreRootEnvVar)
+  if fromEnv.len > 0:
+    return fromEnv
+  when defined(windows):
+    let localAppData = getEnv("LOCALAPPDATA")
+    if localAppData.len > 0:
+      return localAppData & "/repro/store"
+    return getHomeDir() & "AppData/Local/repro/store"
+  elif defined(macosx):
+    return getHomeDir() & "Library/Caches/repro/store"
+  else:
+    let xdg = getEnv("XDG_CACHE_HOME")
+    if xdg.len > 0:
+      return xdg & "/repro/store"
+    return getHomeDir() & ".cache/repro/store"
+
+proc realizationInfoPath*(recipesRoot, depName: string): string =
+  ## Location of the sidecar the hashed-mirror emit writes for
+  ## ``depName``. The resolver reads (version, realization-hash) out
+  ## of this file to compute the hashed prefix path.
+  (recipesRoot / depName / ".repro" / "output" / RealizationInfoFileName)
+    .replace("\\", "/")
+
+proc writeRealizationInfoFile*(recipesRoot, depName, version,
+                               realizationHashHex: string) =
+  ## Write the two-line KV sidecar the hashed resolver consumes.
+  ## Used by the install-mirror emit action once the recipe has opted
+  ## into ``useHashedMirror`` mode. Idempotent: an identical file
+  ## already on disk is left alone.
+  if recipesRoot.len == 0 or depName.len == 0: return
+  if version.len == 0 or realizationHashHex.len != 64: return
+  let path = realizationInfoPath(recipesRoot, depName)
+  let payload = "version=" & version & "\n" &
+                "realization-hash=" & realizationHashHex & "\n"
+  if fileExists(path):
+    let existing = try: readFile(path) except: ""
+    if existing == payload:
+      return
+  createDir(parentDir(path))
+  writeFile(path, payload)
+
+type
+  RealizationInfo* = object
+    ## Parsed contents of the ``.realization-info`` sidecar. Both
+    ## fields are non-empty iff the parse succeeded.
+    version*: string
+    realizationHashHex*: string
+
+proc readRealizationInfoFile*(recipesRoot, depName: string): RealizationInfo =
+  ## Read + parse the ``.realization-info`` sidecar. Returns a
+  ## zero-initialised ``RealizationInfo`` (both fields empty) when
+  ## the sidecar is missing / malformed / partial. Every caller MUST
+  ## check both ``.version`` AND ``.realizationHashHex`` are non-empty
+  ## before consuming the return value.
+  if recipesRoot.len == 0 or depName.len == 0: return
+  let path = realizationInfoPath(recipesRoot, depName)
+  if not fileExists(path): return
+  let raw = try: readFile(path) except: ""
+  if raw.len == 0: return
+  for rawLine in raw.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0: continue
+    let eqIdx = line.find('=')
+    if eqIdx < 1: continue
+    let key = line[0 ..< eqIdx].strip()
+    let value = line[eqIdx + 1 .. ^1].strip()
+    if key == "version":
+      result.version = value
+    elif key == "realization-hash":
+      if value.len == 64:
+        result.realizationHashHex = value
+
+proc hashedDepMirrorRoot*(recipesRoot, depName: string): string =
+  ## Return the content-hashed prefix path for ``depName``. Reads the
+  ## ``.realization-info`` sidecar the emit-side wrote and constructs
+  ## ``<store-root>/prefixes/<depName>/<version>-<hash>/``.
+  ##
+  ## Returns the empty string when the sidecar is missing or the recipe
+  ## has not yet opted into hashed publish. Callers MUST fall back to
+  ## the legacy path in that case (both ``immHashed`` and
+  ## ``immHashedWithLegacyFallback`` do this).
+  ##
+  ## Spec: Store-And-Installation-Layout.md §R11 Two-Layer Split; the
+  ## returned path is the Layer-2 read view built on top of the CAS
+  ## store's blob layout.
+  if recipesRoot.len == 0 or depName.len == 0: return ""
+  let info = readRealizationInfoFile(recipesRoot, depName)
+  if info.version.len == 0 or info.realizationHashHex.len == 0:
+    return ""
+  let storeRoot = resolveCasStoreRoot().replace("\\", "/")
+  storeRoot & "/prefixes/" & depName & "/" &
+    info.version & "-" & info.realizationHashHex
 
 proc packageInstallMirrorRoot*(recipesRoot, depName: string): string =
   ## Return the resolved install-mirror root for ``depName``. POSIX-
@@ -91,11 +202,11 @@ proc packageInstallMirrorRoot*(recipesRoot, depName: string): string =
   of immLegacy:
     legacyDepMirrorRoot(recipesRoot, depName)
   of immHashed:
-    let hashed = hashedDepMirrorRoot(depName)
+    let hashed = hashedDepMirrorRoot(recipesRoot, depName)
     if hashed.len > 0: hashed
     else: legacyDepMirrorRoot(recipesRoot, depName)
   of immHashedWithLegacyFallback:
-    let hashed = hashedDepMirrorRoot(depName)
+    let hashed = hashedDepMirrorRoot(recipesRoot, depName)
     let legacy = legacyDepMirrorRoot(recipesRoot, depName)
     if hashed.len > 0 and dirExists(hashed): hashed
     else: legacy
