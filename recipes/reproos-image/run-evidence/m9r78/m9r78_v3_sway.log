@@ -1,0 +1,142 @@
+======================================================
+M9.R.71 sway launch @ 2026-07-04T19:03:02Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  LIBGL_DRIVERS_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64/dri
+  WLR_LIBINPUT_NO_DEVICES=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 19:03 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 19:03 ..
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 19:02 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 19:02 .
+    drwxr-xr-x 14 root root    2720 Jul  4 19:02 ..
+    drwxr-xr-x  2 root root      60 Jul  4 19:02 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 19:02 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+00:00:00.070 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.070 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.070 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.082 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.083 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.089 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.123 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+======================================================
+M9.R.71 sway launch @ 2026-07-04T19:04:33Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  LIBGL_DRIVERS_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64/dri
+  WLR_LIBINPUT_NO_DEVICES=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 19:03 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 19:03 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 19:03 sway-ipc.1000.582.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 19:03 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 19:03 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 19:02 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 19:02 .
+    drwxr-xr-x 14 root root    2720 Jul  4 19:02 ..
+    drwxr-xr-x  2 root root      60 Jul  4 19:02 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 19:04 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+00:00:00.065 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.066 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.066 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.077 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.077 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.083 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.093 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+======================================================
+M9.R.71 sway launch @ 2026-07-04T19:06:04Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  LIBGL_DRIVERS_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64/dri
+  WLR_LIBINPUT_NO_DEVICES=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 19:04 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 19:03 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 19:03 sway-ipc.1000.582.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 19:04 sway-ipc.1000.629.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 19:04 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 19:03 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 19:02 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 19:02 .
+    drwxr-xr-x 14 root root    2720 Jul  4 19:02 ..
+    drwxr-xr-x  2 root root      60 Jul  4 19:02 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 19:05 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+00:00:00.067 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.067 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.067 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.078 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.079 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.085 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.094 [ERROR] [sway/config/output.c:1083] failed to execute 'sw
