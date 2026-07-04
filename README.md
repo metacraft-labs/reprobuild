@@ -72,15 +72,18 @@ package app:
 
 ---
 
-## 3. Framed for Experienced Developers
+## 3. Reprobuild vs Your Favourite Tools
 
 If you are already familiar with the modern DevOps and build toolchain, Reprobuild maps directly onto concepts you know:
 
-*   **Like Bazel & Buck2**: Models the workspace as a unified build graph of targets with remote action caching. Instead of using a custom language (like Starlark) or a JVM daemon, it uses standard Nim code and compiles into a fast, native binary.
-*   **Like BuildXL & Tup**: Enforces hermetic execution and correct caching by monitoring actual file access during compilation. Instead of unstable FUSE layers or proprietary kernel drivers, it uses a user-space filesystem interceptor (`librepro_monitor_shim`) to verify that all observed reads and writes match declared inputs/outputs.
-*   **Like Nix & direnv**: Automatically activates locked developer environments on directory entry. Unlike direnv, it prevents toolchain leakage by refusing to run compiler tools directly unless the dev-env context has been activated.
-*   **Like devenv.sh & Process Compose**: Orchestrates local background services (databases, queues, daemons) declared inside the DSL, managed by a native dev-env control plane.
-*   **Like Terraform**: Declaratively plans and applies configurations across both local hosts (dotfiles, system packages, services) and cloud resources, with generation logs for instant rollbacks.
+*   **Reprobuild is like Nix & Spack** in the sense that it pins every build tool and library dependency to a precise version. It differs from them by supporting Windows and macOS natively.
+*   **Reprobuild is like Ninja** in the sense that it executes incremental builds in the fastest possible way. It differs from it by adding features such as OOM protection that enable agents to execute concurrent builds without thrashing.
+*   **Reprobuild is like Live++** by supporting hot code reloading, but does it on all operating systems.
+*   **Reprobuild is like direnv**, but is completely zero-bypass—since compiler tools are scoped to the project environment, you can't forget to run it.
+*   **Reprobuild is like Docker Compose & Process Compose**, but it type-checks your service configuration.
+*   **Reprobuild is like Terraform**, but is seamlessly integrated with your build system and host configuration management.
+*   **Reprobuild is like Bazel & Buck2** in the sense that it models the workspace as a build graph of targets with remote caching. It differs from them by using standard Nim code and compiling into a fast, native binary rather than requiring a JVM daemon or Starlark.
+*   **Reprobuild is like BuildXL & Tup** by enforcing hermeticity through filesystem monitoring. It differs from them by using a user-space filesystem interceptor (`librepro_monitor_shim`) rather than kernel-level drivers or FUSE filters.
 
 ---
 
