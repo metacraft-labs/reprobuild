@@ -1,0 +1,60 @@
+M9.R.70 Phase B — reproos-image full rebuild transcript
+========================================================
+
+Fresh reproos-installed.qcow2 produced with the M9.R.70.1 wlroots
+install-mirror in place (DRM backend baked in).
+
+Command
+-------
+  cd /opt/repro/reprobuild
+  rm -rf recipes/reproos-image/{.repro/build,build}
+  nix develop --command ./build/bin/repro build recipes/reproos-image
+
+Runtime
+-------
+  Wall time: ~23 min (08:48 → 09:11)
+  Phase breakdown (approximate, from ps sampling):
+    stage-de-rootfs.sh:            ~9 min
+    relocate-nix-to-repro.sh:      ~9 min
+    repro disk apply + install-root + grub-install: ~5 min
+
+Wrapper outcome
+---------------
+  Exit code:      1 (wrapper)
+  Inner action:   exit code 0 (success)
+  Trip:           "monitor depfile is incomplete" (M9.R.60.D residual —
+                  same class as M9.R.68/69; the io-mon shim's post-run
+                  merge counts kill-before-flush pending markers and
+                  fabricates synthetic mrEventLoss records that flip
+                  the completeness gate to mcIncomplete).
+  Terminal log:   "Installation finished. No error reported." (grub-install)
+
+qcow2 artefact
+--------------
+  Path:    recipes/reproos-image/build/reproos-installed.qcow2
+  Size:    5,146,673,152 bytes (~4.79 GiB)
+  sha256:  3fbca5b73067cfd0287293c20bd86e95def1800b3769a29ae7e9c261a5c35ac3
+  Built:   2026-07-04 09:11
+
+Fresh wlroots inside the staged tree
+------------------------------------
+  Path:    build/work/stage/opt/repro/reprobuild/recipes/packages/source/wlroots/.repro/output/install/usr/lib/libwlroots-0.19.so
+  Size:    1,430,104 bytes (vs 1,217,032 bytes shipped in M9.R.68 qcow2)
+  strings drm_backend_create:   3 (the DRM backend is baked in)
+  strings backend/drm/backend.c: 1 (the DRM subdir compiled)
+
+readelf -d libwlroots-0.19.so:
+  (NEEDED) [libdrm.so.2]
+  (NEEDED) [libdisplay-info.so.2]   -- fresh addition, closes the
+                                       M9.R.59 residual
+
+Recipe changes: none.
+Fix vector:     _m9r70_manual_install.sh (M9.R.70.1) refreshed the
+                wlroots install-mirror by running meson install +
+                mirror emit against the successfully-built (but
+                gate-blocked) build tree. stage-de-rootfs.sh Phase 1
+                then cp -a'd the freshly-populated mirror into the
+                staging tree at the same absolute host path.
+
+Next: Phase C — boot smoke via _m9r68d_boot_smoke.sh + verify sway
+starts + DE screendump.

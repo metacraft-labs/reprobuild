@@ -1,0 +1,119 @@
+Jul 04 09:23:09 reproos-smoke kernel: ACPI: bus type drm_connector registered
+Jul 04 09:23:09 reproos-smoke unknown: [disk-init] modprobe drm ok
+Jul 04 09:23:09 reproos-smoke unknown: [disk-init] modprobe drm_kms_helper ok
+Jul 04 09:23:09 reproos-smoke kernel: bochs-drm 0000:00:01.0: vgaarb: deactivate vga console
+Jul 04 09:23:09 reproos-smoke kernel: [drm] Found bochs VGA, ID 0xb0c5.
+Jul 04 09:23:09 reproos-smoke kernel: [drm] Framebuffer size 16384 kB @ 0x80000000, mmio @ 0x81043000.
+Jul 04 09:23:09 reproos-smoke kernel: [drm] Found EDID data blob.
+Jul 04 09:23:09 reproos-smoke kernel: [drm] Initialized bochs-drm 1.0.0 for 0000:00:01.0 on minor 0
+Jul 04 09:23:09 reproos-smoke kernel: fbcon: bochs-drmdrmfb (fb0) is primary device
+Jul 04 09:23:09 reproos-smoke kernel: bochs-drm 0000:00:01.0: [drm] fb0: bochs-drmdrmfb frame buffer device
+Jul 04 09:23:09 reproos-smoke (modprobe)[230]: modprobe@drm.service: Unable to locate executable '/sbin/modprobe': No such file or directory
+Jul 04 09:23:09 reproos-smoke systemd[1]: modprobe@drm.service: Deactivated successfully.
+Jul 04 09:23:09 reproos-smoke systemd[1]: Finished Load Kernel Module drm.
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) illegal module type: @include
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) no module name supplied
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) illegal module type: @include
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) no module name supplied
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) illegal module type: @include
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) no module name supplied
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) illegal module type: @include
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: PAM (other) no module name supplied
+Jul 04 09:23:12 reproos-smoke sddm-helper[581]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:23:15 reproos-smoke login[595]: pam_unix(login:session): session opened for user root(uid=0) by root(uid=0)
+Jul 04 09:23:15 reproos-smoke login[595]: pam_systemd(login:session): Failed to create session: Input/output error
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) illegal module type: @include
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) no module name supplied
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) illegal module type: @include
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) no module name supplied
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) illegal module type: @include
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) no module name supplied
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) illegal module type: @include
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: PAM (other) no module name supplied
+Jul 04 09:23:17 reproos-smoke sddm-helper[650]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) illegal module type: @include
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) no module name supplied
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) illegal module type: @include
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) no module name supplied
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) illegal module type: @include
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) no module name supplied
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) illegal module type: @include
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: PAM (other) no module name supplied
+Jul 04 09:23:52 reproos-smoke sddm-helper[700]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) illegal module type: @include
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) no module name supplied
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) illegal module type: @include
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) no module name supplied
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) illegal module type: @include
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) no module name supplied
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) illegal module type: @include
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: PAM (other) no module name supplied
+Jul 04 09:24:26 reproos-smoke sddm-helper[750]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) illegal module type: @include
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) no module name supplied
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) illegal module type: @include
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) no module name supplied
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) illegal module type: @include
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) no module name supplied
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) illegal module type: @include
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: PAM (other) no module name supplied
+Jul 04 09:25:01 reproos-smoke sddm-helper[800]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) illegal module type: @include
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) no module name supplied
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) illegal module type: @include
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) no module name supplied
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) illegal module type: @include
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) no module name supplied
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) illegal module type: @include
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: PAM (other) no module name supplied
+Jul 04 09:25:36 reproos-smoke sddm-helper[850]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) illegal module type: @include
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) no module name supplied
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) illegal module type: @include
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) no module name supplied
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) illegal module type: @include
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) no module name supplied
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) illegal module type: @include
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: PAM (other) no module name supplied
+Jul 04 09:26:10 reproos-smoke sddm-helper[900]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) illegal module type: @include
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM pam_parse: expecting return value; [...common-auth]
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) no module name supplied
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) illegal module type: @include
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM pam_parse: expecting return value; [...common-account]
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) no module name supplied
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) illegal module type: @include
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM pam_parse: expecting return value; [...common-password]
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) no module name supplied
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) illegal module type: @include
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM pam_parse: expecting return value; [...common-session]
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: PAM (other) no module name supplied
+Jul 04 09:26:45 reproos-smoke sddm-helper[950]: pam_systemd(sddm-autologin:session): Failed to create session: Input/output error
