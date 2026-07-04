@@ -1473,8 +1473,43 @@ proc runCommand(command: openArray[string];
       $int64(epochTime() * 1_000_000.0)
     let sinkPath = sinkDir / ("repro-runcommand-" & nonce & ".log")
     let scriptPath = sinkDir / ("repro-runcommand-" & nonce & ".cmd")
+    # cmd.exe truncates any single command line past ~8191 chars, so a
+    # large `nim c` invocation (60+ --path: entries) silently produces an
+    # empty sink and we report `command failed` with no stderr. Fall back
+    # to a Nim @response-file when the assembled arg list would overflow.
+    # Nim natively parses `@file` as "read further arguments from file";
+    # every other tool that accepts @-files (gcc via -Wl, node, etc.) does
+    # too, but we only rewrite when the target executable is nim (the only
+    # producer of these blowups in practice) so we don't guess wrong for a
+    # command whose semantics we don't own.
+    let assembledLen = command.mapIt(cmdExeShellEscape(it)).join(" ").len +
+      cmdExeShellEscape(sinkPath).len + " > 2>&1\r\n@echo off\r\n".len
+    let exeName = splitFile(command[0]).name.toLowerAscii()
+    let useResponseFile = assembledLen > 6000 and exeName == "nim"
+    var responseFilePath = ""
+    var effectiveCommand: seq[string]
+    if useResponseFile:
+      responseFilePath = sinkDir /
+        ("repro-runcommand-" & nonce & ".rsp")
+      # Nim's @-file parser treats each whitespace-separated token as one
+      # argument, with double quotes escaping whitespace. Emit one arg per
+      # line, quoting anything that isn't already a bare identifier.
+      var rspLines = newSeqOfCap[string](command.len - 1)
+      for i in 1 ..< command.len:
+        let a = command[i]
+        if a.len == 0:
+          rspLines.add "\"\""
+        elif a.contains(' ') or a.contains('"') or a.contains('\t'):
+          rspLines.add "\"" & a.replace("\"", "\\\"") & "\""
+        else:
+          rspLines.add a
+      writeFile(extendedPath(responseFilePath),
+        rspLines.join("\r\n") & "\r\n")
+      effectiveCommand = @[command[0], "@" & responseFilePath]
+    else:
+      effectiveCommand = @command
     let scriptBody = "@echo off\r\n" &
-      command.mapIt(cmdExeShellEscape(it)).join(" ") &
+      effectiveCommand.mapIt(cmdExeShellEscape(it)).join(" ") &
       " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
     writeFile(extendedPath(scriptPath), scriptBody)
     var process = startProcess("cmd.exe",
@@ -1486,6 +1521,11 @@ proc runCommand(command: openArray[string];
       removeFile(extendedPath(scriptPath))
     except CatchableError:
       discard
+    if responseFilePath.len > 0:
+      try:
+        removeFile(extendedPath(responseFilePath))
+      except CatchableError:
+        discard
     var output = ""
     if fileExists(extendedPath(sinkPath)):
       try:
