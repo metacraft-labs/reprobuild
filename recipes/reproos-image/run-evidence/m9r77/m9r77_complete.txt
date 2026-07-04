@@ -1,0 +1,273 @@
+M9.R.77 close-out — R11 two-layer split (CAS extraction as a dedicated
+                    abstraction)
+======================================================================
+
+User directive
+--------------
+"M9.R.76 landed the R10 immutable side-by-side install-mirror prefixes.
+Now implement reprobuild-specs R11: extract the CAS (Content-Addressed
+Storage) layer as a dedicated abstraction."
+
+Motivating context
+------------------
+M9.R.76's Non-Goals section explicitly flagged R11 as a follow-on:
+
+  "This design does NOT unify the realized-package store with the
+   content-addressed blob store (R11 two-layer split). That's a
+   separate follow-on."
+
+R11 itself was NOT a normative section in any spec file. The CAS layer
+had been landed as part of M56 ("unified local content-addressed
+store") in ``libs/repro_local_store/src/repro_local_store/store.nim``
+but was intermixed with prefix, receipt, root-registry, and recovery
+surfaces — every consumer that needed only CAS had to pull the full
+Layer-2 surface with it.
+
+M9.R.77 formalises R11 as a normative spec section AND extracts a
+dedicated ``libs/repro_cas_store/`` facade so downstream code can
+depend on the narrow blob-level surface without silently gaining the
+Layer-2 prefix / receipt / root / recovery machinery.
+
+
+Commits (7)
+-----------
+Repo A (reprobuild-specs), branch ``latest``:
+
+  M9.R.77.1  R11 two-layer split — spec normative section
+    Store-And-Installation-Layout.md gains a §R11 subsection under
+    §"Human-Friendly Package Store Versus Opaque Content Store".
+    Promotes the two-layer design from an informal preference into
+    a structural requirement. Documents Layer-1 API surface (put /
+    get / verify / path / gc + open / close), Layer-2 responsibilities
+    (prefixes, receipts, root-registry-driven GC, crash recovery),
+    layering invariants (Layer 2 depends on Layer 1; Layer 1 MUST
+    NOT depend on Layer 2), consequences for daemon/direct mode,
+    binary-cache clients, install-mirror resolver, engine cache
+    publish, and explicit non-goals (no on-disk layout change; no
+    unification with the action-cache per-edge record store; no
+    CAS-only GC subcommand distinct from ``repro store gc``).
+
+Repo B (reprobuild), branch ``dev`` (also pushed to ``main``):
+
+  M9.R.77.1  Phase A R11 reading + design summary
+    recipes/reproos-image/run-evidence/m9r77/m9r77_phaseA_r11_reading.txt
+    Reads the R10 companion doc + Local-Content-Addressed-Store.md,
+    enumerates the CAS-provided guarantees (deduplication, integrity
+    verification, addressable retrieval, GC), formalises the R11
+    two-layer split abstraction, lays out the M9.R.77.2 through
+    M9.R.77.6 phase plan.
+
+  M9.R.77.2  repro_cas_store — R11 Layer-1 CAS facade
+    libs/repro_cas_store/ — new focused library with:
+      * ContentHash* = distinct array[32, byte] (BLAKE3-256).
+      * CasStore* opaque handle.
+      * openCasStore / close / root.
+      * casPut / casGet / casExists / casVerify / casPath.
+      * casGc(retainRoots: HashSet[ContentHash]): int.
+      * ContentHash value semantics: '==', hash, hex '$', bytes
+        accessor, toContentHash constructor.
+      * Re-exports Layer-1 errors only (StoreError, ECasMissing,
+        ECasDigestMismatch); Layer-2 errors (EReceiptMismatch,
+        EStoreSchemaTooNew, ...) deliberately NOT re-exported.
+    Registers ``repro_cas_store`` in config.nims's libName loop so
+    downstream callers can import it.
+    12 regression tests in libs/repro_cas_store/tests/
+    t_repro_cas_store_basic.nim: put/get roundtrip, put idempotence,
+    casExists present + absent, casVerify good + corrupted + missing,
+    casPath layout, ContentHash equality + hex, casGc reclaim +
+    preserve retained + no-op on empty store + empty retain set.
+
+  M9.R.77.3  install-mirror resolver — CAS-backed hashed lookup
+    libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/
+    install_mirror_resolver.nim gets:
+      * resolveCasStoreRoot() (Windows / Linux / macOS platform-
+        default resolution mirrors repro_local_store's).
+      * realizationInfoPath(recipesRoot, depName).
+      * writeRealizationInfoFile(...) — idempotent KV writer for the
+        ``.realization-info`` sidecar the emit-side will write once
+        recipes opt into hashed publish.
+      * RealizationInfo type + readRealizationInfoFile(...) parser.
+      * hashedDepMirrorRoot(recipesRoot, depName): string — now
+        exported + takes recipesRoot so it can find the sidecar and
+        return <store-root>/prefixes/<name>/<version>-<hash>/.
+    Behavioural change: ``packageInstallMirrorRoot`` in
+    ``immHashed`` and ``immHashedWithLegacyFallback`` mode now
+    consults the sidecar when present. Legacy fallback semantics
+    preserved when sidecar absent.
+    15 regression tests in tests/unit/t_m9r77_hashed_mirror_wiring.nim
+    covering StoreRootEnvVar override + platform default, sidecar
+    write / idempotence / read / malformed-hash rejection,
+    hashedDepMirrorRoot resolution, and the full mode routing matrix.
+    The existing 18 M9.R.76 tests still pass unchanged.
+
+  M9.R.77.4  repro_cas_store — casMaterialize seam for cache-hit restore
+    Adds ``casMaterialize(entries: openArray[CasMaterialization])`` +
+    the ``CasMaterialization`` (hash, destination) pair type. Reads
+    each blob from CAS with the mandatory hash-on-read verification
+    and writes via temp-file + atomic rename.
+    Why: the current build engine still restores ``opkCasBlobs``
+    cache-hit outputs through the pre-M56 legacy
+    ``LocalCas.restoreOutputs`` API. Migrating every callsite is a
+    multi-week effort outside M9.R.77's scope. ``casMaterialize`` is
+    the documented R11-clean replacement seam future engine
+    migration routes through — no ``ActionResultRecord`` in the
+    signature (Layer 1 knows about blobs, not action records).
+    2 more regression tests: casMaterialize writes verified bytes
+    into destinations, casMaterialize raises on missing hash without
+    leaving partial state on disk.
+
+  M9.R.77.5  repro cas gc CLI — R11 Layer-1 subcommand
+    New ``repro cas <subcommand>`` router alongside the existing
+    ``repro store``. Subcommands:
+      * ``repro cas gc [--keep=HEX,HEX,...] [--store-root=PATH]``
+      * ``repro cas verify <hex> [--store-root=PATH]``
+      * ``repro cas path <hex> [--store-root=PATH]``
+      * ``repro cas exists <hex> [--store-root=PATH]``
+    Adds ``cas`` to ``reproTopLevelCommands`` and the CLI dispatch
+    router.
+    12 regression tests in tests/unit/t_m9r77_cas_cli.nim covering
+    exit code + argv + output for every subcommand + the four usage
+    error paths (no args, unknown subcommand, unknown flag, malformed
+    hex).
+
+  M9.R.77.6  close-out (this file)
+
+
+Phase A — R11 reading + design summary
+--------------------------------------
+
+Layer 1 — CAS store (blob-level):
+  * Public API: openCasStore / close / root; casPut / casGet /
+    casExists / casVerify / casPath; casGc; casMaterialize
+    (M9.R.77.4).
+  * On-disk layout: ``<store-root>/cas/blake3/<aa>/<full-hash>``
+    where ``<aa>`` is the first two hex chars of the digest and
+    ``<full-hash>`` is the full 64-char hex filename under the shard
+    directory.
+  * MUST NOT reason about packages, versions, receipts, prefixes,
+    roots, or generations.
+  * Errors re-exported: StoreError, ECasMissing, ECasDigestMismatch.
+
+Layer 2 — Realized-package-instance store (prefix-level):
+  * Owns ``prefixes/<name>/<version>-<hash>/`` human-friendly tree,
+    ``.repro-receipt`` typed envelopes, the SQLite prefixes / roots /
+    root_holds_prefix / gc_audit tables, atomic-rename publish
+    protocol, root-registry-driven GC, crash recovery.
+  * Depends on Layer 1 for blob contents.
+  * Layer 1 does NOT depend on Layer 2.
+  * Layer 2 lives in libs/repro_local_store/store.nim (M56 code);
+    M9.R.77 did NOT change it.
+
+
+Phase B — CAS API + disk layout
+-------------------------------
+
+The facade in libs/repro_cas_store/src/repro_cas_store.nim wraps the
+already-landed ``storeCasBlob`` / ``readCasBlob`` / ``verifyCasBlob`` /
+``casPath`` primitives from ``repro_local_store``. The facade is
+DELIBERATELY a re-export so the Layer-1 on-disk implementation stays
+byte-identical across the two libraries (no divergence) — only the
+import surface narrows.
+
+Disk layout: ``<store-root>/cas/blake3/<aa>/<full-hash>``.
+
+Facade fits in ~285 lines of Nim; 14 regression tests exercise every
+public API path + one hash-corruption + one missing-blob failure mode.
+
+
+Phase C — install-mirror resolver wiring
+----------------------------------------
+
+The M9.R.76 resolver returned a placeholder empty string from
+``hashedDepMirrorRoot`` because no recipe had opted into the hashed
+mode yet. M9.R.77.3 wires the read side of the sidecar so:
+
+  * Emit-side (a follow-on): the install-mirror emit action writes
+    ``<recipesRoot>/<dep>/.repro/output/.realization-info`` with
+    two KV lines (version + realization-hash) once the recipe opts
+    into ``useHashedMirror``.
+  * Read-side (this milestone): the resolver reads the sidecar to
+    compute ``<store-root>/prefixes/<name>/<version>-<hash>/``.
+  * Mode routing preserved: ``immHashed`` returns hashed when
+    sidecar present, legacy otherwise; ``immHashedWithLegacyFallback``
+    additionally requires the on-disk prefix to exist to return
+    hashed.
+
+
+Phase D — engine migration
+--------------------------
+
+The current build engine still routes ``opkCasBlobs`` cache-hit
+restores through the pre-M56 ``LocalCas.restoreOutputs`` API in
+libs/repro_local_store/src/repro_local_store.nim. Migrating every
+callsite is a multi-week effort outside M9.R.77's scope.
+
+M9.R.77.4 adds ``casMaterialize`` as the documented R11-clean
+replacement seam. A future engine migration:
+  1. Opens a ``CasStore`` from the same on-disk root the current
+     ``LocalCas`` handle uses (they share the same layout).
+  2. For each cache-hit rehydrate, builds a
+     ``seq[CasMaterialization]`` from the ``ActionResultRecord``'s
+     outputs and calls ``casMaterialize``.
+  3. Deletes the legacy ``LocalCas.readBlob`` / ``restoreOutputs``
+     surface once every callsite has moved.
+
+
+Phase E — GC integration
+------------------------
+
+Two GC surfaces exist:
+
+  * Layer-1 CAS-only GC: ``casGc(retainRoots: HashSet[ContentHash])``
+    +  ``repro cas gc --keep=hex,hex,...``. Reclaims blobs NOT in
+    the retain set. Callers that KNOW which blobs they want to keep
+    (a build plan, a test harness) use this directly.
+
+  * Layer-2 store-wide GC: ``Store.gc`` + ``repro store gc``. Walks
+    the SQLite root graph and reclaims everything unreachable from
+    any live root — including CAS blobs orphaned by removed
+    prefixes.
+
+The two GCs are complementary and share the same on-disk layout;
+callers pick the one matching their retain-root computation.
+
+
+Honest residual
+---------------
+
+  * ``casMaterialize`` is the R11-clean replacement seam for the
+    engine's cache-hit restore path but the engine itself HAS NOT
+    been migrated. The pre-M56 ``LocalCas.restoreOutputs`` API is
+    still the one every ``opkCasBlobs`` cache hit routes through.
+    Migrating the engine is genuinely multi-week work: every
+    callsite of ``cas.readBlob`` / ``cas.restoreOutputs`` / ``cas.
+    storeBlob`` in the engine needs to move onto the facade, and
+    the pre-M56 ``LocalCas`` type + ``ActionResultRecord`` interplay
+    also needs to be re-expressed in terms of ``ContentHash`` +
+    ``CasMaterialization``. This is deferred to a dedicated
+    follow-on milestone.
+
+  * The install-mirror emit-side (Phase 2 of the M9.R.76 migration
+    story) has NOT been wired. Recipes still do not write the
+    ``.realization-info`` sidecar because no recipe has declared
+    ``useHashedMirror = true``. The read-side is in place so the
+    day a recipe opts in, the resolver + downstream consumers
+    "just work". Wiring the emit side is a follow-on that touches
+    ``emitInstallTreeMirror`` in
+    libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/
+    package_result.nim to compute the realization hash at plan
+    time + drop the sidecar + publish into the hashed prefix.
+
+  * The R11 spec addendum documents ``casGc`` as returning "freed
+    bytes"; the current implementation returns freed bytes based
+    on ``getFileSize`` snapshots BEFORE unlink. If the delete
+    fails, the counter is already incremented. A future refinement
+    is to only add to ``freed`` after ``removeFile`` succeeds
+    (currently the exception-swallow keeps the count intact but
+    the code path is slightly loose).
+
+  * ``repro cas`` shares the on-disk store root with ``repro
+    store`` deliberately (so a follow-on engine migration doesn't
+    have to relocate anything). If future policy work introduces a
+    dedicated CAS-only root, the ``--store-root`` flag makes that
+    a one-flag switch.
