@@ -170,7 +170,17 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 20'u16
+  BuildActionPayloadVersion = 21'u16
+    ## v21: M9.R.74 — canonical execution root (R2) per-action
+    ## declaration. Appends one byte for ``ActionCwdKind`` (0..4) plus a
+    ## length-prefixed ``cwdCustomPath`` string. v20-and-earlier
+    ## payloads decode with ``cwdKind = acwdRecipeRoot`` (the enum's
+    ## zero value) and ``cwdCustomPath = ""`` so every legacy artefact
+    ## rolls forward to the legacy-recipe-root behaviour byte-for-byte
+    ## — the engine's spawn-time CWD is byte-identical to the
+    ## pre-M9.R.74 hardcoded ``cwd = projectRoot`` on every non-
+    ## ``inlineExecCall`` path.
+    ##
     ## v20: M9.R.34 — appends a length-prefixed string holding the
     ## recipe-file content digest (sha256 hex; empty string when no
     ## recipe file resolves under the active provider's project
@@ -901,7 +911,9 @@ proc buildAction*(id: string; call: PublicCliCall;
                   publishToBinaryCache = false;
                   cacheEntryIdentity = none(CacheEntryIdentity);
                   toolIdentityRefs: openArray[string] = [];
-                  requiresElevation = false):
+                  requiresElevation = false;
+                  cwdKind = acwdRecipeRoot;
+                  cwdCustomPath = ""):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -962,7 +974,9 @@ proc buildAction*(id: string; call: PublicCliCall;
     cacheEntryIdentity: cacheEntryIdentity,
     toolIdentityRefs: @toolIdentityRefs,
     requiresElevation: requiresElevation,
-    recipeRevisionFingerprint: recipeRevisionFingerprint)
+    recipeRevisionFingerprint: recipeRevisionFingerprint,
+    cwdKind: cwdKind,
+    cwdCustomPath: cwdCustomPath)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -2035,6 +2049,14 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   # invalidation" so legacy artefacts still fingerprint the same way
   # they did under v19.
   payload.writeString(action.recipeRevisionFingerprint)
+  # v21: M9.R.74 — canonical execution root (R2) declaration. One byte
+  # for the ``ActionCwdKind`` ordinal followed by a length-prefixed
+  # ``cwdCustomPath`` string. The kind byte is strict 0..ord(high) so
+  # a mutated payload fails closed on decode instead of silently
+  # picking a default kind. Empty ``cwdCustomPath`` is legal for every
+  # kind; the resolver treats it as "fall back to the recipe root."
+  payload.writeByte(byte(ord(action.cwdKind)))
+  payload.writeString(action.cwdCustomPath)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -2051,7 +2073,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, BuildActionPayloadVersion}:
+      17'u16, 18'u16, 19'u16, 20'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2168,6 +2190,25 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # legacy artefacts decode with the field empty so the engine's
     # fingerprint reverts to the pre-M9.R.34 composition for them.
     result.recipeRevisionFingerprint = ""
+  if version >= 21'u16:
+    # M9.R.74 v21: canonical execution root (R2) declaration. Strict
+    # 0..ord(high(ActionCwdKind)) sentinel; anything else fails closed
+    # (same strictness as v16's publish + identity sentinels + v19's
+    # requiresElevation sentinel) so a mutated payload surfaces as a
+    # structured error instead of silently picking a default kind.
+    let cwdKindByte = readByte(bytes, pos)
+    if cwdKindByte > byte(ord(high(ActionCwdKind))):
+      raisePayload("invalid cwdKind ordinal in build action payload")
+    result.cwdKind = ActionCwdKind(cwdKindByte)
+    result.cwdCustomPath = readString(bytes, pos)
+  else:
+    # v20-and-earlier payloads predate the R2 declaration; legacy
+    # artefacts decode with ``cwdKind = acwdRecipeRoot`` (the enum's
+    # zero value) and ``cwdCustomPath = ""`` so the engine's
+    # spawn-time CWD is byte-identical to the pre-M9.R.74 hardcoded
+    # ``cwd = projectRoot`` on every non-``inlineExecCall`` path.
+    result.cwdKind = acwdRecipeRoot
+    result.cwdCustomPath = ""
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

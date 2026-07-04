@@ -368,6 +368,38 @@ type
     types*: seq[string]
     path*: string
 
+  ActionCwdKind* = enum
+    ## M9.R.74 — canonical execution root (R2) per-action declaration.
+    ## Spec cite: Hermetic-Builds-And-Path-Independence.md
+    ## §"Per-action execution-root declaration". Each action declares
+    ## which engine-managed root it wants to run under; the engine
+    ## resolves the enum to an absolute path at spawn time.
+    ##
+    ## ``acwdRecipeRoot`` is the enum's zero value so v20-and-earlier
+    ## payloads (which predate this field) decode with the legacy
+    ## behaviour byte-for-byte — every existing recipe continues to
+    ## run under its recipe/project root without any behavioural
+    ## change until it explicitly opts into a tighter kind.
+    acwdRecipeRoot   ## Legacy default — the recipe's project root
+                     ## (``activeProviderProjectRoot()``). Equivalent to
+                     ## the pre-M9.R.74 hardcoded ``cwd = projectRoot``
+                     ## on every non-``inlineExecCall`` path.
+    acwdSource       ## The extracted upstream source tree — typically
+                     ## ``<recipeRoot>/src/`` or the fetch action's
+                     ## ``extractedRoot`` override.
+    acwdBuild        ## The out-of-tree build directory — typically
+                     ## ``<recipeRoot>/build/`` or a convention-supplied
+                     ## override. Used by ``compile`` actions.
+    acwdInstall      ## The DESTDIR staging directory the install action
+                     ## writes into (typically
+                     ## ``<recipeRoot>/build/out/``). Used by post-install
+                     ## fix-up (``.la`` cleanup, stage-copy, mirror).
+    acwdCustom       ## A caller-supplied absolute or recipe-relative
+                     ## path — matches the pre-existing
+                     ## ``inlineExecCall(argv, cwd = X)`` shape. The
+                     ## resolved path is taken from
+                     ## ``BuildActionDef.cwdCustomPath``.
+
   BuildActionDef* = object
     id*: string
     call*: PublicCliCall
@@ -501,6 +533,34 @@ type
       ## IS the milestone outcome). Outside provider mode (unit
       ## tests, hand-rolled ``buildAction`` callers) the field stays
       ## empty so existing fixtures see no behaviour change.
+    cwdKind*: ActionCwdKind
+      ## M9.R.74 — canonical execution root (R2) declaration. Default
+      ## ``acwdRecipeRoot`` (enum's zero value) preserves the legacy
+      ## behaviour byte-for-byte: every action registered before this
+      ## milestone runs under the recipe's project root, matching the
+      ## pre-M9.R.74 hardcoded ``cwd = projectRoot`` on every
+      ## ``lowerGraphAction`` branch.
+      ##
+      ## Convention emitters (``autotools_package`` / ``meson_package``
+      ## / ``cmake_package`` / ``from_source_custom``) declare tighter
+      ## kinds (``acwdBuild`` for ``compile`` actions, ``acwdSource``
+      ## for ``configure`` scripts, ...) so the engine sees the
+      ## intended CWD instead of an inlined ``cd $buildDir`` that
+      ## hides it inside the shell command. Recipes that used
+      ## ``inlineExecCall(argv, cwd = X)`` before M9.R.74 keep working
+      ## unchanged — the CLI-support lowering routes them through
+      ## ``acwdCustom`` internally with ``cwdCustomPath = X``.
+      ##
+      ## Payload codec v21+.
+    cwdCustomPath*: string
+      ## Companion to ``cwdKind == acwdCustom``: the caller-supplied
+      ## absolute or recipe-relative path to run the action under.
+      ## Ignored for every other ``cwdKind`` value. Empty (the
+      ## default) is legal for ``acwdCustom`` and reduces to
+      ## ``acwdRecipeRoot`` at resolve time — matching the pre-M9.R.74
+      ## behaviour of the ``inlineExecCall(argv, cwd = "")`` overload
+      ## whose CLI-support fallback was ``projectRoot``. Payload
+      ## codec v21+.
     sourceFile*: string
     sourceLine*: int
 

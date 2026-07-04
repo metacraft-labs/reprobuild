@@ -1484,6 +1484,59 @@ proc lowerDependencyPolicy(actionId, depfile: string;
     result = depfilePolicyMulti(merged)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
 
+proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
+                               projectRoot: string): string =
+  ## M9.R.74 — canonical execution root (R2) resolver.
+  ##
+  ## Maps a ``(cwdKind, cwdCustomPath)`` declaration to the absolute
+  ## path the engine sets on the spawned action's ``BuildAction.cwd``.
+  ##
+  ## Resolution rules:
+  ##
+  ## * ``acwdRecipeRoot`` — return ``projectRoot``. This matches the
+  ##   pre-M9.R.74 hardcoded ``cwd = projectRoot`` behaviour on every
+  ##   non-``inlineExecCall`` branch of ``lowerGraphAction`` so
+  ##   legacy actions get byte-identical spawn-time CWDs.
+  ##
+  ## * ``acwdSource`` / ``acwdBuild`` / ``acwdInstall`` — use
+  ##   ``cwdCustomPath`` when non-empty (the convention emitter is
+  ##   expected to supply the path it computed via
+  ##   ``fetchExtractedRoot`` / ``buildDir`` / ``destdir`` at emit
+  ##   time). When empty, fall back to ``projectRoot`` so an
+  ##   improperly-declared kind cannot silently break execution.
+  ##   The kind is preserved through the payload for
+  ##   Filesystem-Policy-And-Observed-Inputs.md §"Read-Only Versus
+  ##   Writable Roots" classification but resolution collapses to
+  ##   ``cwdCustomPath`` today.
+  ##
+  ## * ``acwdCustom`` — use ``cwdCustomPath`` when non-empty. Empty
+  ##   reduces to ``projectRoot`` — matching the pre-M9.R.74
+  ##   behaviour of ``inlineExecCall(argv, cwd = "")``.
+  ##
+  ## Relative paths in ``cwdCustomPath`` are resolved against
+  ## ``projectRoot`` to keep the recipe-side declaration convenient
+  ## (``cwdCustomPath = "build"`` means ``<projectRoot>/build``, not
+  ## the CLI's own cwd).
+  let raw =
+    case cwdKind
+    of acwdRecipeRoot:
+      projectRoot
+    of acwdSource, acwdBuild, acwdInstall, acwdCustom:
+      if cwdCustomPath.len > 0: cwdCustomPath
+      else: projectRoot
+  if raw.len == 0:
+    return projectRoot
+  if raw.isAbsolute:
+    return raw
+  # Relative path — resolve against projectRoot so recipes can pass
+  # ``"build"`` and get ``<projectRoot>/build``. Fall back to
+  # projectRoot when we have no project root to resolve against
+  # (shouldn't happen through normal lowering).
+  if projectRoot.len > 0:
+    projectRoot / raw
+  else:
+    raw
+
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string; actionPathPrefix = ""): BuildAction =
   let payload = decodeBuildActionPayload(toBytes(node.payload))
@@ -1570,6 +1623,19 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # already redacts via this same engine boundary.
     let argv = expandArgFiles(literalArgv, defaultArgFileReader)
     let cwdValue = argValue("cwd")
+    # M9.R.74 — canonical execution root (R2) resolution. The DSL
+    # ``BuildActionDef.cwdKind`` declaration wins; when it is
+    # ``acwdRecipeRoot`` (the enum's zero value / legacy default)
+    # we honour the ``inlineExecCall(argv, cwd = X)`` override as
+    # before so existing recipes that pass an explicit ``cwd``
+    # argument keep their historical behaviour byte-for-byte.
+    let effectiveCwdKind =
+      if payload.cwdKind != acwdRecipeRoot: payload.cwdKind
+      elif cwdValue.len > 0: acwdCustom
+      else: acwdRecipeRoot
+    let effectiveCwdCustomPath =
+      if payload.cwdKind != acwdRecipeRoot: payload.cwdCustomPath
+      else: cwdValue
     let commandStatsId =
       if payload.commandStatsId.len > 0:
         payload.commandStatsId
@@ -1599,9 +1665,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.action(
       payload.id,
       argv,
-      cwd =
-        if cwdValue.len > 0: cwdValue
-        else: projectRoot,
+      cwd = resolveCanonicalExecRoot(effectiveCwdKind,
+        effectiveCwdCustomPath, projectRoot),
       deps = payload.deps,
       inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
       outputs = payload.outputs,
@@ -1644,7 +1709,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.builtinAction(
       kind,
       payload.id,
-      cwd = projectRoot,
+      # M9.R.74 — honour the DSL's ``cwdKind`` declaration. Default
+      # ``acwdRecipeRoot`` collapses to ``projectRoot`` so every
+      # legacy ``reprobuild.builtin.fs`` action gets byte-identical
+      # CWD to the pre-milestone hardcoded path.
+      cwd = resolveCanonicalExecRoot(payload.cwdKind,
+        payload.cwdCustomPath, projectRoot),
       deps = payload.deps,
       inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
       outputs = payload.outputs,
@@ -1692,7 +1762,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.action(
       payload.id,
       argv,
-      cwd = projectRoot,
+      # M9.R.74 — R2 declaration wins; legacy default = projectRoot.
+      cwd = resolveCanonicalExecRoot(payload.cwdKind,
+        payload.cwdCustomPath, projectRoot),
       deps = payload.deps,
       inputs = inputs,
       outputs = payload.outputs,
@@ -1832,7 +1904,9 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     return repro_build_engine.action(
       payload.id,
       argv,
-      cwd = projectRoot,
+      # M9.R.74 — R2 declaration wins; legacy default = projectRoot.
+      cwd = resolveCanonicalExecRoot(payload.cwdKind,
+        payload.cwdCustomPath, projectRoot),
       deps = payload.deps,
       inputs = translatedInputs,
       outputs = payload.outputs,
@@ -1902,7 +1976,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   repro_build_engine.action(
     payload.id,
     argvForCall(payload.call, profile),
-    cwd = projectRoot,
+    # M9.R.74 — R2 declaration wins; legacy default = projectRoot so
+    # every pre-milestone typed-tool action gets byte-identical CWD.
+    cwd = resolveCanonicalExecRoot(payload.cwdKind,
+      payload.cwdCustomPath, projectRoot),
     deps = payload.deps,
     inputs = inputs,
     outputs = outputs,
