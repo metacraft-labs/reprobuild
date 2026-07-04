@@ -1,8 +1,8 @@
 # Reprobuild
 
-Reprobuild (`repro`) exists to make any software easy to modify.
+> **All the world's software, as reproducible development environments.**
 
-It is a unified build system, package and configuration manager, development environment manager, and infrastructure provisioner (covering both local systems and cloud resources). By folding these layers into a single cohesive description, Reprobuild eliminates the fragmented boundary between "how code is compiled," "how dependencies are resolved," and "how environments are configured."
+Reprobuild (`repro`) exists to make any software easy to modify. By folding packaging, build graphs, shell environments, background services, and infrastructure into a single cohesive description, Reprobuild eliminates the fragmented boundary between how code is compiled, how dependencies are resolved, and how environments are configured.
 
 ---
 
@@ -27,25 +27,31 @@ import repro_dsl_stdlib
 
 package app:
   uses:
+    "rust >=1.75 <2.0"
+    "nodejs >=20 <21"
     "nim >=2.0 <3.0"
-    "sqlite >=3.45 <4.0"
+    "protoc >=25 <26"
 
-  # Local dev background services (databases, queues, daemons)
   devEnv:
-    service "postgres":
-      image = "postgres:16-alpine"
-      ports = ["5432:5432"]
-
     # Developer CLI task automation
-    task "bump-version":
-      description = "Automates minor/major/patch version bump"
-      command = "nim r scripts/bump_version.nim"
+    task "publish", command = "repro build --release && npm publish", description = "Builds release binaries and publishes the workspace bundle"
+
+    # Local dev background services (databases, queues, daemons)
+    # Registered via servicePlaceholder in the dev-env registry
+    servicePlaceholder "postgres", metadata = "postgres:16-alpine"
 
   # Hermetic, sandbox-monitored build recipes
-  executable "app":
+  executable "backend":
     build:
-      let objects = nim.compile(glob("src/*.nim"))
-      nim.link(objects = objects, libraries = [sqlite])
+      # Generate source files from protobuf definitions
+      let genSources = protoc.compile(glob("proto/*.proto"), lang = "rust", outputDir = "backend/src/proto")
+
+      # Build backend depending on the generated sources
+      rust.cargoBuild(workDir = "backend", extraInputs = genSources, output = "out/backend")
+
+  executable "frontend":
+    build:
+      nodejs.pnpmBuild(workDir = "frontend", output = "out/frontend")
 ```
 
 ---
