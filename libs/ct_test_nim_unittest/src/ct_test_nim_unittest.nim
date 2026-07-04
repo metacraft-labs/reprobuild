@@ -95,7 +95,9 @@ proc build*(tool: BuildNimUnittest;
             source: string;
             binary: string;
             defines: seq[string] = @[];
+            paths: seq[string] = @[];
             imports: seq[string] = @[];
+            mm = "";
             extraPassC: seq[string] = @[];
             extraPassL: seq[string] = @[];
             threadsOn = true;
@@ -118,7 +120,8 @@ proc build*(tool: BuildNimUnittest;
   ## the exact same argv shape the shim was building by hand:
   ##
   ##   ``<nim-binary> c [--threads:on] [--hints:off] [--warnings:off] \``
-  ##   ``  [-d:<def>...] [--import:<m>...] --out:<binary> <source>``
+  ##   ``  [-d:<def>...] [--path:<dir>...] [--import:<m>...] [--mm:<mgr>] \``
+  ##   ``  --out:<binary> <source>``
   ##
   ## ``threadsOn`` / ``hintsOff`` / ``warningsOff`` default to ``true``
   ## because the pre-M4 callers in ``repro_tests.nim`` and the spec
@@ -142,14 +145,33 @@ proc build*(tool: BuildNimUnittest;
     cliArgs.add(cliArg(name = "warningsOff", value = true,
       alias = "--warnings:off"))
 
-  # ``defines`` and ``imports`` are repeated concat-form flags matching
-  # the ``nim.c`` typed-tool surface (``-d:foo``, ``--import:bar``).
+  # ``defines`` / ``paths`` / ``imports`` are repeated concat-form flags
+  # matching the ``nim.c`` typed-tool surface (``-d:foo``, ``--path:dir``,
+  # ``--import:bar``). ``paths`` maps to the ``nim`` profile's ``--path:``
+  # flag (``libs/repro_dsl_stdlib/.../packages/nim.nim`` subcmd ``c``): a
+  # test whose module search path is supplied by the repo's ``Justfile``
+  # (``--path:src``) rather than a ``config.nims`` needs an explicit
+  # ``--path:`` so ``nim c`` resolves the package's importable modules.
   if defines.len > 0:
     cliArgs.add(cliArgSeq(name = "defines", value = defines,
       alias = "-d:", format = cafConcat, repeated = true))
+  if paths.len > 0:
+    cliArgs.add(cliArgSeq(name = "paths", value = paths,
+      alias = "--path:", format = cafConcat, repeated = true))
   if imports.len > 0:
     cliArgs.add(cliArgSeq(name = "imports", value = imports,
       alias = "--import:", format = cafConcat, repeated = true))
+
+  # ``mm`` maps to the ``nim`` profile's single-valued concat-form
+  # ``--mm:`` flag (``libs/repro_dsl_stdlib/.../packages/nim.nim`` subcmd
+  # ``c`` — same flag the ``nim.c`` typed-tool exposes). A repo whose
+  # ``Justfile`` pins a memory manager for its test matrix point
+  # (e.g. nim-libvterm's default ``--mm:orc``) rather than relying on
+  # Nim's per-file default needs to thread it through here so the
+  # engine-driven compile matches the repo's own ``nim c`` invocation.
+  if mm.len > 0:
+    cliArgs.add(cliArg(name = "mm", value = mm,
+      alias = "--mm:", format = cafConcat))
 
   # Bootstrap-And-Self-Build B4: ``extraPassC`` / ``extraPassL`` are
   # repeated concat-form flags that emit one ``--passC:<value>`` /
@@ -238,6 +260,8 @@ proc run*(self: NimUnittestBinary; filter = "";
           after: openArray[BuildActionDef] = [];
           requiredBinaries: openArray[string] = [];
           extraInputs: openArray[string] = [];
+          pool = "";
+          poolUnits = 1'u32;
           cacheable = true;
           actionCachePolicy = defaultActionCachePolicy();
           registerImplicitName = true):
@@ -266,6 +290,20 @@ proc run*(self: NimUnittestBinary; filter = "";
   ## edge's selector. The default stays ``true`` so existing single-
   ## edge call sites (the Typed-Outputs M1 fixtures, ad-hoc one-off
   ## ``run`` calls) keep their implicit-name behaviour.
+  ##
+  ## ``pool`` / ``poolUnits`` forward the execute edge into a named
+  ## engine build pool (``recordToolInvocation`` → ``BuildAction.pool``;
+  ## the engine's ``poolRunning`` capacity tracker sequences edges that
+  ## share a pool). This is the reprobuild-native way to constrain the
+  ## concurrency of resource-contending test binaries — e.g. pty /
+  ## real-subprocess integration tests whose child fork+exec timing
+  ## degrades under saturated CPU when the whole corpus runs in
+  ## parallel. Assigning such tests a capacity-1 pool (declared once
+  ## with ``buildPool("<name>", 1)`` in the project ``build:`` block)
+  ## serialises them WITHOUT touching any test assertion — nothing is
+  ## skipped or weakened, only scheduled. Defaults (``pool = ""``,
+  ## ``poolUnits = 1``) preserve the prior unconstrained behaviour for
+  ## every existing call site.
   var cliArgs: seq[PublicCliArg] = @[]
   cliArgs.add(inputArg("binary", self.path))
   if filter.len > 0:
@@ -285,6 +323,8 @@ proc run*(self: NimUnittestBinary; filter = "";
   result = recordToolInvocation(selectedActionId, call,
     deps = combineActionDeps(deps, after),
     extraInputs = allExtraInputs,
+    pool = pool,
+    poolUnits = poolUnits,
     cacheable = cacheable,
     dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
