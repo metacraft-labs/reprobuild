@@ -132,10 +132,17 @@ package reproosInstaller:
       #   does NOT exist
       #
       # Pass the cmake-config dirs explicitly to bridge the gap.
-      let qtDecl =
-        "../../recipes/packages/source/qt6-declarative/.repro/output/install/usr/lib/cmake"
-      let qtQc2 =
-        "../../recipes/packages/source/qt6-quickcontrols2/.repro/output/install/usr/lib/cmake"
+      # M9.R.76.5 — route through packageInstallMirrorCmakeRoot so the
+      # Qt6 sibling install-mirror paths follow the mirror mode per
+      # spec R10. In legacy mode the returned strings are byte-
+      # identical to the pre-M9.R.76 hardcoded relative paths after
+      # relative-vs-absolute normalisation (the resolver produces
+      # absolute POSIX paths; cmake accepts both).
+      let qt6SiblingsRoot = "../../recipes/packages/source"
+      let qtDecl = packageInstallMirrorCmakeRoot(
+        qt6SiblingsRoot, "qt6-declarative")
+      let qtQc2 = packageInstallMirrorCmakeRoot(
+        qt6SiblingsRoot, "qt6-quickcontrols2")
       let opts = @[
         # CMake 4.x compatibility -- the local CMakeLists already
         # declares min 3.16, but the from-source cmake-4.x in the
