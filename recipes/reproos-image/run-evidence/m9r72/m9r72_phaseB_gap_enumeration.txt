@@ -1,0 +1,312 @@
+M9.R.72 Phase B — implementation-gap enumeration
+=================================================
+
+Objective
+---------
+Compare Phase A's 13 load-bearing spec rules (R1-R13) against the actual
+engine + DSL implementation. Enumerate the gaps between spec and code.
+Rank by:
+
+  * Load-bearing for the M9.R.60-70 arc (does closing the gap prevent the
+    class of issue from recurring?)
+  * Implementation cost (config change vs deep engine refactor)
+  * Risk (does closing break existing recipes that depend on non-hermetic
+    behavior?)
+
+
+Gap I — Monitor-loss ladder collapse (LOAD-BEARING, LOW COST, LOW RISK)
+=======================================================================
+
+Spec rule (R4, Failure-Semantics.md §"Monitoring Failures"):
+
+    - If the monitor drops events or detects possible loss, affected path
+      sets MUST be invalidated conservatively.
+    - If event loss scope is unknown, the engine MUST invalidate the whole
+      affected watch root or disable cache hits for the affected session.
+    - If required monitoring is unavailable for an action, the scheduler
+      MUST either choose a compatible backend or reject/fallback according
+      to explicit policy.
+
+Reading these three bullets together, the spec defines a graded escalation
+ladder for monitor-loss:
+
+  Level 0 (no loss):        publish action-cache record.
+  Level 1 (known scope):    invalidate affected path set; still may cache.
+  Level 2 (unknown scope):  DISABLE CACHE HITS FOR THE SESSION.
+  Level 3 (no monitoring):  fail the action.
+
+Implementation site 1: libs/repro_build_engine/src/repro_build_engine.nim:1309
+
+  if record.kind == mrEventLoss or record.observationKind == moEventLoss:
+    result = false                             # <-- Level 2/3 flatten to Level 3
+
+Implementation site 2: libs/repro_build_engine/src/repro_build_engine.nim:1448-1466
+
+  let mustFailOnIncompleteEvidence = action.cacheable
+  if action.monitorDepfile.len == 0:
+    ...
+    if mustFailOnIncompleteEvidence:
+      result.publishable = false               # <-- Level 3 always
+  ...
+  if not foldMonitorDepFileEvidence(...):
+    result.evidence.diagnostics.add("monitor depfile is incomplete")
+    if mustFailOnIncompleteEvidence:
+      result.publishable = false               # <-- Level 3 always
+
+Implementation site 3: libs/repro_build_engine/src/repro_build_engine.nim:4160-4175
+
+  let evidence = collectEvidence(action, strict = true)
+  runResult.results[idx].evidence = evidence.evidence
+  if not evidence.publishable:
+    runResult.results[idx].status = asFailed   # <-- flip exit=0 to asFailed
+    ...
+    blockClosure(id, id)                       # <-- blocks all downstream
+    continue
+
+Symptom: an action with exit=0, exec success, correct outputs on disk, gets
+flipped to asFailed and blocks its entire downstream closure. Observed in:
+
+  * M9.R.60.D on __repro_provider_compile (nim c spawning 838 subprocesses;
+    182 lost read-tails from subprocess kill-before-flush).
+  * M9.R.68 on reproos-image (7.72 GB depfile, 28.7 GB monitor RSS,
+    incompleteness on a bootable qcow2 that was successfully produced).
+  * M9.R.70 on mesonbin-compile of wlroots (343/343 linked, exit=0,
+    incompleteness from ~21K reads + child kill-before-flush; cascades
+    to install-mirror-wlrootsSource asBlocked, wlroots-DRM-backend never
+    reaches the ISO).
+
+Fix shape (Phase C1):
+
+  1. `foldMonitorDepFileEvidence` should distinguish loss classes. The
+     io-mon writer.nim already emits classified detail strings:
+       - "kill-before-flush" (KNOWN scope: which pid/tid died)
+       - "unmonitored subtree/peer" (KNOWN scope: which subtree)
+       - "external content channel" (KNOWN scope: which channel)
+       - "ambiguous unstamped fragment record" (UNKNOWN scope)
+       - "duplicate identity token" (UNKNOWN scope)
+     Return a `MonitorEvidenceStatus` enum instead of `bool`:
+       - mesComplete            (Level 0)
+       - mesKnownScopeLoss      (Level 1: still record path set,
+                                 downgrade this session to non-cacheable)
+       - mesUnknownScopeLoss    (Level 2: disable cache hits, do NOT
+                                 publish, but let action succeed)
+       - mesMonitorUnavailable  (Level 3: fail the action)
+
+  2. `collectEvidence` returns a new `cacheableOverride` field. When
+     evidence is incomplete but exit=0, action-cache PUBLISH is skipped
+     and the action succeeds. This is exactly what the M9.R.60.2 comment
+     at :1436-1440 said should happen for non-cacheable actions — but
+     the spec applies it to Level 2 loss regardless of the recipe's
+     `cacheable` declaration.
+
+  3. The status becomes `asSucceeded` (not asFailed) so downstream
+     actions can run. Diagnostics still preserved for `repro why`.
+
+Risk assessment:
+  * No soundness hole: an action whose Level 2 evidence didn't publish
+    to the cache will simply re-execute next time. That's the whole
+    point of Level 2 in the spec.
+  * Existing behavior on Level 3 (no monitoring at all, no backend
+    available) preserved.
+  * Existing behavior on truly bad recipe declarations preserved
+    (dependency policy requires recognized report but none is declared
+    → publishable = false + asFailed).
+
+Cost: ~150 lines of engine change + 1 new enum + regression test.
+
+
+Gap II — Event-loss classification discarded (MEDIUM IMPACT, MEDIUM COST,
+LOW RISK)
+========================================================================
+
+Spec rule (R4 + R12): the classification of monitor-loss (which subtree,
+which pid, which channel) is what lets the engine implement Level 1
+(invalidate a narrow path set) vs Level 2 (disable cache hits for the
+whole session).
+
+Implementation site: libs/repro_build_engine/src/repro_build_engine.nim:1309
+
+  if record.kind == mrEventLoss or record.observationKind == moEventLoss:
+    result = false                             # detail string discarded
+
+The io-mon writer.nim assembles a rich detail string on every eventLoss
+record. Examples from writer.nim:
+
+  writer.nim:2205  "process killed with an un-flushed read batch
+                    (kill-before-flush) diag-ctx=[<attribution>]"
+  writer.nim:2266  "unmonitored subtree/peer (un-injectable spawn child,
+                    SETEXEC into a hardened image, or IPC connect to an
+                    out-of-tree breakaway daemon)"
+  writer.nim:2062  "ambiguous unstamped fragment record for reused pid
+                    in run <id>"
+  writer.nim:2033  "duplicate identity token in fragment record"
+
+The engine currently maps all of these to a single bool `= false` and
+loses the classification.
+
+Fix shape (Phase C2, follow-on):
+
+  Introduce a `MonitorEventLossClass` classifier in the engine that maps
+  `detail` prefixes to (Level 1 | Level 2 | Level 3) buckets. Wire the
+  Level 1 subset (kill-before-flush with an in-tree pid attribution)
+  to a narrow path-set invalidation instead of a whole-session cache
+  skip.
+
+Risk assessment: implementing the classifier is straightforward but the
+Level 1 narrow-invalidation requires a soundness proof for each class
+that is currently deferred. Gap II depends on Gap I being closed first;
+without Gap I, no Level 1 handling matters.
+
+Cost: ~300 lines + a soundness memo + regression tests per class.
+
+
+Gap III — Install-mirror at mutable stable path (ARCHITECTURAL, DEFERRED)
+=========================================================================
+
+Spec rule (R10, Store-And-Installation-Layout.md §"Immutable Side-By-Side
+Prefixes"):
+
+  Every realized package instance should live in its own immutable prefix.
+  ...
+  - different realizations never overwrite one another
+  - packages can be garbage-collected when unreachable from any active root
+  - local development views are layered on top of the immutable store, not
+    substituted for it
+
+Implementation site: libs/repro_dsl_stdlib/src/repro_dsl_stdlib/types/
+package_result.nim:1305 (`emitInstallTreeMirror`):
+
+  let dstUsrRoot = projectRoot / ".repro" / "output" / "install"
+  ...
+  script.add("rm -rf \"" & escapedDstUsr & "\"; ")   # <-- mutable
+  ...
+
+The install-mirror is at a stable, mutable, per-recipe path with `rm -rf`
+overwrite semantics. Every rebuild clobbers the previous mirror.
+
+Consequences observed in the M9.R.60-70 arc:
+  * M9.R.70 Phase A initially misdiagnosed because the on-disk state
+    of the mirror at time-of-inspection reflected the LAST successful
+    rebuild, not the current failing-compile's intended output.
+  * M9.R.69 close-out reported the mirror in a stale state because
+    the previous partial run left `hwdataFiles` marker but no full
+    tree.
+
+Fix shape (deferred to a future architectural milestone):
+  Move to R10's `<cache-root>/<pkg-name>/<version>-<cas-hash>/` layout.
+  Every `emitInstallTreeMirror` call would write to a NEW hash-derived
+  path. Downstream `PKG_CONFIG_PATH` / `CMAKE_PREFIX_PATH` threading
+  in the DSL would need to enumerate the current-generation hash from
+  a store index rather than a fixed relative path. Multi-week refactor
+  touching every autotools / meson / cmake constructor.
+
+Not addressed in M9.R.72 — the scope is too large for one milestone and
+the recurring symptom (mirrors reflecting stale state after a partial
+build) is USUALLY unblocked by closing Gap I (partial builds no longer
+happen because Level 2 loss no longer flips exit=0 actions to asFailed
+mid-cascade).
+
+
+Gap IV — No separate content-addressed store layer (ARCHITECTURAL,
+DEFERRED)
+=========================================================================
+
+Spec rule (R11, Store-And-Installation-Layout.md §"Human-Friendly Package
+Store Versus Opaque Content Store"):
+
+  Reprobuild should not force the same on-disk naming scheme on every kind
+  of stored object. Instead it should keep two different layers:
+    - Human-friendly realized package store  (per-instance prefixes)
+    - Lower-level content store              (CAS by content hash)
+
+Implementation status: there is no separate CAS layer for build outputs.
+Actions write to their `.repro/output/install/` and the cache records
+metadata + optionally blob refs, but there's no `<cache-root>/cas/<blake3>/`
+tree carrying deduplicated build outputs.
+
+Fix shape (deferred to a future architectural milestone):
+  Introduce a first-class CAS layer under `<cache-root>/cas/` with blake3
+  or gxhash content addressing. The action-cache record already carries
+  content refs; extend `recordActionResult` to actually populate the CAS
+  when the `storeOutputBlobs` policy demands it.
+
+Not addressed in M9.R.72.
+
+
+Gap V — Per-tool policy source not fully wired (MEDIUM IMPACT, HIGH COST,
+LOW RISK)
+========================================================================
+
+Spec rule (R12, Filesystem-Policy-And-Observed-Inputs.md §"Policy Source"):
+
+  Filesystem policy should come from a combination of:
+    - engine defaults
+    - typed executable-wrapper metadata
+    - action-level declarations
+    - project/system policy
+
+Implementation site: libs/repro_cli_support/src/repro_cli_support.nim:3485-3492
+has a sketch of `dgNoRuntimeDependencies` / `dgOpaqueToolWithDeclaredInputs`
+policies but the engine currently uses only `dependencyPolicy.kind` +
+`action.cacheable` (a boolean, not a graded per-action policy).
+
+Fix shape (partial in Phase C via Gap I):
+  Gap I's `mesKnownScopeLoss` / `mesUnknownScopeLoss` classifier IS the
+  first step of the per-tool policy source. The recipe-level per-action
+  policy `dgOpaqueToolWithDeclaredInputs` remains a follow-up milestone
+  because it requires an audit of every candidate tool (nim c, gcc, ld,
+  ...) for input-closure soundness.
+
+
+Gap VI — Source-rewrite + double-write enforcement missing (LOW IMPACT
+FOR M9.R.60-70, MEDIUM COST, MEDIUM RISK)
+=========================================================================
+
+Spec rules R6 + R7: source-rewrites and double-writes should be errors by
+default.
+
+Implementation status: `collectEvidence` records `monitorWrites` but the
+engine does NOT check whether any of them mutated a nominally-read-only
+source or output owned by another producer. Never triggers a failure.
+
+Fix shape (deferred):
+  After `collectEvidence`, run a policy pass that classifies each write
+  against declared writable scopes (the action's own outputs, temp
+  scratch dirs, `.repro/build/`, `.repro/output/`) and rejects writes
+  outside the union. Requires per-action writable-scope declarations
+  first (see Gap VII).
+
+
+Gap VII — Canonical execution root not fully enforced (IN-PROGRESS)
+====================================================================
+
+Spec rule R2: "The core should give every action a canonical execution
+root whose path does not depend on the user's original checkout location."
+
+Implementation status: partial. Actions run under `<recipeRoot>/.repro/
+build/...` today, which IS engine-owned, but this path is under the
+original checkout root — so a user with the reprobuild repo at
+`~/work/reprobuild` and one at `/tmp/exp-reprobuild` produce different
+cache keys for the same recipe. Path-remapping is not applied.
+
+Fix shape (already in the roadmap, out of scope for M9.R.72).
+
+
+Summary + ranking
+------------------
+Rank order for M9.R.72 Phase C:
+
+  Highest priority + implementable: Gap I (monitor-loss ladder collapse)
+    -- directly closes the M9.R.60.D / M9.R.68 / M9.R.70 class of
+    "exit=0 flipped to asFailed" issues. Small fix; small risk; landing
+    it unblocks the recurring symptom.
+
+  Follow-on if time permits: Gap II (event-loss classification preserved
+    end-to-end) -- refines Gap I from "session-wide cache skip" to
+    "narrow path-set invalidation" for Level 1 losses.
+
+  Deferred: Gaps III, IV, V (partial), VI, VII -- architectural, out of
+    scope for one milestone.
+
+
+End of Phase B gap enumeration.
