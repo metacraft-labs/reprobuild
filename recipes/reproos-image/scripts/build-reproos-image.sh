@@ -1388,6 +1388,72 @@ echo "[build-reproos-image] Phase 10.9: install + enable seatd system service (l
     ln -sfn \"\$LIBSEAT_INSTALL/seatd-launch\" '$MNT_DIR/usr/bin/seatd-launch'
   fi
 
+  # M9.R.69.3 — patchelf the on-disk copies of seatd + seatd-launch +
+  # libseat.so.1 to prepend the glibc lib dir (extracted from the
+  # ELF interpreter path) to DT_RUNPATH.  Without this, ld-linux
+  # falls through the recipe RUNPATH (which meson populated with
+  # only meson + systemd + clingo + gcc-lib dirs, no glibc), reads
+  # /etc/ld.so.cache, and picks up the Debian base-rootfs glibc as
+  # libc.so.6.  A Nix 2.40 ld-linux + Debian 2.41 libc pair AVs
+  # seatd inside __libc_start_main with 'segfault at 2 ip 0x2' -
+  # the exact class M9.R.58.3 characterised.  _m9r58_swap.sh applied
+  # this patchelf on the qcow2 but never landed the fix into the
+  # reproducible build path; M9.R.68 clean-rebuild regressed it.
+  # This phase lands the fix inside build-reproos-image.sh so
+  # every future clean rebuild patches the RPATH deterministically.
+  PATCHELF=\$(command -v patchelf 2>/dev/null || true)
+  if [ -n \"\$PATCHELF\" ]; then
+    LIBSEAT_INSTALL_ROOT='$MNT_DIR/opt/repro/reprobuild/recipes/packages/source/libseat/.repro/output/install'
+    for target in \\
+      \"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd\" \\
+      \"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd-launch\" \\
+      \"\$LIBSEAT_INSTALL_ROOT/usr/lib/libseat.so.1\"; do
+      if [ ! -f \"\$target\" ]; then
+        echo \"[build-reproos-image] warning: patchelf target not present: \$target\" >&2
+        continue
+      fi
+      ip=\$(\"\$PATCHELF\" --print-interpreter \"\$target\" 2>/dev/null || true)
+      glibc_libdir=\"\"
+      if [ -n \"\$ip\" ]; then
+        # /repro/store/<hash>-glibc-<ver>/lib/ld-linux-x86-64.so.2
+        # -> /repro/store/<hash>-glibc-<ver>/lib
+        glibc_libdir=\"\${ip%/ld-linux-x86-64.so.2}\"
+      fi
+      # Libraries (libseat.so.1) don't have an interpreter but link the same
+      # glibc as the executables through their meson-recorded RPATH origin.
+      # Fall back to extracting the glibc lib dir from seatd's interpreter.
+      if [ -z \"\$glibc_libdir\" ]; then
+        SEATD_BIN=\"\$LIBSEAT_INSTALL_ROOT/usr/bin/seatd\"
+        if [ -f \"\$SEATD_BIN\" ]; then
+          seatd_ip=\$(\"\$PATCHELF\" --print-interpreter \"\$SEATD_BIN\" 2>/dev/null || true)
+          if [ -n \"\$seatd_ip\" ]; then
+            glibc_libdir=\"\${seatd_ip%/ld-linux-x86-64.so.2}\"
+          fi
+        fi
+      fi
+      if [ -z \"\$glibc_libdir\" ]; then
+        echo \"[build-reproos-image] warning: could not determine glibc lib dir for \$target - skipping patchelf\" >&2
+        continue
+      fi
+      rp=\$(\"\$PATCHELF\" --print-rpath \"\$target\" 2>/dev/null || true)
+      if [ -z \"\$rp\" ]; then
+        new_rp=\"\$glibc_libdir\"
+      else
+        case \":\$rp:\" in
+          *\":\$glibc_libdir:\"*)
+            # Already contains the glibc lib dir — nothing to do.
+            continue ;;
+          *)
+            new_rp=\"\$glibc_libdir:\$rp\" ;;
+        esac
+      fi
+      \"\$PATCHELF\" --set-rpath \"\$new_rp\" \"\$target\"
+      echo \"[build-reproos-image] patchelf --set-rpath: prepended \$glibc_libdir to \$target\"
+    done
+  else
+    echo '[build-reproos-image] warning: patchelf not found on PATH - libseat RPATH glibc-lib-dir prepend SKIPPED. seatd will crash at ip=0x2 on boot per M9.R.58.3.' >&2
+  fi
+
   # Create the ``seat`` group used by seatd's socket ownership.
   # Uses a fixed high GID (985) so successive image builds are
   # reproducible.  Idempotent: skip if the group already exists.
