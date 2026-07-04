@@ -385,7 +385,26 @@ proc emitShellActions(projectRoot, packageName, extractedPath, outPath,
       # byte for recipes that never opted into per-row cwd
       # declarations.
       cwdKind = if row.cwd.len > 0: acwdCustom else: acwdRecipeRoot,
-      cwdCustomPath = if row.cwd.len > 0: effectiveCwd else: "")
+      cwdCustomPath = if row.cwd.len > 0: effectiveCwd else: "",
+      # M9.R.75 — declare the write scope + nominally-read-only source
+      # scope so the engine's R7 (double-write reject) + R6 (source-
+      # rewrite reject) enforcement layers can grade this action.
+      #
+      # declaredOutputs: shell rows in from_source_custom conventionally
+      # write into ``$out`` (the ``outPath`` scope owned by this
+      # package). The R7 pass grades this against other actions'
+      # declaredOutputs; sequential rows within the same shell chain
+      # share the dep edge so they don't trip the pass, but two
+      # concurrent packages both trying to write into the same
+      # ``$out`` root would.
+      #
+      # readOnlyRoots: ``$extracted`` (the fetched source tree) MUST
+      # NOT be written to by the shell rows — that would corrupt the
+      # source in ways that break reproducibility. Fetch is the
+      # exception (it populates this dir); the shell rows are all
+      # post-fetch and treat the source as read-only per R6.
+      declaredOutputs = @[outPath],
+      readOnlyRoots = @[extractedPath])
     result.actions.add(action)
     prevId = actionId
     prevStamp = stamp
@@ -463,7 +482,19 @@ proc emitStageCopyAction(projectRoot, outPath, lastShellStamp,
     commandStatsId = "from-source-custom.stage." & kindTag,
     publishToBinaryCache = true,
     cacheEntryIdentity = some(identity),
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = @["sh"],
+    # M9.R.75 — declare the stage-copy artifact scope so R7 grades
+    # this action. Stage-copy writes into ``outDir`` (a per-member
+    # subdirectory of the package's output layout).
+    #
+    # ``readOnlyRoots`` intentionally empty: stage-copy reads from
+    # ``outPath`` (which is a WRITABLE scope owned by the earlier
+    # shell rows in the same convention) and DOES NOT touch the
+    # extracted upstream source. Adding ``outPath`` as a read-only
+    # root here would conflict with the shell rows' declaredOutputs
+    # under the same scope (they legitimately write there earlier
+    # in the dep chain).
+    declaredOutputs = @[outDir])
 
 # ---------------------------------------------------------------------------
 # Convention entry
