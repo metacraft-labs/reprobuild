@@ -2,19 +2,25 @@
 
 > **All the world's software, as reproducible development environments.**
 
-Reprobuild (`repro`) exists to make any software easy to modify. By folding packaging, build graphs, shell environments, background services, and infrastructure into a single cohesive description, Reprobuild eliminates the fragmented boundary between how code is compiled, how dependencies are resolved, and how environments are configured.
+Reprobuild (`repro`) is a unified build system, package and configuration manager, development environment coordinator, and infrastructure provisioner (covering both local systems and cloud resources). By folding these layers into a single cohesive description, Reprobuild eliminates the fragmented boundary between "how code is compiled," "how dependencies are resolved," and "how environments are configured."
 
 ---
 
-## 1. The Core Philosophy: Easy Modifications
+## 1. Core Philosophy & Workflow Story
 
-The core goal of Reprobuild is to lower the barrier to modifying any piece of software. In a Reprobuild workspace, the developer workflow is seamless:
+Reprobuild exists to make any software instantly reproducible and modifiable.
 
-1. Type `repro develop firefox` to clone Firefox and auto-provision its exact toolchains, libraries, and dev-env services.
-2. If you find a bug in `cairo` (a dependency of Firefox), run `repro develop cairo` from inside the workspace.
-3. The workspace automatically clones `cairo` side-by-side, overrides Firefox's dependency pin to this local checkout, and rebuilds dynamically in-process when you edit Cairo's source.
+Imagine you want to fix a bug in Firefox. In a standard setup, this means spending hours setting up your build tools, matching libraries, and downloading massive toolchains. With Reprobuild, you simply run:
 
-Your workspace grows dynamically into the exact slice of the dependency graph you need to modify.
+`repro develop firefox`
+
+This instantly clones Firefox and provisions the exact compiler toolchain, development packages, databases, and any required cloud resources.
+
+But what if the bug isn't in Firefox itself, but in Cairo, one of its underlying libraries? Instead of fork-and-link hell, you just type:
+
+`repro develop cairo`
+
+Reprobuild pulls down the Cairo repository side-by-side, plugs it into your local workspace, and automatically routes Firefox's build system to compile against your local Cairo copy. When you edit and save a file in Cairo, the compiler recompiles the change and propagates it instantly up to Firefox. Your workspace grows dynamically to match exactly the slice of the universe you are modifying.
 
 ---
 
