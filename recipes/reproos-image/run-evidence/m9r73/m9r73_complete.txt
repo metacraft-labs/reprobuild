@@ -1,0 +1,150 @@
+M9.R.73 close-out — narrow Level 1 path-set invalidation
+=========================================================
+
+Task
+----
+M9.R.72 landed the 4-level monitor-loss ladder but Level 1 (known
+scope) currently uses the same session cache-skip as Level 2 pending a
+soundness memo defining exactly which path sets are invalidated per
+loss class. Close this gap.
+
+Commits (4)
+-----------
+  M9.R.73.1  reprobuild-specs (branch: latest, commit 2aa29e7)
+             Phase A: soundness memo `Monitor-Loss-Path-Invalidation.md`
+             + Failure-Semantics.md cross-link + README.md TOC entry.
+
+  M9.R.73.2  reprobuild (branches: dev + main, commit 75a58440)
+             Phase B: engine — narrow Level 1 path-set invalidation.
+             * Adds ``EvidenceCollection.invalidatedPaths`` (HashSet).
+             * On Level 1 (kill-before-flush): populate with materialized
+               declared outputs; do NOT flip ``disableCacheHits``.
+             * On Level 2: flip session-wide
+               ``sessionCachePublishDisabled`` in addition to the existing
+               ``disableCacheHits`` per-action publish-skip.
+             * New scheduler-side accumulator + gate:
+               ``sessionInvalidatedPaths`` (grows monotonically) +
+               ``cacheLookupBlockedByMonitorLoss`` (short-circuits when
+               both accumulator empty and session-flag false).
+             * Adds classifier prefixes for two io-mon strings that
+               M9.R.72 missed: "out-of-tree content channel consumed"
+               and "corrupt or partial RMDF fragment".
+             * 7 new regression tests in
+               `test_m9r73_narrow_invalidation.nim` (all pass).
+
+  M9.R.73.3  reprobuild (branches: dev + main, commit 9ad60438)
+             Phase C: retroactive validation.
+             * 19 tests pass across the M9.R.72 + M9.R.73 test corpus.
+             * pixman + wlroots + sway recipe-level empirical proof
+               deferred to next Linux-host session (nix develop is
+               Linux-only; author on Windows).
+
+  M9.R.73.4  reprobuild (branches: dev + main, this commit)
+             Phase D: close-out evidence.
+
+
+Phase A memo table summary
+--------------------------
+Per-loss-class invalidated-path-set predicate table lives in
+`reprobuild-specs/Monitor-Loss-Path-Invalidation.md`. Highlights:
+
+  * kill-before-flush         → Level 1, narrow, invalidated =
+                                 action's declared OUTPUTS.
+                                 Bounded by io-mon writer.nim:2201-2211
+                                 per-thread mark/clear invariant.
+
+  * unmonitored subtree/peer  → Level 2, session-wide (unbounded).
+  * out-of-tree content       → Level 2, session-wide.
+  * ambiguous unstamped frag  → Level 2, session-wide.
+  * duplicate identity token  → Level 2, session-wide.
+  * corrupt fragment          → Level 2, session-wide.
+  * breakaway-report          → Level 2, session-wide.
+  * unknown detail (default)  → Level 2, session-wide (R3 fail-closed).
+
+The kill-before-flush narrow predicate ("this action's own declared
+outputs") is a superset of the certainly-invalidated set: any
+downstream cache entry can only observe the missed reads through this
+action's own outputs, so bounding invalidation to those outputs is
+sound. See the memo for the full rationale.
+
+
+Phase B implementation summary
+------------------------------
+Files touched:
+  libs/repro_build_engine/src/repro_build_engine.nim
+    * EvidenceCollection.invalidatedPaths field (HashSet[string]).
+    * classifyEventLossDetail — expanded from 6 to 8 explicit prefixes
+      (added out-of-tree-content-channel + corrupt-fragment). Unknown
+      detail still Level 2 fail-closed.
+    * collectEvidence:
+        Level 1: populate invalidatedPaths (materialPath(action.cwd,
+          output) for each output). Does NOT set disableCacheHits.
+        Level 2: continues to set disableCacheHits.
+    * runBuild scheduler:
+        sessionInvalidatedPaths HashSet + sessionCachePublishDisabled
+        bool at scheduler scope.
+        registerEvidenceInvalidation(evidence) called after every
+          successful collectEvidence at all 3 post-execution sites.
+        cacheLookupBlockedByMonitorLoss(action) predicate consulted
+          before cache.lookupActionResult; on hit, force cdMiss with
+          reason "monitor-loss-narrow-invalidation" or
+          "monitor-loss-session-disabled".
+
+Backwards compatibility:
+  * All 12 M9.R.72.3 tests still pass unchanged.
+  * The M9.R.72.3 disableCacheHits publish-skip behaviour is preserved
+    for Level 2 — the M9.R.73.2 change is additive.
+
+
+Phase C validation summary
+---------------------------
+Windows debug build, Nim 2.2.8, vcc backend:
+
+  test_m9r72_monitor_loss_classifier.nim   8/8 pass
+  test_m9r72_phaseD_end_to_end.nim         4/4 pass
+  test_m9r73_narrow_invalidation.nim       7/7 pass
+
+Total: 19/19. No regressions.
+
+pixman/wlroots/sway recipe-level empirical validation: deferred to
+next Linux-host session. Recipe files present in
+recipes/packages/source/{pixman,wlroots,sway}/ ready for a
+nix-develop-driven run.
+
+
+Honest residual
+---------------
+1. Recipe-level empirical validation (Phase C plan A) not executed
+   on this Windows host. The Windows-only regression suite is a
+   strong indicator but not a full recipe re-execution. The next
+   Linux session should:
+     cd /opt/repro/reprobuild
+     rm -rf recipes/packages/source/pixman/.repro/build
+     nix develop --command './build/bin/repro build recipes/packages/source/pixman'
+   Expected: succeeds; trace shows narrow "cache-skip-monitor-loss"
+   events ONLY for downstream actions whose inputs intersect a
+   killed action's outputs — sibling actions get normal hits.
+
+2. The classifier's "breakaway-report" prefix is retained defensively
+   but no io-mon path currently emits an event-loss record with that
+   prefix. Real breakaway-daemon reports fold as reads (not losses);
+   authentication failures manifest as unmonitored-subtree losses.
+   The prefix stays wired so a future io-mon change lands in a
+   Level 2 conservative bucket by default.
+
+3. The kill-before-flush narrow predicate is CONSERVATIVELY "this
+   action's declared outputs". A tighter predicate ("only the
+   specific paths the killed pid tried to read") would require a
+   pid-to-paths reverse index io-mon does not export today. Per R3
+   the current over-invalidation is the correct direction — no
+   soundness hole.
+
+4. New regression test file `test_m9r73_narrow_invalidation.nim` is
+   NOT yet registered in `repro_tests.nim` (the main test runner
+   catalog). It compiles + runs standalone via `nim c -r`. Adding it
+   to repro_tests.nim is a follow-up mechanical wiring, out of scope
+   here (would require also wiring the M9.R.72 tests that are also
+   not yet in the catalog).
+
+
+End of M9.R.73.
