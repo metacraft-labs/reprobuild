@@ -101,24 +101,34 @@ package app:
 
 Reprobuild integrates all build, runtime, task, and workspace workflows into a single CLI:
 
-### Build & Compilation
+### Build, Testing & Graph
 *   `repro build [target]` — compile and materialize targets.
 *   `repro test` — run the workspace test suite.
 *   `repro watch` — start a continuous watch-style build loop.
+*   `repro graph` — output the build target graph (JSON format via `--json`).
+*   `repro capabilities` — query installed build-system-neutral capability configuration (JSON by default, text via `--format=text`).
+*   `repro --version` — print version and self-identification info of the `repro` binary.
 
 ### Shell Environment & Services
 *   `repro shell` — enter an interactive, activated dev-env subshell.
 *   `repro exec -- [cmd]` — run a single command within the dev-env context.
 *   `repro service start [service]` — spin up background services (e.g. database).
+*   `repro service stop [service]` — stop background services.
+*   `repro service restart [service]` — restart background services.
 *   `repro service status` — check the state of running services.
 
-### Task Running
+### Task Running & Local State
 *   `repro tasks` — list all named automation tasks registered in `repro.nim`.
 *   `repro run [task] -- [args]` — run an environment task, forwarding positional arguments.
+*   `repro home apply` — declaratively reconcile and apply local home profile configurations (dotfiles, settings, local shell integration).
 
 ### Workspace & Develop Mode
 *   `repro develop [package]` — clone a package and auto-provision its development resources.
 *   `repro deps refresh` — update inferred inter-package dependency edges.
+
+### Store & Cache Management
+*   `repro store serve` — serve the local/remote build-artifact store cache endpoint.
+*   `repro store daemon install` — install the store cache daemon as a system service (systemd/launchd/Windows Service).
 
 ---
 
