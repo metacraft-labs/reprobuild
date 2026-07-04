@@ -598,16 +598,12 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
 # prefixes (KF6 modules + ECM + any future cmake-config-package dep).
 # ---------------------------------------------------------------------------
 
-proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
-                                 dst: var seq[(string, string)]) =
-  ## DSL-port M9.R.15i.5 — scan a dep's install-mirror cmake/ tree for
-  ## ``<Component>Config.cmake`` (and lowercase
-  ## ``<component>-config.cmake``) files and emit ``(Component, dir)``
-  ## pairs. Unlike ``m9r15iScanQt6CmakeDirs`` this helper does NOT
-  ## filter on ``Component.startsWith("Qt6")`` — it surfaces every
-  ## CMake-config package found in the dep's prefix.
-  let cmakeRoot = depRecipeDir / ".repro" / "output" / "install" /
-    "usr" / "lib" / "cmake"
+proc scanCmakeConfigDirsAt(cmakeRoot: string;
+                            dst: var seq[(string, string)]) =
+  ## M9.R.76.3 — shared scanner core that accepts an already-resolved
+  ## cmake root. Both the legacy ``depRecipeDir``-taking export and
+  ## the resolver-aware collector use this helper so a future mirror
+  ## mode change doesn't fork the scanner logic.
   if not dirExists(cmakeRoot):
     return
   var entries: seq[string] = @[]
@@ -640,6 +636,21 @@ proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
     if fileExists(configKebab):
       dst.add((component, subdir.replace("\\", "/")))
 
+proc m9r15iScanCmakeConfigDirs*(depRecipeDir: string;
+                                 dst: var seq[(string, string)]) =
+  ## DSL-port M9.R.15i.5 — scan a dep's install-mirror cmake/ tree for
+  ## ``<Component>Config.cmake`` (and lowercase
+  ## ``<component>-config.cmake``) files and emit ``(Component, dir)``
+  ## pairs. Unlike ``m9r15iScanQt6CmakeDirs`` this helper does NOT
+  ## filter on ``Component.startsWith("Qt6")`` — it surfaces every
+  ## CMake-config package found in the dep's prefix.
+  ##
+  ## Legacy signature preserved for the existing unit tests; the
+  ## resolver-aware collector calls the shared core directly.
+  let cmakeRoot = depRecipeDir / ".repro" / "output" / "install" /
+    "usr" / "lib" / "cmake"
+  scanCmakeConfigDirsAt(cmakeRoot, dst)
+
 proc m9r15iCollectAllCmakeConfigDirs*(projectRoot, packageName: string):
     seq[(string, string)] =
   ## DSL-port M9.R.15i.5 — enumerate every CMake-config package
@@ -661,11 +672,15 @@ proc m9r15iCollectAllCmakeConfigDirs*(projectRoot, packageName: string):
   if recipeRoot.len == 0:
     return
   proc visitDep(raw: string; sink: var seq[(string, string)]) =
+    ## M9.R.76.3 — resolve the dep's cmake root through the resolver
+    ## so the scan follows the mirror mode per spec R10.
     let dep = m9r14fStripDepConstraint(raw)
     if dep.len == 0:
       return
-    let depRecipeDir = recipeRoot / dep
-    m9r15iScanCmakeConfigDirs(depRecipeDir, sink)
+    let cmakeRoot = packageInstallMirrorCmakeRoot(recipeRoot, dep)
+    if cmakeRoot.len == 0:
+      return
+    scanCmakeConfigDirsAt(cmakeRoot, sink)
   for raw in registeredNativeBuildDeps(packageName):
     visitDep(raw, result)
   for raw in registeredBuildDeps(packageName):
