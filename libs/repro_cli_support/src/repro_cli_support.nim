@@ -46,6 +46,10 @@ import git_actions
 import shared_clones
 import repro_tool_profiles
 import repro_local_store
+# M9.R.77.5 — R11 Layer-1 CAS facade. ``runCasCommand`` uses the narrow
+# put / get / verify / path surface without touching the Layer-2 prefix
+# tables that ``runStoreCommand`` operates against.
+import repro_cas_store
 import repro_store_daemon
 import repro_daemon_core
 import repro_launch_plan
@@ -17318,6 +17322,156 @@ proc runStoreCommand*(args: seq[string]): int =
       return 2
   except CatchableError as err:
     stderr.writeLine("repro store " & sub & ": error: " & err.msg)
+    return 1
+
+proc runCasCommand*(args: seq[string]): int =
+  ## Implements ``repro cas <subcommand>`` for the R11 Layer-1
+  ## content-addressed blob store. This is the NARROW view onto the
+  ## same on-disk store ``repro store`` operates against — it exposes
+  ## only the blob-level surface (put / get / verify / path / gc) and
+  ## does NOT touch the Layer-2 prefix / roots / receipts tables.
+  ##
+  ## Spec: Store-And-Installation-Layout.md §R11 Two-Layer Split.
+  ##
+  ## Supported subcommands:
+  ##
+  ##   gc [--keep=HEX,HEX,...] [--store-root=PATH]
+  ##     Reclaim CAS blobs NOT in the ``--keep`` retain set. Returns
+  ##     the freed bytes count. NOTE: this is the narrow Layer-1 GC;
+  ##     for the store-wide GC that walks the prefix graph and
+  ##     reclaims everything unreachable from any live root, use
+  ##     ``repro store gc`` (which delegates through the SQLite root
+  ##     tables).
+  ##
+  ##   verify <hex> [--store-root=PATH]
+  ##     Verify one blob's on-disk bytes against its digest.
+  ##
+  ##   path <hex> [--store-root=PATH]
+  ##     Print the absolute on-disk path for one blob.
+  ##
+  ##   exists <hex> [--store-root=PATH]
+  ##     Exit 0 if the blob is present, 1 if not.
+  if args.len == 0:
+    echo "usage: repro cas {gc | verify <hex> | path <hex> | " &
+      "exists <hex>} [--store-root=PATH] [--keep=HEX,HEX,...]"
+    return 2
+  var storeRootOverride = ""
+  var keepList = ""
+  var sub = ""
+  var positional: seq[string] = @[]
+  for raw in args:
+    if raw.startsWith("--store-root="):
+      storeRootOverride = raw[len("--store-root=") .. ^1]
+    elif raw.startsWith("--keep="):
+      keepList = raw[len("--keep=") .. ^1]
+    elif raw.startsWith("--"):
+      stderr.writeLine("repro cas: unknown flag: " & raw)
+      return 2
+    elif sub.len == 0:
+      sub = raw
+    else:
+      positional.add(raw)
+  if sub.len == 0:
+    stderr.writeLine("repro cas: missing subcommand")
+    return 2
+
+  let root = resolveStoreRoot(storeRootOverride)
+
+  proc parseHex64(hex: string): (bool, ContentHash) =
+    if hex.len != 64:
+      return (false, ContentHash(default(array[32, byte])))
+    var raw: array[32, byte]
+    for i in 0 ..< 32:
+      let hi = hex[2 * i]
+      let lo = hex[2 * i + 1]
+      let hiVal =
+        if hi >= '0' and hi <= '9': int(hi) - int('0')
+        elif hi >= 'a' and hi <= 'f': 10 + int(hi) - int('a')
+        elif hi >= 'A' and hi <= 'F': 10 + int(hi) - int('A')
+        else: return (false, ContentHash(default(array[32, byte])))
+      let loVal =
+        if lo >= '0' and lo <= '9': int(lo) - int('0')
+        elif lo >= 'a' and lo <= 'f': 10 + int(lo) - int('a')
+        elif lo >= 'A' and lo <= 'F': 10 + int(lo) - int('A')
+        else: return (false, ContentHash(default(array[32, byte])))
+      raw[i] = byte((hiVal shl 4) or loVal)
+    (true, toContentHash(raw))
+
+  try:
+    case sub
+    of "gc":
+      var cas = openCasStore(root)
+      defer: cas.close()
+      var retain: HashSet[ContentHash]
+      if keepList.len > 0:
+        for entry in keepList.split(','):
+          let trimmed = entry.strip()
+          if trimmed.len == 0: continue
+          let (ok, h) = parseHex64(trimmed)
+          if not ok:
+            stderr.writeLine(
+              "repro cas gc: --keep entry is not a 64-char hex digest: " &
+              trimmed)
+            return 2
+          retain.incl(h)
+      let freed = cas.casGc(retain)
+      echo "repro cas gc: store-root=" & root
+      echo "retain count: " & $retain.len
+      echo "freed bytes: " & $freed
+      return 0
+    of "verify":
+      if positional.len != 1:
+        stderr.writeLine(
+          "repro cas verify: exactly one 64-char hex digest required")
+        return 2
+      let (ok, h) = parseHex64(positional[0])
+      if not ok:
+        stderr.writeLine(
+          "repro cas verify: argument is not a 64-char hex digest")
+        return 2
+      var cas = openCasStore(root)
+      defer: cas.close()
+      if cas.casVerify(h):
+        echo "repro cas verify: ok " & positional[0]
+        return 0
+      else:
+        stderr.writeLine("repro cas verify: FAILED " & positional[0])
+        return 1
+    of "path":
+      if positional.len != 1:
+        stderr.writeLine(
+          "repro cas path: exactly one 64-char hex digest required")
+        return 2
+      let (ok, h) = parseHex64(positional[0])
+      if not ok:
+        stderr.writeLine(
+          "repro cas path: argument is not a 64-char hex digest")
+        return 2
+      var cas = openCasStore(root)
+      defer: cas.close()
+      echo cas.casPath(h)
+      return 0
+    of "exists":
+      if positional.len != 1:
+        stderr.writeLine(
+          "repro cas exists: exactly one 64-char hex digest required")
+        return 2
+      let (ok, h) = parseHex64(positional[0])
+      if not ok:
+        stderr.writeLine(
+          "repro cas exists: argument is not a 64-char hex digest")
+        return 2
+      var cas = openCasStore(root)
+      defer: cas.close()
+      if cas.casExists(h):
+        return 0
+      else:
+        return 1
+    else:
+      stderr.writeLine("repro cas: unknown subcommand: " & sub)
+      return 2
+  except CatchableError as err:
+    stderr.writeLine("repro cas " & sub & ": error: " & err.msg)
     return 1
 
 proc runUserDaemonCliCommand(args: seq[string]): int =
@@ -37138,6 +37292,12 @@ const reproTopLevelCommands = [
   "build", "watch", "develop", "add", "remove", "push", "sync", "pull",
   "branch",
   "checkout", "hooks", "check", "workspace", "prompt", "completion", "store",
+  # M9.R.77.5 — ``repro cas <sub>`` is the R11 Layer-1 CLI. It exposes
+  # a narrow view of the CAS (blob-level put/get/verify/path/gc) that
+  # doesn't touch the Layer-2 prefix / roots / receipts surface
+  # ``repro store`` operates against. See runCasCommand for the
+  # supported subcommands.
+  "cas",
   "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
@@ -38656,6 +38816,16 @@ proc runThinApp*(programName: string): int =
       else:
         @[]
     return runStoreCommand(storeArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "cas":
+    # M9.R.77.5 — R11 Layer-1 CLI (blob-level put/get/verify/path/gc).
+    # Separate from ``repro store`` because it exposes ONLY the CAS
+    # surface — see runCasCommand's doc block for the two-layer split.
+    let casArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return runCasCommand(casArgs)
   if programName == "repro" and args.len > 0 and args[0] == "daemon":
     let daemonArgs =
       if args.len > 1:
