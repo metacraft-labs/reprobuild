@@ -1,0 +1,315 @@
+M9.R.74 Phase A — canonical execution root (R2) — CWD-per-action-type audit
+=============================================================================
+
+Objective
+---------
+reprobuild-specs R2 (Hermetic-Builds-And-Path-Independence.md §"Canonical
+Execution Root") mandates every action run in an "engine-chosen path layout
+whose path does not depend on the user's original checkout location." The
+M9.R.72 Phase A summary flagged R2 as "Gap VII (in-progress elsewhere) —
+recipes run under their checkout path today." This audit measures the
+current CWD contract per action-type before proposing a fix.
+
+
+Spec cite
+---------
+Hermetic-Builds-And-Path-Independence.md §"Canonical Execution Root",
+lines 126-150:
+
+    The core should give every action a **canonical execution root** whose
+    path does not depend on the user's original checkout location.
+
+    This is the most important core mechanism for source-location
+    independence.
+
+    Conceptually:
+      * the user's workspace may live anywhere
+      * Reprobuild materializes or projects the action's declared inputs
+        into a controlled execution root
+      * the action runs there, not in the original checkout path
+    ...
+    The important semantic rule is:
+      * the action should see a stable, engine-chosen path layout
+      * not the ambient host checkout path
+
+Also relevant: §"Canonical Build Directories" (lines 342-355) — Nix's
+``/build`` sandbox path is cited as useful prior art; the spec explicitly
+notes "on Windows, this likely means a short, engine-owned canonical
+root rather than inheriting arbitrary long workspace paths."
+
+
+How the engine spawns actions today
+-----------------------------------
+Trace (files are D:/metacraft/reprobuild/libs/...):
+
+  1. DSL side — ``BuildActionDef`` has NO ``cwd`` field of its own
+     (repro_project_dsl/src/repro_project_dsl/types.nim:371-505).
+     CWD travels through ``PublicCliCall.arguments`` when the caller
+     supplies ``inlineExecCall(argv, cwd = X)``
+     (repro_project_dsl/src/repro_project_dsl/runtime_core.nim:845-863).
+
+  2. CLI-support ``lowerGraphAction``
+     (repro_cli_support/src/repro_cli_support.nim:1487):
+
+       * ``reprobuild.builtin.exec`` branch (line 1547-1619):
+         ``cwd = if cwdValue.len > 0: cwdValue else: projectRoot``
+         — projectRoot is the recipe root (``activeProviderProjectRoot()``).
+
+       * ``reprobuild.builtin.fs`` branch (line 1621-1659):
+         ``cwd = projectRoot`` — hardcoded, no override.
+
+       * ``reprobuild.builtin.hcr`` branch (line 1695):
+         ``cwd = projectRoot`` — hardcoded, no override.
+
+       * ``NimUnittestToolId`` short-circuit (line 1835):
+         ``cwd = projectRoot`` — hardcoded, no override.
+
+       * Typed-tool fall-through (line 1902-1919, ``argvForCall``):
+         ``cwd = projectRoot`` — hardcoded, no override.
+
+  3. Engine ``processCwd`` fallback
+     (repro_build_engine/src/repro_build_engine.nim:1768-1773):
+     ``if process.cwd.len > 0: process.cwd else: action.cwd`` — the
+     converter subprocess mechanism honours a per-process override.
+
+  4. Engine ``startBypassRunQuotaProcess``
+     (repro_build_engine/src/repro_build_engine.nim:2654):
+     ``let cwd = if action.cwd.len > 0: action.cwd else: getCurrentDir()``
+     — falls back to the ``repro`` CLI's own cwd if the DSL/CLI left
+     ``action.cwd`` empty (should never happen given the CLI hardcodes
+     ``projectRoot`` above).
+
+  5. Engine RunQuota path
+     (repro_build_engine/src/repro_build_engine.nim:2778, 2813, 3446,
+     4268): ``cwd: action.cwd`` — the RunQuota daemon receives the
+     action's CWD verbatim.
+
+  6. Post-action output resolution
+     (repro_build_engine/src/repro_build_engine.nim:1040, 1082-1083,
+     1219, 1729, 1733, 1739, 1745, 1756, 3586, 3590, 3951, 4138,
+     4166, 4350, 4461, 4825): ``action.cwd`` is the joining base for
+     every relative input/output path emitted by the recipe. So
+     changing the CWD retroactively will silently break every recipe
+     that uses relative paths.
+
+
+CWD-per-action-type table
+--------------------------
+Where each action type ends up executing today:
+
+    Action type                    Default CWD           Overridable?
+    ---------------------------    -------------------   -------------------
+    fetch (autotools/meson/cmake)  projectRoot           Yes via
+                                                          inlineExecCall(cwd=)
+    fetch (from_source_custom)     projectRoot           Yes (same)
+    expand_archive.build           projectRoot           Yes (same)
+    configure                      projectRoot;          Yes (same);
+                                    recipe scripts        recipes do
+                                    ``cd $buildDir``      ``sh -c "cd X && ..."``
+                                    inside the script     inline
+    compile (make workDir=)        projectRoot;          Yes via typed slot;
+                                    typed-tool wrapper    ``make -C buildDir``
+                                    emits ``make -C``     rides in argv
+    compile (meson/cmake/ninja)    projectRoot;          Same as make
+                                    typed-tool wrapper    (``-C`` / ``--build-dir``
+                                    emits ``-C`` /        embedded)
+                                    ``--build-dir``
+    install (make install)         projectRoot;          Same as compile
+                                    inline ``cd $out``    (DESTDIR=... env)
+                                    or DESTDIR=... env
+    custom shell (shell(...))      projectRoot;          Yes via DSL
+                                    from_source_custom    ``shell(cwd=)`` slot,
+                                    ignores DSL's ``cwd`` BUT emitter ignores
+                                    slot and hardcodes    it (documented
+                                    ``cd $extracted``     "honest deferral"
+                                    inside the script     in
+                                                          from_source_custom.nim
+                                                          lines 96-100)
+    reprobuild.builtin.fs          projectRoot           NO — hardcoded
+    reprobuild.builtin.hcr         projectRoot           NO — hardcoded
+    NimUnittestToolId              projectRoot           NO — hardcoded
+    typed-tool fallthrough         projectRoot           NO — hardcoded
+
+
+Recipe-side ad-hoc CWD assumptions (grep results)
+--------------------------------------------------
+Only 4 recipe files use ``$PWD`` / ``cd $X`` in their emitted commands:
+
+  * recipes/packages/source/gcc/repro.nim:276-284 — 3 shell rows
+    that embed ``cd $extracted/build && ...`` inline before the tool
+    invocation.
+  * recipes/packages/source/ninja/repro.nim:187 — one shell row that
+    documents "``cd $extracted`` is added by the convention's ..."
+    (the recipe intentionally relies on the convention's implicit CWD).
+  * recipes/packages/source/hwdata/repro.nim:219 — one $PWD reference
+    in an emitted command.
+  * recipes/reproos-iso/repro.nim:103 — uses ``$PWD`` to compose the
+    ``REPRO_DE_ROOTFS_DIR`` env variable passed to the ISO build script
+    (relies on the recipe-root CWD contract).
+
+Shell scripts under recipes/*/scripts/*.sh (the "custom shell action"
+target of from_source_custom and reproos-image) explicitly document the
+recipe-root CWD contract:
+
+  * recipes/reproos-image/scripts/build-reproos-image.sh:60-63:
+        # The recipe engine sets cwd to recipes/reproos-image; the
+        # repo root is two levels up.
+        REPO_ROOT="$(cd ../.. && pwd)"
+        RECIPE_DIR="$(pwd)"
+
+  * recipes/bootstrap/tcc-chain/scripts/*.sh — three build scripts
+    with ``$(dirname "$0")`` self-locating logic. These are launched
+    by the tcc-chain build harness (not by the reprobuild engine) so
+    they are outside the R2 canonicalisation scope.
+
+
+Recipe-DSL shell-action ``cwd`` slot (already declared, ignored today)
+----------------------------------------------------------------------
+``repro_project_dsl/src/repro_project_dsl/dsl_port_runtime.nim:3822-3824``
+carries:
+
+    cwd*: string
+      ## Working dir override. Empty means "use the convention's default"
+      ## (typically the extracted source dir).
+
+The ``shell()`` public surface at line 3866-3870 accepts ``cwd = ""``
+so recipes CAN already declare "run me from directory X". But the
+consumers of ``DslShellAction.cwd``:
+
+  * from_source_custom.nim emits its own ``cd "$extracted"`` INSIDE the
+    script and IGNORES the DSL's ``cwd`` value (documented in the
+    module's "Honest deferrals" list at lines 96-100).
+  * autotools_package/meson_package/cmake_package all bake ``cd
+    $buildDir`` inline into the emitted shell script and don't accept
+    per-row cwd overrides.
+
+
+Match against the spec (R2)
+---------------------------
+Where today's implementation departs from the spec:
+
+  1. **The "canonical" CWD depends on the user's checkout path.** Every
+     action executes under ``projectRoot`` = the recipe's directory
+     under the operator's arbitrary D:/metacraft/... clone. Two users
+     with the same recipe clone at different paths produce actions
+     with different CWD strings and therefore different observed input
+     paths in monitor evidence, breaking Goal B (cross-location
+     cacheability) documented at spec lines 100-108.
+
+  2. **No engine-owned execution root.** The spec's §"Canonical Build
+     Directories" (line 342) calls out Nix's ``/build`` sandbox
+     directory as prior art. Reprobuild has no equivalent. The recipe
+     root IS the "execution root," but the recipe root IS the
+     checkout path — the two coincide.
+
+  3. **No declarative CWD contract per action.** Every convention
+     (autotools_package/meson_package/cmake_package) inlines its own
+     ``cd $buildDir`` INSIDE the shell command it emits. This is
+     invisible to the engine, invisible to monitoring, and invisible
+     to path-remapping — the tool sees a real absolute host path
+     regardless. R2's semantic contract ("the action should see a
+     stable engine-chosen path layout") is not implementable while
+     the CWD-changing lives inside the script.
+
+  4. **The DSL's ``cwd`` slot is honoured only when non-empty.** For
+     ``reprobuild.builtin.fs`` / ``.hcr`` / ``NimUnittestToolId`` /
+     typed-tool actions the CWD is hardcoded to ``projectRoot`` in
+     the CLI-support lowering; the DSL's slot is not even consulted.
+
+
+Recipe-facing behavioural contract as of 2026-07-01
+---------------------------------------------------
+The de-facto contract every recipe relies on:
+
+  * When a recipe or its convention emits an action, the action's
+    process runs with CWD = the recipe's directory.
+  * Relative paths in ``inputs:`` / ``outputs:`` / ``depfile:`` slots
+    are joined against that CWD (repro_build_engine.nim:1082-1083).
+  * Recipes may side-step the recipe-root CWD by inlining a ``cd X &&
+    ...`` prefix in their emitted shell command. This is idiomatic
+    across autotools/meson/cmake conventions and every from-source
+    recipe.
+
+Any R2 implementation MUST preserve this contract by DEFAULT so the
+existing 74+ NDE recipes don't regress. The canonicalisation happens
+via one of two shapes:
+
+  * Shape A (opt-in per-action). Add a ``cwdKind`` declaration to the
+    DSL's ``BuildActionDef`` + ``DslShellAction``. Recipes and
+    conventions declare "I want to run from {recipe-root|src|build|
+    canonical-execroot}" and the engine sets the process CWD
+    accordingly. Legacy default = recipe-root — no behaviour change.
+
+  * Shape B (engine-projected execroot). Materialise a
+    ``<recipe-root>/.repro/execroot/<action-id>/`` symlink forest per
+    action pointing at declared inputs; run the action there. Requires
+    every recipe path to be rewritten through the projection and
+    breaks the "relative path is joined against action.cwd" contract
+    unless we backfill.
+
+Shape A is the pragmatic small-first step and matches the spec's
+§"Standard-Library Responsibilities" (line 260) — the WRAPPER layer,
+not each recipe, applies path-remapping. Shape B is the strict
+Bazel-style hermeticity target but requires the store-refactor gap
+IV documented in M9.R.72 Phase A (a separate architectural milestone).
+
+
+Recommendation for Phase B / C
+------------------------------
+Phase B (spec side):
+
+  1. Tighten Hermetic-Builds-And-Path-Independence.md §"Canonical
+     Execution Root" with an ``ActionCwdKind`` enum that recipes and
+     conventions can declare against. Enum values:
+
+        acwdRecipeRoot  — legacy default (backward compatible)
+        acwdSource      — the extracted source tree
+                          (``<recipe>/src/`` or fetch's extractedRoot)
+        acwdBuild       — the out-of-tree build directory
+                          (``<recipe>/build/`` typically)
+        acwdInstall     — the DESTDIR staging directory
+                          (``<recipe>/build/out/`` typically)
+        acwdCustom      — a caller-supplied absolute path (matches the
+                          existing ``inlineExecCall(cwd = X)`` shape)
+
+  2. Add a validation criterion under §"Validation Criteria":
+
+        Every action declares its ``cwdKind`` at graph-emit time; the
+        engine sets the spawn-time working directory based on that
+        declaration; a legacy default of ``acwdRecipeRoot`` preserves
+        the existing corpus's behaviour.
+
+Phase C (engine side):
+
+  1. Extend the engine's ``BuildAction`` type with ``cwdKind:
+     ActionCwdKind`` and ``cwdCustomPath: string``.
+
+  2. Compute the effective CWD in the CLI-support lowering path
+     (``lowerGraphAction``) based on ``cwdKind`` — resolve
+     ``acwdSource`` etc. against known layout paths.
+
+  3. Legacy behaviour: when ``cwdKind == acwdRecipeRoot`` (the enum's
+     zero value), the effective CWD is the recipe root — byte-
+     identical to today's ``cwd = projectRoot`` path.
+
+  4. Add a regression test that pins the effective-CWD selection for
+     each enum value; add another that pins backward-compat
+     (``cwdKind`` unset → recipe root).
+
+Phase D (recipe audit):
+
+  1. The 4 recipe-side ad-hoc CWD violations (gcc/ninja/hwdata/
+     reproos-iso) are all documented / working; they can keep the
+     inline ``cd $X && ...`` idiom for now because the enum's
+     default preserves it. A separate follow-up milestone can lift
+     them into ``cwdKind = acwdBuild`` declarations for tighter
+     hermeticity.
+
+  2. from_source_custom's documented "honest deferral" (module
+     lines 96-100) closes at Phase C: the emitter can consult
+     ``DslShellAction.cwd`` (already declared, currently ignored)
+     and translate a populated slot into ``cwdKind = acwdCustom``
+     with ``cwdCustomPath = row.cwd``.
+
+
+End of Phase A audit.
