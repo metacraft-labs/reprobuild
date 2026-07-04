@@ -24,10 +24,49 @@
 #      /run/user/1000: No such file or directory' — so we
 #      belt-and-suspenders create it here (mkdir is a no-op if
 #      systemd-tmpfiles already ran).
-mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
-chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+# M9.R.71.5 XDG_RUNTIME_DIR belt-and-suspenders — the M9.R.71.4
+# wrapper's preamble showed /run/user/1000 still missing at sway
+# launch time.  The runtime dir has to exist AND be owned by the
+# session user, but sway runs as uid=1000 which can't chown a
+# root-created dir.  The tmpfiles.d entry landed by M9.R.56.8.7
+# creates the dir at boot with the right ownership; if it's still
+# absent here it means the setuid'd bash --login shell can't see
+# it (mount namespace race?) or systemd-tmpfiles didn't fire.  We
+# fall back to $HOME/.repro-runtime as a per-session runtime dir.
+if [ ! -d "$XDG_RUNTIME_DIR" ] || [ ! -w "$XDG_RUNTIME_DIR" ]; then
+  XDG_RUNTIME_DIR="$HOME/.repro-runtime"
+  mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+  chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+  export XDG_RUNTIME_DIR
+fi
 
+# M9.R.71.4 WLR_RENDERER_ALLOW_SOFTWARE=1 — allow wlroots to try
+# software EGL when no hardware GPU is present.
 export WLR_RENDERER_ALLOW_SOFTWARE=1
+
+# M9.R.71.5 Mesa GLES2 swrast fallback — validated 2026-07-04:
+# after WLR_RENDERER_ALLOW_SOFTWARE=1 wlroots reaches
+# wlr_gles2_renderer_create() then fails at glGetString(GL_EXTENSIONS)
+# returning NULL.  strace revealed a MIXED-Mesa hazard:
+#   sway loads /lib/x86_64-linux-gnu/libEGL.so.1
+#     (Debian's libglvnd dispatcher, "1.5 libglvnd")
+#   sway loads /opt/repro/reprobuild/recipes/packages/source/mesa/
+#     .repro/output/install/usr/lib64/libGLESv2.so.2
+#     (from-source Mesa's actual GLES2 library)
+# libglvnd routes GL calls via vendor dispatch tables which the
+# from-source libGLESv2 doesn't participate in — glGetString goes
+# through a dispatch table that isn't populated, returning NULL.
+#
+# Fix: pin ALL GL/EGL loads to the from-source Mesa install-mirror
+# via LD_LIBRARY_PATH so Debian's libglvnd is never picked up.
+FROM_SOURCE_MESA=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+if [ -f "$FROM_SOURCE_MESA/libEGL.so.1" ]; then
+  LD_LIBRARY_PATH="$FROM_SOURCE_MESA${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH
+fi
+export LIBGL_ALWAYS_SOFTWARE=1
+export MESA_LOADER_DRIVER_OVERRIDE=swrast
+export GALLIUM_DRIVER=llvmpipe
 
 LOG=/var/log/m9r71_sway.log
 {
@@ -39,6 +78,10 @@ LOG=/var/log/m9r71_sway.log
   echo "  HOME=$HOME"
   echo "  XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
   echo "  WLR_RENDERER_ALLOW_SOFTWARE=$WLR_RENDERER_ALLOW_SOFTWARE"
+  echo "  LIBGL_ALWAYS_SOFTWARE=$LIBGL_ALWAYS_SOFTWARE"
+  echo "  MESA_LOADER_DRIVER_OVERRIDE=$MESA_LOADER_DRIVER_OVERRIDE"
+  echo "  GALLIUM_DRIVER=$GALLIUM_DRIVER"
+  echo "  LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
   echo "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
   echo "  SHELL=$SHELL"
   echo "  PATH=$PATH"
@@ -48,6 +91,10 @@ LOG=/var/log/m9r71_sway.log
   ls -la /run/seatd.sock 2>&1 | sed 's/^/    /'
   echo "  drm devices:"
   ls -la /dev/dri 2>&1 | sed 's/^/    /'
+  echo "  Mesa GLES/EGL libraries + swrast driver:"
+  ls -la /usr/lib/x86_64-linux-gnu/libGLESv2.so.2 \
+         /usr/lib/x86_64-linux-gnu/libEGL.so.1 \
+         /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so 2>&1 | sed 's/^/    /'
   echo "  tty:"
   tty 2>&1 | sed 's/^/    /'
   echo "  ------ end preamble ------"

@@ -1,0 +1,217 @@
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:57:21Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:56 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.338 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.339 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.344 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:57:53Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:57 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.126 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.127 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.131 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:58:24Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:57 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.127 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.127 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.132 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:58:55Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:58 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.121 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.121 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.126 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:59:27Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:58 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.122 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.122 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.127 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T09:59:58Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:59 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.122 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.122 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.127 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:00:29Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/run/user/1000
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    ls: cannot access '/run/user/1000': No such file or directory
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 09:56 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 09:56 .
+    drwxr-xr-x 14 root root    2720 Jul  4 09:56 ..
+    drwxr-xr-x  2 root root      60 Jul  4 09:56 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 09:59 card0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+pci id for fd 12: 1234:1111, driver (null)
+pci id for fd 13: 1234:1111, driver (null)
+kmsro: driver missing
+00:00:00.121 [ERROR] [wlr] [render/gles2/renderer.c:520] Failed to get GL_EXTENSIONS
+00:00:00.122 [ERROR] [wlr] [render/gles2/renderer.c:505] Failed to create GLES2 renderer
+00:00:00.126 [ERROR] [sway/server.c:438] Unable to open wayland socket
+sway: backend/backend.c:52: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_output.listener_list)' failed.
