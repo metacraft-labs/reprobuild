@@ -27,8 +27,8 @@ import repro_dsl_stdlib
 
 package app:
   buildDeps:
-    "rust >=1.75 <2.0"
-    "nodejs >=20 <21"
+    "cargo >=1.75 <2.0"
+    "pnpm >=8 <9"
     "nim >=2.0 <3.0"
     "protoc >=25 <26"
 
@@ -41,20 +41,25 @@ package app:
   devEnv:
     ## Builds release binaries and publishes the workspace bundle
     task "publish":
-      npm.run("publish")
+      pnpm.run("publish")
+
+  # Rust library compiled from source
+  library "rust_lib":
+    build:
+      cargo.build(workDir = "rust_lib", output = "rust_lib/lib/libcore.a")
 
   # Hermetic, sandbox-monitored build recipes
   executable "backend":
     build:
       # Generate source files from protobuf definitions
-      let genSources = protoc.compile(glob("proto/*.proto"), lang = "rust", outputDir = "backend/src/proto")
+      let genSources = protoc.compile(glob("proto/*.proto"), lang = "nim", outputDir = "src/proto")
 
-      # Build backend depending on the generated sources
-      rust.cargoBuild(workDir = "backend", extraInputs = genSources, output = "out/backend")
+      # Compile and link Nim binary with the Rust library dependency
+      nim.c(source = "src/main.nim", extraInputs = genSources, libraries = [rust_lib], output = "out/backend")
 
   executable "frontend":
     build:
-      nodejs.pnpmBuild(workDir = "frontend", output = "out/frontend")
+      pnpm.build(workDir = "frontend", output = "out/frontend")
 ```
 
 ---
