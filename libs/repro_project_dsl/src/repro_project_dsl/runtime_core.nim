@@ -1510,6 +1510,48 @@ proc appendRegisteredActionTypedOutput*(actionId: string;
         path: path))
       return
 
+proc setRegisteredActionDeclaredOutputs*(actionId: string;
+                                         outputs: openArray[string])
+    {.dynOrStatic.} =
+  ## DSL-port M9.R.79.2 — set the registry entry's ``declaredOutputs``
+  ## seq in place.  Used by ``meson_package`` / ``autotools_package`` /
+  ## ``cmake_package`` constructors to declare the write-root scope for
+  ## typed-tool edges AFTER the typed-tool wrapper has already
+  ## registered the action with the default empty seq.  Mirrors the
+  ## ``appendRegisteredActionToolIdentityRefs`` pattern (M9.R.14e.5)
+  ## but uses set-semantics because each edge has one write scope
+  ## known at construction time.
+  ##
+  ## The engine's ``validateGraph`` R7 pairwise-overlap pass grades
+  ## ``declaredOutputs`` at graph-time; missing entries no-op per the
+  ## R7 relaxation for empty seqs (M9.R.75 Phase B).  No-op when
+  ## ``actionId`` is not present (defensive — same shape as the
+  ## rest of the ``setRegisteredAction*`` family).
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].declaredOutputs = @outputs
+      return
+
+proc setRegisteredActionReadOnlyRoots*(actionId: string;
+                                       roots: openArray[string])
+    {.dynOrStatic.} =
+  ## DSL-port M9.R.79.2 — set the registry entry's ``readOnlyRoots``
+  ## seq in place.  Used by ``meson_package`` / ``autotools_package`` /
+  ## ``cmake_package`` constructors to declare the nominally-read-only
+  ## source scope for typed-tool edges AFTER the typed-tool wrapper
+  ## has already registered the action with the default empty seq.
+  ## Mirrors ``setRegisteredActionDeclaredOutputs`` (see there for the
+  ## full rationale).
+  ##
+  ## The engine's ``detectSourceWrites`` / ``collectEvidence`` R6
+  ## post-hoc monitor check grades ``readOnlyRoots`` at execution
+  ## time; missing entries no-op per the R6 fetch-carve-out (M9.R.75
+  ## Phase C).  No-op when ``actionId`` is not present.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      buildActionRegistry[i].readOnlyRoots = @roots
+      return
+
 proc recordToolInvocation*(id: string; call: PublicCliCall;
                            deps: openArray[string] = [];
                            extraInputs: openArray[string] = [];

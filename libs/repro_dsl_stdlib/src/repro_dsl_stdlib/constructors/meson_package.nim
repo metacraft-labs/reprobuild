@@ -253,12 +253,38 @@ proc meson_package*(srcDir: string;
   # carries no refs and the from-source resolver's search-path channels
   # never make it into the action env.
   m9r14eThreadRecipeDepsAsToolRefs(setup.id, pkgName)
+  # M9.R.79.2 — declare the write scope + read-only source scope for
+  # spec R7 (double-write reject) + R6 (source-write reject)
+  # enforcement.  meson.setup writes ``build.ninja`` etc. into
+  # ``<buildDir>``; the upstream source at ``<srcDir>`` MUST NOT be
+  # written to by setup.  Both paths are resolved against the recipe's
+  # ``activeProviderProjectRoot()`` so the enforcement layer sees the
+  # SAME shape the file monitor emits (absolute host paths); when the
+  # provider context is absent (unit-test mode) we fall back to the
+  # relative form so existing tests stay byte-identical.  Sequential
+  # setup/compile/install edges share the same buildDir scope through
+  # the dep chain, which the R7 pass exempts (M9.R.75.3.1 dep-chain
+  # relaxation).
+  let m9r79ProjectRoot = activeProviderProjectRoot()
+  let m9r79BuildDirAbs =
+    if m9r79ProjectRoot.len > 0: m9r79ProjectRoot / buildDir
+    else: buildDir
+  let m9r79SrcDirAbs =
+    if m9r79ProjectRoot.len > 0: m9r79ProjectRoot / srcDir
+    else: srcDir
+  setRegisteredActionDeclaredOutputs(setup.id, @[m9r79BuildDirAbs])
+  setRegisteredActionReadOnlyRoots(setup.id, @[m9r79SrcDirAbs])
   # M9.R.14g.9 — compile MUST depend on setup. Mirror the install fix
   # below; the automatic-monitor evidence on ``meson setup`` may not
   # land before the scheduler dispatches ``meson compile``, races the
   # build.ninja file write, and breaks vendored-subproject builds.
   let compileEdge = meson.compile(workDir = buildDir, after = @[setup])
   m9r14eThreadRecipeDepsAsToolRefs(compileEdge.id, pkgName)
+  # M9.R.79.2 — compile continues writing to buildDir; source stays
+  # read-only.  Sequential edge via ``after = @[setup]`` — R7 dep-chain
+  # relaxation permits the shared write root.
+  setRegisteredActionDeclaredOutputs(compileEdge.id, @[m9r79BuildDirAbs])
+  setRegisteredActionReadOnlyRoots(compileEdge.id, @[m9r79SrcDirAbs])
   # M9.R.14d.7 — meson rejects relative ``--destdir`` (it tries to
   # resolve `wayland/out` under the action's cwd at install time and
   # fails with `No such file or directory`). In provider mode pass the
@@ -287,6 +313,13 @@ proc meson_package*(srcDir: string;
     tags = @[],
     after = @[compileEdge])
   m9r14eThreadRecipeDepsAsToolRefs(installEdge.id, pkgName)
+  # M9.R.79.2 — install writes the DESTDIR-staged tree at
+  # ``effectiveDestdir``; source stays read-only.  The install-mirror
+  # emit stage that runs downstream (see
+  # ``types/package_result.emitInstallTreeMirror``) declares its own
+  # scope; here we cover the meson install step only.
+  setRegisteredActionDeclaredOutputs(installEdge.id, @[effectiveDestdir])
+  setRegisteredActionReadOnlyRoots(installEdge.id, @[m9r79SrcDirAbs])
   MesonPackageResult(
     buildEdge: setup,
     compileEdge: compileEdge,
