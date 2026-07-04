@@ -1,4 +1,4 @@
-import std/[os, osproc, streams, tempfiles, unittest]
+import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_hash
 import repro_local_store
@@ -49,21 +49,34 @@ when isMainModule:
     runWorker(params[1], params[2], params[3], params[4])
     quit(0)
 
+# AC-1b: `hot-records/<key>` is a DIRECTORY of `<nonce>.rec` path-set files.
 proc perEdgeStoreBytes(cacheRoot: string): int =
   let dir = cacheRoot / "hot-records"
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
-      result += int(getFileSize(path))
+    if kind == pcDir:
+      for k2, p2 in walkDir(path):
+        if k2 == pcFile:
+          result += int(getFileSize(p2))
 
-proc perEdgeFileCount(cacheRoot: string): int =
+proc perEdgeCount(cacheRoot: string): int =
+  ## Number of edges (directories) in the store.
   let dir = cacheRoot / "hot-records"
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
+    if kind == pcDir:
       inc result
+
+proc recFilesFor(cacheRoot: string; weak: ContentDigest): seq[string] =
+  ## The `<nonce>.rec` files inside the edge's directory.
+  let dir = cacheRoot / "hot-records" / perEdgeRecordFileName(weak)
+  if not dirExists(dir):
+    return
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(".rec"):
+      result.add(path)
 
 suite "integration_action_cache_concurrent_same_edge_converges_atomically":
   when isNixSupported:
@@ -88,7 +101,6 @@ suite "integration_action_cache_concurrent_same_edge_converges_atomically":
       let self = getAppFilename()
       let workerCount = 16
       let weak = weakFor(EdgeName)
-      let perEdgeFile = cacheRoot / "hot-records" / perEdgeRecordFileName(weak)
 
       # Launch all workers as close to simultaneously as possible so their
       # temp-file + rename windows overlap.
@@ -99,10 +111,12 @@ suite "integration_action_cache_concurrent_same_edge_converges_atomically":
           options = {poStdErrToStdOut}))
 
       # While the workers hammer the shared edge, a concurrent reader keeps
-      # reading the per-edge file. Under atomic rename it must NEVER observe a
-      # torn file: every non-empty snapshot decodes as a byte-complete record
-      # set. A non-atomic truncate-then-write would let this reader catch a
-      # half-written file. `torn` is the falsification signal.
+      # reading the edge's `<nonce>.rec` path-set file (AC-1b: same inputs →
+      # same strong fp → all writers converge on the SAME nonce file). Under
+      # atomic rename it must NEVER observe a torn file: every non-empty
+      # snapshot decodes as a byte-complete record set. A non-atomic
+      # truncate-then-write would let this reader catch a half-written file.
+      # `torn` is the falsification signal.
       var torn = false
       var sawRecord = false
       proc anyRunning(): bool =
@@ -111,10 +125,10 @@ suite "integration_action_cache_concurrent_same_edge_converges_atomically":
             return true
         false
       while anyRunning():
-        if fileExists(perEdgeFile):
+        for recFile in recFilesFor(cacheRoot, weak):
           var raw: string
           try:
-            raw = readFile(perEdgeFile)
+            raw = readFile(recFile)
           except CatchableError:
             raw = ""
           if raw.len > 0:
@@ -139,10 +153,12 @@ suite "integration_action_cache_concurrent_same_edge_converges_atomically":
       check not torn
       check sawRecord
 
-      # Exactly one per-edge file survives (one edge → one file), and it
-      # decodes to a valid record for this edge.
-      check perEdgeFileCount(cacheRoot) == 1
-      check fileExists(cacheRoot / "hot-records" / perEdgeRecordFileName(weak))
+      # Exactly one per-edge directory survives (one edge → one directory),
+      # holding exactly one `.rec` file (all workers saw the SAME path-set, so
+      # they converged on one nonce file — no accumulation).
+      check perEdgeCount(cacheRoot) == 1
+      check dirExists(cacheRoot / "hot-records" / perEdgeRecordFileName(weak))
+      check recFilesFor(cacheRoot, weak).len == 1
 
       let cas = openLocalCas(casRoot)
       var cache = openActionCache(cacheRoot)

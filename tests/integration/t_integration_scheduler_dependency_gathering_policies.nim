@@ -196,14 +196,17 @@ proc weak(name: string): ContentDigest =
   weakFingerprintFromText("m17.integration." & name)
 
 proc cacheRecordsSize(cacheRoot: string): int =
-  # Per-edge store: the record footprint is the sum of every `hot-records/*`
-  # file (there is no global append-log anymore).
+  # Per-edge store: the record footprint is the sum of every `<nonce>.rec` file
+  # across all `hot-records/<key>/` edge directories (AC-1b; there is no global
+  # append-log anymore).
   let dir = cacheRoot / "action-cache" / "hot-records"
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
-      result += int(getFileSize(path))
+    if kind == pcDir:
+      for k2, p2 in walkDir(path):
+        if k2 == pcFile:
+          result += int(getFileSize(p2))
 
 proc reportPolicy(kind: DependencyGatheringKind;
                   reportPath: string): DependencyGatheringPolicy =

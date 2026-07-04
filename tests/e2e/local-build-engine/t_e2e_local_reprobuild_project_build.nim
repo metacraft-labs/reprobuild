@@ -1916,15 +1916,20 @@ suite "e2e_local_reprobuild_project_build":
             let xdg = getEnv("XDG_CACHE_HOME")
             let base = if xdg.len > 0: xdg else: getEnv("HOME") / ".cache"
             base / "repro" / "action-cache"
-      # Per-edge store: a completed build writes authoritative
-      # `hot-records/<key>` files (no global `action-results.records`).
+      # Per-edge store: a completed build writes authoritative records into
+      # per-edge directories `hot-records/<key>/<nonce>.rec` (AC-1b; no global
+      # `action-results.records`).
       block:
         let perEdgeDir = userActionCacheRoot / "action-cache" / "hot-records"
         check dirExists(perEdgeDir)
         var wrotePerEdgeRecord = false
         for kind, path in walkDir(perEdgeDir):
-          if kind == pcFile:
-            wrotePerEdgeRecord = true
+          if kind == pcDir:
+            for k2, p2 in walkDir(path):
+              if k2 == pcFile:
+                wrotePerEdgeRecord = true
+                break
+          if wrotePerEdgeRecord:
             break
         check wrotePerEdgeRecord
         check not fileExists(userActionCacheRoot / "action-cache" /

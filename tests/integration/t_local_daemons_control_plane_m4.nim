@@ -134,12 +134,15 @@ proc countFramedRecordsInPerEdgeFile(path: string): int =
     inc result
 
 proc countFramedActionCacheRecords(dir: string): int =
-  # Total records across every per-edge file — the whole-store record count.
+  # Total records across every per-edge `<nonce>.rec` file (AC-1b: each edge is
+  # a DIRECTORY of path-set files) — the whole-store record count.
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
-      result += countFramedRecordsInPerEdgeFile(path)
+    if kind == pcDir:
+      for k2, p2 in walkDir(path):
+        if k2 == pcFile:
+          result += countFramedRecordsInPerEdgeFile(p2)
 
 proc assertRunQuotaReport(output, socket: string) =
   let reportPath = valueAfter(output, "buildReport:")

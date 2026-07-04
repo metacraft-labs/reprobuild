@@ -5406,6 +5406,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_action_cache_per_edge_multifile_preserves_concurrent_path_sets.nim",
+    binary: "build/test-bin/t_action_cache_per_edge_multifile_preserves_concurrent_path_sets",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_action_cache_per_edge_no_global_log_no_growth.nim",
     binary: "build/test-bin/t_action_cache_per_edge_no_global_log_no_growth",
     defines: @[],

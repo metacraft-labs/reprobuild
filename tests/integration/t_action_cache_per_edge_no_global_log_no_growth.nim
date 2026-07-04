@@ -35,12 +35,16 @@ proc noGlobalStoreFiles(cacheRoot: string): bool =
       return false
   true
 
-proc perEdgeFileCount(cacheRoot: string): int =
+# AC-1b: `hot-records/<key>` is a DIRECTORY of `<nonce>.rec` files (one per
+# observed path-set). "Per-edge" now means one directory; total on-disk record
+# footprint is the sum of every `.rec` file across all edge directories.
+proc perEdgeCount(cacheRoot: string): int =
+  ## Number of edges (directories) in the store.
   let dir = cacheRoot / "hot-records"
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
+    if kind == pcDir:
       inc result
 
 proc perEdgeStoreBytes(cacheRoot: string): int =
@@ -48,8 +52,10 @@ proc perEdgeStoreBytes(cacheRoot: string): int =
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
-      result += int(getFileSize(path))
+    if kind == pcDir:
+      for k2, p2 in walkDir(path):
+        if k2 == pcFile:
+          result += int(getFileSize(p2))
 
 suite "integration_action_cache_per_edge_no_global_log_no_growth":
   when isNixSupported:
@@ -76,13 +82,14 @@ suite "integration_action_cache_per_edge_no_global_log_no_growth":
         [inputPath], ["out.txt"], actionRoot)
       check record.inputs.len == 1
 
-      # Exactly one per-edge file, and NO global append-log/index files.
-      check perEdgeFileCount(cacheRoot) == 1
+      # Exactly one per-edge directory, and NO global append-log/index files.
+      check perEdgeCount(cacheRoot) == 1
       check noGlobalStoreFiles(cacheRoot)
       check dirExists(cacheRoot / "hot-records")
 
-      # The per-edge file's name is derived from the edge's weak fingerprint.
-      check fileExists(cacheRoot / "hot-records" / perEdgeRecordFileName(weak))
+      # The per-edge directory's name is derived from the edge's weak
+      # fingerprint; it holds the edge's `<nonce>.rec` path-set files (AC-1b).
+      check dirExists(cacheRoot / "hot-records" / perEdgeRecordFileName(weak))
 
       # The record is a cache hit.
       removeFile(outputPath)
@@ -99,7 +106,7 @@ suite "integration_action_cache_per_edge_no_global_log_no_growth":
       for _ in 0 ..< 200:
         discard cache.recordActionResult(cas, weak, ffpChecksum,
           [inputPath], ["out.txt"], actionRoot)
-      check perEdgeFileCount(cacheRoot) == 1
+      check perEdgeCount(cacheRoot) == 1
       check perEdgeStoreBytes(cacheRoot) == sizeAfterFirst
       check noGlobalStoreFiles(cacheRoot)
 
@@ -112,7 +119,7 @@ suite "integration_action_cache_per_edge_no_global_log_no_growth":
       writeFile(outputB, "output-bravo\n")
       discard cache.recordActionResult(cas, weakB, ffpChecksum,
         [inputB], ["out-b.txt"], actionRoot)
-      check perEdgeFileCount(cacheRoot) == 2
+      check perEdgeCount(cacheRoot) == 2
       check noGlobalStoreFiles(cacheRoot)
 
       # Re-open across process-simulated boundary: still hits, still no global
@@ -121,7 +128,7 @@ suite "integration_action_cache_per_edge_no_global_log_no_growth":
       let reopenedHit = reopened.lookupActionResult(cas, weak, ffpChecksum)
       check reopenedHit.status == aclHit
       check noGlobalStoreFiles(cacheRoot)
-      check perEdgeFileCount(cacheRoot) == 2
+      check perEdgeCount(cacheRoot) == 2
 
     test "pre-existing global files are ignored then deleted on open":
       let tempRoot = createTempDir("repro-ac1-legacy-cleanup", "")

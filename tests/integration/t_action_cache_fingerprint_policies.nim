@@ -1,4 +1,4 @@
-import std/[os, tempfiles, times, unittest]
+import std/[os, strutils, tempfiles, times, unittest]
 
 import repro_hash
 import repro_local_store
@@ -56,8 +56,26 @@ proc writeU32Le(value: uint32): string =
   result[2] = char((value shr 16) and 0xff'u32)
   result[3] = char((value shr 24) and 0xff'u32)
 
-proc perEdgeRecordPath(cacheRoot: string; weak: ContentDigest): string =
+proc perEdgeDirPath(cacheRoot: string; weak: ContentDigest): string =
+  ## AC-1b: the edge's DIRECTORY of `<nonce>.rec` path-set files.
   cacheRoot / "action-cache" / "hot-records" / perEdgeRecordFileName(weak)
+
+proc perEdgeRecFilePath(cacheRoot: string; weak: ContentDigest): string =
+  ## Path of one (the first) `<nonce>.rec` file inside the edge's directory.
+  let dir = perEdgeDirPath(cacheRoot, weak)
+  if dirExists(dir):
+    for kind, path in walkDir(dir):
+      if kind == pcFile and path.endsWith(".rec"):
+        return path
+  perEdgeDirPath(cacheRoot, weak)  # non-existent → caller's fileExists fails
+
+proc perEdgeDirBytes(cacheRoot: string; weak: ContentDigest): int64 =
+  ## Sum of every `.rec` file's size in the edge's directory (AC-1b).
+  let dir = perEdgeDirPath(cacheRoot, weak)
+  if dirExists(dir):
+    for kind, path in walkDir(dir):
+      if kind == pcFile and path.endsWith(".rec"):
+        result += getFileSize(path)
 
 proc checkPerEdgeRecordFrame(recordsPath: string) =
   ## The authoritative per-edge file is an `RBPE` container (magic + version
@@ -76,15 +94,18 @@ proc checkPerEdgeRecordFrame(recordsPath: string) =
     check raw[14 .. 17] == "RBAR"
 
 proc perEdgeRecordsBytes(cacheRoot: string): int =
-  ## Total on-disk size of every per-edge record file, i.e. the whole
-  ## record store's footprint under the per-edge layout. Used where the
-  ## old tests measured `action-results.records` size.
+  ## Total on-disk size of every per-edge `<nonce>.rec` file across all edge
+  ## directories, i.e. the whole record store's footprint under the AC-1b
+  ## per-edge layout. Used where the old tests measured `action-results.records`
+  ## size.
   let dir = cacheRoot / "action-cache" / "hot-records"
   if not dirExists(dir):
     return 0
   for kind, path in walkDir(dir):
-    if kind == pcFile:
-      result += int(getFileSize(path))
+    if kind == pcDir:
+      for k2, p2 in walkDir(path):
+        if k2 == pcFile and p2.endsWith(".rec"):
+          result += int(getFileSize(p2))
 
 suite "integration_action_cache_fingerprint_policies":
   when isNixSupported:
@@ -111,7 +132,7 @@ suite "integration_action_cache_fingerprint_policies":
         check not record.inputs[0].hasLocalHash
         check record.outputs.len == 1
         check readBlob(cas, record.outputs[0].blob) == asBytes("fixture-output\nalpha\n")
-        checkPerEdgeRecordFrame(perEdgeRecordPath(reproRoot, weakFor("timestamp")))
+        checkPerEdgeRecordFrame(perEdgeRecFilePath(reproRoot, weakFor("timestamp")))
 
         removeIfExists(outputPath)
         var reloaded = openActionCache(reproRoot / "action-cache")
@@ -208,12 +229,11 @@ suite "integration_action_cache_fingerprint_policies":
         check cutoff.record.inputs[0].metadata == observeFile(inputPath, ffpHybrid).metadata
         cas.restoreOutputs(cutoff.record, root)
         check readFile(outputPath) == "fixture-output\nalpha\n"
-        let recordsSizeAfterCutoff = getFileInfo(
-          perEdgeRecordPath(reproRoot, weakFor("hybrid"))).size
+        let recordsSizeAfterCutoff =
+          perEdgeDirBytes(reproRoot, weakFor("hybrid"))
         let refreshedHit = cache.lookupActionResult(cas, weakFor("hybrid"), ffpHybrid)
         check refreshedHit.status == aclHit
-        check getFileInfo(
-          perEdgeRecordPath(reproRoot, weakFor("hybrid"))).size ==
+        check perEdgeDirBytes(reproRoot, weakFor("hybrid")) ==
           recordsSizeAfterCutoff
 
         block noHashFastPath:
@@ -312,7 +332,9 @@ suite "integration_action_cache_fingerprint_policies":
         var oversizedCache = openActionCache(oversizedReproRoot / "action-cache")
         # Hand-write a corrupt per-edge file: valid RBPE header claiming one
         # record whose inner RBAR frame length is oversized. The decoder must
-        # ignore it (no records → clean miss), never trust the length.
+        # ignore it (no records → clean miss), never trust the length. Written
+        # as a legacy single FILE at the edge path — also exercises the AC-1b
+        # back-compat read of a pre-existing AC-1 file.
         let oversizedWeak = weakFor("oversized-action-record")
         let oversizedFrameLen = uint32(64 * 1024 * 1024 + 1)
         var corrupt = "RBPE"
@@ -320,7 +342,7 @@ suite "integration_action_cache_fingerprint_policies":
         corrupt.add(writeU32Le(1'u32))               # record count = 1
         corrupt.add(writeU32Le(oversizedFrameLen))   # inner frame length
         createDir(oversizedReproRoot / "action-cache" / "hot-records")
-        writeFile(perEdgeRecordPath(oversizedReproRoot, oversizedWeak), corrupt)
+        writeFile(perEdgeDirPath(oversizedReproRoot, oversizedWeak), corrupt)
 
         let lookup = oversizedCache.lookupActionResult(oversizedCas,
           oversizedWeak, ffpChecksum)
@@ -344,8 +366,8 @@ suite "integration_action_cache_fingerprint_policies":
         discard hotCache.recordActionResult(hotCas, weakFor("hot-metadata-record"),
           ffpHybrid, [inputPath], ["out.txt"], hotActionRoot)
         hotCache.flushHotIndex()
-        # The per-edge file exists; no global append-log/index is created.
-        check fileExists(perEdgeRecordPath(hotReproRoot, weakFor("hot-metadata-record")))
+        # The per-edge directory exists; no global append-log/index is created.
+        check dirExists(perEdgeDirPath(hotReproRoot, weakFor("hot-metadata-record")))
         check not fileExists(hotReproRoot / "action-cache" / "action-results.hot.index")
 
         # Plant a damaged legacy global file. Re-opening must delete it and

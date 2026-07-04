@@ -133,14 +133,17 @@ proc waitForTimestampBoundary() =
 
 proc perEdgeRecordsExist(tempRoot: string): bool =
   ## The per-edge store replaces the former global hot index: a completed
-  ## build must have written at least one authoritative `hot-records/<key>`
-  ## file (and no global `action-results.*` files).
+  ## build must have written at least one authoritative record. AC-1b:
+  ## `hot-records/<key>/` is a DIRECTORY of `<nonce>.rec` files (and there are
+  ## no global `action-results.*` files).
   let dir = tempRoot / "action-cache" / "action-cache" / "hot-records"
   if not dirExists(dir):
     return false
   for kind, path in walkDir(dir):
-    if kind == pcFile:
-      return true
+    if kind == pcDir:
+      for k2, p2 in walkDir(path):
+        if k2 == pcFile:
+          return true
   false
 
 suite "Local daemons/control-plane M6 warm no-op path":
