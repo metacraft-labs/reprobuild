@@ -1,0 +1,258 @@
+M9.R.79 Phase A — typed-tool call-site audit for
+meson_package / autotools_package / cmake_package
+declaredOutputs + readOnlyRoots threading
+==============================================================
+
+Objective
+---------
+M9.R.75 landed the R7 (double-write reject) + R6 (source-write reject)
+graph-time enforcement layers.  ``from_source_custom.nim`` was lifted
+to populate ``declaredOutputs`` + ``readOnlyRoots`` on the shell + stage-
+copy actions it emits.  The three high-level from-source constructors
+(``meson_package`` / ``autotools_package`` / ``cmake_package``) were
+DEFERRED — their configure / compile / install edges emit through
+TYPED-TOOL call sites (``meson.setup(...)`` / ``make(...)`` /
+``cmake.configure(...)`` etc.) rather than direct ``buildAction(...)``.
+
+This audit maps every typed-tool call site the three constructors drive,
+identifies where each edge's ``declaredOutputs`` + ``readOnlyRoots``
+should land, and picks the mechanism used to inject the fields without
+re-plumbing the entire typed-tool macro surface.
+
+Approach chosen
+----------------
+The typed-tool macro (``libs/repro_project_dsl/src/repro_project_dsl/
+macros_a.nim`` line ~2011) generates one ``proc <name>(...)`` per
+``subcmd`` block.  Every wrapper calls ``recordToolInvocation``, which
+calls ``recordCommandAction``, which calls ``buildAction(...)`` with the
+legacy field surface.
+
+Threading two new params through the macro-generated formal-parameter
+list would touch every ``executable ... cli:`` schema in the corpus
+(dozens of typed tools) and every generated wrapper site (hundreds of
+downstream call sites in constructors + recipes).
+
+A cleaner shape (mirroring the M9.R.14e.5 pattern for
+``toolIdentityRefs``) is to use POST-EMIT registry mutators the
+constructor calls right after the typed-tool wrapper returns:
+
+  * ``setRegisteredActionDeclaredOutputs(actionId, outputs)``
+  * ``setRegisteredActionReadOnlyRoots(actionId, roots)``
+
+The registry entry is looked up by id, mutated in place.  No-op when
+the id is not present (defensive — same shape as
+``setRegisteredActionTargetNames`` /
+``appendRegisteredActionToolIdentityRefs``).
+
+This keeps macros_a.nim + every schema file + every downstream typed
+call site byte-identical.  Only the three constructor modules
+(``meson_package.nim`` / ``autotools_package.nim`` / ``cmake_package.nim``)
+grow the two-line-per-edge post-emit calls.
+
+
+meson_package.nim (libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
+constructors/meson_package.nim)
+==============================================================
+
+Three typed-tool edges emitted:
+
+  1. ``meson.setup(...)``  (line 238)
+     * BuildActionDef id: ``defaultToolActionId(call)`` derived —
+       stored in ``setup.id`` on the returned BuildActionDef.
+     * writes: ``buildDir`` (the meson build dir).
+     * reads: ``srcDir`` (the extracted upstream source tree; MUST NOT
+       be written to per R6).
+     * declaredOutputs = @[<projectRoot>/buildDir]  (absolute path via
+       activeProviderProjectRoot() if set; otherwise the relative form
+       so unit tests stay stable byte-for-byte).
+     * readOnlyRoots = @[<projectRoot>/srcDir]  (absolute path if
+       provider mode active).
+
+  2. ``meson.compile(...)``  (line 260, ``compileEdge``)
+     * writes: continues writing to ``buildDir``.
+     * reads: ``buildDir`` (its own writable scope) — no additional
+       read-only roots (compile does not touch the upstream source
+       tree; header includes go through the meson build.ninja graph
+       which lives inside ``buildDir``).
+     * declaredOutputs = @[<projectRoot>/buildDir]  (same scope as
+       setup — sequential edges via the ``after`` dep chain are exempt
+       from the R7 pass per M9.R.75.3.1's dep-chain relaxation).
+     * readOnlyRoots = @[<projectRoot>/srcDir]  (still read-only from
+       compile's perspective — a compile step that touches the upstream
+       source is a bug).
+
+  3. ``meson.install(...)``  (line 284, ``installEdge``)
+     * writes: ``effectiveDestdir`` (the DESTDIR-staged install tree at
+       ``<projectRoot>/<buildDir>/<destdir>``).
+     * reads: ``buildDir`` (the compiled tree).
+     * declaredOutputs = @[effectiveDestdir]  (the install-mirror scope
+       lands under this path; downstream ``emitInstallTreeMirror`` will
+       further route ``.repro/output/install`` — that's a separate action
+       whose own declaredOutputs the mirror emitter owns).
+     * readOnlyRoots = @[<projectRoot>/srcDir]  (defensive — meson install
+       should only read from buildDir, but declaring srcDir as read-only
+       here catches any leaked ``sed -i`` against the source tree).
+
+
+autotools_package.nim (libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
+constructors/autotools_package.nim)
+==============================================================
+
+Four typed-tool edges emitted (configure via ``buildAction`` directly,
+then three ``make`` calls):
+
+  1. Configure edge (line 391, direct ``buildAction`` call — NOT
+     typed-tool)
+     * Already routes through ``buildAction(...)`` directly so the
+       standard param surface is available — no post-emit mutator
+       needed.  Add the two fields to the direct call.
+     * declaredOutputs = @[<projectRoot>/buildDir]
+     * readOnlyRoots = @[<projectRoot>/srcDir]
+
+  2. ``make(...)`` compile edge (line 449, ``buildEdge``)
+     * writes: buildDir (make writes object files, libs, executables
+       into the out-of-tree buildDir).
+     * declaredOutputs = @[<projectRoot>/buildDir]  (same scope as
+       configure via the dep chain).
+     * readOnlyRoots = @[<projectRoot>/srcDir]
+
+  3. ``make install ...`` install edge (line 514, ``installEdge``)
+     * writes: ``installDestdir`` (the DESTDIR staged tree).
+     * declaredOutputs = @[installDestdir]
+     * readOnlyRoots = @[<projectRoot>/srcDir]
+
+  4. la-cleanup edge (line 541, direct ``buildAction``)
+     * writes: prunes .la files under ``installDestdir``.
+     * Same declaredOutputs as install edge (same scope, sequential dep).
+     * readOnlyRoots = @[] (no source-tree reads).
+
+
+cmake_package.nim (libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
+constructors/cmake_package.nim)
+==============================================================
+
+Three edges emitted.  Configure is typed-tool; build + install are
+already direct ``buildAction`` calls (M9.R.14g.6 opted out of the
+typed-tool surface for --build / --install because cmake rejects them
+as subcommand literals).
+
+  1. ``cmake.configure(...)``  (line 367, ``configureEdge``)
+     * declaredOutputs = @[<projectRoot>/buildDir]
+     * readOnlyRoots = @[<projectRoot>/srcDir]
+
+  2. build edge (line 477, direct ``buildAction`` — no post-emit
+     mutator needed; add fields inline).
+     * declaredOutputs = @[<projectRoot>/buildDir]
+     * readOnlyRoots = @[<projectRoot>/srcDir]
+
+  3. install edge (line 535, direct ``buildAction``)
+     * declaredOutputs = @[effectiveDestRoot]  (the FULL install tree
+       root passed to ``--prefix``).
+     * readOnlyRoots = @[<projectRoot>/srcDir]
+
+
+Registry mutator design
+=========================
+
+New procs in ``libs/repro_project_dsl/src/repro_project_dsl/
+runtime_core.nim`` (after ``appendRegisteredActionTypedOutput``):
+
+  proc setRegisteredActionDeclaredOutputs*(actionId: string;
+                                            outputs: openArray[string])
+      {.dynOrStatic.}
+
+  proc setRegisteredActionReadOnlyRoots*(actionId: string;
+                                          roots: openArray[string])
+      {.dynOrStatic.}
+
+Semantics: locate the registry entry by id (linear scan — the registry
+is small at recipe-eval time), assign the entire seq (not append —
+callers pass the complete set once per edge).  No-op when id is not
+present.
+
+Alternative: append-mode helper.  Rejected because the constructor's
+call graph is single-shot per edge — the constructor knows the full
+seq at emit time, no other emitter contributes to the same edge's
+scope declarations.  Set-semantics matches the typed-outputs pattern
+which is also single-shot per (edge, fieldName) via
+``appendRegisteredActionTypedOutput`` (that helper appends per row but
+each edge has a fixed set of typed-output fields determined at schema
+declaration time — no cross-emitter contention).
+
+
+Phase F recipe migration surface
+=================================
+
+11 recipe files reference ``.repro/output/install`` per M9.R.76.5
+close-out.  Categorised by whether the reference is LIVE (in a shell
+command / cmake config emitter) or COMMENT-ONLY (docstring / trailing
+description):
+
+  LIVE references (need $OUT_MIRROR substitution):
+    * hwdata/repro.nim  (line 219: massive inline shell block emitting
+      the install mirror manually because from-source-custom doesn't
+      auto-emit it).  6 occurrences on that one line.
+    * qt6-quickcontrols2/repro.nim  (lines 100-101, 165, 168: constructs
+      the sibling qt6-declarative install-mirror path + own outRoot
+      shim staging paths for its cmake config).
+    * kwin/repro.nim  (lines 423-425: hardcodes /opt/repro/... absolute
+      paths to wayland/qt6-base/qt6-declarative install mirrors for
+      CMAKE_{C,CXX}_FLAGS include-path threading).  DIFFERENT hazard
+      shape — absolute Linux paths, NOT relative to recipe root, so
+      $OUT_MIRROR doesn't map directly.  These need a sibling-recipe
+      resolver, not the per-recipe $OUT_MIRROR env var.
+
+  COMMENT-ONLY references (documentation drift, no runtime impact):
+    * plasma-workspace/repro.nim  (line 379: example ``ls`` in comment).
+    * xtrans/repro.nim  (line 47-48: docstring only).
+    * xorgproto/repro.nim  (line 48: docstring only).
+    * iana-tzdata/repro.nim  (line 84: docstring only).
+    * breeze/repro.nim  (single doc reference).
+    * ksolid/repro.nim  (lines 138-139: docstring).
+    * plasma-wayland-protocols/repro.nim  (single doc reference).
+    * extra-cmake-modules/repro.nim  (single doc reference).
+
+Migration scope for Phase F:
+  * hwdata — LIVE.  The inline shell block that emits the manual mirror
+    is the single load-bearing site.  Replace the ``MIRROR=$(cd ...)``
+    resolution with ``MIRROR=${OUT_MIRROR}``.
+  * qt6-quickcontrols2 — LIVE.  Sibling-recipe references — these need
+    a different mechanism (M9.R.76's install_mirror_resolver already
+    handles sibling paths at DSL emit time; the shell block should be
+    reworked to receive them via ``extraEnv``).  Deferred pending
+    architectural discussion; documented as a Phase F residual.
+  * kwin — LIVE but absolute Linux paths.  Same class as
+    qt6-quickcontrols2 — needs a sibling-recipe resolver, NOT
+    $OUT_MIRROR.  Deferred.
+  * 8 comment-only recipes — no functional migration needed.  Update
+    docstrings in a single sweep commit so future readers see the
+    resolver-based canonical path.
+
+Realistic Phase F scope: 1 live migration (hwdata) + 1 docstring sweep
+(8 recipes).  qt6-quickcontrols2 + kwin sibling-recipe migrations
+punted to a follow-up milestone that lands the DSL-level ``depMirror``
+helper wiring the sibling paths as ``extraEnv`` entries.
+
+Phase E $OUT_MIRROR env-var mechanism
+======================================
+
+Engine populates $OUT_MIRROR in the action's spawned-process env at
+fork time whenever the action carries a non-empty declaredOutputs seq
+whose first entry lands under the recipe's ``.repro/output/install``
+mirror root.  In the transitional design (this milestone), the env var
+resolves to the same legacy path
+``<projectRoot>/.repro/output/install`` computed via the M9.R.76
+resolver's ``packageInstallMirrorRoot(recipesRoot, packageName)`` shape.
+
+Spawn-time env-var population happens in the same place the existing
+per-edge env slot flows through — the engine's action-realisation path
+(``libs/repro_cli_support/src/repro_cli_support.nim`` +
+``libs/repro_build_engine/src/repro_build_engine.nim``'s spawn
+prelude).  Injecting one env var next to the existing ``env``
+propagation is a surgical change.
+
+The env is CONSTANT once resolved for a given recipe — no per-action
+variance — so a per-recipe cache keyed on the recipe root avoids
+repeated resolver calls in the hot loop.
+
+End of Phase A audit.
