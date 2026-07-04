@@ -371,6 +371,21 @@ proc cmake_package*(srcDir: string;
     cacheVars = effectiveCacheVars,
     after = configureAfter,
     extraEnv = extraEnv)
+  # M9.R.79.4 — declare the write scope + read-only source scope for
+  # spec R7 (double-write reject) + R6 (source-write reject).  Configure
+  # writes cmake's build-system artifacts into ``<buildDir>``; the
+  # upstream source at ``<srcDir>`` MUST NOT be written to by configure.
+  # Sequential configure/build/install edges share the buildDir scope
+  # through the dep chain, which the R7 pass exempts (M9.R.75.3.1
+  # dep-chain relaxation).
+  let m9r79CmBuildDirAbs =
+    if projectRoot.len > 0: projectRoot / buildDir
+    else: buildDir
+  let m9r79CmSrcDirAbs =
+    if projectRoot.len > 0: projectRoot / srcDir
+    else: srcDir
+  setRegisteredActionDeclaredOutputs(configureEdge.id, @[m9r79CmBuildDirAbs])
+  setRegisteredActionReadOnlyRoots(configureEdge.id, @[m9r79CmSrcDirAbs])
   # M9.R.14g.6 — inline-exec build action. cmake's real "build" mode is
   # selected by the ``--build`` flag, NOT by a ``build`` subcommand
   # literal.
@@ -484,7 +499,12 @@ proc cmake_package*(srcDir: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.build",
     toolIdentityRefs = @["cmake", "sh"],
-    env = extraEnv)
+    env = extraEnv,
+    # M9.R.79.4 — build continues writing to buildDir; source stays
+    # read-only.  Sequential edge via ``deps = @[configureEdge.id]`` —
+    # R7 dep-chain relaxation permits the shared write root.
+    declaredOutputs = @[m9r79CmBuildDirAbs],
+    readOnlyRoots = @[m9r79CmSrcDirAbs])
   # M9.R.14g.6 — inline-exec install action. cmake's real install mode
   # is selected by ``--install``, NOT by ``install`` subcommand.
   #
@@ -542,7 +562,14 @@ proc cmake_package*(srcDir: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.install",
     toolIdentityRefs = @["cmake", "sh"],
-    env = extraEnv)
+    env = extraEnv,
+    # M9.R.79.4 — install writes the ``--prefix``-staged tree at
+    # ``effectiveDestRoot``; source stays read-only.  The install-mirror
+    # emit stage that runs downstream (see
+    # ``types/package_result.emitInstallTreeMirror``) declares its own
+    # scope; here we cover the cmake --install step only.
+    declaredOutputs = @[effectiveDestRoot],
+    readOnlyRoots = @[m9r79CmSrcDirAbs])
   # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
   # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
   # from-source search-path channels reach the action env at fork time.
