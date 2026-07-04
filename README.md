@@ -2,7 +2,7 @@
 
 Reprobuild (`repro`) exists to make any software easy to modify.
 
-It is a unified, cross-platform build system, package manager, development environment coordinator, and local infrastructure provisioner. By folding these layers into a single type-checked model, Reprobuild eliminates the fragmented boundary between "how code is compiled," "how dependencies are resolved," and "how environments are configured."
+It is a unified build system, package and configuration manager, development environment manager, and infrastructure provisioner (covering both local systems and cloud resources). By folding these layers into a single cohesive description, Reprobuild eliminates the fragmented boundary between "how code is compiled," "how dependencies are resolved," and "how environments are configured."
 
 ---
 
@@ -22,11 +22,11 @@ Your workspace grows dynamically into the exact slice of the dependency graph yo
 
 If you are already familiar with the modern DevOps and build toolchain, Reprobuild maps directly onto concepts you know:
 
-*   **Like Bazel & Buck2**: Models the workspace as a type-checked Directed Acyclic Graph (DAG) of build targets with remote action caching. However, instead of Starlark or a JVM daemon, it uses standard Nim type-checking and a native statically-linked binary.
+*   **Like Bazel & Buck2**: Models the workspace as a unified build graph of targets with remote action caching. Instead of using a custom language (like Starlark) or a JVM daemon, it uses standard Nim code and compiles into a fast, native binary.
 *   **Like BuildXL & Tup**: Enforces hermetic execution and correct caching by monitoring actual file access during compilation. Instead of unstable FUSE layers or proprietary kernel drivers, it uses a user-space filesystem interceptor (`librepro_monitor_shim`) to verify that all observed reads and writes match declared inputs/outputs.
 *   **Like Nix & direnv**: Automatically activates locked developer environments on directory entry. Unlike direnv, it prevents toolchain leakage by refusing to run compiler tools directly unless the dev-env context has been activated.
 *   **Like devenv.sh & Process Compose**: Orchestrates local background services (databases, queues, daemons) declared inside the DSL, managed by a native dev-env control plane.
-*   **Like Terraform**: Declaratively plans and applies local host system configuration (dotfiles, system packages, services) with generation logs for instant rolling updates and rollbacks.
+*   **Like Terraform**: Declaratively plans and applies configurations across both local hosts (dotfiles, system packages, services) and cloud resources, with generation logs for instant rollbacks.
 
 ---
 
