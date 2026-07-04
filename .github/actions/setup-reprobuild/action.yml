@@ -94,6 +94,21 @@ runs:
             : "${GITHUB_ENV:?GitHub Actions did not set GITHUB_ENV}"
             echo "NIMCRYPTO_SRC=${NIMCRYPTO_SRC}" >> "${GITHUB_ENV}"
             echo "BEARSSL_SRC=${BEARSSL_SRC}" >> "${GITHUB_ENV}"
+            # `repro` dlopens solver/cache libraries by leaf name. The dev
+            # shell provides the clingo/zstd runtime paths while building the
+            # CLI; persist them so later workflow steps can launch that CLI
+            # outside `nix develop`.
+            runtime_library_path="${LD_LIBRARY_PATH:-}"
+            dyld_library_path="${DYLD_LIBRARY_PATH:-}"
+            if [ -z "${dyld_library_path}" ] && [ "$(uname -s)" = "Darwin" ]; then
+              dyld_library_path="${runtime_library_path}"
+            fi
+            if [ -n "${runtime_library_path}" ]; then
+              echo "LD_LIBRARY_PATH=${runtime_library_path}" >> "${GITHUB_ENV}"
+            fi
+            if [ -n "${dyld_library_path}" ]; then
+              echo "DYLD_LIBRARY_PATH=${dyld_library_path}" >> "${GITHUB_ENV}"
+            fi
           '
         # `just build` writes to ./build/bin/repro. Surface it on PATH.
         echo "${PWD}/build/bin" >> "$GITHUB_PATH"
