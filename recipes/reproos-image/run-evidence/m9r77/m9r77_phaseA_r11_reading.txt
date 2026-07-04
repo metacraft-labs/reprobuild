@@ -1,0 +1,189 @@
+M9.R.77 Phase A — R11 reading + design summary
+==============================================
+
+User directive
+--------------
+"M9.R.76 landed the R10 immutable side-by-side install-mirror prefixes.
+Now implement reprobuild-specs R11: extract the CAS
+(Content-Addressed Storage) layer as a dedicated abstraction."
+
+Where R11 lives today
+---------------------
+R11 is referenced by name in exactly one spec passage — the Non-Goals
+section of ``Immutable-Install-Mirror-Prefixes.md``:
+
+    "This design does NOT unify the realized-package store with the
+     content-addressed blob store (R11 two-layer split). That's a
+     separate follow-on."
+
+R11 itself is NOT a normative section in any spec file yet. It IS
+foreshadowed by two other passages that describe the same idea from
+different angles:
+
+  * ``Store-And-Installation-Layout.md`` §"Human-Friendly Package
+    Store Versus Opaque Content Store" (line 202) — the informal
+    two-layer design: friendly ``<name>/<version>-<hash>/`` prefixes
+    on top, opaque content store underneath.
+
+  * ``Local-Content-Addressed-Store.md`` — the v1 concrete design for
+    the local store, which ALREADY specifies the ``cas/blake3/<aa>/
+    <full-hash>`` sharded layout, atomic-materialization write
+    protocol, SQLite root-registry-driven GC, and BLAKE3-256
+    corruption-detection contract.
+
+M9.R.77 formalises R11 as a normative spec section that pulls those
+two threads together, then extracts a dedicated ``repro_cas_store``
+abstraction so downstream libraries (install-mirror resolver, engine
+cache lookup, binary-cache client) can depend on the CAS layer WITHOUT
+importing ``repro_local_store``'s prefix-realization + receipt +
+per-generation-root surface.
+
+What CAS provides (from Local-Content-Addressed-Store.md)
+---------------------------------------------------------
+Deduplication:
+  * A single blob is stored once, keyed by its BLAKE3-256 digest.
+  * Multiple realized prefixes referring to the same blob share one
+    on-disk copy (hardlink / reflink / copy — policy per host).
+
+Integrity verification:
+  * Every ``readCasBlob`` verifies the digest BEFORE returning bytes
+    to the caller. Corrupted blobs raise ``ECasDigestMismatch``.
+  * Never a "trust the filesystem" fast path.
+
+Addressable retrieval:
+  * ``storeCasBlob(payload) -> digest`` — content-addressed put.
+  * ``readCasBlob(digest) -> bytes`` — content-verified get.
+  * ``verifyCasBlob(digest)`` — hash + compare, no returned bytes.
+  * ``casPath(digest) -> string`` — filesystem path (for mmap /
+    hardlink use).
+
+Garbage collection:
+  * Reachability-based, eager, driven by an SQLite root registry.
+  * CAS blobs referenced by any live prefix (which in turn is
+    referenced by any live root) are retained; everything else is
+    quarantined then unlinked after a grace period.
+  * A CAS-only GC (blobs not referenced by any prefix + not directly
+    pinned) is the follow-on ``repro store compact`` subcommand.
+
+R11 as a two-layer split
+------------------------
+The abstraction split M9.R.77 formalises:
+
+  Layer 1 — CAS store (blob-level)
+    A content-addressed blob store. Keys are BLAKE3-256 digests over
+    the exact bytes. No metadata about "what package this blob belongs
+    to" lives here. Blobs are opaque; the layout is opaque; the
+    layout's job is deduplication + integrity, not human browsing.
+
+    API surface:
+      casPut, casGet, casExists, casVerify, casPath, casGc.
+
+    On-disk layout:
+      ``<store-root>/cas/blake3/<aa>/<full-hash>``
+
+  Layer 2 — Realized-package-instance store (prefix-level)
+    Human-friendly per-package immutable prefixes with receipts.
+    Built ON TOP of the CAS layer: a realized prefix is materialized
+    by reading its packed tree manifest out of CAS + hardlinking /
+    reflinking / copying the listed blobs into a fresh directory.
+
+    API surface (already exists in repro_local_store/store.nim):
+      realizePrefix, lookupPrefix, listPrefixes, registerRoot,
+      attachPrefixToRoot, deleteRoot, gc, recover.
+
+    On-disk layout:
+      ``<store-root>/prefixes/<name>/<version>-<hash>/``
+
+Interaction with M9.R.76's install-mirror resolver
+--------------------------------------------------
+The resolver (``install_mirror_resolver.nim``) returns paths of the
+form ``<store-root>/prefixes/<name>/<version>-<hash>/``. That path IS
+the Layer-2 read view. When ``$REPRO_INSTALL_MIRROR_MODE=hashed``,
+the resolver's ``hashedDepMirrorRoot`` must consult the CAS-layer-
+adjacent prefix index (Layer 2's ``lookupPrefix``) to resolve the
+realization hash to a concrete on-disk directory.
+
+M9.R.77 wires this by:
+
+  1. Adding ``libs/repro_cas_store/`` as a focused facade re-exporting
+     ONLY the CAS-layer symbols (put / get / verify / path / gc). The
+     facade lets modules that need only the CAS surface avoid pulling
+     in the full ``repro_local_store`` prefix + root + receipt +
+     recovery machinery.
+
+  2. Extending the resolver to consult a CAS-store handle when one is
+     available (through a per-recipe metadata file that records the
+     dep's realization hash + package name + version — the emit-side
+     already writes this in M9.R.76.2's ``emitInstallTreeMirror``).
+
+  3. Leaving the engine's action-cache path AS-IS. The engine already
+     routes ``opkCasBlobs`` outputs through CAS (via
+     ``repro_local_store.storeCasBlob`` transitively) and treats
+     ``opkMetadataOnly`` outputs as "not backed by CAS content, don't
+     restore" — no migration is required, only a facade tidy so
+     future callers can import the narrower ``repro_cas_store`` alias.
+
+API surface for the CAS facade (Phase B)
+----------------------------------------
+
+  Types
+  -----
+    ContentHash* = distinct array[32, byte]   (alias over BLAKE3-256)
+    CasStore*    = object                     (opaque handle)
+
+  Constructors
+  ------------
+    openCasStore(root: string): CasStore
+    close(cas: var CasStore)
+
+  Core operations
+  ---------------
+    casPut(cas: var CasStore; bytes: openArray[byte]): ContentHash
+    casGet(cas: CasStore; hash: ContentHash): seq[byte]
+    casExists(cas: CasStore; hash: ContentHash): bool
+    casVerify(cas: CasStore; hash: ContentHash): bool
+    casPath(cas: CasStore; hash: ContentHash): string
+
+  Garbage collection
+  ------------------
+    casGc(cas: var CasStore; retainRoots: HashSet[ContentHash]): int
+        Returns freed bytes. Blobs not in ``retainRoots`` are unlinked.
+        For the store-level GC that walks the prefix graph, callers
+        use ``repro_local_store.Store.gc`` (Layer 2) instead.
+
+Disk layout for the facade
+--------------------------
+Identical to what ``repro_local_store`` already implements:
+
+  ``<store-root>/cas/blake3/<aa>/<full-hash>``
+
+where ``<aa>`` is the first two hex chars of the digest and
+``<full-hash>`` is the remaining 62. Sharding avoids one giant
+directory that fills up the FS's dirent cache. Atomic materialization
+is temp-file + rename — same as the write protocol in
+``Local-Content-Addressed-Store.md`` §"Write Protocol".
+
+Non-goals (this milestone)
+--------------------------
+  * No re-implementation of CAS from scratch. The facade delegates to
+    the already-landed ``repro_local_store`` primitives and
+    re-exports them under a narrower, purpose-focused import.
+  * No forced migration of every engine cache callsite. The engine's
+    ``opkCasBlobs`` path already routes through CAS; the
+    ``opkMetadataOnly`` path is a deliberate policy choice per the
+    spec's line 15-20 caveat and remains supported.
+  * No behavioural change to how ``storeCasBlob`` writes atomically.
+    The facade wraps the existing calls with narrower types +
+    documentation, nothing more.
+
+Phases
+------
+  A (M9.R.77.1): this file + spec R11 addendum.
+  B (M9.R.77.2): ``libs/repro_cas_store/`` facade + regression tests.
+  C (M9.R.77.3): install-mirror resolver wire-through.
+  D (M9.R.77.4): engine cache-lookup optional CAS handle.
+  E (M9.R.77.5): ``repro cas gc`` CLI thin subcommand (aliases
+                  through to ``repro store gc``, which already
+                  performs CAS + prefix GC through the Layer-2 root
+                  registry).
+  F (M9.R.77.6): close-out.
