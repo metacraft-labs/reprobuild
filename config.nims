@@ -154,6 +154,10 @@ for libName in [
   "repro_dev_env_engine",
   "repro_tool_profiles",
   "repro_local_store",
+  # Action-Cache-Per-Edge-Store AC-2a: shared-memory hot-tier data structures
+  # (control region, generation segments, seqlock table, MPSC ring). Pure data
+  # structures — no daemon (AC-2b) / engine wiring (AC-2c) yet.
+  "repro_shm_index",
   "repro_store_daemon",
   "repro_launch_plan",
   "repro_runquota",
