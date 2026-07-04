@@ -7389,6 +7389,15 @@ type
     printFormat: DevEnvPrintFormat
     shellPath: string
 
+  ParsedReproRun = object
+    selection: DevEnvCliSelection
+    target: string
+    choose: bool
+    forwardedArgs: seq[string]
+
+  ParsedReproTasks = object
+    selection: DevEnvCliSelection
+
 proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
   let arg = args[i]
   if arg.startsWith(flag & "="):
@@ -7598,6 +7607,76 @@ proc parseDevEnvShellArgs(args: openArray[string]): ParsedDevEnvShell =
   selection.resolveDevEnvSelection()
   result.selection = selection
 
+proc parseReproRunArgs(args: openArray[string]): ParsedReproRun =
+  var selection = DevEnvCliSelection()
+  var afterSeparator = false
+  var rawTarget = ""
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if afterSeparator:
+      result.forwardedArgs.add(arg)
+    elif arg == "--":
+      afterSeparator = true
+    elif arg == "--choose":
+      result.choose = true
+    elif arg == "--activity" or arg.startsWith("--activity="):
+      selection.activity.appendActivitySelection(valueFromFlag(args, i, "--activity"))
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      selection.workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
+      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
+    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
+      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported run flag: " & arg)
+    elif rawTarget.len == 0:
+      rawTarget = arg
+    else:
+      raise newException(ValueError, "unexpected run argument before --: " & arg)
+    inc i
+
+  if rawTarget.len > 0:
+    if rawTarget.contains('/') or rawTarget.contains('\\') or rawTarget.startsWith("."):
+      selection.selector = "."
+      result.target = rawTarget
+    else:
+      let colonIdx = rawTarget.find(':')
+      if colonIdx >= 0:
+        selection.selector = rawTarget[0 ..< colonIdx]
+        result.target = rawTarget[colonIdx + 1 .. ^1]
+      else:
+        selection.selector = "."
+        result.target = rawTarget
+  else:
+    selection.selector = "."
+
+  selection.resolveDevEnvSelection()
+  result.selection = selection
+
+proc parseReproTasksArgs(args: openArray[string]): ParsedReproTasks =
+  var selection = DevEnvCliSelection()
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--activity" or arg.startsWith("--activity="):
+      selection.activity.appendActivitySelection(valueFromFlag(args, i, "--activity"))
+    elif arg == "--work-root" or arg.startsWith("--work-root="):
+      selection.workRoot = valueFromFlag(args, i, "--work-root")
+    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
+      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
+    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
+      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
+    elif arg.startsWith("-"):
+      raise newException(ValueError, "unsupported tasks flag: " & arg)
+    elif selection.selector.len == 0:
+      selection.selector = arg
+    else:
+      raise newException(ValueError, "unexpected tasks argument: " & arg)
+    inc i
+  selection.resolveDevEnvSelection()
+  result.selection = selection
+
 proc publicDevEnvMonitor(publicCliPath: string):
     tuple[path: string, args: seq[string]] =
   ## Executable-Consolidation M1: the dev-env monitor self-spawns the ``repro``
@@ -7751,6 +7830,90 @@ proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
       diagnostic.message)
     if diagnostic.severity == dedsError:
       result = true
+
+proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
+                    task: DevEnvTaskSummary; forwardedArgs: seq[string];
+                    defaultWorkingDirectory: string): int =
+  when defined(windows):
+    let shellLine =
+      if forwardedArgs.len > 0:
+        task.command & " " & forwardedArgs.mapIt(quoteShell(it)).join(" ")
+      else:
+        task.command
+    let activation = activatedEnvironment(artifact, artifactPath, defaultWorkingDirectory)
+    let cmdExe = getEnv("COMSPEC", "cmd.exe")
+    var process = startProcess(cmdExe,
+      args = @["/c", shellLine],
+      env = activation.env,
+      workingDir = activation.workingDirectory,
+      options = {poUsePath, poParentStreams})
+    result = process.waitForExit()
+    process.close()
+  else:
+    let activation = activatedEnvironment(artifact, artifactPath, defaultWorkingDirectory)
+    let shellPath = getEnv("SHELL", "/bin/sh")
+    let shellLine = task.command & " \"$@\""
+    var childArgs = @["-c", shellLine, "--"]
+    for arg in forwardedArgs:
+      childArgs.add(arg)
+    var process = startProcess(shellPath,
+      args = childArgs,
+      env = activation.env,
+      workingDir = activation.workingDirectory,
+      options = {poUsePath, poParentStreams})
+    result = process.waitForExit()
+    process.close()
+
+proc runReproRunCommand(args: openArray[string];
+                        publicCliPath: string): int =
+  let parsed = parseReproRunArgs(args)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  writeDevEnvStats(parsed.selection.statsPath, edge, "run")
+  let artifact = readDevEnvArtifact(edge.artifactPath)
+  if emitDevEnvDiagnostics(artifact):
+    return 1
+
+  if parsed.target.len == 0 or parsed.choose:
+    if artifact.tasks.len == 0:
+      echo "No tasks declared in this project."
+      return 1
+    echo "Available tasks:"
+    for task in artifact.tasks:
+      let desc = if task.description.len > 0: "  - " & task.description else: ""
+      echo "  ", task.name, desc
+    return 0
+
+  var matchingTask: Option[DevEnvTaskSummary]
+  for task in artifact.tasks:
+    if task.name == parsed.target:
+      matchingTask = some(task)
+      break
+
+  if matchingTask.isSome:
+    let task = matchingTask.get()
+    return runTaskCommand(artifact, edge.artifactPath, task, parsed.forwardedArgs, parsed.selection.projectRoot)
+
+  # Fallback to build output name if no task matches
+  stderr.writeLine("Error: task '" & parsed.target & "' is not declared in the project.")
+  1
+
+proc runReproTasksCommand(args: openArray[string];
+                          publicCliPath: string): int =
+  let parsed = parseReproTasksArgs(args)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
+  let artifact = readDevEnvArtifact(edge.artifactPath)
+  if emitDevEnvDiagnostics(artifact):
+    return 1
+
+  if artifact.tasks.len == 0:
+    echo "No tasks declared in this project."
+  else:
+    echo "Available tasks:"
+    for task in artifact.tasks:
+      let desc = if task.description.len > 0: "  - " & task.description else: ""
+      echo "  ", task.name, desc
+  0
 
 proc runReproExecCommand(args: openArray[string];
                          publicCliPath: string): int =
@@ -38192,6 +38355,28 @@ proc runThinApp*(programName: string): int =
       return runStatsCommand(statsArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro stats: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "run":
+    try:
+      let runArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runReproRunCommand(runArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro run: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len > 0 and args[0] == "tasks":
+    try:
+      let tasksArgs =
+        if args.len > 1:
+          args[1 .. ^1]
+        else:
+          @[]
+      return runReproTasksCommand(tasksArgs, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro tasks: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "exec":
     try:
