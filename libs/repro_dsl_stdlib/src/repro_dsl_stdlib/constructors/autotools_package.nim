@@ -388,6 +388,25 @@ proc autotools_package*(srcDir: string;
     configureDeps.add(fetchAct.id)
     for output in fetchAct.outputs:
       configureInputs.add(output)
+  # M9.R.79.3 — declare the write scope + read-only source scope for
+  # spec R7 (double-write reject) + R6 (source-write reject).  The
+  # configure action writes ``Makefile`` under ``<buildDir>`` (the
+  # out-of-tree autotools pattern); it reads ``configure`` from
+  # ``<srcDir>`` but must NOT write there.  When ``patchHardcodedFile``
+  # is true the bootstrap runs ``autoreconf -fi`` inside srcDir which
+  # DOES regenerate files there — in that mode the source scope is
+  # legitimately mutable so we skip the readOnlyRoots declaration.
+  # (The regen writes are the exception R6 line 268 documents as
+  # "action explicitly owns the target location".)
+  let m9r79ConfBuildDirAbs =
+    if projectRoot.len > 0: projectRoot / buildDir
+    else: buildDir
+  let m9r79ConfSrcDirAbs =
+    if projectRoot.len > 0: projectRoot / srcDir
+    else: srcDir
+  var m9r79ConfReadOnly: seq[string] = @[]
+  if not patchHardcodedFile:
+    m9r79ConfReadOnly.add(m9r79ConfSrcDirAbs)
   let configureEdge = buildAction(
     id = actionId,
     call = call,
@@ -396,7 +415,9 @@ proc autotools_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.configure",
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = @["sh"],
+    declaredOutputs = @[m9r79ConfBuildDirAbs],
+    readOnlyRoots = m9r79ConfReadOnly)
   # M9.R.13b.5 — thread the configure edge as a sequencing dep through
   # the ``make`` build + install actions. Without this the engine sees
   # three independent actions (configure, compile, install) and may
@@ -449,6 +470,11 @@ proc autotools_package*(srcDir: string;
   let buildEdge = make(workDir = buildDir, vars = buildVars, targets = @[],
     after = @[configureEdge],
     extraEnv = @[("MAKEFLAGS", makeflags)])
+  # M9.R.79.3 — compile continues writing to buildDir; source stays
+  # read-only.  Sequential edge via ``after = @[configureEdge]`` — R7
+  # dep-chain relaxation permits the shared write root.
+  setRegisteredActionDeclaredOutputs(buildEdge.id, @[m9r79ConfBuildDirAbs])
+  setRegisteredActionReadOnlyRoots(buildEdge.id, m9r79ConfReadOnly)
   # M9.R.14b.3b: install must wait for compile to finish; the prior
   # ``after = @[configureEdge]`` form let the engine schedule install
   # in parallel with compile (both only depended on configure), and
@@ -517,6 +543,13 @@ proc autotools_package*(srcDir: string;
     vars = installVars,
     after = @[configureEdge, buildEdge],
     extraEnv = installEnv)
+  # M9.R.79.3 — install writes the DESTDIR-staged tree at
+  # ``installDestdir``; source stays read-only.  The install-mirror
+  # emit stage that runs downstream (see
+  # ``types/package_result.emitInstallTreeMirror``) declares its own
+  # scope; here we cover the make install step only.
+  setRegisteredActionDeclaredOutputs(installEdge.id, @[installDestdir])
+  setRegisteredActionReadOnlyRoots(installEdge.id, m9r79ConfReadOnly)
   # M9.R.15p.2.4 — post-install .la-file cleanup. libtool's
   # ``libXXX.la`` archive files embed the upstream ``--prefix`` install
   # path verbatim (e.g. ``/usr/lib/libfoo.la``) but our DESTDIR-staged
@@ -546,7 +579,11 @@ proc autotools_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.la_cleanup",
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = @["sh"],
+    # M9.R.79.3 — la-cleanup prunes ``*.la`` under installDestdir; no
+    # source-tree reads.  Same declared write scope as install (dep-
+    # chain relaxation exempts it from R7).
+    declaredOutputs = @[installDestdir])
   # M9.R.14e.5 — fold the recipe's declared ``nativeBuildDeps`` +
   # ``buildDeps`` into each action's ``toolIdentityRefs`` so the M9.R.14e.1
   # from-source search-path channels reach the action env at fork time.
