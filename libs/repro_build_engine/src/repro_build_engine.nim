@@ -1247,14 +1247,16 @@ proc needsExecutionForPolicy(action: BuildAction): bool =
     action.kind == bakPreserveTree
 
 type
-  EvidenceSeenSets = object
+  EvidenceSeenSets* = object
     # Deferred-D4: side-car membership trackers for the parallel ``seq[string]``
     # fields on ``PathSetEvidence``. Threaded through the per-action evidence
     # aggregation so each ``addUnique`` lookup is O(1) instead of O(N).
-    depfileInputs: HashSet[string]
-    monitorReads: HashSet[string]
-    monitorWrites: HashSet[string]
-    monitorProbes: HashSet[string]
+    # M9.R.72.3: exported so end-to-end regression tests can drive
+    # ``foldMonitorDepFileEvidence`` directly against synthetic RMDFs.
+    depfileInputs*: HashSet[string]
+    monitorReads*: HashSet[string]
+    monitorWrites*: HashSet[string]
+    monitorProbes*: HashSet[string]
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
   result = true
@@ -1326,10 +1328,10 @@ proc raiseMonitorDecodeError(kind: MonitorDepFileReaderErrorKind;
                              message: string) {.noreturn.} =
   raiseMonitorDepFileReaderError(kind, message)
 
-proc foldMonitorDepFileEvidence(path, cwd: string;
-                                evidence: var PathSetEvidence;
-                                seen: var EvidenceSeenSets):
-                                MonitorEvidenceStatus =
+proc foldMonitorDepFileEvidence*(path, cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
   ## Fold RMDF records directly into build-engine evidence.
   ##
   ## `io_mon.readMonitorDepFile` materializes both the decoded record seq and a

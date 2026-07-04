@@ -1,0 +1,187 @@
+M9.R.72 Phase D — validation of the spec-graded monitor-loss ladder
+====================================================================
+
+Objective
+---------
+Validate that the M9.R.72.3 Phase C1 fix closes the class-of-issue
+observed in M9.R.60.D / M9.R.68 / M9.R.70:
+
+  * exit=0 action with correct outputs on disk
+  * io-mon injects one or more synthetic mrEventLoss records
+    (kill-before-flush, unmonitored-subtree, etc.)
+  * before M9.R.72.3: action flipped to asFailed, downstream cascade
+    blocks
+  * after M9.R.72.3: action stays asSucceeded, action-cache publish
+    is skipped for the session, downstream cascade runs normally
+
+
+Validation approach
+-------------------
+Two-tier validation:
+
+  1. Classifier unit tests (Phase C1).
+     File: libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim
+     8 cases covering the 6 documented io-mon loss-detail prefixes +
+     unknown-detail-fails-closed + enum ordering.
+
+  2. End-to-end RMDF pipeline test (this Phase D).
+     File: libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim
+     4 cases building synthetic RMDF files with io-mon's real
+     encodeCanonical + writing them to disk + running them through
+     the engine's foldMonitorDepFileEvidence.
+
+The end-to-end test is the load-bearing validation because it verifies
+that the trustworthy path-set observations SURVIVE the presence of
+event-loss records — which is exactly what M9.R.60.D observed but
+couldn't act on before this milestone.
+
+
+Test 1: kill-before-flush + real reads yields Level 1, path set preserved
+------------------------------------------------------------------------
+Fixture RMDF contains:
+  * one mrFileRead record for /some/valid/input.h
+  * one mrEventLoss record with detail:
+      "process killed with an un-flushed read batch (kill-before-flush)
+       diag-ctx=[pid=1234]"
+
+Expected behaviour after M9.R.72.3:
+  * foldMonitorDepFileEvidence returns mesKnownScopeLoss (Level 1).
+  * evidence.monitorReads contains /some/valid/input.h (the read record
+    was folded from the trustworthy portion of the RMDF).
+
+RESULT: PASS.
+
+Before M9.R.72.3, the equivalent behaviour would have been:
+  * foldMonitorDepFileEvidence returns false.
+  * collectEvidence sets publishable = false because action.cacheable.
+  * scheduler flips status to asFailed and blockClosure cascades.
+
+This is the SAME class-of-issue that M9.R.60.D's characterization
+identified but couldn't close — nim c's 838 subprocesses producing
+182 kill-before-flush markers were exactly this pattern at scale.
+
+
+Test 2: unmonitored subtree yields Level 2
+------------------------------------------
+Fixture RMDF contains:
+  * one mrEventLoss record with detail:
+      "unmonitored subtree/peer (un-injectable spawn child)"
+
+Expected: foldMonitorDepFileEvidence returns mesUnknownScopeLoss (Level 2).
+RESULT: PASS.
+
+
+Test 3: complete RMDF yields Level 0
+------------------------------------
+Fixture RMDF contains:
+  * two mrFileRead records, no loss records.
+
+Expected: foldMonitorDepFileEvidence returns mesComplete (Level 0),
+evidence.monitorReads.len == 2.
+RESULT: PASS.
+
+This baseline confirms the fix does NOT regress the healthy-monitoring
+path.
+
+
+Test 4: worst-status wins across mixed loss records
+----------------------------------------------------
+Fixture RMDF contains:
+  * one mrEventLoss with kill-before-flush (Level 1).
+  * one mrEventLoss with unmonitored-subtree (Level 2).
+
+Expected: foldMonitorDepFileEvidence returns mesUnknownScopeLoss
+(Level 2 — the worse of the two).
+RESULT: PASS.
+
+This confirms the classifier's ordering semantics: mesComplete <
+mesKnownScopeLoss < mesUnknownScopeLoss < mesMonitorUnavailable.
+
+
+Full test run output
+---------------------
+$ nim c -r libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim
+[Suite] M9.R.72.3 Phase D end-to-end monitor-loss handling
+  [OK] kill-before-flush + real reads yields Level 1, path set preserved
+  [OK] unmonitored subtree yields Level 2
+  [OK] complete RMDF yields Level 0
+  [OK] worst-status wins across mixed loss records
+
+$ nim c -r libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim
+[Suite] M9.R.72.3 monitor-loss classifier
+  [OK] kill-before-flush maps to Level 1 (known scope)
+  [OK] unmonitored subtree/peer maps to Level 2 (unknown scope)
+  [OK] ambiguous unstamped fragment record maps to Level 2
+  [OK] duplicate identity token maps to Level 2
+  [OK] external content channel maps to Level 2
+  [OK] breakaway-report daemon maps to Level 2
+  [OK] unknown detail fails closed to Level 2 (unknown scope)
+  [OK] status ordering (worseMonitorStatus semantics)
+
+12/12 assertions pass on Windows with -d:none (debug build).
+
+
+Retroactive verdict for M9.R.60.D / M9.R.68 / M9.R.70
+------------------------------------------------------
+M9.R.60.D characterization:
+  * 838 subprocesses observed by the monitor
+  * 182 read-tail-pending markers unmatched
+  * 182 synthetic mrEventLoss records injected
+  * exit=0 -> asFailed via publishable=false gate
+
+After M9.R.72.3: the 182 mrEventLoss records with kill-before-flush
+detail strings map to mesKnownScopeLoss. The 250,954 valid path
+observations are still folded into evidence.monitorReads / probes /
+writes. collectEvidence returns publishable=true + disableCacheHits=
+true. The scheduler leaves status as asSucceeded, invalidates cached
+writes for correctness, and skips cache.recordActionResult. Downstream
+mesonbin-install + install-mirror + reproos-image actions run
+normally. Next rebuild will re-execute the compile (correct) rather
+than hit a stale cache.
+
+M9.R.68 residual (7.72 GB depfile flagged incomplete on a bootable
+qcow2):
+  * The qcow2 IS complete + bootable.
+  * The incompleteness came from monitor-side kill-before-flush during
+    the summarize pass.
+  * After M9.R.72.3, the qcow2's action-cache publish is skipped this
+    session but the action succeeds. Next rebuild re-runs the recipe
+    if it's still in the graph.
+
+M9.R.70 residual (wlroots mesonbin-compile asFailed despite
+343/343 linked with exit=0):
+  * ~21,399 monitorReads observations are trustworthy.
+  * event-loss records for child kill-before-flush trip the incompleteness
+    gate.
+  * After M9.R.72.3, mesonbin-compile stays asSucceeded, mesonbin-install
+    + install-mirror-wlrootsSource + downstream reproos-image actions
+    can proceed. No swap-in-place workaround needed.
+
+
+Residuals NOT closed by M9.R.72.3
+----------------------------------
+  * Gap II (event-loss classification preserved end-to-end down to
+    narrow-path-set invalidation for Level 1) — Level 1 still uses
+    session cache-skip today. The narrow-invalidation would let
+    Level 1 actions still publish trimmed cache entries; scoping it
+    is a follow-on milestone.
+
+  * Gap III (immutable side-by-side install-mirror path) — the
+    install-mirror still lives at a stable, mutable per-recipe path.
+    Not addressed by M9.R.72; multi-week refactor.
+
+  * Gap IV (separate CAS store layer) — not addressed; multi-week
+    refactor.
+
+  * Gap V (per-tool policy source) — partially addressed via the
+    classifier (which IS the first per-class policy decision).
+    Recipe-level per-action policy overrides remain a follow-on.
+
+  * Gap VI (source-rewrite + double-write enforcement) — not
+    addressed; not blocking M9.R.60-70 arc.
+
+  * Gap VII (canonical execution root path-independence) — in
+    progress elsewhere.
+
+
+End of Phase D validation.
