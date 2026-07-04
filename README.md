@@ -6,9 +6,9 @@ Reprobuild (`repro`) is a unified build system, package and configuration manage
 
 ---
 
-## 1. Core Philosophy & Workflow Story
+## 1. Core Philosophy: Modifying any software should be easy!
 
-Reprobuild exists to make any software instantly reproducible and modifiable.
+Reprobuild exists to realize this vision by making all software instantly reproducible and modifiable.
 
 Imagine you want to fix a bug in Firefox. In a standard setup, this means spending hours setting up your build tools, matching libraries, and downloading massive toolchains. With Reprobuild, you simply run:
 
