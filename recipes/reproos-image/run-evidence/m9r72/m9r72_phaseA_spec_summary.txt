@@ -1,0 +1,399 @@
+M9.R.72 Phase A — reprobuild-specs summary for the hermeticity / soundness axis
+================================================================================
+
+Objective
+---------
+Enumerate every reprobuild-spec doc that touches hermeticity, install-mirror
+semantics, cacheable-action soundness gating, content-addressed store layout,
+and recipe write-scope. Cite the load-bearing rules against which we will grade
+the current engine implementation in Phase B.
+
+The user directive: reprobuild builds should be more hermetic; reprobuild-specs
+likely provides the correct architectural solution — it's probably just not
+implemented correctly. The M9.R.60-70 arc surfaced adjacent architectural issues
+that keep resurfacing; this milestone reads the spec first, then compares against
+the implementation to identify implementation gaps that map to those recurring
+classes of issues.
+
+
+Spec docs read
+--------------
+1. Core-Invariants.md              (canonical cross-spec invariants)
+2. Failure-Semantics.md            (fail-closed rules for provider / monitoring /
+                                    cache / store / lock / resource / service /
+                                    metadata failures)
+3. Hermetic-Builds-And-Path-Independence.md
+                                   (core hermetic contract; canonical execution
+                                    root; environment normalization; toolchain
+                                    closure; standard-library responsibilities)
+4. Sandbox-And-Monitoring.md       (BuildXL-style OS instrumentation; per-execution
+                                    backend selection; policy layer; validation
+                                    criteria)
+5. Filesystem-Policy-And-Observed-Inputs.md
+                                   (observed-input classification; read-only vs
+                                    writable roots; opaque outputs; double-write /
+                                    source-rewrite mutation policy)
+6. Caching-Architecture.md         (weak/strong fingerprint; memoization vs
+                                    content store; payload-backed vs metadata-only;
+                                    early cutoff; remote cache compatibility)
+7. Store-And-Installation-Layout.md
+                                   (immutable side-by-side prefixes; two-layer
+                                    human-friendly store vs opaque content store;
+                                    runtime binding; launcher discipline)
+
+
+Load-bearing rules extracted (with spec cites)
+-----------------------------------------------
+
+## R1 — Hermetic Contract (Hermetic-Builds-And-Path-Independence.md, lines
+110-124, "Core Hermetic Contract")
+
+Direct quote:
+
+    At minimum:
+    - all tools are modeled package instances or otherwise explicitly declared
+    - all file inputs are declared or discovered under monitoring
+    - the action runs in a controlled execution root
+    - writable locations are explicitly constrained
+    - environment variables are allowlisted and normalized
+    - network access is denied by default unless explicitly allowed by policy
+    - source-tree writes are disallowed unless the action explicitly owns the
+      target location
+
+    For strict cache-writing and publication workflows, violations should be
+    treated as correctness failures, not merely warnings.
+
+## R2 — Canonical Execution Root (Hermetic-Builds-And-Path-Independence.md,
+lines 126-150, "Canonical Execution Root")
+
+Direct quote:
+
+    The core should give every action a canonical execution root whose path
+    does not depend on the user's original checkout location.
+    ...
+    Conceptually:
+    - the user's workspace may live anywhere
+    - Reprobuild materializes or projects the action's declared inputs into a
+      controlled execution root
+    - the action runs there, not in the original checkout path
+
+
+## R3 — Ambiguous Correctness Failures Fail Closed (Failure-Semantics.md, lines
+7-13, "General Rules")
+
+Direct quote:
+
+    - Failures MUST be explicit and attributable to a graph node, provider
+      artifact, action, resource, service, or lock entry whenever possible.
+    - Ambiguous correctness failures MUST fail closed: reject cache reuse,
+      rerun, or require review rather than silently accepting stale state.
+    - Failure records SHOULD preserve enough evidence for `repro why`,
+      diagnostics, and future replay.
+
+
+## R4 — Monitoring-Loss Semantics (Failure-Semantics.md, lines 27-34,
+"Monitoring Failures")
+
+Direct quote (LOAD-BEARING for M9.R.60.D / M9.R.68 / M9.R.70):
+
+    - If the monitor drops events or detects possible loss, affected path sets
+      MUST be invalidated conservatively.
+    - If event loss scope is unknown, the engine MUST invalidate the whole
+      affected watch root or disable cache hits for the affected session.
+    - If required monitoring is unavailable for an action, the scheduler MUST
+      either choose a compatible backend or reject/fallback according to
+      explicit policy.
+
+KEY OBSERVATION: the spec says "invalidate affected path sets" and "disable
+cache hits" — NOT "fail the whole action". The spec's escalation ladder for
+event loss is invalidation-first; failing the action itself is a separate,
+stronger response reserved for "required monitoring is unavailable" cases.
+
+
+## R5 — Read-Only vs Writable Roots (Filesystem-Policy-And-Observed-Inputs.md,
+lines 130-144, "Read-Only Versus Writable Roots")
+
+Direct quote:
+
+    Reprobuild should support explicit classification of filesystem roots or
+    scopes as:
+    - read-only
+    - writable
+    - untracked
+    ...
+    The default policy for strong reproducibility should be:
+    - sources, toolchains, and declared dependency roots are read-only
+    - outputs go only to declared writable locations
+    - everything else is denied unless policy says otherwise
+
+
+## R6 — Source Rewrites Are Errors By Default (Filesystem-Policy-And-Observed-
+Inputs.md, lines 264-278, "Source Rewrites")
+
+Direct quote:
+
+    A source rewrite occurs when an action mutates a source or other nominally
+    read-only file.
+    ...
+    The default should be:
+    - source rewrites are errors
+
+    This is important because allowing in-place mutation of nominal inputs
+    quickly destroys reproducibility and cache correctness.
+
+
+## R7 — Double Writes Are Errors By Default (Filesystem-Policy-And-Observed-
+Inputs.md, lines 246-262, "Double Writes")
+
+Direct quote:
+
+    A double write occurs when more than one producer writes the same output.
+    ...
+    The default should be the strictest safe behavior:
+    - double writes are errors
+
+    Allowing same-content double writes may be acceptable in carefully
+    controlled cases.
+
+
+## R8 — Opaque Output Directories (Filesystem-Policy-And-Observed-Inputs.md,
+lines 176-201, "Opaque Output Directories")
+
+Direct quote:
+
+    - some actions produce files dynamically under a declared output directory
+    - the full member set may not be known statically ahead of time
+
+    Reprobuild should therefore support opaque output directory kinds
+    analogous to:
+    - exclusive opaque outputs
+    - shared opaque outputs
+
+
+## R9 — Memoization Fail-Closed on Missing Payload (Caching-Architecture.md,
+lines 112-125, "Memoization Layer")
+
+Direct quote:
+
+    The memoization store has two valid local result shapes:
+    - payload-backed: output entries point at CAS blobs or packed trees and can
+      be restored or verified from the content store
+    - metadata-only: output entries record existence/type, timestamp/size
+      where relevant, permissions, and dependency evidence, but do not carry
+      enough bytes to restore a missing output
+
+    Metadata-only records are valid for local in-place builds whose policy is
+    "rebuild missing outputs" rather than "restore missing outputs". A
+    metadata-only result MUST NOT be treated as a remote-cache hit or as a
+    local restore hit; if the declared output is missing, or if a consumer
+    explicitly requires payload verification, the action-cache lookup must
+    fail closed and the action must re-execute or obtain a payload-backed
+    result.
+
+
+## R10 — Immutable Side-By-Side Prefixes (Store-And-Installation-Layout.md,
+lines 102-134, "Immutable Side-By-Side Prefixes")
+
+Direct quote (LOAD-BEARING for the "install-mirror lives at a mutable stable
+per-recipe path" question):
+
+    Every realized package instance should live in its own immutable prefix.
+
+    Conceptually, under a configurable cache root:
+      <cache-root>/
+        <package-name>/
+          <version>-<cas-hash>/
+    ...
+    The exact text encoding of the hash remains open, but the intended
+    semantic rules are:
+    - different realizations never overwrite one another
+    - packages can be garbage-collected when unreachable from any active root
+    - local development views are layered on top of the immutable store, not
+      substituted for it
+
+
+## R11 — Two-Layer Store (Store-And-Installation-Layout.md, lines 136-172,
+"Human-Friendly Package Store Versus Opaque Content Store")
+
+Direct quote:
+
+    Reprobuild should not force the same on-disk naming scheme on every kind
+    of stored object.
+
+    Instead it should keep two different layers:
+
+    ### Human-friendly realized package store
+    Used for:
+    - realized package-instance prefixes
+    - browsing by humans
+    - runtime binding targets
+    - debugging and operational inspection
+
+    ### Lower-level content store
+    Used for:
+    - content-addressed blobs
+    - trees
+    - serialized metadata payloads
+    - action-cache payloads
+
+
+## R12 — Policy Source is the Tool Wrapper (Filesystem-Policy-And-Observed-
+Inputs.md, lines 316-331, "Policy Source")
+
+Direct quote:
+
+    Filesystem policy should come from a combination of:
+    - engine defaults
+    - typed executable-wrapper metadata
+    - action-level declarations
+    - project/system policy
+
+    This is important because the correct classification often depends on the
+    tool:
+    - one compiler may emit complete depfiles
+    - another may rely heavily on search-path enumeration
+    - one tool may require an untracked temp directory
+    - another should be fully hermetic
+
+
+## R13 — Explicit Backend Selection And Fallback (Sandbox-And-Monitoring.md,
+lines 407-433, "Backend Selection")
+
+Direct quote:
+
+    The monitoring subsystem MUST support explicit backend selection and
+    fallback order.
+    ...
+    1. determine the action's monitoring mode
+    2. compute the set of backends compatible with that action on the current
+       platform
+    3. apply the platform preference order to that compatible set
+    4. fail clearly if no acceptable backend exists and runtime monitoring is
+       required
+
+
+Summary of the spec's soundness ladder
+--------------------------------------
+Reading R3 + R4 + R9 together, the spec defines an escalation ladder for
+monitor-loss:
+
+  Level 0 (no loss):        publish action-cache record; downstream can hit
+                            cache next run.
+
+  Level 1 (loss with KNOWN scope):
+                            invalidate the affected path set. Cache-key
+                            construction uses only the trusted subset;
+                            downstream may cache-hit next run.
+
+  Level 2 (loss with UNKNOWN scope):
+                            disable cache hits for the affected session.
+                            Action DOES NOT publish to the action cache;
+                            downstream re-runs next time (equivalent to
+                            action.cacheable = false at publish time).
+
+  Level 3 (required monitoring UNAVAILABLE, no viable backend):
+                            fail the action; reject/fallback per policy.
+
+The current engine implementation collapses all of Levels 1, 2, and 3 into
+Level 3 (fail the whole action). That is spec-non-compliant on both directions:
+too strict (fails actions that Level 2 would let succeed-without-caching), AND
+loses the classification information io-mon already produces (whether the loss
+scope is known or unknown).
+
+
+Load-bearing observations
+-------------------------
+1. The spec's monitoring-failure ladder is explicitly graded from
+   "invalidate path set" through "disable cache hits" to "fail the action";
+   the engine currently treats all failures as fatal.
+
+2. The io-mon writer classifies each event-loss record by a `detail` string
+   at emit time (kill-before-flush, unmonitored-subtree/peer, external-content-
+   channel, duplicate-identity, ambiguous-unstamped, etc.). This classification
+   is preserved in the RMDF format but discarded by the engine's
+   `foldMonitorDepFileEvidence` at
+   libs/repro_build_engine/src/repro_build_engine.nim:1309.
+
+3. The spec's hermetic contract (R1) requires "writable locations are
+   explicitly constrained" and "source-tree writes are disallowed unless the
+   action explicitly owns the target location". The current
+   `emitInstallTreeMirror` writes to a stable per-recipe path
+   `<recipeRoot>/.repro/output/install/` (package_result.nim:1305-1350) with
+   `rm -rf` clobber semantics. This IS a writable scope explicitly owned by
+   the install-mirror emit action, so it does NOT violate R1 per se — but
+   there is no engine-level policy enforcement that PREVENTS a recipe from
+   writing there OUTSIDE its own install-mirror emit action.
+
+4. R10 (immutable side-by-side prefixes) plainly says every realized package
+   instance should live in its own immutable prefix keyed by CAS-hash of the
+   full realization context, and "different realizations never overwrite one
+   another". The current install-mirror layout at
+   `<recipeRoot>/.repro/output/install/` (a single stable path with `rm -rf`
+   overwrite each rebuild) does not implement immutable side-by-side — it
+   implements mutable-in-place. This is a genuine architectural gap.
+   HOWEVER, it is out of scope for M9.R.72 because closing it is a multi-week
+   refactor: the recipe DSL, every downstream `PKG_CONFIG_PATH` / cmake
+   probe, and every consumer's `LD_LIBRARY_PATH` thread would need to move
+   from a stable path to a hash-derived one, and downstream reproos-image /
+   sway / KF6 recipes all consume from the stable path today.
+
+5. R11 (two-layer store) is also a legitimate architectural gap: the current
+   store layout mixes "human-friendly realized package store" (the recipe's
+   `.repro/output/install/`) with the "opaque content-addressed store"
+   (missing entirely — reprobuild has no separate CAS layer for build
+   outputs).
+
+6. R6 (source rewrites are errors) and R7 (double writes are errors) are
+   spec defaults the current engine does not enforce. It records
+   monitorWrites in evidence but does not reject actions that wrote to
+   nominally-read-only source paths. This is a legitimate enforcement gap
+   but not directly load-bearing for the M9.R.60-70 arc.
+
+7. R12 (policy source is the tool wrapper) is partially implemented: recipes
+   declare `dependencyPolicy` on actions (repro_cli_support.nim:3485-3492 has
+   the `dgNoRuntimeDependencies` / `dgOpaqueToolWithDeclaredInputs` sketch)
+   but the engine does not use this policy to select between "invalidate
+   path set" and "disable cache hits" and "fail the action" as R4 requires.
+
+
+Phase B target areas
+--------------------
+Gaps to enumerate in Phase B, ranked by how load-bearing they are for the
+M9.R.60-70 arc:
+
+  * Gap I (highest impact for M9.R.60.D / M9.R.70 / M9.R.68): the engine
+    collapses all monitor-loss classes into "fail action" (Level 3),
+    ignoring the spec's Level 2 "disable cache hits for the affected
+    session" step. This is the direct cause of "exit=0 flipped to
+    asFailed" observed in every recipe that runs `nim c` or `meson
+    compile` with more than a few hundred subprocesses.
+
+  * Gap II (spec-aligned, medium impact): io-mon's event-loss detail
+    classification is discarded by `foldMonitorDepFileEvidence`. Preserving
+    it would let the engine implement Level 1 (known-scope invalidation)
+    for specific loss classes without opening a soundness hole.
+
+  * Gap III (architectural, deferred): install-mirror is at a stable
+    mutable path (R10 says immutable side-by-side). Out of scope for one
+    milestone; deferred to a future architectural milestone.
+
+  * Gap IV (architectural, deferred): no separate content-addressed store
+    layer (R11). Same architectural scope constraint; deferred.
+
+  * Gap V (medium impact): mustFailOnIncompleteEvidence collapses the
+    per-tool policy source (R12). Recipes have no way to declare
+    "monitor completeness is not required for cache soundness because I
+    have a strong weakFingerprint that covers my declared inputs".
+
+  * Gap VI (low impact for M9.R.60-70 but spec-mandated): source-rewrite
+    and double-write enforcement (R6/R7) is missing. Not blocking any
+    current recipe but would tighten hermeticity guarantees.
+
+  * Gap VII (in-progress elsewhere): canonical execution root (R2) is a
+    known open item; recipes run under their checkout path today.
+
+Phase C will pick the top 1-3 gaps that are load-bearing AND implementable
+in this milestone. Gap I is the obvious first target.
+
+
+End of Phase A summary.
