@@ -1,0 +1,433 @@
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:33:17Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:33 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:33 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.051 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.051 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.052 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.080 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.080 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.089 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.122 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.168 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.168 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.169 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.169 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:33:48Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:33 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:33 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.052 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.052 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.052 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.063 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.064 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.070 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.079 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.116 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.116 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.116 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.116 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:34:19Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:33 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.649.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:33 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.052 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.052 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.052 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.063 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.063 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.069 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.078 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.114 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.114 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.114 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.115 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:34:51Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:34 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.649.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.710.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:34 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.053 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.053 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.054 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.065 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.065 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.071 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.080 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.115 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.115 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.116 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.116 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:35:22Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:34 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.649.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.710.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.756.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:34 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.056 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.056 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.056 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.067 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.067 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.074 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.082 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.118 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.118 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.118 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.119 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:35:53Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:35 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.649.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.710.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.756.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 sway-ipc.1000.802.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:35 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.052 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.052 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.052 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.063 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.063 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.070 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.078 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.114 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.114 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.114 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.114 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:36:25Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:35 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.649.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.710.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.756.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 sway-ipc.1000.802.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 sway-ipc.1000.848.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:35 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open kms_swrast: /usr/lib64/dri/kms_swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so: cannot open shared object file: No such file or directory (search paths /usr/lib64/dri, suffix _dri)
+00:00:00.040 [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+00:00:00.041 [ERROR] [wlr] [render/egl.c:611] Failed to initialize EGL context
+00:00:00.041 [ERROR] [wlr] [render/gles2/renderer.c:499] Could not initialize EGL
+00:00:00.052 [ERROR] [sway/commands/output/background.c:126] Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided
+00:00:00.052 [ERROR] [sway/config.c:814] Error on line 24 'output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill': Unable to access background file '/usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png' and no valid fallback provided (//etc/sway/config)
+sh: 1: swaynag: not found
+00:00:00.059 [ERROR] [sway/config.c:440] Error(s) loading config!
+Fontconfig error: Cannot load default config file: No such file: (null)
+00:00:00.068 [ERROR] [sway/config/output.c:1083] failed to execute 'swaybg' (background configuration probably not applied): No such file or directory
+00:00:00.103 [ERROR] [wlr] [backend/libinput/backend.c:111] libinput initialization failed, no input devices
+00:00:00.104 [ERROR] [wlr] [backend/libinput/backend.c:112] Set WLR_LIBINPUT_NO_DEVICES=1 to suppress this check
+00:00:00.104 [ERROR] [wlr] [backend/multi/backend.c:32] Failed to initialize backend.
+00:00:00.104 [ERROR] [sway/server.c:541] Failed to start backend
+sway: backend/backend.c:51: wlr_backend_finish: Assertion `wl_list_empty(&backend->events.new_input.listener_list)' failed.
+======================================================
+M9.R.71 sway launch @ 2026-07-04T10:36:56Z
+  argv: sh=/usr/local/bin/repro-sway-diag args=[/usr/bin/sway]
+  uid=1000 gid=1000 groups=netdev audio video seat live
+  cwd=/home/repro
+  HOME=/home/repro
+  XDG_RUNTIME_DIR=/home/repro/.repro-runtime
+  WLR_RENDERER_ALLOW_SOFTWARE=1
+  LIBGL_ALWAYS_SOFTWARE=1
+  MESA_LOADER_DRIVER_OVERRIDE=swrast
+  GALLIUM_DRIVER=llvmpipe
+  LD_LIBRARY_PATH=/opt/repro/reprobuild/recipes/packages/source/mesa/.repro/output/install/usr/lib64
+  WAYLAND_DISPLAY=
+  SHELL=/bin/bash
+  PATH=/usr/local/bin:/usr/bin:/bin
+  ls XDG_RUNTIME_DIR:
+    total 8
+    drwx------ 2 repro netdev 4096 Jul  4 10:36 .
+    drwxr-xr-x 4 repro netdev 4096 Jul  4 10:33 ..
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.584.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:33 sway-ipc.1000.649.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.710.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:34 sway-ipc.1000.756.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 sway-ipc.1000.802.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:35 sway-ipc.1000.848.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:36 sway-ipc.1000.894.sock
+    srwxr-xr-x 1 repro netdev    0 Jul  4 10:36 wayland-1
+    -rw-r----- 1 repro netdev    0 Jul  4 10:33 wayland-1.lock
+  seatd socket:
+    srwxrwx--- 1 root seat 0 Jul  4 10:33 /run/seatd.sock
+  drm devices:
+    total 0
+    drwxr-xr-x  3 root root      80 Jul  4 10:33 .
+    drwxr-xr-x 14 root root    2720 Jul  4 10:33 ..
+    drwxr-xr-x  2 root root      60 Jul  4 10:33 by-path
+    crw-rw----  1 root video 226, 0 Jul  4 10:36 card0
+  Mesa GLES/EGL libraries + swrast driver:
+    ls: cannot access '/usr/lib/x86_64-linux-gnu/libGLESv2.so.2': No such file or directory
+    lrwxrwxrwx 1 repro users 14 Jun 17  2025 /usr/lib/x86_64-linux-gnu/dri/swrast_dri.so -> libdril_dri.so
+    lrwxrwxrwx 1 repro users 15 Oct 28  2024 /usr/lib/x86_64-linux-gnu/libEGL.so.1 -> libEGL.so.1.1.0
+  tty:
+    /dev/tty1
+  ------ end preamble ------

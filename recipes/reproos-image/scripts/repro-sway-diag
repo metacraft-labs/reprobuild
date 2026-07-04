@@ -68,6 +68,25 @@ export LIBGL_ALWAYS_SOFTWARE=1
 export MESA_LOADER_DRIVER_OVERRIDE=swrast
 export GALLIUM_DRIVER=llvmpipe
 
+# M9.R.71.6 LIBGL_DRIVERS_PATH — validated 2026-07-04: Mesa's
+# dlopen search path for swrast_dri.so defaults to /usr/lib64/dri
+# on this glibc build, but the from-source Mesa recipe installs
+# the drivers at $FROM_SOURCE_MESA/dri/.  Debian's swrast_dri.so
+# is present at /usr/lib/x86_64-linux-gnu/dri but is a symlink to
+# libdril_dri.so (Debian's renamed variant) — using the from-
+# source mesa driver keeps the driver ABI aligned with the from-
+# source libGLESv2/libEGL.
+if [ -d "$FROM_SOURCE_MESA/dri" ]; then
+  LIBGL_DRIVERS_PATH="$FROM_SOURCE_MESA/dri"
+  export LIBGL_DRIVERS_PATH
+fi
+
+# M9.R.71.6 WLR_LIBINPUT_NO_DEVICES=1 — QEMU without vhost-user
+# passthrough has no libinput-visible input devices; without this
+# env var wlroots aborts with "libinput initialization failed, no
+# input devices".  Even a headless smoke boot needs this.
+export WLR_LIBINPUT_NO_DEVICES=1
+
 LOG=/var/log/m9r71_sway.log
 {
   echo "======================================================"
@@ -82,6 +101,8 @@ LOG=/var/log/m9r71_sway.log
   echo "  MESA_LOADER_DRIVER_OVERRIDE=$MESA_LOADER_DRIVER_OVERRIDE"
   echo "  GALLIUM_DRIVER=$GALLIUM_DRIVER"
   echo "  LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+  echo "  LIBGL_DRIVERS_PATH=$LIBGL_DRIVERS_PATH"
+  echo "  WLR_LIBINPUT_NO_DEVICES=$WLR_LIBINPUT_NO_DEVICES"
   echo "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
   echo "  SHELL=$SHELL"
   echo "  PATH=$PATH"
