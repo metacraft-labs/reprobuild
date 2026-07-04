@@ -1,0 +1,86 @@
+M9.R.69 Phase B — root cause classification
+============================================
+
+Phase A characterisation
+------------------------
+Reproduced the "segfault at 2 ip 0x2 error 14" crash inside a chroot
+copy of the M9.R.68 qcow2 rootfs:
+
+  * seatd binary INTERP = /repro/store/xx7cm72*/lib/ld-linux-x86-64.so.2
+    (glibc 2.40, hash xx7cm72...).
+  * seatd DT_RUNPATH does NOT contain ANY libc.so.6 directory.
+  * /etc/ld.so.cache first-preference for libc.so.6 is
+    /lib/x86_64-linux-gnu/libc.so.6 (Debian glibc 2.41-12+deb13u3).
+  * Loading Debian 2.41 libc under Nix 2.40 ld-linux -> mismatched
+    startup state -> indirect-call-through-NULL -> RIP=0x2.
+
+Direct swap test (chroot):
+  LD_LIBRARY_PATH=/lib/x86_64-linux-gnu               -> silent crash
+  LD_LIBRARY_PATH=/repro/store/xx7cm72*/lib           -> seatd -h OK
+
+Candidate classification (from the task-brief taxonomy)
+-------------------------------------------------------
+Candidate alpha — dlopen backend callback zero-init      FALSIFIED
+    The crash reproduces on `seatd -h`, which prints usage and exits
+    before any backend registration.  It's pre-main / early main.
+
+Candidate beta  — missing symbol resolution              FALSIFIED
+    seatd's .gnu.version_r requires only up to GLIBC_2.34.  BOTH
+    the Nix 2.40 store glibc AND the Debian 2.41 base rootfs glibc
+    satisfy this — the wrong libc still resolves every symbol.
+    The crash is NOT ENOENT/undefined-symbol.
+
+Candidate gamma — TLS init failure (static TLS overflow)  FALSIFIED
+    Static TLS budget on this seatd is negligible; test above proves
+    a SAME-hash libc runs cleanly.  If TLS were the issue, the
+    correct libc test would also crash.
+
+Candidate delta — libudev vtable / ABI mismatch          FALSIFIED
+    readelf -d /path/to/seatd shows DT_NEEDED = libc.so.6 only.
+    seatd server binary does not link libudev directly.  The crash
+    reproduces before any dlopen.
+
+Candidate epsilon — RECIPE BUG                            CONFIRMED
+    libseat's `meson_package(...)` invocation records meson +
+    systemd + clingo + gcc-lib in DT_RUNPATH but NOT glibc's lib
+    dir.  Meson doesn't know about the Nix glibc explicitly — it
+    treats it as a compiler-provided implicit dep, so it never lands
+    in RPATH.  Under a normal FHS system where /lib/x86_64-linux-gnu
+    holds the SAME glibc the toolchain was built with, this works.
+    On the reproos image where the toolchain glibc and rootfs glibc
+    are different versions from different distributors, ld-linux
+    ends up with a MISMATCHED pair.
+
+Historical note: M9.R.58.3 hit this exact bug and patched it via
+_m9r58_swap.sh's `patchelf --set-rpath` that PREPENDED the glibc lib
+dir extracted from the interpreter path.  The fix was applied to the
+QCOW2 image but NEVER LANDED in repro.nim or in
+scripts/build-reproos-image.sh.  M9.R.59's DRM-backend closure did
+not re-run the swap script.  M9.R.68 clean-rebuilt the qcow2 and
+regressed the fix.  This is the same class the "Prefer spec over
+memory" feedback covers — the fix taxonomy needed a permanent home.
+
+Chosen fix shape
+-----------------
+Extend `scripts/build-reproos-image.sh` Phase 10.9 (the seatd
+installation phase already gated on libseat) to run patchelf on
+the mounted-image copies of seatd + seatd-launch + libseat.so.1,
+prepending the glibc lib dir extracted from the interpreter path.
+This matches the _m9r58_swap.sh recipe exactly but relocates the
+fix into the reproducible image-build path, so future clean rebuilds
+of reproos-image also emit a patched binary.
+
+Alternative fix shapes considered + rejected:
+
+  Alternative A — landing the fix INSIDE repro.nim as a postInstall
+    step.  Rejected because the DSL doesn't support a first-class
+    postInstall hook and adding one is a much larger scope change.
+  Alternative B — teaching meson to emit RPATH including glibc.
+    Rejected because meson's --auto-rpath is opinionated + the fix
+    would need to be re-applied to every recipe rather than being
+    a one-line hook in the image assembly.
+  Alternative C — swapping /etc/ld.so.cache to prefer /repro/store
+    libc first.  Rejected because it would silently affect EVERY
+    Debian-rootfs binary that lives on the image (some of which
+    might have been linked expecting a specific Debian libc).
+
