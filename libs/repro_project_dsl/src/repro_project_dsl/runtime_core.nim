@@ -170,7 +170,19 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion = 21'u16
+  BuildActionPayloadVersion = 22'u16
+    ## v22: M9.R.75 — R6 (source-write reject) + R7 (double-write
+    ## reject) per-action write-scope declaration. Appends two
+    ## length-prefixed string seqs: ``declaredOutputs`` (write roots
+    ## the engine's ``validateGraph`` pairwise-intersection pass grades
+    ## against R7) followed by ``readOnlyRoots`` (nominally-read-only
+    ## roots the engine's R6 enforcement layer grades writes against).
+    ## v21-and-earlier payloads decode with both seqs empty so the R6/R7
+    ## enforcement passes no-op for legacy artefacts — behaviour is
+    ## byte-identical to the pre-M9.R.75 state until a recipe (or a
+    ## convention emitter) explicitly opts into declaring its write
+    ## scope.
+    ##
     ## v21: M9.R.74 — canonical execution root (R2) per-action
     ## declaration. Appends one byte for ``ActionCwdKind`` (0..4) plus a
     ## length-prefixed ``cwdCustomPath`` string. v20-and-earlier
@@ -913,7 +925,9 @@ proc buildAction*(id: string; call: PublicCliCall;
                   toolIdentityRefs: openArray[string] = [];
                   requiresElevation = false;
                   cwdKind = acwdRecipeRoot;
-                  cwdCustomPath = ""):
+                  cwdCustomPath = "";
+                  declaredOutputs: openArray[string] = [];
+                  readOnlyRoots: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -976,7 +990,9 @@ proc buildAction*(id: string; call: PublicCliCall;
     requiresElevation: requiresElevation,
     recipeRevisionFingerprint: recipeRevisionFingerprint,
     cwdKind: cwdKind,
-    cwdCustomPath: cwdCustomPath)
+    cwdCustomPath: cwdCustomPath,
+    declaredOutputs: @declaredOutputs,
+    readOnlyRoots: @readOnlyRoots)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -2057,6 +2073,13 @@ proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.
   # kind; the resolver treats it as "fall back to the recipe root."
   payload.writeByte(byte(ord(action.cwdKind)))
   payload.writeString(action.cwdCustomPath)
+  # v22: M9.R.75 — R6 + R7 per-action write-scope declaration. Two
+  # length-prefixed string seqs. Empty seqs (the default for legacy
+  # actions that don't opt in) reduce to no-op enforcement in the
+  # engine's validateGraph pass + spawn wrapper, preserving pre-M9.R.75
+  # behaviour byte-for-byte.
+  payload.writeStringSeq(action.declaredOutputs)
+  payload.writeStringSeq(action.readOnlyRoots)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(BuildActionPayloadVersion)
@@ -2073,7 +2096,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   let version = readU16Le(bytes, pos)
   if version notin {1'u16, 2'u16, 3'u16, 4'u16, 5'u16, 6'u16, 7'u16, 8'u16,
       9'u16, 10'u16, 11'u16, 12'u16, 13'u16, 14'u16, 15'u16, 16'u16,
-      17'u16, 18'u16, 19'u16, 20'u16, BuildActionPayloadVersion}:
+      17'u16, 18'u16, 19'u16, 20'u16, 21'u16, BuildActionPayloadVersion}:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -2209,6 +2232,21 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # ``cwd = projectRoot`` on every non-``inlineExecCall`` path.
     result.cwdKind = acwdRecipeRoot
     result.cwdCustomPath = ""
+  if version >= 22'u16:
+    # M9.R.75 v22: R6 + R7 per-action write-scope declaration. Two
+    # length-prefixed string seqs — ``declaredOutputs`` (write roots
+    # the engine's validateGraph pairwise-intersection pass grades
+    # against R7) followed by ``readOnlyRoots`` (nominally-read-only
+    # roots the engine's R6 enforcement layer grades writes against).
+    result.declaredOutputs = readStringSeq(bytes, pos)
+    result.readOnlyRoots = readStringSeq(bytes, pos)
+  else:
+    # v21-and-earlier payloads predate the R6/R7 declaration; legacy
+    # artefacts decode with both seqs empty so the engine's
+    # validateGraph pairwise-intersection pass + R6 enforcement layer
+    # no-op for them.
+    result.declaredOutputs = @[]
+    result.readOnlyRoots = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

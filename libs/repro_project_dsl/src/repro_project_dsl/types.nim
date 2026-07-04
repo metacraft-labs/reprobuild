@@ -561,6 +561,56 @@ type
       ## behaviour of the ``inlineExecCall(argv, cwd = "")`` overload
       ## whose CLI-support fallback was ``projectRoot``. Payload
       ## codec v21+.
+    declaredOutputs*: seq[string]
+      ## M9.R.75 — R7 (double-write reject) per-action write-root
+      ## declaration. Spec cite: Filesystem-Policy-And-Observed-
+      ## Inputs.md §"Double Writes" (lines 246-262). Each entry is a
+      ## directory (or file) path this action commits to writing during
+      ## its execution. The engine's ``validateGraph`` pass runs a
+      ## pairwise intersection over all actions' ``declaredOutputs``
+      ## seqs; overlap (prefix / containment / equality) is a
+      ## graph-time error naming both action ids + the conflicting
+      ## path.
+      ##
+      ## Distinct from ``outputs`` — that field is the per-action
+      ## stamp / artefact set the engine checks for post-run readiness
+      ## and cache-key composition, and it is typically a single
+      ## stamp file (``.repro/stamps/<recipe>-<phase>.stamp``) that
+      ## differs per action by design so the existing string-equality
+      ## check in ``validateGraph`` doesn't fire. ``declaredOutputs``
+      ## carries the FULL write ROOT (``$buildDir`` / ``$installDir`` /
+      ## ``$fetchExtracted``) so the intersection pass can catch two
+      ## configure or install actions racing for the same DESTDIR.
+      ##
+      ## Empty (the default) preserves the pre-M9.R.75 behaviour
+      ## byte-for-byte: the intersection pass no-ops for actions that
+      ## didn't opt in. Payload codec v22+.
+    readOnlyRoots*: seq[string]
+      ## M9.R.75 — R6 (source-write reject) per-action read-only-root
+      ## declaration. Spec cite: Filesystem-Policy-And-Observed-
+      ## Inputs.md §"Source Rewrites" (lines 264-278). Each entry is a
+      ## directory (or file) path this action MUST NOT write to during
+      ## its execution — typically the extracted upstream source tree
+      ## (the ``acwdSource`` root).
+      ##
+      ## Enforcement shapes (either or both):
+      ##
+      ## Shape A (bwrap sandbox, Linux): the engine's spawn wrapper
+      ## adds ``bwrap --ro-bind <root> <root> ...`` for each entry,
+      ## so an in-action write attempt fails hard with EROFS.
+      ##
+      ## Shape B (post-hoc monitor check, all platforms): after the
+      ## action completes, the engine walks io-mon evidence for
+      ## ``mrFileWrite`` records under any entry and hard-fails the
+      ## action with a ``source-write attempt: <path>`` error.
+      ##
+      ## Fetch actions leave this empty — R6 explicitly names the
+      ## fetch step as "the action explicitly owns the target
+      ## location" and permits it to write into the source tree.
+      ##
+      ## Empty (the default) preserves the pre-M9.R.75 behaviour
+      ## byte-for-byte: the source-write check no-ops. Payload
+      ## codec v22+.
     sourceFile*: string
     sourceLine*: int
 

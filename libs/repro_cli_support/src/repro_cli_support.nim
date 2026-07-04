@@ -1577,6 +1577,15 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # action's bare-name argv (``meson`` / ``ninja`` / ``gcc`` / ...)
     # finds the right binaries.
     result.toolIdentityRefs = payload.toolIdentityRefs
+    # M9.R.75: propagate the convention-supplied R6/R7 write-scope
+    # declarations through to the engine-side ``BuildAction``. The
+    # engine's ``validateGraph`` R7 pairwise-intersection pass reads
+    # ``declaredOutputs``; the spawn wrapper + post-hoc monitor check
+    # read ``readOnlyRoots``. Empty seqs (the default for legacy
+    # actions that don't opt in) reduce to no-op enforcement,
+    # preserving pre-M9.R.75 behaviour byte-for-byte.
+    result.declaredOutputs = payload.declaredOutputs
+    result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
     of acfpTimestamp:

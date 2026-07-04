@@ -209,6 +209,38 @@ type
       ## value; the engine then mixes it into the canonical key
       ## bytes so two ``targetTriple`` resolutions produce two
       ## distinct entry-key hexes for the same recipe.
+    declaredOutputs*: seq[string]
+      ## M9.R.75 — R7 (double-write reject) per-action write-root
+      ## declaration. Spec cite: Filesystem-Policy-And-Observed-
+      ## Inputs.md §"Double Writes" (lines 246-262). Populated by the
+      ## DSL lowering from ``BuildActionDef.declaredOutputs``; consumed
+      ## by ``validateGraph``'s pairwise write-root intersection pass.
+      ##
+      ## Distinct from ``outputs``: that field is the per-action stamp
+      ## / artefact set for post-run readiness + cache-key composition
+      ## (typically a single stamp file that differs per action by
+      ## design). ``declaredOutputs`` carries the FULL write ROOT
+      ## (``$buildDir`` / ``$installDir`` / ``$fetchExtracted``) so
+      ## the intersection pass catches two actions racing for the same
+      ## DESTDIR — the case the string-equality check on ``outputs``
+      ## misses because the stamp files differ.
+      ##
+      ## Empty (the default) preserves pre-M9.R.75 behaviour: the
+      ## intersection pass no-ops for actions that didn't opt in.
+    readOnlyRoots*: seq[string]
+      ## M9.R.75 — R6 (source-write reject) per-action read-only-root
+      ## declaration. Spec cite: Filesystem-Policy-And-Observed-
+      ## Inputs.md §"Source Rewrites" (lines 264-278). Populated by
+      ## the DSL lowering from ``BuildActionDef.readOnlyRoots``;
+      ## consumed by the engine's spawn wrapper (bwrap sandbox on
+      ## Linux) and the post-hoc monitor-evidence checker (all
+      ## platforms).
+      ##
+      ## Fetch actions leave this empty — R6 explicitly names the
+      ## fetch step as "the action explicitly owns the target
+      ## location" and permits it to write into the source tree.
+      ## Empty (the default) preserves pre-M9.R.75 behaviour: the
+      ## source-write enforcement layer no-ops.
     requiresElevation*: bool
       ## Windows-System-Resources Phase E. Marks an action edge whose
       ## execution must cross the privileged-operation broker. When
@@ -983,6 +1015,32 @@ proc trace(result: var BuildRunResult; actionId, event, detail: string) =
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
 
+proc normalizeWriteRoot(p: string): string =
+  ## M9.R.75 — canonical form for a declared write root path used by
+  ## the R7 pairwise-intersection pass. Normalises separators to ``/``
+  ## and strips a trailing ``/`` so ``"$b/build"`` and ``"$b/build/"``
+  ## compare equal. Empty in → empty out; empty entries are ignored
+  ## by the caller.
+  if p.len == 0:
+    return ""
+  var s = p.replace("\\", "/")
+  while s.len > 1 and s[^1] == '/':
+    s.setLen(s.len - 1)
+  s
+
+proc writeRootsOverlap(a, b: string): bool =
+  ## M9.R.75 — R7 intersection predicate. Two declared write roots
+  ## OVERLAP when they are the same path OR one is a proper directory
+  ## prefix of the other (with a ``/`` boundary so ``"$b/build"`` is
+  ## not treated as a prefix of ``"$b/buildkit"``).
+  if a.len == 0 or b.len == 0:
+    return false
+  if a == b:
+    return true
+  if a.len < b.len:
+    return b.startsWith(a & "/")
+  return a.startsWith(b & "/")
+
 proc validateGraph(g: BuildGraph) =
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
@@ -1004,6 +1062,40 @@ proc validateGraph(g: BuildGraph) =
     for dep in action.deps:
       if not ids.contains(dep):
         raiseEngine("unknown dependency " & dep & " for " & action.id)
+
+  # M9.R.75 — R7 (double-write reject) pairwise write-root
+  # intersection pass. Spec cite: Filesystem-Policy-And-Observed-
+  # Inputs.md §"Double Writes" (lines 246-262): "double writes are
+  # errors" is the shipping default. Two actions whose declaredOutputs
+  # overlap (equality or directory-prefix containment on any pair of
+  # entries) → graph-time error naming both action ids + the
+  # conflicting path.
+  #
+  # Design choice: pairwise O(N*M*K) over the number of
+  # declaredOutputs-carrying actions. Fine for real graphs
+  # (declaredOutputs is populated only by from-source conventions,
+  # so the seq is small). If a graph outgrows this, a trie-based
+  # containment index is a straightforward follow-up.
+  var declaredIndex: seq[tuple[actionId: string; root: string]] = @[]
+  for action in g.actions:
+    for raw in action.declaredOutputs:
+      let root = normalizeWriteRoot(raw)
+      if root.len == 0:
+        continue
+      declaredIndex.add((actionId: action.id, root: root))
+  for i in 0 ..< declaredIndex.len:
+    for j in (i + 1) ..< declaredIndex.len:
+      if declaredIndex[i].actionId == declaredIndex[j].actionId:
+        continue
+      if writeRootsOverlap(declaredIndex[i].root, declaredIndex[j].root):
+        raiseEngine("double-write reject (R7): actions '" &
+          declaredIndex[i].actionId & "' and '" &
+          declaredIndex[j].actionId &
+          "' declare overlapping write roots ('" &
+          declaredIndex[i].root & "' vs '" & declaredIndex[j].root &
+          "'). Spec: Filesystem-Policy-And-Observed-Inputs.md " &
+          "§\"Double Writes\" — default policy is 'double writes are " &
+          "errors'.")
 
   var state = initTable[string, int]()
   var stack: seq[string] = @[]
