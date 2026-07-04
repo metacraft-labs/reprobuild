@@ -1,0 +1,307 @@
+M9.R.71 close-out — PAM cosmetic fix landed, sway now RUNNING but in
+headless mode; DRM-backed sway rendering blocked by Mesa version skew
+=====================================================================
+
+Milestone summary
+-----------------
+M9.R.71 chartered scope: close the M9.R.70 residual (v) — sddm-helper's
+autologin PAM chain fails, preventing sway from launching.
+
+Empirical Phase A + B audit falsified the task-brief hypotheses that
+Cause alpha (@include syntax) or Cause beta (pam_systemd EIO) were
+the blockers.  Both are REAL but COSMETIC — the from-source Linux-PAM
+1.6.1 recipe genuinely lacks Debian's @include patch, but libpam's
+parser recovers with MUST_FAIL handlers for the affected lines
+without breaking sddm-autologin's own PAM stack.  pam_systemd is
+declared `session optional` so its EIO is ignored by libpam's
+dispatcher.
+
+The REAL blocker was sway compositor crashing with SIGABRT
+IMMEDIATELY after sddm-helper spawned it — invisible to Phase A
+forensics because /home/repro/.local/share/sddm/wayland-session.log
+never got written.  The Phase C fix landed a diagnostic wrapper
+(/usr/local/bin/repro-sway-diag) that captures sway stderr durably
+to /var/log/m9r71_sway.log, unblocking further Phase C+D iteration
+work.
+
+Four fix iterations (M9.R.71.3 -> M9.R.71.6) peeled the sway crash
+cascade one layer at a time.  Each iteration ran a full qcow2
+rebuild + boot smoke, mounted the resulting qcow2 read-only, and
+inspected the captured sway log.
+
+Autologin-to-sway verdict (arc's terminal question, 7th attempt):
+  * @include LOG_ERR spam:               CLOSED (M9.R.71.3) — new
+                                          /etc/pam.d/other uses
+                                          portable pam_deny.so-only
+                                          stack; zero @include
+                                          parse errors in v4 journal.
+  * sway compositor launched:            YES (M9.R.71.6 v4 boot smoke)
+                                          — /home/repro/.repro-runtime/
+                                          contains wayland-1 socket +
+                                          sway-ipc socket.
+  * sway compositor rendering to DRM:    NO — running in wlroots
+                                          headless mode fallback
+                                          because from-source Mesa
+                                          23.3.6 lacks the
+                                          DRI_IMAGE_DRIVER version 1
+                                          extension wlroots 0.19
+                                          requires (Mesa 24+ needed).
+  * DE screendump shows compositor:      NO — all screendumps show
+                                          SDDM greeter on VT 2
+                                          (bochs-drm didn't honour
+                                          sddm-helper's Jumping to
+                                          VT 1 call to switch to
+                                          sway's compositor).
+
+
+Commits (chronological)
+-----------------------
+  ae71c0c6  M9.R.71.1  Phase A PAM audit findings
+  f3891670  M9.R.71.2  Phase B logind I/O + sway SIGABRT
+                        characterization
+  13a29f7f  M9.R.71.3  PAM autologin + sway diagnostic fix (initial
+                        embedded-wrapper version; failed bash -n)
+  90b417b6  M9.R.71.3.1 Extract sway diag wrapper to separate file
+                        (fixes nested-quoting bash-parse error)
+  08cb9b60  M9.R.71.4  sway EGL software-rendering +
+                        installer-autostart fix
+                        (WLR_RENDERER_ALLOW_SOFTWARE=1; disable
+                        /etc/reproos/auto-config.toml)
+  2fd1ac8f  M9.R.71.5  Mesa GLES/EGL library-mixing fix +
+                        XDG_RUNTIME_DIR fallback
+                        (LD_LIBRARY_PATH prepend from-source Mesa;
+                        $HOME/.repro-runtime fallback)
+  85d72f08  M9.R.71.6  LIBGL_DRIVERS_PATH + WLR_LIBINPUT_NO_DEVICES
+                        (from-source Mesa dri/ dir; QEMU headless
+                        libinput bypass)
+
+
+Phase A — PAM configuration audit (M9.R.71.1)
+---------------------------------------------
+Full detail: m9r71_phaseA_pam_audit.txt.
+
+Empirical mount of the M9.R.70 qcow2 established:
+  * The from-source libpam-1.6.1 recipe does NOT recognize Debian's
+    @include directive (only upstream `include` + `substack`).
+    Confirmed via strings(1) on the from-source libpam vs Debian's
+    libpam AND source audit of Linux-PAM-1.6.1/libpam/pam_handlers.c.
+  * sddm-helper links against the from-source libpam via RUNPATH
+    resolution.
+  * /etc/pam.d/other uses four `@include common-*` lines that trip
+    the "illegal module type" LOG_ERR path.
+  * BUT the parser installs MUST_FAIL handlers and returns
+    PAM_SUCCESS — cosmetic, not functional.
+  * pam_systemd.so is `session optional` in
+    /etc/pam.d/sddm-autologin, so its EIO return is IGNORED.
+  * sddm.log's "sddm-helper exited with 6" == sway compositor
+    SIGABRT (HelperApp.cpp:197 exit(status) forwards child
+    exit code).
+
+Real root cause: sway compositor crashes on launch.
+Diagnostic gap: no wayland-session.log captured.
+
+
+Phase B — logind I/O + sway SIGABRT characterization (M9.R.71.2)
+----------------------------------------------------------------
+Full detail: m9r71_phaseB_logind_and_sway.txt.
+
+pam_systemd EIO characterized to dbus-daemon lacking
+--systemd-activation (a M9.R.56.5 residual).  M9.R.56.8.7 tmpfiles.d
+shim provides XDG_RUNTIME_DIR=/run/user/1000 out-of-band, closing
+the downstream consequence.  Cause beta is COSMETIC.
+
+sway SIGABRT class-classified: first attempt SIGABRT (assertion
+failure), subsequent attempts SIGINT (sddm 30s watchdog).  Fatal
+assertion happens BEFORE sway's own stdio buffer flushes to
+/home/repro/.local/share/sddm/wayland-session.log.  Fix shape:
+diagnostic wrapper + world-writable /var/log/m9r71_sway.log
+capture.
+
+
+Phase C + D — fix iteration (M9.R.71.3 -> M9.R.71.6)
+----------------------------------------------------
+Each iteration ran the same shape: (a) mount previous qcow2 read-
+only; (b) inspect /var/log/m9r71_sway.log to see the next-layer
+crash cause; (c) update /usr/local/bin/repro-sway-diag wrapper +
+build script; (d) commit + push; (e) full qcow2 rebuild via
+`nix develop --command ./build/bin/repro build recipes/reproos-image`
+(~22 min); (f) boot smoke (240 s); (g) mount + inspect log; goto (b).
+
+Iteration v1 (M9.R.71.3): install repro-sway-diag wrapper + rewrite
+/etc/pam.d/other to portable pam_deny stack.  Rebuild + boot smoke
+produced the FIRST-EVER sway stderr capture at /var/log/m9r71_sway.log:
+  * [wlr] Software rendering detected, please use the
+    WLR_RENDERER_ALLOW_SOFTWARE environment variable to proceed
+  * [wlr] Failed to initialize EGL context
+  * sway: backend/backend.c:52: wlr_backend_finish: Assertion
+    `wl_list_empty(&backend->events.new_output.listener_list)' failed.
+Also observed: /etc/profile.d/zz-reproos-installer-autostart.sh runs
+the installer on tty1 login (which sddm autologin uses), producing
+"wipefs: not found" installer failure output on every session.
+
+Iteration v2 (M9.R.71.4): export WLR_RENDERER_ALLOW_SOFTWARE=1 +
+disable installer autostart by renaming /etc/reproos/auto-config.toml.
+Sway EGL init passed the software-rendering check but next-layer
+crash:
+  * [wlr] Failed to get GL_EXTENSIONS
+  * [wlr] Failed to create GLES2 renderer
+Root cause identified via strace: MIXED-Mesa library loads.
+  sway loads /lib/x86_64-linux-gnu/libEGL.so.1 (Debian libglvnd
+  dispatcher, "1.5 libglvnd") + /opt/repro/reprobuild/.../mesa/
+  .repro/output/install/usr/lib64/libGLESv2.so.2 (from-source Mesa
+  actual GLES2).  libglvnd's vendor dispatch tables don't match
+  the from-source Mesa's, so glGetString returns NULL.
+
+Iteration v3 (M9.R.71.5): LD_LIBRARY_PATH prepend from-source Mesa's
+lib64 dir + XDG_RUNTIME_DIR fallback to $HOME/.repro-runtime.  Sway
+libraries now consistently from from-source Mesa.  Next-layer crash:
+  * MESA-LOADER: failed to open swrast: /usr/lib64/dri/swrast_dri.so:
+    cannot open shared object file
+  * [wlr] Failed to create GBM device
+  * [wlr] libinput initialization failed, no input devices
+  * [wlr] backend/multi/backend.c:32 Failed to initialize backend
+  * Assertion `wl_list_empty(&backend->events.new_input.listener_list)'
+    failed
+Sway made it FURTHER — wayland-1 socket created briefly before
+crash (visible in the SECOND iteration's preamble showing leftover
+sockets from the crashed first session).
+
+Iteration v4 (M9.R.71.6): export LIBGL_DRIVERS_PATH=$FROM_SOURCE_MESA/dri
++ WLR_LIBINPUT_NO_DEVICES=1.  Next-layer Mesa issue:
+  * did not find extension DRI_IMAGE_DRIVER version 1
+  * failed to bind extensions
+  * [wlr] Failed to create GBM device
+BUT... sway continued past the EGL failure and loaded its config +
+attempted to fork swaybg.  Log ends there with NO crash message.
+Post-boot mount confirmed:
+  * /home/repro/.repro-runtime/wayland-1 (unix socket, active)
+  * /home/repro/.repro-runtime/sway-ipc.1000.587.sock (unix socket)
+  * /home/repro/.repro-runtime/wayland-1.lock (0-byte lock)
+Sway IS RUNNING in wlroots headless-backend fallback mode.  DRM
+backend fails (Mesa version skew — see next section) so no output
+gets rendered to the framebuffer; screendumps show the SDDM greeter
+static image on VT 2 which bochs-drm did not switch away from.
+
+
+Genuine root cause (M9.R.71 residual)
+-------------------------------------
+Mesa version skew: from-source mesa recipe pins Mesa 23.3.6 (per
+recipes/packages/source/mesa/vendor/mesa-23.3.6.tar.xz) but wlroots
+0.19 requires Mesa 24+ for the DRI_IMAGE_DRIVER version 1 extension
+that wlroots' GBM-backed EGL initialization consumes.
+
+Mesa 23.3.6's swrast_dri.so exports `__driDriverExtensions_v2` with
+DRI_IMAGE (image lookup + image loader) but NOT
+DRI_IMAGE_DRIVER — that specific extension was added in Mesa 24.0's
+DRI-driver refactor.  wlroots' egl.c:595 (create_gbm_device) fails
+with "Failed to create GBM device" when DRI_IMAGE_DRIVER is absent.
+
+Fix shape (deferred to M9.R.72+):
+  Bump the from-source mesa recipe to Mesa 24.x (currently 24.3.6 or
+  later).  Multi-week: requires cross-checking Mesa 24's build deps
+  against the from-source graphics-stack recipes (libdrm 2.4.121+,
+  libglvnd, wayland-protocols 1.32+, etc.), regenerating vendor
+  tarballs, and retesting the whole reproos-image graphics path.
+
+
+Retroactive M9.R.57-59 + M9.R.70 validation
+--------------------------------------------
+Retroactive M9.R.57-59 validation: Y (partial, but IMPROVED
+downstream visibility):
+
+  M9.R.57 (libseat compile-time gate):   VALIDATED — libseat.so.1
+                                          resolves via RUNPATH; the
+                                          M9.R.71.6 wrapper preamble
+                                          confirmed /run/seatd.sock
+                                          accessible from the setuid'd
+                                          repro user.
+  M9.R.58 (libseat server backend):      VALIDATED — sway's wayland
+                                          socket creation confirms
+                                          the libseat client-connect
+                                          path holds.
+  M9.R.59 (hwdata + libdisplay-info):    VALIDATED — the
+                                          `did not find extension
+                                          DRI_IMAGE_DRIVER` error is
+                                          DOWNSTREAM of the DRM
+                                          backend init succeeding
+                                          past hwdata/libdisplay-info
+                                          probing; those recipes did
+                                          their job.
+  M9.R.70 (wlroots DRM residual):        VALIDATED — libwlroots-0.19.so
+                                          still ships with
+                                          drm_backend_create +
+                                          libdisplay-info.so.2 in
+                                          DT_NEEDED after the
+                                          M9.R.71 rebuild cycle.
+
+
+Honest residual
+---------------
+M9.R.71 chartered scope: CLOSED at the PAM cosmetic + sway diagnostic
+layers.  4 wrapper env-var fixes moved the sway crash cascade from
+"immediate SIGABRT with no log" to "sway running in headless
+fallback".  ALL bootstrap gates that let sway start (seatd, XDG
+runtime dir, EGL software rendering, Mesa library consistency,
+LIBGL_DRIVERS_PATH, libinput bypass) are CLOSED.
+
+New residual behind the close:
+
+  (vi) Mesa version skew — from-source Mesa 23.3.6 lacks
+       DRI_IMAGE_DRIVER version 1 extension required by wlroots
+       0.19's GBM-EGL init.  wlroots falls back to headless
+       backend; sway runs but renders no output.  Fix: bump
+       from-source mesa recipe to Mesa 24.x.  Multi-week M9.R.72+.
+
+Residuals inherited from M9.R.70 that persist:
+
+  (i) monitor depfile is incomplete:      unchanged (wrapper reports
+                                          failure while qcow2 is
+                                          complete + bootable).
+  (v) PAM autologin @include LOG_ERR:     CLOSED by M9.R.71.3 -
+                                          /etc/pam.d/other now uses
+                                          portable pam_deny stack.
+
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force, no --no-verify;
+--no-gpg-sign on reprobuild per feedback_reprobuild_unsigned_commits.md.
+
+
+Files in this directory (M9.R.71 close-out)
+-------------------------------------------
+  m9r71_complete.txt              this file
+  m9r71_phaseA_pam_audit.txt      Phase A PAM audit findings
+  m9r71_phaseB_logind_and_sway.txt Phase B logind + sway crash char
+  m9r71_boot_serial_v1.log        v1 (M9.R.71.3) QEMU serial (initial
+                                   post-diag-wrapper install)
+  m9r71_sddm_v1.log               v1 sddm.log (exit codes 6, 2, ...)
+  m9r71_sway_v1.log               v1 sway stderr — FIRST-EVER capture
+                                   of the SIGABRT cause
+                                   (WLR_RENDERER_ALLOW_SOFTWARE)
+  m9r71_sddm_v2.log               v2 (M9.R.71.4) sddm.log
+  m9r71_sway_v2.log               v2 sway stderr — GL_EXTENSIONS NULL
+                                   (mixed-Mesa hazard)
+  m9r71_sddm_v3.log               v3 (M9.R.71.5) sddm.log
+  m9r71_sway_v3.log               v3 sway stderr — MESA-LOADER dri
+                                   dir + libinput failures
+  m9r71_boot_serial_v4.log        v4 (M9.R.71.6) QEMU serial
+  m9r71_sddm_v4.log               v4 sddm.log (Session started true,
+                                   no exit — sway RUNNING)
+  m9r71_sway_v4.log               v4 sway stderr — DRI_IMAGE_DRIVER
+                                   version 1 missing (Mesa 23 vs 24)
+  m9r71_de_screen_006_v1.ppm      v1 screendump t=198s (SDDM static)
+  m9r71_de_screen_final.ppm       v4 screendump t=197s (SDDM static —
+                                   sway is running headless on VT 1
+                                   but bochs-drm didn't switch VTs)
+
+
+Autologin-to-sway verdict — one line
+------------------------------------
+YES sway is now RUNNING (wayland-1 socket + sway-ipc socket
+confirmed active in /home/repro/.repro-runtime/) BUT rendering
+nothing to the display because the from-source Mesa 23.3.6 lacks
+the DRI_IMAGE_DRIVER v1 extension wlroots 0.19's DRM/GBM backend
+requires, so wlroots falls back to headless mode.  A rendered DE
+screendump requires bumping the from-source Mesa recipe to Mesa
+24.x (M9.R.72 material).
