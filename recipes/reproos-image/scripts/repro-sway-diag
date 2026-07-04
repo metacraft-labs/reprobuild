@@ -65,7 +65,22 @@ if [ -f "$FROM_SOURCE_MESA/libEGL.so.1" ]; then
   export LD_LIBRARY_PATH
 fi
 export LIBGL_ALWAYS_SOFTWARE=1
-export MESA_LOADER_DRIVER_OVERRIDE=swrast
+# M9.R.78.4 — DROP MESA_LOADER_DRIVER_OVERRIDE=swrast.  In Mesa
+# 24.0.9's gbm/backends/dri/gbm_dri.c:dri_screen_create_sw(), the
+# software-fallback path FIRST tries driver_name="kms_swrast"
+# (swrast=false → the ``gbm_dri_device_extensions`` matcher requires
+# ``__DRI_IMAGE_DRIVER v1``, which ``dri_swrast_kms_driver_extensions``
+# publishes), THEN falls back to driver_name=NULL (pure swrast →
+# ``gbm_swrast_device_extensions`` matcher which does NOT need
+# DRI_IMAGE_DRIVER, matching ``galliumsw_driver_extensions``).
+# The env var ``MESA_LOADER_DRIVER_OVERRIDE=swrast`` short-circuits
+# this into ``dri_screen_create_for_driver(dri, "swrast")`` with a
+# non-NULL driver_name — so gbm requires DRI_IMAGE_DRIVER but
+# swrast_dri.so's pure-swrast extension list does NOT export it.
+# Result: ``did not find extension DRI_IMAGE_DRIVER version 1``.
+# Removing the override lets the default kms_swrast → swrast
+# fallback chain run correctly on QEMU's bochs-drm.
+# export MESA_LOADER_DRIVER_OVERRIDE=swrast  # M9.R.78.4: DROPPED
 export GALLIUM_DRIVER=llvmpipe
 
 # M9.R.71.6 LIBGL_DRIVERS_PATH — validated 2026-07-04: Mesa's
