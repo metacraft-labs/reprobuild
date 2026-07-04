@@ -1098,16 +1098,38 @@ proc validateGraph(g: BuildGraph) =
   # M9.R.75 — R7 (double-write reject) pairwise write-root
   # intersection pass. Spec cite: Filesystem-Policy-And-Observed-
   # Inputs.md §"Double Writes" (lines 246-262): "double writes are
-  # errors" is the shipping default. Two actions whose declaredOutputs
-  # overlap (equality or directory-prefix containment on any pair of
-  # entries) → graph-time error naming both action ids + the
-  # conflicting path.
+  # errors" is the shipping default.
+  #
+  # Dependency-aware relaxation: R7 targets CONCURRENT double writes
+  # (two producers racing for the same output). When action B
+  # transitively depends on action A, they are SEQUENTIAL — B's writes
+  # happen strictly after A's, so a shared write scope is legitimate
+  # sequencing (configure → compile → install all writing under the
+  # same buildDir is the canonical pattern). The check therefore only
+  # fires when neither action reaches the other via ``deps``.
   #
   # Design choice: pairwise O(N*M*K) over the number of
-  # declaredOutputs-carrying actions. Fine for real graphs
-  # (declaredOutputs is populated only by from-source conventions,
-  # so the seq is small). If a graph outgrows this, a trie-based
-  # containment index is a straightforward follow-up.
+  # declaredOutputs-carrying actions with an on-demand transitive-
+  # reachability probe. Fine for real graphs (declaredOutputs is
+  # populated only by from-source conventions, so the seq is small).
+  # If a graph outgrows this, a topo-order + longest-antichain
+  # partitioning is the natural follow-up.
+  proc reachable(fromId, toId: string): bool =
+    var stack: seq[string] = @[fromId]
+    var seen = initHashSet[string]()
+    while stack.len > 0:
+      let cur = stack.pop()
+      if cur == toId:
+        return true
+      if cur in seen:
+        continue
+      seen.incl(cur)
+      if cur in byId:
+        for dep in byId[cur].deps:
+          if dep notin seen:
+            stack.add(dep)
+    false
+
   var declaredIndex: seq[tuple[actionId: string; root: string]] = @[]
   for action in g.actions:
     for raw in action.declaredOutputs:
@@ -1119,15 +1141,24 @@ proc validateGraph(g: BuildGraph) =
     for j in (i + 1) ..< declaredIndex.len:
       if declaredIndex[i].actionId == declaredIndex[j].actionId:
         continue
-      if writeRootsOverlap(declaredIndex[i].root, declaredIndex[j].root):
-        raiseEngine("double-write reject (R7): actions '" &
-          declaredIndex[i].actionId & "' and '" &
-          declaredIndex[j].actionId &
-          "' declare overlapping write roots ('" &
-          declaredIndex[i].root & "' vs '" & declaredIndex[j].root &
-          "'). Spec: Filesystem-Policy-And-Observed-Inputs.md " &
-          "§\"Double Writes\" — default policy is 'double writes are " &
-          "errors'.")
+      if not writeRootsOverlap(declaredIndex[i].root, declaredIndex[j].root):
+        continue
+      # Overlap exists — check for a dep chain in either direction.
+      # If found, treat as sequential (legitimate configure→compile→
+      # install pattern) and skip. Only concurrent writers land as R7.
+      if reachable(declaredIndex[i].actionId, declaredIndex[j].actionId) or
+         reachable(declaredIndex[j].actionId, declaredIndex[i].actionId):
+        continue
+      raiseEngine("double-write reject (R7): concurrent actions '" &
+        declaredIndex[i].actionId & "' and '" &
+        declaredIndex[j].actionId &
+        "' declare overlapping write roots ('" &
+        declaredIndex[i].root & "' vs '" & declaredIndex[j].root &
+        "') with no dependency chain between them. Spec: " &
+        "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\" " &
+        "— default policy is 'double writes are errors'. Add an " &
+        "explicit dependency edge to sequentialise the writes, or " &
+        "redirect one action to a non-overlapping write root.")
 
   var state = initTable[string, int]()
   var stack: seq[string] = @[]
