@@ -3,6 +3,13 @@ set -euo pipefail
 
 mkdir -p build/bin build/lib build/nimcache
 
+if [ -z "${BEARSSL_SRC:-}" ]; then
+  bearssl_store_src="$(find /nix/store -maxdepth 1 -type d -name '*nim-bearssl-*' -print -quit 2>/dev/null || true)"
+  if [ -n "${bearssl_store_src}" ] && [ -f "${bearssl_store_src}/bearssl.nim" ]; then
+    export BEARSSL_SRC="${bearssl_store_src}"
+  fi
+fi
+
 nim_mode_flags=()
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)

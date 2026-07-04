@@ -60,6 +60,8 @@ const
     "reprobuild.workspace-vcs.merge-ff-receipt.v1"
   ForceResetReceiptHeader* =
     "reprobuild.workspace-vcs.force-reset-receipt.v1"
+  ForcePushRebaseReceiptHeader* =
+    "reprobuild.workspace-vcs.force-push-rebase-receipt.v1"
 
 type
   GitVcsOp* = enum
@@ -69,6 +71,7 @@ type
     gvoBranchCreate
     gvoMergeFf
     gvoForceReset
+    gvoForcePushRebase
 
   GitVcsPayload* = object
     ## Compact per-action payload encoded into ``builtinText`` so the
@@ -119,6 +122,7 @@ type
       ## remote head (the ``repo sync -c`` equivalent). EXCLUDED from the
       ## fingerprint: the resolved tree at the pin is unchanged; only the
       ## set of remote-tracking refs differs.
+    baseSha*: string
 
   GitQueryKind* = enum
     gqkHeadSha
@@ -164,6 +168,7 @@ proc opTag(op: GitVcsOp): string =
   of gvoBranchCreate: "branch-create"
   of gvoMergeFf: "merge-ff"
   of gvoForceReset: "force-reset"
+  of gvoForcePushRebase: "force-push-rebase"
 
 proc parseOpTag(tag: string): GitVcsOp =
   case tag
@@ -173,6 +178,7 @@ proc parseOpTag(tag: string): GitVcsOp =
   of "branch-create": gvoBranchCreate
   of "merge-ff": gvoMergeFf
   of "force-reset": gvoForceReset
+  of "force-push-rebase": gvoForcePushRebase
   else:
     raise newException(ValueError,
       "unknown workspace-vcs operation tag: " & tag)
@@ -204,6 +210,7 @@ proc encodePayload(payload: GitVcsPayload): string =
   result.add("clone-filter=" & esc(payload.cloneFilter) & "\n")
   result.add("depth=" & $payload.depth & "\n")
   result.add("single-branch=" & (if payload.singleBranch: "1" else: "0") & "\n")
+  result.add("base-sha=" & esc(payload.baseSha) & "\n")
 
 proc decodePayload(text: string): GitVcsPayload =
   proc unesc(value: string): string =
@@ -254,6 +261,7 @@ proc decodePayload(text: string): GitVcsPayload =
       try: result.depth = parseInt(value.strip())
       except ValueError: result.depth = 0
     of "single-branch": result.singleBranch = value.strip() == "1"
+    of "base-sha": result.baseSha = value
     else:
       # Forward-compatible: ignore unknown keys so a payload written
       # by a newer M2.x build still decodes.
@@ -288,8 +296,10 @@ proc fingerprintPayload(payload: GitVcsPayload): seq[byte] =
   case payload.op
   of gvoClone:
     discard
-  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset:
+  of gvoFetch, gvoSwitch, gvoBranchCreate, gvoMergeFf, gvoForceReset, gvoForcePushRebase:
     result.writeString(payload.repoPath)
+    if payload.op == gvoForcePushRebase:
+      result.writeString(payload.baseSha)
 
 proc actionFingerprint*(payload: GitVcsPayload): ContentDigest =
   blake3DomainDigest(fingerprintPayload(payload), hdActionFingerprint)
@@ -456,6 +466,17 @@ proc renderForceResetReceipt(payload: GitVcsPayload; headSha: string): string =
   result.add("kind\t" & WorkspaceVcsKind & "\n")
   result.add("operation\tforce-reset\n")
   result.add("revision\t" & payload.revision & "\n")
+  result.add("repo-path\t" & payload.repoPath & "\n")
+  result.add("head-sha\t" & headSha & "\n")
+  result.add("git-version\t" & payload.identityVersion & "\n")
+  result.add("git-identity\t" & payload.identityDigestHex & "\n")
+
+proc renderForcePushRebaseReceipt(payload: GitVcsPayload; headSha: string): string =
+  result = ForcePushRebaseReceiptHeader & "\n"
+  result.add("kind\t" & WorkspaceVcsKind & "\n")
+  result.add("operation\tforce-push-rebase\n")
+  result.add("revision\t" & payload.revision & "\n")
+  result.add("base-sha\t" & payload.baseSha & "\n")
   result.add("repo-path\t" & payload.repoPath & "\n")
   result.add("head-sha\t" & headSha & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
@@ -764,6 +785,59 @@ proc executeForceReset(payload: GitVcsPayload;
   writeReceipt(receiptPath, receipt)
   succeeded()
 
+proc executeForcePushRebase(payload: GitVcsPayload;
+                            cwd, receiptPath: string): ActionResult =
+  ## Cherry-pick locally authored commits since the force-pushed base Sha
+  ## onto the new remote tip.
+  let target = absoluteRepoPath(payload, cwd)
+  if not dirExists(target / ".git"):
+    return failed("force-push-rebase-target-missing",
+      "force-push-rebase target is not a git working tree: " & target)
+  if payload.baseSha.len == 0:
+    return failed("force-push-rebase-no-base-sha",
+      "force-push-rebase requires a force-pushed base SHA")
+  
+  let cleanRes = workingTreeIsClean(payload, target)
+  if not cleanRes.ok:
+    return failed("force-push-rebase-status-probe-failed", cleanRes.diagnostic)
+  if not cleanRes.clean:
+    return failed("dirty",
+      "git force-push-rebase refused: working tree is dirty at " & target)
+
+  # 1. Retrieve the list of commits in the range <baseSha>..HEAD in chronological order (oldest first)
+  let listRes = runGit(payload,
+    ["-C", target, "log", "--format=%H", "--reverse", payload.baseSha & "..HEAD"])
+  if listRes.exitCode != 0:
+    return failed("force-push-rebase-log-failed",
+      "git log failed to find commits: " & listRes.output.trimmed)
+  
+  let commitsToCherryPick = listRes.output.strip().splitLines()
+
+  # 2. Reset the branch to the remote tracking tip
+  let remoteRef = "refs/remotes/origin/" & payload.branchName
+  let resetRes = runGit(payload,
+    ["-C", target, "reset", "--hard", remoteRef])
+  if resetRes.exitCode != 0:
+    return failed("force-push-rebase-reset-failed",
+      "git reset --hard " & remoteRef & " failed: " & resetRes.output.trimmed)
+
+  # 3. Cherry-pick each of the local commits in order
+  for rawCommit in commitsToCherryPick:
+    let commit = rawCommit.strip()
+    if commit.len == 0: continue
+    let cpRes = runGit(payload, ["-C", target, "cherry-pick", commit])
+    if cpRes.exitCode != 0:
+      discard runGit(payload, ["-C", target, "cherry-pick", "--abort"])
+      return failed("cherry-pick-failed",
+        "git cherry-pick " & commit & " failed: " & cpRes.output.trimmed)
+
+  let headRes = resolveHeadSha(payload, target)
+  if not headRes.ok:
+    return failed("force-push-rebase-head-probe-failed", headRes.diagnostic)
+  let receipt = renderForcePushRebaseReceipt(payload, headRes.sha)
+  writeReceipt(receiptPath, receipt)
+  succeeded()
+
 type
   WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Callback shape used by sibling VCS backends (currently
@@ -863,6 +937,8 @@ proc executeWorkspaceVcsAction(action: BuildAction): ActionResult {.gcsafe.} =
     result = executeMergeFf(payload, action.cwd, receiptPath)
   of gvoForceReset:
     result = executeForceReset(payload, action.cwd, receiptPath)
+  of gvoForcePushRebase:
+    result = executeForcePushRebase(payload, action.cwd, receiptPath)
   result.id = action.id
   # ``executeBuiltinAction`` wraps the returned ``ActionResult`` and
   # re-sets ``dependencyPolicyKind`` from the action's declared
@@ -883,7 +959,8 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
                   remoteUrl, remoteName, branchName, revision,
                   repoPath, receiptPath: string;
                   referencePath = "";
-                  cloneFilter = ""; depth = 0; singleBranch = false): GitVcsPayload =
+                  cloneFilter = ""; depth = 0; singleBranch = false;
+                  baseSha = ""): GitVcsPayload =
   GitVcsPayload(
     op: op,
     remoteUrl: remoteUrl,
@@ -898,7 +975,8 @@ proc buildPayload(identity: GitToolIdentity; op: GitVcsOp;
     referencePath: referencePath,
     cloneFilter: cloneFilter,
     depth: depth,
-    singleBranch: singleBranch)
+    singleBranch: singleBranch,
+    baseSha: baseSha)
 
 proc gitCloneAction*(id: string; identity: GitToolIdentity;
                      remoteUrl, repoPath, receiptPath: string;
@@ -1031,6 +1109,20 @@ proc gitForceResetAction*(id: string; identity: GitToolIdentity;
   ## caching its receipt would be unsound.
   let payload = buildPayload(identity, gvoForceReset, "", "",
     "", revision, repoPath, receiptPath)
+  result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
+    deps = deps, outputs = @[receiptPath], cacheable = cacheable,
+    weakFingerprint = actionFingerprint(payload),
+    text = encodePayload(payload))
+
+proc gitForcePushRebaseAction*(id: string; identity: GitToolIdentity;
+                              branchName, baseSha, repoPath, receiptPath: string;
+                              cwd = ""; deps: openArray[string] = [];
+                              cacheable = false): BuildAction =
+  ## Construct a force-push rebase action. The executor runs
+  ## executeForcePushRebase, which resets the branch to the remote branch tip
+  ## and cherry-picks the locally authored commits since `baseSha`.
+  let payload = buildPayload(identity, gvoForcePushRebase, "", "origin",
+    branchName, "", repoPath, receiptPath, baseSha = baseSha)
   result = builtinAction(bakWorkspaceVcs, id, cwd = cwd,
     deps = deps, outputs = @[receiptPath], cacheable = cacheable,
     weakFingerprint = actionFingerprint(payload),

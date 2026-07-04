@@ -49,7 +49,6 @@ import bearssl/[ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
 import bearssl/abi/bearssl_hash as bsslHashAbi
 import bearssl/abi/bearssl_x509 as bsslX509Abi
-import bearssl/abi/consttypes as bsslConst
 
 import nimcrypto/sysrand
 
@@ -404,7 +403,7 @@ proc sha256Digest(msg: openArray[byte]): array[32, byte] =
   var ctx: bsslHashAbi.Sha256Context
   bsslHashAbi.sha256Init(ctx)
   if msg.len > 0:
-    bsslHashAbi.sha256Update(ctx, unsafeAddr msg[0], csize_t(msg.len))
+    bsslHashAbi.sha224Update(ctx, unsafeAddr msg[0], uint(msg.len))
   bsslHashAbi.sha256Out(ctx, addr result[0])
 
 proc signTbsAsn1(kp: PeerKeypair; tbs: openArray[byte]): seq[byte] =
@@ -559,10 +558,6 @@ proc generateCaCert*(
 # Cert parsing (round-trip + trust-anchor loading).
 # ---------------------------------------------------------------------------
 
-proc dummyAppendDn(ctx: pointer; buf: bsslConst.ConstPointer;
-                   len: csize_t) {.cdecl.} =
-  discard
-
 type
   ParsedCertInfo = object
     publicKey: PublicKeyBytes
@@ -583,7 +578,12 @@ proc parseCertDer(der: openArray[byte]): ParsedCertInfo =
   ## EC public key + validity window. Raises `CertParseError` on any
   ## decoder error.
   var ctx: bsslX509Abi.X509DecoderContext
-  bsslX509Abi.x509DecoderInit(ctx, dummyAppendDn, nil)
+  # We do not need BearSSL to copy the subject DN here; the public key and
+  # validity fields are exposed directly on the decoder context, and CN parsing
+  # is handled by `findSubjectDn` below. Passing nil also avoids the packaged
+  # nim-bearssl binding's callback-size mismatch on macOS, where C `size_t` is
+  # not Nim `uint`.
+  bsslX509Abi.x509DecoderInit(ctx, nil, nil)
   if der.len > 0:
     bsslX509Abi.x509DecoderPush(ctx, unsafeAddr der[0], csize_t(der.len))
   if not ctx.decoded:

@@ -19908,6 +19908,7 @@ type
     refusalReason*: string
     executionStatus*: string
     executionDiagnostic*: string
+    forcePushedBaseSha*: string
 
   WorkspaceSyncPlanEntry* = object
     ## RA-27 — one announced-before-acting plan line per participating repo.
@@ -20042,6 +20043,7 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["refusalReason"] = %entry.refusalReason
     obj["executionStatus"] = %entry.executionStatus
     obj["executionDiagnostic"] = %entry.executionDiagnostic
+    obj["forcePushedBaseSha"] = %entry.forcePushedBaseSha
     repos.add(obj)
   result["repos"] = repos
   var materialized = newJArray()
@@ -20143,6 +20145,7 @@ type
     noInterleaved: bool  ## ``--no-interleaved``: explicit fetch→checkout barrier.
     failFast: bool       ## ``--fail-fast``: stop on first fetch failure.
     forceSync: bool      ## ``--force-sync``: OVERWRITE divergent/dirty checkouts (RA-16).
+    rebaseOnForcePush: bool ## ``--rebase-on-force-push``: rebase local commits on force push.
     assumeYes: bool      ## ``--yes``/``--force``: skip the destructive-action confirmation.
     dryRun: bool         ## RA-27 ``--dry-run``: print the plan and exit WITHOUT mutating.
     json: bool           ## RA-27 ``--json``: machine surface (plan + per-repo results).
@@ -20199,6 +20202,7 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## the project name to find ``projects/<name>.toml``.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
+  result.rebaseOnForcePush = true
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -20236,6 +20240,10 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       result.failFast = true
     elif arg == "--force-sync":
       result.forceSync = true
+    elif arg == "--rebase-on-force-push":
+      result.rebaseOnForcePush = true
+    elif arg == "--no-rebase-on-force-push":
+      result.rebaseOnForcePush = false
     elif arg == "--yes" or arg == "--force":
       result.assumeYes = true
     elif arg == "--dry-run":
@@ -21812,7 +21820,8 @@ proc commitReachableLocally(identity: GitToolIdentity;
 
 proc observeRepoForSync(identity: GitToolIdentity;
                         repoPath: string;
-                        resolved: ResolvedRepo): RepoSyncObservation =
+                        resolved: ResolvedRepo;
+                        forcePushedSHAs: HashSet[string]): RepoSyncObservation =
   ## Gather everything the M10 planner needs about ONE checkout. A
   ## missing directory short-circuits with ``exists=false``; every
   ## other observation field is filled in best-effort (a failed probe
@@ -21877,6 +21886,17 @@ proc observeRepoForSync(identity: GitToolIdentity;
       let ancestorRes = gitRunPlain(identity, ["-C", repoPath,
         "merge-base", "--is-ancestor", result.headSha, result.remoteBranchTip])
       result.hasUnpublishedCommits = ancestorRes.code != 0
+
+  if result.currentBranch.len > 0 and forcePushedSHAs.len > 0:
+    let remoteRef = "refs/remotes/origin/" & result.currentBranch
+    let logRes = gitRunPlain(identity, ["-C", repoPath, "log", "--format=%H", remoteRef & "..HEAD"])
+    if logRes.code == 0:
+      for rawSha in logRes.output.strip().splitLines():
+        let sha = rawSha.strip()
+        if sha.len > 0 and sha in forcePushedSHAs:
+          result.hasForcePushedCommits = true
+          result.forcePushedBaseSha = sha
+          break
 
 # ---- RA-5c: parallel fetch / checkout phases ------------------------------
 #
@@ -21964,7 +21984,7 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   let idSeg = safeRepoIdSegment(resolved.name) & "-" & $repoIdx
   case decision.action
   of saNone:
-    if decision.syncCase in {scDirty, scLocallyUnpublished}:
+    if decision.syncCase in {scDirty, scLocallyUnpublished, scForcePushRebase}:
       return (false, BuildAction(), "refused", decision.refusalReason)
     return (false, BuildAction(), "noop", "")
   of saClone:
@@ -22028,6 +22048,16 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
       repoPath = resolved.path,
       receiptPath = receiptRel,
       cacheable = false)
+    a.cwd = workspaceRoot
+    return (true, a, "", "")
+  of saForcePushRebase:
+    let receiptRel = ".repro" / "workspace" / "receipts" /
+      ("sync-force-push-rebase-" & idSeg & ".receipt")
+    var a = gitForcePushRebaseAction("workspace-sync-force-push-rebase-" & idSeg, identity,
+      branchName = decision.branch,
+      baseSha = decision.forcePushedBaseSha,
+      repoPath = resolved.path,
+      receiptPath = receiptRel)
     a.cwd = workspaceRoot
     return (true, a, "", "")
 
@@ -22189,6 +22219,21 @@ proc forceSyncGuard(args: WorkspaceSyncArgs;
   of ddConfirmed: fsgConfirmed
   of ddRefusedNonTty: fsgRefusedNonTty
   of ddDeclined: fsgDeclined
+
+proc loadForcePushedCommits(workspaceRoot: string): JsonNode =
+  let path = workspaceRoot / ".repro" / "workspace" / "force-pushes.json"
+  if fileExists(path):
+    try:
+      return parseFile(path)
+    except CatchableError:
+      discard
+  newJObject()
+
+proc saveForcePushedCommits(workspaceRoot: string; node: JsonNode) =
+  let dir = workspaceRoot / ".repro" / "workspace"
+  createDir(dir)
+  let path = dir / "force-pushes.json"
+  writeFile(path, pretty(node, indent = 2) & "\n")
 
 proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
@@ -22394,6 +22439,12 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       return repo.revision
     lockedShasByPath.getOrDefault(repo.path)
 
+  var oldRemoteTips = newSeq[string](resolved.repos.len)
+  for repoIdx, repo in resolved.repos:
+    let repoPath = args.workspaceRoot / repo.path
+    if dirExists(repoPath / ".git") and repo.revision.len > 0 and not looksLikeSha(repo.revision):
+      oldRemoteTips[repoIdx] = revParse(identity, repoPath, "refs/remotes/origin/" & repo.revision)
+
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
   var optimizedFetchSkips = 0
@@ -22466,6 +22517,38 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       stderr.writeLine("workspace sync: fetched " & $fetchOk & "/" &
         $fetchActions.len & " repo(s)")
 
+  # Detect force pushes after parallel fetch
+  var forcePushes = loadForcePushedCommits(args.workspaceRoot)
+  var forcePushesUpdated = false
+  for repoIdx, repo in resolved.repos:
+    let repoPath = args.workspaceRoot / repo.path
+    if oldRemoteTips[repoIdx].len > 0:
+      let newTip = revParse(identity, repoPath, "refs/remotes/origin/" & repo.revision)
+      if newTip.len > 0 and newTip != oldRemoteTips[repoIdx]:
+        let ancestorRes = gitRunPlain(identity, ["-C", repoPath,
+          "merge-base", "--is-ancestor", oldRemoteTips[repoIdx], newTip])
+        if ancestorRes.code != 0:
+          # A force push occurred! Query the superseded commits
+          let logRes = gitRunPlain(identity, ["-C", repoPath,
+            "log", "--format=%H", newTip & ".." & oldRemoteTips[repoIdx]])
+          if logRes.code == 0:
+            let forcePushedSHAs = logRes.output.strip().splitLines()
+            if not forcePushes.hasKey(repo.path):
+              forcePushes[repo.path] = newJArray()
+            for rawSha in forcePushedSHAs:
+              let sha = rawSha.strip()
+              if sha.len > 0:
+                var exists = false
+                for existing in forcePushes[repo.path]:
+                  if existing.getStr() == sha:
+                    exists = true
+                    break
+                if not exists:
+                  forcePushes[repo.path].add(%sha)
+                  forcePushesUpdated = true
+  if forcePushesUpdated:
+    saveForcePushedCommits(args.workspaceRoot, forcePushes)
+
   # Step 3b: observe each repo (now with fresh remote-tracking refs).
   # Read the workspace metadata once and propagate it onto every
   # observation so the M16 planner arm has the started flag + the
@@ -22485,13 +22568,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   var observations: seq[RepoSyncObservation]
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    var obs = observeRepoForSync(identity, repoPath, repo)
+    var repoForcePushed = initHashSet[string]()
+    if forcePushes.hasKey(repo.path):
+      for val in forcePushes[repo.path]:
+        repoForcePushed.incl(val.getStr())
+    var obs = observeRepoForSync(identity, repoPath, repo, repoForcePushed)
     obs.workspaceFeatureStarted = featureStarted
     obs.workspaceBranch = workspaceBranchName
     observations.add(obs)
 
   # Step 4: planner.
-  let planned = planSync(resolved.repos, observations)
+  let planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)
 
   # Step 5 (RA-5c): checkout phase. Collect every repo's mutating action
   # (clone / merge-ff / attach) into ONE graph and run it once. No-op /
@@ -22764,7 +22851,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       message: message,
       refusalReason: (if wasForceReset: "" else: decision.refusalReason),
       executionStatus: status,
-      executionDiagnostic: diagnostic))
+      executionDiagnostic: diagnostic,
+      forcePushedBaseSha: decision.forcePushedBaseSha))
 
   # RA-18: materialize copyfile/linkfile directives AFTER the checkout
   # phase, for every selected repo whose working tree exists. Re-applied on

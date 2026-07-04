@@ -7582,6 +7582,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_workspace_sync_force_push.nim",
+    binary: "build/test-bin/t_workspace_sync_force_push",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_workspace_vcs_clone_cacheable.nim",
     binary: "build/test-bin/t_workspace_vcs_clone_cacheable",
     defines: @[],

@@ -16,6 +16,31 @@ set -euo pipefail
 
 mkdir -p build/test-bin build/nimcache test-logs
 
+# Local Nix builds of repro link libclingo/libzstd dynamically. Make the
+# freshly bootstrapped ./build/bin/repro usable for every test-run invocation,
+# including the repro build collections below.
+CLINGO_LIB="${CLINGO_LIB:-$(find /nix/store -maxdepth 1 -type d -name '*clingo-5.*' -print -quit 2>/dev/null)/lib}"
+ZSTD_LIB="${ZSTD_LIB:-$(find /nix/store -maxdepth 1 -type d -name '*zstd-1.*' -print -quit 2>/dev/null)/lib}"
+if [[ -d "${CLINGO_LIB}" && -d "${ZSTD_LIB}" ]]; then
+  export DYLD_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${DYLD_LIBRARY_PATH:-}"
+  export DYLD_FALLBACK_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="${CLINGO_LIB}:${ZSTD_LIB}:${LD_LIBRARY_PATH:-}"
+fi
+if [[ -z "${REPRO_TEST_ADAPTERS_SRC:-}" &&
+      -f "../reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim" ]]; then
+  export REPRO_TEST_ADAPTERS_SRC="$(cd ../reprobuild-test-adapters/src && pwd)"
+fi
+if [[ -z "${REPRO_CT_TEST_RUNNER_SRC:-}" &&
+      -f "../reprobuild-ct-test-runner/libs/ct_test_runner_adapter/src/ct_test_runner_adapter.nim" ]]; then
+  export REPRO_CT_TEST_RUNNER_SRC="$(cd ../reprobuild-ct-test-runner && pwd)"
+fi
+if [[ -z "${BEARSSL_SRC:-}" ]]; then
+  BEARSSL_SRC="$(find /nix/store -maxdepth 1 -type d -name '*nim-bearssl-*' -print -quit 2>/dev/null || true)"
+  if [[ -n "${BEARSSL_SRC}" ]]; then
+    export BEARSSL_SRC
+  fi
+fi
+
 # Provision the NDE0-A jammy .deb fixtures (sha-pinned download, no
 # binaries vendored into git) so t_nde0a_apt_jammy has its inputs. The
 # step is idempotent, Linux-only, and best-effort — a network failure
@@ -106,8 +131,65 @@ if [[ -d "../reprobuild-cmake" ]]; then
     printf 'Building prerequisite sibling: ../reprobuild-cmake (CMake fork)\n' >&2
     cmake_jobs="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
     if (( cmake_jobs > 16 )); then cmake_jobs=16; fi
+    cmake_generator="Unix Makefiles"
+    if command -v ninja >/dev/null 2>&1; then
+      cmake_generator="Ninja"
+    fi
+    cmake_cc="$(command -v cc)"
+    cmake_cxx="$(command -v c++)"
+    cmake_osx_sysroot=""
+    cmake_apple_framework_flags=()
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      cmake_osx_sysroot="$(find /nix/store -maxdepth 7 -path '*/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk' -type d -print 2>/dev/null | LC_ALL=C sort | tail -n 1 || true)"
+      if [[ -z "${cmake_osx_sysroot}" ]]; then
+        echo "reprobuild-cmake build requires a macOS SDK in /nix/store" >&2
+        exit 1
+      fi
+      cmake_apple_framework_dir="${cmake_osx_sysroot}/System/Library/Frameworks"
+      if [[ -d "${cmake_apple_framework_dir}" ]]; then
+        cmake_apple_framework_flags=(
+          "-DCMAKE_C_FLAGS=-F${cmake_apple_framework_dir}"
+          "-DCMAKE_CXX_FLAGS=-F${cmake_apple_framework_dir}"
+          "-DCMAKE_EXE_LINKER_FLAGS=-F${cmake_apple_framework_dir}"
+        )
+      fi
+    fi
+    iconv_header="$(find /nix/store -maxdepth 3 -path '*/include/iconv.h' -print -quit 2>/dev/null || true)"
+    iconv_args=()
+    if [[ -n "${iconv_header}" ]]; then
+      iconv_include_dir="$(dirname "${iconv_header}")"
+      iconv_prefix="${iconv_include_dir%/include}"
+      iconv_lib="${iconv_prefix}/lib/libiconv.dylib"
+      if [[ ! -f "${iconv_lib}" ]]; then
+        iconv_lib="$(find /nix/store -maxdepth 3 -path '*/lib/libiconv.dylib' -print -quit 2>/dev/null || true)"
+      fi
+      if [[ -n "${iconv_lib}" && -f "${iconv_lib}" ]]; then
+        iconv_args=(
+          "-DICONV_INCLUDE_DIR=${iconv_include_dir}"
+          "-DLIBICONV_PATH=${iconv_lib}"
+        )
+      fi
+    fi
     (cd ../reprobuild-cmake \
-        && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        && if [[ -f build/CMakeCache.txt ]] && \
+             { ! grep -q "^CMAKE_GENERATOR:INTERNAL=${cmake_generator}$" build/CMakeCache.txt || \
+               ! grep -q "^CMAKE_C_COMPILER:FILEPATH=${cmake_cc}$" build/CMakeCache.txt || \
+               ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${cmake_cxx}$" build/CMakeCache.txt || \
+               { [[ -n "${cmake_osx_sysroot}" ]] && ! grep -q "^CMAKE_OSX_SYSROOT:.*=${cmake_osx_sysroot}$" build/CMakeCache.txt; } || \
+               { [[ -n "${cmake_apple_framework_dir:-}" ]] && ! grep -q "^CMAKE_CXX_FLAGS:STRING=-F${cmake_apple_framework_dir}$" build/CMakeCache.txt; } || \
+               ! grep -q "^ENABLE_IPV6:.*=OFF$" build/CMakeCache.txt; }; then \
+             rm -rf build; \
+           fi \
+        && cmake -S . -B build -G "${cmake_generator}" \
+             -DCMAKE_BUILD_TYPE=Release \
+             -DCMAKE_C_COMPILER="${cmake_cc}" \
+             -DCMAKE_CXX_COMPILER="${cmake_cxx}" \
+             ${cmake_osx_sysroot:+-DCMAKE_OSX_SYSROOT="${cmake_osx_sysroot}"} \
+             "${cmake_apple_framework_flags[@]}" \
+             -DCMAKE_USE_SYSTEM_CURL=OFF \
+             -DCMAKE_USE_SYSTEM_ZLIB=OFF \
+             -DENABLE_IPV6=OFF \
+             "${iconv_args[@]}" \
         && cmake --build build --target cmake --parallel "${cmake_jobs}") \
         > test-logs/reprobuild-cmake-build.log 2>&1 || {
       echo "reprobuild-cmake build failed; see test-logs/reprobuild-cmake-build.log" >&2

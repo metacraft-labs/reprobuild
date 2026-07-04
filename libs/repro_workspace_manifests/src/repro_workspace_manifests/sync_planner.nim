@@ -57,6 +57,7 @@ type
     scLocallyUnpublished
     scDivergentFeatureBranch
     scMissingCheckout
+    scForcePushRebase
 
   SyncActionKind* = enum
     ## Discriminator for what the dispatcher should do for a given repo
@@ -67,6 +68,7 @@ type
     saFetchFastForward
     saAttachBranch
     saClone
+    saForcePushRebase
 
   RepoSyncObservation* = object
     ## Everything the planner needs to know about ONE local checkout.
@@ -121,6 +123,8 @@ type
     hasUnpublishedCommits*: bool
     workspaceFeatureStarted*: bool
     workspaceBranch*: string
+    hasForcePushedCommits*: bool
+    forcePushedBaseSha*: string
 
   RepoSyncDecision* = object
     ## One repo's classification + chosen mutating action. The
@@ -137,6 +141,7 @@ type
     branch*: string
     message*: string
     refusalReason*: string
+    forcePushedBaseSha*: string
 
   SyncPlan* = object
     ## The mutating actions the dispatcher must enqueue. Position in
@@ -163,6 +168,7 @@ proc syncCaseTag*(syncCase: SyncCase): string =
   of scLocallyUnpublished: "locally_unpublished"
   of scDivergentFeatureBranch: "divergent_feature_branch"
   of scMissingCheckout: "missing_checkout"
+  of scForcePushRebase: "force_push_rebase"
 
 proc syncActionTag*(action: SyncActionKind): string =
   ## Stable identifier for the planner's action enum, used as the JSON
@@ -173,6 +179,7 @@ proc syncActionTag*(action: SyncActionKind): string =
   of saFetchFastForward: "fetch_fast_forward"
   of saAttachBranch: "attach_branch"
   of saClone: "clone"
+  of saForcePushRebase: "force_push_rebase"
 
 proc sameSha(a, b: string): bool =
   ## SHA equality that tolerates an abbreviated prefix on either side.
@@ -187,7 +194,8 @@ proc sameSha(a, b: string): bool =
   a.startsWith(b) or b.startsWith(a)
 
 proc classifyRepoState*(resolved: ResolvedRepo;
-                        observation: RepoSyncObservation): RepoSyncDecision =
+                        observation: RepoSyncObservation;
+                        rebaseOnForcePush: bool = true): RepoSyncDecision =
   ## Map ``(resolved, observation)`` to one of the seven canonical
   ## cases. The decision logic deliberately runs in a fixed priority
   ## order:
@@ -229,6 +237,20 @@ proc classifyRepoState*(resolved: ResolvedRepo;
       resolved.path & " stash' (or 'git -C " & resolved.path &
       " commit -a') then 'repro sync', or 'repro sync --force-sync' to discard"
     result.message = "refusing to sync dirty checkout at '" & resolved.path & "'"
+    return
+
+  if observation.hasForcePushedCommits:
+    result.syncCase = scForcePushRebase
+    if not rebaseOnForcePush:
+      result.action = saNone
+      result.refusalReason = "remote branch was force-pushed; refused — " &
+        "run 'repro sync --rebase-on-force-push' to rebase your local commits " &
+        "on the new history, or 'repro sync --force-sync' to discard local changes"
+      result.message = "refusing to sync force-pushed checkout at '" & resolved.path & "'"
+    else:
+      result.action = saForcePushRebase
+      result.forcePushedBaseSha = observation.forcePushedBaseSha
+      result.message = "cherry-picking locally authored commits on top of force-pushed branch at '" & resolved.path & "'"
     return
 
   # Locally-unpublished commits beat the fast-forward / divergence
@@ -318,7 +340,8 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   return
 
 proc planSync*(resolved: openArray[ResolvedRepo];
-               observations: openArray[RepoSyncObservation]):
+               observations: openArray[RepoSyncObservation];
+               rebaseOnForcePush: bool = true):
               tuple[plan: SyncPlan; report: SyncReport] =
   ## Drive ``classifyRepoState`` over every (resolved, observation)
   ## pair. ``resolved.len`` MUST equal ``observations.len`` — the
@@ -330,6 +353,6 @@ proc planSync*(resolved: openArray[ResolvedRepo];
       "planSync requires one observation per resolved repo (got " &
         $resolved.len & " repos and " & $observations.len & " observations)")
   for i, repo in resolved:
-    let decision = classifyRepoState(repo, observations[i])
+    let decision = classifyRepoState(repo, observations[i], rebaseOnForcePush)
     result.plan.decisions.add(decision)
     result.report.decisions.add(decision)
