@@ -5758,6 +5758,14 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim",
+    binary: "build/test-bin/t_cross_repo_nim_library_src_threaded_onto_consumer_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_d1_pythonunittest_resolves_in_path_mode.nim",
     binary: "build/test-bin/t_d1_pythonunittest_resolves_in_path_mode",
     defines: @[],

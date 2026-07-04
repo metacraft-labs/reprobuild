@@ -51,6 +51,12 @@ type
   InterfaceLibrary* = object
     name*: string
     kind*: LibraryKind
+    exportedPath*: string
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the producer-relative
+      ## Nim library source root a consumer threads onto its ``nim c --path:``.
+      ## Empty ( = convention default ``"src"``) so existing producers work
+      ## unchanged; carried across lock-pinned fetches on the interface so a
+      ## non-standard layout is known from the fetched interface alone.
     location*: SourceLocation
 
   InterfaceNixProvisioning* = object
@@ -208,8 +214,17 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 10'u16
-    ## v10 (current): adds ``InterfaceTarballProvisioning.cpu`` /
+  EnvelopeVersion = 11'u16
+    ## v11 (current): Cross-Repo-Source-Consumption SC-11 (§4.2a.4) adds
+    ##                ``InterfaceLibrary.exportedPath`` — the producer-relative
+    ##                Nim library source root threaded onto a consumer's
+    ##                ``nim c --path:``. Encoded as one string appended AFTER
+    ##                ``kind`` and BEFORE ``location`` in ``writeLibrary``. v10
+    ##                (and earlier) payloads decode with an empty
+    ##                ``exportedPath`` ( = convention default ``"src"``), so
+    ##                existing producers round-trip unchanged; ``readLibrary``
+    ##                gates the read on ``version >= 11``.
+    ## v10: adds ``InterfaceTarballProvisioning.cpu`` /
     ##                ``InterfaceTarballProvisioning.os`` per-platform
     ##                target fields. Encoded as two strings appended
     ##                AFTER ``lockIdentity`` and BEFORE ``location`` in
@@ -445,14 +460,22 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
 proc writeLibrary(outp: var seq[byte]; lib: InterfaceLibrary) =
   outp.writeString(lib.name)
   outp.writeByte(byte(ord(lib.kind)))
+  # v11 (SC-11): ``exportedPath`` appended AFTER ``kind`` and BEFORE
+  # ``location``; v<11 readers never reach it (gated on ``version >= 11``).
+  outp.writeString(lib.exportedPath)
   outp.writeLocation(lib.location)
 
-proc readLibrary(bytes: openArray[byte]; pos: var int): InterfaceLibrary =
+proc readLibrary(bytes: openArray[byte]; pos: var int;
+                 version = EnvelopeVersion): InterfaceLibrary =
   result.name = readString(bytes, pos)
   let kind = readByte(bytes, pos)
   if kind > byte(ord(lkHeaderOnly)):
     raiseEnvelopeError(eeMalformed, "invalid interface library kind")
   result.kind = LibraryKind(kind)
+  # v11 (SC-11): ``exportedPath``. v<11 envelopes have no such field — leave
+  # it empty (the splice seam then applies the ``"src"`` convention default).
+  if version >= 11'u16:
+    result.exportedPath = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeNixProvisioning(outp: var seq[byte];
@@ -639,7 +662,7 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     let libCount = int(readU32Le(bytes, pos))
     result.publicLibraries = newSeq[InterfaceLibrary](libCount)
     for i in 0 ..< libCount:
-      result.publicLibraries[i] = readLibrary(bytes, pos)
+      result.publicLibraries[i] = readLibrary(bytes, pos, version)
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
@@ -1011,6 +1034,7 @@ proc toProjectInterface*(pkg: PackageDef;
     result.publicLibraries.add(InterfaceLibrary(
       name: lib.name,
       kind: lib.kind,
+      exportedPath: lib.exportedPath,
       location: SourceLocation(file: lib.sourceFile, line: lib.sourceLine)))
 
 proc sameSourceFile(a, b: string): bool =

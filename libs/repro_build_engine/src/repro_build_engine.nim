@@ -728,6 +728,14 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    nimPathDirs*: seq[string]
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a) — the PARALLEL Nim
+      ## language channel. Each dir is a sibling Nim ``library``'s importable
+      ## source root; the engine prepends a ``--path:<dir>`` compiler FLAG onto
+      ## the consumer's ``nim c`` argv for each (see ``applyNimPathArgs``),
+      ## rather than an env var as for the C/C++ channels above. The from-source
+      ## resolver populates it per-ref; every other resolver leaves it empty
+      ## (their imports resolve through nim.cfg / the standard layout).
     cachePlatformTag*: string
       ## DSL-port M9.R.7. The platform-tag the materialization cache
       ## lookup keyed against (``"native"`` on a native build;
@@ -2529,6 +2537,12 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    nimPathDirs*: seq[string]
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the accumulated Nim
+      ## library source roots. Unlike the four C/C++ lists above (each threaded
+      ## onto a dedicated env var), these are projected onto the action's
+      ## ``nim c`` argv as ``--path:<dir>`` compiler flags via
+      ## ``applyNimPathArgs`` at launch, through the SAME aux-projection seam.
 
 proc collectResolvedAuxPaths(action: BuildAction;
                              resolver: ToolIdentityResolver):
@@ -2556,6 +2570,7 @@ proc collectResolvedAuxPaths(action: BuildAction;
   var seenCmakePrefix: HashSet[string] = initHashSet[string]()
   var seenInclude: HashSet[string] = initHashSet[string]()
   var seenLib: HashSet[string] = initHashSet[string]()
+  var seenNimPath: HashSet[string] = initHashSet[string]()
   for i, refName in action.toolIdentityRefs:
     let kind = kindForRef(action, i)
     let resolved = resolver(refName, kind)
@@ -2578,6 +2593,12 @@ proc collectResolvedAuxPaths(action: BuildAction;
       if d.len > 0 and d notin seenLib:
         seenLib.incl(d)
         result.libDirs.add(d)
+    # SC-11 (§4.2a.3): accumulate the Nim library source roots in-order,
+    # deduped, exactly as the four C/C++ lists above.
+    for d in r.nimPathDirs:
+      if d.len > 0 and d notin seenNimPath:
+        seenNimPath.incl(d)
+        result.nimPathDirs.add(d)
 
 proc applyResolvedAuxPathsTable*(env: StringTableRef;
                                  paths: ResolvedAuxPaths) =
@@ -2624,6 +2645,77 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", paths.libDirs)
   when defined(macosx):
     result = prependEnvDirsToArgvEnv(result, "DYLD_LIBRARY_PATH", paths.libDirs)
+
+proc applyNimPathArgs*(argv: openArray[string];
+                       nimPathDirs: openArray[string]): seq[string] =
+  ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
+  ## channel's argv projection. Where the C/C++ channels prepend an ENV VAR,
+  ## the Nim channel prepends a compiler FLAG: for each sibling Nim library
+  ## source root in ``nimPathDirs`` it inserts a ``--path:<dir>`` argument onto
+  ## the consumer's ``nim c`` invocation so ``import <sibmod>`` resolves
+  ## through the threaded search path — the same aux-projection seam, driven
+  ## off the same ``ProducerAuxPaths.nimPathDirs``.
+  ##
+  ## The insert is gated on the argv being a Nim compile: the command token
+  ## (``argv[base]``) has basename ``nim`` (the standard ``nim c ...`` /
+  ## ``buildNimUnittest`` shape) and a compile subcommand token (``c``/``cc``/
+  ## ``compile``/``compileToC``/``c++``/``cpp``/``js``/``e``) appears at
+  ## ``argv[base+1]``. The flags are inserted immediately AFTER that subcommand
+  ## token (Nim accepts options anywhere after the command, so this is
+  ## order-safe against the trailing ``--out:``/positional source). An empty
+  ## ``nimPathDirs`` or a non-Nim argv is the identity transform, so every
+  ## non-Nim-library-consumer action is byte-for-byte unchanged.
+  ##
+  ## The engine wraps a monitored action's argv in an io-monitor prefix
+  ## (``<repro> internal io monitor --depfile <f> -- <real argv>``,
+  ## ``maybeWrapWithMonitor``). ``base`` is the index just past that ``--``
+  ## separator when present, so the Nim compile is recognised whether or not
+  ## the action was monitor-wrapped; the ``--path:`` flags are always inserted
+  ## into the REAL ``nim c`` argv, never into the monitor prefix.
+  result = @[]
+  for a in argv: result.add(a)
+  if nimPathDirs.len == 0 or argv.len < 2:
+    return
+  # Locate the real command start, skipping a leading io-monitor wrapper by
+  # finding the LAST ``--`` argument separator (the monitor CLI ends its own
+  # options with ``--``; a plain ``nim c`` argv has none). ``base`` is the
+  # first token after it, else 0.
+  var base = 0
+  for i in countdown(argv.len - 1, 0):
+    if argv[i] == "--":
+      base = i + 1
+      break
+  if base >= argv.len - 1:
+    return
+  let exeBase = extractFilename(argv[base])
+  let stem =
+    when defined(windows):
+      (if exeBase.toLowerAscii.endsWith(".exe"):
+        exeBase[0 ..< exeBase.len - 4] else: exeBase).toLowerAscii
+    else:
+      exeBase
+  if stem != "nim":
+    return
+  const compileSubcommands = ["c", "cc", "compile", "compiletoc",
+    "c++", "cpp", "js", "e"]
+  if argv[base + 1].toLowerAscii notin compileSubcommands:
+    return
+  var flags: seq[string] = @[]
+  for d in nimPathDirs:
+    if d.len > 0:
+      flags.add("--path:" & d)
+  if flags.len == 0:
+    return
+  # Insert the ``--path:`` flags right after the subcommand token
+  # (``base + 1``), preserving the monitor prefix (if any) and the trailing
+  # ``--out:``/positional source.
+  result = @[]
+  for i in 0 .. base + 1:
+    result.add(argv[i])
+  for f in flags:
+    result.add(f)
+  for i in base + 2 ..< argv.len:
+    result.add(argv[i])
 
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
@@ -2929,8 +3021,12 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   # element per the host platform's shell rules; both branches end up
   # with one redirected-output pipeline that ``cmd`` / ``sh`` will
   # tokenize back into argv before exec'ing the real tool.
+  # SC-11 (§4.2a.3): thread the resolved Nim library source roots onto a
+  # ``nim c`` argv as ``--path:<dir>`` flags before quoting (identity for a
+  # non-Nim argv or when no cross-repo Nim library producer was resolved).
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
   var quotedArgv = ""
-  for i, a in action.argv:
+  for i, a in nimAdjustedArgv:
     if i > 0: quotedArgv.add(" ")
     quotedArgv.add(quoteShell(a))
   let redirectedArgv =
@@ -3058,8 +3154,10 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
   # build inherits whatever umask the runquotad daemon's parent shell
   # had — recreating the qmlcachegen mode-corruption channel that
   # M9.R.35.1 closed on the ``bypassRunQuota`` path.
+  # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
+  # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
   let command = ReproCommandSpec(
-    argv: umaskWrappedArgv(action.argv),
+    argv: umaskWrappedArgv(applyNimPathArgs(action.argv, auxPaths.nimPathDirs)),
     cwd: action.cwd,
     env: threadedEnv,
     stdoutLimit: config.stdoutLimit,
@@ -3093,8 +3191,10 @@ proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
   # ``command.argv`` to ``launchProcess`` inside the helper / inline
   # batch, so an unwrapped argv would resurrect the qmlcachegen mode
   # drift.
+  # SC-11 (§4.2a.3): thread resolved Nim library source roots onto a ``nim c``
+  # argv as ``--path:<dir>`` flags before the umask wrap (identity otherwise).
   ReproCommandSpec(
-    argv: umaskWrappedArgv(action.argv),
+    argv: umaskWrappedArgv(applyNimPathArgs(action.argv, auxPaths.nimPathDirs)),
     cwd: action.cwd,
     env: threadedEnv,
     stdoutLimit: config.stdoutLimit,

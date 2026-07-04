@@ -116,6 +116,12 @@ type
   LibraryDef* = object
     name*: string
     kind*: LibraryKind
+    exportedPath*: string
+      ## Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the producer-relative
+      ## directory a Nim library-consumer threads onto its ``nim c --path:``.
+      ## Empty means the convention default ``"src"`` (resolved at the splice
+      ## seam), so an existing bare ``library foo`` exports ``<root>/src``
+      ## unchanged; a non-standard layout sets it explicitly.
     sourceFile*: string
     sourceLine*: int
 

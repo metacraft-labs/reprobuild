@@ -2786,10 +2786,18 @@ type ProducerAuxPaths* = object
   ##   * ``pkgConfigDirs``  → ``PKG_CONFIG_PATH``
   ##   * ``cmakePrefixDirs`` → ``CMAKE_PREFIX_PATH``
   ## No new channel is introduced; SC-3 adds only the SOURCE.
+  ##
+  ## Cross-Repo-Source-Consumption SC-11 (§4.2a) adds the PARALLEL Nim
+  ## language channel ``nimPathDirs``: the importable ``src/`` root of a
+  ## sibling Nim ``library``, projected onto the consumer's ``nim c
+  ## --path:<dir>`` (a compiler flag, not an env var) — the Nim analogue of
+  ## ``includeDirs`` carrying a C library's header root. Driven off the SAME
+  ## ``ProducerAuxPaths`` through the same aux-projection seam.
   includeDirs*: seq[string]
   libDirs*: seq[string]
   pkgConfigDirs*: seq[string]
   cmakePrefixDirs*: seq[string]
+  nimPathDirs*: seq[string]
 
 var producerMaterializedAuxPaths*: Table[string, ProducerAuxPaths] =
   initTable[string, ProducerAuxPaths]()
@@ -3929,6 +3937,11 @@ proc toolIdentityCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(aux.libDirs.join("\n"))
     payload.addCacheField(aux.pkgConfigDirs.join("\n"))
     payload.addCacheField(aux.cmakePrefixDirs.join("\n"))
+    # SC-11: fold the Nim library source roots so a refreshed pin / changed
+    # sibling src root re-resolves the tool identity (same rationale as the
+    # C/C++ aux dirs above — the Nim channel is threaded through the resolver
+    # aux paths, not PATH).
+    payload.addCacheField(aux.nimPathDirs.join("\n"))
   for useDef in artifact.projectInterface.toolUses:
     payload.addCacheField(useDef.rawConstraint)
     payload.addCacheField(useDef.packageSelector)
@@ -4376,7 +4389,23 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       let hasAuxLists = actionIdy.pkgConfigSearchList.len +
         actionIdy.cmakePrefixList.len + actionIdy.cpathList.len +
         actionIdy.libraryPathList.len > 0
-      if binDirs.len == 0 and not hasAuxLists:
+      # Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
+      # channel. A pure Nim library producer resolves here as a path-mode
+      # ``mkAuxChannelProducerProfile`` (SC-3) whose actionIdy carries no C/C++
+      # aux lists; its importable ``src/`` reaches the consumer NOT through an
+      # env var but through a ``nim c --path:`` flag. The realized dirs live on
+      # the splice sink ``producerMaterializedAuxPaths[name].nimPathDirs`` (the
+      # SC-3 producer branch does not round-trip through the profile codec for
+      # the Nim channel, so read them directly here). Merge them onto the
+      # ``ResolvedToolIdentity`` this early-return path already builds so the
+      # engine's ``collectResolvedAuxPaths`` sees them and ``applyNimPathArgs``
+      # emits ``--path:<dir>`` onto the consumer's ``nim c``. Empty for every
+      # non-Nim-library producer, so this is a zero-impact passthrough.
+      var nimPathDirs: seq[string] = @[]
+      {.cast(gcsafe).}:
+        if producerMaterializedAuxPaths.hasKey(name):
+          nimPathDirs = producerMaterializedAuxPaths[name].nimPathDirs
+      if binDirs.len == 0 and not hasAuxLists and nimPathDirs.len == 0:
         return none(ResolvedToolIdentity)
       # M9.R.14e.3 — project the from-source resolver's auxiliary
       # search-path channels into the engine's ``ResolvedToolIdentity``
@@ -4392,6 +4421,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         cmakePrefixDirs: actionIdy.cmakePrefixList,
         includeDirs: actionIdy.cpathList,
         libDirs: actionIdy.libraryPathList,
+        nimPathDirs: nimPathDirs,
         cachePlatformTag: cacheTag))
     # Cross-Repo-Source-Consumption SC-1 (§4.1) — ADDITIVE cross-repo
     # producer branch. A ref that matched NO host / nix / tarball / scoop /
@@ -4443,7 +4473,8 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
           if producerMaterializedAuxPaths.hasKey(name):
             aux = producerMaterializedAuxPaths[name]
           let haveLib = aux.includeDirs.len > 0 or aux.libDirs.len > 0 or
-            aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0
+            aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
+            aux.nimPathDirs.len > 0
           if binDirs.len > 0 or haveLib:
             # ``resolvedExecutablePath`` is the catalog's tool-of-record
             # path for the ref (``repro_build_engine.nim:629-633``); it must
@@ -4466,6 +4497,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
               libDirs: aux.libDirs,
               pkgConfigDirs: aux.pkgConfigDirs,
               cmakePrefixDirs: aux.cmakePrefixDirs,
+              nimPathDirs: aux.nimPathDirs,
               cachePlatformTag: cacheTag))
     none(ResolvedToolIdentity)
 
@@ -6385,14 +6417,39 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             if dirExists(extendedPath(pkgConfigOutDir)) and
                 pkgConfigOutDir notin aux.pkgConfigDirs:
               aux.pkgConfigDirs.add(pkgConfigOutDir)
+        # Cross-Repo-Source-Consumption SC-11 (§4.2a.2) — the PARALLEL Nim
+        # language channel. When a consumed producer declares a ``library
+        # <name>`` and its resolved source root carries an importable Nim
+        # source tree, add that directory to ``aux.nimPathDirs`` so the SC-11
+        # resolver projection (below / ``mkToolIdentityResolver``) threads it
+        # onto the consumer's ``nim c --path:<dir>`` — the Nim analogue of the
+        # SC-3 ``includeDirs`` header-root discovery for C/C++. Discovery is by
+        # the producer's declared ``library`` name + its source-root
+        # convention: the producer's declared ``exportedPath`` (§4.2a.4) when
+        # set, else the ``"src"`` default, so a bare ``library nim_everywhere``
+        # exports ``<root>/src`` unchanged. Unlike the C/C++ library channel
+        # this needs NO realized ``.so`` — a pure Nim library is consumed from
+        # source directly — so it runs independently of the ``.so`` discovery
+        # above.
+        for lib in producerArtifact.projectInterface.publicLibraries:
+          if lib.name.len == 0:
+            continue
+          let exported =
+            if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+          let nimSrcDir = producerRootAbs / exported
+          if dirExists(extendedPath(nimSrcDir)) and
+              nimSrcDir notin aux.nimPathDirs:
+            aux.nimPathDirs.add(nimSrcDir)
         let haveLibChannel = aux.libDirs.len > 0 or aux.includeDirs.len > 0 or
-          aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0
+          aux.pkgConfigDirs.len > 0 or aux.cmakePrefixDirs.len > 0 or
+          aux.nimPathDirs.len > 0
         if binDirs.len == 0 and not haveLibChannel:
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no executable whose ``build/bin/<name>`` output " &
             "materialized and no library whose ``build/lib/<name>`` output " &
-            "materialized; nothing to splice onto PATH or the aux channels.")
+            "or Nim ``src/`` source root materialized; nothing to splice " &
+            "onto PATH or the aux channels.")
         if binDirs.len > 0:
           producerMaterializedBinDirs[selector] = binDirs
         if haveLibChannel:
@@ -6400,7 +6457,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           logSummary("cross-repo producer: spliced \"" & selector &
             "\" library aux dir(s): libDirs=" & aux.libDirs.join(", ") &
             (if aux.includeDirs.len > 0: " includeDirs=" &
-              aux.includeDirs.join(", ") else: ""))
+              aux.includeDirs.join(", ") else: "") &
+            (if aux.nimPathDirs.len > 0: " nimPathDirs=" &
+              aux.nimPathDirs.join(", ") else: ""))
         # SC-2 deliverable #2 sub-clause — "the producer edge's action-hash
         # folds into the consuming action's cache key" (§4.2 point 3). Compute
         # the producer edge's ACTION-HASH as a content digest over the

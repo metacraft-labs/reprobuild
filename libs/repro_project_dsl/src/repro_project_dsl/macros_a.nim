@@ -654,6 +654,21 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       while valueNode.kind == nnkStmtList and valueNode.len == 1:
         valueNode = valueNode[0]
       result.kind = libraryKindLiteral(valueNode, result.kind)
+    of "exportedpath":
+      # Cross-Repo-Source-Consumption SC-11 (§4.2a.4): the optional
+      # ``exportedPath: "<dir>"`` setter names the producer-relative Nim
+      # library source root a consumer threads onto its ``nim c --path:``.
+      # Defaults (empty) to the convention ``"src"`` at the splice seam.
+      # ``exportedPath: "lib"`` parses to ``Call(exportedPath,
+      # StmtList(<lit>))``; walk to the leaf string literal.
+      if stmt.len < 2:
+        error("library exportedPath: requires a string value", stmt)
+      var pathNode = stmt[1]
+      while pathNode.kind == nnkStmtList and pathNode.len == 1:
+        pathNode = pathNode[0]
+      if pathNode.kind != nnkStrLit:
+        error("library exportedPath: requires a string literal", pathNode)
+      result.exportedPath = pathNode.strVal
     of "discard":
       discard
     else:
