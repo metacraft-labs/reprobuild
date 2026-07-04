@@ -1,0 +1,291 @@
+M9.R.69 close-out — seatd ip=0x2 segfault CLOSED, wlroots DRM residual UNVEILED
+==============================================================================
+
+Milestone summary
+-----------------
+M9.R.68 Phase D3 boot smoke logged 5 deterministic seatd segfaults at
+RIP=0x0000000000000002 within the first 10s of graphical.target
+startup, blocking SDDM's autologin -> sway spawn.  Task brief: audit,
+diagnose, fix, boot-smoke.
+
+M9.R.69 CLOSED THE SEATD RESIDUAL.  After M9.R.69.3 the seatd binary
+starts cleanly under a chroot repro, and the boot smoke serial log
+shows "Started Seat management daemon" with ZERO segfaults on the
+qcow2 rebuild.  A DIFFERENT residual (retroactive M9.R.59) surfaced
+immediately behind: sway crashes at
+"[wlr] Cannot create DRM backend: disabled at compile-time"
+because the shipped wlroots install-mirror was built on 2026-07-02
+BEFORE M9.R.59's hwdata + libdisplay-info recipes landed.
+Rebuilding wlroots blocks on a separate hwdata data-only-recipe
+mirror-emit gap.  Full detail below.
+
+Autologin-to-sway verdict (arc's terminal question, 5th attempt):
+  * seatd runtime crash:      CLOSED (was ip=0x2, now clean).
+  * wlroots DRM backend:      OPEN — sway fails
+                              backend/backend.c:276 "Cannot create
+                              DRM backend: disabled at compile-time".
+  * sway compositor up:       NO — screendump t=164s = 100% RGB(0,0,0)
+                              (post-SDDM kmscon after sway abort).
+
+
+Commits (chronological)
+-----------------------
+  4d6563fc16  M9.R.69.1  Phase A — seatd binary + segfault post-mortem
+  e51f30363e  M9.R.69.2  Phase B — root cause classification (Candidate epsilon)
+  5ad742426b  M9.R.69.3  Phase C — patchelf RPATH glibc-lib-dir fix in
+                                    build-reproos-image.sh Phase 10.9
+
+
+Phase A — seatd binary + segfault audit (M9.R.69.1)
+----------------------------------------------------
+Mounted M9.R.68 reproos-installed.qcow2 read-only + inspected seatd
+ELF (readelf -d, INTERP, .rodata /nix/store leaks, DT_NEEDED).
+Reproduced the "segfault at 2 ip 0x2 error 14" crash inside a
+chroot copy of the image rootfs.  Signature = indirect-call-through-
+NULL, RIP=0x2, Code: "Unable to access opcode bytes at 0xffffffffffffffd8".
+
+Structural findings:
+  * INTERP = /repro/store/xx7cm72*/lib/ld-linux-x86-64.so.2
+    (glibc 2.40 hash xx7cm72...).
+  * DT_NEEDED = libc.so.6 only (no libudev, no libsystemd — seatd
+    daemon is minimal).
+  * DT_RUNPATH = 11 entries (meson + 6xsystemd + clingo + gcc-lib +
+    3x$ORIGIN) — NONE containing glibc's lib dir.
+  * Symbol-version demand = GLIBC_2.2.5 through GLIBC_2.34 — BOTH
+    the Nix 2.40 AND the Debian 2.41 libc.so.6 satisfy this.
+
+Chroot LD_LIBRARY_PATH direct-swap test proved the ip=0x2 crash is
+an ld-linux + libc.so.6 VERSION MISMATCH:
+  LD_LIBRARY_PATH=/lib/x86_64-linux-gnu (Debian 2.41)         crash
+  LD_LIBRARY_PATH=/repro/store/xx7cm72*/lib (Nix 2.40)        seatd -h prints OK
+
+Evidence: m9r69_phaseA_seatd_analysis.txt.
+
+
+Phase B — root cause classification (M9.R.69.2)
+-----------------------------------------------
+Applied the task-brief taxonomy alpha..epsilon:
+
+  alpha (dlopen backend zero-init):  FALSIFIED — crash reproduces on
+                                     "seatd -h" before any backend
+                                     registration.
+  beta (unresolved GOT symbol):      FALSIFIED — symbol demand satisfied
+                                     by both glibcs.
+  gamma (TLS init / static-TLS):     FALSIFIED — SAME-hash libc test
+                                     succeeds.
+  delta (libudev vtable):            FALSIFIED — seatd daemon doesn't
+                                     link libudev; DT_NEEDED only libc.
+  epsilon (recipe bug):              CONFIRMED — meson doesn't record
+                                     glibc's lib dir in RPATH because
+                                     it treats glibc as an implicit
+                                     toolchain input.
+
+Same bug M9.R.58.3 characterised.  Fix was applied on the qcow2 via
+_m9r58_swap.sh's "patchelf --set-rpath" (prepend the glibc lib dir
+extracted from the interpreter path) but NEVER LANDED into the
+reproducible-build path (repro.nim or build-reproos-image.sh).
+M9.R.68's clean rebuild regressed the fix.
+
+Evidence: m9r69_phaseB_root_cause.txt.
+
+
+Phase C — the fix (M9.R.69.3)
+------------------------------
+Chose scripts/build-reproos-image.sh Phase 10.9 as the fix site (the
+existing seatd-service installation phase already gated on libseat).
+Rejected the DSL-postInstall alternative (bigger scope) + the
+meson-auto-rpath alternative (would need per-recipe re-application).
+
+The Phase 10.9 sub-shell now:
+  1. Locates patchelf on PATH (fails-loud with a M9.R.58.3-referenced
+     warning if absent).
+  2. For each of seatd, seatd-launch, libseat.so.1 under
+     $MNT_DIR/opt/repro/.../install/usr/{bin,lib}/:
+     * Extract the glibc lib dir from patchelf --print-interpreter
+       (strip the trailing '/ld-linux-x86-64.so.2').
+     * For libseat.so.1 (no INTERP), reuse the glibc lib dir
+       computed from seatd's interpreter.
+     * If DT_RUNPATH doesn't already contain the glibc lib dir:
+       prepend it via patchelf --set-rpath.
+  3. Idempotent — case-glob against ":$glibc_libdir:" on the
+     existing colon-list.
+
+Fires against the on-disk copies in the mounted image root — the
+host install-mirror is intentionally NOT mutated.  Future recipe
+rebuilds still emit an un-patched binary; Phase 10.9 re-applies the
+patch each image build.
+
+
+Phase D — rebuild + Phase E — boot smoke
+-----------------------------------------
+Rebuild via 'nix develop --command ./build/bin/repro build recipes/reproos-image'.
+
+Same wrapper-level "monitor depfile is incomplete" that M9.R.68
+Phase D flagged (new-blocker (i)).  The qcow2 IS complete and
+bootable — every inner-script step succeeded and grub-install
+reported clean.  The wrapper accounting failure is the same
+depfile-summarize gap M9.R.68 owned.  It is NOT the M9.R.69 seatd
+issue.
+
+Fresh qcow2:
+  Path:   recipes/reproos-image/build/reproos-installed.qcow2
+  Size:   5158076416 bytes (~4.81 GiB)
+  Built:  2026-07-04 04:14
+
+Post-rebuild inspection (patchelf --print-rpath on the mounted seatd
+install-mirror copy):
+  /repro/store/xx7cm72qy2c0643cm1ipngd87aqwkcdp-glibc-2.40-66/lib:$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:/repro/store/f8gicbns4hymkc8k82h6c1cnz4pjs7ip-meson-1.9.1/lib:...
+                       ^^ glibc lib dir now PRESENT as first entry.
+
+Chroot repro on the new binary:
+  $ chroot /tmp/reproos_probe2 /opt/repro/.../seatd -h
+    Usage: seatd [options]
+      -h		Show this help message
+      ...
+    RC=0
+
+Boot smoke driven by _m9r56_boot_smoke.sh (BOOT_TIMEOUT=180s,
+SCREENDUMP_INTERVAL=30s, QEMU q35 OVMF UEFI KVM).  Serial log tail:
+
+  [  OK  ] Reached target Login Prompts.
+  [  OK  ] Started Console Getty.
+  [  OK  ] Started Seat management daemon.
+  [  OK  ] Started Serial Getty on ttyS0.
+  [  OK  ] Started User Login Management.
+  [  OK  ] Started Simple Desktop Display Manager.
+  [  OK  ] Reached target Multi-User System.
+  [  OK  ] Reached target Graphical Interface.
+
+**ZERO segfaults in the serial log.**  M9.R.68's 5-crash respawn
+loop is CLOSED.
+
+Screendumps at t={0,33,67,101,131,164}s:
+  t=0s:    99.7% RGB(0,0,0) + 0.3% RGB(170,170,170) — GRUB late boot
+  t>=33s:  100.0% RGB(0,0,0) — kmscon after sway abort.
+
+
+Behind the seatd fix: NEW residual (retroactive M9.R.59)
+--------------------------------------------------------
+Mounted /home/repro/.local/share/sddm/wayland-session.log:
+
+  Fontconfig error: Cannot load default config file: No such file: (null)
+  00:00:00.010 [ERROR] [wlr] [backend/backend.c:276]
+     Cannot create DRM backend: disabled at compile-time
+  00:00:00.010 [ERROR] [wlr] [backend/backend.c:420]
+     Failed to open any DRM device
+  00:00:00.127 [ERROR] [sway/server.c:247]
+     Unable to create backend
+
+This is the M9.R.58/59 residual class.  The shipped
+libwlroots-0.19.so was built 2026-07-02 19:12, BEFORE M9.R.59's
+hwdata + libdisplay-info recipes landed hwdata/libdisplay-info as
+buildDeps into wlroots' repro.nim.  Empirical proof — the compiled
+libwlroots.so has ONLY libinput + wayland + headless backends baked
+in; no "backend/drm/*.c" strings, no "drm_backend_create" symbol.
+
+M9.R.59 close-out marked this as blocked at the "monitor-depfile
+infrastructure" layer with the note "the recipe-level publish is
+correct; the next milestone that fixes the auto-recurse path can
+consume both from-source recipes verbatim."  M9.R.60-68 did not
+rebuild wlroots.  M9.R.68 clean-rebuild reused the stale install-
+mirror.
+
+Attempted mid-milestone rebuild: reproduced the M9.R.59 blocker at
+a NEW level.  hwdata's recipe declares a "files hwdataFiles"
+artifact but the from-source-custom mirror-emit action wipes and
+re-populates the install-mirror with ONLY the sanity marker
+(pnp.ids -> hwdataFiles), NOT the full "usr/share/hwdata/*.ids"
+tree.  Manually populating the hwdata install-mirror via
+_m9r59_build_hwdata.sh then triggering wlroots build via
+"repro build --tool-provisioning=from-source recipes/packages/source/wlroots"
+also fails at mesonbin-setup (no log surfaced — a separate build-
+engine-cache write gap).
+
+Closing the wlroots DRM residual therefore requires a proper
+M9.R.60-class fix, not a mid-M9.R.69 hack.  Documented as the
+M9.R.69 residual for M9.R.70.
+
+
+Autologin-to-sway verdict
+-------------------------
+  * seatd runtime crash:                CLOSED (was ip=0x2, now clean).
+  * seatd systemd service reaches
+    "Started Seat management daemon":   YES.
+  * sddm authenticates + spawns sway:   YES (sddm.log confirms
+                                        session, sway process starts).
+  * sway can create wlroots DRM backend: NO — libwlroots.so was
+                                         built without DRM subdir
+                                         (M9.R.59 residual, retroactive).
+  * sway compositor up:                 NO.
+  * screendump shows compositor:        NO (100% black at t=164s).
+
+
+Retroactive M9.R.57-59 validation
+---------------------------------
+Retroactive M9.R.57-59 validation: N.
+
+M9.R.57 (libseat compile-time gate):   VALIDATED (libseat.so.1 links,
+                                        wlroots' meson probe accepts).
+M9.R.58 (libseat runtime backend):     VALIDATED (seatd starts +
+                                        systemd unit works — this
+                                        milestone's fix).
+M9.R.59 (hwdata + libdisplay-info):    NOT VALIDATED — the recipes
+                                        exist but the mirror-emit
+                                        gap prevents a real end-to-
+                                        end rebuild.
+
+Marking overall = N because M9.R.59 is not end-to-end validated;
+sway still cannot get a wlroots DRM backend.
+
+
+Honest residual
+---------------
+Strictly smaller than M9.R.68's residual on this milestone's
+chartered scope (seatd runtime crash — was M9.R.68 residual (ii),
+now CLOSED):
+
+  * (ii) seatd segfault at ip=0x2:      CLOSED (M9.R.69.3).
+  * (i)  monitor depfile incomplete:    STILL OPEN (M9.R.68's
+                                        residual, unchanged; wrapper
+                                        reports failure while qcow2
+                                        is complete + bootable).
+
+NEW residual surfaced behind the seatd fix (M9.R.70 owns):
+
+  * (iii) wlroots stale install-mirror: retroactive M9.R.59 gap.
+          The libwlroots-0.19.so shipping in the qcow2 was built
+          2026-07-02 without the DRM backend (M9.R.58/59 recipe
+          buildDeps added hwdata + libdisplay-info but wlroots was
+          never rebuilt).  BLOCKER: hwdata data-only recipe's
+          from-source-custom mirror-emit action clobbers the install
+          mirror with only the sanity marker; wlroots then fails
+          mesonbin-setup with no captured log.
+
+  * (iv)  Autologin loop before sway:   wayland-session.log shows
+          the ReproOS installer running at autologin (attempts
+          "repro disk apply") which is not obviously in scope
+          — future post-install experience needs a "if already
+          installed, skip installer" gate in the wayland-session
+          entry script.  Documented for M9.R.70+.
+
+
+Files in this directory (M9.R.69 close-out)
+-------------------------------------------
+  m9r69_complete.txt              this file
+  m9r69_phaseA_seatd_analysis.txt Phase A audit + chroot repro
+  m9r69_phaseB_root_cause.txt     Phase B taxonomy classification
+  m9r69_boot_serial.log           Phase E QEMU serial console
+  m9r69_wayland-session.log       Phase E sway wayland-session.log
+                                   (extracted from mounted qcow2)
+  screen_000_0s.ppm               t=0s screendump (GRUB late boot)
+  screen_005_164s.ppm             t=164s screendump (post-sway-abort)
+  m9r69_de_last_screen.png        PNG render of screen_005 (3092B —
+                                   100% RGB(0,0,0), consistent with
+                                   the sway backend-create abort)
+
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force, no
+--no-verify; "--no-gpg-sign" on reprobuild per the standing
+convention documented in feedback_reprobuild_unsigned_commits.md.
