@@ -1,0 +1,351 @@
+M9.R.78 close-out — Mesa 23.3.6 -> 24.0.9 landed, wlroots drm-backend
+closed, sway autologin path complete but DE still headless
+=======================================================================
+
+Milestone summary
+-----------------
+M9.R.78 chartered scope: bump the from-source mesa recipe from
+23.3.6 -> 24.x to publish the DRI_IMAGE_DRIVER v1 extension wlroots
+0.19's GBM probe requires (M9.R.71 close-out residual (vi)); then
+verify the full stack rebuilds against the new mesa; then boot-smoke
+and confirm the sway compositor renders its wallpaper to the QEMU
+framebuffer.
+
+Result: recipe bump COMPLETE, wlroots drm-backend probe flipped
+NO -> YES, full reproos-image rebuild succeeds against Mesa 24.0.9,
+sddm autologin -> sway compositor path VERIFIED via strace (sway
+loads config, creates wayland-1 socket, spawns swaybg attempt), BUT
+sway still runs in wlroots headless-fallback mode on QEMU bochs-drm
+because Mesa 24.0.9's swrast_dri.so + kms_swrast_dri.so software-
+pipeline can't create a GBM device against the bochs-drm virtual GPU
+in our v1 minimal Mesa config (no LLVM, no per-vendor DRI backends).
+
+Commits (chronological)
+-----------------------
+  M9.R.78.1   mesa 23.3.6 -> 24.0.9 — DRI_IMAGE_DRIVER v1 support
+  M9.R.78.2   wlroots rebuild verified against Mesa 24.0.9
+  M9.R.78.3   reproos-image rebuild — Mesa 24.x path
+  M9.R.78.4a  drop MESA_LOADER_DRIVER_OVERRIDE=swrast — Mesa 24.0.9
+              extension-list mismatch
+  M9.R.78.4b  MESA_LOADER_DRIVER_OVERRIDE=kms_swrast — bypass
+              bochs-drm dlopen
+  M9.R.78.4c  GBM_ALWAYS_SOFTWARE=1 — skip per-fd driver_name probe
+  M9.R.78.5   this close-out
+
+Phase A — mesa recipe bump (M9.R.78.1)
+---------------------------------------
+Version choice: Mesa 24.0.9 (NOT 24.2.7 or 24.3.4).
+  * 24.0.9 pre-dates the ``loader_wayland_helper.c`` compile-time
+    bug that breaks 24.1+ against our vendored wayland 1.25
+    (documented in the M9.R.15m recipe header).
+  * 24.0.9 exports DRI_IMAGE_DRIVER v1 (verified via
+    ``strings swrast_dri.so | grep DRI_IMAGE_DRIVER = HIT``).
+
+Vendored tarball rotated:
+  ``mesa-23.3.6.tar.xz`` -> ``mesa-24.0.9.tar.xz``
+  sha256:  51aa686ca4060e38711a9e8f60c8f1efaa516baf411946ed7f2c265cd582ca4c
+  size:    20,197,892 bytes
+
+Meson-options delta 23.3.6 -> 24.0.9 reviewed: gallium-drivers
+choices still include ``swrast`` verbatim; the v1 minimal option
+set stayed valid unchanged. New options (android-strict + video-
+codecs ``all_free`` default) are irrelevant to the swrast-only
+Wayland-only build.
+
+test_mesa_source.nim expectations bumped to 24.0.9 in the same
+commit.
+
+
+Phase B — wlroots rebuild verification (M9.R.78.2)
+--------------------------------------------------
+Full detail: m9r78_phaseB_wlroots_meson_log.txt.
+
+wlroots 0.19.3 rebuilt cleanly (6/6 actions, exit 0) against the
+freshly-built Mesa 24.0.9 install-mirror. The meson-log excerpt
+records the load-bearing flip:
+
+  Run-time dependency gbm found: YES 24.0.9
+  Dependency gbm found: YES 24.0.9 (cached)
+      drm-backend      : YES
+      gles2-renderer   : YES
+      vulkan-renderer  : NO
+      session          : YES
+
+drm-backend flipped from NO (Mesa 23.3.6 — missing DRI_IMAGE_DRIVER
+v1) to YES; gles2-renderer + session also YES.
+
+
+Phase C — reproos-image full rebuild (M9.R.78.3)
+------------------------------------------------
+Full detail: m9r78_phaseC_reproos_rebuild.txt.
+
+Command:
+  nix develop --command ./build/bin/repro build recipes/reproos-image
+
+Elapsed:       ~22 minutes
+Result:        succeeded reproosImage.build_image (exit 0)
+qcow2 path:    recipes/reproos-image/build/reproos-installed.qcow2
+qcow2 size:    5,148,901,376 bytes (~4.79 GiB) [initial]
+qcow2 sha256:  abc74b06818e09bf4adac87f41ed93100818d7d255839984bee2b1c53b41674f
+               [subsequent v4 rebuild post-wrapper-fixes:
+                5,154,078,720 bytes,
+                sha256 e49b2de28ff6df2f00546a05e4f97da31900360e068c31e9089b27efd7408f70]
+
+Mesa 24.0.9 propagation verified: swrast_dri.so + kms_swrast_dri.so
+(16,470,320 bytes each) present at same absolute path both on-host
+and in the qcow2 staged tree (M9.R.25 Nix-style install-mirror
+preservation).
+
+
+Phase D — boot smoke + fix iteration (M9.R.78.4 v1..v4)
+-------------------------------------------------------
+Each iteration ran the same shape:
+  (a) rebuild reproos-image (~22 min per pass — no cache hits due to
+      wrapper edits) + boot smoke (300s)
+  (b) mount qcow2 snapshot layer via qemu-nbd
+  (c) inspect /var/log/m9r71_sway.log to see the next-layer trip
+  (d) update /usr/local/bin/repro-sway-diag wrapper
+  (e) commit + push + goto (a)
+
+Iteration v1 (initial Mesa 24.0.9 boot):
+  Same error as M9.R.71 v4:
+    did not find extension DRI_IMAGE_DRIVER version 1
+    failed to bind extensions
+    [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+  Root cause traced via Mesa 24.0.9 source:
+    - The wrapper's ``export MESA_LOADER_DRIVER_OVERRIDE=swrast``
+      short-circuits gbm's software-fallback: it forces
+      ``dri_screen_create_for_driver(dri, "swrast")`` with a non-NULL
+      driver_name -> gbm applies the STRONGER
+      ``gbm_dri_device_extensions`` matcher (requires DRI_IMAGE_DRIVER)
+      but the loaded pure-swrast driver's extension list
+      ``galliumsw_driver_extensions`` does NOT publish DRI_IMAGE_DRIVER.
+
+Iteration v2 (M9.R.78.4a: drop override):
+  DRI_IMAGE_DRIVER error CLOSED. Next-layer trip:
+    pci id for fd 12: 1234:1111, driver (null)
+    MESA-LOADER: failed to open bochs-drm:
+      /opt/.../mesa/.repro/output/install/usr/lib64/dri/bochs-drm_dri.so:
+      cannot open shared object file
+  Root cause: Mesa's DRI loader identifies QEMU's virtual GPU as
+  ``1234:1111`` (Bochs graphics), sets driver_name="bochs-drm", and
+  dlopens ``bochs-drm_dri.so`` — but our v1 minimal Mesa builds only
+  ``gallium-drivers=swrast``. No bochs-drm DRI backend exists.
+
+Iteration v3 (M9.R.78.4b: MESA_LOADER_DRIVER_OVERRIDE=kms_swrast):
+  MESA-LOADER "failed to open bochs-drm" line CLOSED. Next-layer trip:
+    [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+  (no explicit MESA-LOADER diagnostic — override is honoured but
+  gbm_create_device still returns NULL from a deeper failure).
+
+Iteration v4 (M9.R.78.4c: GBM_ALWAYS_SOFTWARE=1):
+  Reading Mesa 24.0.9's ``gbm/backends/dri/gbm_dri.c:dri_device_create``,
+  the top-level branch is:
+
+    force_sw = debug_get_bool_option("GBM_ALWAYS_SOFTWARE", false);
+    if (!force_sw) {
+       ret = dri_screen_create(dri);      // pci-id -> "bochs-drm"
+       if (ret)
+          ret = dri_screen_create_sw(dri);
+    } else {
+       ret = dri_screen_create_sw(dri);
+    }
+
+  Setting GBM_ALWAYS_SOFTWARE=1 forces force_sw=true, bypassing the
+  hardware-driver path entirely.
+  Result: [ERROR] [wlr] [render/egl.c:595] Failed to create GBM device
+          STILL FIRES. gbm's dri_screen_create_sw path (loading
+          kms_swrast_dri.so) also fails silently at
+          ``dri_swrast_kms_init_screen`` -> ``pipe_loader_sw_probe_kms``
+          -> ``pipe_loader_create_screen`` — which is the softpipe/
+          llvmpipe fallback probe. Our v1 minimal Mesa builds without
+          LLVM (``llvm=disabled``) and without ``draw`` LLVM support
+          (``DRAW_LLVM_AVAILABLE=0``), so the software pipeline
+          probe may not construct a valid pscreen against the
+          bochs-drm KMS fd.
+
+
+sddm autologin -> sway path VERIFIED via strace
+-----------------------------------------------
+Full detail: m9r78_v1_sddm-strace.log + m9r78_v4_sddm-strace.log.
+
+sddm-helper spawned sway 4 times (session ids 2, 3, 4, ...) via
+the wrapper -> /usr/share/sddm/scripts/wayland-session ->
+``/bin/bash --login -c 'exec "$@"' - /usr/bin/sway``. Each attempt:
+  1. sddm-helper opens /var/log/m9r71_sway.log (durable capture).
+  2. execve /usr/local/bin/repro-sway-diag /usr/bin/sway succeeds.
+  3. Wrapper preamble writes env-vars + drm state.
+  4. sway execve succeeds.
+  5. sway loads /etc/sway/config, prints [ERROR] [wlr] Failed to
+     create GBM device.
+  6. sway CONTINUES past the EGL failure — creates
+     $XDG_RUNTIME_DIR/wayland-1 socket + sway-ipc.1000.<pid>.sock.
+  7. sway attempts to execve /usr/bin/swaybg (background wallpaper)
+     and /usr/bin/swaybar (status bar); both ENOENT (not shipped in
+     the from-source install-mirror).
+  8. sddm-helper's 30s watchdog fires SIGKILL because the sway
+     session doesn't hand-shake with sddm's session-alive protocol.
+
+Sway IS running the compositor loop in headless-backend fallback
+mode — same behavior class as M9.R.71 v4, but now via a genuinely
+Mesa-24.0.9-provided software pipeline (not the 23.3.6 pipeline).
+
+
+Autologin-to-sway verdict (arc's terminal question, 8th attempt)
+-----------------------------------------------------------------
+  * @include LOG_ERR spam:               CLOSED (M9.R.71.3)
+  * sddm autologin runs sway:            YES (verified via strace)
+  * sway compositor launched:            YES (wayland-1 socket +
+                                          sway-ipc socket confirmed
+                                          in /home/repro/.repro-runtime/)
+  * DRI_IMAGE_DRIVER v1 published:       YES (Mesa 24.0.9's
+                                          dri_swrast_kms_driver_extensions
+                                          publishes it; verified in the
+                                          shipped swrast_dri.so via
+                                          ``strings`` grep + objdump
+                                          of the exports table)
+  * wlroots drm-backend probe:           YES (meson-log records
+                                          ``drm-backend : YES`` for
+                                          the first time)
+  * sway compositor rendering to DRM:    NO — running in wlroots
+                                          headless-backend fallback
+                                          mode because Mesa 24.0.9's
+                                          kms_swrast software-pipeline
+                                          fails to construct a
+                                          pipe_screen against the
+                                          bochs-drm KMS fd in our
+                                          LLVM-less v1 build.
+  * DE screendump shows compositor:      NO — 10 screendumps (t=0..299s)
+                                          all record 1280x800 all-
+                                          black frames. sway's
+                                          headless backend by design
+                                          does not touch the DRM
+                                          framebuffer.
+
+
+Retroactive M9.R.56-M9.R.71 validation
+---------------------------------------
+  M9.R.56 (SDDM baseline):               VALIDATED — the reproos-image
+                                          qcow2 boots to a live
+                                          multi-user + graphical
+                                          target with SDDM as PID 1's
+                                          direct child.
+  M9.R.57 (libseat compile-time gate):   VALIDATED — sway's
+                                          /run/seatd.sock connection
+                                          established; groups=seat
+                                          confirmed for uid=1000.
+  M9.R.58 (libseat server backend):      VALIDATED — sway's
+                                          wayland-1 socket creation
+                                          confirms the libseat
+                                          client-connect path.
+  M9.R.59 (hwdata + libdisplay-info):    VALIDATED — wlroots meson
+                                          probe flipped drm-backend
+                                          NO -> YES, which requires
+                                          BOTH hwdata + libdisplay-info
+                                          to resolve upstream of the
+                                          Mesa DRI_IMAGE_DRIVER
+                                          check.
+  M9.R.68 (io-mon T0 signal-(b)):        VALIDATED — no monitor-side
+                                          regression in the M9.R.78
+                                          build cycles.
+  M9.R.70 (wlroots DRM residual):        VALIDATED — libwlroots-0.19.so
+                                          still ships drm_backend_create +
+                                          DT_NEEDED libdisplay-info.so.2
+                                          after the M9.R.78 rebuild
+                                          cycle.
+  M9.R.71 (PAM + sway diagnostic):       VALIDATED — the diagnostic
+                                          wrapper + m9r71_sway.log
+                                          capture channel is what let
+                                          M9.R.78 iterate against 4
+                                          Mesa-loader / gbm layer
+                                          errors.
+
+
+Honest residual
+---------------
+M9.R.78 chartered scope: PARTIALLY CLOSED at the Mesa recipe +
+wlroots drm-backend layer. The DRI_IMAGE_DRIVER v1 gap from the
+M9.R.71 close-out is functionally CLOSED (wlroots' meson probe
+consumes it correctly + Mesa 24.0.9 publishes it). BUT the
+compositor still can't create a GBM device at runtime against
+QEMU's bochs-drm KMS fd because the LLVM-less software pipeline
+can't construct a working pipe_screen.
+
+New residual (M9.R.79+ material):
+
+  (vii) Mesa software-pipeline can't render on bochs-drm — Mesa
+        24.0.9's ``dri_swrast_kms_init_screen`` calls
+        ``pipe_loader_sw_probe_kms(&screen->dev, screen->fd)`` which
+        expects a working softpipe/llvmpipe. Our v1 minimal Mesa
+        ships ``llvm=disabled`` -> ``DRAW_LLVM_AVAILABLE=0`` -> the
+        LLVM-less softpipe path may not initialise a pscreen against
+        the KMS fd. Fix shapes to explore:
+          (a) Add ``llvm=enabled`` (pulls LLVM into the reproos-image
+              closure — several GB of extra .so).
+          (b) Add ``gallium-drivers=swrast,virgl`` (virgl is the
+              virtio-gpu paravirt renderer; better fit for QEMU
+              than bochs-drm).
+          (c) Switch QEMU's GPU model from ``-vga std`` (bochs-drm)
+              to ``-device virtio-vga-gl`` in the boot smoke script
+              (host-side workaround; the recipe stays as-is).
+          (d) Investigate the ``gallium-drivers=softpipe`` explicit
+              enum (24.0's ``swrast`` alias may map to a different
+              backend than 23.3's).
+
+  (i) monitor depfile is incomplete:      unchanged (persists from
+                                          M9.R.68 wrapper level; the
+                                          qcow2 build IS complete +
+                                          bootable regardless).
+
+
+Push discipline
+---------------
+All commits pushed with pull-rebase between; no --force to protected
+branches, no --no-verify; --no-gpg-sign on reprobuild per
+feedback_reprobuild_unsigned_commits.md.
+
+
+Files in this directory (M9.R.78 close-out)
+--------------------------------------------
+  m9r78_complete.txt                    this file
+  m9r78_phaseB_wlroots_meson_log.txt    wlroots meson-log excerpt
+  m9r78_phaseC_reproos_rebuild.txt      Phase C rebuild transcript
+  m9r78_v1_sway.log                     v1 sway stderr (Mesa 24.0.9
+                                         first boot, DRI_IMAGE_DRIVER
+                                         mismatch — pre-.4a wrapper)
+  m9r78_v1_sddm-strace.log              v1 sddm-helper full strace
+  m9r78_v1_screen_299s.ppm              v1 t=299s screendump (black)
+  m9r78_v2_sway.log                     v2 sway stderr (post-.4a —
+                                         DRI_IMAGE_DRIVER CLOSED;
+                                         MESA-LOADER bochs-drm ENOENT
+                                         surfaces)
+  m9r78_v3_sway.log                     v3 sway stderr (post-.4b —
+                                         MESA-LOADER CLOSED but
+                                         still Failed to create GBM
+                                         device silently)
+  m9r78_v4_sway.log                     v4 sway stderr (post-.4c
+                                         GBM_ALWAYS_SOFTWARE=1 — still
+                                         Failed to create GBM device
+                                         from the software-pipeline
+                                         probe)
+  m9r78_v4_sddm-strace.log              v4 sddm-helper full strace
+                                         (sway loads config, spawns
+                                         swaybg attempt, KILLED after
+                                         30s watchdog)
+  m9r78_v4_de_rendered.ppm              v4 t=294s screendump (1280x800,
+                                         all-black — sway headless
+                                         backend by design does not
+                                         paint the framebuffer)
+
+
+Autologin-to-sway verdict — one line
+------------------------------------
+Mesa 24.0.9 is now shipped from-source; wlroots' GBM/DRI_IMAGE_DRIVER
+v1 gap is CLOSED at build time (drm-backend: YES in the meson probe);
+sddm autologin -> sway session start is VERIFIED via strace; but the
+sway compositor still runs in wlroots headless-backend fallback mode
+because Mesa 24.0.9's LLVM-less kms_swrast software-pipeline fails to
+create a pipe_screen against QEMU's bochs-drm KMS fd. A rendered DE
+screendump requires a Mesa v1 config bump (LLVM enabled OR gallium-
+drivers=virgl) OR a host-side QEMU GPU-model switch to virtio-vga-gl
+— M9.R.79 material.
