@@ -77,8 +77,23 @@ proc createSegment*(cacheRoot: string; gen: uint32; slotCap: int;
 
 proc attachSegment*(cacheRoot: string; gen: uint32; slotCap: int): SegmentTable =
   ## Attach to an existing segment for `gen`; validates the magic/version.
-  let size = segRegionSize(slotCap)
-  result.region = attachRegion(segPath(cacheRoot, gen), size)
+  ##
+  ## The mapping size is derived from the segment file's ACTUAL on-disk size —
+  ## NOT from the caller-supplied `slotCap` — so an attacher never has to agree
+  ## with the control region's `segSlotCap` about the segment's size. This
+  ## closes a crash-safety window during a CAS-resize: between the daemon
+  ## publishing the new generation's `segSlotCap` and the `casCurrentGeneration`
+  ## commit (or vice-versa), the ctl's cap and the live generation's true cap
+  ## can momentarily disagree; sizing from the file makes the attach correct
+  ## regardless. `slotCap` is retained only as a fallback for callers that map a
+  ## segment before its file exists. The true cap is read from the header.
+  let path = segPath(cacheRoot, gen)
+  var size = segRegionSize(slotCap)
+  if fileExists(path):
+    let onDisk = int(getFileSize(path))
+    if onDisk > 0:
+      size = onDisk
+  result.region = attachRegion(path, size)
   if not result.region.isValid:
     return
   let base = result.region.base
@@ -215,3 +230,43 @@ proc evictSlot*(t: var SegmentTable; idx: int) =
 proc probeIndexFor*(t: SegmentTable; digest: openArray[byte]): int =
   ## Expose the probe start (for the AC-2b eviction policy / tests).
   keyProbeStart(digest, t.slotCap)
+
+# --- single-writer introspection (daemon-only: rehash + load factor) ------
+#
+# These helpers read a segment WITHOUT the seqlock re-check because the DAEMON
+# is the sole writer (AC-2b) and calls them only from its own single thread
+# between its own writes — there is never a concurrent writer to tear against.
+# They are NOT for lock-free readers (those use `lookupSlot`).
+
+proc liveSlotCount*(t: SegmentTable): int =
+  ## Number of published (even, non-zero seq) slots. Single-writer view used to
+  ## compute the load factor for the growth threshold.
+  if not t.isValid: return 0
+  let base = t.region.base
+  for idx in 0 ..< t.slotCap:
+    let sb = slotBase(t.slotCap, idx)
+    let sq = loadU64Relaxed(base, sb + SegSlotOffSeq)
+    if sq != 0 and (sq and 1) == 0:
+      inc result
+
+iterator liveSlots*(t: SegmentTable): SlotSnapshot =
+  ## Yield every published slot's {digest, rec} for rehash into a new
+  ## generation. Single-writer only (no seqlock re-check needed).
+  if t.isValid:
+    let base = t.region.base
+    for idx in 0 ..< t.slotCap:
+      let sb = slotBase(t.slotCap, idx)
+      let sq = loadU64Relaxed(base, sb + SegSlotOffSeq)
+      if sq != 0 and (sq and 1) == 0:
+        var snap: SlotSnapshot
+        copyOut(base, sb + SegSlotOffDigest, snap.digest, KeyDigestLen)
+        let recLen = int(loadU32Acquire(base, sb + SegSlotOffRecLen)) and 0xFFFF
+        snap.rec = newSeq[byte](recLen)
+        if recLen > 0:
+          copyOut(base, sb + SegSlotOffRec, snap.rec, recLen)
+        yield snap
+
+proc slotSeqAt*(t: SegmentTable; idx: int): uint64 =
+  ## The raw seqlock value of slot `idx` (single-writer LRU-window inspection).
+  if not t.isValid or idx < 0 or idx >= t.slotCap: return 0
+  loadU64Relaxed(t.region.base, slotBase(t.slotCap, idx) + SegSlotOffSeq)

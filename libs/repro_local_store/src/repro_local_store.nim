@@ -797,7 +797,7 @@ proc perEdgeRecordFileIsIntact*(raw: openArray[byte]): bool =
       return false
   pos == raw.len
 
-proc loadPerEdgeRecords(cache: ActionCache; weak: ContentDigest):
+proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest):
     seq[ActionResultRecord] =
   ## Read the single authoritative `hot-records/<key>` file for `weak`.
   ## O(1) file open — never a whole-cache scan.
@@ -809,7 +809,7 @@ proc loadPerEdgeRecords(cache: ActionCache; weak: ContentDigest):
   except OSError, IOError:
     result = @[]
 
-proc writePerEdgeRecords(cache: ActionCache; weak: ContentDigest;
+proc writePerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
                          records: openArray[ActionResultRecord]) =
   ## Atomically publish an edge's record set: encode to a uniquely named
   ## temp file, fsync-free `rename()` over `hot-records/<key>`. A rewrite of
@@ -886,7 +886,7 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
     checkedInputCount: checkedInputs)
 
-proc readHotRecord(cache: var ActionCache; weak: ContentDigest):
+proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
     tuple[found: bool; record: ActionResultRecord] =
   ## Read the newest metadata-only view of the edge's record from its single
   ## per-edge file. Returns the most recent record (last in the bounded set)

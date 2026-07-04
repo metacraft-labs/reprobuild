@@ -5590,6 +5590,22 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny),
   TestSpec(
+    source: "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim",
+    binary: "build/test-bin/t_cache_daemon_drains_dedups_persists_and_warms_from_disk",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
+    source: "tests/integration/t_cache_daemon_grows_via_cas_resize_and_survives_crash.nim",
+    binary: "build/test-bin/t_cache_daemon_grows_via_cas_resize_and_survives_crash",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny),
+  TestSpec(
     source: "tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim",
     binary: "build/test-bin/t_cert_gate_defaults_off_and_advisory_does_not_block",
     defines: @[],
