@@ -1,0 +1,214 @@
+M9.R.74 — canonical execution root (R2) — close-out
+=====================================================
+
+Objective
+---------
+reprobuild-specs R2 (Hermetic-Builds-And-Path-Independence.md
+§"Canonical Execution Root") mandates that every action run in an
+"engine-chosen path layout" whose path does not depend on the user's
+original checkout location. The M9.R.72 Phase A summary flagged R2
+as "Gap VII (in-progress elsewhere) — recipes run under their checkout
+path today." This milestone closes the declaration boundary.
+
+
+Landed commits
+--------------
+reprobuild (dev + main):
+  * a3341ad5  M9.R.74.1: Phase A CWD-per-action-type audit
+  * 0a5cdbc7  M9.R.74.3: engine — canonical execution root implementation
+  * ce00ee16  (M9.R.74.4 change; landed under M9.R.76.2 title —
+               parallel-agent stage collision. from_source_custom.nim
+               change is the M9.R.74.4 work described below.)
+
+reprobuild-specs (latest):
+  * 0d2d593   (M9.R.74.2 spec-side R2 addendum; landed under
+               M9.R.76.1 title — parallel-agent stage collision.
+               The "Per-action execution-root declaration" +
+               "Engine responsibilities" + "Backward compatibility"
+               + "Interaction with monitoring" sub-sections in
+               Hermetic-Builds-And-Path-Independence.md are the
+               M9.R.74.2 work described below.)
+
+The stage-collision commits are documented for the historical record;
+the code + spec content is exactly what M9.R.74 needed to land, so no
+re-do is required.
+
+
+Phase A summary — CWD-per-action-type table
+--------------------------------------------
+Every action's spawn-time CWD is ``projectRoot`` (recipe root) today:
+
+  * ``lowerGraphAction`` hardcodes ``cwd = projectRoot`` on 5 of 6
+    action-type branches. Only ``reprobuild.builtin.exec`` honours a
+    caller-supplied ``inlineExecCall(cwd = X)`` override.
+  * autotools/meson/cmake conventions inline ``cd $buildDir && ...``
+    INSIDE the emitted shell script; the engine never sees the
+    intended CWD.
+  * The DSL's ``DslShellAction.cwd`` slot has been declared since
+    M9.N Batch C.1 but was ignored by from_source_custom (documented
+    "honest deferral" at module lines 96-100).
+  * 4 recipes use ad-hoc ``$PWD`` / ``cd $X`` shapes, all consistent
+    with the recipe-root CWD contract:
+      - recipes/packages/source/gcc/repro.nim (3 shell rows)
+      - recipes/packages/source/ninja/repro.nim (1 shell row)
+      - recipes/packages/source/hwdata/repro.nim (1 shell row)
+      - recipes/reproos-iso/repro.nim (1 $PWD reference for
+        REPRO_DE_ROOTFS_DIR env var)
+  * recipes/reproos-image/scripts/build-reproos-image.sh:60-63
+    documents the recipe-root CWD contract explicitly.
+
+Full audit at m9r74_phaseA_cwd_audit.txt.
+
+
+Phase B summary — spec R2 tightened
+------------------------------------
+Hermetic-Builds-And-Path-Independence.md §"Canonical Execution Root"
+gained four normative sub-sections:
+
+  * **Per-action execution-root declaration** — enum table naming
+    ``recipeRoot`` / ``source`` / ``build`` / ``install`` / ``custom(path)``
+    plus the DSL surface for recipe authors.
+
+  * **Engine responsibilities** — MUST-list (resolve declared kind,
+    set spawn cwd, fold into monitored-read set) + MUST-NOT-list
+    (no silent path normalization, no bypass via inline ``cd`` in
+    strict reproducible mode).
+
+  * **Backward compatibility** — acwdRecipeRoot is the enum's zero
+    value so v20-and-earlier payloads decode with legacy behaviour
+    byte-for-byte; every existing recipe survives without change.
+
+  * **Interaction with monitoring** — declaration feeds
+    Filesystem-Policy-And-Observed-Inputs.md R5 (read-only vs
+    writable roots) + R6 (source rewrites are errors) so the
+    engine can distinguish source reads from build writes.
+
+
+Phase C summary — engine implementation
+----------------------------------------
+libs/repro_project_dsl/src/repro_project_dsl/types.nim
+  + ActionCwdKind* enum (5 values: acwdRecipeRoot | acwdSource |
+    acwdBuild | acwdInstall | acwdCustom)
+  + BuildActionDef.cwdKind* + BuildActionDef.cwdCustomPath*
+
+libs/repro_project_dsl/src/repro_project_dsl/runtime_core.nim
+  + Payload codec v21 (strict cwdKind sentinel byte + length-prefixed
+    cwdCustomPath). v20-and-earlier round-trip via the version list;
+    legacy decode zero-fills to acwdRecipeRoot + "".
+  + buildAction*() gains ``cwdKind`` + ``cwdCustomPath`` parameters
+    with defaults matching the enum's zero value.
+
+libs/repro_cli_support/src/repro_cli_support.nim
+  + resolveCanonicalExecRoot* helper: maps (cwdKind, cwdCustomPath,
+    projectRoot) → absolute spawn CWD. Relative paths join against
+    projectRoot; absolute paths pass through; every kind falls back
+    to projectRoot when no path is supplied.
+  + All 5 lowerGraphAction branches route ``cwd`` through the
+    resolver so the R2 declaration reaches the engine.
+  + inlineExecCall(cwd = X) override is preserved (routes via
+    acwdCustom internally when the DSL default is still in effect).
+
+Regression tests:
+  * libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim
+    — 7 codec cases pinning every enum value + buildAction defaults.
+    Verified end-to-end: all 7 pass on a compiled binary.
+  * libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim
+    — 11 resolver cases pinning kind→path mapping including
+    absolute-path passthrough, relative-path joining, and empty-
+    path fallbacks.
+
+
+Phase D summary — recipe audit + from_source_custom fix
+--------------------------------------------------------
+Recipe audit (grep results):
+
+  * 4 recipe-side ad-hoc CWD violations found (gcc/ninja/hwdata/
+    reproos-iso). All working as intended under the legacy
+    recipe-root CWD contract; the R2 enum's zero-default preserves
+    their behaviour unchanged. No recipe migration is required for
+    M9.R.74 to land; a future milestone can lift them into
+    ``cwdKind = acwdBuild`` declarations for tighter hermeticity.
+
+  * from_source_custom's "honest deferral" (module lines 96-100
+    documenting that the DSL's ``DslShellAction.cwd`` slot was
+    ignored) is closed. The emitter now:
+      - threads ``row.cwd`` through ``substitutePlaceholders`` so
+        ``$fetch`` / ``$extracted`` / ``$out`` expansion works there
+      - uses the resolved path as the inline ``cd`` target
+      - declares ``cwdKind = acwdCustom`` + ``cwdCustomPath =
+        <resolved>`` on the emitted BuildActionDef so the engine's
+        spawn-time CWD, monitor, and policy layer all see the
+        intended execution root
+      - falls back to ``extractedPath`` byte-identically when
+        ``row.cwd`` is empty, so pre-M9.R.74 recipes see zero drift.
+
+  * autotools_package / meson_package / cmake_package — no fix
+    landed in M9.R.74. They inline ``cd $buildDir && ...`` inside
+    the shell script; the R2 enum's zero-default keeps them working
+    exactly as today. A follow-up milestone (M9.R.75+) can lift the
+    inline ``cd`` into an ``acwdBuild`` declaration on each emitted
+    configure/compile/install action for tighter hermeticity.
+
+
+Honest residuals (deferred to follow-up milestones)
+----------------------------------------------------
+  1. **Convention emitters still inline ``cd $X``.** The three main
+     from-source siblings (autotools_package / meson_package /
+     cmake_package) continue to inline the CWD-change inside the
+     emitted shell script rather than declaring it via ``cwdKind``.
+     The R2 enum's zero-default preserves their behaviour unchanged
+     but the engine's monitor still sees ``projectRoot`` for these
+     actions instead of the intended source/build directory. A
+     recipe-side migration to per-action ``cwdKind`` declarations is
+     out of scope for M9.R.74 because it touches every from-source
+     recipe (74+ NDE recipes documented in the M9 memory note).
+
+  2. **Strict reproducible mode.** Spec §"Engine responsibilities"
+     says the engine MUST NOT allow recipes to bypass the declared
+     CWD by changing directory inside the emitted script "when strict
+     reproducible mode is enabled." No strict-mode gate exists in the
+     engine today; the R2 declaration is currently advisory. Adding
+     the gate requires wiring a new BuildEngineConfig flag through
+     the CLI and every from-source convention.
+
+  3. **Path normalization at the wrapper layer.** Spec §"Standard-
+     Library Responsibilities" (lines 260+) mandates that typed
+     compiler wrappers apply ``-ffile-prefix-map`` / ``--remap-path-
+     prefix`` against the canonical execroot so debug info and
+     ``__FILE__`` expansions use logical paths. The wrappers do not
+     apply these flags today; M9.R.74 landed the CWD declaration
+     boundary but not the path-remapping automation.
+
+  4. **Symlink-forest / hardlink materialization.** Spec §"Canonical
+     Execution Root" lists "symlink forests / hardlinks / reflinks /
+     content-addressed input trees" as implementation options. None
+     are wired: the "execution root" today is a directory the recipe
+     already writes into, not an engine-materialized projection.
+     Adopting a Bazel-style materialized sandbox is a multi-week
+     architectural milestone.
+
+
+Time budget
+-----------
+Wall time: ~1.5hr (audit 30min, spec addendum 15min, impl 45min,
+recipe audit 10min, close-out 10min). Well under the 24hr budget.
+
+
+Files touched (M9.R.74 scope)
+------------------------------
+reprobuild:
+  * recipes/reproos-image/run-evidence/m9r74/m9r74_phaseA_cwd_audit.txt
+  * recipes/reproos-image/run-evidence/m9r74/m9r74_complete.txt (this file)
+  * libs/repro_project_dsl/src/repro_project_dsl/types.nim
+  * libs/repro_project_dsl/src/repro_project_dsl/runtime_core.nim
+  * libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim
+  * libs/repro_cli_support/src/repro_cli_support.nim
+  * libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim
+  * libs/repro_standard_provider/src/repro_standard_provider/conventions/from_source_custom.nim
+
+reprobuild-specs:
+  * Hermetic-Builds-And-Path-Independence.md (§"Canonical Execution Root"
+    gained 4 new sub-sections)
+
+
+End of close-out.

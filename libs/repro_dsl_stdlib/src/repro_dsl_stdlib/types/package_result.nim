@@ -30,6 +30,8 @@ import std/[os, strutils, tables]
 import repro_project_dsl
 import ./library
 import ./executable
+import ./install_mirror_resolver
+export install_mirror_resolver
 
 # DSL-port M9.R.2c — re-export the typed ``Library`` / ``Executable``
 # records so the 79 from-source recipes that import
@@ -353,18 +355,15 @@ proc m9r14fStripDepConstraint*(value: string): string =
   return value
 
 proc m9r14fAppendDepMirrorDir(dst: var seq[string]; recipeRoot, depRaw: string) =
+  ## M9.R.76.2 — route through ``packageInstallMirrorLibDirs`` so the
+  ## install-mirror location can migrate to a content-hashed prefix
+  ## per spec R10 without touching this call site. In legacy mode the
+  ## returned paths are byte-identical to the previous inline join.
   let dep = m9r14fStripDepConstraint(depRaw)
   if dep.len == 0: return
-  let libDir = recipeRoot / dep / ".repro" / "output" / "install" /
-    "usr" / "lib"
-  let lib64Dir = recipeRoot / dep / ".repro" / "output" / "install" /
-    "usr" / "lib64"
-  let posixLib = libDir.replace("\\", "/")
-  let posixLib64 = lib64Dir.replace("\\", "/")
-  if posixLib notin dst:
-    dst.add(posixLib)
-  if posixLib64 notin dst:
-    dst.add(posixLib64)
+  for p in packageInstallMirrorLibDirs(recipeRoot, dep):
+    if p notin dst:
+      dst.add(p)
 
 proc m9r14fCollectDepMirrorLibDirs*(projectRoot, packageName: string):
     seq[string] =
@@ -446,13 +445,16 @@ proc m9r30CollectDepPropagatedManifestPaths*(projectRoot, packageName: string):
   if recipeRoot.len == 0:
     return
   proc appendManifestPath(dst: var seq[string]; depRaw: string) =
+    ## M9.R.76.2 — route through
+    ## ``packageInstallMirrorPropagatedManifestPath`` so the manifest
+    ## file location follows the mirror mode per spec R10.
     let dep = m9r14fStripDepConstraint(depRaw)
     if dep.len == 0: return
-    let manifest = recipeRoot / dep / ".repro" / "output" / "install" /
-      m9r30PropagatedManifestName
-    let posix = manifest.replace("\\", "/")
-    if posix notin dst:
-      dst.add(posix)
+    let manifest = packageInstallMirrorPropagatedManifestPath(
+      recipeRoot, dep, m9r30PropagatedManifestName)
+    if manifest.len == 0: return
+    if manifest notin dst:
+      dst.add(manifest)
   for raw in registeredNativeBuildDeps(packageName):
     appendManifestPath(result, raw)
   for raw in registeredBuildDeps(packageName):
@@ -529,11 +531,63 @@ proc m9r15iCollectQt6ComponentDirs*(projectRoot, packageName: string):
   if recipeRoot.len == 0:
     return
   proc visitDep(raw: string; sink: var seq[(string, string)]) =
+    ## M9.R.76.2 — the ``depRecipeDir`` we hand to
+    ## ``m9r15iScanQt6CmakeDirs`` is derived from
+    ## ``packageInstallMirrorRoot`` so the cmake scan follows the
+    ## mirror mode per spec R10. In legacy mode this is byte-identical
+    ## to the previous inline join.
     let dep = m9r14fStripDepConstraint(raw)
     if not dep.startsWith("qt6-"):
       return
-    let depRecipeDir = recipeRoot / dep
-    m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
+    let mirrorRoot = packageInstallMirrorRoot(recipeRoot, dep)
+    if mirrorRoot.len == 0:
+      return
+    # ``m9r15iScanQt6CmakeDirs`` still expects the recipe-dir side of
+    # the join (it appends ``.repro/output/install/usr/lib/cmake``);
+    # in legacy mode the mirror root strips exactly that suffix off
+    # the emitted recipe-dir shape.
+    let depRecipeDir =
+      if mirrorRoot.endsWith("/.repro/output/install"):
+        mirrorRoot[0 ..< mirrorRoot.len - "/.repro/output/install".len]
+      else:
+        # Non-legacy mode: the mirror root is content-hashed and does
+        # not carry the legacy suffix. Scan the cmake root directly by
+        # feeding a synthetic "recipe dir" whose ``+ /.repro/output/install``
+        # composes to the mirror root.
+        mirrorRoot & "/__pseudo_recipe_dir"
+    if mirrorRoot.endsWith("/.repro/output/install"):
+      m9r15iScanQt6CmakeDirs(depRecipeDir, sink)
+    else:
+      # For non-legacy layouts, scan the mirror root's cmake tree
+      # directly via a helper composed inline (avoids threading a new
+      # exported symbol through the unit-test surface).
+      let cmakeRoot = packageInstallMirrorCmakeRoot(recipeRoot, dep)
+      if cmakeRoot.len == 0 or not dirExists(cmakeRoot):
+        return
+      var entries: seq[string] = @[]
+      for kindPc, walked in walkDir(cmakeRoot):
+        if kindPc != pcDir and kindPc != pcLinkToDir:
+          continue
+        var subdir = walked
+        when defined(windows):
+          if subdir.startsWith("\\\\?\\"):
+            subdir = subdir[4 .. ^1]
+        entries.add(subdir)
+      for i in 1 ..< entries.len:
+        let cur = entries[i]
+        var j = i
+        while j > 0 and entries[j - 1] > cur:
+          entries[j] = entries[j - 1]
+          dec j
+        entries[j] = cur
+      for subdir in entries:
+        let component = lastPathPart(subdir)
+        if not component.startsWith("Qt6"):
+          continue
+        let configFile = subdir / (component & "Config.cmake")
+        if not fileExists(configFile):
+          continue
+        sink.add((component, subdir.replace("\\", "/")))
   for raw in registeredNativeBuildDeps(packageName):
     visitDep(raw, result)
   for raw in registeredBuildDeps(packageName):
